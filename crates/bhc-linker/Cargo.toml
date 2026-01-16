@@ -1,0 +1,18 @@
+[package]
+name = "bhc-linker"
+description = "Linking support for BHC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bhc-target = { workspace = true }
+bhc-session = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+camino = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }

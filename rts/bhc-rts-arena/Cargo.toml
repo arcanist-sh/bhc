@@ -1,0 +1,13 @@
+[package]
+name = "bhc-rts-arena"
+description = "Hot arena allocator for the BHC Runtime System"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bhc-rts-alloc = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

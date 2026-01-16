@@ -1,0 +1,22 @@
+[package]
+name = "bhc-session"
+description = "Compiler session state, options, and configuration for BHC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bhc-span = { workspace = true }
+bhc-diagnostics = { workspace = true }
+bhc-data-structures = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+camino = { workspace = true }
+parking_lot = { workspace = true }
+rustc-hash = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }

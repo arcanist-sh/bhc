@@ -1,0 +1,12 @@
+[package]
+name = "bhc-rts-alloc"
+description = "Memory allocation primitives for the BHC Runtime System"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

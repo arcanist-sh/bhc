@@ -1,0 +1,30 @@
+[package]
+name = "bhc"
+description = "Basel Haskell Compiler - A next-generation Haskell compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "bhc"
+path = "src/main.rs"
+
+[dependencies]
+bhc-span = { workspace = true }
+bhc-intern = { workspace = true }
+bhc-diagnostics = { workspace = true }
+bhc-lexer = { workspace = true }
+bhc-ast = { workspace = true }
+bhc-parser = { workspace = true }
+bhc-session = { workspace = true }
+bhc-driver = { workspace = true }
+
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+insta = { workspace = true }

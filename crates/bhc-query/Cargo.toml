@@ -1,0 +1,19 @@
+[package]
+name = "bhc-query"
+description = "Query-based compilation system for BHC (salsa-like incremental compilation)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bhc-span = { workspace = true }
+bhc-data-structures = { workspace = true }
+parking_lot = { workspace = true }
+rustc-hash = { workspace = true }
+dashmap = { workspace = true }
+crossbeam = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

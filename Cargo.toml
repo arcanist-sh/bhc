@@ -1,0 +1,166 @@
+[workspace]
+resolver = "2"
+members = [
+    # Compiler driver
+    "crates/bhc",
+
+    # Foundation crates (no dependencies on other bhc crates)
+    "crates/bhc-span",
+    "crates/bhc-arena",
+    "crates/bhc-intern",
+    "crates/bhc-index",
+    "crates/bhc-data-structures",
+
+    # Diagnostics (depends on span)
+    "crates/bhc-diagnostics",
+
+    # Syntax and parsing
+    "crates/bhc-lexer",
+    "crates/bhc-ast",
+    "crates/bhc-parser",
+
+    # Type system
+    "crates/bhc-types",
+
+    # Intermediate representations
+    "crates/bhc-hir",
+    "crates/bhc-core",
+    "crates/bhc-tensor-ir",
+    "crates/bhc-loop-ir",
+
+    # Compilation infrastructure
+    "crates/bhc-session",
+    "crates/bhc-query",
+    "crates/bhc-driver",
+
+    # Code generation
+    "crates/bhc-target",
+    "crates/bhc-codegen",
+    "crates/bhc-linker",
+
+    # Package management
+    "crates/bhc-package",
+    "crates/bhc-interface",
+
+    # Procedural macros
+    "crates/bhc-macros",
+
+    # Runtime system
+    "rts/bhc-rts",
+    "rts/bhc-rts-gc",
+    "rts/bhc-rts-arena",
+    "rts/bhc-rts-scheduler",
+    "rts/bhc-rts-alloc",
+
+    # Tools
+    "tools/bhci",
+    "tools/bhi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "BSD-3-Clause"
+repository = "https://github.com/raskell-io/bhc"
+homepage = "https://github.com/raskell-io/bhc"
+authors = ["BHC Contributors"]
+
+[workspace.dependencies]
+# Internal crates
+bhc-span = { path = "crates/bhc-span" }
+bhc-arena = { path = "crates/bhc-arena" }
+bhc-intern = { path = "crates/bhc-intern" }
+bhc-index = { path = "crates/bhc-index" }
+bhc-data-structures = { path = "crates/bhc-data-structures" }
+bhc-diagnostics = { path = "crates/bhc-diagnostics" }
+bhc-lexer = { path = "crates/bhc-lexer" }
+bhc-ast = { path = "crates/bhc-ast" }
+bhc-parser = { path = "crates/bhc-parser" }
+bhc-types = { path = "crates/bhc-types" }
+bhc-hir = { path = "crates/bhc-hir" }
+bhc-core = { path = "crates/bhc-core" }
+bhc-tensor-ir = { path = "crates/bhc-tensor-ir" }
+bhc-loop-ir = { path = "crates/bhc-loop-ir" }
+bhc-session = { path = "crates/bhc-session" }
+bhc-query = { path = "crates/bhc-query" }
+bhc-driver = { path = "crates/bhc-driver" }
+bhc-target = { path = "crates/bhc-target" }
+bhc-codegen = { path = "crates/bhc-codegen" }
+bhc-linker = { path = "crates/bhc-linker" }
+bhc-package = { path = "crates/bhc-package" }
+bhc-interface = { path = "crates/bhc-interface" }
+bhc-macros = { path = "crates/bhc-macros" }
+
+# RTS crates
+bhc-rts = { path = "rts/bhc-rts" }
+bhc-rts-gc = { path = "rts/bhc-rts-gc" }
+bhc-rts-arena = { path = "rts/bhc-rts-arena" }
+bhc-rts-scheduler = { path = "rts/bhc-rts-scheduler" }
+bhc-rts-alloc = { path = "rts/bhc-rts-alloc" }
+
+# External dependencies
+thiserror = "1.0"
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+dashmap = "5.5"
+rustc-hash = "1.1"
+indexmap = "2.1"
+smallvec = { version = "1.11", features = ["union", "const_generics", "serde"] }
+bumpalo = { version = "3.14", features = ["collections"] }
+typed-arena = "2.0"
+once_cell = "1.19"
+rayon = "1.8"
+crossbeam = "0.8"
+crossbeam-channel = "0.5"
+num-traits = "0.2"
+num-derive = "0.4"
+bitflags = { version = "2.4", features = ["serde"] }
+either = "1.9"
+itertools = "0.12"
+unicode-xid = "0.2"
+unicode-normalization = "0.1"
+logos = "0.14"
+codespan-reporting = "0.11"
+ariadne = "0.4"
+miette = { version = "7.0", features = ["fancy"] }
+salsa = "0.17"
+camino = { version = "1.1", features = ["serde1"] }
+tempfile = "3.9"
+similar = "2.4"
+insta = { version = "1.34", features = ["yaml"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.4"
+test-log = "0.2"
+pretty_assertions = "1.4"
+semver = "1.0"
+bincode = "1.3"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+nursery = "warn"
+cargo = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+# Faster builds for development
+opt-level = 0
+debug = true
+
+[profile.dev.package."*"]
+# Optimize dependencies even in dev
+opt-level = 2

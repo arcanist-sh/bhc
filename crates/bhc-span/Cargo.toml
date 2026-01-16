@@ -1,0 +1,13 @@
+[package]
+name = "bhc-span"
+description = "Source location tracking and span management for BHC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

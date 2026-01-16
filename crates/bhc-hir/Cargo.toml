@@ -1,0 +1,26 @@
+[package]
+name = "bhc-hir"
+description = "High-level Intermediate Representation for BHC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Internal crates
+bhc-span = { workspace = true }
+bhc-intern = { workspace = true }
+bhc-index = { workspace = true }
+bhc-arena = { workspace = true }
+bhc-data-structures = { workspace = true }
+bhc-types = { workspace = true }
+
+# External dependencies
+serde = { workspace = true }
+thiserror = { workspace = true }
+rustc-hash = { workspace = true }
+indexmap = { workspace = true }
+smallvec = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

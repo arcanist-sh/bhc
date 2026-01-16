@@ -1,0 +1,14 @@
+[package]
+name = "bhc-rts-gc"
+description = "Generational garbage collector for the BHC Runtime System"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bhc-rts-alloc = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

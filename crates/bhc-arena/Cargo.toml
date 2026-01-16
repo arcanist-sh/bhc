@@ -1,0 +1,15 @@
+[package]
+name = "bhc-arena"
+description = "Arena allocators for efficient compiler data structure allocation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bumpalo = { workspace = true }
+typed-arena = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

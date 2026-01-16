@@ -1,0 +1,28 @@
+[package]
+name = "bhc-loop-ir"
+description = "Loop IR for vectorization and low-level optimization in BHC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Internal crates
+bhc-span = { workspace = true }
+bhc-intern = { workspace = true }
+bhc-index = { workspace = true }
+bhc-arena = { workspace = true }
+bhc-data-structures = { workspace = true }
+bhc-types = { workspace = true }
+bhc-tensor-ir = { workspace = true }
+
+# External dependencies
+serde = { workspace = true }
+thiserror = { workspace = true }
+rustc-hash = { workspace = true }
+indexmap = { workspace = true }
+smallvec = { workspace = true }
+bitflags = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

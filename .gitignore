@@ -1,0 +1,49 @@
+# Rust/Cargo
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# BHC specific
+*.bhi       # Interface files
+*.bhc       # Compiled modules
+*.ir        # IR dumps
+*.kernel    # Kernel reports
+
+# Test artifacts
+/tests/output/
+*.actual
+*.diff
+
+# Coverage
+/coverage/
+*.lcov
+lcov.info
+
+# Benchmarks
+/target/criterion/
+
+# Documentation
+/target/doc/
+
+# Temporary
+*.tmp
+*.temp
+.cache/

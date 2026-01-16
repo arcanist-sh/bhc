@@ -1,0 +1,596 @@
+//! Abstract syntax tree definitions for BHC.
+//!
+//! This crate defines the AST produced by parsing Haskell 2026 source code.
+//! The AST preserves source locations and syntactic structure.
+
+#![warn(missing_docs)]
+
+use bhc_index::define_index;
+use bhc_intern::{Ident, Symbol};
+use bhc_span::Span;
+
+define_index! {
+    /// Index into the expression arena.
+    pub struct ExprId;
+
+    /// Index into the pattern arena.
+    pub struct PatId;
+
+    /// Index into the type arena.
+    pub struct TypeId;
+
+    /// Index into the declaration arena.
+    pub struct DeclId;
+}
+
+/// A Haskell module.
+#[derive(Clone, Debug)]
+pub struct Module {
+    /// Module name.
+    pub name: Option<ModuleName>,
+    /// Export list.
+    pub exports: Option<Vec<Export>>,
+    /// Import declarations.
+    pub imports: Vec<ImportDecl>,
+    /// Top-level declarations.
+    pub decls: Vec<Decl>,
+    /// Span of the entire module.
+    pub span: Span,
+}
+
+/// A qualified module name like `Data.List`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ModuleName {
+    /// The components of the name.
+    pub parts: Vec<Symbol>,
+    /// The span.
+    pub span: Span,
+}
+
+impl ModuleName {
+    /// Get the fully qualified name as a string.
+    #[must_use]
+    pub fn to_string(&self) -> String {
+        self.parts
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+}
+
+/// An export specification.
+#[derive(Clone, Debug)]
+pub enum Export {
+    /// Export a value: `foo`
+    Var(Ident, Span),
+    /// Export a type with optional constructors: `Foo(..)` or `Foo(A, B)`
+    Type(Ident, Option<Vec<Ident>>, Span),
+    /// Export a module: `module Data.List`
+    Module(ModuleName, Span),
+}
+
+/// An import declaration.
+#[derive(Clone, Debug)]
+pub struct ImportDecl {
+    /// The module being imported.
+    pub module: ModuleName,
+    /// Whether this is a qualified import.
+    pub qualified: bool,
+    /// The alias for qualified imports.
+    pub alias: Option<ModuleName>,
+    /// The import specification (hiding or explicit).
+    pub spec: Option<ImportSpec>,
+    /// The span.
+    pub span: Span,
+}
+
+/// Import specification.
+#[derive(Clone, Debug)]
+pub enum ImportSpec {
+    /// Import only the listed items.
+    Only(Vec<Import>),
+    /// Import everything except the listed items.
+    Hiding(Vec<Import>),
+}
+
+/// A single import item.
+#[derive(Clone, Debug)]
+pub enum Import {
+    /// Import a value.
+    Var(Ident, Span),
+    /// Import a type with optional constructors.
+    Type(Ident, Option<Vec<Ident>>, Span),
+}
+
+/// A top-level declaration.
+#[derive(Clone, Debug)]
+pub enum Decl {
+    /// Type signature: `foo :: Int -> Int`
+    TypeSig(TypeSig),
+    /// Function/value binding: `foo x = x + 1`
+    FunBind(FunBind),
+    /// Data type: `data Foo = A | B Int`
+    DataDecl(DataDecl),
+    /// Type alias: `type Foo = Bar`
+    TypeAlias(TypeAlias),
+    /// Newtype: `newtype Foo = Foo Bar`
+    Newtype(NewtypeDecl),
+    /// Class definition: `class Eq a where ...`
+    ClassDecl(ClassDecl),
+    /// Instance definition: `instance Eq Int where ...`
+    InstanceDecl(InstanceDecl),
+    /// Foreign import/export
+    Foreign(ForeignDecl),
+    /// Fixity declaration: `infixl 6 +`
+    Fixity(FixityDecl),
+}
+
+/// A type signature.
+#[derive(Clone, Debug)]
+pub struct TypeSig {
+    /// The names being typed.
+    pub names: Vec<Ident>,
+    /// The type.
+    pub ty: Type,
+    /// The span.
+    pub span: Span,
+}
+
+/// A function binding.
+#[derive(Clone, Debug)]
+pub struct FunBind {
+    /// The function name.
+    pub name: Ident,
+    /// The clauses (pattern matches).
+    pub clauses: Vec<Clause>,
+    /// The span.
+    pub span: Span,
+}
+
+/// A clause in a function binding.
+#[derive(Clone, Debug)]
+pub struct Clause {
+    /// The patterns for arguments.
+    pub pats: Vec<Pat>,
+    /// The right-hand side.
+    pub rhs: Rhs,
+    /// Local bindings.
+    pub wheres: Vec<Decl>,
+    /// The span.
+    pub span: Span,
+}
+
+/// The right-hand side of a binding.
+#[derive(Clone, Debug)]
+pub enum Rhs {
+    /// Simple: `= expr`
+    Simple(Expr, Span),
+    /// Guarded: `| guard = expr`
+    Guarded(Vec<GuardedRhs>, Span),
+}
+
+/// A guarded right-hand side.
+#[derive(Clone, Debug)]
+pub struct GuardedRhs {
+    /// The guard expression.
+    pub guard: Expr,
+    /// The body expression.
+    pub body: Expr,
+    /// The span.
+    pub span: Span,
+}
+
+/// A data type declaration.
+#[derive(Clone, Debug)]
+pub struct DataDecl {
+    /// The type name.
+    pub name: Ident,
+    /// Type parameters.
+    pub params: Vec<TyVar>,
+    /// Constructors.
+    pub constrs: Vec<ConDecl>,
+    /// Deriving clause.
+    pub deriving: Vec<Ident>,
+    /// The span.
+    pub span: Span,
+}
+
+/// A data constructor declaration.
+#[derive(Clone, Debug)]
+pub struct ConDecl {
+    /// Constructor name.
+    pub name: Ident,
+    /// Constructor fields.
+    pub fields: ConFields,
+    /// The span.
+    pub span: Span,
+}
+
+/// Constructor fields.
+#[derive(Clone, Debug)]
+pub enum ConFields {
+    /// Positional: `Foo Int String`
+    Positional(Vec<Type>),
+    /// Record: `Foo { bar :: Int, baz :: String }`
+    Record(Vec<FieldDecl>),
+}
+
+/// A record field declaration.
+#[derive(Clone, Debug)]
+pub struct FieldDecl {
+    /// Field name.
+    pub name: Ident,
+    /// Field type.
+    pub ty: Type,
+    /// The span.
+    pub span: Span,
+}
+
+/// A type alias declaration.
+#[derive(Clone, Debug)]
+pub struct TypeAlias {
+    /// The alias name.
+    pub name: Ident,
+    /// Type parameters.
+    pub params: Vec<TyVar>,
+    /// The aliased type.
+    pub ty: Type,
+    /// The span.
+    pub span: Span,
+}
+
+/// A newtype declaration.
+#[derive(Clone, Debug)]
+pub struct NewtypeDecl {
+    /// The type name.
+    pub name: Ident,
+    /// Type parameters.
+    pub params: Vec<TyVar>,
+    /// The constructor.
+    pub constr: ConDecl,
+    /// Deriving clause.
+    pub deriving: Vec<Ident>,
+    /// The span.
+    pub span: Span,
+}
+
+/// A type class declaration.
+#[derive(Clone, Debug)]
+pub struct ClassDecl {
+    /// Superclass constraints.
+    pub context: Vec<Constraint>,
+    /// Class name.
+    pub name: Ident,
+    /// Type parameter.
+    pub param: TyVar,
+    /// Method signatures and default implementations.
+    pub methods: Vec<Decl>,
+    /// The span.
+    pub span: Span,
+}
+
+/// An instance declaration.
+#[derive(Clone, Debug)]
+pub struct InstanceDecl {
+    /// Instance constraints.
+    pub context: Vec<Constraint>,
+    /// Class name.
+    pub class: Ident,
+    /// Instance type.
+    pub ty: Type,
+    /// Method implementations.
+    pub methods: Vec<Decl>,
+    /// The span.
+    pub span: Span,
+}
+
+/// A foreign declaration.
+#[derive(Clone, Debug)]
+pub struct ForeignDecl {
+    /// Import or export.
+    pub kind: ForeignKind,
+    /// Calling convention.
+    pub convention: Symbol,
+    /// External name.
+    pub external_name: Option<String>,
+    /// Haskell name.
+    pub name: Ident,
+    /// Type signature.
+    pub ty: Type,
+    /// The span.
+    pub span: Span,
+}
+
+/// Foreign declaration kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForeignKind {
+    /// Foreign import.
+    Import,
+    /// Foreign export.
+    Export,
+}
+
+/// A fixity declaration.
+#[derive(Clone, Debug)]
+pub struct FixityDecl {
+    /// The fixity.
+    pub fixity: Fixity,
+    /// Precedence level (0-9).
+    pub prec: u8,
+    /// The operators.
+    pub ops: Vec<Ident>,
+    /// The span.
+    pub span: Span,
+}
+
+/// Operator fixity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fixity {
+    /// Left associative.
+    Left,
+    /// Right associative.
+    Right,
+    /// Non-associative.
+    None,
+}
+
+/// An expression.
+#[derive(Clone, Debug)]
+pub enum Expr {
+    /// Variable: `x`
+    Var(Ident, Span),
+    /// Constructor: `Just`
+    Con(Ident, Span),
+    /// Literal: `42`, `"hello"`
+    Lit(Lit, Span),
+    /// Application: `f x`
+    App(Box<Expr>, Box<Expr>, Span),
+    /// Lambda: `\x -> x`
+    Lam(Vec<Pat>, Box<Expr>, Span),
+    /// Let: `let x = 1 in x`
+    Let(Vec<Decl>, Box<Expr>, Span),
+    /// If: `if c then t else e`
+    If(Box<Expr>, Box<Expr>, Box<Expr>, Span),
+    /// Case: `case x of { ... }`
+    Case(Box<Expr>, Vec<Alt>, Span),
+    /// Do block: `do { ... }`
+    Do(Vec<Stmt>, Span),
+    /// Tuple: `(a, b, c)`
+    Tuple(Vec<Expr>, Span),
+    /// List: `[1, 2, 3]`
+    List(Vec<Expr>, Span),
+    /// Arithmetic sequence: `[1..10]`, `[1,3..10]`
+    ArithSeq(ArithSeq, Span),
+    /// List comprehension: `[x | x <- xs, x > 0]`
+    ListComp(Box<Expr>, Vec<Stmt>, Span),
+    /// Record construction: `Foo { bar = 1 }`
+    RecordCon(Ident, Vec<FieldBind>, Span),
+    /// Record update: `foo { bar = 1 }`
+    RecordUpd(Box<Expr>, Vec<FieldBind>, Span),
+    /// Infix operator: `a + b`
+    Infix(Box<Expr>, Ident, Box<Expr>, Span),
+    /// Negation: `-x`
+    Neg(Box<Expr>, Span),
+    /// Parenthesized expression
+    Paren(Box<Expr>, Span),
+    /// Type annotation: `x :: Int`
+    Ann(Box<Expr>, Type, Span),
+    /// Lazy block (H26): `lazy { ... }`
+    Lazy(Box<Expr>, Span),
+}
+
+impl Expr {
+    /// Get the span of this expression.
+    #[must_use]
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Var(_, s)
+            | Self::Con(_, s)
+            | Self::Lit(_, s)
+            | Self::App(_, _, s)
+            | Self::Lam(_, _, s)
+            | Self::Let(_, _, s)
+            | Self::If(_, _, _, s)
+            | Self::Case(_, _, s)
+            | Self::Do(_, s)
+            | Self::Tuple(_, s)
+            | Self::List(_, s)
+            | Self::ArithSeq(_, s)
+            | Self::ListComp(_, _, s)
+            | Self::RecordCon(_, _, s)
+            | Self::RecordUpd(_, _, s)
+            | Self::Infix(_, _, _, s)
+            | Self::Neg(_, s)
+            | Self::Paren(_, s)
+            | Self::Ann(_, _, s)
+            | Self::Lazy(_, s) => *s,
+        }
+    }
+}
+
+/// A literal value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Lit {
+    /// Integer literal.
+    Int(i64),
+    /// Floating-point literal.
+    Float(f64),
+    /// Character literal.
+    Char(char),
+    /// String literal.
+    String(String),
+}
+
+/// An arithmetic sequence.
+#[derive(Clone, Debug)]
+pub enum ArithSeq {
+    /// `[from..]`
+    From(Box<Expr>),
+    /// `[from, then..]`
+    FromThen(Box<Expr>, Box<Expr>),
+    /// `[from..to]`
+    FromTo(Box<Expr>, Box<Expr>),
+    /// `[from, then..to]`
+    FromThenTo(Box<Expr>, Box<Expr>, Box<Expr>),
+}
+
+/// A case alternative.
+#[derive(Clone, Debug)]
+pub struct Alt {
+    /// The pattern.
+    pub pat: Pat,
+    /// The right-hand side.
+    pub rhs: Rhs,
+    /// Local bindings.
+    pub wheres: Vec<Decl>,
+    /// The span.
+    pub span: Span,
+}
+
+/// A statement in a do block or list comprehension.
+#[derive(Clone, Debug)]
+pub enum Stmt {
+    /// Generator: `x <- xs`
+    Generator(Pat, Expr, Span),
+    /// Qualifier/guard: `x > 0`
+    Qualifier(Expr, Span),
+    /// Let binding: `let x = 1`
+    LetStmt(Vec<Decl>, Span),
+}
+
+/// A field binding in a record.
+#[derive(Clone, Debug)]
+pub struct FieldBind {
+    /// Field name.
+    pub name: Ident,
+    /// Field value (None for punning: `Foo { bar }` means `Foo { bar = bar }`)
+    pub value: Option<Expr>,
+    /// The span.
+    pub span: Span,
+}
+
+/// A pattern.
+#[derive(Clone, Debug)]
+pub enum Pat {
+    /// Wildcard: `_`
+    Wildcard(Span),
+    /// Variable: `x`
+    Var(Ident, Span),
+    /// Literal: `42`
+    Lit(Lit, Span),
+    /// Constructor: `Just x`
+    Con(Ident, Vec<Pat>, Span),
+    /// Infix constructor: `x : xs`
+    Infix(Box<Pat>, Ident, Box<Pat>, Span),
+    /// Tuple: `(a, b)`
+    Tuple(Vec<Pat>, Span),
+    /// List: `[a, b, c]`
+    List(Vec<Pat>, Span),
+    /// Record: `Foo { bar = x }`
+    Record(Ident, Vec<FieldPat>, Span),
+    /// As-pattern: `xs@(x:_)`
+    As(Ident, Box<Pat>, Span),
+    /// Lazy pattern: `~pat`
+    Lazy(Box<Pat>, Span),
+    /// Bang pattern: `!pat`
+    Bang(Box<Pat>, Span),
+    /// Parenthesized pattern
+    Paren(Box<Pat>, Span),
+    /// Type annotation: `x :: Int`
+    Ann(Box<Pat>, Type, Span),
+}
+
+impl Pat {
+    /// Get the span of this pattern.
+    #[must_use]
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Wildcard(s)
+            | Self::Var(_, s)
+            | Self::Lit(_, s)
+            | Self::Con(_, _, s)
+            | Self::Infix(_, _, _, s)
+            | Self::Tuple(_, s)
+            | Self::List(_, s)
+            | Self::Record(_, _, s)
+            | Self::As(_, _, s)
+            | Self::Lazy(_, s)
+            | Self::Bang(_, s)
+            | Self::Paren(_, s)
+            | Self::Ann(_, _, s) => *s,
+        }
+    }
+}
+
+/// A field pattern in a record.
+#[derive(Clone, Debug)]
+pub struct FieldPat {
+    /// Field name.
+    pub name: Ident,
+    /// Pattern (None for punning).
+    pub pat: Option<Pat>,
+    /// The span.
+    pub span: Span,
+}
+
+/// A type.
+#[derive(Clone, Debug)]
+pub enum Type {
+    /// Type variable: `a`
+    Var(TyVar, Span),
+    /// Type constructor: `Int`, `Maybe`
+    Con(Ident, Span),
+    /// Application: `Maybe Int`
+    App(Box<Type>, Box<Type>, Span),
+    /// Function type: `a -> b`
+    Fun(Box<Type>, Box<Type>, Span),
+    /// Tuple type: `(a, b)`
+    Tuple(Vec<Type>, Span),
+    /// List type: `[a]`
+    List(Box<Type>, Span),
+    /// Parenthesized type
+    Paren(Box<Type>, Span),
+    /// Forall type: `forall a. a -> a`
+    Forall(Vec<TyVar>, Box<Type>, Span),
+    /// Constrained type: `Eq a => a -> a -> Bool`
+    Constrained(Vec<Constraint>, Box<Type>, Span),
+}
+
+impl Type {
+    /// Get the span of this type.
+    #[must_use]
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Var(_, s)
+            | Self::Con(_, s)
+            | Self::App(_, _, s)
+            | Self::Fun(_, _, s)
+            | Self::Tuple(_, s)
+            | Self::List(_, s)
+            | Self::Paren(_, s)
+            | Self::Forall(_, _, s)
+            | Self::Constrained(_, _, s) => *s,
+        }
+    }
+}
+
+/// A type variable.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TyVar {
+    /// The name.
+    pub name: Ident,
+    /// The span.
+    pub span: Span,
+}
+
+/// A type class constraint.
+#[derive(Clone, Debug)]
+pub struct Constraint {
+    /// The class name.
+    pub class: Ident,
+    /// The type arguments.
+    pub args: Vec<Type>,
+    /// The span.
+    pub span: Span,
+}

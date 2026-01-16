@@ -1,0 +1,13 @@
+[package]
+name = "bhc-index"
+description = "Typed indices for efficient and safe indexing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

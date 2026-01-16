@@ -1,0 +1,20 @@
+[package]
+name = "bhc-interface"
+description = "Interface files (.bhi) for BHC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bhc-span = { workspace = true }
+bhc-ast = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+camino = { workspace = true }
+bincode = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }

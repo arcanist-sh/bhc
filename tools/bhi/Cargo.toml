@@ -1,0 +1,25 @@
+[package]
+name = "bhi"
+description = "Basel Haskell Inspector - IR and kernel report viewer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "bhi"
+path = "src/main.rs"
+
+[dependencies]
+bhc-span = { workspace = true }
+bhc-intern = { workspace = true }
+bhc-diagnostics = { workspace = true }
+bhc-ast = { workspace = true }
+
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

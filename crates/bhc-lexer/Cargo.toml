@@ -1,0 +1,18 @@
+[package]
+name = "bhc-lexer"
+description = "Lexical analysis for BHC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bhc-span = { workspace = true }
+bhc-intern = { workspace = true }
+bhc-diagnostics = { workspace = true }
+logos = { workspace = true }
+unicode-xid = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+insta = { workspace = true }

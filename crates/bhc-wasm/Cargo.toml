@@ -1,0 +1,40 @@
+[package]
+name = "bhc-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WebAssembly (WASI) backend for the Basel Haskell Compiler"
+readme = "README.md"
+keywords = ["wasm", "webassembly", "compiler", "haskell", "codegen"]
+categories = ["compilers", "wasm"]
+
+[dependencies]
+# Internal crates
+bhc-span = { workspace = true }
+bhc-index = { workspace = true }
+bhc-codegen = { workspace = true }
+bhc-target = { workspace = true }
+bhc-session = { workspace = true }
+bhc-loop-ir = { workspace = true }
+bhc-intern = { workspace = true }
+bhc-tensor-ir = { workspace = true }
+
+# External dependencies
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rustc-hash = { workspace = true }
+smallvec = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+
+[features]
+default = ["simd128"]
+# Enable SIMD128 instruction generation (WASM SIMD proposal)
+simd128 = []
+# Enable browser runtime support (JS interop)
+browser = []
+
+[lints]
+workspace = true

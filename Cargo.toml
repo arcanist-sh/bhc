@@ -41,6 +41,7 @@ members = [
     "crates/bhc-target",
     "crates/bhc-codegen",
     "crates/bhc-gpu",
+    "crates/bhc-wasm",
     "crates/bhc-linker",
 
     # Package management
@@ -94,6 +95,7 @@ bhc-driver = { path = "crates/bhc-driver" }
 bhc-target = { path = "crates/bhc-target" }
 bhc-codegen = { path = "crates/bhc-codegen" }
 bhc-gpu = { path = "crates/bhc-gpu" }
+bhc-wasm = { path = "crates/bhc-wasm" }
 bhc-linker = { path = "crates/bhc-linker" }
 bhc-ffi = { path = "crates/bhc-ffi" }
 bhc-package = { path = "crates/bhc-package" }

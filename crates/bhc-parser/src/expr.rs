@@ -79,7 +79,10 @@ impl<'src> Parser<'src> {
     /// Parse a prefix expression (negation, etc.).
     fn parse_prefix_expr(&mut self) -> ParseResult<Expr> {
         if let Some(tok) = self.current() {
-            if matches!(&tok.node.kind, TokenKind::Operator(s) if s.as_str() == "-") {
+            // Handle prefix negation - lexer produces TokenKind::Minus for standalone `-`
+            let is_minus = matches!(&tok.node.kind, TokenKind::Minus)
+                || matches!(&tok.node.kind, TokenKind::Operator(s) if s.as_str() == "-");
+            if is_minus {
                 let start = tok.span;
                 self.advance();
                 let expr = self.parse_prefix_expr()?;
@@ -281,7 +284,9 @@ impl<'src> Parser<'src> {
             return self.parse_operator_section(start);
         }
 
-        let first = self.parse_expr()?;
+        // For left sections like `(1 +)`, we need to parse without consuming operators
+        // Parse application expression first (no infix operators)
+        let first = self.parse_app_expr()?;
 
         // Check for left operator section: `(x +)`
         if let Some(TokenKind::Operator(sym)) = self.current_kind().cloned() {

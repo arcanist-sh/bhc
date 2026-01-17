@@ -40,7 +40,8 @@ impl<'src> Parser<'src> {
 
         while let Some(tok) = self.current() {
             match &tok.node.kind {
-                TokenKind::Operator(sym) if sym.as_str() == ":" => {
+                // The `:` operator is lexed as ConOperator since it starts with `:`
+                TokenKind::ConOperator(sym) if sym.as_str() == ":" => {
                     let op = Ident::new(*sym);
                     self.advance();
                     let rhs = self.parse_infix_pattern()?;

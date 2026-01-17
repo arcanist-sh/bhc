@@ -400,7 +400,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Left sections need more work to parse correctly
     fn test_operator_section_left() {
         // Left section: (1 +) -> \y -> 1 + y
         let expr = parse_expr_ok("(1 +)");
@@ -415,7 +414,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Negation needs lexer changes to properly distinguish prefix -
     fn test_negation() {
         // Negation only works after another expression in infix context
         // `-x` at the start is ambiguous with operator prefix
@@ -445,14 +443,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // The `:` is lexed as ConOperator, needs lexer fix
     fn test_pattern_infix() {
         let module = parse_module_ok("f (x : xs) = xs");
         assert!(!module.decls.is_empty());
     }
 
     #[test]
-    #[ignore] // The `:` is lexed as ConOperator, needs lexer fix
     fn test_pattern_as() {
         let module = parse_module_ok("f xs@(x : _) = xs");
         assert!(!module.decls.is_empty());

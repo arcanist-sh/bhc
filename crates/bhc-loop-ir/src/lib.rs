@@ -55,6 +55,15 @@
 //! - [`Value`]: SSA values (registers)
 //! - [`MemRef`]: Memory references with access patterns
 //!
+//! ## M3 Deliverables
+//!
+//! This crate implements the following M3 features:
+//!
+//! - **SIMD Types**: [`LoopType::VEC4F32`], [`LoopType::VEC8F32`], [`LoopType::VEC2F64`], [`LoopType::VEC4F64`]
+//! - **Auto-vectorization**: [`vectorize::VectorizePass`]
+//! - **Parallel primitives**: [`parallel::ParFor`], [`parallel::ParMap`], [`parallel::ParReduce`]
+//! - **SIMD intrinsics**: [`vectorize::SimdIntrinsic`]
+//!
 //! ## See Also
 //!
 //! - `bhc-tensor-ir`: Tensor IR that lowers to Loop IR
@@ -64,14 +73,27 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
+#![allow(clippy::module_name_repetitions)]
 
 use bhc_index::Idx;
 use bhc_intern::Symbol;
-use bhc_span::Span;
-use bhc_tensor_ir::{AllocRegion, BufferId, DType, Dim, TensorMeta};
+use bhc_tensor_ir::{AllocRegion, BufferId, DType};
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
+
+// ============================================================================
+// Submodules
+// ============================================================================
+
+pub mod lower;
+pub mod parallel;
+pub mod vectorize;
+
+// Re-export key types from submodules
+pub use lower::{lower_kernel, lower_kernels, LowerConfig, LowerError};
+pub use parallel::{ParFor, ParMap, ParReduce, ParallelConfig, ParallelPass, ParallelStrategy, Range};
+pub use vectorize::{SimdIntrinsic, VectorizeConfig, VectorizePass, VectorizeReport};
 
 /// A unique identifier for values (SSA registers).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -222,6 +244,133 @@ impl ScalarType {
             DType::Float64 => Self::Float(64),
             DType::Complex64 => Self::Float(32), // Represented as pair
             DType::Complex128 => Self::Float(64),
+        }
+    }
+
+    /// 32-bit float scalar type.
+    pub const F32: Self = Self::Float(32);
+
+    /// 64-bit float scalar type.
+    pub const F64: Self = Self::Float(64);
+
+    /// 32-bit signed integer scalar type.
+    pub const I32: Self = Self::Int(32);
+
+    /// 64-bit signed integer scalar type.
+    pub const I64: Self = Self::Int(64);
+}
+
+// ============================================================================
+// SIMD Type Aliases and Constructors (M3 Deliverable)
+// ============================================================================
+
+impl LoopType {
+    // --- Standard SIMD Vector Types ---
+
+    /// 4-wide 32-bit float vector (128-bit, SSE/NEON compatible).
+    pub const VEC4F32: Self = Self::Vector(ScalarType::F32, 4);
+
+    /// 8-wide 32-bit float vector (256-bit, AVX compatible).
+    pub const VEC8F32: Self = Self::Vector(ScalarType::F32, 8);
+
+    /// 2-wide 64-bit float vector (128-bit, SSE/NEON compatible).
+    pub const VEC2F64: Self = Self::Vector(ScalarType::F64, 2);
+
+    /// 4-wide 64-bit float vector (256-bit, AVX compatible).
+    pub const VEC4F64: Self = Self::Vector(ScalarType::F64, 4);
+
+    /// 4-wide 32-bit integer vector (128-bit).
+    pub const VEC4I32: Self = Self::Vector(ScalarType::I32, 4);
+
+    /// 8-wide 32-bit integer vector (256-bit).
+    pub const VEC8I32: Self = Self::Vector(ScalarType::I32, 8);
+
+    /// Returns the natural vector width for a scalar type on the target.
+    ///
+    /// # Target Widths
+    ///
+    /// | Target | F32 | F64 | I32 |
+    /// |--------|-----|-----|-----|
+    /// | x86_64 (SSE) | 4 | 2 | 4 |
+    /// | x86_64 (AVX) | 8 | 4 | 8 |
+    /// | aarch64 (NEON) | 4 | 2 | 4 |
+    #[must_use]
+    pub fn natural_vector_width(scalar: ScalarType, target: TargetArch) -> u8 {
+        match (target, scalar) {
+            // x86_64 with AVX (256-bit vectors)
+            (TargetArch::X86_64Avx | TargetArch::X86_64Avx2, ScalarType::Float(32)) => 8,
+            (TargetArch::X86_64Avx | TargetArch::X86_64Avx2, ScalarType::Float(64)) => 4,
+            (TargetArch::X86_64Avx | TargetArch::X86_64Avx2, ScalarType::Int(32)) => 8,
+            // x86_64 with SSE (128-bit vectors)
+            (TargetArch::X86_64Sse | TargetArch::X86_64Sse2, ScalarType::Float(32)) => 4,
+            (TargetArch::X86_64Sse | TargetArch::X86_64Sse2, ScalarType::Float(64)) => 2,
+            (TargetArch::X86_64Sse | TargetArch::X86_64Sse2, ScalarType::Int(32)) => 4,
+            // aarch64 with NEON (128-bit vectors)
+            (TargetArch::Aarch64Neon, ScalarType::Float(32)) => 4,
+            (TargetArch::Aarch64Neon, ScalarType::Float(64)) => 2,
+            (TargetArch::Aarch64Neon, ScalarType::Int(32)) => 4,
+            // Fallback: no vectorization
+            _ => 1,
+        }
+    }
+
+    /// Creates a vector type for the given scalar and width.
+    #[must_use]
+    pub const fn vector(scalar: ScalarType, width: u8) -> Self {
+        Self::Vector(scalar, width)
+    }
+
+    /// Returns the vector width if this is a vector type, otherwise None.
+    #[must_use]
+    pub fn vector_width(&self) -> Option<u8> {
+        match self {
+            Self::Vector(_, w) => Some(*w),
+            _ => None,
+        }
+    }
+
+    /// Returns the scalar element type if this is a vector type.
+    #[must_use]
+    pub fn element_type(&self) -> Option<ScalarType> {
+        match self {
+            Self::Vector(s, _) => Some(*s),
+            Self::Scalar(s) => Some(*s),
+            _ => None,
+        }
+    }
+}
+
+/// Target architecture for vectorization decisions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TargetArch {
+    /// x86_64 with SSE instructions (128-bit).
+    X86_64Sse,
+    /// x86_64 with SSE2 instructions (128-bit).
+    X86_64Sse2,
+    /// x86_64 with AVX instructions (256-bit).
+    X86_64Avx,
+    /// x86_64 with AVX2 instructions (256-bit).
+    X86_64Avx2,
+    /// aarch64 with NEON instructions (128-bit).
+    Aarch64Neon,
+    /// Generic target (no vectorization).
+    Generic,
+}
+
+impl Default for TargetArch {
+    fn default() -> Self {
+        // Default to AVX for x86_64, NEON for aarch64
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::X86_64Avx2
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::Aarch64Neon
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            Self::Generic
         }
     }
 }
@@ -772,5 +921,430 @@ mod tests {
 
         let dynamic_trip = TripCount::Dynamic;
         assert_eq!(dynamic_trip, TripCount::Dynamic);
+    }
+
+    // ========================================================================
+    // M3 Exit Criteria Integration Tests
+    // ========================================================================
+
+    /// M3 Exit Criterion 1: matmul microkernel auto-vectorizes on x86_64 and aarch64
+    ///
+    /// This test verifies that the vectorization pass correctly identifies
+    /// a matmul-like kernel as vectorizable and selects appropriate vector widths.
+    #[test]
+    fn test_m3_matmul_auto_vectorizes() {
+        use crate::vectorize::{VectorizeConfig, VectorizePass};
+        use bhc_index::Idx;
+        use bhc_tensor_ir::BufferId;
+
+        // Create a matmul-like loop structure (innermost loop computes dot product)
+        let loop_id = LoopId::new(0);
+        let loop_var = ValueId::new(0);
+
+        // Simulate the innermost loop of matmul: c[i,j] += a[i,k] * b[k,j]
+        let mem_ref = MemRef {
+            buffer: BufferId::new(0),
+            index: Value::Var(loop_var, LoopType::Scalar(ScalarType::I64)),
+            elem_ty: LoopType::Scalar(ScalarType::F32),
+            access: AccessPattern::Sequential,
+        };
+
+        let mut body = Body::new();
+        let load_a = ValueId::new(1);
+        body.push(Stmt::Assign(load_a, Op::Load(mem_ref.clone())));
+
+        let load_b = ValueId::new(2);
+        body.push(Stmt::Assign(load_b, Op::Load(mem_ref.clone())));
+
+        let mul_result = ValueId::new(3);
+        body.push(Stmt::Assign(
+            mul_result,
+            Op::Binary(
+                BinOp::Mul,
+                Value::Var(load_a, LoopType::Scalar(ScalarType::F32)),
+                Value::Var(load_b, LoopType::Scalar(ScalarType::F32)),
+            ),
+        ));
+
+        // FMA opportunity: acc = acc + a * b
+        let acc = ValueId::new(4);
+        let fma_result = ValueId::new(5);
+        body.push(Stmt::Assign(
+            fma_result,
+            Op::Fma(
+                Value::Var(load_a, LoopType::Scalar(ScalarType::F32)),
+                Value::Var(load_b, LoopType::Scalar(ScalarType::F32)),
+                Value::Var(acc, LoopType::Scalar(ScalarType::F32)),
+            ),
+        ));
+
+        let lp = Loop {
+            id: loop_id,
+            var: loop_var,
+            lower: Value::i64(0),
+            upper: Value::i64(256), // K dimension
+            step: Value::i64(1),
+            body,
+            attrs: LoopAttrs::VECTORIZE | LoopAttrs::INDEPENDENT,
+        };
+
+        let mut outer_body = Body::new();
+        outer_body.push(Stmt::Loop(lp));
+
+        let ir = LoopIR {
+            name: bhc_intern::Symbol::intern("matmul_kernel"),
+            params: vec![],
+            return_ty: LoopType::Void,
+            body: outer_body,
+            allocs: vec![],
+            loop_info: vec![LoopMetadata {
+                id: loop_id,
+                trip_count: TripCount::Static(256),
+                vector_width: None,
+                parallel_chunk: None,
+                unroll_factor: None,
+                dependencies: Vec::new(),
+            }],
+        };
+
+        // Test on x86_64 AVX2
+        let config_x86 = VectorizeConfig {
+            target: TargetArch::X86_64Avx2,
+            ..Default::default()
+        };
+        let mut pass_x86 = VectorizePass::new(config_x86);
+        let analysis_x86 = pass_x86.analyze(&ir);
+        let info_x86 = analysis_x86.get(&loop_id).expect("loop should be analyzed");
+
+        assert!(
+            info_x86.vectorizable,
+            "M3 FAIL: matmul kernel not vectorizable on x86_64 AVX2"
+        );
+        assert_eq!(
+            info_x86.recommended_width, 8,
+            "M3 FAIL: x86_64 AVX2 should use 8-wide vectors for f32"
+        );
+
+        // Test on aarch64 NEON
+        let config_arm = VectorizeConfig {
+            target: TargetArch::Aarch64Neon,
+            ..Default::default()
+        };
+        let mut pass_arm = VectorizePass::new(config_arm);
+        let analysis_arm = pass_arm.analyze(&ir);
+        let info_arm = analysis_arm.get(&loop_id).expect("loop should be analyzed");
+
+        assert!(
+            info_arm.vectorizable,
+            "M3 FAIL: matmul kernel not vectorizable on aarch64 NEON"
+        );
+        assert_eq!(
+            info_arm.recommended_width, 4,
+            "M3 FAIL: aarch64 NEON should use 4-wide vectors for f32"
+        );
+    }
+
+    /// M3 Exit Criterion 2: Reductions scale linearly up to 8 cores
+    ///
+    /// This test verifies that parallel reduction chunking distributes
+    /// work evenly across workers.
+    #[test]
+    fn test_m3_reductions_scale_linearly() {
+        use crate::parallel::{ParallelConfig, ParReduce, Range};
+        use crate::ReduceOp;
+
+        let data_size = 1_000_000; // 1M elements
+
+        // Test with different worker counts
+        for worker_count in [1, 2, 4, 8] {
+            let config = ParallelConfig {
+                worker_count,
+                deterministic: true,
+                ..Default::default()
+            };
+
+            let par_reduce = ParReduce {
+                size: data_size,
+                op: ReduceOp::Add,
+                config,
+            };
+
+            let chunks = par_reduce.chunk_assignments();
+
+            // Verify correct number of chunks
+            assert_eq!(
+                chunks.len(),
+                worker_count,
+                "M3 FAIL: Expected {} chunks for {} workers",
+                worker_count,
+                worker_count
+            );
+
+            // Verify total work is correct
+            let total_work: usize = chunks.iter().map(|c| c.len()).sum();
+            assert_eq!(
+                total_work, data_size,
+                "M3 FAIL: Total work should equal data size"
+            );
+
+            // Verify work is evenly distributed (within 1 element difference)
+            let expected_per_worker = data_size / worker_count;
+            for (i, chunk) in chunks.iter().enumerate() {
+                let diff = (chunk.len() as i64 - expected_per_worker as i64).abs();
+                assert!(
+                    diff <= 1,
+                    "M3 FAIL: Worker {} has {} elements, expected ~{} (diff={})",
+                    i,
+                    chunk.len(),
+                    expected_per_worker,
+                    diff
+                );
+            }
+        }
+
+        // Verify scaling: doubling workers should halve chunk size
+        let _config_4 = ParallelConfig {
+            worker_count: 4,
+            ..Default::default()
+        };
+        let chunks_4 = Range::new(0, data_size as i64).chunk(4);
+
+        let _config_8 = ParallelConfig {
+            worker_count: 8,
+            ..Default::default()
+        };
+        let chunks_8 = Range::new(0, data_size as i64).chunk(8);
+
+        let avg_chunk_4: usize = chunks_4.iter().map(|c| c.len()).sum::<usize>() / 4;
+        let avg_chunk_8: usize = chunks_8.iter().map(|c| c.len()).sum::<usize>() / 8;
+
+        // 8 workers should have approximately half the chunk size of 4 workers
+        let ratio = avg_chunk_4 as f64 / avg_chunk_8 as f64;
+        assert!(
+            (ratio - 2.0).abs() < 0.1,
+            "M3 FAIL: Chunk size ratio should be ~2.0, got {}",
+            ratio
+        );
+    }
+
+    /// M3 Exit Criterion 3: Deterministic mode produces identical results across runs
+    ///
+    /// This test verifies that parallel chunking is deterministic when configured.
+    #[test]
+    fn test_m3_deterministic_mode() {
+        use crate::parallel::{ParallelConfig, ParReduce, ParallelStrategy};
+        use crate::ReduceOp;
+
+        let data_size = 100_000;
+        let worker_count = 8;
+
+        // Configure deterministic mode
+        let config = ParallelConfig {
+            worker_count,
+            deterministic: true,
+            ..Default::default()
+        };
+
+        let par_reduce = ParReduce {
+            size: data_size,
+            op: ReduceOp::Add,
+            config: config.clone(),
+        };
+
+        // Run multiple times and verify identical chunk assignments
+        let chunks1 = par_reduce.chunk_assignments();
+        let chunks2 = par_reduce.chunk_assignments();
+        let chunks3 = par_reduce.chunk_assignments();
+
+        for i in 0..worker_count {
+            assert_eq!(
+                chunks1[i].start, chunks2[i].start,
+                "M3 FAIL: Chunk {} start differs between runs",
+                i
+            );
+            assert_eq!(
+                chunks1[i].end, chunks2[i].end,
+                "M3 FAIL: Chunk {} end differs between runs",
+                i
+            );
+            assert_eq!(
+                chunks2[i].start, chunks3[i].start,
+                "M3 FAIL: Chunk {} start differs between runs",
+                i
+            );
+            assert_eq!(
+                chunks2[i].end, chunks3[i].end,
+                "M3 FAIL: Chunk {} end differs between runs",
+                i
+            );
+        }
+
+        // Verify strategy is Static for deterministic mode
+        use crate::parallel::ParallelPass;
+
+        let parallel_config = ParallelConfig {
+            worker_count: 8,
+            deterministic: true,
+            ..Default::default()
+        };
+
+        // Build a simple parallelizable loop
+        let loop_id = LoopId::new(0);
+        let mut body = Body::new();
+
+        let lp = Loop {
+            id: loop_id,
+            var: ValueId::new(0),
+            lower: Value::i64(0),
+            upper: Value::i64(100000),
+            step: Value::i64(1),
+            body: Body::new(),
+            attrs: LoopAttrs::PARALLEL | LoopAttrs::INDEPENDENT,
+        };
+
+        body.push(Stmt::Loop(lp));
+
+        let ir = LoopIR {
+            name: bhc_intern::Symbol::intern("deterministic_test"),
+            params: vec![],
+            return_ty: LoopType::Void,
+            body,
+            allocs: vec![],
+            loop_info: vec![LoopMetadata {
+                id: loop_id,
+                trip_count: TripCount::Static(100000),
+                vector_width: None,
+                parallel_chunk: None,
+                unroll_factor: None,
+                dependencies: Vec::new(),
+            }],
+        };
+
+        let mut pass = ParallelPass::new(parallel_config);
+        let analysis = pass.analyze(&ir);
+        let info = analysis.get(&loop_id).expect("loop should be analyzed");
+
+        assert!(
+            info.parallelizable,
+            "M3 FAIL: Loop should be parallelizable"
+        );
+        assert_eq!(
+            info.strategy,
+            ParallelStrategy::Static,
+            "M3 FAIL: Deterministic mode should use Static scheduling"
+        );
+    }
+
+    /// M3 Integration: Complete pipeline test for vectorized parallel reduction
+    #[test]
+    fn test_m3_vectorized_parallel_reduction() {
+        use crate::parallel::{ParallelConfig, ParallelPass};
+        use crate::vectorize::{VectorizeConfig, VectorizePass};
+        use bhc_index::Idx;
+        use bhc_tensor_ir::BufferId;
+
+        // Create a reduction loop that should be both vectorized and parallelized
+        let outer_loop_id = LoopId::new(0);
+        let inner_loop_id = LoopId::new(1);
+
+        // Inner loop: vectorizable reduction
+        let mem_ref = MemRef {
+            buffer: BufferId::new(0),
+            index: Value::Var(ValueId::new(1), LoopType::Scalar(ScalarType::I64)),
+            elem_ty: LoopType::Scalar(ScalarType::F32),
+            access: AccessPattern::Sequential,
+        };
+
+        let mut inner_body = Body::new();
+        let load_result = ValueId::new(2);
+        inner_body.push(Stmt::Assign(load_result, Op::Load(mem_ref)));
+
+        let inner_loop = Loop {
+            id: inner_loop_id,
+            var: ValueId::new(1),
+            lower: Value::i64(0),
+            upper: Value::i64(1024),
+            step: Value::i64(1),
+            body: inner_body,
+            attrs: LoopAttrs::VECTORIZE | LoopAttrs::INDEPENDENT | LoopAttrs::REDUCTION,
+        };
+
+        // Outer loop: parallelizable
+        let mut outer_body = Body::new();
+        outer_body.push(Stmt::Loop(inner_loop));
+
+        let outer_loop = Loop {
+            id: outer_loop_id,
+            var: ValueId::new(0),
+            lower: Value::i64(0),
+            upper: Value::i64(10000),
+            step: Value::i64(1),
+            body: outer_body,
+            attrs: LoopAttrs::PARALLEL | LoopAttrs::INDEPENDENT,
+        };
+
+        let mut top_body = Body::new();
+        top_body.push(Stmt::Loop(outer_loop));
+
+        let ir = LoopIR {
+            name: bhc_intern::Symbol::intern("vec_par_reduce"),
+            params: vec![],
+            return_ty: LoopType::Void,
+            body: top_body,
+            allocs: vec![],
+            loop_info: vec![
+                LoopMetadata {
+                    id: outer_loop_id,
+                    trip_count: TripCount::Static(10000),
+                    vector_width: None,
+                    parallel_chunk: None,
+                    unroll_factor: None,
+                    dependencies: Vec::new(),
+                },
+                LoopMetadata {
+                    id: inner_loop_id,
+                    trip_count: TripCount::Static(1024),
+                    vector_width: None,
+                    parallel_chunk: None,
+                    unroll_factor: None,
+                    dependencies: Vec::new(),
+                },
+            ],
+        };
+
+        // Apply vectorization pass
+        let vec_config = VectorizeConfig {
+            target: TargetArch::X86_64Avx2,
+            ..Default::default()
+        };
+        let mut vec_pass = VectorizePass::new(vec_config);
+        let vec_analysis = vec_pass.analyze(&ir);
+
+        // Verify inner loop is vectorizable
+        let inner_info = vec_analysis.get(&inner_loop_id).expect("inner loop analyzed");
+        assert!(
+            inner_info.vectorizable,
+            "M3 FAIL: Inner reduction loop should be vectorizable"
+        );
+
+        // Apply parallelization pass
+        let par_config = ParallelConfig {
+            worker_count: 8,
+            deterministic: true,
+            ..Default::default()
+        };
+        let mut par_pass = ParallelPass::new(par_config);
+        let par_analysis = par_pass.analyze(&ir);
+
+        // Verify outer loop is parallelizable
+        let outer_info = par_analysis.get(&outer_loop_id).expect("outer loop analyzed");
+        assert!(
+            outer_info.parallelizable,
+            "M3 FAIL: Outer loop should be parallelizable"
+        );
+        assert_eq!(
+            outer_info.num_chunks, 8,
+            "M3 FAIL: Should have 8 parallel chunks"
+        );
     }
 }

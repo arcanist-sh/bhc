@@ -121,6 +121,7 @@ impl<'src> Parser<'src> {
     /// Check if we're at the end of input.
     fn at_eof(&self) -> bool {
         self.pos >= self.tokens.len()
+            || self.current_kind() == Some(&TokenKind::Eof)
     }
 
     /// Advance to the next token.
@@ -158,6 +159,18 @@ impl<'src> Parser<'src> {
             true
         } else {
             false
+        }
+    }
+
+    /// Skip any virtual tokens (VirtualLBrace, VirtualRBrace, VirtualSemi).
+    /// These are inserted by the layout rule and need to be skipped in some contexts.
+    fn skip_virtual_tokens(&mut self) {
+        while let Some(kind) = self.current_kind() {
+            if kind.is_virtual() {
+                self.advance();
+            } else {
+                break;
+            }
         }
     }
 

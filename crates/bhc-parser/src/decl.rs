@@ -38,6 +38,12 @@ impl<'src> Parser<'src> {
         // Declarations
         let mut decls = Vec::new();
         while !self.at_eof() {
+            // Skip any virtual tokens between declarations
+            self.skip_virtual_tokens();
+            if self.at_eof() {
+                break;
+            }
+
             match self.parse_top_decl() {
                 Ok(decl) => decls.push(decl),
                 Err(e) => {

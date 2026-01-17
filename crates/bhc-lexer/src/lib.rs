@@ -85,6 +85,8 @@ pub struct Lexer<'src> {
     line: u32,
     /// Column of current position (1-indexed).
     column: u32,
+    /// Whether we've returned EOF (iterator is exhausted).
+    eof_returned: bool,
 }
 
 impl<'src> Lexer<'src> {
@@ -108,6 +110,7 @@ impl<'src> Lexer<'src> {
             at_line_start: true,
             line: 1,
             column: 1,
+            eof_returned: false,
         }
     }
 
@@ -1059,24 +1062,6 @@ impl<'src> Lexer<'src> {
 
     /// Handle layout rule: generate virtual tokens based on indentation.
     fn handle_layout(&mut self, token: &Token, column: u32) {
-        // If we expect a layout block after a layout keyword
-        if self.expect_layout_block {
-            self.expect_layout_block = false;
-
-            if token.kind == TokenKind::LBrace {
-                // Explicit brace - push explicit context
-                self.layout_stack.push((0, true));
-            } else {
-                // Implicit layout - insert virtual brace and push context
-                self.layout_stack.push((column, false));
-                self.pending.push(Spanned::new(
-                    Token::new(TokenKind::VirtualLBrace),
-                    Span::from_raw(self.pos as u32, self.pos as u32),
-                ));
-            }
-            return;
-        }
-
         // Check for layout keywords that start a new block
         if token.kind.starts_layout() {
             self.expect_layout_block = true;
@@ -1249,12 +1234,72 @@ impl<'src> Iterator for Lexer<'src> {
     type Item = Spanned<Token>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // If we've already returned EOF, iterator is exhausted
+        if self.eof_returned {
+            return None;
+        }
+
         // Return pending tokens first (from layout rule)
         if let Some(tok) = self.pending.pop() {
             return Some(tok);
         }
 
-        self.lex_raw_token()
+        // If we're expecting a layout block, we need to peek at the next
+        // token to decide whether to insert a VirtualLBrace.
+        if self.expect_layout_block {
+            self.expect_layout_block = false;
+
+            // Skip trivia to find the column of the next token
+            self.skip_trivia();
+
+            // Check if next char is explicit brace
+            if self.peek() == Some('{') {
+                // Explicit brace - push explicit context
+                self.layout_stack.push((0, true));
+            } else if self.peek().is_some() {
+                // Implicit layout - insert virtual brace BEFORE the next token
+                let column = self.column;
+                self.layout_stack.push((column, false));
+
+                // Clear at_line_start so the first token in the block
+                // doesn't get a VirtualSemi before it
+                self.at_line_start = false;
+
+                // Return the VirtualLBrace now, the real token comes next
+                return Some(Spanned::new(
+                    Token::new(TokenKind::VirtualLBrace),
+                    Span::from_raw(self.pos as u32, self.pos as u32),
+                ));
+            }
+            // If peek() is None, we're at EOF after a layout keyword
+            // which is unusual but we'll handle it in the EOF case below
+        }
+
+        // Try to lex the next token
+        if let Some(tok) = self.lex_raw_token() {
+            return Some(tok);
+        }
+
+        // At EOF: close any remaining implicit layout blocks (except module-level)
+        while self.layout_stack.len() > 1 {
+            if let Some(&(_, is_explicit)) = self.layout_stack.last() {
+                if is_explicit {
+                    break; // Don't auto-close explicit braces
+                }
+                self.layout_stack.pop();
+                return Some(Spanned::new(
+                    Token::new(TokenKind::VirtualRBrace),
+                    Span::from_raw(self.pos as u32, self.pos as u32),
+                ));
+            }
+        }
+
+        // Finally return EOF
+        self.eof_returned = true;
+        Some(Spanned::new(
+            Token::new(TokenKind::Eof),
+            Span::from_raw(self.pos as u32, self.pos as u32),
+        ))
     }
 }
 
@@ -1283,13 +1328,18 @@ mod tests {
         lex(src).into_iter().map(|t| t.node.kind).collect()
     }
 
+    /// Helper that filters out Eof and virtual tokens for tests that don't care about them
+    fn lex_kinds_no_layout(src: &str) -> Vec<TokenKind> {
+        lex_kinds(src)
+            .into_iter()
+            .filter(|k| !k.is_virtual() && *k != TokenKind::Eof)
+            .collect()
+    }
+
     #[test]
     fn test_keywords() {
-        // Filter out virtual tokens for this test (layout rule adds them after where/do/of/let)
-        let kinds: Vec<_> = lex_kinds("let in where if then else case of do")
-            .into_iter()
-            .filter(|k| !k.is_virtual())
-            .collect();
+        // Filter out virtual tokens and Eof for this test
+        let kinds = lex_kinds_no_layout("let in where if then else case of do");
         assert_eq!(
             kinds,
             vec![
@@ -1325,7 +1375,7 @@ mod tests {
 
     #[test]
     fn test_numbers() {
-        let kinds = lex_kinds("42 0xFF 0o77 0b1010 3.14 1e10");
+        let kinds = lex_kinds_no_layout("42 0xFF 0o77 0b1010 3.14 1e10");
         assert_eq!(kinds.len(), 6);
         assert!(matches!(kinds[0], TokenKind::IntLit(_)));
         assert!(matches!(kinds[1], TokenKind::IntLit(_)));
@@ -1351,7 +1401,7 @@ mod tests {
 
     #[test]
     fn test_string_literal() {
-        let kinds = lex_kinds(r#""hello world""#);
+        let kinds = lex_kinds_no_layout(r#""hello world""#);
         assert_eq!(kinds.len(), 1);
         match &kinds[0] {
             TokenKind::StringLit(s) => assert_eq!(s, "hello world"),
@@ -1406,7 +1456,7 @@ mod tests {
 
     #[test]
     fn test_block_comments() {
-        let kinds = lex_kinds("x {- nested {- comment -} -} y");
+        let kinds = lex_kinds_no_layout("x {- nested {- comment -} -} y");
         assert_eq!(kinds.len(), 2);
     }
 
@@ -1443,10 +1493,111 @@ mod tests {
     }
 
     #[test]
+    fn test_layout_module() {
+        // Test layout for a module with where
+        let src = "module Test where\nfoo = 1\nbar = 2";
+        let kinds = lex_kinds(src);
+
+        // Should have: Module, ConId(Test), Where, VirtualLBrace,
+        // Ident(foo), Eq, IntLit(1), VirtualSemi,
+        // Ident(bar), Eq, IntLit(2), VirtualRBrace, Eof
+        assert_eq!(kinds[0], TokenKind::Module);
+        assert!(matches!(kinds[1], TokenKind::ConId(_))); // Test
+        assert_eq!(kinds[2], TokenKind::Where);
+
+        // After where, should have VirtualLBrace
+        assert_eq!(kinds[3], TokenKind::VirtualLBrace);
+
+        // foo = 1
+        assert!(matches!(kinds[4], TokenKind::Ident(_))); // foo
+        assert_eq!(kinds[5], TokenKind::Eq);
+
+        // VirtualSemi between declarations at same indentation
+        let has_semi = kinds.iter().any(|k| *k == TokenKind::VirtualSemi);
+        assert!(has_semi, "Should have VirtualSemi between decls");
+
+        // VirtualRBrace at end (or before Eof)
+        let has_rbrace = kinds.iter().any(|k| *k == TokenKind::VirtualRBrace);
+        assert!(has_rbrace, "Should have VirtualRBrace at end");
+    }
+
+    #[test]
+    fn test_layout_case() {
+        // Test layout for case expression
+        let src = "case x of\n  Just y -> y\n  Nothing -> 0";
+        let kinds = lex_kinds(src);
+
+        // After 'of', should have VirtualLBrace
+        let of_idx = kinds.iter().position(|k| *k == TokenKind::Of).unwrap();
+        assert_eq!(kinds[of_idx + 1], TokenKind::VirtualLBrace);
+
+        // Should have VirtualSemi between alternatives
+        let has_semi = kinds.iter().any(|k| *k == TokenKind::VirtualSemi);
+        assert!(has_semi, "Should have VirtualSemi between case alts");
+    }
+
+    #[test]
     fn test_constructor_operators() {
         let kinds = lex_kinds(":+ :| :");
         assert!(matches!(kinds[0], TokenKind::ConOperator(_)));
         assert!(matches!(kinds[1], TokenKind::ConOperator(_)));
         assert!(matches!(kinds[2], TokenKind::ConOperator(_)));
     }
+
+    #[test]
+    fn test_layout_nested_let() {
+        // Test nested let expressions
+        let src = "let x = let y = 1 in y in x";
+        let kinds = lex_kinds(src);
+
+        // Should have two VirtualLBrace (one for each let)
+        let lbrace_count = kinds.iter().filter(|k| **k == TokenKind::VirtualLBrace).count();
+        assert_eq!(lbrace_count, 2, "Should have 2 VirtualLBrace for nested lets");
+    }
+
+    #[test]
+    fn test_layout_do_block() {
+        // Test do block layout
+        let src = "do\n  x <- getLine\n  putStrLn x";
+        let kinds = lex_kinds(src);
+
+        // After 'do', should have VirtualLBrace
+        let do_idx = kinds.iter().position(|k| *k == TokenKind::Do).unwrap();
+        assert_eq!(kinds[do_idx + 1], TokenKind::VirtualLBrace);
+
+        // Should have VirtualSemi between statements
+        let has_semi = kinds.iter().any(|k| *k == TokenKind::VirtualSemi);
+        assert!(has_semi, "Should have VirtualSemi between do statements");
+    }
+
+    #[test]
+    fn test_layout_explicit_braces() {
+        // Test that explicit braces disable layout
+        let src = "let { x = 1; y = 2 } in x + y";
+        let kinds = lex_kinds(src);
+
+        // Should have LBrace and RBrace (explicit)
+        let has_lbrace = kinds.iter().any(|k| *k == TokenKind::LBrace);
+        let has_rbrace = kinds.iter().any(|k| *k == TokenKind::RBrace);
+        assert!(has_lbrace, "Should have explicit LBrace");
+        assert!(has_rbrace, "Should have explicit RBrace");
+
+        // Should have semicolons
+        let has_semi = kinds.iter().any(|k| *k == TokenKind::Semi);
+        assert!(has_semi, "Should have explicit semicolons");
+    }
+
+    #[test]
+    fn test_layout_multi_dedent() {
+        // Test dedenting multiple levels at once
+        let src = "module Test where\nfoo = do\n  let x = 1\n  x\nbar = 2";
+        let kinds = lex_kinds(src);
+
+        // Should have multiple VirtualRBrace when we dedent from the let back to module level
+        let rbrace_count = kinds.iter().filter(|k| **k == TokenKind::VirtualRBrace).count();
+        // module where -> VirtualLBrace, do -> VirtualLBrace, let -> VirtualLBrace
+        // bar dedents closes do's let, do, but module continues
+        assert!(rbrace_count >= 2, "Should have at least 2 VirtualRBrace for multi-level dedent");
+    }
 }
+

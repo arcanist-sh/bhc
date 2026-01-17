@@ -120,6 +120,8 @@ Common causes:
 - Using a variable before it's defined
 - Variable defined in a different scope (e.g., inside a let or lambda)
 - Forgot to import a module
+
+The compiler will suggest similar names if it finds a likely typo.
 "#,
             example: Some(
                 r#"
@@ -129,6 +131,193 @@ foo = x + 1  -- Error: x is not defined
             correct_example: Some(
                 r#"
 foo x = x + 1  -- x is now a parameter
+"#,
+            ),
+        },
+    );
+
+    map.insert(
+        "E0004",
+        ErrorExplanation {
+            code: "E0004",
+            title: "Unbound constructor",
+            explanation: r#"
+This error occurs when you use a data constructor that hasn't been defined
+or imported.
+
+Data constructors in Haskell/BHC must:
+- Start with an uppercase letter (e.g., Just, Nothing, True)
+- Be defined in a data/newtype declaration
+- Be imported if defined in another module
+
+Common causes:
+- Typo in the constructor name
+- Forgot to import the data type
+- Constructor is not exported from its module
+"#,
+            example: Some(
+                r#"
+foo = Jus 42  -- Error: typo, should be Just
+"#,
+            ),
+            correct_example: Some(
+                r#"
+foo = Just 42  -- Correct constructor name
+"#,
+            ),
+        },
+    );
+
+    map.insert(
+        "E0005",
+        ErrorExplanation {
+            code: "E0005",
+            title: "Pattern arity mismatch",
+            explanation: r#"
+This error occurs when a pattern has a different number of arguments than
+the data constructor expects.
+
+Each data constructor has a fixed number of fields. When pattern matching,
+you must provide exactly that many pattern variables.
+"#,
+            example: Some(
+                r#"
+data Point = Point Int Int
+
+foo (Point x) = x  -- Error: Point has 2 fields, but pattern has 1
+"#,
+            ),
+            correct_example: Some(
+                r#"
+data Point = Point Int Int
+
+foo (Point x y) = x + y  -- Correct: matches both fields
+-- Or use a wildcard:
+foo (Point x _) = x      -- Ignore second field
+"#,
+            ),
+        },
+    );
+
+    map.insert(
+        "E0006",
+        ErrorExplanation {
+            code: "E0006",
+            title: "Ambiguous type variable",
+            explanation: r#"
+This error occurs when the compiler cannot determine a concrete type for
+a type variable. The type is ambiguous because there's not enough
+information to resolve it.
+
+This often happens with:
+- Numeric literals that could be Int, Float, etc.
+- Polymorphic functions where the result type isn't constrained
+- Show/Read without a concrete type context
+
+Solution: Add a type annotation to specify the intended type.
+"#,
+            example: Some(
+                r#"
+foo = show (read "42")  -- Error: ambiguous type for read
+"#,
+            ),
+            correct_example: Some(
+                r#"
+foo = show (read "42" :: Int)  -- Explicit type annotation
+"#,
+            ),
+        },
+    );
+
+    map.insert(
+        "E0007",
+        ErrorExplanation {
+            code: "E0007",
+            title: "Kind mismatch",
+            explanation: r#"
+This error occurs when a type is used with the wrong kind.
+
+Kinds classify types:
+- `*` (or `Type`): Concrete types like Int, Bool, [Char]
+- `* -> *`: Type constructors like Maybe, [], IO
+- `* -> * -> *`: Two-parameter type constructors like Either, (,)
+
+Kind errors often occur when:
+- Applying a concrete type as if it were a type constructor
+- Forgetting to apply a type constructor to its argument
+"#,
+            example: Some(
+                r#"
+foo :: Int Maybe  -- Error: Int has kind *, not * -> *
+"#,
+            ),
+            correct_example: Some(
+                r#"
+foo :: Maybe Int  -- Correct: Maybe :: * -> *, Int :: *
+"#,
+            ),
+        },
+    );
+
+    map.insert(
+        "E0008",
+        ErrorExplanation {
+            code: "E0008",
+            title: "Function arity mismatch",
+            explanation: r#"
+This error occurs when a function is called with the wrong number of
+arguments.
+
+While Haskell/BHC supports partial application (providing fewer arguments
+than expected), this error is raised when you provide MORE arguments than
+the function accepts.
+
+The error message shows which arguments are extra.
+"#,
+            example: Some(
+                r#"
+add :: Int -> Int -> Int
+add x y = x + y
+
+result = add 1 2 3  -- Error: add takes 2 arguments, got 3
+"#,
+            ),
+            correct_example: Some(
+                r#"
+add :: Int -> Int -> Int
+add x y = x + y
+
+result = add 1 2  -- Correct: 2 arguments
+"#,
+            ),
+        },
+    );
+
+    map.insert(
+        "E0009",
+        ErrorExplanation {
+            code: "E0009",
+            title: "Not a function",
+            explanation: r#"
+This error occurs when you try to apply something that isn't a function
+as if it were one.
+
+In Haskell/BHC, function application is denoted by juxtaposition:
+  f x    -- Apply f to x
+
+If `f` is not a function type (doesn't have the form `a -> b`), you'll
+get this error.
+"#,
+            example: Some(
+                r#"
+x = 42
+result = x 10  -- Error: 42 is Int, not a function
+"#,
+            ),
+            correct_example: Some(
+                r#"
+f x = x + 1
+result = f 10  -- Correct: f is a function
 "#,
             ),
         },

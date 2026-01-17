@@ -1,31 +1,88 @@
 //! Diagnostic emission for type errors.
 //!
 //! This module provides functions to emit type error diagnostics with
-//! helpful messages and suggestions.
+//! helpful messages and suggestions in Cargo/Rust style.
 //!
-//! ## M9 Dependent Types
+//! ## Error Codes
 //!
-//! This module includes diagnostics for shape-indexed tensor type errors,
-//! including dimension mismatches and shape constraint violations.
+//! - `E0001-E0007`: Basic type errors (mismatch, unbound, occurs check)
+//! - `E0008-E0019`: Reserved for basic type errors
+//! - `E0020-E0029`: Shape/dimension errors (M9 dependent types)
+//! - `E0030-E0039`: Tensor operation errors (matmul, broadcast, etc.)
+//!
+//! ## M10 Cargo-Quality Diagnostics
+//!
+//! This module implements Phase 2 of M10: Type Error Overhaul with:
+//! - Aligned type comparisons for mismatches
+//! - "Did you mean?" suggestions for typos
+//! - Function arity mismatch with argument highlighting
+//! - Detailed unification trails for complex errors
 
-use bhc_diagnostics::Diagnostic;
+use bhc_diagnostics::{Applicability, Diagnostic, Suggestion};
 use bhc_hir::DefId;
+use bhc_intern::Symbol;
 use bhc_span::Span;
 use bhc_types::{Ty, TyList, TyNat, TyVar};
 
 use crate::context::TyCtxt;
+use crate::suggest::{find_similar_names, format_suggestions};
 
-/// Emit a type mismatch error.
+/// Emit a type mismatch error with aligned comparison.
+///
+/// This provides a Cargo-style error message with:
+/// - Clear "expected X, found Y" formatting
+/// - Aligned type comparison for easy visual diff
+/// - Suggestions for common fixes
 pub fn emit_type_mismatch(ctx: &mut TyCtxt, expected: &Ty, found: &Ty, span: Span) {
-    let diag = Diagnostic::error(format!(
-        "type mismatch: expected `{}`, found `{}`",
-        pretty_ty(expected),
-        pretty_ty(found)
-    ))
-    .with_code("E0001")
-    .with_label(ctx.full_span(span), "type mismatch here");
+    let expected_str = pretty_ty(expected);
+    let found_str = pretty_ty(found);
+
+    let diag = Diagnostic::error(format!("type mismatch: expected `{expected_str}`, found `{found_str}`"))
+        .with_code("E0001")
+        .with_label(
+            ctx.full_span(span),
+            format!("expected `{expected_str}`"),
+        )
+        .with_note(format_type_comparison(expected, found));
 
     ctx.emit_error(diag);
+}
+
+/// Emit a type mismatch error with additional context about where the expectation came from.
+pub fn emit_type_mismatch_with_context(
+    ctx: &mut TyCtxt,
+    expected: &Ty,
+    found: &Ty,
+    span: Span,
+    context: &str,
+) {
+    let expected_str = pretty_ty(expected);
+    let found_str = pretty_ty(found);
+
+    let diag = Diagnostic::error(format!("type mismatch: expected `{expected_str}`, found `{found_str}`"))
+        .with_code("E0001")
+        .with_label(
+            ctx.full_span(span),
+            format!("expected `{expected_str}` because {context}"),
+        )
+        .with_note(format_type_comparison(expected, found));
+
+    ctx.emit_error(diag);
+}
+
+/// Format a visual comparison of two types for error messages.
+fn format_type_comparison(expected: &Ty, found: &Ty) -> String {
+    let expected_str = pretty_ty(expected);
+    let found_str = pretty_ty(found);
+
+    // Calculate padding for alignment
+    let max_len = expected_str.len().max(found_str.len());
+    let expected_padded = format!("{expected_str:>width$}", width = max_len);
+    let found_padded = format!("{found_str:>width$}", width = max_len);
+
+    format!(
+        "expected: {expected_padded}\n   found: {found_padded}"
+    )
 }
 
 /// Emit an occurs check error (infinite type).
@@ -44,18 +101,90 @@ pub fn emit_occurs_check_error(ctx: &mut TyCtxt, var: &TyVar, ty: &Ty, span: Spa
 
 /// Emit an unbound variable error.
 pub fn emit_unbound_var(ctx: &mut TyCtxt, def_id: DefId, span: Span) {
-    let diag = Diagnostic::error(format!("unbound variable (DefId: {def_id:?})"))
+    let diag = Diagnostic::error(format!("cannot find value `{def_id:?}` in this scope"))
         .with_code("E0003")
-        .with_label(ctx.full_span(span), "not in scope");
+        .with_label(ctx.full_span(span), "not found in this scope")
+        .with_note("variables must be defined before use");
+
+    ctx.emit_error(diag);
+}
+
+/// Emit an unbound variable error with the actual name and suggestions.
+///
+/// This enhanced version provides "Did you mean?" suggestions based on
+/// similar names in scope.
+pub fn emit_unbound_var_named(
+    ctx: &mut TyCtxt,
+    name: Symbol,
+    span: Span,
+    names_in_scope: &[Symbol],
+) {
+    let name_str = name.as_str();
+
+    let mut diag = Diagnostic::error(format!("cannot find value `{name_str}` in this scope"))
+        .with_code("E0003")
+        .with_label(ctx.full_span(span), "not found in this scope");
+
+    // Find similar names for "Did you mean?" suggestions
+    let suggestions = find_similar_names(name_str, names_in_scope);
+    if let Some(suggestion_text) = format_suggestions(&suggestions) {
+        diag = diag.with_note(suggestion_text);
+
+        // If there's a single good suggestion, add a code suggestion
+        if suggestions.len() == 1 && suggestions[0].distance <= 2 {
+            let suggested_name = suggestions[0].name.as_str().to_string();
+            diag = diag.with_suggestion(Suggestion::new(
+                format!("a value with a similar name exists: `{suggested_name}`"),
+                ctx.full_span(span),
+                suggested_name,
+                Applicability::MaybeIncorrect,
+            ));
+        }
+    }
 
     ctx.emit_error(diag);
 }
 
 /// Emit an unbound constructor error.
 pub fn emit_unbound_constructor(ctx: &mut TyCtxt, def_id: DefId, span: Span) {
-    let diag = Diagnostic::error(format!("unbound constructor (DefId: {def_id:?})"))
+    let diag = Diagnostic::error(format!("cannot find data constructor `{def_id:?}` in this scope"))
         .with_code("E0004")
-        .with_label(ctx.full_span(span), "constructor not in scope");
+        .with_label(ctx.full_span(span), "constructor not found")
+        .with_note("data constructors must be imported or defined before use");
+
+    ctx.emit_error(diag);
+}
+
+/// Emit an unbound constructor error with the actual name and suggestions.
+pub fn emit_unbound_constructor_named(
+    ctx: &mut TyCtxt,
+    name: Symbol,
+    span: Span,
+    constructors_in_scope: &[Symbol],
+) {
+    let name_str = name.as_str();
+
+    let mut diag = Diagnostic::error(format!("cannot find data constructor `{name_str}` in this scope"))
+        .with_code("E0004")
+        .with_label(ctx.full_span(span), "constructor not found");
+
+    // Find similar constructor names
+    let suggestions = find_similar_names(name_str, constructors_in_scope);
+    if let Some(suggestion_text) = format_suggestions(&suggestions) {
+        diag = diag.with_note(suggestion_text);
+
+        if suggestions.len() == 1 && suggestions[0].distance <= 2 {
+            let suggested_name = suggestions[0].name.as_str().to_string();
+            diag = diag.with_suggestion(Suggestion::new(
+                format!("a constructor with a similar name exists: `{suggested_name}`"),
+                ctx.full_span(span),
+                suggested_name,
+                Applicability::MaybeIncorrect,
+            ));
+        }
+    } else {
+        diag = diag.with_note("data constructors must start with an uppercase letter");
+    }
 
     ctx.emit_error(diag);
 }
@@ -64,7 +193,36 @@ pub fn emit_unbound_constructor(ctx: &mut TyCtxt, def_id: DefId, span: Span) {
 pub fn emit_too_many_pattern_args(ctx: &mut TyCtxt, span: Span) {
     let diag = Diagnostic::error("too many arguments in pattern")
         .with_code("E0005")
-        .with_label(ctx.full_span(span), "extra arguments here");
+        .with_label(ctx.full_span(span), "extra arguments here")
+        .with_note("check the data constructor's definition for the expected number of fields");
+
+    ctx.emit_error(diag);
+}
+
+/// Emit a pattern arity mismatch error with detailed information.
+pub fn emit_pattern_arity_mismatch(
+    ctx: &mut TyCtxt,
+    constructor_name: &str,
+    expected: usize,
+    found: usize,
+    span: Span,
+) {
+    let plural = |n: usize| if n == 1 { "argument" } else { "arguments" };
+
+    let diag = Diagnostic::error(format!(
+        "constructor `{constructor_name}` expects {expected} {}, but {found} {} supplied",
+        plural(expected),
+        if found == 1 { "was" } else { "were" }
+    ))
+    .with_code("E0005")
+    .with_label(
+        ctx.full_span(span),
+        if found > expected {
+            format!("{} extra {}", found - expected, plural(found - expected))
+        } else {
+            format!("{} missing {}", expected - found, plural(expected - found))
+        },
+    );
 
     ctx.emit_error(diag);
 }
@@ -92,12 +250,113 @@ pub fn emit_kind_mismatch(
     span: Span,
 ) {
     let diag = Diagnostic::error(format!(
-        "kind mismatch: expected `{expected}`, found `{found}`"
+        "kind mismatch: expected kind `{expected}`, found kind `{found}`"
     ))
     .with_code("E0007")
-    .with_label(ctx.full_span(span), "kind mismatch");
+    .with_label(ctx.full_span(span), format!("expected kind `{expected}`"))
+    .with_note("kinds classify types: * is for concrete types, * -> * is for type constructors");
 
     ctx.emit_error(diag);
+}
+
+// === M10 Phase 2: Function arity errors (E0008-E0010) ===
+
+/// Emit a function arity mismatch error.
+///
+/// Called when a function is applied to the wrong number of arguments.
+pub fn emit_function_arity_mismatch(
+    ctx: &mut TyCtxt,
+    function_name: &str,
+    expected: usize,
+    found: usize,
+    span: Span,
+    arg_spans: &[Span],
+) {
+    let plural = |n: usize| if n == 1 { "argument" } else { "arguments" };
+
+    let mut diag = Diagnostic::error(format!(
+        "function `{function_name}` takes {expected} {}, but {found} {} supplied",
+        plural(expected),
+        if found == 1 { "was" } else { "were" }
+    ))
+    .with_code("E0008")
+    .with_label(ctx.full_span(span), format!(
+        "expected {expected} {}", plural(expected)
+    ));
+
+    // Highlight extra arguments
+    if found > expected {
+        for (i, &arg_span) in arg_spans.iter().enumerate().skip(expected) {
+            if !arg_span.is_dummy() {
+                diag = diag.with_secondary_label(
+                    ctx.full_span(arg_span),
+                    format!("unexpected {} argument", ordinal(i + 1)),
+                );
+            }
+        }
+    }
+
+    ctx.emit_error(diag);
+}
+
+/// Emit an error when a non-function is applied to arguments.
+pub fn emit_not_a_function(
+    ctx: &mut TyCtxt,
+    actual_type: &Ty,
+    num_args: usize,
+    span: Span,
+) {
+    let ty_str = pretty_ty(actual_type);
+    let plural = if num_args == 1 { "argument" } else { "arguments" };
+
+    let diag = Diagnostic::error(format!(
+        "expected function, found `{ty_str}`"
+    ))
+    .with_code("E0009")
+    .with_label(ctx.full_span(span), format!(
+        "cannot apply {num_args} {plural} to non-function"
+    ))
+    .with_note(format!(
+        "the expression has type `{ty_str}`, which is not a function type"
+    ));
+
+    ctx.emit_error(diag);
+}
+
+/// Emit an error when too few arguments are provided (partial application context).
+#[allow(dead_code)]
+pub fn emit_partial_application_hint(
+    ctx: &mut TyCtxt,
+    function_name: &str,
+    expected: usize,
+    found: usize,
+    result_type: &Ty,
+    span: Span,
+) {
+    let plural = |n: usize| if n == 1 { "argument" } else { "arguments" };
+    let remaining = expected - found;
+
+    let diag = Diagnostic::warning(format!(
+        "partial application: `{function_name}` expects {remaining} more {}",
+        plural(remaining)
+    ))
+    .with_label(ctx.full_span(span), format!(
+        "this returns `{}`, not a fully applied result",
+        pretty_ty(result_type)
+    ))
+    .with_note("partial application is valid, but this may not be what you intended");
+
+    ctx.emit_error(diag);
+}
+
+/// Helper to format ordinal numbers.
+fn ordinal(n: usize) -> String {
+    match n {
+        1 => "1st".to_string(),
+        2 => "2nd".to_string(),
+        3 => "3rd".to_string(),
+        n => format!("{n}th"),
+    }
 }
 
 /// Emit a "missing type signature" warning.

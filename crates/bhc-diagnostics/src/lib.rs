@@ -30,6 +30,7 @@
 
 pub mod explain;
 pub mod json;
+pub mod lsp;
 pub mod render;
 
 use bhc_span::{FileId, SourceFile};
@@ -41,6 +42,11 @@ use std::io::Write;
 pub use explain::{all_error_codes, format_explanation, get_explanation, print_explanation};
 pub use json::{diagnostic_to_json, diagnostics_to_json, to_json_lines, to_json_string};
 pub use json::{JsonApplicability, JsonDiagnostic, JsonSeverity, JsonSpan, JsonSuggestion};
+pub use lsp::{
+    publish_diagnostics, to_code_actions, to_hover, to_lsp_diagnostic, to_lsp_diagnostics,
+    LspCodeAction, LspDiagnostic, LspHover, LspRange, LspSeverity, LspTextEdit,
+    PublishDiagnosticsParams,
+};
 pub use render::{colors, CargoRenderer, RenderConfig};
 
 /// The severity level of a diagnostic.

@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use bhc_intern::Symbol;
 
+use crate::uarray::UArray;
 use crate::{DataCon, Expr, Var};
 
 /// A runtime value produced by evaluating Core IR.
@@ -46,6 +47,12 @@ pub enum Value {
 
     /// A partially applied primitive operation.
     PartialPrimOp(PrimOp, Vec<Value>),
+
+    /// An unboxed integer array.
+    UArrayInt(UArray<i64>),
+
+    /// An unboxed double array.
+    UArrayDouble(UArray<f64>),
 }
 
 impl fmt::Debug for Value {
@@ -70,6 +77,8 @@ impl fmt::Debug for Value {
             Self::PartialPrimOp(op, args) => {
                 write!(f, "<partial {op:?} applied to {} args>", args.len())
             }
+            Self::UArrayInt(arr) => write!(f, "UArray[Int; {}]", arr.len()),
+            Self::UArrayDouble(arr) => write!(f, "UArray[Double; {}]", arr.len()),
         }
     }
 }
@@ -212,6 +221,56 @@ impl Value {
             .rev()
             .fold(Self::nil(), |acc, v| Self::cons(v, acc))
     }
+
+    /// Creates an integer UArray from a list of int values.
+    #[must_use]
+    pub fn uarray_int_from_list(list: &Self) -> Option<Self> {
+        let values = list.as_list()?;
+        let ints: Option<Vec<i64>> = values.iter().map(Self::as_int).collect();
+        Some(Self::UArrayInt(UArray::from_vec(ints?)))
+    }
+
+    /// Creates a double UArray from a list of double values.
+    #[must_use]
+    pub fn uarray_double_from_list(list: &Self) -> Option<Self> {
+        let values = list.as_list()?;
+        let doubles: Option<Vec<f64>> = values.iter().map(Self::as_double).collect();
+        Some(Self::UArrayDouble(UArray::from_vec(doubles?)))
+    }
+
+    /// Converts a UArray to a list value.
+    #[must_use]
+    pub fn uarray_to_list(&self) -> Option<Self> {
+        match self {
+            Self::UArrayInt(arr) => {
+                let values: Vec<Self> = arr.to_vec().into_iter().map(Self::Int).collect();
+                Some(Self::from_list(values))
+            }
+            Self::UArrayDouble(arr) => {
+                let values: Vec<Self> = arr.to_vec().into_iter().map(Self::Double).collect();
+                Some(Self::from_list(values))
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns the UArray as an integer array, if applicable.
+    #[must_use]
+    pub fn as_uarray_int(&self) -> Option<&UArray<i64>> {
+        match self {
+            Self::UArrayInt(arr) => Some(arr),
+            _ => None,
+        }
+    }
+
+    /// Returns the UArray as a double array, if applicable.
+    #[must_use]
+    pub fn as_uarray_double(&self) -> Option<&UArray<f64>> {
+        match self {
+            Self::UArrayDouble(arr) => Some(arr),
+            _ => None,
+        }
+    }
 }
 
 /// A closure capturing a lambda and its environment.
@@ -326,6 +385,24 @@ pub enum PrimOp {
     // Error
     /// Throw an error.
     Error,
+
+    // UArray operations
+    /// Create an integer UArray from a list.
+    UArrayFromList,
+    /// Convert a UArray back to a list.
+    UArrayToList,
+    /// Map a function over a UArray.
+    UArrayMap,
+    /// Zip two UArrays with a function.
+    UArrayZipWith,
+    /// Fold over a UArray.
+    UArrayFold,
+    /// Sum all elements in a UArray.
+    UArraySum,
+    /// Get the length of a UArray.
+    UArrayLength,
+    /// Create a range [start..end).
+    UArrayRange,
 }
 
 impl PrimOp {
@@ -334,7 +411,10 @@ impl PrimOp {
     pub fn arity(self) -> usize {
         match self {
             Self::NegInt | Self::NegDouble | Self::NotBool | Self::IntToDouble
-            | Self::DoubleToInt | Self::CharToInt | Self::IntToChar | Self::Error => 1,
+            | Self::DoubleToInt | Self::CharToInt | Self::IntToChar | Self::Error
+            | Self::UArrayFromList | Self::UArrayToList | Self::UArraySum | Self::UArrayLength => 1,
+            Self::UArrayMap | Self::UArrayRange => 2,
+            Self::UArrayZipWith | Self::UArrayFold => 3,
             _ => 2,
         }
     }
@@ -371,6 +451,15 @@ impl PrimOp {
             "chr#" => Some(Self::IntToChar),
             "seq" => Some(Self::Seq),
             "error" => Some(Self::Error),
+            // UArray operations
+            "uarrayFromList" | "fromList" => Some(Self::UArrayFromList),
+            "uarrayToList" | "toList" => Some(Self::UArrayToList),
+            "uarrayMap" => Some(Self::UArrayMap),
+            "uarrayZipWith" => Some(Self::UArrayZipWith),
+            "uarrayFold" => Some(Self::UArrayFold),
+            "uarraySum" | "sum" => Some(Self::UArraySum),
+            "uarrayLength" | "length" => Some(Self::UArrayLength),
+            "uarrayRange" | "range" => Some(Self::UArrayRange),
             _ => None,
         }
     }

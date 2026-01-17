@@ -132,11 +132,32 @@ impl Evaluator {
             ("not", PrimOp::NotBool),
             ("seq", PrimOp::Seq),
             ("error", PrimOp::Error),
+            // UArray operations
+            ("fromList", PrimOp::UArrayFromList),
+            ("toList", PrimOp::UArrayToList),
+            ("uarrayMap", PrimOp::UArrayMap),
+            ("uarrayZipWith", PrimOp::UArrayZipWith),
+            ("uarrayFold", PrimOp::UArrayFold),
+            ("sum", PrimOp::UArraySum),
+            ("length", PrimOp::UArrayLength),
+            ("range", PrimOp::UArrayRange),
         ];
 
         for (name, op) in ops {
             prims.insert(Symbol::intern(name), Value::PrimOp(op));
         }
+
+        // Register list constructors
+        prims.insert(Symbol::intern("[]"), Value::nil());
+        prims.insert(Symbol::intern(":"), Value::Data(DataValue {
+            con: crate::DataCon {
+                name: Symbol::intern(":"),
+                ty_con: bhc_types::TyCon::new(Symbol::intern("[]"), bhc_types::Kind::star_to_star()),
+                tag: 1,
+                arity: 2,
+            },
+            args: vec![],
+        }));
     }
 
     /// Evaluates an expression to a value.
@@ -486,6 +507,263 @@ impl Evaluator {
                 };
                 Err(EvalError::UserError(msg))
             }
+
+            // UArray operations
+            PrimOp::UArrayFromList => {
+                // Convert a list to a UArray
+                let list = &args[0];
+                if let Some(arr) = Value::uarray_int_from_list(list) {
+                    Ok(arr)
+                } else if let Some(arr) = Value::uarray_double_from_list(list) {
+                    Ok(arr)
+                } else {
+                    Err(EvalError::TypeError {
+                        expected: "list of Int or Double".into(),
+                        got: format!("{list:?}"),
+                    })
+                }
+            }
+
+            PrimOp::UArrayToList => {
+                // Convert a UArray back to a list
+                args[0].uarray_to_list().ok_or_else(|| EvalError::TypeError {
+                    expected: "UArray".into(),
+                    got: format!("{:?}", args[0]),
+                })
+            }
+
+            PrimOp::UArrayMap => {
+                // map f arr
+                let f = &args[0];
+                let arr = &args[1];
+
+                match arr {
+                    Value::UArrayInt(uarr) => {
+                        let mapped: Result<Vec<i64>, _> = uarr
+                            .as_slice()
+                            .iter()
+                            .map(|x| {
+                                let result = self.apply(f.clone(), Value::Int(*x))?;
+                                let forced = self.force(result)?;
+                                forced.as_int().ok_or_else(|| EvalError::TypeError {
+                                    expected: "Int".into(),
+                                    got: format!("{forced:?}"),
+                                })
+                            })
+                            .collect();
+                        Ok(Value::UArrayInt(crate::uarray::UArray::from_vec(mapped?)))
+                    }
+                    Value::UArrayDouble(uarr) => {
+                        let mapped: Result<Vec<f64>, _> = uarr
+                            .as_slice()
+                            .iter()
+                            .map(|x| {
+                                let result = self.apply(f.clone(), Value::Double(*x))?;
+                                let forced = self.force(result)?;
+                                forced.as_double().ok_or_else(|| EvalError::TypeError {
+                                    expected: "Double".into(),
+                                    got: format!("{forced:?}"),
+                                })
+                            })
+                            .collect();
+                        Ok(Value::UArrayDouble(crate::uarray::UArray::from_vec(mapped?)))
+                    }
+                    // Also support mapping over lists for convenience
+                    _ if args[1].as_list().is_some() => {
+                        let list = args[1].as_list().unwrap();
+                        let mapped: Result<Vec<Value>, _> = list
+                            .iter()
+                            .map(|x| {
+                                let result = self.apply(f.clone(), x.clone())?;
+                                self.force(result)
+                            })
+                            .collect();
+                        Ok(Value::from_list(mapped?))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "UArray or List".into(),
+                        got: format!("{arr:?}"),
+                    }),
+                }
+            }
+
+            PrimOp::UArrayZipWith => {
+                // zipWith f arr1 arr2
+                let f = &args[0];
+                let arr1 = &args[1];
+                let arr2 = &args[2];
+
+                match (arr1, arr2) {
+                    (Value::UArrayInt(a), Value::UArrayInt(b)) => {
+                        let zipped: Result<Vec<i64>, _> = a
+                            .as_slice()
+                            .iter()
+                            .zip(b.as_slice().iter())
+                            .map(|(x, y)| {
+                                let result = self.apply(
+                                    self.apply(f.clone(), Value::Int(*x))?,
+                                    Value::Int(*y),
+                                )?;
+                                let forced = self.force(result)?;
+                                forced.as_int().ok_or_else(|| EvalError::TypeError {
+                                    expected: "Int".into(),
+                                    got: format!("{forced:?}"),
+                                })
+                            })
+                            .collect();
+                        Ok(Value::UArrayInt(crate::uarray::UArray::from_vec(zipped?)))
+                    }
+                    (Value::UArrayDouble(a), Value::UArrayDouble(b)) => {
+                        let zipped: Result<Vec<f64>, _> = a
+                            .as_slice()
+                            .iter()
+                            .zip(b.as_slice().iter())
+                            .map(|(x, y)| {
+                                let result = self.apply(
+                                    self.apply(f.clone(), Value::Double(*x))?,
+                                    Value::Double(*y),
+                                )?;
+                                let forced = self.force(result)?;
+                                forced.as_double().ok_or_else(|| EvalError::TypeError {
+                                    expected: "Double".into(),
+                                    got: format!("{forced:?}"),
+                                })
+                            })
+                            .collect();
+                        Ok(Value::UArrayDouble(crate::uarray::UArray::from_vec(zipped?)))
+                    }
+                    // Support lists
+                    _ if arr1.as_list().is_some() && arr2.as_list().is_some() => {
+                        let list1 = arr1.as_list().unwrap();
+                        let list2 = arr2.as_list().unwrap();
+                        let zipped: Result<Vec<Value>, _> = list1
+                            .iter()
+                            .zip(list2.iter())
+                            .map(|(x, y)| {
+                                let result = self.apply(
+                                    self.apply(f.clone(), x.clone())?,
+                                    y.clone(),
+                                )?;
+                                self.force(result)
+                            })
+                            .collect();
+                        Ok(Value::from_list(zipped?))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "two UArrays or Lists".into(),
+                        got: format!("{arr1:?}, {arr2:?}"),
+                    }),
+                }
+            }
+
+            PrimOp::UArrayFold => {
+                // fold f init arr
+                let f = &args[0];
+                let init = args[1].clone();
+                let arr = &args[2];
+
+                match arr {
+                    Value::UArrayInt(uarr) => {
+                        let mut acc = init;
+                        for x in uarr.as_slice() {
+                            let result = self.apply(
+                                self.apply(f.clone(), acc)?,
+                                Value::Int(*x),
+                            )?;
+                            acc = self.force(result)?;
+                        }
+                        Ok(acc)
+                    }
+                    Value::UArrayDouble(uarr) => {
+                        let mut acc = init;
+                        for x in uarr.as_slice() {
+                            let result = self.apply(
+                                self.apply(f.clone(), acc)?,
+                                Value::Double(*x),
+                            )?;
+                            acc = self.force(result)?;
+                        }
+                        Ok(acc)
+                    }
+                    _ if arr.as_list().is_some() => {
+                        let list = arr.as_list().unwrap();
+                        let mut acc = init;
+                        for x in list {
+                            let result = self.apply(
+                                self.apply(f.clone(), acc)?,
+                                x,
+                            )?;
+                            acc = self.force(result)?;
+                        }
+                        Ok(acc)
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "UArray or List".into(),
+                        got: format!("{arr:?}"),
+                    }),
+                }
+            }
+
+            PrimOp::UArraySum => {
+                // sum arr - works on both UArrays and lists
+                match &args[0] {
+                    Value::UArrayInt(arr) => Ok(Value::Int(arr.sum())),
+                    Value::UArrayDouble(arr) => Ok(Value::Double(arr.sum())),
+                    _ if args[0].as_list().is_some() => {
+                        let list = args[0].as_list().unwrap();
+                        // Try to sum as integers first
+                        let ints: Option<i64> = list.iter().map(Value::as_int).try_fold(0i64, |acc, x| {
+                            x.map(|n| acc.wrapping_add(n))
+                        });
+                        if let Some(sum) = ints {
+                            return Ok(Value::Int(sum));
+                        }
+                        // Try as doubles
+                        let doubles: Option<f64> = list.iter().map(Value::as_double).try_fold(0.0f64, |acc, x| {
+                            x.map(|n| acc + n)
+                        });
+                        if let Some(sum) = doubles {
+                            return Ok(Value::Double(sum));
+                        }
+                        Err(EvalError::TypeError {
+                            expected: "list of numbers".into(),
+                            got: format!("{:?}", args[0]),
+                        })
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "UArray or List".into(),
+                        got: format!("{:?}", args[0]),
+                    }),
+                }
+            }
+
+            PrimOp::UArrayLength => {
+                match &args[0] {
+                    Value::UArrayInt(arr) => Ok(Value::Int(arr.len() as i64)),
+                    Value::UArrayDouble(arr) => Ok(Value::Int(arr.len() as i64)),
+                    _ if args[0].as_list().is_some() => {
+                        let list = args[0].as_list().unwrap();
+                        Ok(Value::Int(list.len() as i64))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "UArray or List".into(),
+                        got: format!("{:?}", args[0]),
+                    }),
+                }
+            }
+
+            PrimOp::UArrayRange => {
+                // range start end
+                let start = args[0].as_int().ok_or_else(|| EvalError::TypeError {
+                    expected: "Int".into(),
+                    got: format!("{:?}", args[0]),
+                })?;
+                let end = args[1].as_int().ok_or_else(|| EvalError::TypeError {
+                    expected: "Int".into(),
+                    got: format!("{:?}", args[1]),
+                })?;
+                Ok(Value::UArrayInt(crate::uarray::UArray::range(start, end)))
+            }
         }
     }
 
@@ -776,5 +1054,215 @@ mod tests {
         assert!(matches!(items[0], Value::Int(1)));
         assert!(matches!(items[1], Value::Int(2)));
         assert!(matches!(items[2], Value::Int(3)));
+    }
+
+    // =========================================================================
+    // UArray Tests - M0 Exit Criteria
+    // =========================================================================
+
+    #[test]
+    fn test_uarray_from_list() {
+        // Create a list [1, 2, 3, 4, 5]
+        let list = Value::from_list(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3),
+            Value::Int(4),
+            Value::Int(5),
+        ]);
+
+        // Convert to UArray
+        let result = Value::uarray_int_from_list(&list).unwrap();
+        match result {
+            Value::UArrayInt(arr) => {
+                assert_eq!(arr.len(), 5);
+                assert_eq!(arr.to_vec(), vec![1, 2, 3, 4, 5]);
+            }
+            _ => panic!("Expected UArrayInt"),
+        }
+    }
+
+    #[test]
+    fn test_uarray_sum() {
+        let eval = Evaluator::new(EvalMode::Strict);
+        let sum_var = Expr::Var(make_var("sum", 100), Span::default());
+
+        // Build: sum [1, 2, 3, 4, 5]
+        // First, create a let binding for the list
+        let list_var = make_var("xs", 0);
+        let list_expr = build_list_expr(vec![1, 2, 3, 4, 5]);
+        let sum_app = Expr::App(Box::new(sum_var), Box::new(Expr::Var(list_var.clone(), Span::default())), Span::default());
+        let expr = Expr::Let(
+            Box::new(Bind::NonRec(list_var, Box::new(list_expr))),
+            Box::new(sum_app),
+            Span::default(),
+        );
+
+        let result = eval.eval(&expr, &Env::new()).unwrap();
+        assert!(matches!(result, Value::Int(15)));
+    }
+
+    #[test]
+    fn test_uarray_map() {
+        let eval = Evaluator::new(EvalMode::Strict);
+
+        // map (+1) [1, 2, 3, 4, 5]
+        let add_one = {
+            let x = make_var("x", 0);
+            let add = Expr::Var(make_var("+", 100), Span::default());
+            Expr::Lam(
+                x.clone(),
+                Box::new(Expr::App(
+                    Box::new(Expr::App(
+                        Box::new(add),
+                        Box::new(Expr::Var(x, Span::default())),
+                        Span::default(),
+                    )),
+                    Box::new(make_int(1)),
+                    Span::default(),
+                )),
+                Span::default(),
+            )
+        };
+
+        let map_var = Expr::Var(make_var("uarrayMap", 101), Span::default());
+        let list_expr = build_list_expr(vec![1, 2, 3, 4, 5]);
+
+        // Build: uarrayMap (+1) [1, 2, 3, 4, 5]
+        let app1 = Expr::App(Box::new(map_var), Box::new(add_one), Span::default());
+        let app2 = Expr::App(Box::new(app1), Box::new(list_expr), Span::default());
+
+        let result = eval.eval(&app2, &Env::new()).unwrap();
+
+        // Should be a list [2, 3, 4, 5, 6]
+        let list = result.as_list().unwrap();
+        assert_eq!(list.len(), 5);
+        assert_eq!(list[0].as_int(), Some(2));
+        assert_eq!(list[1].as_int(), Some(3));
+        assert_eq!(list[2].as_int(), Some(4));
+        assert_eq!(list[3].as_int(), Some(5));
+        assert_eq!(list[4].as_int(), Some(6));
+    }
+
+    #[test]
+    fn test_m0_exit_criteria_sum_map() {
+        // M0 Exit Criteria: sum (map (+1) [1,2,3,4,5]) == 20
+        let eval = Evaluator::new(EvalMode::Strict);
+
+        // Build: sum (map (+1) [1, 2, 3, 4, 5])
+        let add_one = {
+            let x = make_var("x", 0);
+            let add = Expr::Var(make_var("+", 100), Span::default());
+            Expr::Lam(
+                x.clone(),
+                Box::new(Expr::App(
+                    Box::new(Expr::App(
+                        Box::new(add),
+                        Box::new(Expr::Var(x, Span::default())),
+                        Span::default(),
+                    )),
+                    Box::new(make_int(1)),
+                    Span::default(),
+                )),
+                Span::default(),
+            )
+        };
+
+        let map_var = Expr::Var(make_var("uarrayMap", 101), Span::default());
+        let sum_var = Expr::Var(make_var("sum", 102), Span::default());
+        let list_expr = build_list_expr(vec![1, 2, 3, 4, 5]);
+
+        // map (+1) [1, 2, 3, 4, 5]
+        let map_app = Expr::App(
+            Box::new(Expr::App(Box::new(map_var), Box::new(add_one), Span::default())),
+            Box::new(list_expr),
+            Span::default(),
+        );
+
+        // sum (map (+1) [1, 2, 3, 4, 5])
+        let sum_app = Expr::App(Box::new(sum_var), Box::new(map_app), Span::default());
+
+        let result = eval.eval(&sum_app, &Env::new()).unwrap();
+        assert!(matches!(result, Value::Int(20)));
+    }
+
+    #[test]
+    fn test_uarray_zipwith() {
+        let eval = Evaluator::new(EvalMode::Strict);
+
+        // zipWith (+) [1, 2, 3] [4, 5, 6]
+        let add = Expr::Var(make_var("+", 100), Span::default());
+        let zip_var = Expr::Var(make_var("uarrayZipWith", 101), Span::default());
+        let list1 = build_list_expr(vec![1, 2, 3]);
+        let list2 = build_list_expr(vec![4, 5, 6]);
+
+        // zipWith (+) [1, 2, 3] [4, 5, 6]
+        let app1 = Expr::App(Box::new(zip_var), Box::new(add), Span::default());
+        let app2 = Expr::App(Box::new(app1), Box::new(list1), Span::default());
+        let app3 = Expr::App(Box::new(app2), Box::new(list2), Span::default());
+
+        let result = eval.eval(&app3, &Env::new()).unwrap();
+
+        // Should be [5, 7, 9]
+        let list = result.as_list().unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].as_int(), Some(5));
+        assert_eq!(list[1].as_int(), Some(7));
+        assert_eq!(list[2].as_int(), Some(9));
+    }
+
+    #[test]
+    fn test_uarray_dot_product() {
+        // Test dot product: sum (zipWith (*) [1, 2, 3] [4, 5, 6])
+        // = 1*4 + 2*5 + 3*6 = 4 + 10 + 18 = 32
+        let eval = Evaluator::new(EvalMode::Strict);
+
+        let mul = Expr::Var(make_var("*", 100), Span::default());
+        let zip_var = Expr::Var(make_var("uarrayZipWith", 101), Span::default());
+        let sum_var = Expr::Var(make_var("sum", 102), Span::default());
+        let list1 = build_list_expr(vec![1, 2, 3]);
+        let list2 = build_list_expr(vec![4, 5, 6]);
+
+        // zipWith (*) [1, 2, 3] [4, 5, 6]
+        let zip_app = Expr::App(
+            Box::new(Expr::App(
+                Box::new(Expr::App(Box::new(zip_var), Box::new(mul), Span::default())),
+                Box::new(list1),
+                Span::default(),
+            )),
+            Box::new(list2),
+            Span::default(),
+        );
+
+        // sum (zipWith (*) [1, 2, 3] [4, 5, 6])
+        let sum_app = Expr::App(Box::new(sum_var), Box::new(zip_app), Span::default());
+
+        let result = eval.eval(&sum_app, &Env::new()).unwrap();
+        assert!(matches!(result, Value::Int(32)));
+    }
+
+    // Helper function to build a list expression
+    fn build_list_expr(values: Vec<i64>) -> Expr {
+        // Start with nil
+        let mut expr = Expr::Var(
+            Var::new(Symbol::intern("[]"), VarId::new(9999), Ty::Error),
+            Span::default(),
+        );
+
+        // Build from the end: (:) x ((:) y nil)
+        for val in values.into_iter().rev() {
+            let cons_var = Expr::Var(
+                Var::new(Symbol::intern(":"), VarId::new(9998), Ty::Error),
+                Span::default(),
+            );
+            let val_expr = make_int(val);
+            expr = Expr::App(
+                Box::new(Expr::App(Box::new(cons_var), Box::new(val_expr), Span::default())),
+                Box::new(expr),
+                Span::default(),
+            );
+        }
+
+        expr
     }
 }

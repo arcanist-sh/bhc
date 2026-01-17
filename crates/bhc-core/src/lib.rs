@@ -62,6 +62,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod eval;
+pub mod uarray;
 
 use bhc_index::Idx;
 use bhc_intern::Symbol;

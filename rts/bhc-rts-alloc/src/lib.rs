@@ -70,6 +70,18 @@ pub enum MemoryRegion {
     /// General heap: GC-managed boxed structures.
     /// May be moved during garbage collection.
     GeneralHeap,
+    /// GPU device memory: high-bandwidth memory on a GPU device.
+    /// Managed separately from host memory.
+    DeviceMemory(DeviceMemoryKind),
+}
+
+/// Type of GPU device memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceMemoryKind {
+    /// NVIDIA CUDA device memory.
+    Cuda(u32),
+    /// AMD ROCm/HIP device memory.
+    Rocm(u32),
 }
 
 /// Metadata for a memory block.

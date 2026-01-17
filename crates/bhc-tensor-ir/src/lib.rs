@@ -795,6 +795,19 @@ pub enum AllocRegion {
     Pinned,
     /// General heap (GC managed).
     General,
+    /// GPU device memory.
+    DeviceMemory(DeviceTarget),
+}
+
+/// Target device for GPU memory allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DeviceTarget {
+    /// NVIDIA GPU (CUDA).
+    Cuda(u32),
+    /// AMD GPU (ROCm).
+    Rocm(u32),
+    /// Any available GPU.
+    Any,
 }
 
 /// Fusion information for debugging and reporting.

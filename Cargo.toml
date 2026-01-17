@@ -40,6 +40,7 @@ members = [
     # Code generation
     "crates/bhc-target",
     "crates/bhc-codegen",
+    "crates/bhc-gpu",
     "crates/bhc-linker",
 
     # Package management
@@ -92,6 +93,7 @@ bhc-query = { path = "crates/bhc-query" }
 bhc-driver = { path = "crates/bhc-driver" }
 bhc-target = { path = "crates/bhc-target" }
 bhc-codegen = { path = "crates/bhc-codegen" }
+bhc-gpu = { path = "crates/bhc-gpu" }
 bhc-linker = { path = "crates/bhc-linker" }
 bhc-ffi = { path = "crates/bhc-ffi" }
 bhc-package = { path = "crates/bhc-package" }

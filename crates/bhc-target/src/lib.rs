@@ -42,6 +42,10 @@ pub enum Arch {
     Riscv32,
     /// 64-bit RISC-V.
     Riscv64,
+    /// NVIDIA PTX (64-bit).
+    Nvptx64,
+    /// AMD GCN/RDNA.
+    Amdgcn,
 }
 
 impl Arch {
@@ -49,7 +53,7 @@ impl Arch {
     #[must_use]
     pub const fn pointer_width(self) -> u32 {
         match self {
-            Self::X86_64 | Self::Aarch64 | Self::Wasm64 | Self::Riscv64 => 64,
+            Self::X86_64 | Self::Aarch64 | Self::Wasm64 | Self::Riscv64 | Self::Nvptx64 | Self::Amdgcn => 64,
             Self::Wasm32 | Self::Riscv32 => 32,
         }
     }
@@ -58,7 +62,7 @@ impl Arch {
     #[must_use]
     pub const fn natural_alignment(self) -> u32 {
         match self {
-            Self::X86_64 | Self::Aarch64 | Self::Wasm64 | Self::Riscv64 => 8,
+            Self::X86_64 | Self::Aarch64 | Self::Wasm64 | Self::Riscv64 | Self::Nvptx64 | Self::Amdgcn => 8,
             Self::Wasm32 | Self::Riscv32 => 4,
         }
     }
@@ -73,13 +77,21 @@ impl Arch {
             Self::Wasm64 => "wasm64",
             Self::Riscv32 => "riscv32",
             Self::Riscv64 => "riscv64",
+            Self::Nvptx64 => "nvptx64",
+            Self::Amdgcn => "amdgcn",
         }
     }
 
     /// Check if this architecture supports SIMD.
     #[must_use]
     pub const fn has_simd(self) -> bool {
-        matches!(self, Self::X86_64 | Self::Aarch64 | Self::Wasm32 | Self::Wasm64)
+        matches!(self, Self::X86_64 | Self::Aarch64 | Self::Wasm32 | Self::Wasm64 | Self::Nvptx64 | Self::Amdgcn)
+    }
+
+    /// Check if this is a GPU architecture.
+    #[must_use]
+    pub const fn is_gpu(self) -> bool {
+        matches!(self, Self::Nvptx64 | Self::Amdgcn)
     }
 }
 
@@ -352,6 +364,8 @@ fn parse_arch(s: &str) -> Result<Arch, TargetError> {
         "wasm64" => Ok(Arch::Wasm64),
         "riscv32" => Ok(Arch::Riscv32),
         "riscv64" => Ok(Arch::Riscv64),
+        "nvptx64" | "nvptx" => Ok(Arch::Nvptx64),
+        "amdgcn" | "gcn" => Ok(Arch::Amdgcn),
         _ => Err(TargetError::UnknownArch(s.to_string())),
     }
 }
@@ -447,6 +461,14 @@ fn generate_data_layout(arch: Arch, _features: &CpuFeatures) -> String {
         }
         Arch::Riscv64 => {
             "e-m:e-p:64:64-i64:64-i128:128-n64-S128".to_string()
+        }
+        Arch::Nvptx64 => {
+            // NVIDIA PTX data layout (64-bit)
+            "e-i64:64-i128:128-v16:16-v32:32-n16:32:64".to_string()
+        }
+        Arch::Amdgcn => {
+            // AMD GCN data layout
+            "e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7".to_string()
         }
     }
 }

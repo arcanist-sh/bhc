@@ -1,14 +1,47 @@
 //! Error reporting and diagnostics for BHC.
 //!
 //! This crate provides rich error reporting with source code snippets,
-//! suggestions, and structured diagnostic output.
+//! suggestions, and structured diagnostic output in the style of Rust/Cargo.
+//!
+//! ## Features
+//!
+//! - Cargo-style terminal output with colors and underlines
+//! - Machine-readable JSON diagnostic format
+//! - Error code explanations via `--explain`
+//! - Multi-line span support with context
+//!
+//! ## Example
+//!
+//! ```ignore
+//! use bhc_diagnostics::{Diagnostic, SourceMap, CargoRenderer};
+//!
+//! let mut sm = SourceMap::new();
+//! sm.add_file("test.hs".into(), "foo = x + 1".into());
+//!
+//! let diag = Diagnostic::error("undefined variable")
+//!     .with_code("E0003")
+//!     .with_label(span, "not found in scope");
+//!
+//! let renderer = CargoRenderer::new(&sm);
+//! renderer.render_all(&[diag]);
+//! ```
 
 #![warn(missing_docs)]
+
+pub mod explain;
+pub mod json;
+pub mod render;
 
 use bhc_span::{FileId, SourceFile};
 pub use bhc_span::{FullSpan, Span};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+
+// Re-exports for convenience
+pub use explain::{all_error_codes, format_explanation, get_explanation, print_explanation};
+pub use json::{diagnostic_to_json, diagnostics_to_json, to_json_lines, to_json_string};
+pub use json::{JsonApplicability, JsonDiagnostic, JsonSeverity, JsonSpan, JsonSuggestion};
+pub use render::{colors, CargoRenderer, RenderConfig};
 
 /// The severity level of a diagnostic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

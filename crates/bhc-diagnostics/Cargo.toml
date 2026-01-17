@@ -12,6 +12,7 @@ thiserror = { workspace = true }
 ariadne = { workspace = true }
 codespan-reporting = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

@@ -268,6 +268,14 @@ impl SourceFile {
         }
     }
 
+    /// Get the 0-indexed line number for a byte position.
+    #[must_use]
+    pub fn lookup_line(&self, pos: BytePos) -> usize {
+        self.line_starts
+            .partition_point(|&start| start.0 <= pos.0)
+            .saturating_sub(1)
+    }
+
     /// Get the source text for a span.
     #[must_use]
     pub fn source_text(&self, span: Span) -> &str {
@@ -278,6 +286,73 @@ impl SourceFile {
     #[must_use]
     pub fn num_lines(&self) -> usize {
         self.line_starts.len()
+    }
+
+    /// Get the content of a specific line (0-indexed).
+    #[must_use]
+    pub fn line_content(&self, line_idx: usize) -> Option<&str> {
+        if line_idx >= self.line_starts.len() {
+            return None;
+        }
+
+        let start = self.line_starts[line_idx].as_usize();
+        let end = if line_idx + 1 < self.line_starts.len() {
+            // Next line start minus 1 to exclude the newline
+            self.line_starts[line_idx + 1].as_usize().saturating_sub(1)
+        } else {
+            self.src.len()
+        };
+
+        Some(&self.src[start..end])
+    }
+
+    /// Get the byte offset of the start of a line (0-indexed).
+    #[must_use]
+    pub fn line_start(&self, line_idx: usize) -> Option<BytePos> {
+        self.line_starts.get(line_idx).copied()
+    }
+
+    /// Get span information for rendering: start line, start col, end line, end col.
+    ///
+    /// Note: Spans are half-open `[lo, hi)`, so the end position is computed
+    /// from the last included byte (`hi - 1`) for non-empty spans.
+    #[must_use]
+    pub fn span_lines(&self, span: Span) -> SpanLines {
+        let start = self.lookup_line_col(span.lo);
+        // For the end, use the last included byte (hi - 1) for non-empty spans
+        let end = if span.hi.0 > span.lo.0 {
+            self.lookup_line_col(BytePos(span.hi.0 - 1))
+        } else {
+            start
+        };
+        SpanLines {
+            start_line: start.line as usize,
+            start_col: start.col as usize,
+            end_line: end.line as usize,
+            // For end column, add 1 since we want the position after the last char
+            end_col: end.col as usize + 1,
+        }
+    }
+}
+
+/// Information about which lines a span covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpanLines {
+    /// 1-indexed start line.
+    pub start_line: usize,
+    /// 1-indexed start column.
+    pub start_col: usize,
+    /// 1-indexed end line.
+    pub end_line: usize,
+    /// 1-indexed end column.
+    pub end_col: usize,
+}
+
+impl SpanLines {
+    /// Check if this span covers multiple lines.
+    #[must_use]
+    pub fn is_multiline(&self) -> bool {
+        self.start_line != self.end_line
     }
 }
 
@@ -304,5 +379,36 @@ mod tests {
         assert_eq!(file.lookup_line_col(BytePos::new(0)), LineCol::new(1, 1));
         assert_eq!(file.lookup_line_col(BytePos::new(7)), LineCol::new(2, 1));
         assert_eq!(file.lookup_line_col(BytePos::new(10)), LineCol::new(2, 4));
+    }
+
+    #[test]
+    fn test_line_content() {
+        let src = "first line\nsecond line\nthird line";
+        let file = SourceFile::new(FileId::new(0), "test.hs".to_string(), src.to_string());
+
+        assert_eq!(file.line_content(0), Some("first line"));
+        assert_eq!(file.line_content(1), Some("second line"));
+        assert_eq!(file.line_content(2), Some("third line"));
+        assert_eq!(file.line_content(3), None);
+    }
+
+    #[test]
+    fn test_span_lines() {
+        let src = "line 1\nline 2\nline 3";
+        let file = SourceFile::new(FileId::new(0), "test.hs".to_string(), src.to_string());
+
+        // Single line span
+        let span = Span::from_raw(0, 6);
+        let lines = file.span_lines(span);
+        assert_eq!(lines.start_line, 1);
+        assert_eq!(lines.end_line, 1);
+        assert!(!lines.is_multiline());
+
+        // Multi-line span
+        let span = Span::from_raw(0, 14);
+        let lines = file.span_lines(span);
+        assert_eq!(lines.start_line, 1);
+        assert_eq!(lines.end_line, 2);
+        assert!(lines.is_multiline());
     }
 }

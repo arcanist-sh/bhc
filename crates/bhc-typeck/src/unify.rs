@@ -128,7 +128,7 @@ fn bind_var(ctx: &mut TyCtxt, var: &TyVar, ty: &Ty, span: Span) {
     }
 
     // Add binding to substitution
-    ctx.subst.insert(var.clone(), ty.clone());
+    ctx.subst.insert(var, ty.clone());
 }
 
 /// Check if a type variable occurs in a type (prevents infinite types).

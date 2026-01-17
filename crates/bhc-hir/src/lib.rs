@@ -64,7 +64,6 @@ use bhc_intern::Symbol;
 use bhc_span::Span;
 use bhc_types::{Scheme, Ty, TyVar};
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 
 /// A unique identifier for HIR nodes.
 ///
@@ -74,6 +73,7 @@ use smallvec::SmallVec;
 pub struct HirId(u32);
 
 impl Idx for HirId {
+    #[allow(clippy::cast_possible_truncation)]
     fn new(idx: usize) -> Self {
         Self(idx as u32)
     }
@@ -100,6 +100,7 @@ pub struct DefRef {
 pub struct DefId(u32);
 
 impl Idx for DefId {
+    #[allow(clippy::cast_possible_truncation)]
     fn new(idx: usize) -> Self {
         Self(idx as u32)
     }
@@ -644,8 +645,9 @@ mod tests {
 
     #[test]
     fn test_pat_bound_vars() {
-        let x = Symbol::from_raw(0);
-        let y = Symbol::from_raw(1);
+        // SAFETY: These are valid symbol indices for testing purposes
+        let x = unsafe { Symbol::from_raw(0) };
+        let y = unsafe { Symbol::from_raw(1) };
 
         // Simple variable pattern
         let pat = Pat::Var(x, Span::default());

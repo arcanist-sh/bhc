@@ -56,6 +56,7 @@ use serde::{Deserialize, Serialize};
 pub struct TyId(u32);
 
 impl Idx for TyId {
+    #[allow(clippy::cast_possible_truncation)]
     fn new(idx: usize) -> Self {
         Self(idx as u32)
     }
@@ -202,7 +203,7 @@ impl Ty {
                     vars.push(v.clone());
                 }
             }
-            Self::Con(_) => {}
+            Self::Con(_) | Self::Error => {}
             Self::App(f, a) | Self::Fun(f, a) => {
                 f.collect_free_vars(vars);
                 a.collect_free_vars(vars);
@@ -222,7 +223,6 @@ impl Ty {
                     }
                 }
             }
-            Self::Error => {}
         }
     }
 }
@@ -341,7 +341,7 @@ impl Subst {
     }
 
     /// Inserts a mapping from a type variable to a type.
-    pub fn insert(&mut self, var: TyVar, ty: Ty) {
+    pub fn insert(&mut self, var: &TyVar, ty: Ty) {
         self.mapping.insert(var.id, ty);
     }
 
@@ -458,7 +458,7 @@ mod tests {
         let b = TyVar::new_star(1);
 
         // `a -> b` has free vars {a, b}
-        let ty = Ty::fun(Ty::Var(a), Ty::Var(b));
+        let ty = Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone()));
         let vars = ty.free_vars();
         assert_eq!(vars.len(), 2);
         assert!(vars.contains(&a));
@@ -468,12 +468,13 @@ mod tests {
     #[test]
     fn test_subst_apply() {
         let a = TyVar::new_star(0);
-        let int_con = TyCon::new(Symbol::from_raw(0), Kind::Star);
+        // SAFETY: 0 is a valid symbol index for testing purposes
+        let int_con = TyCon::new(unsafe { Symbol::from_raw(0) }, Kind::Star);
 
         let mut subst = Subst::new();
-        subst.insert(a, Ty::Con(int_con.clone()));
+        subst.insert(&a, Ty::Con(int_con.clone()));
 
-        let ty = Ty::fun(Ty::Var(a), Ty::Var(a));
+        let ty = Ty::fun(Ty::Var(a.clone()), Ty::Var(a));
         let result = subst.apply(&ty);
 
         match result {
@@ -487,7 +488,8 @@ mod tests {
 
     #[test]
     fn test_scheme_mono() {
-        let int_con = TyCon::new(Symbol::from_raw(0), Kind::Star);
+        // SAFETY: 0 is a valid symbol index for testing purposes
+        let int_con = TyCon::new(unsafe { Symbol::from_raw(0) }, Kind::Star);
         let scheme = Scheme::mono(Ty::Con(int_con));
         assert!(scheme.is_mono());
     }

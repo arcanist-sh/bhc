@@ -209,7 +209,7 @@ impl Expr {
                     if let Some(var) = vars.first() {
                         // Substitute the first type variable
                         let mut subst = bhc_types::Subst::new();
-                        subst.insert(var.clone(), ty_arg.clone());
+                        subst.insert(var, ty_arg.clone());
                         subst.apply(&body)
                     } else {
                         (*body).clone()

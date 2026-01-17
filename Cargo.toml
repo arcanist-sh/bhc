@@ -34,6 +34,9 @@ members = [
     "crates/bhc-query",
     "crates/bhc-driver",
 
+    # FFI and external libraries
+    "crates/bhc-ffi",
+
     # Code generation
     "crates/bhc-target",
     "crates/bhc-codegen",
@@ -90,6 +93,7 @@ bhc-driver = { path = "crates/bhc-driver" }
 bhc-target = { path = "crates/bhc-target" }
 bhc-codegen = { path = "crates/bhc-codegen" }
 bhc-linker = { path = "crates/bhc-linker" }
+bhc-ffi = { path = "crates/bhc-ffi" }
 bhc-package = { path = "crates/bhc-package" }
 bhc-interface = { path = "crates/bhc-interface" }
 bhc-macros = { path = "crates/bhc-macros" }

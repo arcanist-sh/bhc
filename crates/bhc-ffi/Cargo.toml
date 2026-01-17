@@ -1,0 +1,33 @@
+[package]
+name = "bhc-ffi"
+description = "FFI primitives and BLAS integration for BHC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Enable OpenBLAS bindings (requires OpenBLAS installed)
+openblas = []
+# Enable Apple Accelerate bindings (macOS only)
+accelerate = []
+# Enable Intel MKL bindings
+mkl = []
+
+[dependencies]
+# Internal crates
+bhc-rts-alloc = { workspace = true }
+bhc-rts-gc = { workspace = true }
+bhc-tensor-ir = { workspace = true }
+
+# External dependencies
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# For raw pointer handling
+# libc provides C types for FFI
+libc = "0.2"
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

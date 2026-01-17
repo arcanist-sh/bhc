@@ -75,6 +75,9 @@
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
 
+pub mod fusion;
+pub mod lower;
+
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;

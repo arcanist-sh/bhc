@@ -1,8 +1,8 @@
 //! Package management and manifest parsing for BHC.
 //!
-//! This crate handles BHC package definitions, manifest parsing, and
-//! dependency resolution. Packages are the unit of distribution and
-//! dependency management in BHC.
+//! This crate handles BHC package definitions, manifest parsing,
+//! dependency resolution, and lockfile management. Packages are the
+//! unit of distribution and dependency management in BHC.
 //!
 //! # Manifest Format
 //!
@@ -33,6 +33,8 @@
 //! - `edge` - Minimal runtime
 
 #![warn(missing_docs)]
+
+pub mod lockfile;
 
 use bhc_session::Profile;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -125,7 +127,7 @@ pub struct PackageMetadata {
 }
 
 /// Custom serde for semver::Version.
-mod version_serde {
+pub(crate) mod version_serde {
     use semver::Version;
     use serde::{self, Deserialize, Deserializer, Serializer};
 

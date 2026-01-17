@@ -63,6 +63,7 @@ pub mod kind_check;
 pub mod nat_solver;
 mod pattern;
 pub mod shape_bridge;
+pub mod shape_diagrams;
 pub mod suggest;
 pub mod type_families;
 mod unify;

@@ -25,6 +25,7 @@ use bhc_span::Span;
 use bhc_types::{Ty, TyList, TyNat, TyVar};
 
 use crate::context::TyCtxt;
+use crate::shape_diagrams;
 use crate::suggest::{find_similar_names, format_suggestions};
 
 /// Emit a type mismatch error with aligned comparison.
@@ -413,26 +414,40 @@ pub fn emit_nat_occurs_check_error(ctx: &mut TyCtxt, var: &TyVar, n: &TyNat, spa
 }
 
 /// Emit a shape length mismatch error.
+///
+/// ## M10 Phase 3: Visual Rank Comparison
+///
+/// Includes a visual diagram showing the rank difference.
 pub fn emit_shape_length_mismatch(ctx: &mut TyCtxt, s1: &TyList, s2: &TyList, span: Span) {
-    let len1 = s1.static_len().map_or("?".to_string(), |n| n.to_string());
-    let len2 = s2.static_len().map_or("?".to_string(), |n| n.to_string());
+    let len1 = s1.static_len().map_or(0, |n| n);
+    let len2 = s2.static_len().map_or(0, |n| n);
+
+    let len1_str = s1.static_len().map_or("?".to_string(), |n| n.to_string());
+    let len2_str = s2.static_len().map_or("?".to_string(), |n| n.to_string());
+
+    // Generate visual diagram
+    let diagram = shape_diagrams::format_rank_mismatch(len1, len2, s1, s2);
 
     let diag = Diagnostic::error(format!(
-        "shape rank mismatch: expected rank {len1}, found rank {len2}"
+        "shape rank mismatch: expected rank {len1_str}, found rank {len2_str}"
     ))
     .with_code("E0023")
     .with_label(ctx.full_span(span), "incompatible tensor ranks")
-    .with_note(format!(
-        "Shape `{}` is incompatible with `{}`",
-        pretty_ty_list(s1),
-        pretty_ty_list(s2)
-    ));
+    .with_note(diagram);
 
     ctx.emit_error(diag);
 }
 
 /// Emit a shape mismatch error for type-level lists.
+///
+/// ## M10 Phase 3: Unification Trace
+///
+/// Includes a step-by-step trace of shape unification to help
+/// users understand where the mismatch occurred.
 pub fn emit_shape_mismatch(ctx: &mut TyCtxt, s1: &TyList, s2: &TyList, span: Span) {
+    // Generate unification trace
+    let trace = shape_diagrams::format_unification_trace(s1, s2, &[]);
+
     let diag = Diagnostic::error(format!(
         "shape mismatch: `{}` vs `{}`",
         pretty_ty_list(s1),
@@ -440,6 +455,7 @@ pub fn emit_shape_mismatch(ctx: &mut TyCtxt, s1: &TyList, s2: &TyList, span: Spa
     ))
     .with_code("E0024")
     .with_label(ctx.full_span(span), "incompatible tensor shapes")
+    .with_note(trace)
     .with_note("Ensure tensor dimensions are compatible for this operation");
 
     ctx.emit_error(diag);
@@ -512,7 +528,12 @@ pub fn emit_nat_solver_error(
 /// Emit a matrix multiplication dimension mismatch error.
 ///
 /// This provides detailed information about which dimensions don't match
-/// and suggests potential fixes.
+/// with a visual ASCII diagram showing the shape mismatch.
+///
+/// ## M10 Phase 3: Visual Shape Diagrams
+///
+/// Includes an ASCII art diagram showing the matrices and highlighting
+/// the mismatched inner dimensions.
 pub fn emit_matmul_dimension_mismatch(
     ctx: &mut TyCtxt,
     left_shape: &TyList,
@@ -521,6 +542,14 @@ pub fn emit_matmul_dimension_mismatch(
     inner_right: &TyNat,
     span: Span,
 ) {
+    // Generate visual diagram
+    let diagram = shape_diagrams::format_matmul_diagram(
+        left_shape,
+        right_shape,
+        inner_left,
+        inner_right,
+    );
+
     let diag = Diagnostic::error(format!(
         "matrix multiplication dimension mismatch: inner dimensions {} and {} are not equal",
         pretty_nat(inner_left),
@@ -528,15 +557,7 @@ pub fn emit_matmul_dimension_mismatch(
     ))
     .with_code("E0030")
     .with_label(ctx.full_span(span), "matmul dimension error")
-    .with_note(format!(
-        "For matmul, the inner dimensions must match:\n\
-         • Left matrix shape:  {} (columns = {})\n\
-         • Right matrix shape: {} (rows = {})",
-        pretty_ty_list(left_shape),
-        pretty_nat(inner_left),
-        pretty_ty_list(right_shape),
-        pretty_nat(inner_right)
-    ))
+    .with_note(diagram)
     .with_note(
         "Matrix multiplication requires: Tensor '[m, k] a -> Tensor '[k, n] a -> Tensor '[m, n] a"
     );
@@ -545,6 +566,11 @@ pub fn emit_matmul_dimension_mismatch(
 }
 
 /// Emit a broadcast shape incompatibility error.
+///
+/// ## M10 Phase 3: Axis-by-Axis Breakdown
+///
+/// Includes a visual diagram showing compatibility at each axis,
+/// with the failing axis clearly marked.
 pub fn emit_broadcast_incompatible(
     ctx: &mut TyCtxt,
     shape1: &TyList,
@@ -554,19 +580,23 @@ pub fn emit_broadcast_incompatible(
     dim2: &TyNat,
     span: Span,
 ) {
+    // Generate visual diagram with axis-by-axis breakdown
+    let diagram = shape_diagrams::format_broadcast_diagram(
+        shape1,
+        shape2,
+        axis,
+        dim1,
+        dim2,
+    );
+
     let diag = Diagnostic::error(format!(
         "shapes cannot be broadcast together: {} and {}",
         pretty_ty_list(shape1),
         pretty_ty_list(shape2)
     ))
     .with_code("E0031")
-    .with_label(ctx.full_span(span), "broadcast error")
-    .with_note(format!(
-        "At axis {axis}: dimension {} is not compatible with {}\n\
-         Broadcasting requires dimensions to be equal or one of them to be 1",
-        pretty_nat(dim1),
-        pretty_nat(dim2)
-    ));
+    .with_label(ctx.full_span(span), format!("broadcast error at axis {axis}"))
+    .with_note(diagram);
 
     ctx.emit_error(diag);
 }
@@ -636,11 +666,17 @@ pub fn emit_dimension_must_be(
 }
 
 /// Emit an error when a tensor doesn't have the expected rank.
+///
+/// ## M10 Phase 3: Visual Rank Comparison
+///
+/// Includes a visual representation of expected vs found dimensions.
 pub fn emit_wrong_tensor_rank(
     ctx: &mut TyCtxt,
     operation: &str,
     expected_rank: usize,
     found_rank: usize,
+    expected_shape: Option<&TyList>,
+    found_shape: Option<&TyList>,
     span: Span,
 ) {
     let rank_desc = match expected_rank {
@@ -657,11 +693,22 @@ pub fn emit_wrong_tensor_rank(
         n => format!("{n}-dimensional tensor"),
     };
 
-    let diag = Diagnostic::error(format!(
+    let mut diag = Diagnostic::error(format!(
         "{operation} expects a {rank_desc} (rank {expected_rank}), but got a {found_desc} (rank {found_rank})"
     ))
     .with_code("E0035")
     .with_label(ctx.full_span(span), format!("expected rank {expected_rank}"));
+
+    // Add visual diagram if shapes are available
+    if let (Some(exp), Some(fnd)) = (expected_shape, found_shape) {
+        let diagram = shape_diagrams::format_rank_mismatch(
+            expected_rank,
+            found_rank,
+            exp,
+            fnd,
+        );
+        diag = diag.with_note(diagram);
+    }
 
     ctx.emit_error(diag);
 }
@@ -719,6 +766,10 @@ pub fn emit_dyn_tensor_conversion_failed(
 }
 
 /// Emit a suggestion when shapes might be transposed.
+///
+/// ## M10 Phase 3: Visual Transpose Suggestion
+///
+/// Shows a visual diagram of the transpose operation that would fix the error.
 pub fn emit_possible_transpose_suggestion(
     ctx: &mut TyCtxt,
     found: &TyList,
@@ -731,6 +782,9 @@ pub fn emit_possible_transpose_suggestion(
 
     if let (Some(f), Some(e)) = (found_dims, expected_dims) {
         if f.len() == 2 && e.len() == 2 && f[0] == e[1] && f[1] == e[0] {
+            // Generate visual transpose suggestion
+            let diagram = shape_diagrams::format_transpose_suggestion(found, expected);
+
             let diag = Diagnostic::error(format!(
                 "shape mismatch: expected {}, found {}",
                 pretty_ty_list(expected),
@@ -738,8 +792,7 @@ pub fn emit_possible_transpose_suggestion(
             ))
             .with_code("E0038")
             .with_label(ctx.full_span(span), "shapes appear transposed")
-            .with_note("Did you mean to transpose the tensor?\n\
-                        Try using `transpose` on the input tensor");
+            .with_note(diagram);
 
             ctx.emit_error(diag);
             return;

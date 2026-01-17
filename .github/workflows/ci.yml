@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
@@ -51,7 +51,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-action@${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -75,17 +77,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust nightly
-        uses: dtolnay/rust-action@nightly
+        uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
 
       - name: Setup Miri
         run: cargo miri setup
 
-      - name: Run Miri on RTS crates
-        run: |
-          cargo miri test -p bhc-rts-arena
-          cargo miri test -p bhc-rts-alloc
+      - name: Run Miri on arena crate
+        run: cargo miri test -p bhc-arena
 
   docs:
     name: Documentation
@@ -94,7 +94,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build docs
         run: cargo doc --no-deps --all-features
@@ -108,7 +108,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
 
@@ -132,7 +132,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Run benchmarks
         run: cargo bench --no-run

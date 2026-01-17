@@ -555,6 +555,13 @@ pub enum Type {
     Forall(Vec<TyVar>, Box<Type>, Span),
     /// Constrained type: `Eq a => a -> a -> Bool`
     Constrained(Vec<Constraint>, Box<Type>, Span),
+
+    // === M9 Dependent Types Preview ===
+
+    /// Promoted list: `'[1024, 768]` for tensor shapes
+    PromotedList(Vec<Type>, Span),
+    /// Type-level natural literal: `1024` in type position
+    NatLit(u64, Span),
 }
 
 impl Type {
@@ -570,7 +577,9 @@ impl Type {
             | Self::List(_, s)
             | Self::Paren(_, s)
             | Self::Forall(_, _, s)
-            | Self::Constrained(_, _, s) => *s,
+            | Self::Constrained(_, _, s)
+            | Self::PromotedList(_, s)
+            | Self::NatLit(_, s) => *s,
         }
     }
 }

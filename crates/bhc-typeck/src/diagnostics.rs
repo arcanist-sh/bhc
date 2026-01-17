@@ -2,11 +2,16 @@
 //!
 //! This module provides functions to emit type error diagnostics with
 //! helpful messages and suggestions.
+//!
+//! ## M9 Dependent Types
+//!
+//! This module includes diagnostics for shape-indexed tensor type errors,
+//! including dimension mismatches and shape constraint violations.
 
 use bhc_diagnostics::Diagnostic;
 use bhc_hir::DefId;
 use bhc_span::Span;
-use bhc_types::{Ty, TyVar};
+use bhc_types::{Ty, TyList, TyNat, TyVar};
 
 use crate::context::TyCtxt;
 
@@ -107,6 +112,450 @@ pub fn emit_missing_signature(ctx: &mut TyCtxt, name: &str, ty: &Ty, span: Span)
     ctx.emit_error(diag);
 }
 
+// === M9 Dependent Types: Shape-indexed tensor diagnostics ===
+
+/// Emit a dimension mismatch error for type-level naturals.
+pub fn emit_dimension_mismatch(ctx: &mut TyCtxt, expected: u64, found: u64, span: Span) {
+    let diag = Diagnostic::error(format!(
+        "dimension mismatch: expected `{expected}`, found `{found}`"
+    ))
+    .with_code("E0020")
+    .with_label(ctx.full_span(span), "incompatible tensor dimensions")
+    .with_note("Tensor dimensions must match exactly for this operation");
+
+    ctx.emit_error(diag);
+}
+
+/// Emit a type-level natural unification failure.
+pub fn emit_nat_mismatch(ctx: &mut TyCtxt, n1: &TyNat, n2: &TyNat, span: Span) {
+    let diag = Diagnostic::error(format!(
+        "cannot unify type-level naturals: `{}` vs `{}`",
+        pretty_nat(n1),
+        pretty_nat(n2)
+    ))
+    .with_code("E0021")
+    .with_label(ctx.full_span(span), "dimension constraint violation")
+    .with_note("These dimensions cannot be proven equal");
+
+    ctx.emit_error(diag);
+}
+
+/// Emit an occurs check error for type-level naturals.
+pub fn emit_nat_occurs_check_error(ctx: &mut TyCtxt, var: &TyVar, n: &TyNat, span: Span) {
+    let diag = Diagnostic::error(format!(
+        "infinite dimension: variable `{}` occurs in `{}`",
+        pretty_tyvar(var),
+        pretty_nat(n)
+    ))
+    .with_code("E0022")
+    .with_label(ctx.full_span(span), "circular dimension constraint");
+
+    ctx.emit_error(diag);
+}
+
+/// Emit a shape length mismatch error.
+pub fn emit_shape_length_mismatch(ctx: &mut TyCtxt, s1: &TyList, s2: &TyList, span: Span) {
+    let len1 = s1.static_len().map_or("?".to_string(), |n| n.to_string());
+    let len2 = s2.static_len().map_or("?".to_string(), |n| n.to_string());
+
+    let diag = Diagnostic::error(format!(
+        "shape rank mismatch: expected rank {len1}, found rank {len2}"
+    ))
+    .with_code("E0023")
+    .with_label(ctx.full_span(span), "incompatible tensor ranks")
+    .with_note(format!(
+        "Shape `{}` is incompatible with `{}`",
+        pretty_ty_list(s1),
+        pretty_ty_list(s2)
+    ));
+
+    ctx.emit_error(diag);
+}
+
+/// Emit a shape mismatch error for type-level lists.
+pub fn emit_shape_mismatch(ctx: &mut TyCtxt, s1: &TyList, s2: &TyList, span: Span) {
+    let diag = Diagnostic::error(format!(
+        "shape mismatch: `{}` vs `{}`",
+        pretty_ty_list(s1),
+        pretty_ty_list(s2)
+    ))
+    .with_code("E0024")
+    .with_label(ctx.full_span(span), "incompatible tensor shapes")
+    .with_note("Ensure tensor dimensions are compatible for this operation");
+
+    ctx.emit_error(diag);
+}
+
+/// Emit an occurs check error for type-level lists.
+pub fn emit_ty_list_occurs_check_error(ctx: &mut TyCtxt, var: &TyVar, l: &TyList, span: Span) {
+    let diag = Diagnostic::error(format!(
+        "infinite shape: variable `{}` occurs in `{}`",
+        pretty_tyvar(var),
+        pretty_ty_list(l)
+    ))
+    .with_code("E0025")
+    .with_label(ctx.full_span(span), "circular shape constraint");
+
+    ctx.emit_error(diag);
+}
+
+/// Emit an error from the nat constraint solver.
+pub fn emit_nat_solver_error(
+    ctx: &mut TyCtxt,
+    err: &crate::nat_solver::SolverError,
+    span: Span,
+) {
+    use crate::nat_solver::SolverError;
+
+    let (message, note) = match err {
+        SolverError::LiteralMismatch { expected, found } => (
+            format!("dimension mismatch: expected `{expected}`, found `{found}`"),
+            Some("Tensor dimensions must match exactly".to_string()),
+        ),
+        SolverError::OccursCheck { var_id, term } => (
+            format!(
+                "infinite dimension: variable `n{}` occurs in `{}`",
+                var_id,
+                pretty_nat(term)
+            ),
+            Some("This would create an infinitely recursive dimension".to_string()),
+        ),
+        SolverError::Inconsistent { message } => (
+            format!("inconsistent dimension constraint: {message}"),
+            Some("These dimension constraints cannot all be satisfied".to_string()),
+        ),
+        SolverError::CannotSolve { constraint } => {
+            let crate::nat_solver::NatConstraint::Equal(n1, n2) = constraint;
+            (
+                format!(
+                    "cannot prove dimension equality: `{}` = `{}`",
+                    pretty_nat(n1),
+                    pretty_nat(n2)
+                ),
+                Some("Consider adding a type annotation or ensuring dimensions match".to_string()),
+            )
+        }
+    };
+
+    let mut diag = Diagnostic::error(message)
+        .with_code("E0026")
+        .with_label(ctx.full_span(span), "dimension constraint failure");
+
+    if let Some(note_text) = note {
+        diag = diag.with_note(note_text);
+    }
+
+    ctx.emit_error(diag);
+}
+
+// === M9 Phase 7: Enhanced shape error messages ===
+
+/// Emit a matrix multiplication dimension mismatch error.
+///
+/// This provides detailed information about which dimensions don't match
+/// and suggests potential fixes.
+pub fn emit_matmul_dimension_mismatch(
+    ctx: &mut TyCtxt,
+    left_shape: &TyList,
+    right_shape: &TyList,
+    inner_left: &TyNat,
+    inner_right: &TyNat,
+    span: Span,
+) {
+    let diag = Diagnostic::error(format!(
+        "matrix multiplication dimension mismatch: inner dimensions {} and {} are not equal",
+        pretty_nat(inner_left),
+        pretty_nat(inner_right)
+    ))
+    .with_code("E0030")
+    .with_label(ctx.full_span(span), "matmul dimension error")
+    .with_note(format!(
+        "For matmul, the inner dimensions must match:\n\
+         • Left matrix shape:  {} (columns = {})\n\
+         • Right matrix shape: {} (rows = {})",
+        pretty_ty_list(left_shape),
+        pretty_nat(inner_left),
+        pretty_ty_list(right_shape),
+        pretty_nat(inner_right)
+    ))
+    .with_note(
+        "Matrix multiplication requires: Tensor '[m, k] a -> Tensor '[k, n] a -> Tensor '[m, n] a"
+    );
+
+    ctx.emit_error(diag);
+}
+
+/// Emit a broadcast shape incompatibility error.
+pub fn emit_broadcast_incompatible(
+    ctx: &mut TyCtxt,
+    shape1: &TyList,
+    shape2: &TyList,
+    axis: usize,
+    dim1: &TyNat,
+    dim2: &TyNat,
+    span: Span,
+) {
+    let diag = Diagnostic::error(format!(
+        "shapes cannot be broadcast together: {} and {}",
+        pretty_ty_list(shape1),
+        pretty_ty_list(shape2)
+    ))
+    .with_code("E0031")
+    .with_label(ctx.full_span(span), "broadcast error")
+    .with_note(format!(
+        "At axis {axis}: dimension {} is not compatible with {}\n\
+         Broadcasting requires dimensions to be equal or one of them to be 1",
+        pretty_nat(dim1),
+        pretty_nat(dim2)
+    ));
+
+    ctx.emit_error(diag);
+}
+
+/// Emit a transpose axis out of bounds error.
+pub fn emit_transpose_axis_error(
+    ctx: &mut TyCtxt,
+    rank: usize,
+    invalid_axis: usize,
+    span: Span,
+) {
+    let diag = Diagnostic::error(format!(
+        "transpose axis {invalid_axis} is out of bounds for tensor of rank {rank}"
+    ))
+    .with_code("E0032")
+    .with_label(ctx.full_span(span), "invalid transpose axis")
+    .with_note(format!(
+        "Valid axis values are 0 to {} for a {rank}-dimensional tensor",
+        rank.saturating_sub(1)
+    ));
+
+    ctx.emit_error(diag);
+}
+
+/// Emit a concatenation shape mismatch error.
+pub fn emit_concat_shape_mismatch(
+    ctx: &mut TyCtxt,
+    axis: usize,
+    expected_shape: &TyList,
+    found_shape: &TyList,
+    tensor_index: usize,
+    span: Span,
+) {
+    let diag = Diagnostic::error(format!(
+        "cannot concatenate tensors with incompatible shapes along axis {axis}"
+    ))
+    .with_code("E0033")
+    .with_label(ctx.full_span(span), "concat shape mismatch")
+    .with_note(format!(
+        "Tensor {} has shape {} but expected shape compatible with {}\n\
+         All tensors must have matching dimensions except along the concatenation axis",
+        tensor_index,
+        pretty_ty_list(found_shape),
+        pretty_ty_list(expected_shape)
+    ));
+
+    ctx.emit_error(diag);
+}
+
+/// Emit an error when a specific dimension value is required.
+pub fn emit_dimension_must_be(
+    ctx: &mut TyCtxt,
+    operation: &str,
+    axis: usize,
+    expected: u64,
+    found: &TyNat,
+    span: Span,
+) {
+    let diag = Diagnostic::error(format!(
+        "{operation} requires dimension {axis} to be {expected}, but found {}",
+        pretty_nat(found)
+    ))
+    .with_code("E0034")
+    .with_label(ctx.full_span(span), format!("expected dimension {expected}"));
+
+    ctx.emit_error(diag);
+}
+
+/// Emit an error when a tensor doesn't have the expected rank.
+pub fn emit_wrong_tensor_rank(
+    ctx: &mut TyCtxt,
+    operation: &str,
+    expected_rank: usize,
+    found_rank: usize,
+    span: Span,
+) {
+    let rank_desc = match expected_rank {
+        0 => "scalar".to_string(),
+        1 => "vector".to_string(),
+        2 => "matrix".to_string(),
+        n => format!("{n}-dimensional tensor"),
+    };
+
+    let found_desc = match found_rank {
+        0 => "scalar".to_string(),
+        1 => "vector".to_string(),
+        2 => "matrix".to_string(),
+        n => format!("{n}-dimensional tensor"),
+    };
+
+    let diag = Diagnostic::error(format!(
+        "{operation} expects a {rank_desc} (rank {expected_rank}), but got a {found_desc} (rank {found_rank})"
+    ))
+    .with_code("E0035")
+    .with_label(ctx.full_span(span), format!("expected rank {expected_rank}"));
+
+    ctx.emit_error(diag);
+}
+
+/// Emit a shape mismatch error with detailed axis information.
+pub fn emit_shape_axis_mismatch(
+    ctx: &mut TyCtxt,
+    shape1: &TyList,
+    shape2: &TyList,
+    axis: usize,
+    dim1: &TyNat,
+    dim2: &TyNat,
+    span: Span,
+) {
+    let diag = Diagnostic::error(format!(
+        "shape mismatch at axis {axis}: expected {}, found {}",
+        pretty_nat(dim1),
+        pretty_nat(dim2)
+    ))
+    .with_code("E0036")
+    .with_label(ctx.full_span(span), format!("dimension mismatch at axis {axis}"))
+    .with_note(format!(
+        "Full shapes:\n\
+         • Expected: {}\n\
+         • Found:    {}",
+        pretty_ty_list(shape1),
+        pretty_ty_list(shape2)
+    ));
+
+    ctx.emit_error(diag);
+}
+
+/// Emit an error when DynTensor conversion fails at runtime.
+pub fn emit_dyn_tensor_conversion_failed(
+    ctx: &mut TyCtxt,
+    expected_shape: &TyList,
+    actual_dims: &[u64],
+    span: Span,
+) {
+    let actual_str = format!("[{}]", actual_dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "));
+
+    let diag = Diagnostic::error(format!(
+        "dynamic tensor shape {} does not match expected static shape {}",
+        actual_str,
+        pretty_ty_list(expected_shape)
+    ))
+    .with_code("E0037")
+    .with_label(ctx.full_span(span), "fromDynamic failed")
+    .with_note("Use pattern matching with `fromDynamic` to handle shape mismatches:\n\
+                case fromDynamic witness dynTensor of\n\
+                  Just tensor -> ...\n\
+                  Nothing -> handle mismatch");
+
+    ctx.emit_error(diag);
+}
+
+/// Emit a suggestion when shapes might be transposed.
+pub fn emit_possible_transpose_suggestion(
+    ctx: &mut TyCtxt,
+    found: &TyList,
+    expected: &TyList,
+    span: Span,
+) {
+    // Check if shapes are compatible when transposed
+    let found_dims = found.to_static_dims();
+    let expected_dims = expected.to_static_dims();
+
+    if let (Some(f), Some(e)) = (found_dims, expected_dims) {
+        if f.len() == 2 && e.len() == 2 && f[0] == e[1] && f[1] == e[0] {
+            let diag = Diagnostic::error(format!(
+                "shape mismatch: expected {}, found {}",
+                pretty_ty_list(expected),
+                pretty_ty_list(found)
+            ))
+            .with_code("E0038")
+            .with_label(ctx.full_span(span), "shapes appear transposed")
+            .with_note("Did you mean to transpose the tensor?\n\
+                        Try using `transpose` on the input tensor");
+
+            ctx.emit_error(diag);
+            return;
+        }
+    }
+
+    // Fall back to regular shape mismatch
+    emit_shape_mismatch(ctx, expected, found, span);
+}
+
+/// Emit a helpful error when matmul arguments might be swapped.
+pub fn emit_matmul_swap_suggestion(
+    ctx: &mut TyCtxt,
+    left_shape: &TyList,
+    right_shape: &TyList,
+    span: Span,
+) {
+    let left_dims = left_shape.to_static_dims();
+    let right_dims = right_shape.to_static_dims();
+
+    if let (Some(l), Some(r)) = (left_dims, right_dims) {
+        if l.len() == 2 && r.len() == 2 {
+            // Check if swapping would work
+            if l[0] == r[1] {
+                let diag = Diagnostic::error(format!(
+                    "matrix multiplication shape mismatch: {} and {}",
+                    pretty_ty_list(left_shape),
+                    pretty_ty_list(right_shape)
+                ))
+                .with_code("E0039")
+                .with_label(ctx.full_span(span), "matmul arguments may be swapped")
+                .with_note(format!(
+                    "Did you mean to swap the arguments?\n\
+                     • Current:  matmul {} {}\n\
+                     • Suggested: matmul {} {}",
+                    pretty_ty_list(left_shape),
+                    pretty_ty_list(right_shape),
+                    pretty_ty_list(right_shape),
+                    pretty_ty_list(left_shape)
+                ));
+
+                ctx.emit_error(diag);
+                return;
+            }
+
+            // Check if transpose would help
+            if l[1] != r[0] && l[1] == r[1] {
+                let diag = Diagnostic::error(format!(
+                    "matrix multiplication shape mismatch: {} and {}",
+                    pretty_ty_list(left_shape),
+                    pretty_ty_list(right_shape)
+                ))
+                .with_code("E0039")
+                .with_label(ctx.full_span(span), "inner dimensions don't match")
+                .with_note(format!(
+                    "Did you mean to transpose the right matrix?\n\
+                     • Current:  matmul {} {} -- inner dimensions: {} vs {}\n\
+                     • Try: matmul {} (transpose {}) -- inner dimensions would match",
+                    pretty_ty_list(left_shape),
+                    pretty_ty_list(right_shape),
+                    l[1], r[0],
+                    pretty_ty_list(left_shape),
+                    pretty_ty_list(right_shape)
+                ));
+
+                ctx.emit_error(diag);
+                return;
+            }
+        }
+    }
+
+    // Fall back to basic matmul error
+    emit_shape_mismatch(ctx, left_shape, right_shape, span);
+}
+
 /// Pretty-print a type.
 fn pretty_ty(ty: &Ty) -> String {
     match ty {
@@ -126,6 +575,43 @@ fn pretty_ty(ty: &Ty) -> String {
             format!("forall {}. {}", var_names.join(" "), pretty_ty(body))
         }
         Ty::Error => "<error>".to_string(),
+        // M9: Type-level naturals and lists
+        Ty::Nat(n) => pretty_nat(n),
+        Ty::TyList(l) => pretty_ty_list(l),
+    }
+}
+
+/// Pretty-print a type-level natural.
+fn pretty_nat(n: &TyNat) -> String {
+    match n {
+        TyNat::Lit(v) => v.to_string(),
+        TyNat::Var(v) => pretty_tyvar(v),
+        TyNat::Add(a, b) => format!("({} + {})", pretty_nat(a), pretty_nat(b)),
+        TyNat::Mul(a, b) => format!("({} * {})", pretty_nat(a), pretty_nat(b)),
+    }
+}
+
+/// Pretty-print a type-level list.
+fn pretty_ty_list(l: &TyList) -> String {
+    match l {
+        TyList::Nil => "'[]".to_string(),
+        TyList::Var(v) => pretty_tyvar(v),
+        TyList::Cons(_, _) => {
+            let mut parts = Vec::new();
+            let mut current = l;
+            while let TyList::Cons(head, tail) = current {
+                parts.push(pretty_ty(head));
+                current = tail;
+            }
+            if !matches!(current, TyList::Nil) {
+                // Variable or append at the tail
+                parts.push(format!("...{}", pretty_ty_list(current)));
+            }
+            format!("'[{}]", parts.join(", "))
+        }
+        TyList::Append(xs, ys) => {
+            format!("({} ++ {})", pretty_ty_list(xs), pretty_ty_list(ys))
+        }
     }
 }
 
@@ -169,5 +655,144 @@ mod tests {
         assert_eq!(pretty_tyvar(&TyVar::new_star(1)), "b");
         assert_eq!(pretty_tyvar(&TyVar::new_star(25)), "z");
         assert_eq!(pretty_tyvar(&TyVar::new_star(26)), "t26");
+    }
+
+    // === M9 Phase 7: Error message formatting tests ===
+
+    #[test]
+    fn test_pretty_nat_literal() {
+        let n = TyNat::Lit(1024);
+        assert_eq!(pretty_nat(&n), "1024");
+    }
+
+    #[test]
+    fn test_pretty_nat_variable() {
+        let var = TyVar::new(0, Kind::Nat);
+        let n = TyNat::Var(var);
+        assert_eq!(pretty_nat(&n), "a");
+    }
+
+    #[test]
+    fn test_pretty_nat_arithmetic() {
+        let m = TyNat::Var(TyVar::new(0, Kind::Nat));
+        let k = TyNat::Var(TyVar::new(1, Kind::Nat));
+
+        let add = TyNat::Add(Box::new(m.clone()), Box::new(k.clone()));
+        assert_eq!(pretty_nat(&add), "(a + b)");
+
+        let mul = TyNat::Mul(Box::new(m), Box::new(k));
+        assert_eq!(pretty_nat(&mul), "(a * b)");
+    }
+
+    #[test]
+    fn test_pretty_ty_list_nil() {
+        let nil = TyList::Nil;
+        assert_eq!(pretty_ty_list(&nil), "'[]");
+    }
+
+    #[test]
+    fn test_pretty_ty_list_static() {
+        let shape = TyList::shape_from_dims(&[1024, 768]);
+        assert_eq!(pretty_ty_list(&shape), "'[1024, 768]");
+    }
+
+    #[test]
+    fn test_pretty_ty_list_polymorphic() {
+        let m = TyVar::new(0, Kind::Nat);
+        let n = TyVar::new(1, Kind::Nat);
+        let shape = TyList::from_vec(vec![
+            Ty::Nat(TyNat::Var(m)),
+            Ty::Nat(TyNat::Var(n)),
+        ]);
+        assert_eq!(pretty_ty_list(&shape), "'[a, b]");
+    }
+
+    #[test]
+    fn test_pretty_ty_list_mixed() {
+        let m = TyVar::new(0, Kind::Nat);
+        let shape = TyList::from_vec(vec![
+            Ty::Nat(TyNat::Var(m)),
+            Ty::Nat(TyNat::Lit(784)),
+        ]);
+        assert_eq!(pretty_ty_list(&shape), "'[a, 784]");
+    }
+
+    #[test]
+    fn test_pretty_ty_list_append() {
+        let xs = TyList::shape_from_dims(&[1, 2]);
+        let ys = TyList::shape_from_dims(&[3, 4]);
+        let appended = TyList::Append(Box::new(xs), Box::new(ys));
+        assert_eq!(pretty_ty_list(&appended), "('[1, 2] ++ '[3, 4])");
+    }
+
+    #[test]
+    fn test_pretty_ty_nat_in_type() {
+        let nat = Ty::Nat(TyNat::Lit(512));
+        assert_eq!(pretty_ty(&nat), "512");
+    }
+
+    #[test]
+    fn test_pretty_ty_ty_list_in_type() {
+        let shape = TyList::shape_from_dims(&[32, 64]);
+        let ty = Ty::TyList(shape);
+        assert_eq!(pretty_ty(&ty), "'[32, 64]");
+    }
+
+    #[test]
+    fn test_matmul_error_message_format() {
+        // Verify the error message captures the essential information
+        let left_shape = TyList::shape_from_dims(&[3, 5]);
+        let right_shape = TyList::shape_from_dims(&[7, 4]);
+        let inner_left = TyNat::Lit(5);
+        let inner_right = TyNat::Lit(7);
+
+        // Check that the pretty printing captures the dimension mismatch
+        let left_str = pretty_ty_list(&left_shape);
+        let right_str = pretty_ty_list(&right_shape);
+        let inner_left_str = pretty_nat(&inner_left);
+        let inner_right_str = pretty_nat(&inner_right);
+
+        assert!(left_str.contains("3"));
+        assert!(left_str.contains("5"));
+        assert!(right_str.contains("7"));
+        assert!(right_str.contains("4"));
+        assert_eq!(inner_left_str, "5");
+        assert_eq!(inner_right_str, "7");
+    }
+
+    #[test]
+    fn test_broadcast_error_context() {
+        // Test that we can capture axis-specific dimension info
+        let shape1 = TyList::shape_from_dims(&[32, 64, 128]);
+        let shape2 = TyList::shape_from_dims(&[32, 100, 128]);
+
+        let s1_str = pretty_ty_list(&shape1);
+        let s2_str = pretty_ty_list(&shape2);
+
+        assert!(s1_str.contains("64"));
+        assert!(s2_str.contains("100"));
+    }
+
+    #[test]
+    fn test_tensor_type_display() {
+        // Test displaying a full tensor type for error messages
+        let shape = TyList::shape_from_dims(&[256, 128]);
+        let float = Ty::Con(TyCon::new(Symbol::intern("Float32"), Kind::Star));
+
+        // Build Tensor '[256, 128] Float32
+        let tensor_con = TyCon::new(Symbol::intern("Tensor"), Kind::tensor_kind());
+        let tensor_app = Ty::App(
+            Box::new(Ty::App(
+                Box::new(Ty::Con(tensor_con)),
+                Box::new(Ty::TyList(shape)),
+            )),
+            Box::new(float),
+        );
+
+        let displayed = pretty_ty(&tensor_app);
+        assert!(displayed.contains("Tensor"));
+        assert!(displayed.contains("256"));
+        assert!(displayed.contains("128"));
+        assert!(displayed.contains("Float32"));
     }
 }

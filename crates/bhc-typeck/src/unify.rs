@@ -18,12 +18,18 @@
 //!
 //! The occurs check prevents infinite types. Before binding a variable
 //! `a` to a type `t`, we verify that `a` does not appear in `t`.
+//!
+//! ## M9 Dependent Types
+//!
+//! This module extends unification to handle type-level naturals (`TyNat`)
+//! and type-level lists (`TyList`) for shape-indexed tensors.
 
 use bhc_span::Span;
-use bhc_types::{Ty, TyVar};
+use bhc_types::{Ty, TyList, TyNat, TyVar};
 
 use crate::context::TyCtxt;
 use crate::diagnostics;
+use crate::nat_solver::{NatConstraint, NatSolver};
 
 /// Unify two types, updating the substitution in the context.
 ///
@@ -112,9 +118,209 @@ fn unify_inner(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
             unify_inner(ctx, t1, body2, span);
         }
 
+        // === M9 Dependent Types: Type-level naturals ===
+        (Ty::Nat(n1), Ty::Nat(n2)) => {
+            unify_nat(ctx, n1, n2, span);
+        }
+
+        // === M9 Dependent Types: Type-level lists ===
+        (Ty::TyList(l1), Ty::TyList(l2)) => {
+            unify_ty_list(ctx, l1, l2, span);
+        }
+
         // Different type structures: mismatch
         _ => {
             diagnostics::emit_type_mismatch(ctx, t1, t2, span);
+        }
+    }
+}
+
+// === M9 Dependent Types: Type-level natural unification ===
+
+/// Unify two type-level naturals.
+///
+/// This uses the `NatSolver` for complex arithmetic constraints that
+/// can't be solved by simple structural unification.
+fn unify_nat(ctx: &mut TyCtxt, n1: &TyNat, n2: &TyNat, span: Span) {
+    match (n1, n2) {
+        // Same literals unify trivially
+        (TyNat::Lit(v1), TyNat::Lit(v2)) => {
+            if v1 != v2 {
+                diagnostics::emit_dimension_mismatch(ctx, *v1, *v2, span);
+            }
+        }
+
+        // Same variable unifies trivially
+        (TyNat::Var(v1), TyNat::Var(v2)) if v1.id == v2.id => {}
+
+        // Variable on either side: bind it
+        (TyNat::Var(v), n) | (n, TyNat::Var(v)) => {
+            bind_nat_var(ctx, v, n, span);
+        }
+
+        // Addition: try to solve or record constraint
+        (TyNat::Add(a1, b1), TyNat::Add(a2, b2)) => {
+            // Structurally unify the components
+            unify_nat(ctx, a1, a2, span);
+            let b1_applied = ctx.subst.apply_nat(b1);
+            let b2_applied = ctx.subst.apply_nat(b2);
+            unify_nat(ctx, &b1_applied, &b2_applied, span);
+        }
+
+        // Multiplication: try to solve or record constraint
+        (TyNat::Mul(a1, b1), TyNat::Mul(a2, b2)) => {
+            // Structurally unify the components
+            unify_nat(ctx, a1, a2, span);
+            let b1_applied = ctx.subst.apply_nat(b1);
+            let b2_applied = ctx.subst.apply_nat(b2);
+            unify_nat(ctx, &b1_applied, &b2_applied, span);
+        }
+
+        // For complex cases, use the constraint solver
+        _ => {
+            // First try to evaluate to ground values
+            if let (Some(v1), Some(v2)) = (n1.eval(), n2.eval()) {
+                if v1 != v2 {
+                    diagnostics::emit_dimension_mismatch(ctx, v1, v2, span);
+                }
+                return;
+            }
+
+            // Use NatSolver for complex arithmetic constraints
+            // This handles cases like: a + 3 = 10 => a = 7
+            let mut solver = NatSolver::new();
+            solver.add_constraint(NatConstraint::Equal(n1.clone(), n2.clone()));
+
+            match solver.solve() {
+                Ok(subst) => {
+                    // Apply the solved substitution to our type context
+                    for (var_id, nat) in subst.iter() {
+                        // Create a TyVar for this binding
+                        let ty_var = TyVar::new(var_id, bhc_types::Kind::Nat);
+                        ctx.subst.insert(&ty_var, Ty::Nat(nat.clone()));
+                    }
+                }
+                Err(err) => {
+                    // Solver couldn't find a solution
+                    diagnostics::emit_nat_solver_error(ctx, &err, span);
+                }
+            }
+        }
+    }
+}
+
+/// Bind a type-level natural variable to a value.
+fn bind_nat_var(ctx: &mut TyCtxt, var: &TyVar, n: &TyNat, span: Span) {
+    // Skip if binding to self
+    if let TyNat::Var(v) = n {
+        if v.id == var.id {
+            return;
+        }
+    }
+
+    // Occurs check for naturals
+    if occurs_check_nat(var, n) {
+        diagnostics::emit_nat_occurs_check_error(ctx, var, n, span);
+        return;
+    }
+
+    // Add binding to substitution (wrap in Ty::Nat)
+    ctx.subst.insert(var, Ty::Nat(n.clone()));
+}
+
+/// Check if a type variable occurs in a type-level natural.
+fn occurs_check_nat(var: &TyVar, n: &TyNat) -> bool {
+    match n {
+        TyNat::Lit(_) => false,
+        TyNat::Var(v) => v.id == var.id,
+        TyNat::Add(a, b) | TyNat::Mul(a, b) => {
+            occurs_check_nat(var, a) || occurs_check_nat(var, b)
+        }
+    }
+}
+
+// === M9 Dependent Types: Type-level list unification ===
+
+/// Unify two type-level lists.
+fn unify_ty_list(ctx: &mut TyCtxt, l1: &TyList, l2: &TyList, span: Span) {
+    match (l1, l2) {
+        // Both empty: unify trivially
+        (TyList::Nil, TyList::Nil) => {}
+
+        // Same variable unifies trivially
+        (TyList::Var(v1), TyList::Var(v2)) if v1.id == v2.id => {}
+
+        // Variable on either side: bind it
+        (TyList::Var(v), l) | (l, TyList::Var(v)) => {
+            bind_ty_list_var(ctx, v, l, span);
+        }
+
+        // Both cons: unify heads and tails
+        (TyList::Cons(h1, t1), TyList::Cons(h2, t2)) => {
+            // Unify heads
+            let h1_applied = ctx.apply_subst(h1);
+            let h2_applied = ctx.apply_subst(h2);
+            unify_inner(ctx, &h1_applied, &h2_applied, span);
+
+            // Unify tails
+            let t1_applied = ctx.subst.apply_ty_list(t1);
+            let t2_applied = ctx.subst.apply_ty_list(t2);
+            unify_ty_list(ctx, &t1_applied, &t2_applied, span);
+        }
+
+        // Length mismatch: one is empty, other is not
+        (TyList::Nil, TyList::Cons(_, _)) | (TyList::Cons(_, _), TyList::Nil) => {
+            diagnostics::emit_shape_length_mismatch(ctx, l1, l2, span);
+        }
+
+        // Append: handle structurally or defer
+        (TyList::Append(xs1, ys1), TyList::Append(xs2, ys2)) => {
+            // Try structural unification
+            let xs1_applied = ctx.subst.apply_ty_list(xs1);
+            let xs2_applied = ctx.subst.apply_ty_list(xs2);
+            unify_ty_list(ctx, &xs1_applied, &xs2_applied, span);
+
+            let ys1_applied = ctx.subst.apply_ty_list(ys1);
+            let ys2_applied = ctx.subst.apply_ty_list(ys2);
+            unify_ty_list(ctx, &ys1_applied, &ys2_applied, span);
+        }
+
+        // Other cases: cannot unify
+        _ => {
+            diagnostics::emit_shape_mismatch(ctx, l1, l2, span);
+        }
+    }
+}
+
+/// Bind a type-level list variable to a value.
+fn bind_ty_list_var(ctx: &mut TyCtxt, var: &TyVar, l: &TyList, span: Span) {
+    // Skip if binding to self
+    if let TyList::Var(v) = l {
+        if v.id == var.id {
+            return;
+        }
+    }
+
+    // Occurs check for lists
+    if occurs_check_ty_list(var, l) {
+        diagnostics::emit_ty_list_occurs_check_error(ctx, var, l, span);
+        return;
+    }
+
+    // Add binding to substitution (wrap in Ty::TyList)
+    ctx.subst.insert(var, Ty::TyList(l.clone()));
+}
+
+/// Check if a type variable occurs in a type-level list.
+fn occurs_check_ty_list(var: &TyVar, l: &TyList) -> bool {
+    match l {
+        TyList::Nil => false,
+        TyList::Var(v) => v.id == var.id,
+        TyList::Cons(head, tail) => {
+            occurs_check(var, head) || occurs_check_ty_list(var, tail)
+        }
+        TyList::Append(xs, ys) => {
+            occurs_check_ty_list(var, xs) || occurs_check_ty_list(var, ys)
         }
     }
 }
@@ -155,6 +361,9 @@ fn occurs_check(var: &TyVar, ty: &Ty) -> bool {
                 occurs_check(var, body)
             }
         }
+        // M9: Check in type-level naturals and lists
+        Ty::Nat(n) => occurs_check_nat(var, n),
+        Ty::TyList(l) => occurs_check_ty_list(var, l),
     }
 }
 
@@ -260,5 +469,156 @@ mod tests {
         unify(&mut ctx, &t1, &t2, Span::DUMMY);
 
         assert!(ctx.has_errors());
+    }
+
+    // === M9 Dependent Types: Nat unification tests ===
+
+    #[test]
+    fn test_unify_nat_literals() {
+        let mut ctx = test_context();
+        let n1 = Ty::Nat(TyNat::Lit(1024));
+        let n2 = Ty::Nat(TyNat::Lit(1024));
+
+        unify(&mut ctx, &n1, &n2, Span::DUMMY);
+
+        assert!(!ctx.has_errors());
+    }
+
+    #[test]
+    fn test_unify_nat_literal_mismatch() {
+        let mut ctx = test_context();
+        let n1 = Ty::Nat(TyNat::Lit(1024));
+        let n2 = Ty::Nat(TyNat::Lit(768));
+
+        unify(&mut ctx, &n1, &n2, Span::DUMMY);
+
+        assert!(ctx.has_errors());
+    }
+
+    #[test]
+    fn test_unify_nat_var_to_literal() {
+        let mut ctx = test_context();
+        let m = TyVar::new(1, Kind::Nat);
+
+        let t1 = Ty::Nat(TyNat::Var(m.clone()));
+        let t2 = Ty::Nat(TyNat::Lit(256));
+
+        unify(&mut ctx, &t1, &t2, Span::DUMMY);
+
+        assert!(!ctx.has_errors());
+        let result = ctx.apply_subst(&Ty::Nat(TyNat::Var(m)));
+        assert_eq!(result, Ty::Nat(TyNat::Lit(256)));
+    }
+
+    #[test]
+    fn test_unify_nat_var_to_var() {
+        let mut ctx = test_context();
+        let m = TyVar::new(1, Kind::Nat);
+        let n = TyVar::new(2, Kind::Nat);
+
+        let t1 = Ty::Nat(TyNat::Var(m.clone()));
+        let t2 = Ty::Nat(TyNat::Var(n.clone()));
+
+        unify(&mut ctx, &t1, &t2, Span::DUMMY);
+
+        assert!(!ctx.has_errors());
+        // After unification, both should resolve to the same thing
+        let r1 = ctx.apply_subst(&Ty::Nat(TyNat::Var(m.clone())));
+        let r2 = ctx.apply_subst(&Ty::Nat(TyNat::Var(n.clone())));
+        // One should be bound to the other
+        assert!(r1 == Ty::Nat(TyNat::Var(n)) || r2 == Ty::Nat(TyNat::Var(m)));
+    }
+
+    #[test]
+    fn test_unify_nat_add_with_solver() {
+        let mut ctx = test_context();
+        let a = TyVar::new(1, Kind::Nat);
+
+        // a + 3 = 10, so a should be 7
+        let t1 = Ty::Nat(TyNat::add(TyNat::Var(a.clone()), TyNat::Lit(3)));
+        let t2 = Ty::Nat(TyNat::Lit(10));
+
+        unify(&mut ctx, &t1, &t2, Span::DUMMY);
+
+        assert!(!ctx.has_errors());
+        let result = ctx.apply_subst(&Ty::Nat(TyNat::Var(a)));
+        assert_eq!(result, Ty::Nat(TyNat::Lit(7)));
+    }
+
+    #[test]
+    fn test_unify_nat_mul_with_solver() {
+        let mut ctx = test_context();
+        let a = TyVar::new(1, Kind::Nat);
+
+        // a * 4 = 12, so a should be 3
+        let t1 = Ty::Nat(TyNat::mul(TyNat::Var(a.clone()), TyNat::Lit(4)));
+        let t2 = Ty::Nat(TyNat::Lit(12));
+
+        unify(&mut ctx, &t1, &t2, Span::DUMMY);
+
+        assert!(!ctx.has_errors());
+        let result = ctx.apply_subst(&Ty::Nat(TyNat::Var(a)));
+        assert_eq!(result, Ty::Nat(TyNat::Lit(3)));
+    }
+
+    #[test]
+    fn test_unify_nat_mul_not_divisible() {
+        let mut ctx = test_context();
+        let a = TyVar::new(1, Kind::Nat);
+
+        // a * 4 = 10 has no integer solution
+        let t1 = Ty::Nat(TyNat::mul(TyNat::Var(a.clone()), TyNat::Lit(4)));
+        let t2 = Ty::Nat(TyNat::Lit(10));
+
+        unify(&mut ctx, &t1, &t2, Span::DUMMY);
+
+        assert!(ctx.has_errors());
+    }
+
+    #[test]
+    fn test_unify_ty_list_nil() {
+        let mut ctx = test_context();
+        let l1 = Ty::TyList(TyList::Nil);
+        let l2 = Ty::TyList(TyList::Nil);
+
+        unify(&mut ctx, &l1, &l2, Span::DUMMY);
+
+        assert!(!ctx.has_errors());
+    }
+
+    #[test]
+    fn test_unify_ty_list_cons() {
+        let mut ctx = test_context();
+        let shape1 = TyList::from_vec(vec![Ty::Nat(TyNat::Lit(1024)), Ty::Nat(TyNat::Lit(768))]);
+        let shape2 = TyList::from_vec(vec![Ty::Nat(TyNat::Lit(1024)), Ty::Nat(TyNat::Lit(768))]);
+
+        unify(&mut ctx, &Ty::TyList(shape1), &Ty::TyList(shape2), Span::DUMMY);
+
+        assert!(!ctx.has_errors());
+    }
+
+    #[test]
+    fn test_unify_ty_list_length_mismatch() {
+        let mut ctx = test_context();
+        let shape1 = TyList::from_vec(vec![Ty::Nat(TyNat::Lit(1024))]);
+        let shape2 = TyList::from_vec(vec![Ty::Nat(TyNat::Lit(1024)), Ty::Nat(TyNat::Lit(768))]);
+
+        unify(&mut ctx, &Ty::TyList(shape1), &Ty::TyList(shape2), Span::DUMMY);
+
+        assert!(ctx.has_errors());
+    }
+
+    #[test]
+    fn test_unify_ty_list_with_var() {
+        let mut ctx = test_context();
+        let m = TyVar::new(1, Kind::Nat);
+        let shape1 = TyList::from_vec(vec![Ty::Nat(TyNat::Var(m.clone())), Ty::Nat(TyNat::Lit(768))]);
+        let shape2 = TyList::from_vec(vec![Ty::Nat(TyNat::Lit(1024)), Ty::Nat(TyNat::Lit(768))]);
+
+        unify(&mut ctx, &Ty::TyList(shape1), &Ty::TyList(shape2), Span::DUMMY);
+
+        assert!(!ctx.has_errors());
+        let result = ctx.apply_subst(&Ty::Nat(TyNat::Var(m)));
+        assert_eq!(result, Ty::Nat(TyNat::Lit(1024)));
     }
 }

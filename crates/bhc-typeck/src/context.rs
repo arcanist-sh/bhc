@@ -145,8 +145,19 @@ impl TyCtxt {
             .register_type_con(self.builtins.either_con.clone());
         self.env.register_type_con(self.builtins.io_con.clone());
 
+        // Register shape-indexed tensor type constructors
+        self.env
+            .register_type_con(self.builtins.tensor_con.clone());
+        self.env
+            .register_type_con(self.builtins.dyn_tensor_con.clone());
+        self.env
+            .register_type_con(self.builtins.shape_witness_con.clone());
+
         // Register built-in data constructors
         self.builtins.register_data_cons(&mut self.env);
+
+        // Register dynamic tensor operations (toDynamic, fromDynamic, etc.)
+        self.builtins.register_dyn_tensor_ops(&mut self.env);
     }
 
     /// Register a data type definition.

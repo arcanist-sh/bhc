@@ -13,6 +13,8 @@
 //! - Type families
 //! - GADTs (Generalized Algebraic Data Types)
 //! - Rank-N polymorphism (limited)
+//! - **M9 Dependent Types Preview**: Shape-indexed tensors with compile-time
+//!   dimension checking
 //!
 //! ## Core Types
 //!
@@ -23,6 +25,8 @@
 //! - [`TyId`]: Unique type identifiers
 //! - [`Kind`]: Kinds for higher-kinded types
 //! - [`Scheme`]: Polymorphic type schemes
+//! - [`TyNat`]: Type-level natural numbers (M9)
+//! - [`TyList`]: Type-level lists for shapes (M9)
 //!
 //! ## Type Inference
 //!
@@ -33,15 +37,34 @@
 //! 3. **Generalization**: Generalize types at let-bindings
 //! 4. **Defaulting**: Apply defaulting rules for ambiguous types
 //!
+//! ## Shape-Indexed Tensors (M9)
+//!
+//! BHC supports shape-indexed tensor types for compile-time dimension checking:
+//!
+//! ```text
+//! matmul :: Tensor '[m, k] Float -> Tensor '[k, n] Float -> Tensor '[m, n] Float
+//! ```
+//!
+//! See [`nat`] and [`ty_list`] modules for type-level constructs.
+//!
 //! ## See Also
 //!
 //! - `bhc-hir`: High-level IR that uses these types
 //! - `bhc-core`: Core IR with explicit type annotations
 //! - H26-SPEC Section 4: Type System Specification
+//! - H26-SPEC Section 7: Tensor Model
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
+
+pub mod dyn_tensor;
+pub mod nat;
+pub mod ty_list;
+
+pub use dyn_tensor::{dyn_tensor_of, dyn_tensor_tycon, shape_witness_of, shape_witness_tycon};
+pub use nat::TyNat;
+pub use ty_list::TyList;
 
 use bhc_index::Idx;
 use bhc_intern::Symbol;
@@ -98,6 +121,8 @@ impl TyVar {
 /// - `*` (Star): The kind of types that have values (e.g., `Int`, `Bool`)
 /// - `* -> *`: The kind of type constructors (e.g., `Maybe`, `[]`)
 /// - `Constraint`: The kind of type class constraints
+/// - `Nat`: The kind of type-level natural numbers (M9)
+/// - `List k`: The kind of type-level lists with element kind `k` (M9)
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Kind {
     /// `*` - The kind of proper types (types that have values).
@@ -108,6 +133,24 @@ pub enum Kind {
     Constraint,
     /// A kind variable, for kind inference.
     Var(u32),
+
+    // === M9 Dependent Types Preview ===
+
+    /// `Nat` - The kind of type-level natural numbers.
+    ///
+    /// Used for tensor dimensions in shape-indexed types:
+    /// ```text
+    /// Tensor :: [Nat] -> * -> *
+    /// ```
+    Nat,
+
+    /// `List k` - The kind of type-level lists with element kind `k`.
+    ///
+    /// Primarily used as `[Nat]` for tensor shapes:
+    /// ```text
+    /// '[1024, 768] :: [Nat]
+    /// ```
+    List(Box<Kind>),
 }
 
 impl Kind {
@@ -121,6 +164,43 @@ impl Kind {
     #[must_use]
     pub fn is_star(&self) -> bool {
         matches!(self, Self::Star)
+    }
+
+    /// Returns true if this is a `Nat` kind.
+    #[must_use]
+    pub fn is_nat(&self) -> bool {
+        matches!(self, Self::Nat)
+    }
+
+    /// Returns the kind `[Nat]` for tensor shapes.
+    #[must_use]
+    pub fn nat_list() -> Self {
+        Self::List(Box::new(Self::Nat))
+    }
+
+    /// Returns the kind `[Nat] -> * -> *` for the Tensor type constructor.
+    #[must_use]
+    pub fn tensor_kind() -> Self {
+        // Tensor :: [Nat] -> * -> *
+        Self::Arrow(
+            Box::new(Self::nat_list()),
+            Box::new(Self::star_to_star()),
+        )
+    }
+
+    /// Returns true if this is a list kind.
+    #[must_use]
+    pub fn is_list(&self) -> bool {
+        matches!(self, Self::List(_))
+    }
+
+    /// Returns the element kind if this is a list kind.
+    #[must_use]
+    pub fn list_elem_kind(&self) -> Option<&Kind> {
+        match self {
+            Self::List(k) => Some(k),
+            _ => None,
+        }
     }
 }
 
@@ -159,6 +239,18 @@ pub enum Ty {
 
     /// An error type, used during type checking to allow recovery.
     Error,
+
+    // === M9 Dependent Types Preview ===
+
+    /// A type-level natural number (e.g., `1024` in `Tensor '[1024] Float`).
+    ///
+    /// Has kind `Nat`. Used for tensor dimensions.
+    Nat(TyNat),
+
+    /// A type-level list (e.g., `'[1024, 768]` in `Tensor '[1024, 768] Float`).
+    ///
+    /// Has kind `[Nat]` when used for tensor shapes.
+    TyList(TyList),
 }
 
 impl Ty {
@@ -260,6 +352,111 @@ impl Ty {
                     }
                 }
             }
+            // M9: Type-level naturals and lists
+            Self::Nat(n) => {
+                for v in n.free_vars() {
+                    if !vars.contains(&v) {
+                        vars.push(v);
+                    }
+                }
+            }
+            Self::TyList(l) => {
+                for v in l.free_vars() {
+                    if !vars.contains(&v) {
+                        vars.push(v);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns true if this type contains no unification variables.
+    #[must_use]
+    pub fn is_ground(&self) -> bool {
+        match self {
+            Self::Var(_) => false,
+            Self::Con(_) | Self::Prim(_) | Self::Error => true,
+            Self::App(f, a) | Self::Fun(f, a) => f.is_ground() && a.is_ground(),
+            Self::Tuple(tys) => tys.iter().all(Ty::is_ground),
+            Self::List(elem) => elem.is_ground(),
+            Self::Forall(_, body) => body.is_ground(),
+            Self::Nat(n) => n.is_ground(),
+            Self::TyList(l) => l.is_ground(),
+        }
+    }
+
+    /// Creates a type-level natural literal.
+    #[must_use]
+    pub fn nat_lit(n: u64) -> Self {
+        Self::Nat(TyNat::lit(n))
+    }
+
+    /// Creates a shape type from dimension values.
+    #[must_use]
+    pub fn shape(dims: &[u64]) -> Self {
+        Self::TyList(TyList::shape_from_dims(dims))
+    }
+
+    /// Returns true if this is a type-level natural.
+    #[must_use]
+    pub fn is_nat(&self) -> bool {
+        matches!(self, Self::Nat(_))
+    }
+
+    /// Returns true if this is a type-level list.
+    #[must_use]
+    pub fn is_ty_list(&self) -> bool {
+        matches!(self, Self::TyList(_))
+    }
+
+    /// Returns the type-level natural if this is a Nat variant.
+    #[must_use]
+    pub fn as_nat(&self) -> Option<&TyNat> {
+        match self {
+            Self::Nat(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// Returns the type-level list if this is a TyList variant.
+    #[must_use]
+    pub fn as_ty_list(&self) -> Option<&TyList> {
+        match self {
+            Self::TyList(l) => Some(l),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Ty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Var(v) => write!(f, "t{}", v.id),
+            Self::Con(c) => write!(f, "{}", c.name.as_str()),
+            Self::Prim(p) => write!(f, "{p}"),
+            Self::App(fun, arg) => write!(f, "({fun} {arg})"),
+            Self::Fun(from, to) => write!(f, "({from} -> {to})"),
+            Self::Tuple(tys) => {
+                write!(f, "(")?;
+                for (i, ty) in tys.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{ty}")?;
+                }
+                write!(f, ")")
+            }
+            Self::List(elem) => write!(f, "[{elem}]"),
+            Self::Forall(vars, body) => {
+                write!(f, "forall")?;
+                for v in vars {
+                    write!(f, " t{}", v.id)?;
+                }
+                write!(f, ". {body}")
+            }
+            Self::Error => write!(f, "<error>"),
+            Self::Nat(n) => write!(f, "{n}"),
+            Self::TyList(l) => write!(f, "{l}"),
         }
     }
 }
@@ -407,6 +604,49 @@ impl Subst {
                 Ty::Forall(vars.clone(), Box::new(inner.apply(body)))
             }
             Ty::Error => Ty::Error,
+            // M9: Apply substitution to type-level naturals and lists
+            Ty::Nat(n) => Ty::Nat(self.apply_nat(n)),
+            Ty::TyList(l) => Ty::TyList(self.apply_ty_list(l)),
+        }
+    }
+
+    /// Applies this substitution to a type-level natural.
+    #[must_use]
+    pub fn apply_nat(&self, n: &TyNat) -> TyNat {
+        match n {
+            TyNat::Lit(val) => TyNat::Lit(*val),
+            TyNat::Var(v) => {
+                // Check if this variable is mapped to a Nat type
+                match self.get(v) {
+                    Some(Ty::Nat(replacement)) => replacement.clone(),
+                    Some(_) => n.clone(), // Type mismatch, keep original
+                    None => n.clone(),
+                }
+            }
+            TyNat::Add(a, b) => TyNat::add(self.apply_nat(a), self.apply_nat(b)),
+            TyNat::Mul(a, b) => TyNat::mul(self.apply_nat(a), self.apply_nat(b)),
+        }
+    }
+
+    /// Applies this substitution to a type-level list.
+    #[must_use]
+    pub fn apply_ty_list(&self, l: &TyList) -> TyList {
+        match l {
+            TyList::Nil => TyList::Nil,
+            TyList::Cons(head, tail) => {
+                TyList::cons(self.apply(head), self.apply_ty_list(tail))
+            }
+            TyList::Var(v) => {
+                // Check if this variable is mapped to a TyList type
+                match self.get(v) {
+                    Some(Ty::TyList(replacement)) => replacement.clone(),
+                    Some(_) => l.clone(), // Type mismatch, keep original
+                    None => l.clone(),
+                }
+            }
+            TyList::Append(xs, ys) => {
+                TyList::append(self.apply_ty_list(xs), self.apply_ty_list(ys))
+            }
         }
     }
 

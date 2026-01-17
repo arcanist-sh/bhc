@@ -8,8 +8,13 @@
 //!
 //! The identity function has scheme `forall a. a -> a`.
 //! When used, we instantiate it to `t1 -> t1` where `t1` is fresh.
+//!
+//! ## M9 Dependent Types
+//!
+//! Instantiation also handles type-level naturals and lists for
+//! shape-indexed tensor types.
 
-use bhc_types::{Scheme, Ty};
+use bhc_types::{Scheme, Ty, TyList, TyNat};
 use rustc_hash::FxHashMap;
 
 use crate::context::TyCtxt;
@@ -69,6 +74,49 @@ fn substitute(ty: &Ty, subst: &FxHashMap<u32, Ty>) -> Ty {
             Ty::Forall(vars.clone(), Box::new(substitute(body, &inner_subst)))
         }
         Ty::Error => Ty::Error,
+        // M9: Handle type-level naturals and lists
+        Ty::Nat(n) => Ty::Nat(substitute_nat(n, subst)),
+        Ty::TyList(l) => Ty::TyList(substitute_ty_list(l, subst)),
+    }
+}
+
+/// Apply a substitution to a type-level natural.
+fn substitute_nat(n: &TyNat, subst: &FxHashMap<u32, Ty>) -> TyNat {
+    match n {
+        TyNat::Lit(v) => TyNat::Lit(*v),
+        TyNat::Var(v) => {
+            // Check if this variable maps to a Nat type
+            match subst.get(&v.id) {
+                Some(Ty::Nat(replacement)) => replacement.clone(),
+                _ => n.clone(),
+            }
+        }
+        TyNat::Add(a, b) => {
+            TyNat::add(substitute_nat(a, subst), substitute_nat(b, subst))
+        }
+        TyNat::Mul(a, b) => {
+            TyNat::mul(substitute_nat(a, subst), substitute_nat(b, subst))
+        }
+    }
+}
+
+/// Apply a substitution to a type-level list.
+fn substitute_ty_list(l: &TyList, subst: &FxHashMap<u32, Ty>) -> TyList {
+    match l {
+        TyList::Nil => TyList::Nil,
+        TyList::Cons(head, tail) => {
+            TyList::cons(substitute(head, subst), substitute_ty_list(tail, subst))
+        }
+        TyList::Var(v) => {
+            // Check if this variable maps to a TyList type
+            match subst.get(&v.id) {
+                Some(Ty::TyList(replacement)) => replacement.clone(),
+                _ => l.clone(),
+            }
+        }
+        TyList::Append(xs, ys) => {
+            TyList::append(substitute_ty_list(xs, subst), substitute_ty_list(ys, subst))
+        }
     }
 }
 

@@ -802,9 +802,15 @@ impl<'src> Lexer<'src> {
             .ok_or(LexError::InvalidNumber(dec.to_string()))
     }
 
-    /// Lex a character literal.
+    /// Lex a character literal or promoted list token.
     fn lex_char(&mut self, _start: usize) -> Token {
         self.advance(); // Opening '
+
+        // M9: Check for promoted list syntax '[
+        if self.peek() == Some('[') {
+            self.advance();
+            return Token::new(TokenKind::TickLBracket);
+        }
 
         let c = match self.peek() {
             Some('\'') => {

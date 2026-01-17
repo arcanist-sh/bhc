@@ -59,11 +59,16 @@ mod env;
 mod generalize;
 mod infer;
 mod instantiate;
+pub mod kind_check;
+pub mod nat_solver;
 mod pattern;
+pub mod shape_bridge;
+pub mod type_families;
 mod unify;
 
 pub use context::TyCtxt;
 pub use env::{DataConInfo, TypeEnv};
+pub use kind_check::KindEnv;
 
 use bhc_diagnostics::Diagnostic;
 use bhc_hir::{DefId, HirId, Module};

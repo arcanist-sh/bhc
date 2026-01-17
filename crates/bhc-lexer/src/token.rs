@@ -160,6 +160,8 @@ pub enum TokenKind {
     LBracketPipe,
     /// `|]` (quasiquote close)
     PipeRBracket,
+    /// `'[` (promoted list - M9 dependent types)
+    TickLBracket,
     /// `{`
     LBrace,
     /// `}`
@@ -540,6 +542,7 @@ impl TokenKind {
             Self::RBracket => "`]`",
             Self::LBracketPipe => "`[|`",
             Self::PipeRBracket => "`|]`",
+            Self::TickLBracket => "`'[`",
             Self::LBrace => "`{`",
             Self::RBrace => "`}`",
             Self::Comma => "`,`",

@@ -158,6 +158,19 @@ impl TypeEnv {
         self.data_cons_by_id.insert(def_id, info);
     }
 
+    /// Register a built-in value (function) with both a DefId and name.
+    ///
+    /// This is used for built-in functions like `toDynamic`, `fromDynamic`, etc.
+    /// The value can be looked up by both `DefId` and name.
+    pub fn register_value(&mut self, def_id: DefId, name: Symbol, scheme: Scheme) {
+        // Register in globals by DefId
+        self.globals.insert(def_id, scheme.clone());
+        // Also make it available by name in the outermost local scope
+        if let Some(scope) = self.locals.first_mut() {
+            scope.insert(name, scheme);
+        }
+    }
+
     /// Look up a data constructor by name.
     #[must_use]
     pub fn lookup_data_con(&self, name: Symbol) -> Option<&DataConInfo> {

@@ -157,6 +157,9 @@ impl<'src> Parser<'src> {
                     | TokenKind::ConId(_)
                     | TokenKind::LParen
                     | TokenKind::LBracket
+                    // M9: Type-level naturals and promoted lists
+                    | TokenKind::IntLit(_)
+                    | TokenKind::TickLBracket
             ),
             None => false,
         }
@@ -187,12 +190,57 @@ impl<'src> Parser<'src> {
 
             TokenKind::LBracket => self.parse_list_type(),
 
+            // M9: Type-level natural literal
+            TokenKind::IntLit(lit) => {
+                let span = tok.span;
+                let value = lit.parse().ok_or_else(|| ParseError::Unexpected {
+                    found: "invalid integer".to_string(),
+                    expected: "type-level natural".to_string(),
+                    span,
+                })?;
+                // Type-level naturals must be non-negative
+                if value < 0 {
+                    return Err(ParseError::Unexpected {
+                        found: "negative integer".to_string(),
+                        expected: "type-level natural (non-negative)".to_string(),
+                        span,
+                    });
+                }
+                self.advance();
+                Ok(Type::NatLit(value as u64, span))
+            }
+
+            // M9: Promoted list syntax '[a, b, c]
+            TokenKind::TickLBracket => self.parse_promoted_list(),
+
             _ => Err(ParseError::Unexpected {
                 found: tok.node.kind.description().to_string(),
                 expected: "type".to_string(),
                 span: tok.span,
             }),
         }
+    }
+
+    /// Parse a promoted list: `'[a, b, c]`.
+    fn parse_promoted_list(&mut self) -> ParseResult<Type> {
+        let start = self.current_span();
+        self.expect(&TokenKind::TickLBracket)?;
+
+        if self.eat(&TokenKind::RBracket) {
+            // Empty promoted list: '[]
+            let span = start.to(self.tokens[self.pos - 1].span);
+            return Ok(Type::PromotedList(vec![], span));
+        }
+
+        let mut elems = vec![self.parse_type()?];
+        while self.eat(&TokenKind::Comma) {
+            elems.push(self.parse_type()?);
+        }
+
+        let end = self.expect(&TokenKind::RBracket)?;
+        let span = start.to(end.span);
+
+        Ok(Type::PromotedList(elems, span))
     }
 
     /// Parse a parenthesized type or tuple type.

@@ -1344,6 +1344,19 @@ class ExtensionClass a where
     }
 
     #[test]
+    fn test_inline_let_expression() {
+        // Test inline let...in expression
+        let src = "foo = let x = 1 in x + 1";
+        let (module, diags) = parse_module(src, FileId::new(0));
+        for d in &diags {
+            eprintln!("Error: {:?}", d);
+        }
+        assert!(diags.is_empty(), "Inline let expression should parse");
+        let module = module.expect("Should parse");
+        assert_eq!(module.decls.len(), 1);
+    }
+
+    #[test]
     fn test_xmonad_parsing() {
         // Test parsing XMonad-style code
         use std::path::Path;

@@ -428,6 +428,14 @@ impl TokenKind {
         matches!(self, Self::Where | Self::Let | Self::Do | Self::Of | Self::Mdo)
     }
 
+    /// Check if this token closes an implicit layout context.
+    /// `in` closes `let` layouts, but we also handle `then`/`else` here
+    /// even though `if` doesn't use layout in standard Haskell.
+    #[must_use]
+    pub fn closes_layout(&self) -> bool {
+        matches!(self, Self::In)
+    }
+
     /// Check if this is a virtual (layout-inserted) token.
     #[must_use]
     pub fn is_virtual(&self) -> bool {

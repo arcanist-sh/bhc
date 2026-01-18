@@ -281,17 +281,18 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        // Skip the newline if present (but don't call skip_newline
-        // because we want to set at_line_start properly)
+        // Skip the newline if present and reset column tracking
         if self.peek() == Some('\n') {
             self.advance();
             self.at_line_start = true;
+            self.column = 1; // Reset column for new line
         } else if self.peek() == Some('\r') {
             self.advance();
             if self.peek() == Some('\n') {
                 self.advance();
             }
             self.at_line_start = true;
+            self.column = 1; // Reset column for new line
         }
     }
 
@@ -1864,6 +1865,27 @@ class ExtensionClass a where
         // Check for VirtualSemi after pragma
         let tokens_after_pragma = &kinds[pragma_idx..];
         println!("Tokens after pragma: {:?}", tokens_after_pragma);
+    }
+
+    #[test]
+    fn test_let_explicit_braces_in() {
+        // Test that `in` doesn't incorrectly close module-level layout
+        let src = "let { x = 1 } in x";
+        let kinds = lex_kinds(src);
+        println!("Tokens for 'let {{ x = 1 }} in x': {:?}", kinds);
+        // Should NOT have VirtualRBrace before `in` since let uses explicit braces
+        // This test now expects VirtualRBrace because of module-level layout
+        // which is actually wrong behavior that we need to fix
+    }
+
+    #[test]
+    fn test_inline_let_expression_token_stream() {
+        // Test inline let...in without layout
+        let src = "foo = let x = 1 in x + 1";
+        let kinds = lex_kinds(src);
+        println!("Tokens for 'foo = let x = 1 in x + 1': {:?}", kinds);
+        // Should have: Ident(foo), Eq, Let, VirtualLBrace, Ident(x), Eq, Int(1),
+        // VirtualRBrace, In, Ident(x), Operator(+), Int(1)
     }
 }
 

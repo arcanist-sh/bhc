@@ -621,16 +621,26 @@ impl<'src> Parser<'src> {
             self.expect(&TokenKind::RBrace)?;
         } else if self.eat(&TokenKind::VirtualLBrace) {
             // Layout-based declarations (implicit braces)
-            if !self.check(&TokenKind::VirtualRBrace) {
+            // Note: `in` can also end a let-block (e.g., `let x = 1 in ...`)
+            if !self.check(&TokenKind::VirtualRBrace) && !self.check(&TokenKind::In) {
                 decls.push(self.parse_value_decl()?);
                 while self.eat(&TokenKind::VirtualSemi) {
-                    if self.check(&TokenKind::VirtualRBrace) {
+                    if self.check(&TokenKind::VirtualRBrace) || self.check(&TokenKind::In) {
                         break;
                     }
                     decls.push(self.parse_value_decl()?);
                 }
             }
-            self.expect(&TokenKind::VirtualRBrace)?;
+            // Accept either VirtualRBrace or implicitly end on `in`
+            if !self.eat(&TokenKind::VirtualRBrace) && !self.check(&TokenKind::In) {
+                // If neither, report error expecting VirtualRBrace
+                return Err(ParseError::Unexpected {
+                    found: self.current().map(|t| t.node.kind.description().to_string())
+                        .unwrap_or("end of file".to_string()),
+                    expected: "layout `}`".to_string(),
+                    span: self.current_span(),
+                });
+            }
         } else {
             // Single declaration (no braces)
             decls.push(self.parse_value_decl()?);

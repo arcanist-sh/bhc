@@ -10,9 +10,16 @@ use bhc_span::Span;
 use crate::{ParseResult, Parser, ParseError};
 
 impl<'src> Parser<'src> {
-    /// Parse an expression.
+    /// Parse an expression, including optional type annotation.
     pub fn parse_expr(&mut self) -> ParseResult<Expr> {
-        self.parse_infix_expr(0)
+        let expr = self.parse_infix_expr(0)?;
+
+        // Check for type annotation: expr :: Type
+        if self.check(&TokenKind::DoubleColon) {
+            self.parse_type_annotation(expr)
+        } else {
+            Ok(expr)
+        }
     }
 
     /// Parse an infix expression with precedence climbing.
@@ -20,6 +27,9 @@ impl<'src> Parser<'src> {
         let mut lhs = self.parse_prefix_expr()?;
 
         while let Some(tok) = self.current() {
+            // Track whether the operator was already consumed (for backtick case)
+            let mut op_consumed = false;
+
             let (op, prec, assoc) = match &tok.node.kind {
                 TokenKind::Operator(sym) => {
                     let (prec, assoc) = self.get_operator_info(sym.as_str());
@@ -45,7 +55,7 @@ impl<'src> Parser<'src> {
                     (Ident::from_str("-"), prec, assoc)
                 }
                 TokenKind::Backtick => {
-                    // Infix function application: `x `mod` y`
+                    // Infix function application: `x `mod` y` or `x `E.catch` y`
                     let _start = tok.span;
                     self.advance(); // `
                     let Some(func_tok) = self.current() else {
@@ -56,6 +66,11 @@ impl<'src> Parser<'src> {
                     let func = match &func_tok.node.kind {
                         TokenKind::Ident(sym) => Ident::new(*sym),
                         TokenKind::ConId(sym) => Ident::new(*sym),
+                        TokenKind::QualIdent(qual, name) => {
+                            // Create qualified name like "E.catch"
+                            let full_name = format!("{}.{}", qual.as_str(), name.as_str());
+                            Ident::from_str(&full_name)
+                        }
                         _ => {
                             return Err(ParseError::Unexpected {
                                 found: func_tok.node.kind.description().to_string(),
@@ -66,6 +81,7 @@ impl<'src> Parser<'src> {
                     };
                     self.advance();
                     self.expect(&TokenKind::Backtick)?;
+                    op_consumed = true; // Already consumed the entire `func` operator
                     (func, 9, Assoc::Left) // Default infix precedence
                 }
                 // Handle . (Dot token for function composition)
@@ -92,7 +108,9 @@ impl<'src> Parser<'src> {
             }
 
             let _op_span = self.current_span();
-            self.advance();
+            if !op_consumed {
+                self.advance();
+            }
 
             let next_min_prec = match assoc {
                 Assoc::Left => prec + 1,
@@ -892,7 +910,6 @@ impl<'src> Parser<'src> {
     }
 
     /// Parse type annotation: `expr :: Type`
-    #[allow(dead_code)]
     fn parse_type_annotation(&mut self, expr: Expr) -> ParseResult<Expr> {
         let start = expr.span();
         self.expect(&TokenKind::DoubleColon)?;

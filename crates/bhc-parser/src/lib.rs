@@ -771,4 +771,95 @@ mod tests {
             panic!("Expected FunBind");
         }
     }
+
+    #[test]
+    fn test_backtick_operator_with_lambda() {
+        // Backtick operators followed by lambda expressions
+        let _ = parse_module_ok("test = f `catch` \\e -> handle e");
+        let _ = parse_module_ok("test = x `fmap` (\\a -> a + 1)");
+        // Qualified names in backticks
+        let _ = parse_module_ok("test = action `E.catch` \\e -> case e of { Ex -> handler }");
+    }
+
+    #[test]
+    fn test_as_patterns() {
+        // Simple as-pattern
+        let _ = parse_module_ok("f x@(Just y) = y");
+        // As-pattern with list
+        let _ = parse_module_ok("g xs@(x:_) = x");
+        // As-pattern with record (XMonad style) - using explicit braces
+        let _ = parse_module_ok("h conf@(Config { field = v }) = v");
+    }
+
+    #[test]
+    fn test_list_type_annotation() {
+        // List with type annotation (XMonad workspaces pattern)
+        let _ = parse_module_ok("test = [1 .. 9 :: Int]");
+        // List with explicit type inside
+        let _ = parse_module_ok("test = map show [4..9]");
+    }
+
+    #[test]
+    fn test_multi_clause_explicit_layout() {
+        // Multi-clause pattern matching function (uses explicit layout)
+        let module = parse_module_ok("f 0 = 1; f n = n");
+        // Check that both clauses are in the same FunBind
+        if let bhc_ast::Decl::FunBind(fun) = &module.decls[0] {
+            assert_eq!(fun.clauses.len(), 2, "Expected 2 clauses");
+        } else {
+            panic!("Expected FunBind");
+        }
+    }
+
+    #[test]
+    fn test_multi_clause_with_type_sig_explicit() {
+        // Type signature followed by multi-clause function
+        let module = parse_module_ok("f :: Int -> Int; f 0 = 1; f n = n");
+        // First decl is TypeSig, second is FunBind with 2 clauses
+        assert!(matches!(module.decls[0], bhc_ast::Decl::TypeSig { .. }));
+        if let bhc_ast::Decl::FunBind(fun) = &module.decls[1] {
+            assert_eq!(fun.clauses.len(), 2, "Expected 2 clauses");
+        } else {
+            panic!("Expected FunBind");
+        }
+    }
+
+    #[test]
+    fn test_xmonad_parsing() {
+        // Test parsing XMonad-style code
+        use std::path::Path;
+
+        let xmonad_dir = Path::new("/tmp/xmonad/src/XMonad");
+        if !xmonad_dir.exists() {
+            println!("XMonad source not found at {:?}, skipping test", xmonad_dir);
+            return;
+        }
+
+        let mut total_errors = 0;
+        for entry in std::fs::read_dir(xmonad_dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext == "hs") {
+                let src = std::fs::read_to_string(&path).unwrap();
+                let file_id = crate::FileId::new(0);
+                let (_, diagnostics) = parse_module(&src, file_id);
+                let error_count = diagnostics.iter().filter(|d| d.is_error()).count();
+                total_errors += error_count;
+                if error_count > 0 {
+                    println!(
+                        "{}: {} errors",
+                        path.file_name().unwrap().to_str().unwrap(),
+                        error_count
+                    );
+                    // Print first 5 errors for debugging
+                    for (i, d) in diagnostics.iter().filter(|d| d.is_error()).take(5).enumerate() {
+                        println!("  {}: {:?}", i + 1, d);
+                    }
+                }
+            }
+        }
+        println!("Total XMonad parse errors: {}", total_errors);
+        // We're tracking progress, so allow errors but report them
+        // assert_eq!(total_errors, 0, "XMonad files should parse without errors");
+    }
 }

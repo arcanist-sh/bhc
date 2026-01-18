@@ -46,8 +46,11 @@ impl<'src> Parser<'src> {
         // Declarations
         let mut decls = Vec::new();
         while !self.at_eof() {
-            // Skip any virtual tokens between declarations
+            // Skip any virtual tokens and explicit semicolons between declarations
             self.skip_virtual_tokens();
+            while self.eat(&TokenKind::Semi) {
+                self.skip_virtual_tokens();
+            }
             if self.at_eof() {
                 break;
             }
@@ -67,6 +70,9 @@ impl<'src> Parser<'src> {
 
         let span = start.to(self.tokens.last().map(|t| t.span).unwrap_or(start));
 
+        // Merge consecutive clauses of the same function
+        let decls = self.merge_function_clauses(decls);
+
         Ok(Module {
             pragmas,
             name,
@@ -75,6 +81,41 @@ impl<'src> Parser<'src> {
             decls,
             span,
         })
+    }
+
+    /// Merge consecutive function bindings with the same name into multi-clause functions.
+    ///
+    /// In Haskell, functions can be defined with multiple clauses:
+    /// ```haskell
+    /// fac 0 = 1
+    /// fac n = n * fac (n - 1)
+    /// ```
+    ///
+    /// These are parsed as separate `FunBind` declarations initially,
+    /// and this function merges them into a single `FunBind` with multiple clauses.
+    fn merge_function_clauses(&self, decls: Vec<Decl>) -> Vec<Decl> {
+        let mut result: Vec<Decl> = Vec::new();
+
+        for decl in decls {
+            match decl {
+                Decl::FunBind(mut fun_bind) => {
+                    // Check if the last declaration is a FunBind with the same name
+                    if let Some(Decl::FunBind(ref mut last)) = result.last_mut() {
+                        if last.name.name == fun_bind.name.name {
+                            // Merge clauses
+                            last.clauses.append(&mut fun_bind.clauses);
+                            // Update span to include all clauses
+                            last.span = last.span.to(fun_bind.span);
+                            continue;
+                        }
+                    }
+                    result.push(Decl::FunBind(fun_bind));
+                }
+                other => result.push(other),
+            }
+        }
+
+        result
     }
 
     /// Parse pragmas at the start of a module.
@@ -572,7 +613,8 @@ impl<'src> Parser<'src> {
             decls.push(self.parse_value_decl()?);
         }
 
-        Ok(decls)
+        // Merge multi-clause functions in local declarations too
+        Ok(self.merge_function_clauses(decls))
     }
 
     /// Parse a value declaration (type signature or binding).
@@ -596,14 +638,22 @@ impl<'src> Parser<'src> {
                 pats.push(self.parse_pattern()?);
             }
 
-            self.expect(&TokenKind::Eq)?;
-            let rhs_expr = self.parse_expr()?;
-            let span = start.to(rhs_expr.span());
+            // Parse RHS: either `= expr` or guarded: `| guard = expr`
+            let rhs = self.parse_binding_rhs()?;
+
+            // Parse optional where clause
+            let wheres = if self.eat(&TokenKind::Where) {
+                self.parse_local_decls()?
+            } else {
+                vec![]
+            };
+
+            let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
 
             let clause = Clause {
                 pats,
-                rhs: Rhs::Simple(rhs_expr, span),
-                wheres: vec![],
+                rhs,
+                wheres,
                 span,
             };
 
@@ -613,6 +663,38 @@ impl<'src> Parser<'src> {
                 span,
             }))
         }
+    }
+
+    /// Parse the right-hand side of a binding: either `= expr` or guarded `| guard = expr`.
+    fn parse_binding_rhs(&mut self) -> ParseResult<Rhs> {
+        let start = self.current_span();
+
+        if self.check(&TokenKind::Pipe) {
+            // Guarded RHS: `| guard = expr`
+            let guards = self.parse_guarded_binding_rhss()?;
+            let end_span = guards.last().map(|g| g.span).unwrap_or(start);
+            Ok(Rhs::Guarded(guards, start.to(end_span)))
+        } else {
+            // Simple RHS: `= expr`
+            self.expect(&TokenKind::Eq)?;
+            let expr = self.parse_expr()?;
+            let span = start.to(expr.span());
+            Ok(Rhs::Simple(expr, span))
+        }
+    }
+
+    /// Parse guarded right-hand sides for bindings: `| guard = expr | guard = expr ...`
+    fn parse_guarded_binding_rhss(&mut self) -> ParseResult<Vec<GuardedRhs>> {
+        let mut guards = Vec::new();
+        while self.eat(&TokenKind::Pipe) {
+            let guard_start = self.current_span();
+            let guard = self.parse_expr()?;
+            self.expect(&TokenKind::Eq)?;
+            let body = self.parse_expr()?;
+            let span = guard_start.to(body.span());
+            guards.push(GuardedRhs { guard, body, span });
+        }
+        Ok(guards)
     }
 
     /// Parse an identifier.

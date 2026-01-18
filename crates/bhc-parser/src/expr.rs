@@ -28,6 +28,22 @@ impl<'src> Parser<'src> {
                     }
                     (Ident::new(*sym), prec, assoc)
                 }
+                // Handle * (Star token is lexed separately for kind syntax)
+                TokenKind::Star => {
+                    let (prec, assoc) = self.get_operator_info("*");
+                    if prec < min_prec {
+                        break;
+                    }
+                    (Ident::from_str("*"), prec, assoc)
+                }
+                // Handle - (Minus token is lexed separately for prefix negation)
+                TokenKind::Minus => {
+                    let (prec, assoc) = self.get_operator_info("-");
+                    if prec < min_prec {
+                        break;
+                    }
+                    (Ident::from_str("-"), prec, assoc)
+                }
                 TokenKind::Backtick => {
                     // Infix function application: `x `mod` y`
                     let _start = tok.span;
@@ -280,7 +296,7 @@ impl<'src> Parser<'src> {
         }
 
         // Check for operator section starting with operator: `(+)` or `(+ x)`
-        if let Some(TokenKind::Operator(_)) = self.current_kind() {
+        if matches!(self.current_kind(), Some(TokenKind::Operator(_)) | Some(TokenKind::Star) | Some(TokenKind::Minus)) {
             return self.parse_operator_section(start);
         }
 
@@ -288,9 +304,15 @@ impl<'src> Parser<'src> {
         // Parse application expression first (no infix operators)
         let first = self.parse_app_expr()?;
 
-        // Check for left operator section: `(x +)`
-        if let Some(TokenKind::Operator(sym)) = self.current_kind().cloned() {
-            let op = Ident::new(sym);
+        // Check for left operator section: `(x +)` or infix expression in parens
+        let op_ident = match self.current_kind().cloned() {
+            Some(TokenKind::Operator(sym)) => Some(Ident::new(sym)),
+            Some(TokenKind::Star) => Some(Ident::from_str("*")),
+            Some(TokenKind::Minus) => Some(Ident::from_str("-")),
+            _ => None,
+        };
+
+        if let Some(op) = op_ident {
             self.advance();
 
             if self.eat(&TokenKind::RParen) {
@@ -750,6 +772,8 @@ impl<'src> Parser<'src> {
 
         let op = match &tok.node.kind {
             TokenKind::Operator(sym) => Ident::new(*sym),
+            TokenKind::Star => Ident::from_str("*"),
+            TokenKind::Minus => Ident::from_str("-"),
             _ => {
                 return Err(ParseError::Unexpected {
                     found: tok.node.kind.description().to_string(),

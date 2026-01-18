@@ -230,12 +230,41 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
 }
 
 /// Run a Haskell program
-fn run_file(file: &PathBuf, args: &[String], cli: &Cli) -> Result<()> {
+fn run_file(file: &PathBuf, _args: &[String], cli: &Cli) -> Result<()> {
+    use bhc_driver::CompilerBuilder;
+    use camino::Utf8PathBuf;
+
     tracing::info!("Running {}", file.display());
-    // TODO: Compile and execute
-    println!("Running {} with args {:?}", file.display(), args);
-    println!("(Not yet implemented)");
-    Ok(())
+
+    // Convert profile
+    let profile = match cli.profile {
+        Profile::Default => bhc_session::Profile::Default,
+        Profile::Server => bhc_session::Profile::Server,
+        Profile::Numeric => bhc_session::Profile::Numeric,
+        Profile::Edge => bhc_session::Profile::Edge,
+    };
+
+    // Build compiler
+    let compiler = CompilerBuilder::new()
+        .profile(profile)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create compiler: {}", e))?;
+
+    // Convert path
+    let path = Utf8PathBuf::from_path_buf(file.clone())
+        .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in path"))?;
+
+    // Run the file
+    match compiler.run_file(&path) {
+        Ok(value) => {
+            println!("{:?}", value);
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Execution error: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Start the interactive REPL

@@ -156,6 +156,9 @@ impl TyCtxt {
         // Register built-in data constructors
         self.builtins.register_data_cons(&mut self.env);
 
+        // Register primitive operators (+, -, *, etc.)
+        self.builtins.register_primitive_ops(&mut self.env);
+
         // Register dynamic tensor operations (toDynamic, fromDynamic, etc.)
         self.builtins.register_dyn_tensor_ops(&mut self.env);
     }

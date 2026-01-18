@@ -28,6 +28,7 @@ pub use value::{Closure, DataValue, PrimOp, Thunk, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_session::Profile;
 use thiserror::Error;
@@ -103,6 +104,10 @@ pub struct Evaluator {
     max_depth: usize,
     /// Current recursion depth.
     depth: RefCell<usize>,
+    /// Module-level environment for top-level bindings.
+    /// This is always consulted for variable lookups, allowing recursive
+    /// functions to find themselves without capturing a circular environment.
+    module_env: RefCell<Option<Env>>,
 }
 
 impl Evaluator {
@@ -117,6 +122,7 @@ impl Evaluator {
             primitives,
             max_depth: 10000,
             depth: RefCell::new(0),
+            module_env: RefCell::new(None),
         }
     }
 
@@ -158,6 +164,20 @@ impl Evaluator {
     /// Sets the maximum recursion depth.
     pub fn set_max_depth(&mut self, depth: usize) {
         self.max_depth = depth;
+    }
+
+    /// Sets the module-level environment.
+    ///
+    /// This environment is always consulted when looking up variables,
+    /// allowing recursive functions to find themselves without needing
+    /// to capture a circular environment in their closures.
+    pub fn set_module_env(&self, env: Env) {
+        *self.module_env.borrow_mut() = Some(env);
+    }
+
+    /// Clears the module-level environment.
+    pub fn clear_module_env(&self) {
+        *self.module_env.borrow_mut() = None;
     }
 
     /// Registers primitive operations in the environment.
@@ -207,6 +227,62 @@ impl Evaluator {
                 ty_con: bhc_types::TyCon::new(Symbol::intern("[]"), bhc_types::Kind::star_to_star()),
                 tag: 1,
                 arity: 2,
+            },
+            args: vec![],
+        }));
+
+        // Register tuple constructors
+        // Unit tuple ()
+        prims.insert(Symbol::intern("()"), Value::Data(DataValue {
+            con: crate::DataCon {
+                name: Symbol::intern("()"),
+                ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star),
+                tag: 0,
+                arity: 0,
+            },
+            args: vec![],
+        }));
+
+        // Pair (,)
+        prims.insert(Symbol::intern("(,)"), Value::Data(DataValue {
+            con: crate::DataCon {
+                name: Symbol::intern("(,)"),
+                ty_con: bhc_types::TyCon::new(Symbol::intern("(,)"), bhc_types::Kind::Star),
+                tag: 0,
+                arity: 2,
+            },
+            args: vec![],
+        }));
+
+        // Triple (,,)
+        prims.insert(Symbol::intern("(,,)"), Value::Data(DataValue {
+            con: crate::DataCon {
+                name: Symbol::intern("(,,)"),
+                ty_con: bhc_types::TyCon::new(Symbol::intern("(,,)"), bhc_types::Kind::Star),
+                tag: 0,
+                arity: 3,
+            },
+            args: vec![],
+        }));
+
+        // Quadruple (,,,)
+        prims.insert(Symbol::intern("(,,,)"), Value::Data(DataValue {
+            con: crate::DataCon {
+                name: Symbol::intern("(,,,)"),
+                ty_con: bhc_types::TyCon::new(Symbol::intern("(,,,)"), bhc_types::Kind::Star),
+                tag: 0,
+                arity: 4,
+            },
+            args: vec![],
+        }));
+
+        // Quintuple (,,,,)
+        prims.insert(Symbol::intern("(,,,,)"), Value::Data(DataValue {
+            con: crate::DataCon {
+                name: Symbol::intern("(,,,,)"),
+                ty_con: bhc_types::TyCon::new(Symbol::intern("(,,,,)"), bhc_types::Kind::Star),
+                tag: 0,
+                arity: 5,
             },
             args: vec![],
         }));
@@ -296,6 +372,15 @@ impl Evaluator {
             return self.force(value.clone());
         }
 
+        // Then check the module-level environment
+        // This is crucial for recursive functions: when a closure is applied,
+        // it can find other module-level bindings through this env
+        if let Some(ref module_env) = *self.module_env.borrow() {
+            if let Some(value) = module_env.lookup(var.id) {
+                return self.force(value.clone());
+            }
+        }
+
         // Then check primitives
         if let Some(value) = self.primitives.get(&var.name) {
             return Ok(value.clone());
@@ -304,6 +389,28 @@ impl Evaluator {
         // Check if it's a primitive by its raw name
         if let Some(op) = PrimOp::from_name(var.name.as_str()) {
             return Ok(Value::PrimOp(op));
+        }
+
+        // Check if it looks like a data constructor (starts with uppercase)
+        // User-defined constructors won't be in primitives or the env
+        let name_str = var.name.as_str();
+        if !name_str.is_empty() {
+            let first_char = name_str.chars().next().unwrap();
+            if first_char.is_uppercase() {
+                // This is a constructor - create an unsaturated DataValue
+                // We don't know the exact arity here, so use a large number
+                // to allow arguments to be added. Pattern matching uses tags.
+                let tycon = bhc_types::TyCon::new(var.name, bhc_types::Kind::Star);
+                return Ok(Value::Data(DataValue {
+                    con: crate::DataCon {
+                        name: var.name,
+                        ty_con: tycon,
+                        tag: var.id.index() as u32,
+                        arity: 100, // Large arity to accept arguments
+                    },
+                    args: vec![],
+                }));
+            }
         }
 
         Err(EvalError::UnboundVariable(var.name.to_string()))
@@ -919,9 +1026,9 @@ impl Evaluator {
             }
 
             AltCon::DataCon(con) => {
-                // Match data constructor
+                // Match data constructor by name (tags may differ due to ID allocation)
                 if let Value::Data(data) = value {
-                    if data.con.name == con.name && data.con.tag == con.tag {
+                    if data.con.name == con.name {
                         // Bind constructor arguments to pattern variables
                         let bindings: Vec<_> = binders
                             .iter()

@@ -160,6 +160,9 @@ impl<'src> Parser<'src> {
                     // M9: Type-level naturals and promoted lists
                     | TokenKind::IntLit(_)
                     | TokenKind::TickLBracket
+                    // Strictness/laziness annotations for constructor fields
+                    | TokenKind::Bang
+                    | TokenKind::Tilde
             ),
             None => false,
         }
@@ -212,6 +215,24 @@ impl<'src> Parser<'src> {
 
             // M9: Promoted list syntax '[a, b, c]
             TokenKind::TickLBracket => self.parse_promoted_list(),
+
+            // Strict type annotation: !Type
+            TokenKind::Bang => {
+                let start = tok.span;
+                self.advance();
+                let inner = self.parse_atype()?;
+                let span = start.to(inner.span());
+                Ok(Type::Bang(Box::new(inner), span))
+            }
+
+            // Lazy type annotation: ~Type
+            TokenKind::Tilde => {
+                let start = tok.span;
+                self.advance();
+                let inner = self.parse_atype()?;
+                let span = start.to(inner.span());
+                Ok(Type::Lazy(Box::new(inner), span))
+            }
 
             _ => Err(ParseError::Unexpected {
                 found: tok.node.kind.description().to_string(),

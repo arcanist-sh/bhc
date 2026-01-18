@@ -23,6 +23,10 @@ members = [
     "crates/bhc-types",
     "crates/bhc-typeck",
 
+    # Lowering
+    "crates/bhc-lower",
+    "crates/bhc-hir-to-core",
+
     # Intermediate representations
     "crates/bhc-hir",
     "crates/bhc-core",
@@ -85,6 +89,8 @@ bhc-ast = { path = "crates/bhc-ast" }
 bhc-parser = { path = "crates/bhc-parser" }
 bhc-types = { path = "crates/bhc-types" }
 bhc-typeck = { path = "crates/bhc-typeck" }
+bhc-lower = { path = "crates/bhc-lower" }
+bhc-hir-to-core = { path = "crates/bhc-hir-to-core" }
 bhc-hir = { path = "crates/bhc-hir" }
 bhc-core = { path = "crates/bhc-core" }
 bhc-tensor-ir = { path = "crates/bhc-tensor-ir" }

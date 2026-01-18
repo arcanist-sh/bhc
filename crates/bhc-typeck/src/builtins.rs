@@ -357,6 +357,318 @@ impl Builtins {
         )
     }
 
+    /// Register primitive operators in the environment.
+    ///
+    /// This registers arithmetic, comparison, and other basic operators.
+    /// The DefIds MUST match the order in bhc_lower::context::define_builtins.
+    ///
+    /// Operators registered:
+    /// - Arithmetic: +, -, *, /, div, mod, ^, ^^, **
+    /// - Comparison: ==, /=, <, <=, >, >=
+    /// - Boolean: &&, ||
+    /// - List: :, ++, !!
+    /// - Function: ., $
+    /// - Monadic: >>=, >>
+    /// - Applicative: <*>, <$>, *>, <*
+    /// - Alternative: <|>
+    /// - And many more...
+    pub fn register_primitive_ops(&self, env: &mut TypeEnv) {
+        // Start after types (9) and constructors (9: 6 basic + 3 list/unit) = 18
+        // Order MUST match bhc_lower::context::define_builtins
+        let mut next_id = BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT + BUILTIN_LIST_UNIT_COUNT;
+
+        // Type variables for polymorphic types
+        let a = TyVar::new_star(BUILTIN_TYVAR_A);
+        let b = TyVar::new_star(BUILTIN_TYVAR_B);
+
+        // Helper to create common type schemes
+        let num_binop = || {
+            // a -> a -> a (for Num types, we simplify to Int for now)
+            Scheme::mono(Ty::fun(
+                self.int_ty.clone(),
+                Ty::fun(self.int_ty.clone(), self.int_ty.clone()),
+            ))
+        };
+
+        let cmp_binop = || {
+            // a -> a -> Bool (for Ord types, we simplify to Int for now)
+            Scheme::mono(Ty::fun(
+                self.int_ty.clone(),
+                Ty::fun(self.int_ty.clone(), self.bool_ty.clone()),
+            ))
+        };
+
+        let eq_binop = || {
+            // a -> a -> Bool (for Eq types, polymorphic)
+            Scheme::poly(
+                vec![a.clone()],
+                Ty::fun(
+                    Ty::Var(a.clone()),
+                    Ty::fun(Ty::Var(a.clone()), self.bool_ty.clone()),
+                ),
+            )
+        };
+
+        let bool_binop = || {
+            Scheme::mono(Ty::fun(
+                self.bool_ty.clone(),
+                Ty::fun(self.bool_ty.clone(), self.bool_ty.clone()),
+            ))
+        };
+
+        // Register each operator with its DefId matching the lowering order
+        // Order MUST match bhc_lower::context::define_builtins
+        let ops: Vec<(&str, Scheme)> = vec![
+            // Arithmetic operators (DefIds 15-23)
+            ("+", num_binop()),
+            ("-", num_binop()),
+            ("*", num_binop()),
+            ("/", num_binop()),
+            ("div", num_binop()),
+            ("mod", num_binop()),
+            ("^", num_binop()),
+            ("^^", num_binop()),
+            ("**", num_binop()),
+            // Comparison operators (DefIds 24-29)
+            ("==", eq_binop()),
+            ("/=", eq_binop()),
+            ("<", cmp_binop()),
+            ("<=", cmp_binop()),
+            (">", cmp_binop()),
+            (">=", cmp_binop()),
+            // Boolean operators (DefIds 30-31)
+            ("&&", bool_binop()),
+            ("||", bool_binop()),
+            // List operators (DefIds 32-34)
+            (
+                ":",
+                {
+                    // a -> [a] -> [a]
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(list_a.clone(), list_a)),
+                    )
+                },
+            ),
+            (
+                "++",
+                {
+                    // [a] -> [a] -> [a]
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(list_a.clone(), Ty::fun(list_a.clone(), list_a)),
+                    )
+                },
+            ),
+            (
+                "!!",
+                {
+                    // [a] -> Int -> a
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(list_a, Ty::fun(self.int_ty.clone(), Ty::Var(a.clone()))),
+                    )
+                },
+            ),
+            // Function composition (DefIds 35-36)
+            (
+                ".",
+                {
+                    // (b -> c) -> (a -> b) -> a -> c
+                    let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
+                    Scheme::poly(
+                        vec![a.clone(), b.clone(), c.clone()],
+                        Ty::fun(
+                            Ty::fun(Ty::Var(b.clone()), Ty::Var(c.clone())),
+                            Ty::fun(
+                                Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                                Ty::fun(Ty::Var(a.clone()), Ty::Var(c.clone())),
+                            ),
+                        ),
+                    )
+                },
+            ),
+            (
+                "$",
+                {
+                    // (a -> b) -> a -> b
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(
+                            Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                            Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                        ),
+                    )
+                },
+            ),
+            // For remaining operators, use placeholder types
+            // These can be refined later when we have type classes
+            (">>=", Scheme::mono(Ty::Error)),  // Monad
+            (">>", Scheme::mono(Ty::Error)),   // Monad
+            ("<*>", Scheme::mono(Ty::Error)),  // Applicative
+            ("<$>", Scheme::mono(Ty::Error)),  // Functor
+            ("*>", Scheme::mono(Ty::Error)),   // Applicative
+            ("<*", Scheme::mono(Ty::Error)),   // Applicative
+            ("<|>", Scheme::mono(Ty::Error)),  // Alternative
+            // Monadic operations
+            ("return", Scheme::mono(Ty::Error)),
+            ("pure", Scheme::mono(Ty::Error)),
+            // List operations
+            ("map", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                        Ty::fun(list_a, list_b),
+                    ),
+                )
+            }),
+            ("filter", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        Ty::fun(Ty::Var(a.clone()), self.bool_ty.clone()),
+                        Ty::fun(list_a.clone(), list_a),
+                    ),
+                )
+            }),
+            ("foldr", Scheme::mono(Ty::Error)),
+            ("foldl", Scheme::mono(Ty::Error)),
+            ("foldl'", Scheme::mono(Ty::Error)),
+            ("concatMap", Scheme::mono(Ty::Error)),
+            ("head", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
+            }),
+            ("tail", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(vec![a.clone()], Ty::fun(list_a.clone(), list_a))
+            }),
+            ("length", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(vec![a.clone()], Ty::fun(list_a, self.int_ty.clone()))
+            }),
+            ("null", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(vec![a.clone()], Ty::fun(list_a, self.bool_ty.clone()))
+            }),
+            ("reverse", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(vec![a.clone()], Ty::fun(list_a.clone(), list_a))
+            }),
+            ("take", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(self.int_ty.clone(), Ty::fun(list_a.clone(), list_a)),
+                )
+            }),
+            ("drop", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(self.int_ty.clone(), Ty::fun(list_a.clone(), list_a)),
+                )
+            }),
+            ("sum", {
+                let list_a = Ty::List(Box::new(self.int_ty.clone()));
+                Scheme::mono(Ty::fun(list_a, self.int_ty.clone()))
+            }),
+            ("product", {
+                let list_a = Ty::List(Box::new(self.int_ty.clone()));
+                Scheme::mono(Ty::fun(list_a, self.int_ty.clone()))
+            }),
+            ("maximum", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
+            }),
+            ("minimum", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
+            }),
+            ("zip", Scheme::mono(Ty::Error)),
+            ("zipWith", Scheme::mono(Ty::Error)),
+            // Prelude functions
+            ("id", Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))),
+            ("const", Scheme::poly(
+                vec![a.clone(), b.clone()],
+                Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(a.clone()))),
+            )),
+            ("flip", Scheme::mono(Ty::Error)),
+            ("error", Scheme::poly(vec![a.clone()], Ty::fun(self.string_ty.clone(), Ty::Var(a.clone())))),
+            ("undefined", Scheme::poly(vec![a.clone()], Ty::Var(a.clone()))),
+            ("seq", Scheme::poly(
+                vec![a.clone(), b.clone()],
+                Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))),
+            )),
+            // Numeric operations
+            ("fromInteger", Scheme::mono(Ty::fun(self.int_ty.clone(), self.int_ty.clone()))),
+            ("fromRational", Scheme::mono(Ty::Error)),
+            ("negate", Scheme::mono(Ty::fun(self.int_ty.clone(), self.int_ty.clone()))),
+            ("abs", Scheme::mono(Ty::fun(self.int_ty.clone(), self.int_ty.clone()))),
+            ("signum", Scheme::mono(Ty::fun(self.int_ty.clone(), self.int_ty.clone()))),
+            ("sqrt", Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone()))),
+            ("exp", Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone()))),
+            ("log", Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone()))),
+            ("sin", Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone()))),
+            ("cos", Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone()))),
+            ("tan", Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone()))),
+            // Comparison
+            ("compare", Scheme::mono(Ty::Error)),
+            ("min", num_binop()),
+            ("max", num_binop()),
+            // Show
+            ("show", Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), self.string_ty.clone()))),
+            // Boolean
+            ("not", Scheme::mono(Ty::fun(self.bool_ty.clone(), self.bool_ty.clone()))),
+            ("otherwise", Scheme::mono(self.bool_ty.clone())),
+            // Maybe
+            ("maybe", Scheme::mono(Ty::Error)),
+            ("fromMaybe", Scheme::mono(Ty::Error)),
+            // Either
+            ("either", Scheme::mono(Ty::Error)),
+            // IO
+            ("print", Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::App(
+                Box::new(Ty::Con(self.io_con.clone())),
+                Box::new(Ty::unit()),
+            )))),
+            ("putStrLn", Scheme::mono(Ty::fun(self.string_ty.clone(), Ty::App(
+                Box::new(Ty::Con(self.io_con.clone())),
+                Box::new(Ty::unit()),
+            )))),
+            ("putStr", Scheme::mono(Ty::fun(self.string_ty.clone(), Ty::App(
+                Box::new(Ty::Con(self.io_con.clone())),
+                Box::new(Ty::unit()),
+            )))),
+            ("getLine", Scheme::mono(Ty::App(
+                Box::new(Ty::Con(self.io_con.clone())),
+                Box::new(self.string_ty.clone()),
+            ))),
+            ("readFile", Scheme::mono(Ty::fun(self.string_ty.clone(), Ty::App(
+                Box::new(Ty::Con(self.io_con.clone())),
+                Box::new(self.string_ty.clone()),
+            )))),
+            ("writeFile", Scheme::mono(Ty::fun(self.string_ty.clone(), Ty::fun(self.string_ty.clone(), Ty::App(
+                Box::new(Ty::Con(self.io_con.clone())),
+                Box::new(Ty::unit()),
+            ))))),
+            // Guard helper
+            ("guard", Scheme::mono(Ty::Error)),
+        ];
+
+        for (name, scheme) in ops {
+            let def_id = DefId::new(next_id);
+            env.register_value(def_id, Symbol::intern(name), scheme);
+            next_id += 1;
+        }
+    }
+
     /// Register dynamic tensor operations in the environment.
     ///
     /// This registers:
@@ -480,27 +792,43 @@ impl Builtins {
     }
 }
 
-// Reserved DefId values for built-in constructors
-// These are in a reserved range that won't conflict with user definitions
-const BUILTIN_BASE: usize = 0xFFFF_0000;
-const BUILTIN_TRUE_ID: usize = BUILTIN_BASE;
-const BUILTIN_FALSE_ID: usize = BUILTIN_BASE + 1;
-const BUILTIN_NOTHING_ID: usize = BUILTIN_BASE + 2;
-const BUILTIN_JUST_ID: usize = BUILTIN_BASE + 3;
-const BUILTIN_NIL_ID: usize = BUILTIN_BASE + 4;
-const BUILTIN_CONS_ID: usize = BUILTIN_BASE + 5;
-const BUILTIN_LEFT_ID: usize = BUILTIN_BASE + 6;
-const BUILTIN_RIGHT_ID: usize = BUILTIN_BASE + 7;
-const BUILTIN_UNIT_ID: usize = BUILTIN_BASE + 8;
+// DefId values for built-in constructors.
+// These MUST match the order in bhc_lower::context::define_builtins!
+//
+// Lowering phase allocates:
+// - Types: Int, Float, Double, Char, Bool, String, IO, Maybe, Either (DefIds 0-8)
+// - Constructors: True, False, Nothing, Just, Left, Right (DefIds 9-14)
+// - Functions: +, -, *, /, ... (DefIds 15+)
+//
+// We skip the type DefIds (0-8) and start constructors at 9.
+const BUILTIN_TYPE_COUNT: usize = 9; // Int, Float, Double, Char, Bool, String, IO, Maybe, Either
 
-// M9 Phase 5: Dynamic tensor operations
-const BUILTIN_TO_DYNAMIC_ID: usize = BUILTIN_BASE + 9;
-const BUILTIN_FROM_DYNAMIC_ID: usize = BUILTIN_BASE + 10;
-const BUILTIN_DYN_SHAPE_ID: usize = BUILTIN_BASE + 11;
-const BUILTIN_DYN_RANK_ID: usize = BUILTIN_BASE + 12;
-const BUILTIN_WITH_DYN_SHAPE_ID: usize = BUILTIN_BASE + 13;
-const BUILTIN_MK_SHAPE_WITNESS_ID: usize = BUILTIN_BASE + 14;
-const BUILTIN_MK_DYN_TENSOR_ID: usize = BUILTIN_BASE + 15;
+const BUILTIN_TRUE_ID: usize = BUILTIN_TYPE_COUNT;     // 9
+const BUILTIN_FALSE_ID: usize = BUILTIN_TYPE_COUNT + 1; // 10
+const BUILTIN_NOTHING_ID: usize = BUILTIN_TYPE_COUNT + 2; // 11
+const BUILTIN_JUST_ID: usize = BUILTIN_TYPE_COUNT + 3; // 12
+const BUILTIN_LEFT_ID: usize = BUILTIN_TYPE_COUNT + 4; // 13
+const BUILTIN_RIGHT_ID: usize = BUILTIN_TYPE_COUNT + 5; // 14
+
+const BUILTIN_CON_COUNT: usize = 6; // True, False, Nothing, Just, Left, Right
+
+// List and unit constructors - registered by both lowering and type checker
+const BUILTIN_NIL_ID: usize = BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT; // 15
+const BUILTIN_CONS_ID: usize = BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT + 1; // 16
+const BUILTIN_UNIT_ID: usize = BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT + 2; // 17
+
+// Count of list/unit constructors for calculating operator DefId start
+const BUILTIN_LIST_UNIT_COUNT: usize = 3; // [], :, ()
+
+// M9 Phase 5: Dynamic tensor operations - use reserved range to avoid conflicts
+const BUILTIN_RESERVED_BASE: usize = 0xFFFF_0000;
+const BUILTIN_TO_DYNAMIC_ID: usize = BUILTIN_RESERVED_BASE;
+const BUILTIN_FROM_DYNAMIC_ID: usize = BUILTIN_RESERVED_BASE + 1;
+const BUILTIN_DYN_SHAPE_ID: usize = BUILTIN_RESERVED_BASE + 2;
+const BUILTIN_DYN_RANK_ID: usize = BUILTIN_RESERVED_BASE + 3;
+const BUILTIN_WITH_DYN_SHAPE_ID: usize = BUILTIN_RESERVED_BASE + 4;
+const BUILTIN_MK_SHAPE_WITNESS_ID: usize = BUILTIN_RESERVED_BASE + 5;
+const BUILTIN_MK_DYN_TENSOR_ID: usize = BUILTIN_RESERVED_BASE + 6;
 
 // Reserved TyVar IDs for built-in schemes
 const BUILTIN_TYVAR_A: u32 = 0xFFFF_0000;

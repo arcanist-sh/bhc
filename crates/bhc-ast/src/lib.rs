@@ -819,6 +819,12 @@ pub enum Type {
     PromotedList(Vec<Type>, Span),
     /// Type-level natural literal: `1024` in type position
     NatLit(u64, Span),
+
+    /// Strict type annotation: `!Int` in constructor fields
+    Bang(Box<Type>, Span),
+
+    /// Lazy type annotation: `~Int` in constructor fields
+    Lazy(Box<Type>, Span),
 }
 
 impl Type {
@@ -836,7 +842,9 @@ impl Type {
             | Self::Forall(_, _, s)
             | Self::Constrained(_, _, s)
             | Self::PromotedList(_, s)
-            | Self::NatLit(_, s) => *s,
+            | Self::NatLit(_, s)
+            | Self::Bang(_, s)
+            | Self::Lazy(_, s) => *s,
         }
     }
 }

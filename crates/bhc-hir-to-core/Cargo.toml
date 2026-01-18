@@ -1,0 +1,23 @@
+[package]
+name = "bhc-hir-to-core"
+description = "HIR to Core IR lowering for BHC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Internal crates
+bhc-span = { workspace = true }
+bhc-hir = { workspace = true }
+bhc-core = { workspace = true }
+bhc-types = { workspace = true }
+bhc-intern = { workspace = true }
+bhc-index = { workspace = true }
+
+# External dependencies
+thiserror = { workspace = true }
+rustc-hash = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

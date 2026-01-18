@@ -77,12 +77,15 @@ pub fn compute_binding_groups(items: &[Item]) -> Vec<BindingGroup<'_>> {
         }
     }
 
-    // Compute SCCs (Kosaraju's algorithm returns in reverse topological order)
+    // Compute SCCs (Kosaraju's algorithm returns in reverse topological order,
+    // meaning sinks first, sources last. Sinks are nodes with no outgoing edges,
+    // i.e., definitions that don't depend on others. This is exactly the order
+    // we want: process dependencies before dependents.)
     let sccs = kosaraju_scc(&graph);
 
-    // Convert SCCs to binding groups
+    // Convert SCCs to binding groups (no .rev() needed - sinks-first is correct)
     let mut groups = Vec::new();
-    for scc in sccs.into_iter().rev() {
+    for scc in sccs.into_iter() {
         if scc.len() == 1 {
             let idx = graph[scc[0]];
             let item = &items[idx];

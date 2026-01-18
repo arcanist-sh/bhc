@@ -28,10 +28,14 @@ pub fn infer_pattern(ctx: &mut TyCtxt, pat: &Pat) -> Ty {
             ctx.fresh_ty()
         }
 
-        Pat::Var(name, _span) => {
+        Pat::Var(name, def_id, _span) => {
             // Variable pattern: create fresh type and bind
             let ty = ctx.fresh_ty();
-            ctx.env.insert_local(*name, Scheme::mono(ty.clone()));
+            let scheme = Scheme::mono(ty.clone());
+            // Bind by name (for nested pattern lookups)
+            ctx.env.insert_local(*name, scheme.clone());
+            // Also bind by DefId (for expression variable lookups)
+            ctx.env.insert_global(*def_id, scheme);
             ty
         }
 
@@ -60,10 +64,14 @@ pub fn infer_pattern(ctx: &mut TyCtxt, pat: &Pat) -> Ty {
             }
         }
 
-        Pat::As(name, inner, _span) => {
+        Pat::As(name, def_id, inner, _span) => {
             // As-pattern: bind name and check inner pattern
             let ty = infer_pattern(ctx, inner);
-            ctx.env.insert_local(*name, Scheme::mono(ty.clone()));
+            let scheme = Scheme::mono(ty.clone());
+            // Bind by name (for nested pattern lookups)
+            ctx.env.insert_local(*name, scheme.clone());
+            // Also bind by DefId (for expression variable lookups)
+            ctx.env.insert_global(*def_id, scheme);
             ty
         }
 
@@ -166,15 +174,23 @@ mod tests {
 
     #[test]
     fn test_var_pattern() {
+        use bhc_hir::DefId;
+        use bhc_index::Idx;
+
         let mut ctx = test_context();
         let x = Symbol::intern("x");
-        let pat = Pat::Var(x, Span::DUMMY);
+        let def_id = DefId::new(1000); // Dummy DefId for test
+        let pat = Pat::Var(x, def_id, Span::DUMMY);
 
         let ty = infer_pattern(&mut ctx, &pat);
 
-        // x should be bound in environment
+        // x should be bound in environment (by name)
         let scheme = ctx.env.lookup_local(x).unwrap();
         assert_eq!(scheme.ty, ty);
+
+        // Also bound by DefId
+        let scheme_by_id = ctx.env.lookup_global(def_id).unwrap();
+        assert_eq!(scheme_by_id.ty, ty);
     }
 
     #[test]
@@ -189,18 +205,26 @@ mod tests {
 
     #[test]
     fn test_as_pattern() {
+        use bhc_hir::DefId;
+        use bhc_index::Idx;
+
         let mut ctx = test_context();
         let x = Symbol::intern("x");
+        let def_id = DefId::new(1001); // Dummy DefId for test
         let inner = Box::new(Pat::Lit(Lit::Int(42), Span::DUMMY));
-        let pat = Pat::As(x, inner, Span::DUMMY);
+        let pat = Pat::As(x, def_id, inner, Span::DUMMY);
 
         let ty = infer_pattern(&mut ctx, &pat);
 
         // Type should be Int
         assert_eq!(ty, ctx.builtins.int_ty);
 
-        // x should be bound to Int
+        // x should be bound to Int (by name)
         let scheme = ctx.env.lookup_local(x).unwrap();
         assert_eq!(scheme.ty, ctx.builtins.int_ty);
+
+        // Also bound by DefId
+        let scheme_by_id = ctx.env.lookup_global(def_id).unwrap();
+        assert_eq!(scheme_by_id.ty, ctx.builtins.int_ty);
     }
 }

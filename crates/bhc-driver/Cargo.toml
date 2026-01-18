@@ -15,6 +15,11 @@ bhc-query = { workspace = true }
 bhc-lexer = { workspace = true }
 bhc-ast = { workspace = true }
 bhc-parser = { workspace = true }
+bhc-hir = { workspace = true }
+bhc-lower = { workspace = true }
+bhc-hir-to-core = { workspace = true }
+bhc-typeck = { workspace = true }
+bhc-intern = { workspace = true }
 
 # Internal crates - IR pipeline
 bhc-core = { workspace = true }

@@ -1,0 +1,555 @@
+//! Lowering context and scope management.
+//!
+//! This module provides the context needed during AST to HIR lowering,
+//! including:
+//!
+//! - Unique ID generation for definitions
+//! - Scope management for name resolution
+//! - Symbol tables mapping names to definitions
+
+use bhc_hir::{DefId, DefRef, HirId};
+use bhc_index::Idx;
+use bhc_intern::Symbol;
+use bhc_span::Span;
+use indexmap::IndexMap;
+use rustc_hash::FxHashMap;
+
+/// A unique identifier for scopes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ScopeId(u32);
+
+impl Idx for ScopeId {
+    #[allow(clippy::cast_possible_truncation)]
+    fn new(idx: usize) -> Self {
+        Self(idx as u32)
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// The kind of definition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DefKind {
+    /// A value binding (function or variable).
+    Value,
+    /// A data type.
+    Type,
+    /// A data constructor.
+    Constructor,
+    /// A type class.
+    Class,
+    /// A type variable.
+    TyVar,
+    /// A pattern variable.
+    PatVar,
+}
+
+/// Information about a definition.
+#[derive(Clone, Debug)]
+pub struct DefInfo {
+    /// The unique ID.
+    pub id: DefId,
+    /// The name.
+    pub name: Symbol,
+    /// The kind of definition.
+    pub kind: DefKind,
+    /// Source location.
+    pub span: Span,
+}
+
+/// A scope containing name bindings.
+#[derive(Debug)]
+pub struct Scope {
+    /// The scope ID.
+    pub id: ScopeId,
+    /// Parent scope, if any.
+    pub parent: Option<ScopeId>,
+    /// Value bindings (variables, functions).
+    values: FxHashMap<Symbol, DefId>,
+    /// Type bindings (types, type constructors).
+    types: FxHashMap<Symbol, DefId>,
+    /// Constructor bindings.
+    constructors: FxHashMap<Symbol, DefId>,
+}
+
+impl Scope {
+    /// Creates a new scope with the given ID and optional parent.
+    fn new(id: ScopeId, parent: Option<ScopeId>) -> Self {
+        Self {
+            id,
+            parent,
+            values: FxHashMap::default(),
+            types: FxHashMap::default(),
+            constructors: FxHashMap::default(),
+        }
+    }
+
+    /// Binds a value name in this scope.
+    pub fn bind_value(&mut self, name: Symbol, def_id: DefId) -> Option<DefId> {
+        self.values.insert(name, def_id)
+    }
+
+    /// Binds a type name in this scope.
+    pub fn bind_type(&mut self, name: Symbol, def_id: DefId) -> Option<DefId> {
+        self.types.insert(name, def_id)
+    }
+
+    /// Binds a constructor name in this scope.
+    pub fn bind_constructor(&mut self, name: Symbol, def_id: DefId) -> Option<DefId> {
+        self.constructors.insert(name, def_id)
+    }
+
+    /// Looks up a value in this scope only (not parents).
+    pub fn lookup_value_local(&self, name: Symbol) -> Option<DefId> {
+        self.values.get(&name).copied()
+    }
+
+    /// Looks up a type in this scope only (not parents).
+    pub fn lookup_type_local(&self, name: Symbol) -> Option<DefId> {
+        self.types.get(&name).copied()
+    }
+
+    /// Looks up a constructor in this scope only (not parents).
+    pub fn lookup_constructor_local(&self, name: Symbol) -> Option<DefId> {
+        self.constructors.get(&name).copied()
+    }
+}
+
+/// Map from `DefId` to definition information.
+pub type DefMap = IndexMap<DefId, DefInfo>;
+
+/// The lowering context, holding all state needed during lowering.
+pub struct LowerContext {
+    /// Next DefId to allocate.
+    next_def_id: u32,
+    /// Next HirId to allocate.
+    next_hir_id: u32,
+    /// Next scope ID to allocate.
+    next_scope_id: u32,
+    /// All scopes.
+    scopes: Vec<Scope>,
+    /// Current scope.
+    current_scope: ScopeId,
+    /// Definition information.
+    pub defs: DefMap,
+    /// Errors collected during lowering.
+    pub errors: Vec<crate::LowerError>,
+}
+
+impl Default for LowerContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LowerContext {
+    /// Creates a new lowering context.
+    pub fn new() -> Self {
+        // Create root scope
+        let root_scope = Scope::new(ScopeId::new(0), None);
+        Self {
+            next_def_id: 0,
+            next_hir_id: 0,
+            next_scope_id: 1, // 0 is the root scope
+            scopes: vec![root_scope],
+            current_scope: ScopeId::new(0),
+            defs: IndexMap::default(),
+            errors: Vec::new(),
+        }
+    }
+
+    /// Creates a new lowering context with builtins pre-defined.
+    pub fn with_builtins() -> Self {
+        let mut ctx = Self::new();
+        ctx.define_builtins();
+        ctx
+    }
+
+    /// Define builtin types and functions.
+    fn define_builtins(&mut self) {
+        // Define builtin types
+        let builtin_types = [
+            "Int",
+            "Float",
+            "Double",
+            "Char",
+            "Bool",
+            "String",
+            "IO",
+            "Maybe",
+            "Either",
+        ];
+
+        for name in builtin_types {
+            let sym = Symbol::intern(name);
+            let def_id = self.fresh_def_id();
+            self.define(def_id, sym, DefKind::Type, Span::default());
+            self.bind_type(sym, def_id);
+        }
+
+        // Define builtin constructors
+        // Order MUST match bhc-typeck/src/builtins.rs BUILTIN_*_ID constants
+        let builtin_cons = [
+            ("True", "Bool"),   // DefId 9
+            ("False", "Bool"),  // DefId 10
+            ("Nothing", "Maybe"),  // DefId 11
+            ("Just", "Maybe"),     // DefId 12
+            ("Left", "Either"),    // DefId 13
+            ("Right", "Either"),   // DefId 14
+            ("[]", "List"),        // DefId 15 - list nil
+            (":", "List"),         // DefId 16 - list cons
+            ("()", "Unit"),        // DefId 17 - unit
+        ];
+
+        for (con_name, _type_name) in builtin_cons {
+            let sym = Symbol::intern(con_name);
+            let def_id = self.fresh_def_id();
+            self.define(def_id, sym, DefKind::Constructor, Span::default());
+            self.bind_constructor(sym, def_id);
+        }
+
+        // Define builtin functions (starting at DefId 18)
+        let builtin_funcs = [
+            // Arithmetic operators
+            "+",
+            "-",
+            "*",
+            "/",
+            "div",
+            "mod",
+            "^",
+            "^^",
+            "**",
+            // Comparison operators
+            "==",
+            "/=",
+            "<",
+            "<=",
+            ">",
+            ">=",
+            // Boolean operators
+            "&&",
+            "||",
+            // List operators
+            ":",
+            "++",
+            "!!",
+            // Function composition
+            ".",
+            "$",
+            // Monadic operators
+            ">>=",
+            ">>",
+            // Applicative operators
+            "<*>",
+            "<$>",
+            "*>",
+            "<*",
+            // Alternative operator
+            "<|>",
+            // Monadic operations
+            "return",
+            "pure",
+            // List operations
+            "map",
+            "filter",
+            "foldr",
+            "foldl",
+            "foldl'",
+            "concatMap",
+            "head",
+            "tail",
+            "length",
+            "null",
+            "reverse",
+            "take",
+            "drop",
+            "sum",
+            "product",
+            "maximum",
+            "minimum",
+            "zip",
+            "zipWith",
+            // Prelude functions
+            "id",
+            "const",
+            "flip",
+            "error",
+            "undefined",
+            "seq",
+            // Numeric operations
+            "fromInteger",
+            "fromRational",
+            "negate",
+            "abs",
+            "signum",
+            "sqrt",
+            "exp",
+            "log",
+            "sin",
+            "cos",
+            "tan",
+            // Comparison
+            "compare",
+            "min",
+            "max",
+            // Show
+            "show",
+            // Boolean
+            "not",
+            "otherwise",
+            // Maybe
+            "maybe",
+            "fromMaybe",
+            // Either
+            "either",
+            // IO
+            "print",
+            "putStrLn",
+            "putStr",
+            "getLine",
+            "readFile",
+            "writeFile",
+            // Guard helper
+            "guard",
+        ];
+
+        for name in builtin_funcs {
+            let sym = Symbol::intern(name);
+            let def_id = self.fresh_def_id();
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+    }
+
+    /// Allocates a fresh `DefId`.
+    pub fn fresh_def_id(&mut self) -> DefId {
+        let id = DefId::new(self.next_def_id as usize);
+        self.next_def_id += 1;
+        id
+    }
+
+    /// Allocates a fresh `HirId`.
+    pub fn fresh_hir_id(&mut self) -> HirId {
+        let id = HirId::new(self.next_hir_id as usize);
+        self.next_hir_id += 1;
+        id
+    }
+
+    /// Records a definition.
+    pub fn define(&mut self, id: DefId, name: Symbol, kind: DefKind, span: Span) {
+        self.defs.insert(
+            id,
+            DefInfo {
+                id,
+                name,
+                kind,
+                span,
+            },
+        );
+    }
+
+    /// Creates a `DefRef` for a definition.
+    pub fn def_ref(&self, def_id: DefId, span: Span) -> DefRef {
+        DefRef { def_id, span }
+    }
+
+    /// Gets the current scope.
+    pub fn current_scope(&self) -> &Scope {
+        &self.scopes[self.current_scope.index()]
+    }
+
+    /// Gets the current scope mutably.
+    pub fn current_scope_mut(&mut self) -> &mut Scope {
+        let idx = self.current_scope.index();
+        &mut self.scopes[idx]
+    }
+
+    /// Enters a new scope.
+    pub fn enter_scope(&mut self) -> ScopeId {
+        let parent = Some(self.current_scope);
+        let id = ScopeId::new(self.next_scope_id as usize);
+        self.next_scope_id += 1;
+        let scope = Scope::new(id, parent);
+        self.scopes.push(scope);
+        self.current_scope = id;
+        id
+    }
+
+    /// Exits the current scope, returning to the parent.
+    pub fn exit_scope(&mut self) {
+        if let Some(parent) = self.scopes[self.current_scope.index()].parent {
+            self.current_scope = parent;
+        }
+    }
+
+    /// Runs a function in a new scope.
+    pub fn in_scope<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.enter_scope();
+        let result = f(self);
+        self.exit_scope();
+        result
+    }
+
+    /// Binds a value in the current scope.
+    pub fn bind_value(&mut self, name: Symbol, def_id: DefId) -> Option<DefId> {
+        self.current_scope_mut().bind_value(name, def_id)
+    }
+
+    /// Binds a type in the current scope.
+    pub fn bind_type(&mut self, name: Symbol, def_id: DefId) -> Option<DefId> {
+        self.current_scope_mut().bind_type(name, def_id)
+    }
+
+    /// Binds a constructor in the current scope.
+    pub fn bind_constructor(&mut self, name: Symbol, def_id: DefId) -> Option<DefId> {
+        self.current_scope_mut().bind_constructor(name, def_id)
+    }
+
+    /// Looks up a value, searching parent scopes.
+    pub fn lookup_value(&self, name: Symbol) -> Option<DefId> {
+        let mut scope_id = Some(self.current_scope);
+        while let Some(id) = scope_id {
+            let scope = &self.scopes[id.index()];
+            if let Some(def_id) = scope.lookup_value_local(name) {
+                return Some(def_id);
+            }
+            scope_id = scope.parent;
+        }
+        None
+    }
+
+    /// Looks up a type, searching parent scopes.
+    pub fn lookup_type(&self, name: Symbol) -> Option<DefId> {
+        let mut scope_id = Some(self.current_scope);
+        while let Some(id) = scope_id {
+            let scope = &self.scopes[id.index()];
+            if let Some(def_id) = scope.lookup_type_local(name) {
+                return Some(def_id);
+            }
+            scope_id = scope.parent;
+        }
+        None
+    }
+
+    /// Looks up a constructor, searching parent scopes.
+    pub fn lookup_constructor(&self, name: Symbol) -> Option<DefId> {
+        let mut scope_id = Some(self.current_scope);
+        while let Some(id) = scope_id {
+            let scope = &self.scopes[id.index()];
+            if let Some(def_id) = scope.lookup_constructor_local(name) {
+                return Some(def_id);
+            }
+            scope_id = scope.parent;
+        }
+        None
+    }
+
+    /// Records an error.
+    pub fn error(&mut self, err: crate::LowerError) {
+        self.errors.push(err);
+    }
+
+    /// Returns true if any errors were recorded.
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+
+    /// Takes all errors from the context.
+    pub fn take_errors(&mut self) -> Vec<crate::LowerError> {
+        std::mem::take(&mut self.errors)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scope_binding() {
+        let mut ctx = LowerContext::new();
+
+        let x = Symbol::intern("x");
+        let def_id = ctx.fresh_def_id();
+        ctx.define(def_id, x, DefKind::Value, Span::default());
+        ctx.bind_value(x, def_id);
+
+        assert_eq!(ctx.lookup_value(x), Some(def_id));
+    }
+
+    #[test]
+    fn test_nested_scopes() {
+        let mut ctx = LowerContext::new();
+
+        // Bind x in outer scope
+        let x = Symbol::intern("x");
+        let outer_def = ctx.fresh_def_id();
+        ctx.define(outer_def, x, DefKind::Value, Span::default());
+        ctx.bind_value(x, outer_def);
+
+        // Enter inner scope
+        ctx.enter_scope();
+
+        // y is only in inner scope
+        let y = Symbol::intern("y");
+        let inner_def = ctx.fresh_def_id();
+        ctx.define(inner_def, y, DefKind::Value, Span::default());
+        ctx.bind_value(y, inner_def);
+
+        // Can see both x and y
+        assert_eq!(ctx.lookup_value(x), Some(outer_def));
+        assert_eq!(ctx.lookup_value(y), Some(inner_def));
+
+        // Exit inner scope
+        ctx.exit_scope();
+
+        // Can see x but not y
+        assert_eq!(ctx.lookup_value(x), Some(outer_def));
+        assert_eq!(ctx.lookup_value(y), None);
+    }
+
+    #[test]
+    fn test_shadowing() {
+        let mut ctx = LowerContext::new();
+
+        let x = Symbol::intern("x");
+
+        // Bind x in outer scope
+        let outer_def = ctx.fresh_def_id();
+        ctx.define(outer_def, x, DefKind::Value, Span::default());
+        ctx.bind_value(x, outer_def);
+
+        // Enter inner scope and shadow x
+        ctx.enter_scope();
+        let inner_def = ctx.fresh_def_id();
+        ctx.define(inner_def, x, DefKind::Value, Span::default());
+        ctx.bind_value(x, inner_def);
+
+        // Inner scope sees shadowed x
+        assert_eq!(ctx.lookup_value(x), Some(inner_def));
+
+        ctx.exit_scope();
+
+        // Outer scope sees original x
+        assert_eq!(ctx.lookup_value(x), Some(outer_def));
+    }
+
+    #[test]
+    fn test_builtins() {
+        let ctx = LowerContext::with_builtins();
+
+        // Check builtin types are defined
+        let int = Symbol::intern("Int");
+        assert!(ctx.lookup_type(int).is_some());
+
+        // Check builtin constructors are defined
+        let true_con = Symbol::intern("True");
+        assert!(ctx.lookup_constructor(true_con).is_some());
+
+        // Check builtin functions are defined
+        let map_fn = Symbol::intern("map");
+        assert!(ctx.lookup_value(map_fn).is_some());
+    }
+}

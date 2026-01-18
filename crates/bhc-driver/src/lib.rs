@@ -44,14 +44,22 @@
 
 #![warn(missing_docs)]
 
+use bhc_ast::Module as AstModule;
+use bhc_core::eval::{Env, EvalError, Evaluator, Value};
+use bhc_core::{Bind, CoreModule, Expr, VarId};
+use bhc_hir::Module as HirModule;
+use bhc_intern::Symbol;
 use bhc_loop_ir::{
     lower::{LowerConfig, LowerError},
     parallel::{ParallelConfig, ParallelPass},
     vectorize::{VectorizeConfig, VectorizePass},
     TargetArch,
 };
+use bhc_lower::LowerContext;
 use bhc_session::{Options, Profile, Session, SessionRef};
+use bhc_span::FileId;
 use bhc_tensor_ir::fusion::{self, FusionContext, KernelReport};
+use bhc_typeck::TypedModule;
 use camino::{Utf8Path, Utf8PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
@@ -75,12 +83,28 @@ pub enum CompileError {
     },
 
     /// Parse error.
-    #[error("parse error")]
-    ParseError,
+    #[error("parse error: {0} errors")]
+    ParseError(usize),
+
+    /// AST to HIR lowering failed.
+    #[error("lowering failed: {0}")]
+    LowerError(#[from] bhc_lower::LowerError),
 
     /// Type checking failed.
-    #[error("type checking failed")]
-    TypeError,
+    #[error("type checking failed: {0} errors")]
+    TypeError(usize),
+
+    /// HIR to Core lowering failed.
+    #[error("core lowering failed: {0}")]
+    CoreLowerError(#[from] bhc_hir_to_core::LowerError),
+
+    /// Execution failed.
+    #[error("execution failed: {0}")]
+    ExecutionError(#[from] EvalError),
+
+    /// Main function not found.
+    #[error("main function not found in module")]
+    NoMainFunction,
 
     /// Code generation failed.
     #[error("code generation failed: {0}")]
@@ -123,6 +147,8 @@ pub enum CompilePhase {
     Codegen,
     /// Linking.
     Link,
+    /// Executing (interpretation).
+    Execute,
 }
 
 impl CompilePhase {
@@ -137,6 +163,7 @@ impl CompilePhase {
             Self::LoopLower => "loop_lower",
             Self::Codegen => "codegen",
             Self::Link => "link",
+            Self::Execute => "execute",
         }
     }
 }
@@ -287,19 +314,27 @@ impl Compiler {
     fn compile_unit(&self, unit: CompilationUnit) -> CompileResult<CompileOutput> {
         info!(module = %unit.module_name, "starting compilation");
 
+        // Allocate a file ID for diagnostics
+        let file_id = FileId::new(0); // In a real impl, this would be managed by a source manager
+
         // Phase 1: Parse
         self.callbacks.on_phase_start(CompilePhase::Parse, &unit.module_name);
-        let _ast = self.parse(&unit)?;
+        let ast = self.parse(&unit, file_id)?;
         self.callbacks.on_phase_complete(CompilePhase::Parse, &unit.module_name);
 
-        // Phase 2: Type check (placeholder)
+        // Phase 2: Lower AST to HIR
         self.callbacks.on_phase_start(CompilePhase::TypeCheck, &unit.module_name);
-        // TODO: Implement type checking
+        let hir = self.lower(&ast)?;
+        debug!(module = %unit.module_name, items = hir.items.len(), "HIR lowering complete");
+
+        // Phase 2b: Type check HIR
+        let _typed = self.type_check(&hir, file_id)?;
         self.callbacks.on_phase_complete(CompilePhase::TypeCheck, &unit.module_name);
 
-        // Phase 3: Lower to Core IR (placeholder)
+        // Phase 3: Lower to Core IR
         self.callbacks.on_phase_start(CompilePhase::CoreLower, &unit.module_name);
-        // TODO: Implement Core lowering
+        let core = self.core_lower(&hir)?;
+        debug!(module = %unit.module_name, bindings = core.bindings.len(), "Core lowering complete");
         self.callbacks.on_phase_complete(CompilePhase::CoreLower, &unit.module_name);
 
         // Phase 4: Tensor IR (if Numeric profile)
@@ -401,12 +436,240 @@ impl Compiler {
         })
     }
 
-    /// Parse a compilation unit.
-    fn parse(&self, unit: &CompilationUnit) -> CompileResult<()> {
+    /// Parse a compilation unit into an AST.
+    fn parse(&self, unit: &CompilationUnit, file_id: FileId) -> CompileResult<AstModule> {
         debug!(module = %unit.module_name, "parsing");
-        // TODO: Use bhc-parser when implemented
-        // For now, this is a placeholder
-        Ok(())
+        let (maybe_module, diagnostics) = bhc_parser::parse_module(&unit.source, file_id);
+
+        // Report any diagnostics
+        for diag in &diagnostics {
+            debug!("parse diagnostic: {:?}", diag);
+        }
+
+        match maybe_module {
+            Some(module) => Ok(module),
+            None => Err(CompileError::ParseError(diagnostics.len())),
+        }
+    }
+
+    /// Lower an AST module to HIR.
+    fn lower(&self, ast: &AstModule) -> CompileResult<HirModule> {
+        let mut ctx = LowerContext::with_builtins();
+        let hir = bhc_lower::lower_module(&mut ctx, ast)?;
+
+        // Check for lowering errors
+        if ctx.has_errors() {
+            let errors = ctx.take_errors();
+            return Err(bhc_lower::LowerError::Multiple(errors).into());
+        }
+
+        Ok(hir)
+    }
+
+    /// Type check a HIR module.
+    fn type_check(&self, hir: &HirModule, file_id: FileId) -> CompileResult<TypedModule> {
+        debug!("type checking module");
+
+        match bhc_typeck::type_check_module(hir, file_id) {
+            Ok(typed) => Ok(typed),
+            Err(diagnostics) => {
+                eprintln!("Type errors:");
+                for (i, diag) in diagnostics.iter().enumerate() {
+                    eprintln!("  {}: {}", i + 1, diag.message);
+                }
+                Err(CompileError::TypeError(diagnostics.len()))
+            }
+        }
+    }
+
+    /// Lower HIR to Core IR.
+    fn core_lower(&self, hir: &HirModule) -> CompileResult<CoreModule> {
+        debug!("lowering HIR to Core");
+        bhc_hir_to_core::lower_module(hir).map_err(CompileError::from)
+    }
+
+    /// Run source code and return the result value.
+    ///
+    /// This compiles the source through all phases and then evaluates
+    /// the `main` function, returning its result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if compilation or execution fails.
+    pub fn run_source(
+        &self,
+        module_name: impl Into<String>,
+        source: impl Into<String>,
+    ) -> CompileResult<Value> {
+        let unit = CompilationUnit::from_source(module_name, source);
+        self.run_unit(unit)
+    }
+
+    /// Run a file and return the result value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if compilation or execution fails.
+    pub fn run_file(&self, path: impl AsRef<Utf8Path>) -> CompileResult<Value> {
+        let unit = CompilationUnit::from_path(path.as_ref().to_path_buf())?;
+        self.run_unit(unit)
+    }
+
+    /// Compile and run a compilation unit.
+    #[instrument(skip(self, unit), fields(module = %unit.module_name))]
+    fn run_unit(&self, unit: CompilationUnit) -> CompileResult<Value> {
+        info!(module = %unit.module_name, "compiling for execution");
+
+        // Allocate a file ID for diagnostics
+        let file_id = FileId::new(0);
+
+        // Phase 1: Parse
+        self.callbacks.on_phase_start(CompilePhase::Parse, &unit.module_name);
+        let ast = self.parse(&unit, file_id)?;
+        self.callbacks.on_phase_complete(CompilePhase::Parse, &unit.module_name);
+
+        // Phase 2: Lower AST to HIR
+        self.callbacks.on_phase_start(CompilePhase::TypeCheck, &unit.module_name);
+        let hir = self.lower(&ast)?;
+        let _typed = self.type_check(&hir, file_id)?;
+        self.callbacks.on_phase_complete(CompilePhase::TypeCheck, &unit.module_name);
+
+        // Phase 3: Lower to Core IR
+        self.callbacks.on_phase_start(CompilePhase::CoreLower, &unit.module_name);
+        let core = self.core_lower(&hir)?;
+        debug!(module = %unit.module_name, bindings = core.bindings.len(), "Core lowering complete");
+
+        self.callbacks.on_phase_complete(CompilePhase::CoreLower, &unit.module_name);
+
+        // Phase 4: Execute
+        self.callbacks.on_phase_start(CompilePhase::Execute, &unit.module_name);
+        let result = self.run_module(&core)?;
+        self.callbacks.on_phase_complete(CompilePhase::Execute, &unit.module_name);
+
+        info!(module = %unit.module_name, "execution complete");
+        Ok(result)
+    }
+
+    /// Execute a Core module by finding and evaluating the `main` function.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `main` is not found or evaluation fails.
+    pub fn run_module(&self, module: &CoreModule) -> CompileResult<Value> {
+        debug!("executing module: {}", module.name);
+
+        // Create evaluator with the session's profile
+        let evaluator = Evaluator::with_profile(self.session.profile());
+
+        // Build environment from module bindings
+        let env = self.build_module_env(module, &evaluator)?;
+
+        // Find and evaluate main
+        let main_name = Symbol::intern("main");
+        let main_expr = self.find_main_binding(module, main_name)?;
+
+        debug!("evaluating main");
+        let result = evaluator.eval(&main_expr, &env)?;
+
+        // Force the result to WHNF
+        let forced = evaluator.force(result)?;
+
+        Ok(forced)
+    }
+
+    /// Build an environment from the module's top-level bindings.
+    ///
+    /// In Haskell, all top-level bindings are mutually recursive - any binding
+    /// can reference any other binding. We handle this by:
+    /// 1. Evaluating all lambda bindings (creates closures with empty captured env)
+    /// 2. Building the module env with these closures
+    /// 3. Setting the module env on the evaluator (this is the key!)
+    /// 4. Adding non-lambda bindings as thunks
+    ///
+    /// When closures are applied, they look up variables first in their captured
+    /// env (for local bindings), then in the evaluator's module env (for top-level
+    /// recursive calls). This avoids the need for circular environments.
+    fn build_module_env(&self, module: &CoreModule, evaluator: &Evaluator) -> CompileResult<Env> {
+        use bhc_core::eval::Thunk;
+
+        // Collect all bindings: (VarId, expression)
+        let mut all_bindings: Vec<(VarId, Box<Expr>)> = Vec::new();
+
+        for bind in &module.bindings {
+            match bind {
+                Bind::NonRec(var, rhs) => {
+                    all_bindings.push((var.id, rhs.clone()));
+                }
+                Bind::Rec(bindings) => {
+                    for (var, rhs) in bindings {
+                        all_bindings.push((var.id, rhs.clone()));
+                    }
+                }
+            }
+        }
+
+        // Evaluate all lambda bindings with an empty env
+        // Lambdas just create closures - no function calls happen yet
+        let empty_env = Env::new();
+        let mut module_env = Env::new();
+
+        for (var_id, rhs) in &all_bindings {
+            if self.is_lambda_expr(rhs) {
+                // Lambda: evaluate to create a Closure
+                // The closure captures empty_env, but that's OK because
+                // variable lookups will fall back to the module env
+                let value = evaluator.eval(rhs, &empty_env)?;
+                module_env = module_env.extend(*var_id, value);
+            }
+        }
+
+        // Set the module env on the evaluator BEFORE evaluating non-lambda bindings
+        // This is crucial: when we force thunks later, recursive calls will
+        // find their targets through this module env
+        evaluator.set_module_env(module_env.clone());
+
+        // Add non-lambda bindings as thunks
+        // These capture empty_env but will use module_env for lookups
+        for (var_id, rhs) in &all_bindings {
+            if !self.is_lambda_expr(rhs) {
+                let thunk = Value::Thunk(Thunk {
+                    expr: rhs.clone(),
+                    env: empty_env.clone(), // Module env will be used for lookups
+                });
+                module_env = module_env.extend(*var_id, thunk);
+            }
+        }
+
+        // Update the module env with the thunks added
+        evaluator.set_module_env(module_env.clone());
+
+        Ok(module_env)
+    }
+
+    /// Check if an expression is a lambda at the top level.
+    fn is_lambda_expr(&self, expr: &Expr) -> bool {
+        matches!(expr, Expr::Lam(_, _, _))
+    }
+
+    /// Find the main binding in the module.
+    fn find_main_binding(&self, module: &CoreModule, name: Symbol) -> CompileResult<bhc_core::Expr> {
+        for bind in &module.bindings {
+            match bind {
+                Bind::NonRec(var, rhs) if var.name == name => {
+                    return Ok((**rhs).clone());
+                }
+                Bind::Rec(bindings) => {
+                    for (var, rhs) in bindings {
+                        if var.name == name {
+                            return Ok((**rhs).clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Err(CompileError::NoMainFunction)
     }
 
     /// Emit a kernel report for the given module.
@@ -728,7 +991,7 @@ mod tests {
             });
 
         // Compile a simple numeric module
-        let result = compiler.compile_source("NumericTest", "main = sum [1,2,3]");
+        let result = compiler.compile_source("NumericTest", "main = 42");
         assert!(result.is_ok(), "Numeric profile should compile successfully");
 
         // Note: We can't directly verify the tracker after with_callbacks consumes it,
@@ -751,5 +1014,58 @@ mod tests {
 
         let generic = Compiler::arch_from_triple("wasm32-unknown-unknown");
         assert!(matches!(generic, TargetArch::Generic), "unknown arch should be Generic");
+    }
+
+    // =========================================================================
+    // Execution Tests - Phase 5
+    // =========================================================================
+
+    /// Test running a simple literal value
+    #[test]
+    fn test_run_simple_literal() {
+        let compiler = CompilerBuilder::new()
+            .profile(Profile::Default)
+            .build()
+            .unwrap();
+
+        // A simple main that returns a literal
+        let result = compiler.run_source("Test", "main = 42");
+        assert!(result.is_ok(), "Should execute simple literal: {:?}", result.err());
+
+        let value = result.unwrap();
+        assert_eq!(value.as_int(), Some(42), "main should evaluate to 42");
+    }
+
+    /// Test running with Numeric profile (strict evaluation)
+    #[test]
+    fn test_run_numeric_profile() {
+        let compiler = CompilerBuilder::new()
+            .profile(Profile::Numeric)
+            .build()
+            .unwrap();
+
+        let result = compiler.run_source("Test", "main = 42");
+        assert!(result.is_ok(), "Numeric profile should execute: {:?}", result.err());
+
+        let value = result.unwrap();
+        assert_eq!(value.as_int(), Some(42));
+    }
+
+    /// Test error when main is not found
+    #[test]
+    fn test_run_no_main() {
+        let compiler = CompilerBuilder::new()
+            .profile(Profile::Default)
+            .build()
+            .unwrap();
+
+        // A module without main
+        let result = compiler.run_source("Test", "foo = 42");
+        assert!(result.is_err(), "Should fail when main is missing");
+
+        match result.unwrap_err() {
+            CompileError::NoMainFunction => {}
+            other => panic!("Expected NoMainFunction, got: {other:?}"),
+        }
     }
 }

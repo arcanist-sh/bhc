@@ -645,4 +645,125 @@ mod tests {
             _ => panic!("Expected Inline pragma"),
         }
     }
+
+    // ============================================================
+    // Phase 1: New parser features tests
+    // ============================================================
+
+    #[test]
+    fn test_guarded_function() {
+        let module = parse_module_ok("abs x | x >= 0 = x | otherwise = -x");
+        assert!(!module.decls.is_empty());
+        if let bhc_ast::Decl::FunBind(fun) = &module.decls[0] {
+            assert_eq!(fun.name.name.as_str(), "abs");
+            assert_eq!(fun.clauses.len(), 1);
+            if let bhc_ast::Rhs::Guarded(guards, _) = &fun.clauses[0].rhs {
+                assert_eq!(guards.len(), 2);
+            } else {
+                panic!("Expected guarded RHS");
+            }
+        } else {
+            panic!("Expected FunBind");
+        }
+    }
+
+    #[test]
+    fn test_multi_clause_function() {
+        // Simple test with explicit semicolons and parentheses around expression
+        let module = parse_module_ok("fac 0 = 1; fac n = (n * fac (n - 1))");
+        assert_eq!(module.decls.len(), 1); // Should be merged into one
+        if let bhc_ast::Decl::FunBind(fun) = &module.decls[0] {
+            assert_eq!(fun.name.name.as_str(), "fac");
+            assert_eq!(fun.clauses.len(), 2);
+        } else {
+            panic!("Expected FunBind");
+        }
+    }
+
+    #[test]
+    fn test_where_clause() {
+        // Simple where clause with single binding
+        let module = parse_module_ok("f x = y where { y = x }");
+        if let bhc_ast::Decl::FunBind(fun) = &module.decls[0] {
+            assert_eq!(fun.clauses[0].wheres.len(), 1);
+        } else {
+            panic!("Expected FunBind");
+        }
+    }
+
+    #[test]
+    fn test_where_clause_multiple() {
+        // Where clause with multiple bindings
+        let module = parse_module_ok("f x = y where { y = (x + 1); z = (x + 2) }");
+        if let bhc_ast::Decl::FunBind(fun) = &module.decls[0] {
+            assert_eq!(fun.clauses[0].wheres.len(), 2);
+        } else {
+            panic!("Expected FunBind");
+        }
+    }
+
+    #[test]
+    fn test_strict_field() {
+        let module = parse_module_ok("data Pair = Pair !Int !Int");
+        if let bhc_ast::Decl::DataDecl(data) = &module.decls[0] {
+            assert_eq!(data.constrs.len(), 1);
+            if let bhc_ast::ConFields::Positional(fields) = &data.constrs[0].fields {
+                assert_eq!(fields.len(), 2);
+                assert!(matches!(fields[0], bhc_ast::Type::Bang(_, _)));
+                assert!(matches!(fields[1], bhc_ast::Type::Bang(_, _)));
+            } else {
+                panic!("Expected Positional fields");
+            }
+        } else {
+            panic!("Expected DataDecl");
+        }
+    }
+
+    #[test]
+    fn test_lazy_field() {
+        let module = parse_module_ok("data Lazy a = Lazy ~a");
+        if let bhc_ast::Decl::DataDecl(data) = &module.decls[0] {
+            if let bhc_ast::ConFields::Positional(fields) = &data.constrs[0].fields {
+                assert_eq!(fields.len(), 1);
+                assert!(matches!(fields[0], bhc_ast::Type::Lazy(_, _)));
+            } else {
+                panic!("Expected Positional fields");
+            }
+        } else {
+            panic!("Expected DataDecl");
+        }
+    }
+
+    #[test]
+    fn test_mixed_strict_lazy_fields() {
+        let module = parse_module_ok("data Triple a b c = Triple !a b ~c");
+        if let bhc_ast::Decl::DataDecl(data) = &module.decls[0] {
+            if let bhc_ast::ConFields::Positional(fields) = &data.constrs[0].fields {
+                assert_eq!(fields.len(), 3);
+                assert!(matches!(fields[0], bhc_ast::Type::Bang(_, _)));
+                assert!(matches!(fields[1], bhc_ast::Type::Var(_, _)));
+                assert!(matches!(fields[2], bhc_ast::Type::Lazy(_, _)));
+            } else {
+                panic!("Expected Positional fields");
+            }
+        } else {
+            panic!("Expected DataDecl");
+        }
+    }
+
+    #[test]
+    fn test_guards_with_where() {
+        // Simplified: guards with a simple where clause
+        let module = parse_module_ok("signum x | x > 0 = positive | otherwise = zero where { positive = 1; zero = 0 }");
+        if let bhc_ast::Decl::FunBind(fun) = &module.decls[0] {
+            if let bhc_ast::Rhs::Guarded(guards, _) = &fun.clauses[0].rhs {
+                assert_eq!(guards.len(), 2);
+            } else {
+                panic!("Expected guarded RHS");
+            }
+            assert_eq!(fun.clauses[0].wheres.len(), 2);
+        } else {
+            panic!("Expected FunBind");
+        }
+    }
 }

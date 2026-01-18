@@ -265,7 +265,8 @@ pub enum Pat {
     Wild(Span),
 
     /// Variable pattern: `x`.
-    Var(Symbol, Span),
+    /// The DefId is the definition ID assigned during lowering.
+    Var(Symbol, DefId, Span),
 
     /// Literal pattern: `42`, `'a'`.
     Lit(Lit, Span),
@@ -274,7 +275,8 @@ pub enum Pat {
     Con(DefRef, Vec<Pat>, Span),
 
     /// As-pattern: `x@pat`.
-    As(Symbol, Box<Pat>, Span),
+    /// The DefId is the definition ID assigned during lowering for the bound variable.
+    As(Symbol, DefId, Box<Pat>, Span),
 
     /// Or-pattern: `pat1 | pat2` (for view patterns).
     Or(Box<Pat>, Box<Pat>, Span),
@@ -292,10 +294,10 @@ impl Pat {
     pub fn span(&self) -> Span {
         match self {
             Self::Wild(span)
-            | Self::Var(_, span)
+            | Self::Var(_, _, span)
             | Self::Lit(_, span)
             | Self::Con(_, _, span)
-            | Self::As(_, _, span)
+            | Self::As(_, _, _, span)
             | Self::Or(_, _, span)
             | Self::Ann(_, _, span)
             | Self::Error(span) => *span,
@@ -313,13 +315,13 @@ impl Pat {
     fn collect_vars(&self, vars: &mut Vec<Symbol>) {
         match self {
             Self::Wild(_) | Self::Lit(_, _) | Self::Error(_) => {}
-            Self::Var(name, _) => vars.push(*name),
+            Self::Var(name, _, _) => vars.push(*name),
             Self::Con(_, pats, _) => {
                 for p in pats {
                     p.collect_vars(vars);
                 }
             }
-            Self::As(name, inner, _) => {
+            Self::As(name, _, inner, _) => {
                 vars.push(*name);
                 inner.collect_vars(vars);
             }
@@ -648,9 +650,11 @@ mod tests {
         // SAFETY: These are valid symbol indices for testing purposes
         let x = unsafe { Symbol::from_raw(0) };
         let y = unsafe { Symbol::from_raw(1) };
+        let def_x = DefId::new(1);
+        let def_y = DefId::new(2);
 
         // Simple variable pattern
-        let pat = Pat::Var(x, Span::default());
+        let pat = Pat::Var(x, def_x, Span::default());
         assert_eq!(pat.bound_vars(), vec![x]);
 
         // Tuple pattern
@@ -659,7 +663,7 @@ mod tests {
                 def_id: DefId::new(0),
                 span: Span::default(),
             },
-            vec![Pat::Var(x, Span::default()), Pat::Var(y, Span::default())],
+            vec![Pat::Var(x, def_x, Span::default()), Pat::Var(y, def_y, Span::default())],
             Span::default(),
         );
         let vars = tuple_pat.bound_vars();

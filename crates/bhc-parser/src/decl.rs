@@ -1201,8 +1201,13 @@ impl<'src> Parser<'src> {
             }
         };
 
-        self.expect(&TokenKind::Where)?;
-        let methods = self.parse_class_methods()?;
+        // The `where` clause is optional in Haskell
+        // e.g., `class Foo a` with no methods
+        let methods = if self.eat(&TokenKind::Where) {
+            self.parse_class_methods()?
+        } else {
+            vec![]
+        };
 
         let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
         Ok(Decl::ClassDecl(ClassDecl {
@@ -1215,10 +1220,85 @@ impl<'src> Parser<'src> {
     }
 
     /// Parse optional class/instance context.
+    /// Handles patterns like `(Eq a, Show a) =>` or `Eq a =>`
     fn parse_optional_context(&mut self) -> ParseResult<Vec<Constraint>> {
-        // Simplified: look for `... =>`
-        // For now, just return empty
-        Ok(vec![])
+        // Save position in case we need to backtrack
+        let saved_pos = self.pos;
+
+        // Try to parse constraint(s) followed by `=>`
+        // Context can be:
+        //   - Single: `Eq a =>`
+        //   - Multiple in parens: `(Eq a, Show a) =>`
+
+        let start_span = self.current_span();
+
+        let constraints = if self.check(&TokenKind::LParen) {
+            // Could be tuple context `(C1 a, C2 a) =>` or just a type in parens
+            self.advance();
+
+            // Try parsing as constraints
+            let mut constraints = Vec::new();
+            if !self.check(&TokenKind::RParen) {
+                // Parse first constraint
+                let class = self.parse_conid().ok();
+                if let Some(class) = class {
+                    let arg = self.parse_type().ok();
+                    if let Some(arg) = arg {
+                        let span = start_span.to(self.tokens[self.pos.saturating_sub(1)].span);
+                        constraints.push(Constraint { class, args: vec![arg], span });
+
+                        // Parse more constraints
+                        while self.eat(&TokenKind::Comma) {
+                            let c_start = self.current_span();
+                            if let (Some(class), Some(arg)) =
+                                (self.parse_conid().ok(), self.parse_type().ok())
+                            {
+                                let span = c_start.to(self.tokens[self.pos.saturating_sub(1)].span);
+                                constraints.push(Constraint { class, args: vec![arg], span });
+                            } else {
+                                // Failed, backtrack
+                                self.pos = saved_pos;
+                                return Ok(vec![]);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !self.eat(&TokenKind::RParen) {
+                // Not a valid context tuple, backtrack
+                self.pos = saved_pos;
+                return Ok(vec![]);
+            }
+            constraints
+        } else if let Some(TokenKind::ConId(_)) = self.current_kind() {
+            // Could be single constraint `Eq a =>`
+            let class = self.parse_conid().ok();
+            if let Some(class) = class {
+                let arg = self.parse_type().ok();
+                if let Some(arg) = arg {
+                    let span = start_span.to(self.tokens[self.pos.saturating_sub(1)].span);
+                    vec![Constraint { class, args: vec![arg], span }]
+                } else {
+                    // Not a constraint, backtrack
+                    self.pos = saved_pos;
+                    return Ok(vec![]);
+                }
+            } else {
+                return Ok(vec![]);
+            }
+        } else {
+            return Ok(vec![]);
+        };
+
+        // Check for `=>`
+        if self.eat(&TokenKind::FatArrow) {
+            Ok(constraints)
+        } else {
+            // No `=>` found, backtrack
+            self.pos = saved_pos;
+            Ok(vec![])
+        }
     }
 
     /// Parse class methods.
@@ -1236,8 +1316,13 @@ impl<'src> Parser<'src> {
         let class = self.parse_conid()?;
         let ty = self.parse_type()?;
 
-        self.expect(&TokenKind::Where)?;
-        let methods = self.parse_class_methods()?;
+        // The `where` clause is optional in Haskell
+        // e.g., `instance Message Resize` with no methods
+        let methods = if self.eat(&TokenKind::Where) {
+            self.parse_class_methods()?
+        } else {
+            vec![]
+        };
 
         let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
         Ok(Decl::InstanceDecl(InstanceDecl {

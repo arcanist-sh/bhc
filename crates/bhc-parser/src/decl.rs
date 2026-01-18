@@ -556,6 +556,9 @@ impl<'src> Parser<'src> {
 
     /// Parse a top-level declaration.
     fn parse_top_decl(&mut self) -> ParseResult<Decl> {
+        // Skip Haddock documentation comments before declarations
+        self.skip_doc_comments();
+
         let tok = self.current().ok_or(ParseError::UnexpectedEof {
             expected: "declaration".to_string(),
         })?;
@@ -619,6 +622,9 @@ impl<'src> Parser<'src> {
 
     /// Parse a value declaration (type signature or binding).
     fn parse_value_decl(&mut self) -> ParseResult<Decl> {
+        // Skip Haddock documentation comments before value declarations
+        self.skip_doc_comments();
+
         let start = self.current_span();
         let name = self.parse_ident()?;
 
@@ -781,8 +787,14 @@ impl<'src> Parser<'src> {
     /// Parse data constructors.
     fn parse_constructors(&mut self) -> ParseResult<Vec<ConDecl>> {
         let mut constrs = vec![self.parse_constructor()?];
+        // Skip doc comments after constructor (e.g., `-- ^ description`)
+        self.skip_doc_comments();
         while self.eat(&TokenKind::Pipe) {
+            // Skip doc comments before next constructor
+            self.skip_doc_comments();
             constrs.push(self.parse_constructor()?);
+            // Skip doc comments after constructor
+            self.skip_doc_comments();
         }
         Ok(constrs)
     }
@@ -817,13 +829,22 @@ impl<'src> Parser<'src> {
         self.expect(&TokenKind::LBrace)?;
         let mut fields = Vec::new();
 
+        // Skip leading doc comments
+        self.skip_doc_comments();
+
         if !self.check(&TokenKind::RBrace) {
             fields.push(self.parse_field_decl()?);
+            // Skip trailing doc comments after field (e.g., `-- ^ description`)
+            self.skip_doc_comments();
             while self.eat(&TokenKind::Comma) {
+                // Skip doc comments before next field
+                self.skip_doc_comments();
                 if self.check(&TokenKind::RBrace) {
                     break;
                 }
                 fields.push(self.parse_field_decl()?);
+                // Skip trailing doc comments after field
+                self.skip_doc_comments();
             }
         }
 

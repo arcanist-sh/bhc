@@ -12,13 +12,13 @@ XMonad source files are located at `/tmp/xmonad/src/XMonad/` (cloned from github
 | File | Parsing Issues | Lowering | Type Check | Execution |
 |------|----------------|----------|------------|-----------|
 | ManageHook.hs | 152 | blocked | blocked | blocked |
-| Layout.hs | 262 | blocked | blocked | blocked |
+| Layout.hs | ~~262~~ 256 | blocked | blocked | blocked |
 | Config.hs | 350 | blocked | blocked | blocked |
-| StackSet.hs | 408 | blocked | blocked | blocked |
+| StackSet.hs | ~~408~~ 402 | blocked | blocked | blocked |
 | Main.hs | 794 | blocked | blocked | blocked |
-| Core.hs | 960 | blocked | blocked | blocked |
+| Core.hs | ~~960~~ 928 | blocked | blocked | blocked |
 | Operations.hs | 1,808 | blocked | blocked | blocked |
-| **TOTAL** | **4,734** | - | - | - |
+| **TOTAL** | ~~4,734~~ **4,690** | - | - | - |
 
 ## Parsing Issues by Category
 
@@ -28,21 +28,26 @@ XMonad source files are located at `/tmp/xmonad/src/XMonad/` (cloned from github
 | P0 | Parentheses | 362 | Expression grouping in complex contexts | TODO |
 | P0 | Operators | 304 | Operator parsing in various contexts | TODO |
 | P1 | `<-` bindings | 175 | Do-notation, list comprehensions | TODO |
-| P1 | Doc comments | 149 | Haddock `-- \|` style comments | TODO |
+| P1 | Doc comments | ~~149~~ 8 | Haddock `-- \|` style comments | DONE (141 fixed) |
 | P1 | Qualified names | 91 | `Module.identifier` references | TODO |
 | P1 | `->` arrows | 85 | Function types, case branches | TODO |
 | P2 | Backtick operators | 38 | `` `elem` `` infix application | TODO |
 | P2 | `where` clauses | 15 | Where clause indentation/attachment | TODO |
+| P2 | `forall` in constructors | 8 | Existential types (remaining doc errors cascade from this) | TODO |
 
 ## Specific Syntax Patterns Failing
 
-### 1. Haddock Documentation Comments
+### 1. Haddock Documentation Comments - FIXED
 ```haskell
--- | This is a doc comment  -- FAILS: "unexpected documentation comment"
+-- | This is a doc comment  -- NOW WORKS
 foo :: Int -> Int
 foo x = x
 ```
-**Fix needed in:** `crates/bhc-parser/src/lexer.rs` or `decl.rs`
+**Fixed in:** `crates/bhc-parser/src/decl.rs` - Added `skip_doc_comments()` calls in:
+- `parse_top_decl()` - before parsing declarations
+- `parse_value_decl()` - before value declarations
+- `parse_record_fields()` - around record fields
+- `parse_constructors()` - around data constructors
 
 ### 2. Where Clauses with Indentation
 ```haskell

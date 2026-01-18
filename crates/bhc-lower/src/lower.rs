@@ -175,9 +175,13 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
             ast::Rhs::Simple(expr, _) => (lower_expr(ctx, expr), Vec::new()),
             ast::Rhs::Guarded(guarded_rhss, _) => {
                 // For guarded RHS, we desugar to nested if expressions
-                let rhs = desugar::desugar_guarded_rhs(ctx, guarded_rhss, clause.span, &|ctx, e| {
-                    lower_expr(ctx, e)
-                });
+                let rhs = desugar::desugar_guarded_rhs(
+                    ctx,
+                    guarded_rhss,
+                    clause.span,
+                    &|ctx, e| lower_expr(ctx, e),
+                    &|ctx, p| lower_pat(ctx, p),
+                );
 
                 // We don't need guards in HIR for this; they're already desugared
                 (rhs, Vec::new())
@@ -234,7 +238,13 @@ fn lower_rhs(ctx: &mut LowerContext, rhs: &ast::Rhs) -> hir::Expr {
     match rhs {
         ast::Rhs::Simple(expr, _) => lower_expr(ctx, expr),
         ast::Rhs::Guarded(guards, span) => {
-            desugar::desugar_guarded_rhs(ctx, guards, *span, &|ctx, e| lower_expr(ctx, e))
+            desugar::desugar_guarded_rhs(
+                ctx,
+                guards,
+                *span,
+                &|ctx, e| lower_expr(ctx, e),
+                &|ctx, p| lower_pat(ctx, p),
+            )
         }
     }
 }

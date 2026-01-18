@@ -1,7 +1,7 @@
 //! Expression parsing.
 
 use bhc_ast::{
-    Alt, ArithSeq, Expr, FieldBind, GuardedRhs, Lit, ModuleName, Pat, Rhs, Stmt,
+    Alt, ArithSeq, Expr, FieldBind, Guard, GuardedRhs, Lit, ModuleName, Pat, Rhs, Stmt,
 };
 use bhc_intern::Ident;
 use bhc_lexer::TokenKind;
@@ -663,16 +663,21 @@ impl<'src> Parser<'src> {
 
     /// Parse guarded right-hand sides: `| guard -> expr | guard -> expr ...`
     fn parse_guarded_rhss(&mut self) -> ParseResult<Vec<GuardedRhs>> {
-        let mut guards = Vec::new();
+        let mut guarded_rhss = Vec::new();
         while self.eat(&TokenKind::Pipe) {
             let start = self.current_span();
-            let guard = self.parse_expr()?;
+            let guard_expr = self.parse_expr()?;
+            let guard_span = guard_expr.span();
             self.expect(&TokenKind::Arrow)?;
             let body = self.parse_expr()?;
             let span = start.to(body.span());
-            guards.push(GuardedRhs { guard, body, span });
+            guarded_rhss.push(GuardedRhs {
+                guards: vec![Guard::Expr(guard_expr, guard_span)],
+                body,
+                span,
+            });
         }
-        Ok(guards)
+        Ok(guarded_rhss)
     }
 
     /// Parse a do expression.

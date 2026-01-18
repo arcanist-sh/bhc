@@ -101,7 +101,7 @@ fn desugar_let_decls(
     body: hir::Expr,
     span: Span,
     lower_expr: &impl Fn(&mut LowerContext, &ast::Expr) -> hir::Expr,
-    _lower_pat: &impl Fn(&mut LowerContext, &ast::Pat) -> hir::Pat,
+    lower_pat: &impl Fn(&mut LowerContext, &ast::Pat) -> hir::Pat,
 ) -> hir::Expr {
     use crate::context::DefKind;
 
@@ -130,7 +130,7 @@ fn desugar_let_decls(
                 let rhs = match &clause.rhs {
                     ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
                     ast::Rhs::Guarded(guards, _) => {
-                        desugar_guarded_rhs(ctx, guards, span, lower_expr)
+                        desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
                     }
                 };
 
@@ -221,8 +221,9 @@ fn desugar_stmts_for_comp(
     }
 }
 
-/// Desugar guarded right-hand sides to nested if expressions.
+/// Desugar guarded right-hand sides to nested if/case expressions.
 ///
+/// For boolean guards:
 /// ```haskell
 /// | g1 = e1
 /// | g2 = e2
@@ -230,21 +231,89 @@ fn desugar_stmts_for_comp(
 /// -- becomes --
 /// if g1 then e1 else if g2 then e2 else e3
 /// ```
+///
+/// For pattern guards:
+/// ```haskell
+/// | Just x <- mx = e
+/// -- becomes --
+/// case mx of { Just x -> e; _ -> error "..." }
+/// ```
 pub fn desugar_guarded_rhs(
     ctx: &mut LowerContext,
-    guards: &[ast::GuardedRhs],
+    guarded_rhss: &[ast::GuardedRhs],
     span: Span,
     lower_expr: &impl Fn(&mut LowerContext, &ast::Expr) -> hir::Expr,
+    lower_pat: &impl Fn(&mut LowerContext, &ast::Pat) -> hir::Pat,
 ) -> hir::Expr {
-    guards.iter().rev().fold(
+    guarded_rhss.iter().rev().fold(
         // Default: error "Non-exhaustive guards"
         make_pattern_match_error(ctx, span),
-        |else_branch, guard| {
-            let cond = lower_expr(ctx, &guard.guard);
-            let then_branch = lower_expr(ctx, &guard.body);
-            hir::Expr::If(Box::new(cond), Box::new(then_branch), Box::new(else_branch), span)
+        |else_branch, grhs| {
+            let body = lower_expr(ctx, &grhs.body);
+            // Process guards right-to-left, wrapping the body
+            desugar_guards(ctx, &grhs.guards, body, else_branch, span, lower_expr, lower_pat)
         },
     )
+}
+
+/// Desugar a sequence of guards into nested if/case expressions.
+fn desugar_guards(
+    ctx: &mut LowerContext,
+    guards: &[ast::Guard],
+    then_branch: hir::Expr,
+    else_branch: hir::Expr,
+    span: Span,
+    lower_expr: &impl Fn(&mut LowerContext, &ast::Expr) -> hir::Expr,
+    lower_pat: &impl Fn(&mut LowerContext, &ast::Pat) -> hir::Pat,
+) -> hir::Expr {
+    match guards {
+        [] => then_branch,
+        [guard, rest @ ..] => {
+            // First, desugar the rest of the guards with the then_branch
+            let inner = if rest.is_empty() {
+                then_branch
+            } else {
+                desugar_guards(ctx, rest, then_branch, else_branch.clone(), span, lower_expr, lower_pat)
+            };
+
+            match guard {
+                ast::Guard::Expr(cond_expr, _guard_span) => {
+                    // Boolean guard: if cond then inner else else_branch
+                    let cond = lower_expr(ctx, cond_expr);
+                    hir::Expr::If(
+                        Box::new(cond),
+                        Box::new(inner),
+                        Box::new(else_branch),
+                        span,
+                    )
+                }
+                ast::Guard::Pattern(pat, scrut_expr, guard_span) => {
+                    // Pattern guard: case scrut of { pat -> inner; _ -> else_branch }
+                    let scrut = lower_expr(ctx, scrut_expr);
+                    let pat_hir = lower_pat(ctx, pat);
+
+                    let match_alt = hir::CaseAlt {
+                        pat: pat_hir,
+                        guards: vec![],
+                        rhs: inner,
+                        span: *guard_span,
+                    };
+                    let default_alt = hir::CaseAlt {
+                        pat: hir::Pat::Wild(*guard_span),
+                        guards: vec![],
+                        rhs: else_branch,
+                        span: *guard_span,
+                    };
+
+                    hir::Expr::Case(
+                        Box::new(scrut),
+                        vec![match_alt, default_alt],
+                        span,
+                    )
+                }
+            }
+        }
+    }
 }
 
 /// Create a reference to a variable (looking it up in scope).

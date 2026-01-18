@@ -710,16 +710,60 @@ impl<'src> Parser<'src> {
 
     /// Parse guarded right-hand sides for bindings: `| guard = expr | guard = expr ...`
     fn parse_guarded_binding_rhss(&mut self) -> ParseResult<Vec<GuardedRhs>> {
-        let mut guards = Vec::new();
+        let mut guarded_rhss = Vec::new();
         while self.eat(&TokenKind::Pipe) {
             let guard_start = self.current_span();
-            let guard = self.parse_expr()?;
+            let guards = self.parse_guards()?;
             self.expect(&TokenKind::Eq)?;
             let body = self.parse_expr()?;
             let span = guard_start.to(body.span());
-            guards.push(GuardedRhs { guard, body, span });
+            guarded_rhss.push(GuardedRhs { guards, body, span });
+        }
+        Ok(guarded_rhss)
+    }
+
+    /// Parse guards: `guard1, guard2, ...` where each guard is either:
+    /// - A pattern guard: `pat <- expr`
+    /// - A boolean guard: `expr`
+    fn parse_guards(&mut self) -> ParseResult<Vec<Guard>> {
+        let mut guards = Vec::new();
+        guards.push(self.parse_single_guard()?);
+        while self.eat(&TokenKind::Comma) {
+            guards.push(self.parse_single_guard()?);
         }
         Ok(guards)
+    }
+
+    /// Parse a single guard.
+    fn parse_single_guard(&mut self) -> ParseResult<Guard> {
+        let start = self.current_span();
+
+        // Try to parse as pattern guard first by looking ahead
+        // Pattern guards have the form: pat <- expr
+        // We need to check if there's a `<-` ahead
+
+        // Save position for backtracking
+        let saved_pos = self.pos;
+
+        // Try parsing as pattern
+        if let Ok(pat) = self.parse_pattern() {
+            if self.eat(&TokenKind::LeftArrow) {
+                // This is a pattern guard
+                let expr = self.parse_expr()?;
+                let span = start.to(expr.span());
+                return Ok(Guard::Pattern(pat, expr, span));
+            }
+            // Not a pattern guard, backtrack
+            self.pos = saved_pos;
+        } else {
+            // Couldn't parse as pattern, reset position
+            self.pos = saved_pos;
+        }
+
+        // Parse as boolean guard
+        let expr = self.parse_expr()?;
+        let span = start.to(expr.span());
+        Ok(Guard::Expr(expr, span))
     }
 
     /// Check if the current token starts an infix operator for bindings.

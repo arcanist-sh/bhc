@@ -430,12 +430,31 @@ pub enum Rhs {
 /// A guarded right-hand side.
 #[derive(Clone, Debug)]
 pub struct GuardedRhs {
-    /// The guard expression.
-    pub guard: Expr,
+    /// The guards (can be multiple, e.g., `| pat <- expr, cond`).
+    pub guards: Vec<Guard>,
     /// The body expression.
     pub body: Expr,
     /// The span.
     pub span: Span,
+}
+
+/// A guard in a guarded RHS.
+#[derive(Clone, Debug)]
+pub enum Guard {
+    /// A pattern guard: `pat <- expr`
+    Pattern(Pat, Expr, Span),
+    /// A boolean guard: `expr`
+    Expr(Expr, Span),
+}
+
+impl Guard {
+    /// Get the span of this guard.
+    #[must_use]
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Pattern(_, _, s) | Self::Expr(_, s) => *s,
+        }
+    }
 }
 
 /// A data type declaration.

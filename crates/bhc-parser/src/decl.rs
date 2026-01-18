@@ -559,6 +559,10 @@ impl<'src> Parser<'src> {
         // Skip Haddock documentation comments before declarations
         self.skip_doc_comments();
 
+        // After doc comments, there may be a VirtualSemi if the next token
+        // is at the same indentation level. Skip it.
+        self.eat(&TokenKind::VirtualSemi);
+
         let tok = self.current().ok_or(ParseError::UnexpectedEof {
             expected: "declaration".to_string(),
         })?;

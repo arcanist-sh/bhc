@@ -967,6 +967,42 @@ isFixedSizeOrTransient d w = do
     }
 
     #[test]
+    fn test_import_then_function() {
+        // Test imports followed by function definitions
+        let src = r#"module Test where
+
+import Data.Maybe
+
+-- | Lift action
+liftX :: X a -> Query a
+liftX = Query . lift
+"#;
+        let (_module, diags) = parse_module(src, FileId::new(0));
+        for d in &diags {
+            eprintln!("Error: {:?}", d);
+        }
+        assert!(diags.is_empty(), "Import followed by function should parse");
+    }
+
+    #[test]
+    fn test_infix_function_definition() {
+        // Test infix operator definitions like XMonad's (-->)
+        let src = r#"module Test where
+
+(-->) :: Bool -> a -> a
+p --> f = if p then f else undefined
+
+(<&&>) :: Bool -> Bool -> Bool
+x <&&> y = x && y
+"#;
+        let (_module, diags) = parse_module(src, FileId::new(0));
+        for d in &diags {
+            eprintln!("Error: {:?}", d);
+        }
+        assert!(diags.is_empty(), "Infix function definitions should parse");
+    }
+
+    #[test]
     fn test_xmonad_parsing() {
         // Test parsing XMonad-style code
         use std::path::Path;

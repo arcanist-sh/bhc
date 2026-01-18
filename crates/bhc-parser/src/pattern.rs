@@ -86,6 +86,8 @@ impl<'src> Parser<'src> {
             Some(kind) => matches!(
                 kind,
                 TokenKind::Ident(_)
+                    | TokenKind::ConId(_)        // Constructors can be pattern arguments
+                    | TokenKind::QualConId(_, _) // Qualified constructors too
                     | TokenKind::IntLit(_)
                     | TokenKind::FloatLit(_)
                     | TokenKind::CharLit(_)

@@ -1001,9 +1001,17 @@ impl<'src> Parser<'src> {
                     if self.check(&rbrace) || self.check(&TokenKind::VirtualRBrace) {
                         break;
                     }
+                    // Stop at 'where' - it belongs to the enclosing function binding
+                    if self.check(&TokenKind::Where) {
+                        break;
+                    }
                     // Skip any extra semicolons
                     while self.eat(&TokenKind::Semi) || self.eat(&TokenKind::VirtualSemi) {}
                     if self.check(&rbrace) || self.check(&TokenKind::VirtualRBrace) {
+                        break;
+                    }
+                    // Stop at 'where' - it belongs to the enclosing function binding
+                    if self.check(&TokenKind::Where) {
                         break;
                     }
                     stmts.push(self.parse_stmt()?);

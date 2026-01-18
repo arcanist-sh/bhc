@@ -1069,6 +1069,23 @@ impl<'src> Lexer<'src> {
         }
     }
 
+    /// Check if a token is a "continuation token" that shouldn't trigger VirtualSemi.
+    /// These tokens indicate we're in the middle of a construct that spans multiple lines.
+    fn is_continuation_token(kind: &TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::Arrow           // -> in type signatures, case alternatives
+            | TokenKind::UnicodeArrow  // →
+            | TokenKind::FatArrow      // => in contexts
+            | TokenKind::UnicodeFatArrow // ⇒
+            | TokenKind::Pipe          // | in guards, data alternatives
+            | TokenKind::Comma         // , in tuples, lists, records
+            | TokenKind::DoubleColon   // :: can continue (rare but possible)
+            | TokenKind::UnicodeDoubleColon // ∷
+            // Note: Don't include Eq (=) as continuation - it can start a new declaration
+        )
+    }
+
     /// Handle layout rule: generate virtual tokens based on indentation.
     fn handle_layout(&mut self, token: &Token, column: u32) {
         // Handle indentation at line start FIRST (before checking for layout keywords)
@@ -1084,6 +1101,7 @@ impl<'src> Lexer<'src> {
 
                 if column < ctx_col {
                     // Dedent: close the layout block
+                    // Note: Always emit VirtualRBrace for dedents, even for continuation tokens
                     self.layout_stack.pop();
                     self.pending.push(Spanned::new(
                         Token::new(TokenKind::VirtualRBrace),
@@ -1091,10 +1109,14 @@ impl<'src> Lexer<'src> {
                     ));
                 } else if column == ctx_col {
                     // Same indentation: new item in the block
-                    self.pending.push(Spanned::new(
-                        Token::new(TokenKind::VirtualSemi),
-                        Span::from_raw(self.pos as u32, self.pos as u32),
-                    ));
+                    // BUT don't insert VirtualSemi for continuation tokens
+                    // (these indicate we're in the middle of a multi-line construct)
+                    if !Self::is_continuation_token(&token.kind) {
+                        self.pending.push(Spanned::new(
+                            Token::new(TokenKind::VirtualSemi),
+                            Span::from_raw(self.pos as u32, self.pos as u32),
+                        ));
+                    }
                     break;
                 } else {
                     break;
@@ -1659,6 +1681,83 @@ mod tests {
         // module where -> VirtualLBrace, do -> VirtualLBrace, let -> VirtualLBrace
         // bar dedents closes do's let, do, but module continues
         assert!(rbrace_count >= 2, "Should have at least 2 VirtualRBrace for multi-level dedent");
+    }
+
+    #[test]
+    fn test_multiline_type_signature() {
+        // Test that multi-line type signatures don't get VirtualSemi between lines
+        let src = "tile\n    :: Rational\n    -> Rectangle\n    -> Int";
+        let kinds = lex_kinds(src);
+
+        println!("Tokens: {:?}", kinds);
+
+        // Should NOT have VirtualSemi before :: or ->
+        // Expected: Ident(tile), DoubleColon, ConId(Rational), Arrow, ConId(Rectangle), Arrow, ConId(Int), Eof
+        let semi_count = kinds.iter().filter(|k| **k == TokenKind::VirtualSemi).count();
+
+        // Ideally 0 virtual semis, but we might have one at the end
+        assert!(semi_count <= 1, "Should not have VirtualSemi in middle of type signature, got {:?}", kinds);
+
+        // Check the token sequence
+        assert!(matches!(kinds[0], TokenKind::Ident(_)), "First should be Ident, got {:?}", kinds[0]);
+        // After Ident, we should see DoubleColon (not VirtualSemi)
+        assert_eq!(kinds[1], TokenKind::DoubleColon, "Second should be DoubleColon, got {:?}", kinds[1]);
+    }
+
+    #[test]
+    fn test_multiline_type_signature_in_module() {
+        // Test multi-line type signature inside module context
+        let src = "module Foo where\ntile\n    :: Rational\n    -> Rectangle";
+        let kinds = lex_kinds(src);
+
+        println!("Module type sig tokens: {:?}", kinds);
+
+        // Find the position of 'tile'
+        let tile_idx = kinds.iter().position(|k| matches!(k, TokenKind::Ident(s) if s.as_str() == "tile")).unwrap();
+        println!("tile at index {}, next token: {:?}", tile_idx, kinds.get(tile_idx + 1));
+
+        // After tile, we should see DoubleColon (not VirtualSemi)
+        assert_eq!(kinds[tile_idx + 1], TokenKind::DoubleColon,
+            "After 'tile' should be DoubleColon, got {:?}", kinds[tile_idx + 1]);
+    }
+
+    #[test]
+    fn test_multiline_type_signature_with_doc_comments() {
+        // Test multi-line type signature with Haddock comments (like XMonad Layout.hs)
+        let src = "tile\n    :: Rational  -- ^ comment\n    -> Rectangle -- ^ comment";
+        let kinds = lex_kinds(src);
+
+        println!("With doc comments: {:?}", kinds);
+
+        // Check that no VirtualSemi appears between tile and ::
+        assert_eq!(kinds[0], TokenKind::Ident(bhc_intern::Symbol::intern("tile")));
+        // Note: doc comments are preserved, so :: might not be at index 1
+        // Find :: and check it comes before any VirtualSemi
+        let has_semi_before_double_colon = kinds.iter()
+            .take_while(|k| **k != TokenKind::DoubleColon)
+            .any(|k| *k == TokenKind::VirtualSemi);
+        assert!(!has_semi_before_double_colon, "Should not have VirtualSemi before ::");
+    }
+
+    #[test]
+    fn test_layout_with_doc_comment_before_type_sig() {
+        // Test the problematic pattern from Layout.hs
+        let src = r#"module Foo where
+instance Show Foo where
+    desc _ = "Foo"
+
+-- | Doc
+tile
+    :: Int
+    -> Bool"#;
+        let kinds = lex_kinds(src);
+
+        println!("Layout with doc comment before type sig: {:?}", kinds);
+
+        // Find tile's position
+        let tile_idx = kinds.iter().position(|k| matches!(k, TokenKind::Ident(s) if s.as_str() == "tile")).unwrap();
+        println!("tile at index {}", tile_idx);
+        println!("tokens around tile: {:?}", &kinds[tile_idx.saturating_sub(3)..=tile_idx.min(kinds.len()-1)+3]);
     }
 }
 

@@ -1167,6 +1167,89 @@ instance (a ~ Int) => Num a where
     }
 
     #[test]
+    fn test_multiline_type_signature_parsing() {
+        // Test parsing multi-line type signature like XMonad Layout.hs
+        let src = r#"module Foo where
+tile
+    :: Rational
+    -> Rectangle
+    -> Int
+"#;
+        let (module, diags) = parse_module(src, FileId::new(0));
+        for d in &diags {
+            eprintln!("Error: {:?}", d);
+        }
+        assert!(diags.is_empty(), "Multi-line type signature should parse");
+        let module = module.expect("Should parse");
+        // Should have one declaration: the type signature
+        assert_eq!(module.decls.len(), 1, "Should have 1 decl, got {:?}", module.decls);
+    }
+
+    #[test]
+    fn test_multiline_type_signature_with_function_parsing() {
+        // Test parsing multi-line type signature followed by function definition
+        let src = r#"module Foo where
+tile
+    :: Rational
+    -> Rectangle
+tile f r = r
+"#;
+        let (module, diags) = parse_module(src, FileId::new(0));
+        for d in &diags {
+            eprintln!("Error: {:?}", d);
+        }
+        assert!(diags.is_empty(), "Multi-line type signature with function should parse");
+        let module = module.expect("Should parse");
+        // Should have two declarations: type signature and function binding
+        assert_eq!(module.decls.len(), 2, "Should have 2 decls, got {:?}", module.decls);
+    }
+
+    #[test]
+    fn test_multiline_type_signature_after_instance() {
+        // Test Layout.hs pattern: instance body followed by top-level type signature
+        let src = r#"module Foo where
+instance Show Foo where
+    show _ = "Foo"
+
+tile
+    :: Int
+    -> Bool
+tile n = n > 0
+"#;
+        let (module, diags) = parse_module(src, FileId::new(0));
+        for d in &diags {
+            eprintln!("Error: {:?}", d);
+        }
+        assert!(diags.is_empty(), "Type signature after instance should parse");
+        let module = module.expect("Should parse");
+        // Should have: instance, type signature, function binding
+        assert_eq!(module.decls.len(), 3, "Should have 3 decls, got {:?}", module.decls);
+    }
+
+    #[test]
+    fn test_multiline_type_signature_with_doc_comments() {
+        // Test Layout.hs pattern with doc comments
+        let src = r#"module Foo where
+instance Show Foo where
+    description _ = "Foo"
+
+-- | Doc comment
+tile
+    :: Int  -- ^ arg1
+    -> Bool -- ^ result
+tile n = n > 0
+"#;
+        let (module, diags) = parse_module(src, FileId::new(0));
+        for d in &diags {
+            eprintln!("Error: {:?}", d);
+        }
+        assert!(diags.is_empty(), "Type signature with doc comments should parse");
+        let module = module.expect("Should parse");
+        // Should have: instance, type signature, function binding
+        assert_eq!(module.decls.len(), 3, "Should have 3 decls, got {:?}", module.decls);
+    }
+
+    #[test]
     fn test_xmonad_parsing() {
         // Test parsing XMonad-style code
         use std::path::Path;

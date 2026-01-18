@@ -126,6 +126,10 @@ impl<'src> Parser<'src> {
     fn parse_fun_type(&mut self) -> ParseResult<Type> {
         let lhs = self.parse_app_type()?;
 
+        // Skip any doc comments before checking for ->
+        // (Haddock argument documentation like `-- ^`)
+        self.skip_doc_comments();
+
         if self.eat(&TokenKind::Arrow) {
             let rhs = self.parse_fun_type()?;
             let span = lhs.span().to(rhs.span());

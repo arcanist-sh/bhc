@@ -690,19 +690,43 @@ impl<'src> Parser<'src> {
     fn parse_do_stmts(&mut self) -> ParseResult<Vec<Stmt>> {
         let mut stmts = Vec::new();
 
-        if self.eat(&TokenKind::LBrace) {
-            if !self.check(&TokenKind::RBrace) {
+        // Check for explicit or virtual opening brace
+        let explicit_braces = self.eat(&TokenKind::LBrace);
+        let virtual_braces = !explicit_braces && self.eat(&TokenKind::VirtualLBrace);
+        let has_braces = explicit_braces || virtual_braces;
+
+        if has_braces {
+            // Parse statements separated by semicolons (real or virtual)
+            let rbrace = if explicit_braces {
+                TokenKind::RBrace
+            } else {
+                TokenKind::VirtualRBrace
+            };
+
+            if !self.check(&rbrace) {
                 stmts.push(self.parse_stmt()?);
-                while self.eat(&TokenKind::Semi) {
-                    if self.check(&TokenKind::RBrace) {
+                // Accept either real or virtual semicolons
+                while self.eat(&TokenKind::Semi) || self.eat(&TokenKind::VirtualSemi) {
+                    if self.check(&rbrace) || self.check(&TokenKind::VirtualRBrace) {
+                        break;
+                    }
+                    // Skip any extra semicolons
+                    while self.eat(&TokenKind::Semi) || self.eat(&TokenKind::VirtualSemi) {}
+                    if self.check(&rbrace) || self.check(&TokenKind::VirtualRBrace) {
                         break;
                     }
                     stmts.push(self.parse_stmt()?);
                 }
             }
-            self.expect(&TokenKind::RBrace)?;
+
+            if explicit_braces {
+                self.expect(&TokenKind::RBrace)?;
+            } else {
+                // Virtual braces: consume if present, but don't require
+                self.eat(&TokenKind::VirtualRBrace);
+            }
         } else {
-            // Simplified layout
+            // No braces at all - single statement
             stmts.push(self.parse_stmt()?);
         }
 

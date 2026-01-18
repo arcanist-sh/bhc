@@ -1240,9 +1240,9 @@ impl<'src> Lexer<'src> {
 
         // If layout rule generated pending tokens, they should come BEFORE current token
         if !self.pending.is_empty() {
-            // Add current token to end of pending, return first pending
-            self.pending.insert(0, current_tok);
-            Some(self.pending.pop().unwrap())
+            // Add current token to end of pending, return first pending (FIFO)
+            self.pending.push(current_tok);
+            Some(self.pending.remove(0))
         } else {
             Some(current_tok)
         }
@@ -1259,8 +1259,9 @@ impl<'src> Iterator for Lexer<'src> {
         }
 
         // Return pending tokens first (from layout rule)
-        if let Some(tok) = self.pending.pop() {
-            return Some(tok);
+        // Use remove(0) for FIFO order: VirtualRBrace should come before VirtualSemi
+        if !self.pending.is_empty() {
+            return Some(self.pending.remove(0));
         }
 
         // If we're expecting a layout block, we need to peek at the next
@@ -1273,8 +1274,8 @@ impl<'src> Iterator for Lexer<'src> {
 
             // Check if next char is explicit brace
             if self.peek() == Some('{') {
-                // Explicit brace - push explicit context
-                self.layout_stack.push((0, true));
+                // Explicit brace - handle_layout will push the explicit context
+                // when it sees the LBrace token, so we don't need to do anything here
             } else if self.peek().is_some() {
                 // Implicit layout - insert virtual brace BEFORE the next token
                 let column = self.column;

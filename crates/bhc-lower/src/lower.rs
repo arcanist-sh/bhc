@@ -1019,6 +1019,20 @@ fn lower_class_decl(ctx: &mut LowerContext, class: &ast::ClassDecl) -> LowerResu
         .flatten()
         .collect();
 
+    // Pre-bind default method implementations before lowering them
+    // (TypeSig names are already bound in collect_module_definitions, but
+    // default implementations may have names not in TypeSig or may appear first)
+    for method in &class.methods {
+        if let ast::Decl::FunBind(fb) = method {
+            let name = fb.name.name;
+            if ctx.lookup_value(name).is_none() {
+                let def_id = ctx.fresh_def_id();
+                ctx.define(def_id, name, DefKind::Value, fb.span);
+                ctx.bind_value(name, def_id);
+            }
+        }
+    }
+
     // Extract default implementations
     let defaults: Vec<hir::ValueDef> = class
         .methods
@@ -1055,6 +1069,19 @@ fn lower_instance_decl(
         .iter()
         .map(|c| c.class.name)
         .collect();
+
+    // Pre-bind all instance methods before lowering them
+    for method in &instance.methods {
+        if let ast::Decl::FunBind(fb) = method {
+            let name = fb.name.name;
+            // Only bind if not already bound (method could shadow class method)
+            if ctx.lookup_value(name).is_none() {
+                let def_id = ctx.fresh_def_id();
+                ctx.define(def_id, name, DefKind::Value, fb.span);
+                ctx.bind_value(name, def_id);
+            }
+        }
+    }
 
     let methods: Vec<hir::ValueDef> = instance
         .methods

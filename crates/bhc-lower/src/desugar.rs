@@ -14,6 +14,7 @@ use bhc_intern::Symbol;
 use bhc_span::Span;
 
 use crate::context::LowerContext;
+use crate::resolve::bind_pattern;
 
 /// Desugar do-notation into monadic bind and sequence operations.
 ///
@@ -61,8 +62,13 @@ fn desugar_do_stmts(
         // Generator: x <- e
         [ast::Stmt::Generator(pat, expr, stmt_span), rest @ ..] => {
             let e = lower_expr(ctx, expr);
+            // Enter a new scope for the pattern variable
+            ctx.enter_scope();
+            // Bind pattern variables before lowering
+            bind_pattern(ctx, pat);
             let p = lower_pat(ctx, pat);
             let body = desugar_do_stmts(ctx, rest, span, lower_expr, lower_pat);
+            ctx.exit_scope();
 
             // e >>= \p -> body
             let bind_sym = Symbol::intern(">>=");
@@ -186,9 +192,14 @@ fn desugar_stmts_for_comp(
 
         [ast::Stmt::Generator(pat, gen_expr, qual_span), rest @ ..] => {
             // x <- xs becomes concatMap (\x -> ...) xs
-            let p = lower_pat(ctx, pat);
             let xs = lower_expr(ctx, gen_expr);
+            // Enter a new scope for the pattern variable
+            ctx.enter_scope();
+            // Bind pattern variables before lowering
+            bind_pattern(ctx, pat);
+            let p = lower_pat(ctx, pat);
             let body = desugar_stmts_for_comp(ctx, expr, rest, span, lower_expr, lower_pat);
+            ctx.exit_scope();
 
             let lambda = hir::Expr::Lam(vec![p], Box::new(body), span);
 
@@ -290,14 +301,21 @@ fn desugar_guards(
                 ast::Guard::Pattern(pat, scrut_expr, guard_span) => {
                     // Pattern guard: case scrut of { pat -> inner; _ -> else_branch }
                     let scrut = lower_expr(ctx, scrut_expr);
+                    // Enter a new scope for the pattern variables
+                    ctx.enter_scope();
+                    // Bind pattern variables before lowering
+                    bind_pattern(ctx, pat);
                     let pat_hir = lower_pat(ctx, pat);
 
+                    // Note: inner is already computed, so pattern variables are in scope for the RHS
                     let match_alt = hir::CaseAlt {
                         pat: pat_hir,
                         guards: vec![],
                         rhs: inner,
                         span: *guard_span,
                     };
+                    ctx.exit_scope();
+
                     let default_alt = hir::CaseAlt {
                         pat: hir::Pat::Wild(*guard_span),
                         guards: vec![],

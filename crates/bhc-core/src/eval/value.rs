@@ -403,6 +403,22 @@ pub enum PrimOp {
     UArrayLength,
     /// Create a range [start..end).
     UArrayRange,
+
+    // List operations
+    /// Concatenate two lists.
+    Concat,
+    /// Map a function over a list and concatenate results.
+    ConcatMap,
+    /// Append an element to a list.
+    Append,
+
+    // Monad operations (for list monad)
+    /// Monadic bind (>>=) for lists: xs >>= f = concatMap f xs
+    ListBind,
+    /// Monadic then (>>) for lists: xs >> ys = xs >>= \_ -> ys
+    ListThen,
+    /// Monadic return for lists: return x = [x]
+    ListReturn,
 }
 
 impl PrimOp {
@@ -412,8 +428,10 @@ impl PrimOp {
         match self {
             Self::NegInt | Self::NegDouble | Self::NotBool | Self::IntToDouble
             | Self::DoubleToInt | Self::CharToInt | Self::IntToChar | Self::Error
-            | Self::UArrayFromList | Self::UArrayToList | Self::UArraySum | Self::UArrayLength => 1,
-            Self::UArrayMap | Self::UArrayRange => 2,
+            | Self::UArrayFromList | Self::UArrayToList | Self::UArraySum | Self::UArrayLength
+            | Self::ListReturn => 1,
+            Self::UArrayMap | Self::UArrayRange | Self::Concat | Self::ConcatMap | Self::Append
+            | Self::ListBind | Self::ListThen => 2,
             Self::UArrayZipWith | Self::UArrayFold => 3,
             _ => 2,
         }
@@ -460,6 +478,14 @@ impl PrimOp {
             "uarraySum" | "sum" => Some(Self::UArraySum),
             "uarrayLength" | "length" => Some(Self::UArrayLength),
             "uarrayRange" | "range" => Some(Self::UArrayRange),
+            // List operations
+            "++" | "concat" => Some(Self::Concat),
+            "concatMap" => Some(Self::ConcatMap),
+            "append" => Some(Self::Append),
+            // Monad operations (list monad for now)
+            ">>=" => Some(Self::ListBind),
+            ">>" => Some(Self::ListThen),
+            "return" => Some(Self::ListReturn),
             _ => None,
         }
     }

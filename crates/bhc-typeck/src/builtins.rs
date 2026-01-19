@@ -457,9 +457,10 @@ impl Builtins {
         };
 
         // Register each operator with its DefId matching the lowering order
-        // Order MUST match bhc_lower::context::define_builtins
+        // Order MUST match bhc_lower::context::define_builtins EXACTLY
+        // Any mismatch will cause "cannot find value DefId(N)" errors
         let ops: Vec<(&str, Scheme)> = vec![
-            // Arithmetic operators (DefIds 15-23)
+            // Arithmetic operators
             ("+", num_binop()),
             ("-", num_binop()),
             ("*", num_binop()),
@@ -469,94 +470,155 @@ impl Builtins {
             ("^", num_binop()),
             ("^^", num_binop()),
             ("**", num_binop()),
-            // Comparison operators (DefIds 24-29)
+            // Comparison operators
             ("==", eq_binop()),
             ("/=", eq_binop()),
             ("<", cmp_binop()),
             ("<=", cmp_binop()),
             (">", cmp_binop()),
             (">=", cmp_binop()),
-            // Boolean operators (DefIds 30-31)
+            // Boolean operators
             ("&&", bool_binop()),
             ("||", bool_binop()),
-            // List operators (DefIds 32-34)
-            (
-                ":",
-                {
-                    // a -> [a] -> [a]
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                    Scheme::poly(
-                        vec![a.clone()],
-                        Ty::fun(Ty::Var(a.clone()), Ty::fun(list_a.clone(), list_a)),
-                    )
-                },
-            ),
-            (
-                "++",
-                {
-                    // [a] -> [a] -> [a]
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                    Scheme::poly(
-                        vec![a.clone()],
-                        Ty::fun(list_a.clone(), Ty::fun(list_a.clone(), list_a)),
-                    )
-                },
-            ),
-            (
-                "!!",
-                {
-                    // [a] -> Int -> a
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                    Scheme::poly(
-                        vec![a.clone()],
-                        Ty::fun(list_a, Ty::fun(self.int_ty.clone(), Ty::Var(a.clone()))),
-                    )
-                },
-            ),
-            // Function composition (DefIds 35-36)
-            (
-                ".",
-                {
-                    // (b -> c) -> (a -> b) -> a -> c
-                    let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
-                    Scheme::poly(
-                        vec![a.clone(), b.clone(), c.clone()],
-                        Ty::fun(
-                            Ty::fun(Ty::Var(b.clone()), Ty::Var(c.clone())),
-                            Ty::fun(
-                                Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                                Ty::fun(Ty::Var(a.clone()), Ty::Var(c.clone())),
-                            ),
-                        ),
-                    )
-                },
-            ),
-            (
-                "$",
-                {
-                    // (a -> b) -> a -> b
-                    Scheme::poly(
-                        vec![a.clone(), b.clone()],
+            // List operators
+            (":", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::fun(list_a.clone(), list_a)),
+                )
+            }),
+            ("++", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(list_a.clone(), Ty::fun(list_a.clone(), list_a)),
+                )
+            }),
+            ("!!", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(list_a, Ty::fun(self.int_ty.clone(), Ty::Var(a.clone()))),
+                )
+            }),
+            // Function composition
+            (".", {
+                let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
+                Scheme::poly(
+                    vec![a.clone(), b.clone(), c.clone()],
+                    Ty::fun(
+                        Ty::fun(Ty::Var(b.clone()), Ty::Var(c.clone())),
                         Ty::fun(
                             Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                            Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                            Ty::fun(Ty::Var(a.clone()), Ty::Var(c.clone())),
                         ),
-                    )
-                },
-            ),
-            // For remaining operators, use placeholder types
-            // These can be refined later when we have type classes
-            (">>=", Scheme::mono(Ty::Error)),  // Monad
-            (">>", Scheme::mono(Ty::Error)),   // Monad
-            ("<*>", Scheme::mono(Ty::Error)),  // Applicative
-            ("<$>", Scheme::mono(Ty::Error)),  // Functor
-            ("*>", Scheme::mono(Ty::Error)),   // Applicative
-            ("<*", Scheme::mono(Ty::Error)),   // Applicative
-            ("<|>", Scheme::mono(Ty::Error)),  // Alternative
+                    ),
+                )
+            }),
+            ("$", {
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                    ),
+                )
+            }),
+            // Monadic operators
+            (">>=", Scheme::mono(Ty::Error)),
+            (">>", Scheme::mono(Ty::Error)),
+            ("=<<", Scheme::mono(Ty::Error)),
+            // Applicative/Functor operators
+            ("<*>", Scheme::mono(Ty::Error)),
+            ("<$>", Scheme::mono(Ty::Error)),
+            ("<$", Scheme::mono(Ty::Error)),
+            ("*>", Scheme::mono(Ty::Error)),
+            ("<*", Scheme::mono(Ty::Error)),
+            ("fmap", Scheme::mono(Ty::Error)),
+            // Alternative operator
+            ("<|>", Scheme::mono(Ty::Error)),
+            ("empty", Scheme::mono(Ty::Error)),
+            // Semigroup/Monoid operators
+            ("<>", Scheme::mono(Ty::Error)),
+            ("mempty", Scheme::mono(Ty::Error)),
+            ("mappend", Scheme::mono(Ty::Error)),
+            ("mconcat", Scheme::mono(Ty::Error)),
             // Monadic operations
             ("return", Scheme::mono(Ty::Error)),
             ("pure", Scheme::mono(Ty::Error)),
-            // List operations
+            ("join", Scheme::mono(Ty::Error)),
+            ("liftM", Scheme::mono(Ty::Error)),
+            ("liftM2", Scheme::mono(Ty::Error)),
+            ("ap", Scheme::mono(Ty::Error)),
+            ("mapM", Scheme::mono(Ty::Error)),
+            ("mapM_", Scheme::mono(Ty::Error)),
+            ("forM", Scheme::mono(Ty::Error)),
+            ("forM_", Scheme::mono(Ty::Error)),
+            ("sequence", Scheme::mono(Ty::Error)),
+            ("sequence_", Scheme::mono(Ty::Error)),
+            ("when", Scheme::mono(Ty::Error)),
+            ("unless", Scheme::mono(Ty::Error)),
+            ("void", Scheme::mono(Ty::Error)),
+            ("liftIO", Scheme::mono(Ty::Error)),
+            // Reader/State monad operations
+            ("ask", Scheme::mono(Ty::Error)),
+            ("asks", Scheme::mono(Ty::Error)),
+            ("local", Scheme::mono(Ty::Error)),
+            ("reader", Scheme::mono(Ty::Error)),
+            ("get", Scheme::mono(Ty::Error)),
+            ("gets", Scheme::mono(Ty::Error)),
+            ("put", Scheme::mono(Ty::Error)),
+            ("modify", Scheme::mono(Ty::Error)),
+            ("modify'", Scheme::mono(Ty::Error)),
+            ("state", Scheme::mono(Ty::Error)),
+            ("runReader", Scheme::mono(Ty::Error)),
+            ("runReaderT", Scheme::mono(Ty::Error)),
+            ("runState", Scheme::mono(Ty::Error)),
+            ("runStateT", Scheme::mono(Ty::Error)),
+            ("evalState", Scheme::mono(Ty::Error)),
+            ("evalStateT", Scheme::mono(Ty::Error)),
+            ("execState", Scheme::mono(Ty::Error)),
+            ("execStateT", Scheme::mono(Ty::Error)),
+            ("lift", Scheme::mono(Ty::Error)),
+            // Exception handling
+            ("catch", Scheme::mono(Ty::Error)),
+            ("try", Scheme::mono(Ty::Error)),
+            ("throw", Scheme::mono(Ty::Error)),
+            ("throwIO", Scheme::mono(Ty::Error)),
+            ("bracket", Scheme::mono(Ty::Error)),
+            ("bracket_", Scheme::mono(Ty::Error)),
+            ("bracketOnError", Scheme::mono(Ty::Error)),
+            ("finally", Scheme::mono(Ty::Error)),
+            ("onException", Scheme::mono(Ty::Error)),
+            ("handle", Scheme::mono(Ty::Error)),
+            ("handleJust", Scheme::mono(Ty::Error)),
+            ("catchJust", Scheme::mono(Ty::Error)),
+            ("tryJust", Scheme::mono(Ty::Error)),
+            ("evaluate", Scheme::mono(Ty::Error)),
+            ("mask", Scheme::mono(Ty::Error)),
+            ("mask_", Scheme::mono(Ty::Error)),
+            ("uninterruptibleMask", Scheme::mono(Ty::Error)),
+            ("uninterruptibleMask_", Scheme::mono(Ty::Error)),
+            // IO operations
+            ("hPutStr", Scheme::mono(Ty::Error)),
+            ("hPutStrLn", Scheme::mono(Ty::Error)),
+            ("hPrint", Scheme::mono(Ty::Error)),
+            ("hGetLine", Scheme::mono(Ty::Error)),
+            ("hGetContents", Scheme::mono(Ty::Error)),
+            ("hClose", Scheme::mono(Ty::Error)),
+            ("openFile", Scheme::mono(Ty::Error)),
+            ("withFile", Scheme::mono(Ty::Error)),
+            ("stdin", Scheme::mono(Ty::Error)),
+            ("stdout", Scheme::mono(Ty::Error)),
+            ("stderr", Scheme::mono(Ty::Error)),
+            ("hFlush", Scheme::mono(Ty::Error)),
+            ("hIsEOF", Scheme::mono(Ty::Error)),
+            ("isEOF", Scheme::mono(Ty::Error)),
+            ("getContents", Scheme::mono(Ty::Error)),
+            ("interact", Scheme::mono(Ty::Error)),
+            ("appendFile", Scheme::mono(Ty::Error)),
+            // List operations (these need proper types for list comprehensions)
             ("map", {
                 let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                 let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
@@ -581,7 +643,18 @@ impl Builtins {
             ("foldr", Scheme::mono(Ty::Error)),
             ("foldl", Scheme::mono(Ty::Error)),
             ("foldl'", Scheme::mono(Ty::Error)),
-            ("concatMap", Scheme::mono(Ty::Error)),
+            ("concatMap", {
+                // concatMap :: (a -> [b]) -> [a] -> [b]
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::fun(Ty::Var(a.clone()), list_b.clone()),
+                        Ty::fun(list_a, list_b),
+                    ),
+                )
+            }),
             ("head", {
                 let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                 Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
@@ -634,6 +707,61 @@ impl Builtins {
             }),
             ("zip", Scheme::mono(Ty::Error)),
             ("zipWith", Scheme::mono(Ty::Error)),
+            ("zip3", Scheme::mono(Ty::Error)),
+            ("zipWith3", Scheme::mono(Ty::Error)),
+            ("unzip", Scheme::mono(Ty::Error)),
+            ("unzip3", Scheme::mono(Ty::Error)),
+            ("lines", Scheme::mono(Ty::Error)),
+            ("unlines", Scheme::mono(Ty::Error)),
+            ("words", Scheme::mono(Ty::Error)),
+            ("unwords", Scheme::mono(Ty::Error)),
+            ("concat", {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                let list_list_a = Ty::List(Box::new(list_a.clone()));
+                Scheme::poly(vec![a.clone()], Ty::fun(list_list_a, list_a))
+            }),
+            ("intercalate", Scheme::mono(Ty::Error)),
+            ("intersperse", Scheme::mono(Ty::Error)),
+            ("transpose", Scheme::mono(Ty::Error)),
+            ("subsequences", Scheme::mono(Ty::Error)),
+            ("permutations", Scheme::mono(Ty::Error)),
+            ("scanl", Scheme::mono(Ty::Error)),
+            ("scanl'", Scheme::mono(Ty::Error)),
+            ("scanr", Scheme::mono(Ty::Error)),
+            ("iterate", Scheme::mono(Ty::Error)),
+            ("repeat", Scheme::mono(Ty::Error)),
+            ("replicate", Scheme::mono(Ty::Error)),
+            ("cycle", Scheme::mono(Ty::Error)),
+            ("splitAt", Scheme::mono(Ty::Error)),
+            ("span", Scheme::mono(Ty::Error)),
+            ("break", Scheme::mono(Ty::Error)),
+            ("takeWhile", Scheme::mono(Ty::Error)),
+            ("dropWhile", Scheme::mono(Ty::Error)),
+            ("group", Scheme::mono(Ty::Error)),
+            ("inits", Scheme::mono(Ty::Error)),
+            ("tails", Scheme::mono(Ty::Error)),
+            ("isPrefixOf", Scheme::mono(Ty::Error)),
+            ("isSuffixOf", Scheme::mono(Ty::Error)),
+            ("isInfixOf", Scheme::mono(Ty::Error)),
+            ("elem", Scheme::mono(Ty::Error)),
+            ("notElem", Scheme::mono(Ty::Error)),
+            ("lookup", Scheme::mono(Ty::Error)),
+            ("find", Scheme::mono(Ty::Error)),
+            ("partition", Scheme::mono(Ty::Error)),
+            ("nub", Scheme::mono(Ty::Error)),
+            ("delete", Scheme::mono(Ty::Error)),
+            ("union", Scheme::mono(Ty::Error)),
+            ("intersect", Scheme::mono(Ty::Error)),
+            ("sort", Scheme::mono(Ty::Error)),
+            ("sortBy", Scheme::mono(Ty::Error)),
+            ("sortOn", Scheme::mono(Ty::Error)),
+            ("insert", Scheme::mono(Ty::Error)),
+            ("genericLength", Scheme::mono(Ty::Error)),
+            ("genericTake", Scheme::mono(Ty::Error)),
+            ("genericDrop", Scheme::mono(Ty::Error)),
+            ("genericSplitAt", Scheme::mono(Ty::Error)),
+            ("genericIndex", Scheme::mono(Ty::Error)),
+            ("genericReplicate", Scheme::mono(Ty::Error)),
             // Prelude functions
             ("id", Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))),
             ("const", Scheme::poly(
@@ -700,6 +828,109 @@ impl Builtins {
             ))))),
             // Guard helper
             ("guard", Scheme::mono(Ty::Error)),
+            // Tuple functions
+            ("fst", Scheme::mono(Ty::Error)),
+            ("snd", Scheme::mono(Ty::Error)),
+            ("curry", Scheme::mono(Ty::Error)),
+            ("uncurry", Scheme::mono(Ty::Error)),
+            ("swap", Scheme::mono(Ty::Error)),
+            // Character functions
+            ("ord", Scheme::mono(Ty::fun(self.char_ty.clone(), self.int_ty.clone()))),
+            ("chr", Scheme::mono(Ty::fun(self.int_ty.clone(), self.char_ty.clone()))),
+            ("isAlpha", Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))),
+            ("isAlphaNum", Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))),
+            ("isAscii", Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))),
+            ("isControl", Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))),
+            ("isDigit", Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))),
+            ("isHexDigit", Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))),
+            ("isLetter", Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))),
+            ("isLower", Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))),
+            ("isNumber", Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))),
+            ("isPrint", Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))),
+            ("isPunctuation", Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))),
+            ("isSpace", Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))),
+            ("isSymbol", Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))),
+            ("isUpper", Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))),
+            ("toLower", Scheme::mono(Ty::fun(self.char_ty.clone(), self.char_ty.clone()))),
+            ("toUpper", Scheme::mono(Ty::fun(self.char_ty.clone(), self.char_ty.clone()))),
+            ("digitToInt", Scheme::mono(Ty::fun(self.char_ty.clone(), self.int_ty.clone()))),
+            ("intToDigit", Scheme::mono(Ty::fun(self.int_ty.clone(), self.char_ty.clone()))),
+            // Enum functions
+            ("succ", Scheme::mono(Ty::Error)),
+            ("pred", Scheme::mono(Ty::Error)),
+            ("toEnum", Scheme::mono(Ty::Error)),
+            ("fromEnum", Scheme::mono(Ty::Error)),
+            ("enumFrom", Scheme::mono(Ty::Error)),
+            ("enumFromThen", Scheme::mono(Ty::Error)),
+            ("enumFromTo", Scheme::mono(Ty::Error)),
+            ("enumFromThenTo", Scheme::mono(Ty::Error)),
+            // Bounded
+            ("minBound", Scheme::mono(Ty::Error)),
+            ("maxBound", Scheme::mono(Ty::Error)),
+            // Read functions
+            ("read", Scheme::mono(Ty::Error)),
+            ("reads", Scheme::mono(Ty::Error)),
+            ("readMaybe", Scheme::mono(Ty::Error)),
+            ("readEither", Scheme::mono(Ty::Error)),
+            // Numeric conversion
+            ("toInteger", Scheme::mono(Ty::Error)),
+            ("toRational", Scheme::mono(Ty::Error)),
+            ("realToFrac", Scheme::mono(Ty::Error)),
+            ("truncate", Scheme::mono(Ty::Error)),
+            ("round", Scheme::mono(Ty::Error)),
+            ("ceiling", Scheme::mono(Ty::Error)),
+            ("floor", Scheme::mono(Ty::Error)),
+            ("even", Scheme::mono(Ty::fun(self.int_ty.clone(), self.bool_ty.clone()))),
+            ("odd", Scheme::mono(Ty::fun(self.int_ty.clone(), self.bool_ty.clone()))),
+            ("gcd", num_binop()),
+            ("lcm", num_binop()),
+            ("quot", num_binop()),
+            ("rem", num_binop()),
+            ("quotRem", Scheme::mono(Ty::Error)),
+            ("divMod", Scheme::mono(Ty::Error)),
+            ("recip", Scheme::mono(Ty::Error)),
+            // Data.Function
+            ("on", Scheme::mono(Ty::Error)),
+            ("fix", Scheme::mono(Ty::Error)),
+            // Data.Maybe (additional)
+            ("isJust", Scheme::mono(Ty::Error)),
+            ("isNothing", Scheme::mono(Ty::Error)),
+            ("listToMaybe", Scheme::mono(Ty::Error)),
+            ("maybeToList", Scheme::mono(Ty::Error)),
+            ("catMaybes", Scheme::mono(Ty::Error)),
+            ("mapMaybe", Scheme::mono(Ty::Error)),
+            // Data.Either (additional)
+            ("isLeft", Scheme::mono(Ty::Error)),
+            ("isRight", Scheme::mono(Ty::Error)),
+            ("lefts", Scheme::mono(Ty::Error)),
+            ("rights", Scheme::mono(Ty::Error)),
+            ("partitionEithers", Scheme::mono(Ty::Error)),
+            // Control.Applicative
+            ("optional", Scheme::mono(Ty::Error)),
+            ("some", Scheme::mono(Ty::Error)),
+            ("many", Scheme::mono(Ty::Error)),
+            // Data.Foldable
+            ("fold", Scheme::mono(Ty::Error)),
+            ("foldMap", Scheme::mono(Ty::Error)),
+            ("toList", Scheme::mono(Ty::Error)),
+            ("any", Scheme::mono(Ty::Error)),
+            ("all", Scheme::mono(Ty::Error)),
+            ("and", Scheme::mono(Ty::Error)),
+            ("or", Scheme::mono(Ty::Error)),
+            ("asum", Scheme::mono(Ty::Error)),
+            ("msum", Scheme::mono(Ty::Error)),
+            // Data.Traversable
+            ("traverse", Scheme::mono(Ty::Error)),
+            ("traverse_", Scheme::mono(Ty::Error)),
+            ("for", Scheme::mono(Ty::Error)),
+            ("for_", Scheme::mono(Ty::Error)),
+            ("sequenceA", Scheme::mono(Ty::Error)),
+            ("sequenceA_", Scheme::mono(Ty::Error)),
+            // Common type constructors used as functions
+            ("Just", Scheme::mono(Ty::Error)),
+            ("Nothing", Scheme::mono(Ty::Error)),
+            ("Left", Scheme::mono(Ty::Error)),
+            ("Right", Scheme::mono(Ty::Error)),
         ];
 
         for (name, scheme) in ops {

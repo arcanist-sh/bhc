@@ -220,6 +220,15 @@ impl Evaluator {
             ("sum", PrimOp::UArraySum),
             ("length", PrimOp::UArrayLength),
             ("range", PrimOp::UArrayRange),
+            // List operations
+            ("++", PrimOp::Concat),
+            ("concat", PrimOp::Concat),
+            ("concatMap", PrimOp::ConcatMap),
+            ("append", PrimOp::Append),
+            // Monad operations (list monad)
+            (">>=", PrimOp::ListBind),
+            (">>", PrimOp::ListThen),
+            ("return", PrimOp::ListReturn),
         ];
 
         for (name, op) in ops {
@@ -937,6 +946,74 @@ impl Evaluator {
                     got: format!("{:?}", args[1]),
                 })?;
                 Ok(Value::UArrayInt(crate::uarray::UArray::range(start, end)))
+            }
+
+            // List operations
+            PrimOp::Concat => {
+                // xs ++ ys - concatenate two lists
+                let xs = self.force_list(args[0].clone())?;
+                let ys = self.force_list(args[1].clone())?;
+                let mut result = xs;
+                result.extend(ys);
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::ConcatMap => {
+                // concatMap f xs - map f over xs and concatenate results
+                let f = &args[0];
+                let xs = self.force_list(args[1].clone())?;
+                let mut result = Vec::new();
+                for x in xs {
+                    let mapped = self.apply(f.clone(), x)?;
+                    let forced = self.force(mapped)?;
+                    let list = self.force_list(forced)?;
+                    result.extend(list);
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Append => {
+                // append x xs - add x to the end of xs
+                let x = args[0].clone();
+                let xs = self.force_list(args[1].clone())?;
+                let mut result = xs;
+                result.push(x);
+                Ok(Value::from_list(result))
+            }
+
+            // Monad operations for list
+            PrimOp::ListBind => {
+                // xs >>= f = concatMap f xs
+                // Argument order: xs, f
+                let xs = self.force_list(args[0].clone())?;
+                let f = &args[1];
+                let mut result = Vec::new();
+                for x in xs {
+                    let mapped = self.apply(f.clone(), x)?;
+                    let forced = self.force(mapped)?;
+                    let list = self.force_list(forced)?;
+                    result.extend(list);
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::ListThen => {
+                // xs >> ys = xs >>= \_ -> ys
+                // Argument order: xs, ys
+                let xs = self.force_list(args[0].clone())?;
+                let ys = args[1].clone();
+                let ys_list = self.force_list(ys)?;
+                let mut result = Vec::new();
+                for _ in xs {
+                    result.extend(ys_list.clone());
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::ListReturn => {
+                // return x = [x]
+                let x = args[0].clone();
+                Ok(Value::from_list(vec![x]))
             }
         }
     }

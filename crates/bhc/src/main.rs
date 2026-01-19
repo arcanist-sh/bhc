@@ -256,8 +256,8 @@ fn run_file(file: &PathBuf, _args: &[String], cli: &Cli) -> Result<()> {
 
     // Run the file
     match compiler.run_file(&path) {
-        Ok(value) => {
-            println!("{:?}", value);
+        Ok((_value, display)) => {
+            println!("{}", display);
             Ok(())
         }
         Err(e) => {

@@ -524,10 +524,11 @@ impl Compiler {
         bhc_hir_to_core::lower_module_with_defs(hir, Some(&def_map)).map_err(CompileError::from)
     }
 
-    /// Run source code and return the result value.
+    /// Run source code and return the result value and display string.
     ///
     /// This compiles the source through all phases and then evaluates
-    /// the `main` function, returning its result.
+    /// the `main` function, returning its result along with a human-readable
+    /// display string.
     ///
     /// # Errors
     ///
@@ -536,24 +537,24 @@ impl Compiler {
         &self,
         module_name: impl Into<String>,
         source: impl Into<String>,
-    ) -> CompileResult<Value> {
+    ) -> CompileResult<(Value, String)> {
         let unit = CompilationUnit::from_source(module_name, source);
         self.run_unit(unit)
     }
 
-    /// Run a file and return the result value.
+    /// Run a file and return the result value and display string.
     ///
     /// # Errors
     ///
     /// Returns an error if compilation or execution fails.
-    pub fn run_file(&self, path: impl AsRef<Utf8Path>) -> CompileResult<Value> {
+    pub fn run_file(&self, path: impl AsRef<Utf8Path>) -> CompileResult<(Value, String)> {
         let unit = CompilationUnit::from_path(path.as_ref().to_path_buf())?;
         self.run_unit(unit)
     }
 
     /// Compile and run a compilation unit.
     #[instrument(skip(self, unit), fields(module = %unit.module_name))]
-    fn run_unit(&self, unit: CompilationUnit) -> CompileResult<Value> {
+    fn run_unit(&self, unit: CompilationUnit) -> CompileResult<(Value, String)> {
         info!(module = %unit.module_name, "compiling for execution");
 
         // Allocate a file ID for diagnostics
@@ -579,11 +580,11 @@ impl Compiler {
 
         // Phase 4: Execute
         self.callbacks.on_phase_start(CompilePhase::Execute, &unit.module_name);
-        let result = self.run_module(&core)?;
+        let (result, display) = self.run_module_with_display(&core)?;
         self.callbacks.on_phase_complete(CompilePhase::Execute, &unit.module_name);
 
         info!(module = %unit.module_name, "execution complete");
-        Ok(result)
+        Ok((result, display))
     }
 
     /// Execute a Core module by finding and evaluating the `main` function.
@@ -592,6 +593,19 @@ impl Compiler {
     ///
     /// Returns an error if `main` is not found or evaluation fails.
     pub fn run_module(&self, module: &CoreModule) -> CompileResult<Value> {
+        let (value, _display) = self.run_module_with_display(module)?;
+        Ok(value)
+    }
+
+    /// Execute a Core module and return both the value and its display string.
+    ///
+    /// This is useful when you need a human-readable representation of the
+    /// result, as it deeply forces all thunks for display.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `main` is not found or evaluation fails.
+    pub fn run_module_with_display(&self, module: &CoreModule) -> CompileResult<(Value, String)> {
         debug!("executing module: {}", module.name);
 
         // Create evaluator with the session's profile
@@ -610,7 +624,10 @@ impl Compiler {
         // Force the result to WHNF
         let forced = evaluator.force(result)?;
 
-        Ok(forced)
+        // Generate display string (deeply forces thunks)
+        let display = evaluator.display_value(&forced)?;
+
+        Ok((forced, display))
     }
 
     /// Build an environment from the module's top-level bindings.
@@ -1068,7 +1085,7 @@ mod tests {
         let result = compiler.run_source("Test", "main = 42");
         assert!(result.is_ok(), "Should execute simple literal: {:?}", result.err());
 
-        let value = result.unwrap();
+        let (value, _display) = result.unwrap();
         assert_eq!(value.as_int(), Some(42), "main should evaluate to 42");
     }
 
@@ -1083,7 +1100,7 @@ mod tests {
         let result = compiler.run_source("Test", "main = 42");
         assert!(result.is_ok(), "Numeric profile should execute: {:?}", result.err());
 
-        let value = result.unwrap();
+        let (value, _display) = result.unwrap();
         assert_eq!(value.as_int(), Some(42));
     }
 

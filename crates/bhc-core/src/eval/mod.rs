@@ -1190,6 +1190,89 @@ impl Evaluator {
             }
         }
     }
+
+    /// Display a value, deeply forcing all thunks.
+    ///
+    /// This produces a readable string representation of a value,
+    /// recursively forcing any thunks encountered.
+    pub fn display_value(&self, value: &Value) -> Result<String, EvalError> {
+        self.display_value_impl(value, 0)
+    }
+
+    fn display_value_impl(&self, value: &Value, depth: usize) -> Result<String, EvalError> {
+        // Prevent infinite recursion
+        if depth > 1000 {
+            return Ok("<deep>".to_string());
+        }
+
+        // Force thunks first
+        let forced = match value {
+            Value::Thunk(thunk) => self.force_thunk(thunk)?,
+            v => v.clone(),
+        };
+
+        match &forced {
+            Value::Int(n) => Ok(n.to_string()),
+            Value::Integer(n) => Ok(n.to_string()),
+            Value::Float(n) => Ok(format!("{n}")),
+            Value::Double(n) => Ok(format!("{n}")),
+            Value::Char(c) => Ok(format!("{c:?}")),
+            Value::String(s) => Ok(format!("{s:?}")),
+            Value::Closure(c) => Ok(format!("<function {}>", c.var.name)),
+            Value::PrimOp(op) => Ok(format!("<primop {op:?}>")),
+            Value::PartialPrimOp(op, args) => {
+                Ok(format!("<partial {op:?} applied to {} args>", args.len()))
+            }
+            Value::UArrayInt(arr) => {
+                let elements: Vec<String> = arr.as_slice().iter().map(|n| n.to_string()).collect();
+                Ok(format!("[{}]", elements.join(", ")))
+            }
+            Value::UArrayDouble(arr) => {
+                let elements: Vec<String> = arr.as_slice().iter().map(|n| format!("{n}")).collect();
+                Ok(format!("[{}]", elements.join(", ")))
+            }
+            Value::Data(d) => {
+                let name = d.con.name.as_str();
+                // Special case for lists
+                if name == "[]" {
+                    return Ok("[]".to_string());
+                }
+                if name == ":" {
+                    // It's a list - collect all elements
+                    let list = self.force_list(forced.clone())?;
+                    let elements: Result<Vec<String>, _> = list
+                        .iter()
+                        .map(|v| self.display_value_impl(v, depth + 1))
+                        .collect();
+                    return Ok(format!("[{}]", elements?.join(", ")));
+                }
+                // Special case for tuples
+                if name.starts_with('(') && name.ends_with(')') && name.contains(',') {
+                    let elements: Result<Vec<String>, _> = d
+                        .args
+                        .iter()
+                        .map(|v| self.display_value_impl(v, depth + 1))
+                        .collect();
+                    return Ok(format!("({})", elements?.join(", ")));
+                }
+                // General data constructor
+                if d.args.is_empty() {
+                    Ok(name.to_string())
+                } else {
+                    let args: Result<Vec<String>, _> = d
+                        .args
+                        .iter()
+                        .map(|v| self.display_value_impl(v, depth + 1))
+                        .collect();
+                    Ok(format!("{} {}", name, args?.join(" ")))
+                }
+            }
+            Value::Thunk(_) => {
+                // Should have been forced above, but just in case
+                Ok("<thunk>".to_string())
+            }
+        }
+    }
 }
 
 impl Default for Evaluator {

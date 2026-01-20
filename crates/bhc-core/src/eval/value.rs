@@ -455,6 +455,22 @@ pub enum PrimOp {
     Replicate,
     /// Enumeration: enumFromTo start end
     EnumFromTo,
+
+    // IO operations
+    /// Print a string followed by newline.
+    PutStrLn,
+    /// Print a string without newline.
+    PutStr,
+    /// Print a value using Show (for now, uses Debug).
+    Print,
+    /// Read a line from stdin.
+    GetLine,
+    /// IO bind (>>=) for IO monad.
+    IoBind,
+    /// IO then (>>) for IO monad.
+    IoThen,
+    /// IO return/pure.
+    IoReturn,
 }
 
 impl PrimOp {
@@ -467,11 +483,15 @@ impl PrimOp {
             | Self::DoubleToInt | Self::CharToInt | Self::IntToChar | Self::Error
             | Self::UArrayFromList | Self::UArrayToList | Self::UArraySum | Self::UArrayLength
             | Self::ListReturn | Self::Head | Self::Tail | Self::Last | Self::Init
-            | Self::Reverse | Self::Null => 1,
+            | Self::Reverse | Self::Null
+            | Self::PutStrLn | Self::PutStr | Self::Print | Self::IoReturn => 1,
+            // Arity 0
+            Self::GetLine => 0,
             // Arity 2
             Self::UArrayMap | Self::UArrayRange | Self::Concat | Self::ConcatMap | Self::Append
             | Self::ListBind | Self::ListThen | Self::Filter | Self::Zip | Self::Take | Self::Drop
-            | Self::Index | Self::Replicate | Self::EnumFromTo => 2,
+            | Self::Index | Self::Replicate | Self::EnumFromTo
+            | Self::IoBind | Self::IoThen => 2,
             // Arity 3
             Self::UArrayZipWith | Self::UArrayFold | Self::Foldr | Self::Foldl | Self::FoldlStrict
             | Self::ZipWith => 3,
@@ -547,6 +567,11 @@ impl PrimOp {
             "!!" => Some(Self::Index),
             "replicate" => Some(Self::Replicate),
             "enumFromTo" => Some(Self::EnumFromTo),
+            // IO operations
+            "putStrLn" => Some(Self::PutStrLn),
+            "putStr" => Some(Self::PutStr),
+            "print" => Some(Self::Print),
+            "getLine" => Some(Self::GetLine),
             _ => None,
         }
     }

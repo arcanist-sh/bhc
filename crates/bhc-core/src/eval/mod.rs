@@ -247,6 +247,11 @@ impl Evaluator {
             ("!!", PrimOp::Index),
             ("replicate", PrimOp::Replicate),
             ("enumFromTo", PrimOp::EnumFromTo),
+            // IO operations
+            ("putStrLn", PrimOp::PutStrLn),
+            ("putStr", PrimOp::PutStr),
+            ("print", PrimOp::Print),
+            ("getLine", PrimOp::GetLine),
         ];
 
         for (name, op) in ops {
@@ -431,11 +436,21 @@ impl Evaluator {
 
         // Then check primitives
         if let Some(value) = self.primitives.get(&var.name) {
+            // Arity-0 primops (like getLine) execute immediately
+            if let Value::PrimOp(op) = value {
+                if op.arity() == 0 {
+                    return self.apply_primop(*op, vec![]);
+                }
+            }
             return Ok(value.clone());
         }
 
         // Check if it's a primitive by its raw name
         if let Some(op) = PrimOp::from_name(var.name.as_str()) {
+            // Arity-0 primops (like getLine) execute immediately
+            if op.arity() == 0 {
+                return self.apply_primop(op, vec![]);
+            }
             return Ok(Value::PrimOp(op));
         }
 
@@ -1249,6 +1264,71 @@ impl Evaluator {
                 let result: Vec<Value> = (start..=end).map(Value::Int).collect();
                 Ok(Value::from_list(result))
             }
+
+            // IO operations
+            PrimOp::PutStrLn => {
+                // putStrLn :: String -> IO ()
+                let s = self.value_to_string(&args[0])?;
+                println!("{s}");
+                Ok(Value::unit())
+            }
+
+            PrimOp::PutStr => {
+                // putStr :: String -> IO ()
+                use std::io::Write;
+                let s = self.value_to_string(&args[0])?;
+                print!("{s}");
+                std::io::stdout().flush().ok();
+                Ok(Value::unit())
+            }
+
+            PrimOp::Print => {
+                // print :: Show a => a -> IO ()
+                let displayed = self.display_value(&args[0])?;
+                println!("{displayed}");
+                Ok(Value::unit())
+            }
+
+            PrimOp::GetLine => {
+                // getLine :: IO String
+                use std::io::BufRead;
+                let stdin = std::io::stdin();
+                let mut line = String::new();
+                stdin.lock().read_line(&mut line).map_err(|e| {
+                    EvalError::UserError(format!("getLine failed: {e}"))
+                })?;
+                // Remove trailing newline
+                if line.ends_with('\n') {
+                    line.pop();
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                }
+                Ok(Value::String(line.into()))
+            }
+
+            PrimOp::IoBind => {
+                // (>>=) :: IO a -> (a -> IO b) -> IO b
+                // In our interpreter, IO actions execute immediately,
+                // so we just run the first action and pass result to continuation
+                let io_a = args[0].clone();
+                let f = &args[1];
+                // "Execute" the IO action (it's already a value in our interpreter)
+                // and apply the continuation
+                self.apply(f.clone(), io_a)
+            }
+
+            PrimOp::IoThen => {
+                // (>>) :: IO a -> IO b -> IO b
+                // Execute first action (already done), return second
+                Ok(args[1].clone())
+            }
+
+            PrimOp::IoReturn => {
+                // return :: a -> IO a
+                // In our interpreter, just return the value as-is
+                Ok(args[0].clone())
+            }
         }
     }
 
@@ -1390,6 +1470,34 @@ impl Evaluator {
         match value {
             Value::Thunk(thunk) => self.force_thunk(&thunk),
             other => Ok(other),
+        }
+    }
+
+    /// Converts a Value to a String, for use in IO operations.
+    /// Handles both String values and [Char] lists.
+    fn value_to_string(&self, value: &Value) -> Result<String, EvalError> {
+        let forced = self.force(value.clone())?;
+        match &forced {
+            Value::String(s) => Ok(s.to_string()),
+            Value::Data(d) if d.con.name.as_str() == "[]" || d.con.name.as_str() == ":" => {
+                // It's a list - try to interpret as [Char]
+                let list = self.force_list(forced)?;
+                let chars: Result<String, _> = list
+                    .into_iter()
+                    .map(|v| match v {
+                        Value::Char(c) => Ok(c),
+                        other => Err(EvalError::TypeError {
+                            expected: "Char".into(),
+                            got: format!("{other:?}"),
+                        }),
+                    })
+                    .collect();
+                chars
+            }
+            other => Err(EvalError::TypeError {
+                expected: "String".into(),
+                got: format!("{other:?}"),
+            }),
         }
     }
 

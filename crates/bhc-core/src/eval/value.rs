@@ -471,6 +471,12 @@ pub enum PrimOp {
     IoThen,
     /// IO return/pure.
     IoReturn,
+
+    // Polymorphic monad operations (dispatch based on first argument type)
+    /// Polymorphic bind (>>=): dispatches to IoBind or ListBind based on first arg.
+    MonadBind,
+    /// Polymorphic then (>>): dispatches to IoThen or ListThen based on first arg.
+    MonadThen,
 }
 
 impl PrimOp {
@@ -491,7 +497,7 @@ impl PrimOp {
             Self::UArrayMap | Self::UArrayRange | Self::Concat | Self::ConcatMap | Self::Append
             | Self::ListBind | Self::ListThen | Self::Filter | Self::Zip | Self::Take | Self::Drop
             | Self::Index | Self::Replicate | Self::EnumFromTo
-            | Self::IoBind | Self::IoThen => 2,
+            | Self::IoBind | Self::IoThen | Self::MonadBind | Self::MonadThen => 2,
             // Arity 3
             Self::UArrayZipWith | Self::UArrayFold | Self::Foldr | Self::Foldl | Self::FoldlStrict
             | Self::ZipWith => 3,

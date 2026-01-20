@@ -226,8 +226,8 @@ impl Evaluator {
             ("concatMap", PrimOp::ConcatMap),
             ("append", PrimOp::Append),
             // Monad operations (list monad)
-            (">>=", PrimOp::ListBind),
-            (">>", PrimOp::ListThen),
+            (">>=", PrimOp::MonadBind),
+            (">>", PrimOp::MonadThen),
             ("return", PrimOp::ListReturn),
             // Additional list operations
             ("foldr", PrimOp::Foldr),
@@ -1329,6 +1329,34 @@ impl Evaluator {
                 // In our interpreter, just return the value as-is
                 Ok(args[0].clone())
             }
+
+            PrimOp::MonadBind => {
+                // Polymorphic (>>=): dispatch based on first argument type
+                // If it's a list, use list bind (concatMap)
+                // Otherwise, use IO bind (apply continuation to result)
+                let first_arg = self.force(args[0].clone())?;
+
+                if self.is_list_value(&first_arg) {
+                    // List monad: xs >>= f = concatMap f xs
+                    self.apply_primop(PrimOp::ListBind, args)
+                } else {
+                    // IO monad (or other): just apply f to the value
+                    self.apply_primop(PrimOp::IoBind, args)
+                }
+            }
+
+            PrimOp::MonadThen => {
+                // Polymorphic (>>): dispatch based on first argument type
+                let first_arg = self.force(args[0].clone())?;
+
+                if self.is_list_value(&first_arg) {
+                    // List monad: xs >> ys = xs >>= \_ -> ys
+                    self.apply_primop(PrimOp::ListThen, args)
+                } else {
+                    // IO monad: just return second arg (first already executed)
+                    self.apply_primop(PrimOp::IoThen, args)
+                }
+            }
         }
     }
 
@@ -1470,6 +1498,18 @@ impl Evaluator {
         match value {
             Value::Thunk(thunk) => self.force_thunk(&thunk),
             other => Ok(other),
+        }
+    }
+
+    /// Checks if a value is a list (either empty list or cons cell).
+    fn is_list_value(&self, value: &Value) -> bool {
+        match value {
+            Value::Data(d) => {
+                let name = d.con.name.as_str();
+                name == "[]" || name == ":"
+            }
+            Value::String(_) => true, // String is [Char]
+            _ => false,
         }
     }
 

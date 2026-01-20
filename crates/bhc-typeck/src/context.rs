@@ -10,8 +10,8 @@
 
 use bhc_diagnostics::{Diagnostic, DiagnosticHandler, FullSpan};
 use bhc_hir::{
-    Binding, ClassDef, DataDef, DefId, Equation, HirId, InstanceDef, Item, Module, NewtypeDef, Pat,
-    ValueDef,
+    Binding, ClassDef, ConFields, DataDef, DefId, Equation, HirId, InstanceDef, Item, Module,
+    NewtypeDef, Pat, ValueDef,
 };
 use bhc_span::{FileId, Span};
 use bhc_types::{Kind, Scheme, Subst, Ty, TyCon, TyVar};
@@ -409,10 +409,24 @@ impl TyCtxt {
         let tycon = TyCon::new(data.name, kind);
         self.env.register_type_con(tycon);
 
-        // Register data constructors
+        // Register data constructors and field accessors
         for con in &data.cons {
             let scheme = self.compute_data_con_scheme(data, con);
             self.env.register_data_con(con.id, con.name, scheme);
+
+            // Register field accessor functions for record constructors
+            if let ConFields::Named(fields) = &con.fields {
+                // Build the data type: T a1 a2 ... an
+                let data_ty = Self::build_applied_type(data.name, &data.params);
+
+                for field in fields {
+                    // Field accessor type: T a1 ... an -> FieldType
+                    let accessor_ty = Ty::fun(data_ty.clone(), field.ty.clone());
+                    let accessor_scheme = Scheme::poly(data.params.clone(), accessor_ty);
+                    // Register the field accessor as a global value
+                    self.env.insert_global(field.id, accessor_scheme);
+                }
+            }
         }
     }
 
@@ -427,6 +441,20 @@ impl TyCtxt {
         let scheme = self.compute_newtype_con_scheme(newtype);
         self.env
             .register_data_con(newtype.con.id, newtype.con.name, scheme);
+
+        // Register field accessor if this is a record-style newtype
+        if let ConFields::Named(fields) = &newtype.con.fields {
+            // Build the newtype: T a1 a2 ... an
+            let newtype_ty = Self::build_applied_type(newtype.name, &newtype.params);
+
+            for field in fields {
+                // Field accessor type: T a1 ... an -> FieldType
+                let accessor_ty = Ty::fun(newtype_ty.clone(), field.ty.clone());
+                let accessor_scheme = Scheme::poly(newtype.params.clone(), accessor_ty);
+                // Register the field accessor as a global value
+                self.env.insert_global(field.id, accessor_scheme);
+            }
+        }
     }
 
     /// Register a type class definition.

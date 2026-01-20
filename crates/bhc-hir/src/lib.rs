@@ -433,6 +433,8 @@ pub enum ConFields {
 /// A record field definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FieldDef {
+    /// The unique ID for the field accessor function.
+    pub id: DefId,
     /// The field name.
     pub name: Symbol,
     /// The field type.

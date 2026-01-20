@@ -257,8 +257,12 @@ fn lower_decl(ctx: &mut LowerContext, decl: &ast::Decl) -> LowerResult<Vec<hir::
         }
 
         ast::Decl::DataDecl(data_decl) => {
-            let item = lower_data_decl(ctx, data_decl)?;
-            Ok(vec![hir::Item::Data(item)])
+            let (data_def, accessors) = lower_data_decl_with_accessors(ctx, data_decl)?;
+            let mut items = vec![hir::Item::Data(data_def)];
+            for accessor in accessors {
+                items.push(hir::Item::Value(accessor));
+            }
+            Ok(items)
         }
 
         ast::Decl::Newtype(newtype_decl) => {
@@ -1443,6 +1447,87 @@ fn lower_export(exp: &ast::Export) -> hir::Export {
     }
 }
 
+/// Lower a data declaration and generate field accessor functions for records.
+fn lower_data_decl_with_accessors(
+    ctx: &mut LowerContext,
+    data: &ast::DataDecl,
+) -> LowerResult<(hir::DataDef, Vec<hir::ValueDef>)> {
+    let data_def = lower_data_decl(ctx, data)?;
+
+    // Generate field accessor functions for record constructors
+    let mut accessors = Vec::new();
+    for con in &data_def.cons {
+        if let hir::ConFields::Named(fields) = &con.fields {
+            for (field_idx, field) in fields.iter().enumerate() {
+                let accessor = generate_field_accessor(ctx, con, fields.len(), field_idx, field);
+                accessors.push(accessor);
+            }
+        }
+    }
+
+    Ok((data_def, accessors))
+}
+
+/// Generate a field accessor function for a record field.
+///
+/// For `data Point = Point { px :: Int, py :: Int }`, generates:
+/// - `px (Point x _) = x`
+/// - `py (Point _ y) = y`
+fn generate_field_accessor(
+    ctx: &mut LowerContext,
+    con: &hir::ConDef,
+    num_fields: usize,
+    field_idx: usize,
+    field: &hir::FieldDef,
+) -> hir::ValueDef {
+    // Create a pattern for matching the constructor
+    // e.g., Point x _ for accessing the first field
+    let mut sub_pats = Vec::with_capacity(num_fields);
+    let mut result_var_def_id = None;
+    let result_var_name = Symbol::intern("_field_val");
+
+    for i in 0..num_fields {
+        if i == field_idx {
+            // This is the field we're extracting
+            let var_def_id = ctx.fresh_def_id();
+            result_var_def_id = Some(var_def_id);
+            ctx.define(var_def_id, result_var_name, DefKind::Value, field.span);
+            sub_pats.push(hir::Pat::Var(result_var_name, var_def_id, field.span));
+        } else {
+            // Other fields are wildcards
+            sub_pats.push(hir::Pat::Wild(field.span));
+        }
+    }
+
+    let result_var_def_id = result_var_def_id.expect("field_idx should be valid");
+
+    // Build the constructor pattern
+    let con_pat = hir::Pat::Con(
+        ctx.def_ref(con.id, con.span),
+        sub_pats,
+        field.span,
+    );
+
+    // The RHS is just the variable we bound
+    let rhs = hir::Expr::Var(ctx.def_ref(result_var_def_id, field.span));
+
+    // Create the equation: accessor (Con ... x ...) = x
+    let equation = hir::Equation {
+        pats: vec![con_pat],
+        guards: vec![],
+        rhs,
+        span: field.span,
+    };
+
+    hir::ValueDef {
+        id: field.id,
+        name: field.name,
+        sig: None, // Type is inferred from the registered type
+        equations: vec![equation],
+        span: field.span,
+    }
+}
+
 /// Lower a data declaration.
 fn lower_data_decl(ctx: &mut LowerContext, data: &ast::DataDecl) -> LowerResult<hir::DataDef> {
     let type_def_id = ctx.lookup_type(data.name.name).expect("type should be pre-bound");
@@ -1489,10 +1574,18 @@ fn lower_con_def(ctx: &mut LowerContext, con: &ast::ConDecl) -> hir::ConDef {
         ast::ConFields::Record(fields) => {
             let hir_fields: Vec<hir::FieldDef> = fields
                 .iter()
-                .map(|f| hir::FieldDef {
-                    name: f.name.name,
-                    ty: lower_type(ctx, &f.ty),
-                    span: f.span,
+                .map(|f| {
+                    // Look up the DefId for the field accessor that was bound during
+                    // collect_module_definitions
+                    let field_def_id = ctx
+                        .lookup_value(f.name.name)
+                        .expect("field accessor should be pre-bound");
+                    hir::FieldDef {
+                        id: field_def_id,
+                        name: f.name.name,
+                        ty: lower_type(ctx, &f.ty),
+                        span: f.span,
+                    }
                 })
                 .collect();
             hir::ConFields::Named(hir_fields)

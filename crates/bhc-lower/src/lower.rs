@@ -794,6 +794,9 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
 
             // Use the qualified name resolution which handles aliases
             if let Some(def_id) = ctx.resolve_qualified_var(qualifier, name) {
+                // Warn if this is a stub
+                let qual_name = format!("{}.{}", module_name.to_string(), name.as_str());
+                ctx.warn_if_stub(def_id, &qual_name, *span);
                 hir::Expr::Var(ctx.def_ref(def_id, *span))
             } else {
                 // Fall back to creating a placeholder with the full qualified name
@@ -827,6 +830,9 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
 
             // Use the qualified constructor resolution which handles aliases
             if let Some(def_id) = ctx.resolve_qualified_constructor(qualifier, name) {
+                // Warn if this is a stub
+                let qual_name = format!("{}.{}", module_name.to_string(), name.as_str());
+                ctx.warn_if_stub(def_id, &qual_name, *span);
                 hir::Expr::Con(ctx.def_ref(def_id, *span))
             } else {
                 // Fall back to creating a placeholder with the full qualified name

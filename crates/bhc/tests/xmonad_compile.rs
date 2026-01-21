@@ -9,10 +9,21 @@ use std::fs;
 /// XMonad source directory for module resolution
 const XMONAD_SRC_DIR: &str = "/tmp/xmonad/src";
 
-fn test_compile_file(path: &str) -> (String, Vec<String>) {
+/// Result of compiling a file
+struct CompileResult {
+    status: String,
+    errors: Vec<String>,
+    warnings: usize,
+}
+
+fn test_compile_file(path: &str) -> CompileResult {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
-        Err(e) => return ("READ_ERROR".into(), vec![format!("{}", e)]),
+        Err(e) => return CompileResult {
+            status: "READ_ERROR".into(),
+            errors: vec![format!("{}", e)],
+            warnings: 0,
+        },
     };
 
     let file_id = FileId::new(0);
@@ -24,12 +35,20 @@ fn test_compile_file(path: &str) -> (String, Vec<String>) {
         .collect();
 
     if !parse_errors.is_empty() {
-        return ("PARSE_ERROR".into(), parse_errors);
+        return CompileResult {
+            status: "PARSE_ERROR".into(),
+            errors: parse_errors,
+            warnings: 0,
+        };
     }
 
     let module = match module {
         Some(m) => m,
-        None => return ("NO_MODULE".into(), vec![]),
+        None => return CompileResult {
+            status: "NO_MODULE".into(),
+            errors: vec![],
+            warnings: 0,
+        },
     };
 
     // Configure lowering with search paths for XMonad modules
@@ -43,18 +62,32 @@ fn test_compile_file(path: &str) -> (String, Vec<String>) {
     let mut lower_ctx = LowerContext::with_builtins();
     let hir_module = match bhc_lower::lower_module(&mut lower_ctx, &module, &config) {
         Ok(m) => m,
-        Err(e) => return ("LOWER_ERROR".into(), vec![format!("{:?}", e)]),
+        Err(e) => return CompileResult {
+            status: "LOWER_ERROR".into(),
+            errors: vec![format!("{:?}", e)],
+            warnings: lower_ctx.warnings.len(),
+        },
     };
+
+    let warning_count = lower_ctx.warnings.len();
 
     // Try type checking using the public API
     match bhc_typeck::type_check_module(&hir_module, file_id) {
-        Ok(_typed) => ("OK".into(), vec![]),
+        Ok(_typed) => CompileResult {
+            status: "OK".into(),
+            errors: vec![],
+            warnings: warning_count,
+        },
         Err(errors) => {
             let msgs: Vec<String> = errors.into_iter()
                 .take(5)
                 .map(|e| e.message)
                 .collect();
-            ("TYPE_ERROR".into(), msgs)
+            CompileResult {
+                status: "TYPE_ERROR".into(),
+                errors: msgs,
+                warnings: warning_count,
+            }
         }
     }
 }
@@ -71,25 +104,31 @@ fn test_compile_xmonad_files() {
         ("/tmp/xmonad/src/XMonad/ManageHook.hs", "ManageHook"),
         ("/tmp/xmonad/src/XMonad/Operations.hs", "Operations"),
     ];
-    
+
     println!("\n=== XMonad Compilation Test Results ===\n");
-    
+
     let mut ok_count = 0;
     let mut fail_count = 0;
-    
+    let mut total_warnings = 0;
+
     for (path, name) in files {
-        let (status, errors) = test_compile_file(path);
-        if status == "OK" {
-            println!("{}: OK", name);
+        let result = test_compile_file(path);
+        total_warnings += result.warnings;
+        if result.status == "OK" {
+            if result.warnings > 0 {
+                println!("{}: OK ({} stub warnings)", name, result.warnings);
+            } else {
+                println!("{}: OK", name);
+            }
             ok_count += 1;
         } else {
-            println!("{}: {} ({} errors)", name, status, errors.len());
-            for e in errors.iter().take(3) {
+            println!("{}: {} ({} errors, {} stub warnings)", name, result.status, result.errors.len(), result.warnings);
+            for e in result.errors.iter().take(3) {
                 println!("    {}", e);
             }
             fail_count += 1;
         }
     }
-    
-    println!("\n=== Summary: {} OK, {} FAILED ===", ok_count, fail_count);
+
+    println!("\n=== Summary: {} OK, {} FAILED, {} total stub warnings ===", ok_count, fail_count, total_warnings);
 }

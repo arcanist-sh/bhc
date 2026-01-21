@@ -45,6 +45,22 @@ pub enum DefKind {
     TyVar,
     /// A pattern variable.
     PatVar,
+    /// A stub value (external package function not yet implemented).
+    StubValue,
+    /// A stub type (external package type not yet implemented).
+    StubType,
+    /// A stub constructor (external package constructor not yet implemented).
+    StubConstructor,
+}
+
+impl DefKind {
+    /// Returns true if this definition kind is a stub (placeholder for external package).
+    pub fn is_stub(self) -> bool {
+        matches!(
+            self,
+            DefKind::StubValue | DefKind::StubType | DefKind::StubConstructor
+        )
+    }
 }
 
 /// Information about a definition.
@@ -137,6 +153,8 @@ pub struct LowerContext {
     pub defs: DefMap,
     /// Errors collected during lowering.
     pub errors: Vec<crate::LowerError>,
+    /// Warnings collected during lowering.
+    pub warnings: Vec<crate::LowerWarning>,
     /// Import aliases: maps alias (e.g., "M") to full module name (e.g., "Data.Map")
     import_aliases: FxHashMap<Symbol, Symbol>,
     /// Qualified imports: maps "Module.name" to the unqualified name for resolution
@@ -164,6 +182,7 @@ impl LowerContext {
             current_scope: ScopeId::new(0),
             defs: IndexMap::default(),
             errors: Vec::new(),
+            warnings: Vec::new(),
             import_aliases: FxHashMap::default(),
             qualified_names: FxHashMap::default(),
             type_signatures: FxHashMap::default(),
@@ -174,6 +193,7 @@ impl LowerContext {
     pub fn with_builtins() -> Self {
         let mut ctx = Self::new();
         ctx.define_builtins();
+        ctx.define_stubs();
         ctx
     }
 
@@ -260,34 +280,7 @@ impl LowerContext {
             // GHC.Generics
             ("All", "All"),
             ("Any", "Any"),
-            // Graphics.X11 - Event types
-            ("KeyEvent", "Event"),
-            ("ButtonEvent", "Event"),
-            ("MotionEvent", "Event"),
-            ("CrossingEvent", "Event"),
-            ("ConfigureEvent", "Event"),
-            ("ConfigureRequestEvent", "Event"),
-            ("MapRequestEvent", "Event"),
-            ("UnmapEvent", "Event"),
-            ("DestroyWindowEvent", "Event"),
-            ("PropertyEvent", "Event"),
-            ("ClientMessageEvent", "Event"),
-            ("MappingNotifyEvent", "Event"),
-            // Graphics.X11 - Types
-            ("Rectangle", "Rectangle"),
-            ("WindowChanges", "WindowChanges"),
-            // System.Posix
-            ("ReadOnly", "OpenMode"),
-            ("WriteOnly", "OpenMode"),
-            ("ReadWrite", "OpenMode"),
-            ("Default", "Handler"),
-            ("Ignore", "Handler"),
-            ("Catch", "Handler"),
-            // X11.Xlib.Extras (LayoutClass)
-            ("Full", "Full"),
-            // System.Locale
-            ("LC_ALL", "LocaleCategory"),
-            ("LC_CTYPE", "LocaleCategory"),
+            // Note: X11/System.Posix stub constructors are now in define_stubs()
         ];
 
         for (con_name, _type_name) in builtin_cons {
@@ -773,6 +766,86 @@ impl LowerContext {
             "fromException",
             "toException",
             "displayException",
+            // Note: X11/System.Posix stubs are now in define_stubs()
+        ];
+
+        for name in builtin_funcs {
+            let sym = Symbol::intern(name);
+            let def_id = self.fresh_def_id();
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+    }
+
+    /// Define stub types, constructors, and functions for external packages.
+    ///
+    /// These are placeholders for X11, System.Posix, and other external dependencies
+    /// that allow the lowering phase to succeed. They are marked with `DefKind::Stub*`
+    /// variants so they can be tracked and eventually warned about when resolved.
+    fn define_stubs(&mut self) {
+        // Stub types from external packages
+        let stub_types = [
+            // Graphics.X11
+            "Event",
+            "Rectangle",
+            "WindowChanges",
+            // System.Posix
+            "OpenMode",
+            "Handler",
+            // X11.Xlib.Extras
+            "Full",
+            // System.Locale
+            "LocaleCategory",
+        ];
+
+        for name in stub_types {
+            let sym = Symbol::intern(name);
+            let def_id = self.fresh_def_id();
+            self.define(def_id, sym, DefKind::StubType, Span::default());
+            self.bind_type(sym, def_id);
+        }
+
+        // Stub constructors from external packages
+        let stub_cons = [
+            // Graphics.X11 - Event types
+            ("KeyEvent", "Event"),
+            ("ButtonEvent", "Event"),
+            ("MotionEvent", "Event"),
+            ("CrossingEvent", "Event"),
+            ("ConfigureEvent", "Event"),
+            ("ConfigureRequestEvent", "Event"),
+            ("MapRequestEvent", "Event"),
+            ("UnmapEvent", "Event"),
+            ("DestroyWindowEvent", "Event"),
+            ("PropertyEvent", "Event"),
+            ("ClientMessageEvent", "Event"),
+            ("MappingNotifyEvent", "Event"),
+            // Graphics.X11 - Types
+            ("Rectangle", "Rectangle"),
+            ("WindowChanges", "WindowChanges"),
+            // System.Posix
+            ("ReadOnly", "OpenMode"),
+            ("WriteOnly", "OpenMode"),
+            ("ReadWrite", "OpenMode"),
+            ("Default", "Handler"),
+            ("Ignore", "Handler"),
+            ("Catch", "Handler"),
+            // X11.Xlib.Extras (LayoutClass)
+            ("Full", "Full"),
+            // System.Locale
+            ("LC_ALL", "LocaleCategory"),
+            ("LC_CTYPE", "LocaleCategory"),
+        ];
+
+        for (con_name, _type_name) in stub_cons {
+            let sym = Symbol::intern(con_name);
+            let def_id = self.fresh_def_id();
+            self.define(def_id, sym, DefKind::StubConstructor, Span::default());
+            self.bind_constructor(sym, def_id);
+        }
+
+        // Stub functions from external packages
+        let stub_funcs = [
             // Graphics.X11 - Basic
             "openDisplay",
             "rootWindow",
@@ -939,6 +1012,12 @@ impl LowerContext {
             "ev_request",
             "ev_value_mask",
             "ev_border_width",
+            "ev_x",
+            "ev_y",
+            "ev_width",
+            "ev_height",
+            "ev_above",
+            "ev_detail",
             // Graphics.X11 - Window attributes accessors
             "wa_x",
             "wa_y",
@@ -996,12 +1075,20 @@ impl LowerContext {
             "openEndedPipe",
             // System.Locale
             "setLocale",
-            // System.IO
+            // System.IO (stubs)
             "hSetBuffering",
             "hFlush",
-            // Data.Set qualified
+            "flush",
+            // Data.Map/Set qualified functions (stubs)
             "M.fromListWith",
-            // Misc XMonad internal
+            "M.member",
+            "M.notMember",
+            "member",
+            "notMember",
+            "fromListWith",
+            // Control.Exception qualified
+            "E.catch",
+            // Misc XMonad internal stubs
             "buildScript",
             "stackYaml",
             "flakeNix",
@@ -1010,35 +1097,18 @@ impl LowerContext {
             "launch'",
             "Default.def",
             "def",  // Data.Default
-            "f",  // generic variable
+            "f",    // generic variable
             "width",
             "height",
             "least",
             "subtract",
             "maybeShow",
-            // Additional X11 event field accessors
-            "ev_x",
-            "ev_y",
-            "ev_width",
-            "ev_height",
-            "ev_above",
-            "ev_detail",
-            // Data.Map qualified functions
-            "M.member",
-            "M.notMember",
-            "member",
-            "notMember",
-            "fromListWith",
-            // System.IO
-            "flush",
-            // Control.Exception qualified
-            "E.catch",
         ];
 
-        for name in builtin_funcs {
+        for name in stub_funcs {
             let sym = Symbol::intern(name);
             let def_id = self.fresh_def_id();
-            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.define(def_id, sym, DefKind::StubValue, Span::default());
             self.bind_value(sym, def_id);
         }
     }
@@ -1073,6 +1143,41 @@ impl LowerContext {
     /// Creates a `DefRef` for a definition.
     pub fn def_ref(&self, def_id: DefId, span: Span) -> DefRef {
         DefRef { def_id, span }
+    }
+
+    /// Checks if a definition is a stub (external package placeholder).
+    pub fn is_stub(&self, def_id: DefId) -> bool {
+        self.defs
+            .get(&def_id)
+            .map(|info| info.kind.is_stub())
+            .unwrap_or(false)
+    }
+
+    /// Gets the DefKind for a definition.
+    pub fn def_kind(&self, def_id: DefId) -> Option<DefKind> {
+        self.defs.get(&def_id).map(|info| info.kind)
+    }
+
+    /// Emits a warning if the given definition is a stub.
+    /// Returns true if a warning was emitted.
+    pub fn warn_if_stub(&mut self, def_id: DefId, name: &str, span: Span) -> bool {
+        if let Some(info) = self.defs.get(&def_id) {
+            if info.kind.is_stub() {
+                let kind = match info.kind {
+                    DefKind::StubValue => "function",
+                    DefKind::StubType => "type",
+                    DefKind::StubConstructor => "constructor",
+                    _ => return false,
+                };
+                self.warnings.push(crate::LowerWarning::StubUsed {
+                    name: name.to_string(),
+                    span,
+                    kind,
+                });
+                return true;
+            }
+        }
+        false
     }
 
     /// Gets the current scope.

@@ -22,8 +22,11 @@ use crate::LowerError;
 /// Resolve a variable reference.
 ///
 /// Returns the `DefId` if found, or records an error and returns `None`.
+/// If the resolved definition is a stub, emits a warning.
 pub fn resolve_var(ctx: &mut LowerContext, name: Symbol, span: Span) -> Option<DefId> {
     if let Some(def_id) = ctx.lookup_value(name) {
+        // Warn if this is a stub (external package placeholder)
+        ctx.warn_if_stub(def_id, name.as_str(), span);
         Some(def_id)
     } else {
         ctx.error(LowerError::UnboundVar {
@@ -35,8 +38,12 @@ pub fn resolve_var(ctx: &mut LowerContext, name: Symbol, span: Span) -> Option<D
 }
 
 /// Resolve a type reference.
+///
+/// If the resolved definition is a stub, emits a warning.
 pub fn resolve_type(ctx: &mut LowerContext, name: Symbol, span: Span) -> Option<DefId> {
     if let Some(def_id) = ctx.lookup_type(name) {
+        // Warn if this is a stub (external package placeholder)
+        ctx.warn_if_stub(def_id, name.as_str(), span);
         Some(def_id)
     } else {
         ctx.error(LowerError::UnboundType {
@@ -48,8 +55,12 @@ pub fn resolve_type(ctx: &mut LowerContext, name: Symbol, span: Span) -> Option<
 }
 
 /// Resolve a constructor reference.
+///
+/// If the resolved definition is a stub, emits a warning.
 pub fn resolve_constructor(ctx: &mut LowerContext, name: Symbol, span: Span) -> Option<DefId> {
     if let Some(def_id) = ctx.lookup_constructor(name) {
+        // Warn if this is a stub (external package placeholder)
+        ctx.warn_if_stub(def_id, name.as_str(), span);
         Some(def_id)
     } else {
         ctx.error(LowerError::UnboundCon {

@@ -52,7 +52,7 @@ pub mod loader;
 mod lower;
 mod resolve;
 
-pub use context::{DefMap, LowerContext, Scope, ScopeId};
+pub use context::{DefKind, DefMap, LowerContext, Scope, ScopeId};
 pub use loader::{LoadError, ModuleCache, ModuleExports};
 pub use lower::{lower_module, LowerConfig};
 
@@ -134,6 +134,33 @@ fn display_multiple(errors: &[LowerError]) -> String {
 
 /// Result type for lowering operations.
 pub type LowerResult<T> = Result<T, LowerError>;
+
+/// Warnings that can occur during lowering.
+#[derive(Debug)]
+pub enum LowerWarning {
+    /// A stub definition was used (external package placeholder).
+    StubUsed {
+        /// The stub name.
+        name: String,
+        /// Source location where stub was used.
+        span: Span,
+        /// What kind of stub (value, type, or constructor).
+        kind: &'static str,
+    },
+}
+
+impl std::fmt::Display for LowerWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LowerWarning::StubUsed { name, kind, .. } => {
+                write!(
+                    f,
+                    "stub {kind} `{name}` used (external package not implemented)"
+                )
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

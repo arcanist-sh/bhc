@@ -23,13 +23,38 @@
 //!
 //! This module extends unification to handle type-level naturals (`TyNat`)
 //! and type-level lists (`TyList`) for shape-indexed tensors.
+//!
+//! ## Type Aliases
+//!
+//! String is a type alias for [Char] in Haskell, so we handle this
+//! equivalence during unification.
 
 use bhc_span::Span;
-use bhc_types::{Ty, TyList, TyNat, TyVar};
+use bhc_types::{Ty, TyCon, TyList, TyNat, TyVar};
 
 use crate::context::TyCtxt;
 use crate::diagnostics;
 use crate::nat_solver::{NatConstraint, NatSolver};
+
+/// Check if a type is the String type constructor.
+fn is_string_con(ty: &Ty) -> bool {
+    matches!(ty, Ty::Con(c) if c.name.as_str() == "String")
+}
+
+/// Get the element type of a list, if this is a list type.
+fn get_list_elem(ty: &Ty) -> Option<&Ty> {
+    match ty {
+        Ty::List(elem) => Some(elem.as_ref()),
+        _ => None,
+    }
+}
+
+/// Get the Char type constructor.
+fn char_ty() -> Ty {
+    use bhc_intern::Symbol;
+    use bhc_types::Kind;
+    Ty::Con(TyCon::new(Symbol::intern("Char"), Kind::Star))
+}
 
 /// Unify two types, updating the substitution in the context.
 ///
@@ -126,6 +151,29 @@ fn unify_inner(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
         // === M9 Dependent Types: Type-level lists ===
         (Ty::TyList(l1), Ty::TyList(l2)) => {
             unify_ty_list(ctx, l1, l2, span);
+        }
+
+        // === Type alias: String = [Char] ===
+        // In Haskell, String is defined as `type String = [Char]`, so these
+        // types should unify. Handle both directions.
+        // When unifying String with [a], unify a with Char.
+        (t1, t2) if is_string_con(t1) => {
+            if let Some(elem) = get_list_elem(t2) {
+                // String ~ [elem] => unify elem with Char
+                let char = char_ty();
+                unify_inner(ctx, elem, &char, span);
+            } else {
+                diagnostics::emit_type_mismatch(ctx, t1, t2, span);
+            }
+        }
+        (t1, t2) if is_string_con(t2) => {
+            if let Some(elem) = get_list_elem(t1) {
+                // [elem] ~ String => unify elem with Char
+                let char = char_ty();
+                unify_inner(ctx, elem, &char, span);
+            } else {
+                diagnostics::emit_type_mismatch(ctx, t1, t2, span);
+            }
         }
 
         // Different type structures: mismatch

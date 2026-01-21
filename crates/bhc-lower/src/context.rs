@@ -74,6 +74,8 @@ pub struct DefInfo {
     pub kind: DefKind,
     /// Source location.
     pub span: Span,
+    /// For constructors, the number of fields/arguments. None for non-constructors.
+    pub arity: Option<usize>,
 }
 
 /// A scope containing name bindings.
@@ -233,60 +235,61 @@ impl LowerContext {
             self.bind_type(sym, def_id);
         }
 
-        // Define builtin constructors
+        // Define builtin constructors with their arities
         // Order MUST match bhc-typeck/src/builtins.rs BUILTIN_*_ID constants
-        let builtin_cons = [
-            ("True", "Bool"),   // DefId 9
-            ("False", "Bool"),  // DefId 10
-            ("Nothing", "Maybe"),  // DefId 11
-            ("Just", "Maybe"),     // DefId 12
-            ("Left", "Either"),    // DefId 13
-            ("Right", "Either"),   // DefId 14
-            ("[]", "List"),        // DefId 15 - list nil
-            (":", "List"),         // DefId 16 - list cons
-            ("()", "Unit"),        // DefId 17 - unit
-            ("(,)", "Tuple2"),     // DefId 18 - pair constructor
-            ("(,,)", "Tuple3"),    // DefId 19 - triple constructor
+        // Format: (name, type, arity)
+        let builtin_cons: &[(&str, &str, usize)] = &[
+            ("True", "Bool", 0),   // DefId 9
+            ("False", "Bool", 0),  // DefId 10
+            ("Nothing", "Maybe", 0),  // DefId 11
+            ("Just", "Maybe", 1),     // DefId 12
+            ("Left", "Either", 1),    // DefId 13
+            ("Right", "Either", 1),   // DefId 14
+            ("[]", "List", 0),        // DefId 15 - list nil
+            (":", "List", 2),         // DefId 16 - list cons
+            ("()", "Unit", 0),        // DefId 17 - unit
+            ("(,)", "Tuple2", 2),     // DefId 18 - pair constructor
+            ("(,,)", "Tuple3", 3),    // DefId 19 - triple constructor
             // NonEmpty constructor
-            (":|", "NonEmpty"),    // DefId 20 - NonEmpty cons
+            (":|", "NonEmpty", 2),    // DefId 20 - NonEmpty cons (head :| tail)
             // Control.Applicative.Backwards
-            ("Backwards", "Backwards"),
+            ("Backwards", "Backwards", 1),
             // Data.Monoid
-            ("Endo", "Endo"),
+            ("Endo", "Endo", 1),
             // System.Exit
-            ("ExitSuccess", "ExitCode"),
-            ("ExitFailure", "ExitCode"),
+            ("ExitSuccess", "ExitCode", 0),
+            ("ExitFailure", "ExitCode", 1),
             // Control.Exception
-            ("SomeException", "SomeException"),
+            ("SomeException", "SomeException", 1),
             // System.IO
-            ("ReadMode", "IOMode"),
-            ("WriteMode", "IOMode"),
-            ("AppendMode", "IOMode"),
-            ("ReadWriteMode", "IOMode"),
-            ("NoBuffering", "BufferMode"),
-            ("LineBuffering", "BufferMode"),
-            ("BlockBuffering", "BufferMode"),
+            ("ReadMode", "IOMode", 0),
+            ("WriteMode", "IOMode", 0),
+            ("AppendMode", "IOMode", 0),
+            ("ReadWriteMode", "IOMode", 0),
+            ("NoBuffering", "BufferMode", 0),
+            ("LineBuffering", "BufferMode", 0),
+            ("BlockBuffering", "BufferMode", 1),  // BlockBuffering (Maybe Int)
             // System.Directory
-            ("XdgData", "XdgDirectory"),
-            ("XdgConfig", "XdgDirectory"),
-            ("XdgCache", "XdgDirectory"),
+            ("XdgData", "XdgDirectory", 0),
+            ("XdgConfig", "XdgDirectory", 0),
+            ("XdgCache", "XdgDirectory", 0),
             // System.Process
-            ("CreatePipe", "StdStream"),
-            ("Inherit", "StdStream"),
-            ("UseHandle", "StdStream"),
-            ("NoStream", "StdStream"),
+            ("CreatePipe", "StdStream", 0),
+            ("Inherit", "StdStream", 0),
+            ("UseHandle", "StdStream", 1),
+            ("NoStream", "StdStream", 0),
             // Data.Typeable
-            ("TypeRep", "TypeRep"),
+            ("TypeRep", "TypeRep", 1),
             // GHC.Generics
-            ("All", "All"),
-            ("Any", "Any"),
+            ("All", "All", 1),
+            ("Any", "Any", 1),
             // Note: X11/System.Posix stub constructors are now in define_stubs()
         ];
 
-        for (con_name, _type_name) in builtin_cons {
+        for (con_name, _type_name, arity) in builtin_cons {
             let sym = Symbol::intern(con_name);
             let def_id = self.fresh_def_id();
-            self.define(def_id, sym, DefKind::Constructor, Span::default());
+            self.define_constructor(def_id, sym, Span::default(), *arity);
             self.bind_constructor(sym, def_id);
         }
 
@@ -805,42 +808,43 @@ impl LowerContext {
             self.bind_type(sym, def_id);
         }
 
-        // Stub constructors from external packages
-        let stub_cons = [
-            // Graphics.X11 - Event types
-            ("KeyEvent", "Event"),
-            ("ButtonEvent", "Event"),
-            ("MotionEvent", "Event"),
-            ("CrossingEvent", "Event"),
-            ("ConfigureEvent", "Event"),
-            ("ConfigureRequestEvent", "Event"),
-            ("MapRequestEvent", "Event"),
-            ("UnmapEvent", "Event"),
-            ("DestroyWindowEvent", "Event"),
-            ("PropertyEvent", "Event"),
-            ("ClientMessageEvent", "Event"),
-            ("MappingNotifyEvent", "Event"),
+        // Stub constructors from external packages with arities
+        // Format: (name, type, arity)
+        let stub_cons: &[(&str, &str, usize)] = &[
+            // Graphics.X11 - Event types (records with many fields, but pattern matched with {})
+            ("KeyEvent", "Event", 0),       // Actually has fields, but we use 0 for record-style
+            ("ButtonEvent", "Event", 0),
+            ("MotionEvent", "Event", 0),
+            ("CrossingEvent", "Event", 0),
+            ("ConfigureEvent", "Event", 0),
+            ("ConfigureRequestEvent", "Event", 0),
+            ("MapRequestEvent", "Event", 0),
+            ("UnmapEvent", "Event", 0),
+            ("DestroyWindowEvent", "Event", 0),
+            ("PropertyEvent", "Event", 0),
+            ("ClientMessageEvent", "Event", 0),
+            ("MappingNotifyEvent", "Event", 0),
             // Graphics.X11 - Types
-            ("Rectangle", "Rectangle"),
-            ("WindowChanges", "WindowChanges"),
+            ("Rectangle", "Rectangle", 4),      // Rectangle x y width height
+            ("WindowChanges", "WindowChanges", 0), // Record type
             // System.Posix
-            ("ReadOnly", "OpenMode"),
-            ("WriteOnly", "OpenMode"),
-            ("ReadWrite", "OpenMode"),
-            ("Default", "Handler"),
-            ("Ignore", "Handler"),
-            ("Catch", "Handler"),
+            ("ReadOnly", "OpenMode", 0),
+            ("WriteOnly", "OpenMode", 0),
+            ("ReadWrite", "OpenMode", 0),
+            ("Default", "Handler", 0),
+            ("Ignore", "Handler", 0),
+            ("Catch", "Handler", 1),            // Catch (Signal -> IO ())
             // X11.Xlib.Extras (LayoutClass)
-            ("Full", "Full"),
+            ("Full", "Full", 0),
             // System.Locale
-            ("LC_ALL", "LocaleCategory"),
-            ("LC_CTYPE", "LocaleCategory"),
+            ("LC_ALL", "LocaleCategory", 0),
+            ("LC_CTYPE", "LocaleCategory", 0),
         ];
 
-        for (con_name, _type_name) in stub_cons {
+        for (con_name, _type_name, arity) in stub_cons {
             let sym = Symbol::intern(con_name);
             let def_id = self.fresh_def_id();
-            self.define(def_id, sym, DefKind::StubConstructor, Span::default());
+            self.define_constructor(def_id, sym, Span::default(), *arity);
             self.bind_constructor(sym, def_id);
         }
 
@@ -1136,6 +1140,21 @@ impl LowerContext {
                 name,
                 kind,
                 span,
+                arity: None,
+            },
+        );
+    }
+
+    /// Records a constructor definition with its arity.
+    pub fn define_constructor(&mut self, id: DefId, name: Symbol, span: Span, arity: usize) {
+        self.defs.insert(
+            id,
+            DefInfo {
+                id,
+                name,
+                kind: DefKind::Constructor,
+                span,
+                arity: Some(arity),
             },
         );
     }

@@ -65,6 +65,15 @@ pub enum LoadError {
     },
 }
 
+/// Information about an exported constructor.
+#[derive(Clone, Debug)]
+pub struct ConstructorInfo {
+    /// The DefId of the constructor.
+    pub def_id: DefId,
+    /// The number of fields/arguments the constructor takes.
+    pub arity: usize,
+}
+
 /// Exports collected from a loaded module.
 ///
 /// Contains mappings from names to their DefIds for values, types, and constructors
@@ -77,8 +86,8 @@ pub struct ModuleExports {
     pub values: FxHashMap<Symbol, DefId>,
     /// Exported types.
     pub types: FxHashMap<Symbol, DefId>,
-    /// Exported data constructors.
-    pub constructors: FxHashMap<Symbol, DefId>,
+    /// Exported data constructors with their arities.
+    pub constructors: FxHashMap<Symbol, ConstructorInfo>,
 }
 
 impl ModuleExports {
@@ -277,8 +286,14 @@ fn collect_decl_exports(
                     for con in &data_decl.constrs {
                         let con_name = con.name.name;
                         let con_def_id = ctx.fresh_def_id();
-                        ctx.define(con_def_id, con_name, DefKind::Constructor, con.span);
-                        exports.constructors.insert(con_name, con_def_id);
+
+                        // Calculate constructor arity from fields
+                        let arity = match &con.fields {
+                            ast::ConFields::Positional(fields) => fields.len(),
+                            ast::ConFields::Record(fields) => fields.len(),
+                        };
+                        ctx.define_constructor(con_def_id, con_name, con.span, arity);
+                        exports.constructors.insert(con_name, ConstructorInfo { def_id: con_def_id, arity });
 
                         // Export record field accessors
                         if let ast::ConFields::Record(fields) = &con.fields {
@@ -308,8 +323,9 @@ fn collect_decl_exports(
                 if export_constructors {
                     let con_name = newtype_decl.constr.name.name;
                     let con_def_id = ctx.fresh_def_id();
-                    ctx.define(con_def_id, con_name, DefKind::Constructor, newtype_decl.constr.span);
-                    exports.constructors.insert(con_name, con_def_id);
+                    // Newtypes always have arity 1
+                    ctx.define_constructor(con_def_id, con_name, newtype_decl.constr.span, 1);
+                    exports.constructors.insert(con_name, ConstructorInfo { def_id: con_def_id, arity: 1 });
 
                     // Export record field if present
                     if let ast::ConFields::Record(fields) = &newtype_decl.constr.fields {
@@ -487,16 +503,16 @@ pub fn apply_import_spec(
                         // Handle constructors
                         if let Some(constructors) = cons {
                             for con in constructors {
-                                if let Some(&def_id) = exports.constructors.get(&con.name) {
-                                    filtered.constructors.insert(con.name, def_id);
+                                if let Some(info) = exports.constructors.get(&con.name) {
+                                    filtered.constructors.insert(con.name, info.clone());
                                 }
                             }
                         } else {
                             // Type(..) - import all constructors of this type
                             // We need to find constructors associated with this type
                             // For now, import all constructors (conservative)
-                            for (&name, &def_id) in &exports.constructors {
-                                filtered.constructors.insert(name, def_id);
+                            for (&name, info) in &exports.constructors {
+                                filtered.constructors.insert(name, info.clone());
                             }
                         }
                     }
@@ -588,12 +604,12 @@ pub fn register_imported_names(
     }
 
     // Register constructors
-    for (&name, &def_id) in &exports.constructors {
+    for (&name, info) in &exports.constructors {
         let qualified = Symbol::intern(&format!("{}.{}", qualifier, name.as_str()));
         ctx.register_qualified_name(qualified, name);
 
         if ctx.lookup_constructor(name).is_none() {
-            ctx.bind_constructor(name, def_id);
+            ctx.bind_constructor(name, info.def_id);
         }
     }
 }

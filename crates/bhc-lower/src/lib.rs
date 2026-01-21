@@ -53,7 +53,7 @@ mod lower;
 mod resolve;
 
 pub use context::{DefKind, DefMap, LowerContext, Scope, ScopeId};
-pub use loader::{LoadError, ModuleCache, ModuleExports};
+pub use loader::{ConstructorInfo, LoadError, ModuleCache, ModuleExports};
 pub use lower::{lower_module, LowerConfig};
 
 use bhc_span::Span;

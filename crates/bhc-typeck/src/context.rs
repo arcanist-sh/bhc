@@ -290,10 +290,23 @@ impl TyCtxt {
                 }
 
                 // For imported constructors that aren't known builtins,
-                // register them with a fresh polymorphic type.
+                // create a function type based on the constructor's arity.
                 _ => {
-                    let fresh = self.fresh_ty();
-                    Scheme::mono(fresh)
+                    if let Some(arity) = def_info.arity {
+                        // Build: a1 -> a2 -> ... -> aN -> Result
+                        // where all are fresh type variables
+                        let result = self.fresh_ty();
+                        let mut con_ty = result;
+                        for _ in 0..arity {
+                            let arg = self.fresh_ty();
+                            con_ty = Ty::fun(arg, con_ty);
+                        }
+                        Scheme::mono(con_ty)
+                    } else {
+                        // No arity info, fall back to fresh type variable
+                        let fresh = self.fresh_ty();
+                        Scheme::mono(fresh)
+                    }
                 }
             };
 

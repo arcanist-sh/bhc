@@ -73,7 +73,7 @@ fn test_compile_xmonad_files() {
             ok_count += 1;
         } else {
             println!("{}: {} ({} errors)", name, status, errors.len());
-            for e in errors.iter().take(2) {
+            for e in errors.iter().take(3) {
                 println!("    {}", e);
             }
             fail_count += 1;

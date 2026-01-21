@@ -213,6 +213,8 @@ impl LowerContext {
             ("()", "Unit"),        // DefId 17 - unit
             ("(,)", "Tuple2"),     // DefId 18 - pair constructor
             ("(,,)", "Tuple3"),    // DefId 19 - triple constructor
+            // NonEmpty constructor
+            (":|", "NonEmpty"),    // DefId 20 - NonEmpty cons
         ];
 
         for (con_name, _type_name) in builtin_cons {
@@ -248,6 +250,7 @@ impl LowerContext {
             ":",
             "++",
             "!!",
+            "\\\\", // List difference
             // Function composition
             ".",
             "$",
@@ -424,6 +427,8 @@ impl LowerContext {
             "error",
             "undefined",
             "seq",
+            "until",
+            "asTypeOf",
             // Numeric operations
             "fromInteger",
             "fromRational",

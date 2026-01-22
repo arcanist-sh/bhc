@@ -4,6 +4,7 @@
 //! - Fresh variable generation
 //! - Error collection
 //! - Type environment
+//! - Constructor metadata for ADTs
 
 use bhc_core::{self as core, Bind, CoreModule, Var, VarId};
 use bhc_hir::{DefId, Item, Module as HirModule, ValueDef};
@@ -12,6 +13,22 @@ use bhc_intern::Symbol;
 use bhc_span::Span;
 use bhc_types::{Scheme, Ty};
 use rustc_hash::FxHashMap;
+
+/// Metadata about a data constructor.
+///
+/// This stores information needed to generate correct pattern matching code,
+/// particularly the constructor's tag (position within its data type).
+#[derive(Clone, Debug)]
+pub struct ConstructorInfo {
+    /// The name of the constructor.
+    pub name: Symbol,
+    /// The name of the data type this constructor belongs to.
+    pub type_name: Symbol,
+    /// The constructor's tag (0-based index within the data type's constructor list).
+    pub tag: u32,
+    /// The number of fields this constructor has.
+    pub arity: u32,
+}
 
 use crate::expr::lower_expr;
 use crate::{LowerError, LowerResult, TypeSchemeMap};
@@ -27,6 +44,10 @@ pub struct LowerContext {
     /// Type schemes from the type checker (DefId -> Scheme).
     type_schemes: TypeSchemeMap,
 
+    /// Constructor metadata (DefId -> ConstructorInfo).
+    /// This maps constructor DefIds to their metadata including tag and type.
+    constructor_map: FxHashMap<DefId, ConstructorInfo>,
+
     /// Accumulated errors.
     errors: Vec<LowerError>,
 }
@@ -40,9 +61,11 @@ impl LowerContext {
             fresh_counter: 100,
             var_map: FxHashMap::default(),
             type_schemes: FxHashMap::default(),
+            constructor_map: FxHashMap::default(),
             errors: Vec::new(),
         };
         ctx.register_builtins();
+        ctx.register_builtin_constructors();
         ctx
     }
 
@@ -59,6 +82,81 @@ impl LowerContext {
             .get(&def_id)
             .map(|scheme| scheme.ty.clone())
             .unwrap_or(Ty::Error)
+    }
+
+    /// Register builtin constructor metadata.
+    ///
+    /// This sets up the constructor tags for builtin types (Bool, Maybe, Either, etc.)
+    /// so pattern matching generates correct code.
+    fn register_builtin_constructors(&mut self) {
+        // Bool: False = 0, True = 1
+        let bool_sym = Symbol::intern("Bool");
+        self.constructor_map.insert(DefId::new(9), ConstructorInfo {
+            name: Symbol::intern("True"),
+            type_name: bool_sym,
+            tag: 1,
+            arity: 0,
+        });
+        self.constructor_map.insert(DefId::new(10), ConstructorInfo {
+            name: Symbol::intern("False"),
+            type_name: bool_sym,
+            tag: 0,
+            arity: 0,
+        });
+
+        // Maybe: Nothing = 0, Just = 1
+        let maybe_sym = Symbol::intern("Maybe");
+        self.constructor_map.insert(DefId::new(11), ConstructorInfo {
+            name: Symbol::intern("Nothing"),
+            type_name: maybe_sym,
+            tag: 0,
+            arity: 0,
+        });
+        self.constructor_map.insert(DefId::new(12), ConstructorInfo {
+            name: Symbol::intern("Just"),
+            type_name: maybe_sym,
+            tag: 1,
+            arity: 1,
+        });
+
+        // Either: Left = 0, Right = 1
+        let either_sym = Symbol::intern("Either");
+        self.constructor_map.insert(DefId::new(13), ConstructorInfo {
+            name: Symbol::intern("Left"),
+            type_name: either_sym,
+            tag: 0,
+            arity: 1,
+        });
+        self.constructor_map.insert(DefId::new(14), ConstructorInfo {
+            name: Symbol::intern("Right"),
+            type_name: either_sym,
+            tag: 1,
+            arity: 1,
+        });
+
+        // List: [] = 0, : = 1
+        let list_sym = Symbol::intern("List");
+        self.constructor_map.insert(DefId::new(15), ConstructorInfo {
+            name: Symbol::intern("[]"),
+            type_name: list_sym,
+            tag: 0,
+            arity: 0,
+        });
+        self.constructor_map.insert(DefId::new(16), ConstructorInfo {
+            name: Symbol::intern(":"),
+            type_name: list_sym,
+            tag: 1,
+            arity: 2,
+        });
+
+        // Unit: () = 0
+        let unit_sym = Symbol::intern("Unit");
+        self.constructor_map.insert(DefId::new(17), ConstructorInfo {
+            name: Symbol::intern("()"),
+            type_name: unit_sym,
+            tag: 0,
+            arity: 0,
+        });
     }
 
     /// Register builtin operators and constructors.
@@ -223,6 +321,17 @@ impl LowerContext {
         self.var_map.get(&def_id)
     }
 
+    /// Register a data constructor with its metadata.
+    pub fn register_constructor(&mut self, def_id: DefId, info: ConstructorInfo) {
+        self.constructor_map.insert(def_id, info);
+    }
+
+    /// Look up constructor metadata for a given DefId.
+    #[must_use]
+    pub fn lookup_constructor(&self, def_id: DefId) -> Option<&ConstructorInfo> {
+        self.constructor_map.get(&def_id)
+    }
+
     /// Lower a HIR module to Core.
     pub fn lower_module(&mut self, module: &HirModule) -> LowerResult<CoreModule> {
         // First pass: collect all top-level definitions and create Core variables
@@ -247,10 +356,25 @@ impl LowerContext {
                     }
                 }
                 Item::Data(data_def) => {
-                    // Register data constructors so they can be looked up during lowering
-                    for con in &data_def.cons {
+                    // Register data constructors with their metadata
+                    // The tag is the 0-based position in the constructor list
+                    for (tag, con) in data_def.cons.iter().enumerate() {
                         let var = self.named_var(con.name, Ty::Error);
                         self.register_var(con.id, var);
+
+                        // Calculate arity based on field type
+                        let arity = match &con.fields {
+                            bhc_hir::ConFields::Positional(fields) => fields.len() as u32,
+                            bhc_hir::ConFields::Named(fields) => fields.len() as u32,
+                        };
+
+                        // Register constructor metadata
+                        self.register_constructor(con.id, ConstructorInfo {
+                            name: con.name,
+                            type_name: data_def.name,
+                            tag: tag as u32,
+                            arity,
+                        });
                     }
                 }
                 Item::Newtype(newtype_def) => {

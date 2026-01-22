@@ -64,6 +64,15 @@ use super::context::LlvmContext;
 use super::module::LlvmModule;
 use super::types::TypeMapper;
 
+/// Metadata about a data constructor, used for code generation.
+#[derive(Clone, Debug)]
+pub struct ConstructorMeta {
+    /// The constructor's tag (0-based index within the data type).
+    pub tag: u32,
+    /// The number of fields this constructor has.
+    pub arity: u32,
+}
+
 /// State for lowering Core IR to LLVM IR.
 ///
 /// The struct has two lifetimes:
@@ -80,6 +89,9 @@ pub struct Lowering<'ctx, 'm> {
     functions: FxHashMap<VarId, FunctionValue<'ctx>>,
     /// Counter for generating unique closure names.
     closure_counter: u32,
+    /// Mapping from constructor names to metadata (tag, arity).
+    /// This is populated from DataCon entries in case alternatives.
+    constructor_metadata: FxHashMap<String, ConstructorMeta>,
 }
 
 impl<'ctx, 'm> Lowering<'ctx, 'm> {
@@ -91,9 +103,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             env: FxHashMap::default(),
             functions: FxHashMap::default(),
             closure_counter: 0,
+            constructor_metadata: FxHashMap::default(),
         };
         lowering.declare_rts_functions();
         lowering
+    }
+
+    /// Register a constructor's metadata for later use.
+    pub fn register_constructor(&mut self, name: &str, tag: u32, arity: u32) {
+        self.constructor_metadata.insert(
+            name.to_string(),
+            ConstructorMeta { tag, arity },
+        );
     }
 
     /// Declare external RTS functions.
@@ -1117,50 +1138,50 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Check if a name is a data constructor and return (tag, arity).
     ///
-    /// Data constructors in Haskell start with uppercase letters.
-    /// For builtin types, we know the exact tags:
-    /// - Bool: False=0, True=1
-    /// - Maybe: Nothing=0, Just=1
-    /// - Either: Left=0, Right=1
-    /// - List: []=0, (:)=1
-    /// - Tuple: ()=0
+    /// This function checks:
+    /// 1. Builtin types (Bool, Maybe, Either, List, Tuple, Ordering)
+    /// 2. User-defined types registered via `register_constructor`
     fn constructor_info(&self, name: &str) -> Option<(u32, u32)> {
+        // First check builtin constructors
         match name {
             // Bool constructors
-            "False" => Some((0, 0)),  // tag=0, arity=0
-            "True" => Some((1, 0)),   // tag=1, arity=0
+            "False" => return Some((0, 0)),  // tag=0, arity=0
+            "True" => return Some((1, 0)),   // tag=1, arity=0
 
             // Maybe constructors
-            "Nothing" => Some((0, 0)), // tag=0, arity=0
-            "Just" => Some((1, 1)),    // tag=1, arity=1
+            "Nothing" => return Some((0, 0)), // tag=0, arity=0
+            "Just" => return Some((1, 1)),    // tag=1, arity=1
 
             // Either constructors
-            "Left" => Some((0, 1)),   // tag=0, arity=1
-            "Right" => Some((1, 1)),  // tag=1, arity=1
+            "Left" => return Some((0, 1)),   // tag=0, arity=1
+            "Right" => return Some((1, 1)),  // tag=1, arity=1
 
             // List constructors
-            "[]" => Some((0, 0)),     // tag=0, arity=0 (Nil)
-            ":" => Some((1, 2)),      // tag=1, arity=2 (Cons head tail)
+            "[]" => return Some((0, 0)),     // tag=0, arity=0 (Nil)
+            ":" => return Some((1, 2)),      // tag=1, arity=2 (Cons head tail)
 
             // Unit constructor
-            "()" => Some((0, 0)),     // tag=0, arity=0
+            "()" => return Some((0, 0)),     // tag=0, arity=0
 
             // Ordering constructors
-            "LT" => Some((0, 0)),     // tag=0, arity=0
-            "EQ" => Some((1, 0)),     // tag=1, arity=0
-            "GT" => Some((2, 0)),     // tag=2, arity=0
+            "LT" => return Some((0, 0)),     // tag=0, arity=0
+            "EQ" => return Some((1, 0)),     // tag=1, arity=0
+            "GT" => return Some((2, 0)),     // tag=2, arity=0
 
-            // User-defined constructors: check first character is uppercase
-            _ => {
-                if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                    // For user-defined constructors, we don't know the tag/arity
-                    // This would need to be passed from the type checker
-                    // For now, return None and fall back to function call
-                    None
-                } else {
-                    None
-                }
-            }
+            _ => {}
+        }
+
+        // Check user-defined constructors registered from case alternatives
+        if let Some(meta) = self.constructor_metadata.get(name) {
+            return Some((meta.tag, meta.arity));
+        }
+
+        // If it looks like a constructor (starts with uppercase), return None
+        // to indicate we don't have metadata yet (might be registered later)
+        if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            None
+        } else {
+            None
         }
     }
 
@@ -1481,6 +1502,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower a Core module to LLVM IR.
     pub fn lower_module(&mut self, core_module: &CoreModule) -> CodegenResult<()> {
+        // Pre-pass: collect all constructor metadata from case alternatives
+        // This ensures constructors are known before we try to lower applications
+        for bind in &core_module.bindings {
+            self.collect_constructors_from_binding(bind);
+        }
+
         // First pass: declare all top-level functions
         for bind in &core_module.bindings {
             self.declare_binding(bind)?;
@@ -1492,6 +1519,47 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         Ok(())
+    }
+
+    /// Collect constructor metadata from a binding's expression.
+    fn collect_constructors_from_binding(&mut self, bind: &Bind) {
+        match bind {
+            Bind::NonRec(_, expr) => {
+                self.collect_constructors_from_expr(expr);
+            }
+            Bind::Rec(bindings) => {
+                for (_, expr) in bindings {
+                    self.collect_constructors_from_expr(expr);
+                }
+            }
+        }
+    }
+
+    /// Recursively collect constructor metadata from an expression.
+    fn collect_constructors_from_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Case(scrut, alts, _, _) => {
+                self.collect_constructors_from_expr(scrut);
+                for alt in alts {
+                    if let AltCon::DataCon(con) = &alt.con {
+                        self.register_constructor(con.name.as_str(), con.tag, con.arity);
+                    }
+                    self.collect_constructors_from_expr(&alt.rhs);
+                }
+            }
+            Expr::App(func, arg, _) => {
+                self.collect_constructors_from_expr(func);
+                self.collect_constructors_from_expr(arg);
+            }
+            Expr::Lam(_, body, _) => {
+                self.collect_constructors_from_expr(body);
+            }
+            Expr::Let(bind, body, _) => {
+                self.collect_constructors_from_binding(bind);
+                self.collect_constructors_from_expr(body);
+            }
+            Expr::Var(_, _) | Expr::Lit(_, _, _) => {}
+        }
     }
 
     /// Declare a binding (creates function signature without body).
@@ -2658,6 +2726,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     let tag_val = self.type_mapper().i64_type().const_int(con.tag as u64, false);
                     cases.push((tag_val, block));
                     datacon_info.push(Some(con));
+                    // Register this constructor for later use in constructor applications
+                    self.register_constructor(con.name.as_str(), con.tag, con.arity);
                 }
                 AltCon::Default => {
                     default_block = Some(block);

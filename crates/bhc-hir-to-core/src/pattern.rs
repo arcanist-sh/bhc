@@ -132,22 +132,23 @@ pub fn lower_pat_to_alt(
             binders.reverse();
 
             // Create the data constructor
-            // Look up the constructor name from the context
-            let con_name = if let Some(var) = ctx.lookup_var(def_ref.def_id) {
-                var.name
+            // Look up the constructor metadata from the context
+            let (con_name, type_name, tag) = if let Some(info) = ctx.lookup_constructor(def_ref.def_id) {
+                (info.name, info.type_name, info.tag)
+            } else if let Some(var) = ctx.lookup_var(def_ref.def_id) {
+                // Fallback for constructors not in the map - use name-based lookup
+                let tag = get_constructor_tag(var.name.as_str(), def_ref.def_id.index() as u32);
+                (var.name, Symbol::intern("DataType"), tag)
             } else {
-                // Fallback - shouldn't happen if constructor was registered
-                Symbol::intern("Con")
+                // Last resort fallback
+                let name = Symbol::intern("Con");
+                (name, Symbol::intern("DataType"), def_ref.def_id.index() as u32)
             };
 
-            // Get the tag for this constructor
-            // For builtin types, use known tags; otherwise use DefId index
-            let tag = get_constructor_tag(con_name.as_str(), def_ref.def_id.index() as u32);
-
-            let placeholder_tycon = TyCon::new(Symbol::intern("DataType"), Kind::Star);
+            let tycon = TyCon::new(type_name, Kind::Star);
             let con = DataCon {
                 name: con_name,
-                ty_con: placeholder_tycon,
+                ty_con: tycon,
                 tag,
                 arity: sub_pats.len() as u32,
             };
@@ -207,20 +208,21 @@ pub fn lower_pat_to_alt(
 
             binders.reverse();
 
-            // Create the data constructor
-            let con_name = if let Some(var) = ctx.lookup_var(def_ref.def_id) {
-                var.name
+            // Create the data constructor using metadata from context
+            let (con_name, type_name, tag) = if let Some(info) = ctx.lookup_constructor(def_ref.def_id) {
+                (info.name, info.type_name, info.tag)
+            } else if let Some(var) = ctx.lookup_var(def_ref.def_id) {
+                let tag = get_constructor_tag(var.name.as_str(), def_ref.def_id.index() as u32);
+                (var.name, Symbol::intern("DataType"), tag)
             } else {
-                Symbol::intern("Con")
+                let name = Symbol::intern("Con");
+                (name, Symbol::intern("DataType"), def_ref.def_id.index() as u32)
             };
 
-            // Get the tag for this constructor
-            let tag = get_constructor_tag(con_name.as_str(), def_ref.def_id.index() as u32);
-
-            let placeholder_tycon = TyCon::new(Symbol::intern("DataType"), Kind::Star);
+            let tycon = TyCon::new(type_name, Kind::Star);
             let con = DataCon {
                 name: con_name,
-                ty_con: placeholder_tycon,
+                ty_con: tycon,
                 tag,
                 arity: field_pats.len() as u32,
             };

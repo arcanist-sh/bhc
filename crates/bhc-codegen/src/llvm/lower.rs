@@ -482,8 +482,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let entry = self.llvm_context().append_basic_block(fn_val, "entry");
         self.builder().position_at_end(entry);
 
-        // Lower the expression body
-        let result = self.lower_expr(expr)?;
+        // Lower the function body, handling lambda parameters
+        let result = self.lower_function_body(fn_val, expr)?;
 
         // Build return
         if let Some(val) = result {
@@ -1167,14 +1167,94 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 Ok(result)
             }
 
-            Bind::Rec(_bindings) => {
-                // For recursive let bindings, we'd need phi nodes or allocas
-                // For now, just return an error for non-function recursive bindings
-                Err(CodegenError::Unsupported(
-                    "recursive let bindings not yet supported".to_string(),
-                ))
+            Bind::Rec(bindings) => {
+                // For recursive let bindings, we lift them to top-level functions.
+                // This works because:
+                // 1. We declare all the functions first (so they can reference each other)
+                // 2. Then we define their bodies
+                // 3. The body of the let can then call them
+
+                // Save the current insertion point
+                let current_block = self.builder().get_insert_block();
+
+                // First pass: declare all recursive functions
+                for (var, _expr) in bindings {
+                    // Generate a unique name for the lifted function
+                    let lifted_name = format!("{}${}", var.name.as_str(), var.id.index());
+                    let fn_type = self.lower_function_type(&var.ty)?;
+                    let fn_val = self.module.add_function(&lifted_name, fn_type);
+                    self.functions.insert(var.id, fn_val);
+                }
+
+                // Second pass: define all recursive functions
+                for (var, expr) in bindings {
+                    self.lower_recursive_function(var, expr)?;
+                }
+
+                // Restore insertion point
+                if let Some(block) = current_block {
+                    self.builder().position_at_end(block);
+                }
+
+                // Lower the body (recursive functions are now available)
+                let result = self.lower_expr(body)?;
+
+                // Note: We don't remove the functions from self.functions
+                // because they're now top-level and may be needed later.
+                // This is fine because VarIds are unique.
+
+                Ok(result)
             }
         }
+    }
+
+    /// Lower a recursive function that was lifted from a let binding.
+    fn lower_recursive_function(&mut self, var: &Var, expr: &Expr) -> CodegenResult<()> {
+        let fn_val = self.functions.get(&var.id).copied().ok_or_else(|| {
+            CodegenError::Internal(format!("recursive function not declared: {}", var.name.as_str()))
+        })?;
+
+        // Create entry block
+        let entry = self.llvm_context().append_basic_block(fn_val, "entry");
+        self.builder().position_at_end(entry);
+
+        // Handle lambda parameters
+        let result = self.lower_function_body(fn_val, expr)?;
+
+        // Build return
+        if let Some(val) = result {
+            self.builder()
+                .build_return(Some(&val))
+                .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
+        } else {
+            self.builder()
+                .build_return(None)
+                .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
+        }
+
+        Ok(())
+    }
+
+    /// Lower a function body, handling lambda parameters.
+    fn lower_function_body(
+        &mut self,
+        fn_val: FunctionValue<'ctx>,
+        expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // If the expression is a lambda, bind parameters to function arguments
+        let mut current = expr;
+        let mut param_idx = 0;
+
+        while let Expr::Lam(param, body, _span) = current {
+            if let Some(arg) = fn_val.get_nth_param(param_idx) {
+                self.env.insert(param.id, arg);
+            }
+            param_idx += 1;
+            current = body.as_ref();
+        }
+
+        // Lower the body
+        self.lower_expr(current)
     }
 
     /// Lower a case expression.

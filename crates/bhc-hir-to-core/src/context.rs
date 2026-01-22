@@ -83,6 +83,7 @@ impl LowerContext {
         };
         ctx.register_builtins();
         ctx.register_builtin_constructors();
+        ctx.register_builtin_classes();
         ctx
     }
 
@@ -264,6 +265,174 @@ impl LowerContext {
             self.var_map.insert(def_id, var);
             id += 1;
         }
+    }
+
+    /// Register built-in type classes and their instances.
+    ///
+    /// This sets up the type class hierarchy (Eq, Ord, Num, etc.) and
+    /// registers instances for built-in types (Int, Float, Bool, Char).
+    fn register_builtin_classes(&mut self) {
+        use bhc_types::{Kind, TyCon};
+
+        // Helper to create a type constructor
+        let make_ty = |name: &str| -> Ty {
+            Ty::Con(TyCon::new(Symbol::intern(name), Kind::Star))
+        };
+
+        // === Register Eq class ===
+        // Methods: == (/=)
+        // DefIds: == is 27, /= is 28
+        let eq_class = ClassInfo {
+            name: Symbol::intern("Eq"),
+            methods: vec![Symbol::intern("=="), Symbol::intern("/=")],
+            method_types: FxHashMap::default(),
+            superclasses: vec![],
+            defaults: FxHashMap::default(),
+        };
+        self.class_registry.register_class(eq_class);
+
+        // === Register Ord class ===
+        // Methods: compare, <, <=, >, >=, min, max
+        // DefIds: < is 29, <= is 30, > is 31, >= is 32, compare is 89, min is 90, max is 91
+        let ord_class = ClassInfo {
+            name: Symbol::intern("Ord"),
+            methods: vec![
+                Symbol::intern("compare"),
+                Symbol::intern("<"),
+                Symbol::intern("<="),
+                Symbol::intern(">"),
+                Symbol::intern(">="),
+                Symbol::intern("min"),
+                Symbol::intern("max"),
+            ],
+            method_types: FxHashMap::default(),
+            superclasses: vec![Symbol::intern("Eq")],
+            defaults: FxHashMap::default(),
+        };
+        self.class_registry.register_class(ord_class);
+
+        // === Register Num class ===
+        // Methods: +, -, *, negate, abs, signum, fromInteger
+        // DefIds: + is 18, - is 19, * is 20, negate is 82, abs is 83, signum is 84, fromInteger is 80
+        let num_class = ClassInfo {
+            name: Symbol::intern("Num"),
+            methods: vec![
+                Symbol::intern("+"),
+                Symbol::intern("-"),
+                Symbol::intern("*"),
+                Symbol::intern("negate"),
+                Symbol::intern("abs"),
+                Symbol::intern("signum"),
+                Symbol::intern("fromInteger"),
+            ],
+            method_types: FxHashMap::default(),
+            superclasses: vec![],
+            defaults: FxHashMap::default(),
+        };
+        self.class_registry.register_class(num_class);
+
+        // === Register Fractional class ===
+        // Methods: /, recip, fromRational
+        // DefIds: / is 21, fromRational is 81
+        let fractional_class = ClassInfo {
+            name: Symbol::intern("Fractional"),
+            methods: vec![
+                Symbol::intern("/"),
+                Symbol::intern("recip"),
+                Symbol::intern("fromRational"),
+            ],
+            method_types: FxHashMap::default(),
+            superclasses: vec![Symbol::intern("Num")],
+            defaults: FxHashMap::default(),
+        };
+        self.class_registry.register_class(fractional_class);
+
+        // === Register Show class ===
+        // Methods: show
+        // DefIds: show is 92
+        let show_class = ClassInfo {
+            name: Symbol::intern("Show"),
+            methods: vec![Symbol::intern("show")],
+            method_types: FxHashMap::default(),
+            superclasses: vec![],
+            defaults: FxHashMap::default(),
+        };
+        self.class_registry.register_class(show_class);
+
+        // === Register instances for Int ===
+        let int_ty = make_ty("Int");
+        self.register_builtin_instance("Eq", &int_ty, &[(27, "=="), (28, "/=")]);
+        self.register_builtin_instance("Ord", &int_ty, &[
+            (89, "compare"), (29, "<"), (30, "<="), (31, ">"), (32, ">="),
+            (90, "min"), (91, "max"),
+        ]);
+        self.register_builtin_instance("Num", &int_ty, &[
+            (18, "+"), (19, "-"), (20, "*"),
+            (82, "negate"), (83, "abs"), (84, "signum"), (80, "fromInteger"),
+        ]);
+        self.register_builtin_instance("Show", &int_ty, &[(92, "show")]);
+
+        // === Register instances for Float ===
+        let float_ty = make_ty("Float");
+        self.register_builtin_instance("Eq", &float_ty, &[(27, "=="), (28, "/=")]);
+        self.register_builtin_instance("Ord", &float_ty, &[
+            (89, "compare"), (29, "<"), (30, "<="), (31, ">"), (32, ">="),
+            (90, "min"), (91, "max"),
+        ]);
+        self.register_builtin_instance("Num", &float_ty, &[
+            (18, "+"), (19, "-"), (20, "*"),
+            (82, "negate"), (83, "abs"), (84, "signum"), (80, "fromInteger"),
+        ]);
+        self.register_builtin_instance("Fractional", &float_ty, &[
+            (21, "/"), (81, "fromRational"),
+        ]);
+        self.register_builtin_instance("Show", &float_ty, &[(92, "show")]);
+
+        // === Register instances for Bool ===
+        let bool_ty = make_ty("Bool");
+        self.register_builtin_instance("Eq", &bool_ty, &[(27, "=="), (28, "/=")]);
+        self.register_builtin_instance("Ord", &bool_ty, &[
+            (89, "compare"), (29, "<"), (30, "<="), (31, ">"), (32, ">="),
+            (90, "min"), (91, "max"),
+        ]);
+        self.register_builtin_instance("Show", &bool_ty, &[(92, "show")]);
+
+        // === Register instances for Char ===
+        let char_ty = make_ty("Char");
+        self.register_builtin_instance("Eq", &char_ty, &[(27, "=="), (28, "/=")]);
+        self.register_builtin_instance("Ord", &char_ty, &[
+            (89, "compare"), (29, "<"), (30, "<="), (31, ">"), (32, ">="),
+            (90, "min"), (91, "max"),
+        ]);
+        self.register_builtin_instance("Show", &char_ty, &[(92, "show")]);
+    }
+
+    /// Helper to register a builtin instance with method DefIds.
+    fn register_builtin_instance(
+        &mut self,
+        class_name: &str,
+        instance_type: &Ty,
+        methods: &[(usize, &str)],
+    ) {
+        let mut method_map = FxHashMap::default();
+        for (def_id, name) in methods {
+            method_map.insert(Symbol::intern(name), DefId::new(*def_id));
+        }
+
+        // For superclass instances, use the same instance type
+        let class_info = self.class_registry.lookup_class(Symbol::intern(class_name));
+        let superclass_instances = class_info
+            .map(|c| c.superclasses.iter().map(|_| instance_type.clone()).collect())
+            .unwrap_or_default();
+
+        let instance_info = InstanceInfo {
+            class: Symbol::intern(class_name),
+            instance_type: instance_type.clone(),
+            methods: method_map,
+            superclass_instances,
+        };
+
+        self.class_registry.register_instance(instance_info);
     }
 
     /// Register builtins using DefIds from the lowering pass.

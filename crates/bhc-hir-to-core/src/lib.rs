@@ -723,4 +723,143 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_builtin_classes_registered() {
+        // Verify that builtin type classes are registered in a fresh context
+        let ctx = LowerContext::new();
+        let registry = ctx.class_registry();
+
+        // Check Eq class
+        let eq_class = registry.lookup_class(Symbol::intern("Eq"));
+        assert!(eq_class.is_some(), "Eq class should be registered");
+        let eq_class = eq_class.unwrap();
+        assert!(eq_class.methods.contains(&Symbol::intern("==")));
+        assert!(eq_class.methods.contains(&Symbol::intern("/=")));
+        assert!(eq_class.superclasses.is_empty());
+
+        // Check Ord class
+        let ord_class = registry.lookup_class(Symbol::intern("Ord"));
+        assert!(ord_class.is_some(), "Ord class should be registered");
+        let ord_class = ord_class.unwrap();
+        assert!(ord_class.methods.contains(&Symbol::intern("compare")));
+        assert!(ord_class.methods.contains(&Symbol::intern("<")));
+        assert!(ord_class.methods.contains(&Symbol::intern(">")));
+        assert!(ord_class.methods.contains(&Symbol::intern("min")));
+        assert!(ord_class.methods.contains(&Symbol::intern("max")));
+        assert_eq!(ord_class.superclasses, vec![Symbol::intern("Eq")]);
+
+        // Check Num class
+        let num_class = registry.lookup_class(Symbol::intern("Num"));
+        assert!(num_class.is_some(), "Num class should be registered");
+        let num_class = num_class.unwrap();
+        assert!(num_class.methods.contains(&Symbol::intern("+")));
+        assert!(num_class.methods.contains(&Symbol::intern("-")));
+        assert!(num_class.methods.contains(&Symbol::intern("*")));
+        assert!(num_class.methods.contains(&Symbol::intern("negate")));
+        assert!(num_class.methods.contains(&Symbol::intern("fromInteger")));
+        assert!(num_class.superclasses.is_empty());
+
+        // Check Fractional class
+        let frac_class = registry.lookup_class(Symbol::intern("Fractional"));
+        assert!(frac_class.is_some(), "Fractional class should be registered");
+        let frac_class = frac_class.unwrap();
+        assert!(frac_class.methods.contains(&Symbol::intern("/")));
+        assert!(frac_class.methods.contains(&Symbol::intern("fromRational")));
+        assert_eq!(frac_class.superclasses, vec![Symbol::intern("Num")]);
+
+        // Check Show class
+        let show_class = registry.lookup_class(Symbol::intern("Show"));
+        assert!(show_class.is_some(), "Show class should be registered");
+        let show_class = show_class.unwrap();
+        assert!(show_class.methods.contains(&Symbol::intern("show")));
+    }
+
+    #[test]
+    fn test_builtin_instances_registered() {
+        use bhc_types::{Kind, TyCon};
+
+        let ctx = LowerContext::new();
+        let registry = ctx.class_registry();
+
+        let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
+        let float_ty = Ty::Con(TyCon::new(Symbol::intern("Float"), Kind::Star));
+        let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+        let char_ty = Ty::Con(TyCon::new(Symbol::intern("Char"), Kind::Star));
+
+        // Check Eq Int instance
+        let eq_int = registry.resolve_instance(Symbol::intern("Eq"), &int_ty);
+        assert!(eq_int.is_some(), "Eq Int instance should be registered");
+        let eq_int = eq_int.unwrap();
+        assert!(eq_int.methods.contains_key(&Symbol::intern("==")));
+        assert!(eq_int.methods.contains_key(&Symbol::intern("/=")));
+
+        // Check Num Int instance
+        let num_int = registry.resolve_instance(Symbol::intern("Num"), &int_ty);
+        assert!(num_int.is_some(), "Num Int instance should be registered");
+        let num_int = num_int.unwrap();
+        assert!(num_int.methods.contains_key(&Symbol::intern("+")));
+        assert!(num_int.methods.contains_key(&Symbol::intern("-")));
+        assert!(num_int.methods.contains_key(&Symbol::intern("*")));
+
+        // Check Fractional Float instance
+        let frac_float = registry.resolve_instance(Symbol::intern("Fractional"), &float_ty);
+        assert!(frac_float.is_some(), "Fractional Float instance should be registered");
+        let frac_float = frac_float.unwrap();
+        assert!(frac_float.methods.contains_key(&Symbol::intern("/")));
+
+        // Check Eq Bool instance
+        let eq_bool = registry.resolve_instance(Symbol::intern("Eq"), &bool_ty);
+        assert!(eq_bool.is_some(), "Eq Bool instance should be registered");
+
+        // Check Ord Char instance
+        let ord_char = registry.resolve_instance(Symbol::intern("Ord"), &char_ty);
+        assert!(ord_char.is_some(), "Ord Char instance should be registered");
+
+        // Check Show instances
+        let show_int = registry.resolve_instance(Symbol::intern("Show"), &int_ty);
+        assert!(show_int.is_some(), "Show Int instance should be registered");
+
+        let show_bool = registry.resolve_instance(Symbol::intern("Show"), &bool_ty);
+        assert!(show_bool.is_some(), "Show Bool instance should be registered");
+    }
+
+    #[test]
+    fn test_is_class_method() {
+        let ctx = LowerContext::new();
+
+        // Check that arithmetic operators are class methods
+        assert_eq!(
+            ctx.is_class_method(Symbol::intern("+")),
+            Some(Symbol::intern("Num")),
+            "+ should be a Num method"
+        );
+        assert_eq!(
+            ctx.is_class_method(Symbol::intern("==")),
+            Some(Symbol::intern("Eq")),
+            "== should be an Eq method"
+        );
+        assert_eq!(
+            ctx.is_class_method(Symbol::intern("/")),
+            Some(Symbol::intern("Fractional")),
+            "/ should be a Fractional method"
+        );
+        assert_eq!(
+            ctx.is_class_method(Symbol::intern("compare")),
+            Some(Symbol::intern("Ord")),
+            "compare should be an Ord method"
+        );
+        assert_eq!(
+            ctx.is_class_method(Symbol::intern("show")),
+            Some(Symbol::intern("Show")),
+            "show should be a Show method"
+        );
+
+        // Check that non-class functions return None
+        assert_eq!(
+            ctx.is_class_method(Symbol::intern("map")),
+            None,
+            "map is not a class method"
+        );
+    }
 }

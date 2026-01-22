@@ -1,6 +1,37 @@
-//! System libraries for BHC
+//! BHC System Library - Rust support
 //!
-//! This crate provides OS interaction primitives for the BHC runtime:
+//! OS interaction primitives for BHC.
+//!
+//! # Architecture
+//!
+//! The high-level System.* API is **defined in Haskell** (see
+//! `hs/BHC/System/*.hs`). This Rust crate provides FFI primitives
+//! for OS operations that cannot be expressed in pure Haskell.
+//!
+//! # What belongs here
+//!
+//! - File I/O primitives (open, read, write, close)
+//! - Environment variable access
+//! - Directory operations
+//! - Process spawning
+//! - Exit codes
+//!
+//! # What does NOT belong here
+//!
+//! - High-level Handle abstraction (that's Haskell)
+//! - Monad instances for IO (that's Haskell)
+//! - Exception handling (that's Haskell + RTS)
+//!
+//! # FFI Exports
+//!
+//! This crate exports C-ABI functions for BHC to call:
+//! - IO: `bhc_open`, `bhc_read`, `bhc_write`, `bhc_close`
+//! - Environment: `bhc_getenv`, `bhc_setenv`, `bhc_getargs`
+//! - Directory: `bhc_mkdir`, `bhc_rmdir`, `bhc_listdir`
+//! - Process: `bhc_spawn`, `bhc_wait`
+//! - Exit: `bhc_exit`
+//!
+//! # Modules
 //!
 //! - [`io`] - File handles and buffered I/O
 //! - [`environment`] - Environment variables and program arguments
@@ -8,27 +39,6 @@
 //! - [`directory`] - Directory operations
 //! - [`exit`] - Program exit codes
 //! - [`process`] - Process spawning and management
-//!
-//! # Overview
-//!
-//! The system libraries provide a safe, cross-platform interface to
-//! operating system functionality. All operations that can fail return
-//! `Result` types with descriptive errors.
-//!
-//! # Example
-//!
-//! ```no_run
-//! use bhc_system::{environment, filepath, io};
-//!
-//! // Get program arguments
-//! let args = environment::get_args();
-//!
-//! // Build a file path
-//! let path = filepath::join(&["home", "user", "data.txt"]);
-//!
-//! // Read file contents
-//! let contents = io::read_file(&path).unwrap();
-//! ```
 
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]

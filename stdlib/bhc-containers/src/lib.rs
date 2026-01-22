@@ -1,20 +1,22 @@
-//! BHC Containers Library
+//! BHC Containers Library - Rust support
 //!
-//! Efficient container types for BHC.
+//! This crate provides minimal Rust support for BHC containers.
 //!
-//! # Containers
+//! # Architecture
 //!
-//! - `map` - Immutable ordered maps (weight-balanced trees)
-//! - `set` - Immutable ordered sets
-//! - `intmap` - Maps with Int keys (optimized)
-//! - `intset` - Sets of Int values (optimized)
-//! - `sequence` - Sequences (finger trees)
+//! Container types (Map, Set, IntMap, IntSet, Sequence) are **implemented
+//! in Haskell** (see `hs/BHC/Data/*.hs`). BHC compiles them directly.
+//!
+//! These are classic functional data structures:
+//! - Weight-balanced trees (Map, Set)
+//! - Patricia tries (IntMap, IntSet)
+//! - Finger trees (Sequence)
+//!
+//! This Rust crate is intentionally empty. All functionality comes from
+//! the Haskell source.
 
 #![warn(missing_docs)]
-#![warn(unsafe_code)]
+#![allow(unsafe_code)]
 
-pub mod intmap;
-pub mod intset;
-pub mod map;
-pub mod sequence;
-pub mod set;
+// This crate is intentionally minimal.
+// Container implementations are in hs/BHC/Data/*.hs

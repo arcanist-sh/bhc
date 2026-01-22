@@ -1,54 +1,18 @@
-//! BHC Transformers Library
+//! BHC Transformers Library - Rust support
 //!
-//! Monad transformers for composing effects in pure functional style.
+//! This crate provides minimal Rust support for BHC transformers.
 //!
-//! # Overview
+//! # Architecture
 //!
-//! Monad transformers allow you to combine multiple effects (state, errors,
-//! logging, environment) in a single computation. Each transformer adds
-//! one effect to an underlying monad.
+//! Monad transformers (ReaderT, StateT, WriterT, ExceptT, etc.) are
+//! **implemented in Haskell** (see `hs/BHC/Control/Monad/*.hs`).
+//! BHC compiles them directly.
 //!
-//! # Available Transformers
-//!
-//! - [`identity`] - Identity monad and IdentityT (base case for stacking)
-//! - [`reader`] - ReaderT for read-only environment access
-//! - [`writer`] - WriterT for logging/accumulation
-//! - [`state`] - StateT for mutable state
-//! - [`except`] - ExceptT for error handling
-//! - [`maybe`] - MaybeT for optional/failure semantics
-//! - [`rws`] - RWS combined Reader/Writer/State
-//!
-//! # Example
-//!
-//! ```ignore
-//! use bhc_transformers::{Reader, State, Writer};
-//!
-//! // Reader for configuration
-//! let config_reader = Reader::asks(|cfg: &Config| cfg.timeout);
-//!
-//! // State for counters
-//! let tick = State::get().and_then(|n| State::put(n + 1));
-//!
-//! // Writer for logging
-//! let logged = Writer::tell(vec!["started"]).and_then(|_| Writer::pure(42));
-//! ```
+//! Monad transformers are quintessentially Haskell - they don't need
+//! any Rust implementation. This crate is intentionally empty.
 
 #![warn(missing_docs)]
-#![warn(unsafe_code)]
+#![allow(unsafe_code)]
 
-pub mod except;
-pub mod identity;
-pub mod maybe;
-pub mod reader;
-pub mod rws;
-pub mod state;
-pub mod writer;
-
-// Re-export main types at crate level
-pub use except::{Except, ExceptT};
-pub use identity::{Identity, IdentityT};
-pub use maybe::MaybeT;
-pub use reader::{Reader, ReaderT};
-pub use state::{State, StateT};
-pub use writer::{Monoid, Product, Sum, Writer, WriterT};
-pub use rws::{RWS, RWST};
+// This crate is intentionally minimal.
+// Transformer implementations are in hs/BHC/Control/Monad/*.hs

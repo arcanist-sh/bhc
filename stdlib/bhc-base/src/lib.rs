@@ -1,36 +1,22 @@
-//! BHC Base Library
+//! BHC Base Library - Rust support
 //!
-//! This crate provides the core Data.*, Control.*, and System.* modules
-//! for the BHC standard library.
+//! This crate provides minimal Rust support for the BHC base library.
 //!
-//! # Modules
+//! # Architecture
 //!
-//! ## Data modules
-//! - `list` - Extended list operations
-//! - `char` - Character operations
-//! - `string` - String operations
-//! - `function` - Extended function combinators
-//! - `ord` - Extended ordering operations
+//! The BHC base library is **implemented in Haskell** (see `hs/BHC/Data/*.hs`
+//! and `hs/BHC/Control/*.hs`). BHC compiles the Haskell source directly.
 //!
-//! ## Control modules
-//! - `monad` - Extended monad operations
-//! - `applicative` - Extended applicative operations
-//! - `category` - Category theory abstractions
-//! - `arrow` - Arrow combinators
+//! This Rust crate only provides:
+//! - Character primitives (Unicode operations via Rust's char handling)
+//! - Re-exports from bhc-rts
 //!
-//! ## System modules
-//! - `io` - Input/output operations
-//! - `environment` - Environment variable access
+//! # What does NOT belong here
+//!
+//! - List, Monad, Applicative, Arrow implementations
+//! - Those are Haskell and compiled by BHC
 
 #![warn(missing_docs)]
-#![warn(unsafe_code)]
+#![allow(unsafe_code)]
 
-pub mod applicative;
-pub mod arrow;
-pub mod category;
-pub mod char;
-pub mod function;
-pub mod io;
-pub mod list;
-pub mod monad;
-pub mod string;
+pub mod char;  // Unicode primitives - actually needed

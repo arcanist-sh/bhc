@@ -1,43 +1,42 @@
 //! Character operations
 //!
 //! Unicode character classification and conversion functions.
-
-use bhc_prelude::bool::Bool;
+//! These are FFI primitives called by BHC-compiled Haskell code.
 
 /// Check if character is a letter
 #[no_mangle]
-pub extern "C" fn bhc_char_is_alpha(c: u32) -> Bool {
-    Bool::from_bool(char::from_u32(c).map_or(false, |c| c.is_alphabetic()))
+pub extern "C" fn bhc_char_is_alpha(c: u32) -> bool {
+    char::from_u32(c).map_or(false, |c| c.is_alphabetic())
 }
 
 /// Check if character is a digit
 #[no_mangle]
-pub extern "C" fn bhc_char_is_digit(c: u32) -> Bool {
-    Bool::from_bool(char::from_u32(c).map_or(false, |c| c.is_ascii_digit()))
+pub extern "C" fn bhc_char_is_digit(c: u32) -> bool {
+    char::from_u32(c).map_or(false, |c| c.is_ascii_digit())
 }
 
 /// Check if character is alphanumeric
 #[no_mangle]
-pub extern "C" fn bhc_char_is_alphanumeric(c: u32) -> Bool {
-    Bool::from_bool(char::from_u32(c).map_or(false, |c| c.is_alphanumeric()))
+pub extern "C" fn bhc_char_is_alphanumeric(c: u32) -> bool {
+    char::from_u32(c).map_or(false, |c| c.is_alphanumeric())
 }
 
 /// Check if character is whitespace
 #[no_mangle]
-pub extern "C" fn bhc_char_is_space(c: u32) -> Bool {
-    Bool::from_bool(char::from_u32(c).map_or(false, |c| c.is_whitespace()))
+pub extern "C" fn bhc_char_is_space(c: u32) -> bool {
+    char::from_u32(c).map_or(false, |c| c.is_whitespace())
 }
 
 /// Check if character is uppercase
 #[no_mangle]
-pub extern "C" fn bhc_char_is_upper(c: u32) -> Bool {
-    Bool::from_bool(char::from_u32(c).map_or(false, |c| c.is_uppercase()))
+pub extern "C" fn bhc_char_is_upper(c: u32) -> bool {
+    char::from_u32(c).map_or(false, |c| c.is_uppercase())
 }
 
 /// Check if character is lowercase
 #[no_mangle]
-pub extern "C" fn bhc_char_is_lower(c: u32) -> Bool {
-    Bool::from_bool(char::from_u32(c).map_or(false, |c| c.is_lowercase()))
+pub extern "C" fn bhc_char_is_lower(c: u32) -> bool {
+    char::from_u32(c).map_or(false, |c| c.is_lowercase())
 }
 
 /// Convert to uppercase
@@ -79,14 +78,14 @@ pub extern "C" fn bhc_char_int_to_digit(n: i32) -> u32 {
 
 /// Get character's Unicode general category
 #[no_mangle]
-pub extern "C" fn bhc_char_is_print(c: u32) -> Bool {
-    Bool::from_bool(char::from_u32(c).map_or(false, |c| !c.is_control()))
+pub extern "C" fn bhc_char_is_print(c: u32) -> bool {
+    char::from_u32(c).map_or(false, |c| !c.is_control())
 }
 
 /// Check if ASCII
 #[no_mangle]
-pub extern "C" fn bhc_char_is_ascii(c: u32) -> Bool {
-    Bool::from_bool(c <= 127)
+pub extern "C" fn bhc_char_is_ascii(c: u32) -> bool {
+    c <= 127
 }
 
 /// Get character's code point
@@ -111,9 +110,9 @@ mod tests {
 
     #[test]
     fn test_is_alpha() {
-        assert_eq!(bhc_char_is_alpha('a' as u32), Bool::True);
-        assert_eq!(bhc_char_is_alpha('Z' as u32), Bool::True);
-        assert_eq!(bhc_char_is_alpha('1' as u32), Bool::False);
+        assert!(bhc_char_is_alpha('a' as u32));
+        assert!(bhc_char_is_alpha('Z' as u32));
+        assert!(!bhc_char_is_alpha('1' as u32));
     }
 
     #[test]

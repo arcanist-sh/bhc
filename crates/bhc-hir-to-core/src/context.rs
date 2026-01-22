@@ -558,6 +558,27 @@ impl LowerContext {
         None
     }
 
+    /// Find an in-scope dictionary whose class has the given class as a superclass.
+    ///
+    /// For example, if we need an `Eq` dictionary but only have `Ord` in scope,
+    /// this will find the `Ord` dictionary since `Ord` has `Eq` as a superclass.
+    ///
+    /// Returns `(subclass_name, dict_var)` if found.
+    #[must_use]
+    pub fn lookup_superclass_dict(&self, needed_class: Symbol) -> Option<(Symbol, &Var)> {
+        for scope in self.dict_scope.iter().rev() {
+            for (class_name, dict_var) in scope {
+                // Check if this class has the needed class as a superclass
+                if let Some(class_info) = self.class_registry.lookup_class(*class_name) {
+                    if class_info.superclasses.contains(&needed_class) {
+                        return Some((*class_name, dict_var));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Get all dictionary variables that match the given constraints.
     ///
     /// Returns dictionary variables in the same order as the constraints.
@@ -579,10 +600,13 @@ impl LowerContext {
         &self.class_registry
     }
 
-    /// Try to resolve a dictionary for a constraint with a concrete type.
+    /// Try to resolve a dictionary for a constraint.
     ///
-    /// This first checks the in-scope dictionaries (for polymorphic contexts),
-    /// then falls back to constructing a dictionary from an instance.
+    /// Resolution order:
+    /// 1. Direct lookup: Check if we have an in-scope dictionary for the class
+    /// 2. Superclass extraction: Check if we have a dictionary for a subclass
+    ///    (e.g., have Ord, need Eq - extract Eq from Ord)
+    /// 3. Instance construction: For concrete types, construct from an instance
     ///
     /// Returns the dictionary expression and any bindings that need to be added.
     pub fn resolve_dictionary(
@@ -590,12 +614,27 @@ impl LowerContext {
         constraint: &Constraint,
         span: Span,
     ) -> Option<core::Expr> {
-        // First, try to find an in-scope dictionary variable
+        // 1. First, try to find an in-scope dictionary variable directly
         if let Some(dict_var) = self.lookup_dict(constraint.class) {
             return Some(core::Expr::Var(dict_var.clone(), span));
         }
 
-        // If not in scope, try to construct from an instance
+        // 2. Try superclass extraction: if we have Ord but need Eq, extract Eq from Ord
+        if let Some((subclass, dict_var)) = self.lookup_superclass_dict(constraint.class) {
+            // We found a dictionary for a class that has our needed class as a superclass
+            // Extract the superclass dictionary
+            if let Some(superclass_expr) = crate::dictionary::select_superclass(
+                dict_var,
+                subclass,
+                constraint.class,
+                &self.class_registry,
+                span,
+            ) {
+                return Some(superclass_expr);
+            }
+        }
+
+        // 3. If not in scope, try to construct from an instance
         // (only works for concrete types)
         if let Some(ty) = constraint.args.first() {
             if !has_type_variables(ty) {

@@ -862,4 +862,147 @@ mod tests {
             "map is not a class method"
         );
     }
+
+    #[test]
+    fn test_superclass_dictionary_extraction() {
+        // Test that when we have an Ord dictionary in scope but need an Eq dictionary,
+        // we can extract Eq from Ord (since Ord has Eq as a superclass).
+        //
+        // Scenario:
+        // foo :: Ord a => a -> a -> Bool
+        // foo x y = x == y   -- needs Eq, but we only have Ord
+        //
+        // The (==) call should get its dictionary by extracting Eq from Ord.
+
+        use bhc_types::{Constraint, Kind, TyVar};
+
+        let mut ctx = LowerContext::new();
+
+        // Create a type variable for `a`
+        let a_var = TyVar::new(0, Kind::Star);
+        let a_ty = Ty::Var(a_var.clone());
+
+        // Create an Ord dictionary variable (simulating what happens when lowering
+        // a function with Ord constraint)
+        let ord_dict_var = ctx.fresh_var("$dOrd", Ty::Error, Span::default());
+
+        // Push a dictionary scope and register the Ord dictionary
+        ctx.push_dict_scope();
+        ctx.register_dict(Symbol::intern("Ord"), ord_dict_var.clone());
+
+        // Now try to resolve an Eq constraint - this should extract from Ord
+        let eq_constraint = Constraint::new(
+            Symbol::intern("Eq"),
+            a_ty.clone(),
+            Span::default(),
+        );
+
+        let result = ctx.resolve_dictionary(&eq_constraint, Span::default());
+        assert!(result.is_some(), "Should resolve Eq via superclass extraction from Ord");
+
+        // The result should be a selector expression that extracts Eq from Ord
+        // It should be an App (selector applied to dictionary)
+        if let Some(expr) = result {
+            match &expr {
+                bhc_core::Expr::App(_, arg, _) => {
+                    // The argument should reference our Ord dictionary
+                    if let bhc_core::Expr::Var(var, _) = arg.as_ref() {
+                        assert_eq!(
+                            var.name, ord_dict_var.name,
+                            "Should extract from the Ord dictionary"
+                        );
+                    } else {
+                        panic!("Expected Var as argument to selector, got {:?}", arg);
+                    }
+                }
+                _ => panic!("Expected App expression for superclass extraction, got {:?}", expr),
+            }
+        }
+
+        // Also verify that lookup_superclass_dict finds the Ord dictionary
+        let found = ctx.lookup_superclass_dict(Symbol::intern("Eq"));
+        assert!(found.is_some(), "lookup_superclass_dict should find Ord for Eq");
+        let (class, dict) = found.unwrap();
+        assert_eq!(class, Symbol::intern("Ord"), "Should find Ord class");
+        assert_eq!(dict.name, ord_dict_var.name, "Should return the Ord dictionary");
+
+        ctx.pop_dict_scope();
+    }
+
+    #[test]
+    fn test_superclass_not_found_when_no_subclass_dict() {
+        // Test that superclass extraction fails gracefully when no subclass dictionary
+        // is in scope.
+
+        use bhc_types::{Constraint, Kind, TyVar};
+
+        let mut ctx = LowerContext::new();
+
+        let a_var = TyVar::new(0, Kind::Star);
+        let a_ty = Ty::Var(a_var);
+
+        // Register a Num dictionary (Num has no superclass relation to Eq)
+        let num_dict_var = ctx.fresh_var("$dNum", Ty::Error, Span::default());
+        ctx.push_dict_scope();
+        ctx.register_dict(Symbol::intern("Num"), num_dict_var);
+
+        // Try to resolve Eq - should fail since Num doesn't have Eq as superclass
+        let eq_constraint = Constraint::new(
+            Symbol::intern("Eq"),
+            a_ty,
+            Span::default(),
+        );
+
+        let result = ctx.resolve_dictionary(&eq_constraint, Span::default());
+        // This should be None because:
+        // - No direct Eq dictionary in scope
+        // - Num doesn't have Eq as superclass
+        // - Type variable means we can't construct from instance
+        assert!(result.is_none(), "Should not resolve Eq from Num (no superclass relation)");
+
+        ctx.pop_dict_scope();
+    }
+
+    #[test]
+    fn test_direct_dict_preferred_over_superclass() {
+        // Test that when both a direct dictionary and a superclass dictionary
+        // are available, the direct dictionary is preferred.
+
+        use bhc_types::{Constraint, Kind, TyVar};
+
+        let mut ctx = LowerContext::new();
+
+        let a_var = TyVar::new(0, Kind::Star);
+        let a_ty = Ty::Var(a_var);
+
+        // Register both Eq and Ord dictionaries
+        let eq_dict_var = ctx.fresh_var("$dEq", Ty::Error, Span::default());
+        let ord_dict_var = ctx.fresh_var("$dOrd", Ty::Error, Span::default());
+
+        ctx.push_dict_scope();
+        ctx.register_dict(Symbol::intern("Eq"), eq_dict_var.clone());
+        ctx.register_dict(Symbol::intern("Ord"), ord_dict_var);
+
+        // Resolve Eq - should use the direct Eq dictionary, not extract from Ord
+        let eq_constraint = Constraint::new(
+            Symbol::intern("Eq"),
+            a_ty,
+            Span::default(),
+        );
+
+        let result = ctx.resolve_dictionary(&eq_constraint, Span::default());
+        assert!(result.is_some(), "Should resolve Eq");
+
+        // Should be a simple Var reference to the Eq dictionary
+        if let Some(bhc_core::Expr::Var(var, _)) = result {
+            assert_eq!(
+                var.name, eq_dict_var.name,
+                "Should use direct Eq dictionary, not extract from Ord"
+            );
+        } else {
+            panic!("Expected direct Var reference for Eq dictionary");
+        }
+
+        ctx.pop_dict_scope();
+    }
 }

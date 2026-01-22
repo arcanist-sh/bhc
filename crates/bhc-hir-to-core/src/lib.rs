@@ -266,6 +266,7 @@ mod tests {
             id: class_def_id,
             name: Symbol::intern("MyEq"),
             params: vec![a_var.clone()],
+            fundeps: vec![],
             supers: vec![], // No superclasses
             methods: vec![
                 bhc_hir::MethodSig {
@@ -593,6 +594,7 @@ mod tests {
             id: class_def_id,
             name: Symbol::intern("MyEq"),
             params: vec![a_var.clone()],
+            fundeps: vec![],
             supers: vec![],
             methods: vec![bhc_hir::MethodSig {
                 name: Symbol::intern("myEq"),
@@ -890,6 +892,7 @@ mod tests {
             id: class_def_id,
             name: Symbol::intern("MyEq"),
             params: vec![a_var.clone()],
+            fundeps: vec![],
             supers: vec![],
             methods: vec![
                 bhc_hir::MethodSig {

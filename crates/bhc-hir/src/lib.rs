@@ -497,6 +497,20 @@ pub struct TypeAlias {
     pub span: Span,
 }
 
+/// A functional dependency declaration.
+///
+/// Represents `a b -> c d` meaning "given a and b, c and d are uniquely determined".
+/// The indices refer to positions in the class's type parameter list.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FunDep {
+    /// Indices of determining type parameters (left side of ->).
+    pub from: Vec<usize>,
+    /// Indices of determined type parameters (right side of ->).
+    pub to: Vec<usize>,
+    /// Source span.
+    pub span: Span,
+}
+
 /// A type class definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClassDef {
@@ -506,6 +520,8 @@ pub struct ClassDef {
     pub name: Symbol,
     /// Type parameters.
     pub params: Vec<TyVar>,
+    /// Functional dependencies (e.g., `| a -> b` means `a` determines `b`).
+    pub fundeps: Vec<FunDep>,
     /// Superclass constraints.
     pub supers: Vec<Symbol>,
     /// Method signatures.
@@ -694,5 +710,87 @@ mod tests {
         assert_eq!(vars.len(), 2);
         assert!(vars.contains(&x));
         assert!(vars.contains(&y));
+    }
+
+    #[test]
+    fn test_fundep_creation() {
+        // Test creating a functional dependency: a -> b (param 0 determines param 1)
+        let fundep = FunDep {
+            from: vec![0],
+            to: vec![1],
+            span: Span::default(),
+        };
+        assert_eq!(fundep.from, vec![0]);
+        assert_eq!(fundep.to, vec![1]);
+    }
+
+    #[test]
+    fn test_class_with_fundeps() {
+        use bhc_types::{Kind, TyVar};
+
+        // Test: class Convert a b | a -> b where convert :: a -> b
+        let a_var = TyVar::new(0, Kind::Star);
+        let b_var = TyVar::new(1, Kind::Star);
+
+        let class = ClassDef {
+            id: DefId::new(100),
+            name: Symbol::intern("Convert"),
+            params: vec![a_var, b_var],
+            fundeps: vec![FunDep {
+                from: vec![0],    // 'a' determines
+                to: vec![1],      // 'b'
+                span: Span::default(),
+            }],
+            supers: vec![],
+            methods: vec![],
+            defaults: vec![],
+            span: Span::default(),
+        };
+
+        assert_eq!(class.fundeps.len(), 1);
+        assert_eq!(class.fundeps[0].from, vec![0]);
+        assert_eq!(class.fundeps[0].to, vec![1]);
+    }
+
+    #[test]
+    fn test_class_with_multi_fundeps() {
+        use bhc_types::{Kind, TyVar};
+
+        // Test: class Collection c e i | c -> e, c -> i where ...
+        // This represents a collection type 'c' that determines both
+        // its element type 'e' and index type 'i'
+        let c_var = TyVar::new(0, Kind::Star);
+        let e_var = TyVar::new(1, Kind::Star);
+        let i_var = TyVar::new(2, Kind::Star);
+
+        let class = ClassDef {
+            id: DefId::new(101),
+            name: Symbol::intern("Collection"),
+            params: vec![c_var, e_var, i_var],
+            fundeps: vec![
+                FunDep {
+                    from: vec![0],    // 'c' determines
+                    to: vec![1],      // 'e'
+                    span: Span::default(),
+                },
+                FunDep {
+                    from: vec![0],    // 'c' also determines
+                    to: vec![2],      // 'i'
+                    span: Span::default(),
+                },
+            ],
+            supers: vec![],
+            methods: vec![],
+            defaults: vec![],
+            span: Span::default(),
+        };
+
+        assert_eq!(class.fundeps.len(), 2);
+        // First fundep: c -> e
+        assert_eq!(class.fundeps[0].from, vec![0]);
+        assert_eq!(class.fundeps[0].to, vec![1]);
+        // Second fundep: c -> i
+        assert_eq!(class.fundeps[1].from, vec![0]);
+        assert_eq!(class.fundeps[1].to, vec![2]);
     }
 }

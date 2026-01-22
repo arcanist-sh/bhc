@@ -2057,6 +2057,37 @@ fn lower_class_decl(ctx: &mut LowerContext, class: &ast::ClassDecl) -> LowerResu
         .map(|p| bhc_types::TyVar::new_star(p.name.name.as_u32()))
         .collect();
 
+    // Build a map from param name to index for fundep conversion
+    let param_indices: std::collections::HashMap<Symbol, usize> = class
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.name.name, i))
+        .collect();
+
+    // Convert AST fundeps to HIR fundeps (names -> indices)
+    let fundeps: Vec<hir::FunDep> = class
+        .fundeps
+        .iter()
+        .map(|fd| {
+            let from: Vec<usize> = fd
+                .from
+                .iter()
+                .filter_map(|ident| param_indices.get(&ident.name).copied())
+                .collect();
+            let to: Vec<usize> = fd
+                .to
+                .iter()
+                .filter_map(|ident| param_indices.get(&ident.name).copied())
+                .collect();
+            hir::FunDep {
+                from,
+                to,
+                span: fd.span,
+            }
+        })
+        .collect();
+
     let supers: Vec<Symbol> = class
         .context
         .iter()
@@ -2117,6 +2148,7 @@ fn lower_class_decl(ctx: &mut LowerContext, class: &ast::ClassDecl) -> LowerResu
         id: def_id,
         name: class.name.name,
         params,
+        fundeps,
         supers,
         methods,
         defaults,

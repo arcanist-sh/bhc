@@ -943,6 +943,7 @@ fn test_class_declaration() {
         id: def_id(200),
         name: Symbol::intern("Eq"),
         params: vec![a_var],
+        fundeps: vec![],
         supers: vec![],
         methods: vec![MethodSig {
             name: Symbol::intern("=="),
@@ -987,6 +988,7 @@ fn test_class_with_multiple_methods() {
         id: def_id(201),
         name: Symbol::intern("Ord"),
         params: vec![a_var],
+        fundeps: vec![],
         supers: vec![],
         methods: vec![
             MethodSig {
@@ -1027,6 +1029,7 @@ fn test_instance_declaration() {
         id: def_id(200),
         name: Symbol::intern("MyEq"),
         params: vec![a_var],
+        fundeps: vec![],
         supers: vec![],
         methods: vec![MethodSig {
             name: Symbol::intern("myEq"),
@@ -1096,6 +1099,7 @@ fn test_instance_with_multiple_methods() {
         id: def_id(300),
         name: Symbol::intern("NumCheck"),
         params: vec![a_var],
+        fundeps: vec![],
         supers: vec![],
         methods: vec![
             MethodSig {

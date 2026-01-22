@@ -74,6 +74,7 @@ members = [
     "stdlib/bhc-transformers",
     "stdlib/bhc-numeric",
     "stdlib/bhc-concurrent",
+    "stdlib/bhc-system",
 ]
 
 [workspace.package]
@@ -132,6 +133,7 @@ bhc-text = { path = "stdlib/bhc-text" }
 bhc-transformers = { path = "stdlib/bhc-transformers" }
 bhc-numeric = { path = "stdlib/bhc-numeric" }
 bhc-concurrent = { path = "stdlib/bhc-concurrent" }
+bhc-system = { path = "stdlib/bhc-system" }
 
 # External dependencies
 thiserror = "1.0"

@@ -1,0 +1,21 @@
+[package]
+name = "bhc-system"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "System libraries for BHC: IO, Environment, FilePath, Directory, Process"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+bhc-prelude = { path = "../bhc-prelude" }
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+tempfile = "3"

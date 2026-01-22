@@ -410,6 +410,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "id" => Some(1),
             "const" => Some(2),
 
+            // IO operations
+            "putStrLn" => Some(1),
+            "putStr" => Some(1),
+            "putChar" => Some(1),
+            "print" => Some(1),
+            "getLine" => Some(0),
+
             _ => None,
         }
     }
@@ -473,6 +480,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "seq" => self.lower_builtin_seq(args[0], args[1]),
             "id" => self.lower_expr(args[0]),
             "const" => self.lower_expr(args[0]),
+
+            // IO operations
+            "putStrLn" => self.lower_builtin_put_str_ln(args[0]),
+            "putStr" => self.lower_builtin_put_str(args[0]),
+            "putChar" => self.lower_builtin_put_char(args[0]),
+            "print" => self.lower_builtin_print(args[0]),
+            "getLine" => self.lower_builtin_get_line(),
 
             _ => Err(CodegenError::Internal(format!("unknown builtin: {}", name))),
         }
@@ -940,6 +954,165 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let _a = self.lower_expr(a_expr)?;
         // Return second argument
         self.lower_expr(b_expr)
+    }
+
+    // ========================================================================
+    // IO Builtin Functions
+    // ========================================================================
+
+    /// Lower `putStrLn` - print a string followed by newline.
+    fn lower_builtin_put_str_ln(&mut self, str_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let str_val = self.lower_expr(str_expr)?.ok_or_else(|| {
+            CodegenError::Internal("putStrLn: string has no value".to_string())
+        })?;
+
+        let str_ptr = match str_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError("putStrLn expects a string".to_string())),
+        };
+
+        // Call bhc_print_string_ln
+        let print_fn = self.functions.get(&VarId::new(1002)).ok_or_else(|| {
+            CodegenError::Internal("bhc_print_string_ln not declared".to_string())
+        })?;
+
+        self.builder()
+            .build_call(*print_fn, &[str_ptr.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("failed to call print: {:?}", e)))?;
+
+        // Return unit (null pointer for IO ())
+        Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+    }
+
+    /// Lower `putStr` - print a string without newline.
+    fn lower_builtin_put_str(&mut self, str_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let str_val = self.lower_expr(str_expr)?.ok_or_else(|| {
+            CodegenError::Internal("putStr: string has no value".to_string())
+        })?;
+
+        let str_ptr = match str_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError("putStr expects a string".to_string())),
+        };
+
+        // Call bhc_print_string
+        let print_fn = self.functions.get(&VarId::new(1004)).ok_or_else(|| {
+            CodegenError::Internal("bhc_print_string not declared".to_string())
+        })?;
+
+        self.builder()
+            .build_call(*print_fn, &[str_ptr.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("failed to call print: {:?}", e)))?;
+
+        // Return unit
+        Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+    }
+
+    /// Lower `putChar` - print a single character.
+    fn lower_builtin_put_char(&mut self, char_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let char_val = self.lower_expr(char_expr)?.ok_or_else(|| {
+            CodegenError::Internal("putChar: char has no value".to_string())
+        })?;
+
+        let char_int = match char_val {
+            BasicValueEnum::IntValue(i) => i,
+            BasicValueEnum::PointerValue(p) => {
+                // Might be a boxed char - unbox it
+                self.builder()
+                    .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_char")
+                    .map_err(|e| CodegenError::Internal(format!("failed to unbox char: {:?}", e)))?
+            }
+            _ => return Err(CodegenError::TypeError("putChar expects a Char".to_string())),
+        };
+
+        // Truncate to i32 for the RTS call
+        let char_i32 = self.builder()
+            .build_int_truncate(char_int, self.type_mapper().i32_type(), "char_i32")
+            .map_err(|e| CodegenError::Internal(format!("failed to truncate char: {:?}", e)))?;
+
+        // Call bhc_print_char
+        let print_fn = self.functions.get(&VarId::new(1009)).ok_or_else(|| {
+            CodegenError::Internal("bhc_print_char not declared".to_string())
+        })?;
+
+        self.builder()
+            .build_call(*print_fn, &[char_i32.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("failed to call print_char: {:?}", e)))?;
+
+        // Return unit
+        Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+    }
+
+    /// Lower `print` - print a value with its Show instance (simplified).
+    ///
+    /// For now, we detect the type at codegen time and call the appropriate
+    /// print function. This is a simplification - real Haskell uses type classes.
+    fn lower_builtin_print(&mut self, val_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let val = self.lower_expr(val_expr)?.ok_or_else(|| {
+            CodegenError::Internal("print: value has no result".to_string())
+        })?;
+
+        match val {
+            BasicValueEnum::IntValue(i) => {
+                // Print as integer
+                let print_fn = self.functions.get(&VarId::new(1000)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_print_int_ln not declared".to_string())
+                })?;
+
+                self.builder()
+                    .build_call(*print_fn, &[i.into()], "")
+                    .map_err(|e| CodegenError::Internal(format!("failed to call print_int: {:?}", e)))?;
+            }
+            BasicValueEnum::FloatValue(f) => {
+                // Print as double
+                let print_fn = self.functions.get(&VarId::new(1001)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_print_double_ln not declared".to_string())
+                })?;
+
+                // Extend float to double if needed
+                let f64_val = if f.get_type().get_bit_size() == 32 {
+                    self.builder()
+                        .build_float_ext(f, self.type_mapper().f64_type(), "to_f64")
+                        .map_err(|e| CodegenError::Internal(format!("failed to extend float: {:?}", e)))?
+                } else {
+                    f
+                };
+
+                self.builder()
+                    .build_call(*print_fn, &[f64_val.into()], "")
+                    .map_err(|e| CodegenError::Internal(format!("failed to call print_double: {:?}", e)))?;
+            }
+            BasicValueEnum::PointerValue(p) => {
+                // Could be a string, ADT, or boxed value
+                // Try to detect ADT (Bool, Maybe, etc.) by checking tag
+                // For now, assume it's a string if it's a pointer
+                let print_fn = self.functions.get(&VarId::new(1002)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_print_string_ln not declared".to_string())
+                })?;
+
+                self.builder()
+                    .build_call(*print_fn, &[p.into()], "")
+                    .map_err(|e| CodegenError::Internal(format!("failed to call print_string: {:?}", e)))?;
+            }
+            _ => {
+                return Err(CodegenError::Unsupported(
+                    "print: unsupported value type".to_string(),
+                ));
+            }
+        }
+
+        // Return unit
+        Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+    }
+
+    /// Lower `getLine` - read a line from stdin.
+    ///
+    /// For now, this is a placeholder that returns an empty string.
+    /// Full implementation requires RTS support.
+    fn lower_builtin_get_line(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Return empty string for now (placeholder)
+        let empty_str = self.module.add_global_string("empty_string", "");
+        Ok(Some(empty_str.into()))
     }
 
     /// Check if a name is a data constructor and return (tag, arity).

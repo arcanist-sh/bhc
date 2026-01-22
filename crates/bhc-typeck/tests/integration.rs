@@ -922,3 +922,90 @@ fn test_deeply_nested_lets() {
         _ => panic!("Expected 3-tuple type"),
     }
 }
+
+// =============================================================================
+// Type Class Tests
+// =============================================================================
+
+#[test]
+fn test_class_declaration() {
+    use bhc_hir::{ClassDef, MethodSig};
+
+    // Define a simple class: class Eq a where (==) :: a -> a -> Bool
+    let a_var = TyVar::new(100, Kind::Star);
+
+    // Method type: a -> a -> Bool
+    let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+    let method_ty = Ty::fun(Ty::Var(a_var.clone()), Ty::fun(Ty::Var(a_var.clone()), bool_ty));
+    let method_scheme = Scheme::poly(vec![a_var.clone()], method_ty);
+
+    let eq_class = ClassDef {
+        id: def_id(200),
+        name: Symbol::intern("Eq"),
+        params: vec![a_var],
+        supers: vec![],
+        methods: vec![MethodSig {
+            name: Symbol::intern("=="),
+            ty: method_scheme.clone(),
+            span: Span::DUMMY,
+        }],
+        defaults: vec![],
+        span: Span::DUMMY,
+    };
+
+    let module = module_with_items(vec![Item::Class(eq_class)]);
+
+    let result = type_check_module(&module, FileId::new(0));
+    assert!(result.is_ok(), "Class declaration should type check: {:?}", result.err());
+}
+
+#[test]
+fn test_class_with_multiple_methods() {
+    use bhc_hir::{ClassDef, MethodSig};
+
+    // Define: class Ord a where compare :: a -> a -> Int; (<) :: a -> a -> Bool
+    let a_var = TyVar::new(100, Kind::Star);
+
+    let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
+    let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+
+    // compare :: a -> a -> Int
+    let compare_ty = Ty::fun(
+        Ty::Var(a_var.clone()),
+        Ty::fun(Ty::Var(a_var.clone()), int_ty),
+    );
+    let compare_scheme = Scheme::poly(vec![a_var.clone()], compare_ty);
+
+    // (<) :: a -> a -> Bool
+    let lt_ty = Ty::fun(
+        Ty::Var(a_var.clone()),
+        Ty::fun(Ty::Var(a_var.clone()), bool_ty),
+    );
+    let lt_scheme = Scheme::poly(vec![a_var.clone()], lt_ty);
+
+    let ord_class = ClassDef {
+        id: def_id(201),
+        name: Symbol::intern("Ord"),
+        params: vec![a_var],
+        supers: vec![],
+        methods: vec![
+            MethodSig {
+                name: Symbol::intern("compare"),
+                ty: compare_scheme,
+                span: Span::DUMMY,
+            },
+            MethodSig {
+                name: Symbol::intern("<"),
+                ty: lt_scheme,
+                span: Span::DUMMY,
+            },
+        ],
+        defaults: vec![],
+        span: Span::DUMMY,
+    };
+
+    let module = module_with_items(vec![Item::Class(ord_class)]);
+
+    let result = type_check_module(&module, FileId::new(0));
+    assert!(result.is_ok(), "Class with multiple methods should type check: {:?}", result.err());
+}

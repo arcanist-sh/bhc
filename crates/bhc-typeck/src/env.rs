@@ -207,6 +207,17 @@ impl TypeEnv {
         }
     }
 
+    /// Insert a global binding by name only (for class methods).
+    ///
+    /// This is used for type class methods which don't have a DefId at definition
+    /// time, but need to be available for lookup by name in expressions.
+    pub fn insert_global_by_name(&mut self, name: Symbol, scheme: Scheme) {
+        // Insert into the outermost local scope so it's found by lookup_by_name
+        if let Some(scope) = self.locals.first_mut() {
+            scope.insert(name, scheme);
+        }
+    }
+
     /// Look up a data constructor by name.
     #[must_use]
     pub fn lookup_data_con(&self, name: Symbol) -> Option<&DataConInfo> {

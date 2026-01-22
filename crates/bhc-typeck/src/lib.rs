@@ -164,6 +164,18 @@ pub fn type_check_module_with_defs(
         }
     }
 
+    // Register type classes and instances
+    for item in &hir.items {
+        if let bhc_hir::Item::Class(class) = item {
+            ctx.register_class(class);
+        }
+    }
+    for item in &hir.items {
+        if let bhc_hir::Item::Instance(instance) = item {
+            ctx.register_instance(instance);
+        }
+    }
+
     // Compute binding groups (SCCs) for mutual recursion
     let groups = binding_groups::compute_binding_groups(&hir.items);
 

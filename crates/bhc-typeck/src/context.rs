@@ -837,7 +837,7 @@ impl TyCtxt {
     /// Register a type class definition.
     pub fn register_class(&mut self, class: &ClassDef) {
         // Build method signatures map
-        let methods = class
+        let methods: FxHashMap<Symbol, Scheme> = class
             .methods
             .iter()
             .map(|m| (m.name, m.ty.clone()))
@@ -847,12 +847,21 @@ impl TyCtxt {
             name: class.name,
             params: class.params.clone(),
             supers: class.supers.clone(),
-            methods,
+            methods: methods.clone(),
         };
 
         self.env.register_class(info);
 
-        // TODO: Register default method implementations
+        // Register class methods as globally available functions.
+        // Each method gets its declared type scheme, which includes the class
+        // constraint implicitly through the type variables.
+        for method in &class.methods {
+            // The method's type scheme already has the correct form from lowering.
+            // We register it globally so expressions can reference the method.
+            self.env.insert_global_by_name(method.name, method.ty.clone());
+        }
+
+        // TODO: Type-check default method implementations
         // for default in &class.defaults {
         //     self.check_value_def(default);
         // }

@@ -25,6 +25,18 @@ pub struct DataConInfo {
     pub scheme: Scheme,
 }
 
+/// A functional dependency within a type class.
+///
+/// Represents `a b -> c` meaning "given types for parameters at indices in `from`,
+/// the types at indices in `to` are uniquely determined".
+#[derive(Clone, Debug)]
+pub struct FunDep {
+    /// Indices of determining type parameters.
+    pub from: Vec<usize>,
+    /// Indices of determined type parameters.
+    pub to: Vec<usize>,
+}
+
 /// Information about a type class.
 #[derive(Clone, Debug)]
 pub struct ClassInfo {
@@ -32,6 +44,8 @@ pub struct ClassInfo {
     pub name: Symbol,
     /// Type parameters.
     pub params: Vec<TyVar>,
+    /// Functional dependencies.
+    pub fundeps: Vec<FunDep>,
     /// Superclass names.
     pub supers: Vec<Symbol>,
     /// Method signatures (name -> type scheme).

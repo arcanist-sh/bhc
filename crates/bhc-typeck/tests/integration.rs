@@ -1166,3 +1166,134 @@ fn test_instance_with_multiple_methods() {
     let result = type_check_module(&module, FileId::new(0));
     assert!(result.is_ok(), "Instance with multiple methods should type check: {:?}", result.err());
 }
+
+
+#[test]
+fn test_functional_dependency_type_inference() {
+    use bhc_hir::{ClassDef, FunDep, InstanceDef, MethodSig};
+
+    // Define: class Convert a b | a -> b where convert :: a -> b
+    // This fundep says: given 'a', we can uniquely determine 'b'
+    let a_var = TyVar::new(100, Kind::Star);
+    let b_var = TyVar::new(101, Kind::Star);
+
+    // convert :: a -> b
+    let convert_ty = Ty::fun(Ty::Var(a_var.clone()), Ty::Var(b_var.clone()));
+    let convert_scheme = Scheme::poly(vec![a_var.clone(), b_var.clone()], convert_ty);
+
+    let convert_class = ClassDef {
+        id: def_id(400),
+        name: Symbol::intern("Convert"),
+        params: vec![a_var.clone(), b_var.clone()],
+        fundeps: vec![FunDep {
+            from: vec![0],  // 'a' (first param)
+            to: vec![1],    // determines 'b' (second param)
+            span: Span::DUMMY,
+        }],
+        supers: vec![],
+        methods: vec![MethodSig {
+            name: Symbol::intern("convert"),
+            ty: convert_scheme,
+            span: Span::DUMMY,
+        }],
+        defaults: vec![],
+        span: Span::DUMMY,
+    };
+
+    // Define: instance Convert Int String where convert = show
+    let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
+    let string_ty = Ty::Con(TyCon::new(Symbol::intern("String"), Kind::Star));
+
+    let convert_impl = ValueDef {
+        id: def_id(401),
+        name: Symbol::intern("convert"),
+        sig: Some(Scheme::mono(Ty::fun(int_ty.clone(), string_ty.clone()))),
+        equations: vec![Equation {
+            pats: vec![Pat::Var(Symbol::intern("x"), def_id(402), Span::DUMMY)],
+            guards: vec![],
+            rhs: Expr::Lit(Lit::String(Symbol::intern("converted")), Span::DUMMY),
+            span: Span::DUMMY,
+        }],
+        span: Span::DUMMY,
+    };
+
+    let convert_instance = InstanceDef {
+        class: Symbol::intern("Convert"),
+        types: vec![int_ty, string_ty],
+        constraints: vec![],
+        methods: vec![convert_impl],
+        span: Span::DUMMY,
+    };
+
+    let module = module_with_items(vec![
+        Item::Class(convert_class),
+        Item::Instance(convert_instance),
+    ]);
+
+    let result = type_check_module(&module, FileId::new(0));
+    assert!(
+        result.is_ok(),
+        "Multi-param type class with fundeps should type check: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_fundep_bidirectional() {
+    use bhc_hir::{ClassDef, FunDep, MethodSig};
+
+    // Define: class Iso a b | a -> b, b -> a where
+    //   to :: a -> b
+    //   from :: b -> a
+    // This is a bidirectional fundep (bijection between a and b)
+    let a_var = TyVar::new(200, Kind::Star);
+    let b_var = TyVar::new(201, Kind::Star);
+
+    let to_ty = Ty::fun(Ty::Var(a_var.clone()), Ty::Var(b_var.clone()));
+    let to_scheme = Scheme::poly(vec![a_var.clone(), b_var.clone()], to_ty);
+
+    let from_ty = Ty::fun(Ty::Var(b_var.clone()), Ty::Var(a_var.clone()));
+    let from_scheme = Scheme::poly(vec![a_var.clone(), b_var.clone()], from_ty);
+
+    let iso_class = ClassDef {
+        id: def_id(500),
+        name: Symbol::intern("Iso"),
+        params: vec![a_var.clone(), b_var.clone()],
+        fundeps: vec![
+            FunDep {
+                from: vec![0],  // a -> b
+                to: vec![1],
+                span: Span::DUMMY,
+            },
+            FunDep {
+                from: vec![1],  // b -> a
+                to: vec![0],
+                span: Span::DUMMY,
+            },
+        ],
+        supers: vec![],
+        methods: vec![
+            MethodSig {
+                name: Symbol::intern("to"),
+                ty: to_scheme,
+                span: Span::DUMMY,
+            },
+            MethodSig {
+                name: Symbol::intern("from"),
+                ty: from_scheme,
+                span: Span::DUMMY,
+            },
+        ],
+        defaults: vec![],
+        span: Span::DUMMY,
+    };
+
+    let module = module_with_items(vec![Item::Class(iso_class)]);
+
+    let result = type_check_module(&module, FileId::new(0));
+    assert!(
+        result.is_ok(),
+        "Bidirectional fundep class should type check: {:?}",
+        result.err()
+    );
+}

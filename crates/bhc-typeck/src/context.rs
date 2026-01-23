@@ -161,12 +161,20 @@ impl TyCtxt {
     ///
     /// For each constraint:
     /// 1. Apply current substitution to get the concrete type
-    /// 2. Look up an instance for the class and type
-    /// 3. If found, the constraint is satisfied
-    /// 4. If not found and type is a variable, try defaulting
-    /// 5. If not found and type is concrete, emit an error
+    /// 2. Apply functional dependency improvement
+    /// 3. Look up an instance for the class and type
+    /// 4. If found, the constraint is satisfied
+    /// 5. If not found and type is a variable, try defaulting
+    /// 6. If not found and type is concrete, emit an error
     pub fn solve_constraints(&mut self) {
         // First apply substitution to all constraints
+        self.apply_subst_to_constraints();
+
+        // Apply functional dependency improvement
+        // This may add new substitutions based on fundeps
+        self.apply_fundep_improvement();
+
+        // Re-apply substitution after fundep improvement
         self.apply_subst_to_constraints();
 
         // Take constraints to avoid borrow conflicts
@@ -267,6 +275,137 @@ impl TyCtxt {
             true
         } else {
             false
+        }
+    }
+
+    /// Apply functional dependency improvement to constraints.
+    ///
+    /// For each constraint `C t1 t2 ... tn` where class C has fundeps:
+    /// - For each fundep `from_indices -> to_indices`:
+    ///   - If all types at `from_indices` are ground (no unresolved type vars)
+    ///   - Find instances where those types match
+    ///   - Unify the constraint's types at `to_indices` with the instance's types
+    ///
+    /// This allows type inference to propagate information through fundeps.
+    /// For example, if we have:
+    ///   class Convert a b | a -> b
+    ///   instance Convert Int String
+    /// And constraint `Convert Int ?x`, fundep improvement will unify `?x` with `String`.
+    fn apply_fundep_improvement(&mut self) {
+        // Iterate until no more improvements can be made
+        let mut changed = true;
+        let mut iterations = 0;
+        const MAX_ITERATIONS: usize = 100; // Prevent infinite loops
+
+        while changed && iterations < MAX_ITERATIONS {
+            changed = false;
+            iterations += 1;
+
+            // Apply current substitution to constraints
+            self.apply_subst_to_constraints();
+
+            // Clone constraints to avoid borrow issues
+            let constraints = self.constraints.clone();
+
+            for constraint in &constraints {
+                // Look up the class to get its fundeps
+                let class_info = match self.env.lookup_class(constraint.class) {
+                    Some(info) => info.clone(),
+                    None => continue, // Unknown class, skip
+                };
+
+                if class_info.fundeps.is_empty() {
+                    continue; // No fundeps for this class
+                }
+
+                // Get the constraint's type arguments (after substitution)
+                let args: Vec<Ty> = constraint
+                    .args
+                    .iter()
+                    .map(|t| self.subst.apply(t))
+                    .collect();
+
+                // For each fundep, check if we can improve
+                for fundep in &class_info.fundeps {
+                    // Check if all "from" types are ground
+                    let from_types: Vec<&Ty> = fundep
+                        .from
+                        .iter()
+                        .filter_map(|&i| args.get(i))
+                        .collect();
+
+                    if from_types.iter().any(|t| self.contains_unresolved_var(t)) {
+                        continue; // Not all "from" types are ground yet
+                    }
+
+                    // Find matching instances
+                    if let Some(instances) = self.env.lookup_instances(constraint.class) {
+                        for inst in instances.clone() {
+                            // Check if this instance matches on the "from" positions
+                            let inst_matches = fundep.from.iter().all(|&i| {
+                                match (args.get(i), inst.types.get(i)) {
+                                    (Some(arg_ty), Some(inst_ty)) => {
+                                        self.types_match_for_fundep(arg_ty, inst_ty)
+                                    }
+                                    _ => false,
+                                }
+                            });
+
+                            if inst_matches {
+                                // Unify the "to" positions
+                                for &to_idx in &fundep.to {
+                                    if let (Some(arg_ty), Some(inst_ty)) =
+                                        (args.get(to_idx), inst.types.get(to_idx))
+                                    {
+                                        // If arg_ty is a type variable, unify it with inst_ty
+                                        if let Ty::Var(v) = arg_ty {
+                                            if !self.subst.contains(v) {
+                                                self.subst.insert(v, inst_ty.clone());
+                                                changed = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if a type contains any unresolved type variables.
+    fn contains_unresolved_var(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Var(v) => !self.subst.contains(v),
+            Ty::Con(_) | Ty::Prim(_) | Ty::Error | Ty::Nat(_) | Ty::TyList(_) => false,
+            Ty::App(f, a) => self.contains_unresolved_var(f) || self.contains_unresolved_var(a),
+            Ty::Fun(a, b) => self.contains_unresolved_var(a) || self.contains_unresolved_var(b),
+            Ty::Tuple(elems) => elems.iter().any(|t| self.contains_unresolved_var(t)),
+            Ty::List(elem) => self.contains_unresolved_var(elem),
+            Ty::Forall(_, body) => self.contains_unresolved_var(body),
+        }
+    }
+
+    /// Check if two types match for fundep purposes.
+    /// This is a structural match that treats type constructors as equal if names match.
+    fn types_match_for_fundep(&self, ty1: &Ty, ty2: &Ty) -> bool {
+        match (ty1, ty2) {
+            (Ty::Con(c1), Ty::Con(c2)) => c1.name == c2.name,
+            (Ty::App(f1, a1), Ty::App(f2, a2)) => {
+                self.types_match_for_fundep(f1, f2) && self.types_match_for_fundep(a1, a2)
+            }
+            (Ty::Fun(a1, b1), Ty::Fun(a2, b2)) => {
+                self.types_match_for_fundep(a1, a2) && self.types_match_for_fundep(b1, b2)
+            }
+            (Ty::Tuple(e1), Ty::Tuple(e2)) => {
+                e1.len() == e2.len()
+                    && e1.iter().zip(e2.iter()).all(|(t1, t2)| self.types_match_for_fundep(t1, t2))
+            }
+            (Ty::List(e1), Ty::List(e2)) => self.types_match_for_fundep(e1, e2),
+            (Ty::Prim(p1), Ty::Prim(p2)) => p1 == p2,
+            (Ty::Nat(n1), Ty::Nat(n2)) => n1 == n2,
+            _ => false,
         }
     }
 
@@ -843,9 +982,20 @@ impl TyCtxt {
             .map(|m| (m.name, m.ty.clone()))
             .collect();
 
+        // Convert HIR fundeps to typechecker fundeps
+        let fundeps: Vec<crate::env::FunDep> = class
+            .fundeps
+            .iter()
+            .map(|fd| crate::env::FunDep {
+                from: fd.from.clone(),
+                to: fd.to.clone(),
+            })
+            .collect();
+
         let info = ClassInfo {
             name: class.name,
             params: class.params.clone(),
+            fundeps,
             supers: class.supers.clone(),
             methods: methods.clone(),
         };

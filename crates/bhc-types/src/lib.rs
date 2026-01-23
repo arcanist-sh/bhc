@@ -585,6 +585,12 @@ impl Subst {
         self.mapping.get(&var.id)
     }
 
+    /// Checks if a type variable has a mapping in this substitution.
+    #[must_use]
+    pub fn contains(&self, var: &TyVar) -> bool {
+        self.mapping.contains_key(&var.id)
+    }
+
     /// Applies this substitution to a type.
     #[must_use]
     pub fn apply(&self, ty: &Ty) -> Ty {

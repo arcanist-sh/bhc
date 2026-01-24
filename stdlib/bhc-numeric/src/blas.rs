@@ -6,6 +6,13 @@
 
 use std::sync::OnceLock;
 
+// Import external BLAS providers when features are enabled
+#[cfg(feature = "openblas")]
+use crate::blas_openblas::OpenBlasProvider;
+
+#[cfg(all(target_os = "macos", feature = "accelerate"))]
+use crate::blas_accelerate::AccelerateProvider;
+
 /// BLAS transpose option
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -872,22 +879,16 @@ impl BlasBackend {
             BlasBackend::PureRust => true,
             BlasBackend::SimdRust => true,
             #[cfg(feature = "openblas")]
-            BlasBackend::OpenBlas => {
-                // Try to load OpenBLAS dynamically
-                false // TODO: implement dynamic loading
-            }
+            BlasBackend::OpenBlas => true, // Available when feature is enabled
             #[cfg(not(feature = "openblas"))]
             BlasBackend::OpenBlas => false,
             #[cfg(feature = "mkl")]
-            BlasBackend::Mkl => {
-                // Try to load MKL dynamically
-                false // TODO: implement dynamic loading
-            }
+            BlasBackend::Mkl => true, // Available when feature is enabled
             #[cfg(not(feature = "mkl"))]
             BlasBackend::Mkl => false,
-            #[cfg(target_os = "macos")]
-            BlasBackend::Accelerate => true,
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(all(target_os = "macos", feature = "accelerate"))]
+            BlasBackend::Accelerate => true, // Available on macOS with feature
+            #[cfg(not(all(target_os = "macos", feature = "accelerate")))]
             BlasBackend::Accelerate => false,
         }
     }
@@ -913,6 +914,10 @@ pub fn default_provider_f64() -> &'static dyn BlasProviderF64 {
     PROVIDER.get_or_init(|| {
         let backend = detect_best_backend();
         match backend {
+            #[cfg(all(target_os = "macos", feature = "accelerate"))]
+            BlasBackend::Accelerate => Box::new(AccelerateProvider),
+            #[cfg(feature = "openblas")]
+            BlasBackend::OpenBlas => Box::new(OpenBlasProvider),
             BlasBackend::SimdRust => Box::new(SimdRustBlas),
             _ => Box::new(PureRustBlas),
         }
@@ -925,6 +930,10 @@ pub fn default_provider_f32() -> &'static dyn BlasProviderF32 {
     PROVIDER.get_or_init(|| {
         let backend = detect_best_backend();
         match backend {
+            #[cfg(all(target_os = "macos", feature = "accelerate"))]
+            BlasBackend::Accelerate => Box::new(AccelerateProvider),
+            #[cfg(feature = "openblas")]
+            BlasBackend::OpenBlas => Box::new(OpenBlasProvider),
             BlasBackend::SimdRust => Box::new(SimdRustBlas),
             _ => Box::new(PureRustBlas),
         }
@@ -935,7 +944,7 @@ pub fn default_provider_f32() -> &'static dyn BlasProviderF32 {
 pub fn detect_best_backend() -> BlasBackend {
     *DEFAULT_PROVIDER.get_or_init(|| {
         // Priority: Accelerate > MKL > OpenBLAS > SimdRust > PureRust
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "accelerate"))]
         if BlasBackend::Accelerate.is_available() {
             return BlasBackend::Accelerate;
         }

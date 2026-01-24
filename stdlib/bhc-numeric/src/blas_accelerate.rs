@@ -444,7 +444,8 @@ mod tests {
     #[test]
     fn test_provider_name() {
         let p = AccelerateProvider;
-        let name = p.name();
+        // Disambiguate by calling through trait
+        let name = BlasProviderF64::name(&p);
         assert!(name.starts_with("Accelerate"));
     }
 

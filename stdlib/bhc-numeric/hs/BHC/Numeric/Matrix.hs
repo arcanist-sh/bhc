@@ -546,46 +546,162 @@ trace m = unsafePerformIO $ matrixTrace m
 {-# NOINLINE trace #-}
 
 -- | Matrix determinant.
--- Note: Currently a placeholder, full implementation requires LU decomposition
-det :: (Num a, MatrixElem a) => Matrix a -> a
+--
+-- Uses LU decomposition for n>2.
+det :: (Fractional a, Ord a, MatrixElem a) => Matrix a -> a
 det m
     | rows m /= cols m = error "Determinant requires square matrix"
-    | rows m == 1 = m ! (0, 0)
-    | rows m == 2 = m ! (0, 0) * m ! (1, 1) - m ! (0, 1) * m ! (1, 0)
-    | otherwise = error "Determinant for n>2 requires LU decomposition (not yet implemented)"
+    | n == 0 = 1
+    | n == 1 = m ! (0, 0)
+    | n == 2 = m ! (0, 0) * m ! (1, 1) - m ! (0, 1) * m ! (1, 0)
+    | otherwise =
+        -- Use LU decomposition: det(A) = det(L) * det(U) * det(P)^(-1)
+        -- det(L) = 1 (unit lower triangular), det(P) = (-1)^swaps
+        let (_, u, _, swaps) = luWithPivot m
+            diagProd = P.product [u ! (i, i) | i <- [0..n-1]]
+            sign = if even swaps then 1 else (-1)
+        in sign * diagProd
+  where
+    n = rows m
 
 -- | Matrix rank.
--- Note: Currently a placeholder, requires SVD for robust implementation
-rank :: (Ord a, Num a, MatrixElem a) => Matrix a -> Int
-rank m = error "Matrix rank requires SVD (not yet implemented)"
+--
+-- Computed via SVD (count of non-zero singular values).
+rank :: (Floating a, Ord a, MatrixElem a, V.VectorElem a) => Matrix a -> Int
+rank m =
+    let (_, s, _) = svd m
+        tolerance = 1e-10 * V.maximum (V.map P.abs s)
+    in V.length (V.filter (\x -> P.abs x > tolerance) s)
 
 -- | Matrix inverse.
 --
 -- Throws error if matrix is singular.
--- Note: Currently a placeholder, requires LU decomposition
-inv :: (Fractional a, MatrixElem a) => Matrix a -> Matrix a
+-- Uses Gauss-Jordan elimination.
+inv :: (Fractional a, Ord a, MatrixElem a) => Matrix a -> Matrix a
 inv m
     | rows m /= cols m = error "Inverse requires square matrix"
-    | otherwise = error "Matrix inverse requires LU decomposition (not yet implemented)"
+    | otherwise = gaussJordanInverse m
+
+-- | Gauss-Jordan elimination for matrix inverse.
+gaussJordanInverse :: (Fractional a, Ord a, MatrixElem a) => Matrix a -> Matrix a
+gaussJordanInverse m =
+    let n = rows m
+        -- Augment matrix [A | I]
+        augmented = m ||| identity n
+        -- Forward elimination with partial pivoting
+        reduced = gaussElim n (2 * n) augmented
+        -- Extract right half (inverse)
+    in submatrix 0 n n (2 * n) reduced
+
+-- | Gaussian elimination with partial pivoting (modifies to reduced row echelon form).
+gaussElim :: (Fractional a, Ord a, MatrixElem a) => Int -> Int -> Matrix a -> Matrix a
+gaussElim nRows nCols m = go 0 m
+  where
+    go col mat
+        | col >= nRows = mat
+        | otherwise =
+            -- Find pivot (max abs value in column)
+            let pivotRow = findPivotRow col col mat nRows
+                mat1 = swapRows col pivotRow mat
+                pivotVal = mat1 ! (col, col)
+            in if P.abs pivotVal < 1e-10
+               then error "Matrix is singular"
+               else
+                   -- Scale pivot row
+                   let mat2 = scaleRow col (1 / pivotVal) mat1
+                       -- Eliminate column
+                       mat3 = eliminateColumn col mat2 nRows
+                   in go (col + 1) mat3
+
+    findPivotRow col startRow mat maxRow =
+        let candidates = [(i, P.abs (mat ! (i, col))) | i <- [startRow..maxRow-1]]
+        in fst $ P.maximumBy (\(_, a) (_, b) -> compare a b) candidates
+
+    swapRows r1 r2 mat
+        | r1 == r2 = mat
+        | otherwise = fromList (rows mat) (cols mat)
+            [if i == r1 then mat ! (r2, j)
+             else if i == r2 then mat ! (r1, j)
+             else mat ! (i, j)
+            | i <- [0..rows mat - 1], j <- [0..cols mat - 1]]
+
+    scaleRow r s mat = fromList (rows mat) (cols mat)
+        [if i == r then s * mat ! (i, j) else mat ! (i, j)
+        | i <- [0..rows mat - 1], j <- [0..cols mat - 1]]
+
+    eliminateColumn col mat maxRow = fromList (rows mat) (cols mat)
+        [if i /= col
+         then mat ! (i, j) - mat ! (i, col) * mat ! (col, j)
+         else mat ! (i, j)
+        | i <- [0..rows mat - 1], j <- [0..cols mat - 1]]
 
 -- | Moore-Penrose pseudoinverse.
--- Note: Currently a placeholder, requires SVD
-pinv :: (Floating a, MatrixElem a) => Matrix a -> Matrix a
-pinv m = error "Pseudoinverse requires SVD (not yet implemented)"
+--
+-- A+ = V * S+ * U^T where S+ has reciprocals of non-zero singular values.
+pinv :: (Floating a, Ord a, MatrixElem a, V.VectorElem a) => Matrix a -> Matrix a
+pinv m =
+    let (u, s, vt) = svd m
+        tolerance = 1e-10 * V.maximum (V.map P.abs s)
+        sInv = V.map (\x -> if P.abs x > tolerance then 1 / x else 0) s
+        -- S+ is diagonal matrix from sInv, dimensions transposed
+        k = V.length s
+        sInvMat = diag (V.toList sInv)
+    in (transpose vt) @@ sInvMat @@ (transpose u)
 
 -- | Solve linear system Ax = b.
 --
 -- Returns x such that Ax = b.
--- Note: Currently a placeholder, requires LU decomposition
-solve :: (Fractional a, MatrixElem a, V.VectorElem a) => Matrix a -> V.Vector a -> V.Vector a
-solve a b = error "Linear solve requires LU decomposition (not yet implemented)"
+-- Uses LU decomposition with forward/back substitution.
+solve :: (Fractional a, Ord a, MatrixElem a, V.VectorElem a) => Matrix a -> V.Vector a -> V.Vector a
+solve a b
+    | rows a /= cols a = error "solve requires square matrix"
+    | rows a /= V.length b = error "solve: dimension mismatch"
+    | otherwise =
+        let (l, u, p, _) = luWithPivot a
+            n = rows a
+            -- Apply permutation to b
+            pb = V.generate n (\i -> b V.! (permIdx p i))
+            -- Forward substitution: Ly = Pb
+            y = forwardSubst l pb
+            -- Back substitution: Ux = y
+        in backSubst u y
+  where
+    permIdx p i = P.fst $ P.head $ P.filter (\(_, j) -> p ! (i, j) == 1) [(k, k) | k <- [0..rows p - 1]]
+
+-- | Forward substitution for Lx = b (L is lower triangular with unit diagonal).
+forwardSubst :: (Fractional a, MatrixElem a, V.VectorElem a) => Matrix a -> V.Vector a -> V.Vector a
+forwardSubst l b = V.generate n solve_i
+  where
+    n = V.length b
+    solve_i i =
+        let sum_j = P.sum [l ! (i, j) * (result V.! j) | j <- [0..i-1]]
+        in b V.! i - sum_j
+    result = forwardSubst l b
+
+-- | Back substitution for Ux = b (U is upper triangular).
+backSubst :: (Fractional a, MatrixElem a, V.VectorElem a) => Matrix a -> V.Vector a -> V.Vector a
+backSubst u b = go (n-1) (V.replicate n 0)
+  where
+    n = V.length b
+    go i acc
+        | i < 0 = acc
+        | otherwise =
+            let sum_j = P.sum [u ! (i, j) * (acc V.! j) | j <- [i+1..n-1]]
+                xi = (b V.! i - sum_j) / (u ! (i, i))
+            in go (i-1) (V.update acc i xi)
 
 -- | Least squares solution.
 --
 -- Minimizes ||Ax - b||_2.
--- Note: Currently a placeholder, requires QR or SVD
-lstsq :: (Floating a, MatrixElem a, V.VectorElem a) => Matrix a -> V.Vector a -> V.Vector a
-lstsq a b = error "Least squares requires QR/SVD (not yet implemented)"
+-- Uses QR decomposition: A = QR, then Rx = Q^T b.
+lstsq :: (Floating a, Ord a, MatrixElem a, V.VectorElem a) => Matrix a -> V.Vector a -> V.Vector a
+lstsq a b =
+    let (q, r) = qr a
+        qt = transpose q
+        qtb = mulV qt b
+        -- Solve Rx = Q^T b via back substitution
+        n = cols a
+    in backSubstRect r qtb n
 
 -- ============================================================
 -- Decompositions
@@ -594,48 +710,225 @@ lstsq a b = error "Least squares requires QR/SVD (not yet implemented)"
 -- | LU decomposition.
 --
 -- Returns (L, U, P) where PA = LU.
--- Note: Placeholder, requires full implementation
-lu :: (Floating a, MatrixElem a) => Matrix a -> (Matrix a, Matrix a, Matrix a)
-lu m = error "LU decomposition not yet implemented"
+lu :: (Fractional a, Ord a, MatrixElem a) => Matrix a -> (Matrix a, Matrix a, Matrix a)
+lu m =
+    let (l, u, p, _) = luWithPivot m
+    in (l, u, p)
+
+-- | Internal LU decomposition with pivot count.
+luWithPivot :: (Fractional a, Ord a, MatrixElem a) => Matrix a -> (Matrix a, Matrix a, Matrix a, Int)
+luWithPivot m
+    | rows m /= cols m = error "LU decomposition requires square matrix"
+    | otherwise = go 0 (identity n) (identity n) m 0
+  where
+    n = rows m
+
+    go k l u mat swaps
+        | k >= n = (l, mat, u, swaps)  -- u is actually P here, mat is U
+        | otherwise =
+            -- Find pivot
+            let pivotRow = findPivotRow k mat
+                (mat', p', newSwaps) =
+                    if pivotRow /= k
+                    then (swapRows k pivotRow mat, swapRows k pivotRow u, swaps + 1)
+                    else (mat, u, swaps)
+                pivotVal = mat' ! (k, k)
+            in if P.abs pivotVal < 1e-14
+               then go (k + 1) l mat' p' newSwaps  -- Skip zero pivot
+               else
+                   -- Compute multipliers and eliminate
+                   let factors = [(i, mat' ! (i, k) / pivotVal) | i <- [k+1..n-1]]
+                       mat'' = eliminateBelow k factors mat'
+                       l' = setFactors k factors l
+                   in go (k + 1) l' mat'' p' newSwaps
+
+    findPivotRow k mat =
+        let candidates = [(i, P.abs (mat ! (i, k))) | i <- [k..n-1]]
+        in fst $ P.maximumBy (\(_, a) (_, b) -> compare a b) candidates
+
+    swapRows r1 r2 mat = fromList n n
+        [if i == r1 then mat ! (r2, j)
+         else if i == r2 then mat ! (r1, j)
+         else mat ! (i, j)
+        | i <- [0..n-1], j <- [0..n-1]]
+
+    eliminateBelow k factors mat = fromList n n
+        [let factor = P.lookup i factors
+         in case factor of
+             Just f -> if j >= k then mat ! (i, j) - f * mat ! (k, j) else mat ! (i, j)
+             Nothing -> mat ! (i, j)
+        | i <- [0..n-1], j <- [0..n-1]]
+
+    setFactors k factors l = fromList n n
+        [if i > k && j == k
+         then case P.lookup i factors of
+             Just f -> f
+             Nothing -> 0
+         else l ! (i, j)
+        | i <- [0..n-1], j <- [0..n-1]]
 
 -- | QR decomposition.
 --
 -- Returns (Q, R) where A = QR.
--- Note: Placeholder, requires Householder or Gram-Schmidt
-qr :: (Floating a, MatrixElem a) => Matrix a -> (Matrix a, Matrix a)
-qr m = error "QR decomposition not yet implemented"
+-- Uses modified Gram-Schmidt orthogonalization.
+qr :: (Floating a, Ord a, MatrixElem a) => Matrix a -> (Matrix a, Matrix a)
+qr m = (q, r)
+  where
+    nRows = rows m
+    nCols = cols m
+    k = P.min nRows nCols
+
+    -- Gram-Schmidt process
+    (qCols, rData) = gramSchmidt 0 [] []
+
+    gramSchmidt j qAcc rAcc
+        | j >= k = (qAcc, rAcc)
+        | otherwise =
+            let colJ = [m ! (i, j) | i <- [0..nRows-1]]
+                -- Subtract projections onto previous q vectors
+                (v, rEntries) = subtractProjections colJ qAcc 0 []
+                -- Normalize
+                normV = P.sqrt (P.sum (P.map (^(2::Int)) v))
+                qj = if normV > 1e-14
+                     then P.map (/ normV) v
+                     else P.replicate nRows 0
+                rjj = normV
+            in gramSchmidt (j + 1) (qAcc ++ [qj]) (rAcc ++ [(j, rEntries ++ [(j, rjj)])])
+
+    subtractProjections v [] _ acc = (v, acc)
+    subtractProjections v (qi:qis) i acc =
+        let rij = P.sum (P.zipWith (*) v qi)
+            v' = P.zipWith (\vk qik -> vk - rij * qik) v qi
+        in subtractProjections v' qis (i + 1) (acc ++ [(i, rij)])
+
+    q = fromList nRows k [qCols !! j !! i | i <- [0..nRows-1], j <- [0..k-1]]
+    r = fromList k nCols
+        [case P.lookup j rData of
+             Just entries -> case P.lookup i entries of
+                 Just rij -> rij
+                 Nothing -> 0
+             Nothing -> 0
+        | i <- [0..k-1], j <- [0..nCols-1]]
 
 -- | Singular value decomposition.
 --
--- Returns (U, S, V) where A = U * diag(S) * V^T.
--- Note: Placeholder, requires iterative algorithm
-svd :: (Floating a, MatrixElem a, V.VectorElem a) => Matrix a -> (Matrix a, V.Vector a, Matrix a)
-svd m = error "SVD not yet implemented"
+-- Returns (U, S, V^T) where A = U * diag(S) * V^T.
+-- Uses power iteration method for computing dominant singular vectors.
+svd :: (Floating a, Ord a, MatrixElem a, V.VectorElem a) => Matrix a -> (Matrix a, V.Vector a, Matrix a)
+svd m =
+    let nRows = rows m
+        nCols = cols m
+        k = P.min nRows nCols
+        -- Compute singular values and vectors iteratively
+        ata = (transpose m) @@ m
+        aat = m @@ (transpose m)
+        -- Get singular values from eigenvalues of A^T A
+        (singVals, vVecs) = powerIterationMultiple ata k
+        -- Compute U from AV/sigma
+        uCols = P.zipWith (\sigma vCol ->
+            if sigma > 1e-14
+            then V.map (/ sigma) (mulV m vCol)
+            else V.replicate nRows 0) singVals vVecs
+        uMat = fromCols uCols
+        vMat = fromCols vVecs
+    in (uMat, V.fromList singVals, transpose vMat)
+
+-- | Power iteration for multiple eigenvectors.
+powerIterationMultiple :: (Floating a, Ord a, MatrixElem a, V.VectorElem a) => Matrix a -> Int -> ([a], [V.Vector a])
+powerIterationMultiple m k = go k [] []
+  where
+    n = rows m
+    maxIter = 100
+
+    go 0 vals vecs = (P.reverse vals, P.reverse vecs)
+    go remaining vals vecs =
+        let -- Start with random-ish vector
+            v0 = V.fromList [1 / P.sqrt (fromIntegral n) | _ <- [1..n]]
+            -- Orthogonalize against existing eigenvectors
+            v0Orth = orthogonalize v0 vecs
+            -- Power iteration
+            (lambda, v) = powerIter v0Orth maxIter
+            sigma = P.sqrt (P.abs lambda)
+        in go (remaining - 1) (sigma : vals) (v : vecs)
+
+    powerIter v 0 = (0, v)
+    powerIter v iter =
+        let av = mulV m v
+            norm_av = V.norm av
+            v' = if norm_av > 1e-14 then V.map (/ norm_av) av else v
+            lambda = V.dot (mulV m v') v'
+        in if iter <= 1 || norm_av < 1e-14
+           then (lambda, v')
+           else powerIter v' (iter - 1)
+
+    orthogonalize v [] = v
+    orthogonalize v (qi:qis) =
+        let proj = V.dot v qi
+            v' = V.zipWith (\vi qii -> vi - proj * qii) v qi
+            normV = V.norm v'
+            v'' = if normV > 1e-14 then V.map (/ normV) v' else v'
+        in orthogonalize v'' qis
 
 -- | Cholesky decomposition.
 --
 -- Returns L where A = LL^T.
--- Requires A to be positive definite.
--- Note: Placeholder
-cholesky :: (Floating a, MatrixElem a) => Matrix a -> Matrix a
-cholesky m = error "Cholesky decomposition not yet implemented"
+-- Requires A to be symmetric positive definite.
+cholesky :: (Floating a, Ord a, MatrixElem a) => Matrix a -> Matrix a
+cholesky m
+    | rows m /= cols m = error "Cholesky requires square matrix"
+    | otherwise = fromList n n [computeL i j | i <- [0..n-1], j <- [0..n-1]]
+  where
+    n = rows m
+
+    computeL i j
+        | j > i = 0  -- Upper triangle is zero
+        | i == j = -- Diagonal
+            let sumSq = P.sum [lij i k ^ (2::Int) | k <- [0..j-1]]
+                val = m ! (i, i) - sumSq
+            in if val <= 0
+               then error "Cholesky: matrix is not positive definite"
+               else P.sqrt val
+        | otherwise = -- Lower triangle
+            let sumProd = P.sum [lij i k * lij j k | k <- [0..j-1]]
+                ljj = lij j j
+            in if ljj == 0
+               then error "Cholesky: zero diagonal"
+               else (m ! (i, j) - sumProd) / ljj
+
+    -- Memoized L values (computed on demand)
+    lMatrix = fromList n n [computeL i j | i <- [0..n-1], j <- [0..n-1]]
+    lij i j = lMatrix ! (i, j)
 
 -- | Eigendecomposition.
 --
 -- Returns (eigenvalues, eigenvectors).
 -- Eigenvectors are columns of the matrix.
--- Note: Placeholder
-eig :: (Floating a, MatrixElem a, V.VectorElem (Complex a), MatrixElem (Complex a)) => Matrix a -> (V.Vector (Complex a), Matrix (Complex a))
-eig m = error "Eigendecomposition not yet implemented"
+-- Uses power iteration for dominant eigenvalues.
+eig :: (Floating a, Ord a, MatrixElem a, V.VectorElem a) => Matrix a -> (V.Vector a, Matrix a)
+eig m
+    | rows m /= cols m = error "Eigendecomposition requires square matrix"
+    | otherwise =
+        let n = rows m
+            (vals, vecs) = powerIterationMultiple m n
+        in (V.fromList vals, fromCols vecs)
 
 -- | Eigenvalues only.
--- Note: Placeholder
-eigvals :: (Floating a, MatrixElem a, V.VectorElem (Complex a)) => Matrix a -> V.Vector (Complex a)
-eigvals m = error "Eigenvalues not yet implemented"
+eigvals :: (Floating a, Ord a, MatrixElem a, V.VectorElem a) => Matrix a -> V.Vector a
+eigvals m = fst (eig m)
 
--- Complex number placeholder
-data Complex a = Complex !a !a
-    deriving (Eq, Show)
+-- | Back substitution for rectangular upper triangular system.
+backSubstRect :: (Fractional a, MatrixElem a, V.VectorElem a) => Matrix a -> V.Vector a -> Int -> V.Vector a
+backSubstRect r b n = go (n-1) (V.replicate n 0)
+  where
+    go i acc
+        | i < 0 = acc
+        | otherwise =
+            let rii = r ! (i, i)
+                sum_j = P.sum [r ! (i, j) * (acc V.! j) | j <- [i+1..n-1]]
+                xi = if P.abs rii > 1e-14
+                     then (b V.! i - sum_j) / rii
+                     else 0
+            in go (i-1) (V.update acc i xi)
 
 -- ============================================================
 -- Norms

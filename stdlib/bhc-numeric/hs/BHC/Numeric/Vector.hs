@@ -63,6 +63,9 @@ module BHC.Numeric.Vector (
     find, findIndex,
     elemIndex, elemIndices,
 
+    -- * Modification
+    update, filter,
+
     -- * Numeric operations
     dot, norm, normalize,
     add, sub, mul, div,
@@ -89,7 +92,7 @@ import BHC.Prelude hiding (
     (++), concat, map, zipWith, zipWith3,
     foldl, foldl1, foldr, foldr1,
     sum, product, maximum, minimum,
-    all, any, elem, notElem,
+    all, any, elem, notElem, filter,
     replicate, negate, abs
     )
 import qualified BHC.Prelude as P
@@ -582,6 +585,26 @@ elemIndex x = findIndex (== x)
 -- | Find all indices of element.
 elemIndices :: (Eq a, VectorElem a) => a -> Vector a -> Vector Int
 elemIndices x v = fromList [i | i <- [0..length v - 1], v ! i == x]
+
+-- ============================================================
+-- Modification
+-- ============================================================
+
+-- | Update element at index.
+--
+-- >>> update (fromList [1,2,3]) 1 10
+-- [1, 10, 3]
+update :: VectorElem a => Vector a -> Int -> a -> Vector a
+update v i x
+    | i < 0 || i >= length v = v
+    | otherwise = generate (length v) (\j -> if j == i then x else v ! j)
+
+-- | Filter elements satisfying predicate.
+--
+-- >>> filter (> 2) (fromList [1,2,3,4,5])
+-- [3, 4, 5]
+filter :: VectorElem a => (a -> Bool) -> Vector a -> Vector a
+filter p v = fromList [v ! i | i <- [0..length v - 1], p (v ! i)]
 
 -- ============================================================
 -- Numeric Operations

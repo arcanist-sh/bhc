@@ -105,7 +105,7 @@ impl<'src> Lexer<'src> {
             src,
             pos: 0,
             config,
-            layout_stack: vec![(0, false)], // Implicit module-level context
+            layout_stack: vec![(1, false)], // Implicit module-level context at column 1
             pending: Vec::new(),
             line_start_column: 1,
             expect_layout_block: false,

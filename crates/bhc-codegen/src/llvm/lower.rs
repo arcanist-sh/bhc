@@ -1667,18 +1667,66 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Declare a binding (creates function signature without body).
     fn declare_binding(&mut self, bind: &Bind) -> CodegenResult<()> {
         match bind {
-            Bind::NonRec(var, _) => {
-                let fn_val = self.declare_function(var)?;
+            Bind::NonRec(var, expr) => {
+                let fn_val = self.declare_function_from_expr(var, expr)?;
                 self.functions.insert(var.id, fn_val);
             }
             Bind::Rec(bindings) => {
-                for (var, _) in bindings {
-                    let fn_val = self.declare_function(var)?;
+                for (var, expr) in bindings {
+                    let fn_val = self.declare_function_from_expr(var, expr)?;
                     self.functions.insert(var.id, fn_val);
                 }
             }
         }
         Ok(())
+    }
+
+    /// Count the number of lambda parameters in an expression.
+    fn count_lambda_params(&self, expr: &Expr) -> usize {
+        let mut count = 0;
+        let mut current = expr;
+        while let Expr::Lam(_, body, _) = current {
+            count += 1;
+            current = body.as_ref();
+        }
+        count
+    }
+
+    /// Check if a type contains unresolved type variables or errors.
+    fn type_needs_inference(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Error => true,
+            Ty::Var(_) => true,
+            Ty::Fun(arg, ret) => self.type_needs_inference(arg) || self.type_needs_inference(ret),
+            Ty::Forall(_, body) => self.type_needs_inference(body),
+            Ty::App(f, arg) => self.type_needs_inference(f) || self.type_needs_inference(arg),
+            _ => false,
+        }
+    }
+
+    /// Declare a function from a Core variable and expression.
+    /// Uses the expression to infer the function type when var.ty contains unresolved types.
+    fn declare_function_from_expr(&self, var: &Var, expr: &Expr) -> CodegenResult<FunctionValue<'ctx>> {
+        let param_count = self.count_lambda_params(expr);
+
+        // Only infer types for functions with parameters
+        // For CAFs (0 parameters), use the original type lowering
+        let fn_type = if param_count > 0 && self.type_needs_inference(&var.ty) {
+            // Infer function type from the expression structure
+            let tm = self.type_mapper();
+
+            // Use i64 as default parameter type (most common for numeric code)
+            let param_types: Vec<_> = (0..param_count)
+                .map(|_| tm.i64_type().into())
+                .collect();
+
+            // Default return type is i64
+            tm.i64_type().fn_type(&param_types, false)
+        } else {
+            self.lower_function_type(&var.ty)?
+        };
+        let name = var.name.as_str();
+        Ok(self.module.add_function(name, fn_type))
     }
 
     /// Declare a function from a Core variable.
@@ -1761,8 +1809,25 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 if let Some(val) = self.env.get(&var.id) {
                     Ok(Some(*val))
                 } else if let Some(fn_val) = self.functions.get(&var.id) {
-                    // It's a function reference - return as pointer
-                    Ok(Some(fn_val.as_global_value().as_pointer_value().into()))
+                    // It's a function reference
+                    // Check if it's a CAF (zero-argument function)
+                    let fn_type = fn_val.get_type();
+                    if fn_type.count_param_types() == 0 {
+                        // CAF - call the function to get its value
+                        let call_result = self.builder()
+                            .build_call(*fn_val, &[], "caf_result")
+                            .map_err(|e| CodegenError::Internal(format!("failed to call CAF: {:?}", e)))?;
+                        // Get the return value
+                        if let Some(ret_val) = call_result.try_as_basic_value().left() {
+                            Ok(Some(ret_val))
+                        } else {
+                            // Void function - shouldn't happen for CAFs
+                            Ok(None)
+                        }
+                    } else {
+                        // Function with parameters - return as pointer for potential partial application
+                        Ok(Some(fn_val.as_global_value().as_pointer_value().into()))
+                    }
                 } else {
                     Err(CodegenError::Internal(format!(
                         "unbound variable: {}",
@@ -2727,8 +2792,47 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             CodegenError::Internal("scrutinee has no value".to_string())
         })?;
 
+        // Check if all alternatives are Default (no actual pattern matching needed)
+        // This happens for simple variable patterns like `f n = 42`
+        let all_default = alts.iter().all(|alt| matches!(&alt.con, AltCon::Default));
+        if all_default && !alts.is_empty() {
+            // Just use the first (and likely only) default alternative
+            let alt = &alts[0];
+
+            // Bind any pattern variables to the scrutinee value
+            for binder in &alt.binders {
+                self.env.insert(binder.id, scrut_val);
+            }
+
+            // Lower the RHS
+            let result = self.lower_expr(&alt.rhs)?;
+
+            // Clean up bindings
+            for binder in &alt.binders {
+                self.env.remove(&binder.id);
+            }
+
+            return Ok(result);
+        }
+
         // Determine if this is a constructor case or a literal case
         let has_datacon = alts.iter().any(|alt| matches!(&alt.con, AltCon::DataCon(_)));
+
+        // Check if this is a Bool case (True/False patterns) with an integer scrutinee
+        // This happens when the condition is a comparison result
+        let is_bool_case = alts.iter().any(|alt| {
+            if let AltCon::DataCon(con) = &alt.con {
+                let name = con.name.as_str();
+                name == "True" || name == "False" || name == "GHC.Types.True" || name == "GHC.Types.False"
+            } else {
+                false
+            }
+        });
+
+        if is_bool_case && matches!(scrut_val, BasicValueEnum::IntValue(_)) {
+            // Bool case with integer scrutinee - use direct integer comparison
+            return self.lower_case_bool_as_int(scrut_val, alts);
+        }
 
         if has_datacon {
             self.lower_case_datacon(scrut_val, alts)
@@ -2789,11 +2893,25 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         // Build switch
-        let default = default_block.unwrap_or(merge_block);
+        // If there's no explicit default, create an unreachable block
+        let default = if let Some(db) = default_block {
+            db
+        } else {
+            let unreachable_block = self.llvm_context().append_basic_block(current_fn, "case_unreachable");
+            unreachable_block
+        };
+
         let _switch = self
             .builder()
             .build_switch(scrut_int, default, &cases)
             .map_err(|e| CodegenError::Internal(format!("failed to build switch: {:?}", e)))?;
+
+        // If we created an unreachable block, fill it in
+        if default_block.is_none() {
+            self.builder().position_at_end(default);
+            self.builder().build_unreachable()
+                .map_err(|e| CodegenError::Internal(format!("failed to build unreachable: {:?}", e)))?;
+        }
 
         // Generate code for each alternative
         self.lower_case_alternatives(alts, &blocks, merge_block)
@@ -2865,11 +2983,27 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         // Build switch on tag
-        let default = default_block.unwrap_or(merge_block);
+        // If there's no explicit default, create an unreachable block to indicate exhaustive matching
+        let default = if let Some(db) = default_block {
+            db
+        } else {
+            // Create an unreachable block for the default case
+            // This avoids having merge_block as a direct successor of the switch
+            let unreachable_block = self.llvm_context().append_basic_block(current_fn, "case_unreachable");
+            unreachable_block
+        };
+
         let _switch = self
             .builder()
             .build_switch(tag, default, &cases)
             .map_err(|e| CodegenError::Internal(format!("failed to build switch: {:?}", e)))?;
+
+        // If we created an unreachable block, fill it in
+        if default_block.is_none() {
+            self.builder().position_at_end(default);
+            self.builder().build_unreachable()
+                .map_err(|e| CodegenError::Internal(format!("failed to build unreachable: {:?}", e)))?;
+        }
 
         // Generate code for each alternative with field extraction
         self.lower_case_datacon_alternatives(alts, &blocks, merge_block, scrut_ptr, &datacon_info)
@@ -2907,6 +3041,120 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let phi = self
                 .builder()
                 .build_phi(first_val.get_type(), "case_result")
+                .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+
+            for (val, block) in &phi_values {
+                phi.add_incoming(&[(val, *block)]);
+            }
+
+            Ok(Some(phi.as_basic_value()))
+        }
+    }
+
+    /// Lower a Bool case expression when the scrutinee is an integer (from comparison).
+    /// True is represented as non-zero (typically 1), False as 0.
+    fn lower_case_bool_as_int(
+        &mut self,
+        scrut_val: BasicValueEnum<'ctx>,
+        alts: &[Alt],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let scrut_int = match scrut_val {
+            BasicValueEnum::IntValue(i) => i,
+            _ => {
+                return Err(CodegenError::Internal(
+                    "lower_case_bool_as_int called with non-integer scrutinee".to_string(),
+                ))
+            }
+        };
+
+        let current_fn = self.builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?
+            .get_parent()
+            .ok_or_else(|| CodegenError::Internal("no parent function".to_string()))?;
+
+        // Find the True and False alternatives
+        let mut true_alt = None;
+        let mut false_alt = None;
+        let mut default_alt = None;
+
+        for alt in alts {
+            match &alt.con {
+                AltCon::DataCon(con) => {
+                    let name = con.name.as_str();
+                    if name == "True" || name == "GHC.Types.True" {
+                        true_alt = Some(alt);
+                    } else if name == "False" || name == "GHC.Types.False" {
+                        false_alt = Some(alt);
+                    }
+                }
+                AltCon::Default => {
+                    default_alt = Some(alt);
+                }
+                _ => {}
+            }
+        }
+
+        // Create blocks
+        let true_block = self.llvm_context().append_basic_block(current_fn, "bool_true");
+        let false_block = self.llvm_context().append_basic_block(current_fn, "bool_false");
+        let merge_block = self.llvm_context().append_basic_block(current_fn, "bool_merge");
+
+        // Compare scrutinee to zero (False = 0, True = non-zero)
+        let zero = self.type_mapper().i64_type().const_zero();
+        let is_true = self.builder()
+            .build_int_compare(inkwell::IntPredicate::NE, scrut_int, zero, "is_true")
+            .map_err(|e| CodegenError::Internal(format!("failed to build bool cmp: {:?}", e)))?;
+
+        // Branch based on the comparison
+        self.builder()
+            .build_conditional_branch(is_true, true_block, false_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build cond branch: {:?}", e)))?;
+
+        let mut phi_values = Vec::new();
+
+        // Generate code for True branch
+        self.builder().position_at_end(true_block);
+        let true_rhs = if let Some(alt) = true_alt {
+            self.lower_expr(&alt.rhs)?
+        } else if let Some(alt) = default_alt {
+            self.lower_expr(&alt.rhs)?
+        } else {
+            None
+        };
+        if let Some(val) = true_rhs {
+            phi_values.push((val, true_block));
+        }
+        self.builder()
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Generate code for False branch
+        self.builder().position_at_end(false_block);
+        let false_rhs = if let Some(alt) = false_alt {
+            self.lower_expr(&alt.rhs)?
+        } else if let Some(alt) = default_alt {
+            self.lower_expr(&alt.rhs)?
+        } else {
+            None
+        };
+        if let Some(val) = false_rhs {
+            phi_values.push((val, false_block));
+        }
+        self.builder()
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Build phi node in merge block
+        self.builder().position_at_end(merge_block);
+
+        if phi_values.is_empty() {
+            Ok(None)
+        } else {
+            let first_val = phi_values[0].0;
+            let phi = self
+                .builder()
+                .build_phi(first_val.get_type(), "bool_result")
                 .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
 
             for (val, block) in &phi_values {
@@ -3149,7 +3397,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     "Float" | "Float#" => Ok(Some(tm.f32_type().into())),
                     "Double" | "Double#" => Ok(Some(tm.f64_type().into())),
                     "Char" | "Char#" => Ok(Some(tm.i32_type().into())),
-                    "Bool" => Ok(Some(tm.bool_type().into())),
+                    // Bool uses i64 for consistency with how comparisons return values
+                    "Bool" => Ok(Some(tm.i64_type().into())),
                     "()" | "Unit" => Ok(None), // Unit type has no value
                     _ => {
                         // Unknown type - use a pointer for now

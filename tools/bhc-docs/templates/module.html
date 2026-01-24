@@ -1,0 +1,311 @@
+{% extends "base.html" %}
+
+{% block title %}{{ module.name }} - BHC Documentation{% endblock %}
+
+{% block sidebar %}
+<nav class="nav-tree">
+    <h3>Contents</h3>
+    <ul>
+        {% if module.types | length > 0 %}
+        <li>
+            <a href="#types">Types</a>
+            <ul>
+                {% for item in module.types %}
+                <li><a href="#t:{{ item.name }}">{{ item.name }}</a></li>
+                {% endfor %}
+            </ul>
+        </li>
+        {% endif %}
+        {% if module.classes | length > 0 %}
+        <li>
+            <a href="#classes">Classes</a>
+            <ul>
+                {% for item in module.classes %}
+                <li><a href="#c:{{ item.name }}">{{ item.name }}</a></li>
+                {% endfor %}
+            </ul>
+        </li>
+        {% endif %}
+        {% if module.functions | length > 0 %}
+        <li>
+            <a href="#functions">Functions</a>
+            <ul>
+                {% for item in module.functions %}
+                <li><a href="#v:{{ item.name }}">{{ item.name }}</a></li>
+                {% endfor %}
+            </ul>
+        </li>
+        {% endif %}
+    </ul>
+    <hr>
+    <h3>Modules</h3>
+    <ul>
+        {% for mod in all_modules %}
+        <li {% if mod.name == module.name %}class="active"{% endif %}>
+            <a href="{{ base_url }}/{{ mod.path }}.html">{{ mod.name }}</a>
+        </li>
+        {% endfor %}
+    </ul>
+</nav>
+{% endblock %}
+
+{% block toc %}
+<!-- Right sidebar: On this page -->
+<aside class="toc-sidebar" id="toc-sidebar">
+    <div class="toc-header">
+        <span class="toc-label">On this page</span>
+        <button class="toc-toggle" id="toc-toggle" aria-label="Toggle table of contents">
+            <span class="toc-toggle-icon">▼</span>
+        </button>
+    </div>
+    <nav class="toc-content" id="toc-content">
+        <ul class="toc-list">
+            {% if module.types | length > 0 %}
+            <li class="toc-section">
+                <a href="#types" class="toc-section-link">Types</a>
+                <ul class="toc-items">
+                    {% for item in module.types %}
+                    <li><a href="#t:{{ item.name }}">{{ item.name }}</a></li>
+                    {% endfor %}
+                </ul>
+            </li>
+            {% endif %}
+            {% if module.classes | length > 0 %}
+            <li class="toc-section">
+                <a href="#classes" class="toc-section-link">Classes</a>
+                <ul class="toc-items">
+                    {% for item in module.classes %}
+                    <li><a href="#c:{{ item.name }}">{{ item.name }}</a></li>
+                    {% endfor %}
+                </ul>
+            </li>
+            {% endif %}
+            {% if module.functions | length > 0 %}
+            <li class="toc-section">
+                <a href="#functions" class="toc-section-link">Functions</a>
+                <ul class="toc-items">
+                    {% for item in module.functions %}
+                    <li><a href="#v:{{ item.name }}">{{ item.name }}</a></li>
+                    {% endfor %}
+                </ul>
+            </li>
+            {% endif %}
+            {% if module.instances | length > 0 %}
+            <li class="toc-section">
+                <a href="#instances" class="toc-section-link">Instances</a>
+            </li>
+            {% endif %}
+        </ul>
+    </nav>
+</aside>
+{% endblock %}
+
+{% block content %}
+<article class="module-page">
+    <!-- Module Header Frame -->
+    <div class="page-header">
+        <div class="page-header__bar">
+            <span class="page-header__label">Module</span>
+            {% if module.source_file %}
+            <a href="{{ module.source_url | default(value='#') }}" class="source-link" title="View source">
+                <span class="source-icon">{ }</span>
+                <span class="source-path">{{ module.source_file }}</span>
+            </a>
+            {% endif %}
+            {% if module.badges | length > 0 %}
+            <div class="badges" style="margin-left: auto;">
+                {% for badge in module.badges %}
+                <span class="badge badge-{{ badge.kind }}">{{ badge.label }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        <div class="page-header__content">
+            <h1>{{ module.name }}</h1>
+            {% if module.doc %}
+            <div class="module-doc">
+                {{ module.doc | safe }}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if module.types | length > 0 %}
+    <!-- Types Section Frame -->
+    <div id="types" class="decl-section">
+        <div class="decl-section__header">
+            <span class="decl-section__label">Types</span>
+        </div>
+        <div class="decl-section__content">
+            {% for item in module.types %}
+            <div id="t:{{ item.name }}" class="decl">
+                <div class="decl-header">
+                    <code class="decl-name">{{ item.keyword }} {{ item.name }}{% if item.params %} {{ item.params }}{% endif %}</code>
+                    {% if item.badges | length > 0 %}
+                    <div class="badges">
+                        {% for badge in item.badges %}
+                        <span class="badge badge-{{ badge.kind }}" title="{{ badge.title | default(value='') }}">{{ badge.label }}</span>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                    {% if item.source_line %}
+                    <a href="{{ module.source_url | default(value='#') }}#L{{ item.source_line }}" class="source-link-small" title="View source">
+                        <span class="source-icon-small">{ }</span>
+                    </a>
+                    {% endif %}
+                    <a href="#t:{{ item.name }}" class="anchor">#</a>
+                </div>
+                {% if item.constructors | length > 0 %}
+                <div class="constructors">
+                    {% for con in item.constructors %}
+                    <div class="constructor">
+                        <code>{{ con.name }}{% if con.fields %} {{ con.fields }}{% endif %}</code>
+                        {% if con.doc %}
+                        <p class="con-doc">{{ con.doc | safe }}</p>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                {% if item.doc %}
+                <div class="decl-doc">
+                    {{ item.doc | safe }}
+                </div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if module.classes | length > 0 %}
+    <!-- Type Classes Section Frame -->
+    <div id="classes" class="decl-section">
+        <div class="decl-section__header">
+            <span class="decl-section__label">Type Classes</span>
+        </div>
+        <div class="decl-section__content">
+            {% for item in module.classes %}
+            <div id="c:{{ item.name }}" class="decl">
+                <div class="decl-header">
+                    <code class="decl-name">class {% if item.context %}{{ item.context }} => {% endif %}{{ item.name }} {{ item.params }}</code>
+                    {% if item.source_line %}
+                    <a href="{{ module.source_url | default(value='#') }}#L{{ item.source_line }}" class="source-link-small" title="View source">
+                        <span class="source-icon-small">{ }</span>
+                    </a>
+                    {% endif %}
+                    <a href="#c:{{ item.name }}" class="anchor">#</a>
+                </div>
+                {% if item.methods | length > 0 %}
+                <div class="class-methods">
+                    <h4>Methods</h4>
+                    {% for method in item.methods %}
+                    <div class="method">
+                        <code>{{ method.name }} :: {{ method.signature }}</code>
+                        {% if method.doc %}
+                        <p class="method-doc">{{ method.doc | safe }}</p>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                {% if item.doc %}
+                <div class="decl-doc">
+                    {{ item.doc | safe }}
+                </div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if module.functions | length > 0 %}
+    <!-- Functions Section Frame -->
+    <div id="functions" class="decl-section">
+        <div class="decl-section__header">
+            <span class="decl-section__label">Functions</span>
+        </div>
+        <div class="decl-section__content">
+            {% for item in module.functions %}
+            <div id="v:{{ item.name }}" class="decl">
+                <div class="decl-header">
+                    <code class="decl-name">{{ item.name }} :: {{ item.signature }}</code>
+                    {% if item.badges | length > 0 %}
+                    <div class="badges">
+                        {% for badge in item.badges %}
+                        <span class="badge badge-{{ badge.kind }}" title="{{ badge.title | default(value='') }}">{{ badge.label }}</span>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                    {% if item.source_line %}
+                    <a href="{{ module.source_url | default(value='#') }}#L{{ item.source_line }}" class="source-link-small" title="View source">
+                        <span class="source-icon-small">{ }</span>
+                    </a>
+                    {% endif %}
+                    <a href="#v:{{ item.name }}" class="anchor">#</a>
+                </div>
+                {% if item.doc %}
+                <div class="decl-doc">
+                    {{ item.doc | safe }}
+                </div>
+                {% endif %}
+                {% if item.examples | length > 0 %}
+                <div class="examples">
+                    <h4>Examples</h4>
+                    {% for example in item.examples %}
+                    <div class="example">
+                        <div class="example__header">
+                            <span class="example__dot"></span>
+                            <span class="example__dot"></span>
+                            <span class="example__dot"></span>
+                            <span class="example__label">ghci</span>
+                        </div>
+                        <pre><code class="language-haskell">{{ example.code }}</code></pre>
+                        {% if example.output %}
+                        <div class="example-output">
+                            <pre><code>{{ example.output }}</code></pre>
+                        </div>
+                        {% endif %}
+                        {% if playground %}
+                        <button class="run-btn" data-code="{{ example.code | escape }}">Run</button>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if module.instances | length > 0 %}
+    <!-- Instances Section Frame -->
+    <div id="instances" class="decl-section">
+        <div class="decl-section__header">
+            <span class="decl-section__label">Instances</span>
+        </div>
+        <div class="decl-section__content">
+            {% for item in module.instances %}
+            <div class="decl instance">
+                <div class="decl-header">
+                    <code class="decl-name">instance {% if item.context %}{{ item.context }} => {% endif %}{{ item.head }}</code>
+                    {% if item.source_line %}
+                    <a href="{{ module.source_url | default(value='#') }}#L{{ item.source_line }}" class="source-link-small" title="View source">
+                        <span class="source-icon-small">{ }</span>
+                    </a>
+                    {% endif %}
+                </div>
+                {% if item.doc %}
+                <div class="decl-doc">
+                    {{ item.doc | safe }}
+                </div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+</article>
+{% endblock %}

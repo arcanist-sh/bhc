@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}BHC Documentation{% endblock %}</title>
+    <link rel="stylesheet" href="{{ base_url }}/css/style.css">
+    <script defer src="{{ base_url }}/js/main.js"></script>
+</head>
+<body>
+    <nav class="sidebar">
+        <div class="sidebar-header">
+            <a href="{{ base_url }}/" class="logo">BHC</a>
+            <div class="header-controls">
+                {% if version %}
+                <div class="version-select">
+                    <select id="version-select" aria-label="Select version">
+                        <option value="{{ version }}" selected>{{ version }}</option>
+                        {% for v in versions %}
+                        {% if v != version %}
+                        <option value="{{ v }}">{{ v }}</option>
+                        {% endif %}
+                        {% endfor %}
+                    </select>
+                </div>
+                {% endif %}
+                <button class="theme-toggle" aria-label="Toggle dark mode">
+                    <span class="icon-sun">☀</span>
+                    <span class="icon-moon">☾</span>
+                </button>
+            </div>
+        </div>
+        <div class="search-box">
+            <input type="text" id="search" placeholder="Search (/)..." aria-label="Search">
+        </div>
+        {% block sidebar %}{% endblock %}
+    </nav>
+
+    <main class="content">
+        {% block content %}{% endblock %}
+    </main>
+
+    {% block toc %}{% endblock %}
+
+    <div class="search-modal" id="search-modal" hidden>
+        <div class="search-modal-content">
+            <div class="search-modal__header">
+                <span class="search-modal__dot"></span>
+                <span class="search-modal__dot"></span>
+                <span class="search-modal__dot"></span>
+                <span class="search-modal__title">Search</span>
+            </div>
+            <input type="text" id="search-input" placeholder="Type to search...">
+            <div class="search-results" id="search-results"></div>
+        </div>
+    </div>
+</body>
+</html>

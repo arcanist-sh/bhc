@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}Search Results - BHC Documentation{% endblock %}
+
+{% block sidebar %}
+<nav class="nav-tree">
+    <h3>Search Options</h3>
+    <form id="search-options" class="search-options">
+        <label>
+            <input type="checkbox" id="type-search" {% if type_search %}checked{% endif %}>
+            Type search
+        </label>
+        <p class="help-text">
+            Search by type signature, e.g. <code>a -> [a] -> [a]</code>
+        </p>
+    </form>
+</nav>
+{% endblock %}
+
+{% block content %}
+<article class="search-page">
+    <header>
+        <h1>Search Results</h1>
+        <p class="search-query">
+            {% if query %}
+            Results for: <code>{{ query }}</code>
+            {% else %}
+            Enter a search query above
+            {% endif %}
+        </p>
+    </header>
+
+    {% if results | length > 0 %}
+    <section class="search-results">
+        <p class="result-count">Found {{ results | length }} result{% if results | length != 1 %}s{% endif %}</p>
+
+        <ul class="result-list">
+            {% for result in results %}
+            <li class="result-item">
+                <div class="result-header">
+                    <a href="{{ base_url }}/{{ result.module_path }}.html#{% if result.kind == 'function' %}v{% elif result.kind == 'type' %}t{% else %}c{% endif %}:{{ result.name }}" class="result-link">
+                        <span class="result-module">{{ result.module }}</span>.<span class="result-name">{{ result.name }}</span>
+                    </a>
+                    <span class="result-kind">{{ result.kind }}</span>
+                    <span class="result-score" title="Relevance score">{{ result.score | round(precision=2) }}</span>
+                </div>
+                {% if result.signature %}
+                <code class="result-signature">{{ result.signature }}</code>
+                {% endif %}
+                {% if result.doc %}
+                <p class="result-doc">{{ result.doc }}</p>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </section>
+    {% elif query %}
+    <section class="no-results">
+        <p>No results found for <code>{{ query }}</code></p>
+        <p>Try:</p>
+        <ul>
+            <li>Using different keywords</li>
+            <li>Enabling type search for signature queries</li>
+            <li>Using partial names</li>
+        </ul>
+    </section>
+    {% endif %}
+</article>
+{% endblock %}

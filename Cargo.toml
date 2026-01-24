@@ -65,6 +65,10 @@ members = [
     # Tools
     "tools/bhci",
     "tools/bhi",
+    "tools/bhc-docs",
+
+    # Web playground (WASM-compatible)
+    "crates/bhc-playground",
 
     # Standard library
     "stdlib/bhc-prelude",
@@ -118,6 +122,7 @@ bhc-ffi = { path = "crates/bhc-ffi" }
 bhc-package = { path = "crates/bhc-package" }
 bhc-interface = { path = "crates/bhc-interface" }
 bhc-macros = { path = "crates/bhc-macros" }
+bhc-playground = { path = "crates/bhc-playground" }
 
 # RTS crates
 bhc-rts = { path = "rts/bhc-rts" }

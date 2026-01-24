@@ -1,0 +1,49 @@
+[package]
+name = "bhc-docs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Documentation generator for BHC with type search and interactive examples"
+
+[dependencies]
+# Internal crates
+bhc-ast.workspace = true
+bhc-parser.workspace = true
+bhc-span.workspace = true
+bhc-session.workspace = true
+bhc-lexer.workspace = true
+bhc-intern.workspace = true
+
+# External dependencies
+tera = "1.19"           # Template engine
+syntect = "5.1"         # Syntax highlighting
+clap = { version = "4.4", features = ["derive"] }
+axum = "0.7"            # Dev server
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["fs", "compression-gzip"] }
+tower-livereload = "0.9"
+notify = "6.1"          # File watching
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+walkdir = "2.4"
+pulldown-cmark = "0.9"  # Markdown rendering
+regex = "1.10"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "bhc-docs"
+path = "src/main.rs"
+
+[lib]
+name = "bhc_docs"
+path = "src/lib.rs"

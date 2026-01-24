@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} - BHC Documentation{% endblock %}
+
+{% block sidebar %}
+<nav class="nav-tree">
+    <h3>Modules</h3>
+    <ul>
+        {% for module in modules %}
+        <li>
+            <a href="{{ base_url }}/{{ module.path }}.html">{{ module.name }}</a>
+        </li>
+        {% endfor %}
+    </ul>
+</nav>
+{% endblock %}
+
+{% block content %}
+<article class="index-page">
+    <!-- Page Header Frame -->
+    <div class="page-header">
+        <div class="page-header__bar">
+            <span class="page-header__label">Documentation</span>
+        </div>
+        <div class="page-header__content">
+            <h1>{{ title }}</h1>
+            {% if description %}
+            <p class="description">{{ description }}</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Stats Frame -->
+    <div class="quick-stats">
+        <div class="stat">
+            <span class="stat-value">{{ modules | length }}</span>
+            <span class="stat-label">Modules</span>
+        </div>
+        <div class="stat">
+            <span class="stat-value">{{ total_functions }}</span>
+            <span class="stat-label">Functions</span>
+        </div>
+        <div class="stat">
+            <span class="stat-value">{{ total_types }}</span>
+            <span class="stat-label">Types</span>
+        </div>
+    </div>
+
+    <!-- Module List Frame -->
+    <div class="module-list">
+        <div class="module-list__header">
+            <span class="module-list__label">All Modules</span>
+        </div>
+        <table class="module-table">
+            <thead>
+                <tr>
+                    <th>Module</th>
+                    <th>Description</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for module in modules %}
+                <tr>
+                    <td>
+                        <a href="{{ base_url }}/{{ module.path }}.html">{{ module.name }}</a>
+                    </td>
+                    <td>{{ module.brief | default(value="") }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</article>
+{% endblock %}

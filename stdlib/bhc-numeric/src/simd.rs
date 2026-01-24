@@ -1201,7 +1201,7 @@ pub extern "C" fn bhc_simd_dot_f32(a: *const f32, b: *const f32, len: usize) -> 
     let b_slice = unsafe { std::slice::from_raw_parts(b, len) };
 
     let chunks = len / 8;
-    let remainder = len % 8;
+    let _remainder = len % 8;
     let mut sum = Vec8F32::zero();
 
     for i in 0..chunks {

@@ -5,7 +5,52 @@
 -- License     : BSD-3-Clause
 -- Stability   : stable
 --
--- JSON encoding and decoding.
+-- JSON encoding and decoding with type-safe accessors.
+--
+-- = Overview
+--
+-- This module provides JSON parsing and serialization using a simple
+-- 'JSON' data type and 'ToJSON'/'FromJSON' type classes for automatic
+-- conversion.
+--
+-- = Quick Start
+--
+-- @
+-- import BHC.Data.JSON
+--
+-- -- Parse JSON
+-- case decode \"{\\"name\\": \\"Alice\\", \\"age\\": 30}\" of
+--     Just val -> print (val .: "name")
+--     Nothing  -> putStrLn "Parse error"
+--
+-- -- Build JSON
+-- let person = object
+--         [ "name" .= "Bob"
+--         , "age" .= 25
+--         , "active" .= True
+--         ]
+-- putStrLn (encodePretty person)
+-- @
+--
+-- = Custom Types
+--
+-- @
+-- data User = User { userName :: String, userAge :: Int }
+--
+-- instance ToJSON User where
+--     toJSON (User n a) = object [\"name\" .= n, \"age\" .= a]
+--
+-- instance FromJSON User where
+--     fromJSON (Object m) = User \<$\> m .: \"name\" \<*\> m .: \"age\"
+--     fromJSON _ = Left (TypeMismatch \"Object\" \"other\")
+-- @
+--
+-- = Operators
+--
+-- * '.:' — Required field lookup
+-- * '.:?' — Optional field lookup (returns 'Maybe')
+-- * '.!=' — Provide default for optional field
+-- * '.=' — Create key-value pair for 'object'
 
 module BHC.Data.JSON (
     -- * JSON type

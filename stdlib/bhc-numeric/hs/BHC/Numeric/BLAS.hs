@@ -5,8 +5,40 @@
 -- License     : BSD-3-Clause
 -- Stability   : stable
 --
--- Bindings to BLAS for high-performance linear algebra.
--- Supports multiple backends: OpenBLAS, MKL, Accelerate, and pure BHC fallback.
+-- High-performance linear algebra through BLAS (Basic Linear Algebra
+-- Subprograms). BLAS is the industry standard for matrix and vector
+-- operations, with highly optimized implementations available from
+-- multiple vendors.
+--
+-- = Provider Selection
+--
+-- BHC automatically selects the best available BLAS provider at runtime:
+--
+-- 1. Intel MKL (if available) - Best performance on Intel CPUs
+-- 2. Apple Accelerate (macOS) - Optimized for Apple Silicon
+-- 3. OpenBLAS (cross-platform) - Good open-source option
+-- 4. Pure BHC fallback - Always available, no dependencies
+--
+-- = BLAS Levels
+--
+-- BLAS operations are organized into three levels:
+--
+-- * __Level 1__: Vector-vector operations (O(n)) - dot products, norms
+-- * __Level 2__: Matrix-vector operations (O(n²)) - matrix-vector multiply
+-- * __Level 3__: Matrix-matrix operations (O(n³)) - matrix multiply (GEMM)
+--
+-- = Usage
+--
+-- @
+-- import BHC.Numeric.BLAS
+--
+-- -- Check current provider
+-- provider <- currentProvider
+-- putStrLn $ "Using: " ++ provider
+--
+-- -- Matrix multiply (calls DGEMM)
+-- dgemm layout NoTrans NoTrans m n k alpha ptrA ldA ptrB ldB beta ptrC ldC
+-- @
 
 {-# LANGUAGE ForeignFunctionInterface #-}
 

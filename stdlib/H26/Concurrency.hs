@@ -1,12 +1,92 @@
 -- |
 -- Module      : H26.Concurrency
 -- Description : Structured concurrency primitives
+-- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
+-- Stability   : stable
 --
--- The H26.Concurrency module provides structured concurrency with
--- automatic cancellation propagation, deadline support, and safe
--- resource management. All concurrent operations happen within
--- scopes that outlive them.
+-- Structured concurrency with automatic cancellation and resource safety.
+--
+-- = Overview
+--
+-- This module provides structured concurrency primitives following the
+-- principle that all concurrent operations happen within scopes that
+-- outlive them. Features include:
+--
+-- * 'Scope'-based task management with automatic cleanup
+-- * Cancellation propagation from parent to child tasks
+-- * Deadline and timeout support
+-- * Software Transactional Memory (STM)
+-- * Traditional synchronization primitives (MVar, Mutex, etc.)
+--
+-- = Quick Start
+--
+-- @
+-- import H26.Concurrency
+--
+-- -- Run parallel tasks within a scope
+-- example :: IO (Int, Int)
+-- example = withScope $ \\scope -> do
+--     t1 <- spawn scope computeX
+--     t2 <- spawn scope computeY
+--     x <- await t1
+--     y <- await t2
+--     return (x, y)
+--     -- Both tasks complete before withScope returns
+--
+-- -- With timeout
+-- withTimeout (seconds 5) longOperation >>= \\case
+--     Just result -> use result
+--     Nothing -> handleTimeout
+-- @
+--
+-- = Task Lifecycle
+--
+-- @
+-- spawn      await
+--   │          │
+--   ▼          ▼
+-- ┌────┐    ┌─────────┐    ┌────────────┐    ┌───────────┐
+-- │ New│ →  │ Running │ →  │ Completing │ →  │ Completed │
+-- └────┘    └─────────┘    └────────────┘    └───────────┘
+--                │
+--                │ cancel
+--                ▼
+--           ┌───────────┐
+--           │ Cancelled │
+--           └───────────┘
+-- @
+--
+-- = Cancellation
+--
+-- Cancellation is cooperative. Tasks should periodically call
+-- 'checkCancelled' or use operations that check automatically:
+--
+-- @
+-- longTask :: IO ()
+-- longTask = forM_ items $ \\item -> do
+--     checkCancelled  -- Throws if cancelled
+--     processItem item
+-- @
+--
+-- = STM
+--
+-- For lock-free concurrent data structures, use STM:
+--
+-- @
+-- transferFunds :: TVar Int -> TVar Int -> Int -> STM ()
+-- transferFunds from to amount = do
+--     balance <- readTVar from
+--     check (balance >= amount)  -- Retry if insufficient
+--     writeTVar from (balance - amount)
+--     modifyTVar' to (+ amount)
+-- @
+--
+-- = See Also
+--
+-- * "BHC.Control.Concurrent.Scope" for scope implementation
+-- * "BHC.Control.Concurrent.STM" for STM implementation
+-- * H26-SPEC Section 10 for concurrency specification
 
 {-# HASKELL_EDITION 2026 #-}
 {-# PROFILE Server #-}

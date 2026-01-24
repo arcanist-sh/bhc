@@ -1,11 +1,83 @@
 -- |
 -- Module      : H26.Vector
 -- Description : Boxed and unboxed vector types
+-- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
+-- Stability   : stable
 --
--- The H26.Vector module provides efficient array-like containers.
--- Includes both boxed vectors (any type) and unboxed vectors
--- (primitive types with better cache performance).
+-- Efficient array-like containers with O(1) indexing.
+--
+-- = Overview
+--
+-- This module provides two vector types:
+--
+-- * 'Vector' — Boxed vectors that can hold any type
+-- * 'UVector' — Unboxed vectors for primitive types (better performance)
+--
+-- Both support O(1) indexing and O(1) slicing (creating views).
+--
+-- = Quick Start
+--
+-- @
+-- import H26.Vector
+--
+-- -- Construction
+-- v1 = fromList [1, 2, 3, 4, 5]
+-- v2 = replicate 100 0
+-- v3 = generate 100 (\\i -> i * i)
+--
+-- -- Indexing
+-- x = v1 ! 2               -- 3 (unsafe)
+-- y = v1 !? 10             -- Nothing (safe)
+--
+-- -- Slicing (O(1), creates view)
+-- prefix = take 3 v1       -- [1, 2, 3]
+-- suffix = drop 2 v1       -- [3, 4, 5]
+--
+-- -- Transformations
+-- doubled = map (*2) v1    -- [2, 4, 6, 8, 10]
+-- evens = filter even v1   -- [2, 4]
+--
+-- -- Folds
+-- total = sum v1           -- 15
+-- big = maximum v1         -- 5
+-- @
+--
+-- = Boxed vs Unboxed
+--
+-- Choose 'UVector' for primitive types when performance matters:
+--
+-- @
+-- -- Boxed: each element is a pointer (8 bytes overhead)
+-- boxed :: Vector Int
+-- boxed = fromList [1..1000000]
+--
+-- -- Unboxed: elements stored directly (no overhead)
+-- unboxed :: UVector Int
+-- unboxed = fromList [1..1000000]  -- ~8x less memory
+-- @
+--
+-- 'UVector' requires an 'Unbox' instance for the element type.
+--
+-- = Mutable Vectors
+--
+-- For in-place modifications, use 'MVector' or 'MUVector':
+--
+-- @
+-- import Control.Monad.ST
+--
+-- sortInPlace :: UVector Int -> UVector Int
+-- sortInPlace v = runST $ do
+--     mv <- thaw v
+--     quicksort mv
+--     freeze mv
+-- @
+--
+-- = See Also
+--
+-- * "H26.Tensor" for multidimensional arrays
+-- * "H26.Bytes" for raw byte arrays
+-- * "BHC.Data.Vector" for the underlying implementation
 
 {-# HASKELL_EDITION 2026 #-}
 

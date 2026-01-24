@@ -8,11 +8,38 @@
 -- An efficient implementation of maps from integer keys to values
 -- using Patricia tries (also known as radix trees).
 --
+-- = Performance
+--
+-- Most operations are /O(min(n, W))/ where /W/ is the number of bits
+-- in an 'Int' (typically 64). In practice, this means operations are
+-- essentially /O(1)/ for maps with fewer than 2^20 elements.
+--
+-- | Operation | Time Complexity |
+-- |-----------|-----------------|
+-- | lookup    | O(min(n, W))    |
+-- | insert    | O(min(n, W))    |
+-- | delete    | O(min(n, W))    |
+-- | union     | O(n + m)        |
+--
+-- = Usage
+--
 -- This module is designed to be imported qualified:
 --
 -- @
 -- import qualified BHC.Data.IntMap as IM
+--
+-- ages :: IM.IntMap String
+-- ages = IM.fromList [(1, "Alice"), (2, "Bob"), (3, "Carol")]
+--
+-- getName :: Int -> Maybe String
+-- getName uid = IM.lookup uid ages
 -- @
+--
+-- = Comparison with Data.Map
+--
+-- Use 'IntMap' when your keys are 'Int'. It is significantly faster
+-- than @Map Int@ because it avoids the overhead of key comparisons
+-- and has better cache behavior due to the trie structure.
 
 {-# LANGUAGE BangPatterns #-}
 

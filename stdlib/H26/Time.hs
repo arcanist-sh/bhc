@@ -1,11 +1,78 @@
 -- |
 -- Module      : H26.Time
 -- Description : Time and duration types
+-- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
+-- Stability   : stable
 --
--- The H26.Time module provides time measurement, durations, and
--- timestamps. Designed for both high-precision timing and
--- human-readable date/time operations.
+-- Time measurement, durations, and calendar operations.
+--
+-- = Overview
+--
+-- This module provides comprehensive time handling:
+--
+-- * 'Duration' — Time spans with nanosecond precision
+-- * 'Instant' — Monotonic timestamps for measuring elapsed time
+-- * 'UTCTime' — Wall-clock time (affected by system adjustments)
+-- * Calendar types for dates and times
+--
+-- = Quick Start
+--
+-- @
+-- import H26.Time
+--
+-- -- Measure execution time
+-- main :: IO ()
+-- main = do
+--     start <- now
+--     result <- performComputation
+--     elapsed <- elapsed start
+--     putStrLn $ \"Took \" ++ show (toMilliseconds elapsed) ++ \"ms\"
+--
+-- -- Create dates and times
+-- let day = fromGregorian 2026 1 24
+--     (y, m, d) = toGregorian day  -- (2026, 1, 24)
+--
+-- -- Durations
+-- let timeout = seconds 30
+--     delay = milliseconds 100
+--     total = addDuration timeout delay
+-- @
+--
+-- = Instant vs UTCTime
+--
+-- Use 'Instant' for performance measurement and timeouts:
+--
+-- @
+-- start <- now          -- Monotonic, never goes backwards
+-- -- ... computation ...
+-- elapsed <- elapsed start
+-- @
+--
+-- Use 'UTCTime' for wall-clock time and calendars:
+--
+-- @
+-- utc <- getCurrentTime
+-- let formatted = formatTime iso8601Format utc
+-- @
+--
+-- = Timeout and Delay
+--
+-- @
+-- -- Run with timeout
+-- result <- timeout (seconds 5) longOperation
+-- case result of
+--     Just x  -> use x
+--     Nothing -> handleTimeout
+--
+-- -- Delay execution
+-- delay (milliseconds 100)
+-- @
+--
+-- = See Also
+--
+-- * "BHC.Data.Time" for the underlying implementation
+-- * "H26.Concurrency" for deadline-aware concurrency
 
 {-# HASKELL_EDITION 2026 #-}
 

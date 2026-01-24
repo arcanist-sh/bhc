@@ -1,11 +1,65 @@
 -- |
 -- Module      : H26.Bytes
 -- Description : Byte arrays with slicing and pinned memory support
+-- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
+-- Stability   : stable
 --
--- The H26.Bytes module provides efficient byte array operations for
--- binary data processing. Supports both managed and pinned memory
--- for FFI interop.
+-- Efficient byte array operations for binary data processing.
+--
+-- = Overview
+--
+-- 'Bytes' is an immutable byte array type with O(1) slicing.
+-- Supports both managed and pinned memory for FFI interop.
+--
+-- = Quick Start
+--
+-- @
+-- import H26.Bytes
+--
+-- -- Construction
+-- bs = pack [0x48, 0x65, 0x6c, 0x6c, 0x6f]  -- \"Hello\" in ASCII
+-- bs' = replicate 100 0                      -- 100 zero bytes
+--
+-- -- Slicing (O(1), creates view)
+-- header = take 4 fileContents
+-- payload = drop 4 fileContents
+--
+-- -- File I\/O
+-- contents <- readFile \"binary.dat\"
+-- writeFile \"output.dat\" processedData
+-- @
+--
+-- = Memory Types
+--
+-- The module provides three byte array types:
+--
+-- [@Bytes@] Immutable, GC-managed byte array
+-- [@MutableBytes@] Mutable byte array for in-place operations
+-- [@PinnedBytes@] Memory that won't move (required for FFI)
+--
+-- = FFI Interop
+--
+-- For calling C code, use 'PinnedBytes' to ensure pointers remain valid:
+--
+-- @
+-- import H26.Bytes
+-- import H26.FFI
+--
+-- processWithC :: Bytes -> IO Bytes
+-- processWithC bs = do
+--     let pinned = toPinned bs
+--     withPinnedPtr pinned $ \\ptr -> do
+--         c_process ptr (length bs)
+--         -- ptr is valid here
+--     return (fromPinned pinned)
+-- @
+--
+-- = See Also
+--
+-- * "H26.Text" for Unicode text (uses UTF-8 bytes internally)
+-- * "H26.FFI" for foreign function interface
+-- * "BHC.Data.ByteString" for the underlying implementation
 
 {-# HASKELL_EDITION 2026 #-}
 

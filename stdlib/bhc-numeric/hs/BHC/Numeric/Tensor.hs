@@ -130,7 +130,13 @@ type Shape = [Int]
 -- Construction
 -- ============================================================
 
--- | Create tensor filled with zeros.
+-- | /O(n)/. Create a tensor filled with zeros.
+--
+-- >>> zeros [2, 3]
+-- Tensor [2,3] [[0,0,0],[0,0,0]]
+--
+-- >>> shape (zeros [4, 5, 6])
+-- [4, 5, 6]
 zeros :: (Num a, VU.Unbox a) => Shape -> Tensor a
 zeros sh = Tensor
     { tensorData = VU.replicate (product sh) 0
@@ -139,7 +145,13 @@ zeros sh = Tensor
     , tensorOffset = 0
     }
 
--- | Create tensor filled with ones.
+-- | /O(n)/. Create a tensor filled with ones.
+--
+-- >>> ones [3]
+-- Tensor [3] [1,1,1]
+--
+-- >>> tSum (ones [10, 10])
+-- 100
 ones :: (Num a, VU.Unbox a) => Shape -> Tensor a
 ones sh = Tensor
     { tensorData = VU.replicate (product sh) 1
@@ -148,7 +160,10 @@ ones sh = Tensor
     , tensorOffset = 0
     }
 
--- | Create tensor filled with a constant value.
+-- | /O(n)/. Create a tensor filled with a constant value.
+--
+-- >>> full [2, 2] 3.14
+-- Tensor [2,2] [[3.14,3.14],[3.14,3.14]]
 full :: VU.Unbox a => Shape -> a -> Tensor a
 full sh val = Tensor
     { tensorData = VU.replicate (product sh) val
@@ -157,10 +172,10 @@ full sh val = Tensor
     , tensorOffset = 0
     }
 
--- | Create tensor from nested list.
+-- | /O(n)/. Create a 2D tensor from a nested list.
 --
 -- >>> fromList [[1,2,3], [4,5,6]]
--- Tensor [2, 3] ...
+-- Tensor [2,3] [[1,2,3],[4,5,6]]
 fromList :: VU.Unbox a => [[a]] -> Tensor a
 fromList [] = Tensor VU.empty [] [] 0
 fromList xss =
@@ -169,10 +184,13 @@ fromList xss =
         flat = concat xss
     in fromListFlat [rows, cols] flat
 
--- | Create tensor from flat list with shape.
+-- | /O(n)/. Create a tensor from a flat list with specified shape.
 --
 -- >>> fromListFlat [2, 3] [1,2,3,4,5,6]
--- Tensor [2, 3] ...
+-- Tensor [2,3] [[1,2,3],[4,5,6]]
+--
+-- >>> fromListFlat [2, 2, 2] [1,2,3,4,5,6,7,8]
+-- Tensor [2,2,2] [[[1,2],[3,4]],[[5,6],[7,8]]]
 fromListFlat :: VU.Unbox a => Shape -> [a] -> Tensor a
 fromListFlat sh xs
     | length xs /= product sh = error "fromListFlat: size mismatch"
@@ -183,10 +201,16 @@ fromListFlat sh xs
         , tensorOffset = 0
         }
 
--- | Create 1D tensor with range [start, end).
+-- | /O(n)/. Create a 1D tensor with values in the range [start, end) with given step.
 --
--- >>> arange 0 10 1
--- Tensor [10] [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+-- >>> toList (arange 0 10 1)
+-- [0,1,2,3,4,5,6,7,8,9]
+--
+-- >>> toList (arange 0 10 2)
+-- [0,2,4,6,8]
+--
+-- >>> toList (arange 5 0 (-1))
+-- [5,4,3,2,1]
 arange :: (Num a, Ord a, VU.Unbox a) => a -> a -> a -> Tensor a
 arange start end step =
     let vals = takeWhile (< end) $ iterate (+ step) start
@@ -198,10 +222,13 @@ arange start end step =
         , tensorOffset = 0
         }
 
--- | Create 1D tensor with evenly spaced values.
+-- | /O(n)/. Create a 1D tensor with @n@ evenly spaced values from @start@ to @end@ (inclusive).
 --
--- >>> linspace 0 1 5
--- Tensor [5] [0.0, 0.25, 0.5, 0.75, 1.0]
+-- >>> toList (linspace 0 1 5)
+-- [0.0,0.25,0.5,0.75,1.0]
+--
+-- >>> toList (linspace 0 10 3)
+-- [0.0,5.0,10.0]
 linspace :: (Fractional a, VU.Unbox a) => a -> a -> Int -> Tensor a
 linspace start end n
     | n <= 0 = Tensor VU.empty [] [] 0
@@ -216,10 +243,13 @@ linspace start end n
             , tensorOffset = 0
             }
 
--- | Create identity matrix.
+-- | /O(n²)/. Create an n×n identity matrix.
 --
 -- >>> eye 3
--- Tensor [3, 3] [[1,0,0], [0,1,0], [0,0,1]]
+-- Tensor [3,3] [[1,0,0],[0,1,0],[0,0,1]]
+--
+-- >>> trace (eye 5)
+-- 5
 eye :: (Num a, VU.Unbox a) => Int -> Tensor a
 eye n = unsafePerformIO $ do
     mv <- VUM.replicate (n * n) 0
@@ -275,27 +305,40 @@ randn sh = do
 -- Shape Operations
 -- ============================================================
 
--- | Get tensor shape.
+-- | /O(1)/. Get the shape of a tensor (list of dimensions).
+--
+-- >>> shape (zeros [2, 3, 4])
+-- [2,3,4]
 shape :: Tensor a -> Shape
 shape = tensorShape
 
--- | Get tensor rank (number of dimensions).
+-- | /O(1)/. Get the rank (number of dimensions) of a tensor.
+--
+-- >>> rank (zeros [2, 3, 4])
+-- 3
+--
+-- >>> rank (zeros [100])
+-- 1
 rank :: Tensor a -> Int
 rank = length . tensorShape
 
--- | Get total number of elements.
+-- | /O(1)/. Get the total number of elements in a tensor.
+--
+-- >>> size (zeros [2, 3, 4])
+-- 24
 size :: Tensor a -> Int
 size = product . tensorShape
 
--- | Reshape tensor to new shape.
+-- | /O(n)/. Reshape a tensor to a new shape.
 --
--- The new shape must have the same number of elements.
+-- The new shape must have the same total number of elements.
+-- If the tensor is not contiguous, a copy is made.
 --
--- >>> reshape [6] (zeros [2, 3])
--- Tensor [6] ...
+-- >>> shape (reshape [6] (zeros [2, 3]))
+-- [6]
 --
--- >>> reshape [3, 2] (zeros [2, 3])
--- Tensor [3, 2] ...
+-- >>> shape (reshape [3, 2] (zeros [2, 3]))
+-- [3,2]
 reshape :: VU.Unbox a => Shape -> Tensor a -> Tensor a
 reshape newShape t
     | product newShape /= size t = error "reshape: size mismatch"
@@ -304,11 +347,17 @@ reshape newShape t
         let t' = contiguous t
         in t' { tensorShape = newShape, tensorStride = computeStrides newShape }
 
--- | Flatten tensor to 1D.
+-- | /O(n)/. Flatten a tensor to a 1D tensor.
+--
+-- >>> shape (flatten (zeros [2, 3, 4]))
+-- [24]
 flatten :: VU.Unbox a => Tensor a -> Tensor a
 flatten t = reshape [size t] t
 
--- | Remove dimensions of size 1.
+-- | /O(1)/. Remove all dimensions of size 1.
+--
+-- >>> shape (squeeze (zeros [1, 3, 1, 4, 1]))
+-- [3,4]
 squeeze :: Tensor a -> Tensor a
 squeeze t =
     let newShape = filter (/= 1) (tensorShape t)
@@ -317,7 +366,13 @@ squeeze t =
          , tensorStride = if null newStride then [1] else newStride
          }
 
--- | Add dimension of size 1 at position.
+-- | /O(1)/. Add a dimension of size 1 at the specified position.
+--
+-- >>> shape (unsqueeze 0 (zeros [3, 4]))
+-- [1,3,4]
+--
+-- >>> shape (unsqueeze 2 (zeros [3, 4]))
+-- [3,4,1]
 unsqueeze :: Int -> Tensor a -> Tensor a
 unsqueeze dim t =
     let sh = tensorShape t
@@ -326,13 +381,23 @@ unsqueeze dim t =
         newStride = insertAt dim (if dim < length st then st !! dim else 1) st
     in t { tensorShape = newShape, tensorStride = newStride }
 
--- | Transpose a 2D tensor.
+-- | /O(1)/. Transpose a 2D tensor (swap rows and columns).
+--
+-- This is a view operation - no data is copied.
+--
+-- >>> shape (transpose (zeros [3, 4]))
+-- [4,3]
 transpose :: Tensor a -> Tensor a
 transpose t
     | rank t /= 2 = error "transpose: expected 2D tensor"
     | otherwise = permute [1, 0] t
 
--- | Permute dimensions.
+-- | /O(1)/. Permute the dimensions of a tensor.
+--
+-- This is a view operation - no data is copied.
+--
+-- >>> shape (permute [2, 0, 1] (zeros [2, 3, 4]))
+-- [4,2,3]
 permute :: [Int] -> Tensor a -> Tensor a
 permute perm t = t
     { tensorShape = permuteList perm (tensorShape t)
@@ -450,12 +515,20 @@ masked mask t
 -- ============================================================
 -- Element-wise Operations (MUST FUSE)
 -- ============================================================
+--
+-- All element-wise operations are designed to fuse with each other
+-- according to H26-SPEC Section 8. Fusion eliminates intermediate
+-- allocations and reduces memory bandwidth requirements.
 
--- | Map function over tensor elements.
+-- | /O(n)/. Map a function over all tensor elements.
+--
+-- >>> tMap (*2) (fromListFlat [3] [1, 2, 3])
+-- Tensor [3] [2,4,6]
 --
 -- ==== __Fusion__
 --
--- @tMap f (tMap g t)@ MUST fuse to @tMap (f . g) t@.
+-- @tMap f (tMap g t)@ MUST fuse to @tMap (f . g) t@ (single traversal).
+-- This is a guaranteed fusion pattern per H26-SPEC Section 8.1.
 {-# RULES
 "tMap/tMap" forall f g t. tMap f (tMap g t) = tMap (f . g) t
 #-}
@@ -467,11 +540,16 @@ tMap f t = Tensor
     , tensorOffset = 0
     }
 
--- | Zip two tensors with a binary function.
+-- | /O(n)/. Combine two tensors element-wise with a binary function.
+--
+-- The tensors must have the same shape.
+--
+-- >>> tZipWith (+) (ones [2, 2]) (ones [2, 2])
+-- Tensor [2,2] [[2,2],[2,2]]
 --
 -- ==== __Fusion__
 --
--- @tZipWith f (tMap g a) (tMap h b)@ MUST fuse to single traversal.
+-- @tZipWith f (tMap g a) (tMap h b)@ MUST fuse to a single traversal.
 {-# RULES
 "tZipWith/tMap/tMap" forall f g h a b.
     tZipWith f (tMap g a) (tMap h b) = tZipWith (\x y -> f (g x) (h y)) a b
@@ -487,156 +565,223 @@ tZipWith f t1 t2
         , tensorOffset = 0
         }
 
--- | Element-wise addition.
+-- | /O(n)/. Element-wise addition.
+--
+-- >>> tAdd (ones [2]) (ones [2])
+-- Tensor [2] [2,2]
 tAdd :: (Num a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor a
 tAdd = tZipWith (+)
 
--- | Element-wise subtraction.
+-- | /O(n)/. Element-wise subtraction.
 tSub :: (Num a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor a
 tSub = tZipWith (-)
 
--- | Element-wise multiplication.
+-- | /O(n)/. Element-wise multiplication (Hadamard product).
 tMul :: (Num a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor a
 tMul = tZipWith (*)
 
--- | Element-wise division.
+-- | /O(n)/. Element-wise division.
 tDiv :: (Fractional a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor a
 tDiv = tZipWith (/)
 
--- | Negate all elements.
+-- | /O(n)/. Negate all elements.
 tNeg :: (Num a, VU.Unbox a) => Tensor a -> Tensor a
 tNeg = tMap negate
 
--- | Absolute value.
+-- | /O(n)/. Absolute value of all elements.
 tAbs :: (Num a, VU.Unbox a) => Tensor a -> Tensor a
 tAbs = tMap abs
 
--- | Sign function.
+-- | /O(n)/. Sign of each element (-1, 0, or 1).
 tSign :: (Num a, VU.Unbox a) => Tensor a -> Tensor a
 tSign = tMap signum
 
--- | Square root.
+-- | /O(n)/. Square root of all elements.
 tSqrt :: (Floating a, VU.Unbox a) => Tensor a -> Tensor a
 tSqrt = tMap sqrt
 
--- | Exponential.
+-- | /O(n)/. Exponential (e^x) of all elements.
 tExp :: (Floating a, VU.Unbox a) => Tensor a -> Tensor a
 tExp = tMap exp
 
--- | Natural logarithm.
+-- | /O(n)/. Natural logarithm of all elements.
 tLog :: (Floating a, VU.Unbox a) => Tensor a -> Tensor a
 tLog = tMap log
 
--- | Power.
+-- | /O(n)/. Element-wise power.
 tPow :: (Floating a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor a
 tPow = tZipWith (**)
 
--- | Sine.
+-- | /O(n)/. Sine of all elements (radians).
 tSin :: (Floating a, VU.Unbox a) => Tensor a -> Tensor a
 tSin = tMap sin
 
--- | Cosine.
+-- | /O(n)/. Cosine of all elements (radians).
 tCos :: (Floating a, VU.Unbox a) => Tensor a -> Tensor a
 tCos = tMap cos
 
--- | Tangent.
+-- | /O(n)/. Tangent of all elements (radians).
 tTan :: (Floating a, VU.Unbox a) => Tensor a -> Tensor a
 tTan = tMap tan
 
--- | Hyperbolic sine.
+-- | /O(n)/. Hyperbolic sine of all elements.
 tSinh :: (Floating a, VU.Unbox a) => Tensor a -> Tensor a
 tSinh = tMap sinh
 
--- | Hyperbolic cosine.
+-- | /O(n)/. Hyperbolic cosine of all elements.
 tCosh :: (Floating a, VU.Unbox a) => Tensor a -> Tensor a
 tCosh = tMap cosh
 
--- | Hyperbolic tangent.
+-- | /O(n)/. Hyperbolic tangent of all elements.
+--
+-- Commonly used as an activation function in neural networks.
 tTanh :: (Floating a, VU.Unbox a) => Tensor a -> Tensor a
 tTanh = tMap tanh
 
--- | Floor.
+-- | /O(n)/. Floor of all elements.
 tFloor :: (RealFrac a, VU.Unbox a) => Tensor a -> Tensor a
 tFloor = tMap (fromIntegral . floor)
 
--- | Ceiling.
+-- | /O(n)/. Ceiling of all elements.
 tCeil :: (RealFrac a, VU.Unbox a) => Tensor a -> Tensor a
 tCeil = tMap (fromIntegral . ceiling)
 
--- | Round.
+-- | /O(n)/. Round all elements to nearest integer.
 tRound :: (RealFrac a, VU.Unbox a) => Tensor a -> Tensor a
 tRound = tMap (fromIntegral . round)
 
--- | Element-wise minimum.
+-- | /O(n)/. Element-wise minimum of two tensors.
 tMin :: (Ord a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor a
 tMin = tZipWith min
 
--- | Element-wise maximum.
+-- | /O(n)/. Element-wise maximum of two tensors.
 tMax :: (Ord a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor a
 tMax = tZipWith max
 
--- | Clamp values to range.
+-- | /O(n)/. Clamp all values to the range [lo, hi].
+--
+-- >>> toList (tClamp 0 1 (fromListFlat [5] [-1, 0, 0.5, 1, 2]))
+-- [0.0,0.0,0.5,1.0,1.0]
 tClamp :: (Ord a, VU.Unbox a) => a -> a -> Tensor a -> Tensor a
 tClamp lo hi = tMap (max lo . min hi)
 
 -- ============================================================
 -- Reductions (MUST FUSE with maps)
 -- ============================================================
+--
+-- Reduction operations collapse tensor elements to a single value.
+-- All reductions fuse with preceding map operations to avoid
+-- intermediate allocations.
 
--- | Sum of all elements.
+-- | /O(n)/. Sum of all elements.
+--
+-- >>> tSum (fromListFlat [4] [1, 2, 3, 4])
+-- 10
 --
 -- ==== __Fusion__
 --
--- @tSum (tMap f t)@ MUST fuse to single traversal.
+-- @tSum (tMap f t)@ MUST fuse to a single traversal with no
+-- intermediate allocation. This is a guaranteed fusion pattern.
 {-# RULES
 "tSum/tMap" forall f t. tSum (tMap f t) = tFoldl' (\acc x -> acc + f x) 0 t
 #-}
 tSum :: (Num a, VU.Unbox a) => Tensor a -> a
 tSum = VU.sum . tensorData . contiguous
 
--- | Product of all elements.
+-- | /O(n)/. Product of all elements.
+--
+-- >>> tProduct (fromListFlat [4] [1, 2, 3, 4])
+-- 24
 {-# RULES
 "tProduct/tMap" forall f t. tProduct (tMap f t) = tFoldl' (\acc x -> acc * f x) 1 t
 #-}
 tProduct :: (Num a, VU.Unbox a) => Tensor a -> a
 tProduct = VU.product . tensorData . contiguous
 
--- | Mean of all elements.
+-- | /O(n)/. Arithmetic mean of all elements.
+--
+-- \[ \text{mean}(\mathbf{x}) = \frac{1}{n} \sum_{i=1}^{n} x_i \]
+--
+-- >>> tMean (fromListFlat [4] [1, 2, 3, 4])
+-- 2.5
 tMean :: (Fractional a, VU.Unbox a) => Tensor a -> a
 tMean t = tSum t / fromIntegral (size t)
 
--- | Variance of all elements.
+-- | /O(n)/. Population variance of all elements.
+--
+-- \[ \text{var}(\mathbf{x}) = \frac{1}{n} \sum_{i=1}^{n} (x_i - \mu)^2 \]
+--
+-- >>> tVar (fromListFlat [4] [1, 2, 3, 4])
+-- 1.25
+--
+-- __Note__: This computes population variance (divides by n).
+-- For sample variance (divides by n-1), use @tVar t * n / (n-1)@.
 tVar :: (Floating a, VU.Unbox a) => Tensor a -> a
 tVar t =
     let m = tMean t
         n = fromIntegral (size t)
     in tSum (tMap (\x -> (x - m) ^ (2 :: Int)) t) / n
 
--- | Standard deviation.
+-- | /O(n)/. Population standard deviation of all elements.
+--
+-- \[ \text{std}(\mathbf{x}) = \sqrt{\text{var}(\mathbf{x})} \]
+--
+-- >>> tStd (fromListFlat [4] [2, 4, 4, 4, 5, 5, 7, 9])
+-- 2.0
 tStd :: (Floating a, VU.Unbox a) => Tensor a -> a
 tStd = sqrt . tVar
 
--- | Minimum element.
+-- | /O(n)/. Minimum element of the tensor.
+--
+-- >>> tMin' (fromListFlat [5] [3, 1, 4, 1, 5])
+-- 1
+--
+-- __Warning__: Partial function. Throws an error on empty tensors.
 tMin' :: (Ord a, VU.Unbox a) => Tensor a -> a
 tMin' t = VU.minimum (tensorData (contiguous t))
 
--- | Maximum element.
+-- | /O(n)/. Maximum element of the tensor.
+--
+-- >>> tMax' (fromListFlat [5] [3, 1, 4, 1, 5])
+-- 5
+--
+-- __Warning__: Partial function. Throws an error on empty tensors.
 tMax' :: (Ord a, VU.Unbox a) => Tensor a -> a
 tMax' t = VU.maximum (tensorData (contiguous t))
 
--- | Index of minimum element.
+-- | /O(n)/. Index of the minimum element (flat index).
+--
+-- >>> tArgmin (fromListFlat [5] [3, 1, 4, 1, 5])
+-- 1
+--
+-- __Note__: Returns the first occurrence if there are ties.
 tArgmin :: (Ord a, VU.Unbox a) => Tensor a -> Int
 tArgmin t = VU.minIndex (tensorData (contiguous t))
 
--- | Index of maximum element.
+-- | /O(n)/. Index of the maximum element (flat index).
+--
+-- >>> tArgmax (fromListFlat [5] [3, 1, 4, 1, 5])
+-- 4
+--
+-- __Note__: Returns the first occurrence if there are ties.
 tArgmax :: (Ord a, VU.Unbox a) => Tensor a -> Int
 tArgmax t = VU.maxIndex (tensorData (contiguous t))
 
--- | True if any element is True.
+-- | /O(n)/. True if any element is True.
+--
+-- >>> tAny (tGt (fromListFlat [3] [1, 2, 3]) (fromListFlat [3] [0, 5, 0]))
+-- True
+--
+-- Short-circuits on first True (in sequential evaluation).
 tAny :: Tensor Bool -> Bool
 tAny t = VU.or (tensorData (contiguous t))
 
--- | True if all elements are True.
+-- | /O(n)/. True if all elements are True.
+--
+-- >>> tAll (tGt (fromListFlat [3] [1, 2, 3]) (zeros [3]))
+-- True
+--
+-- Short-circuits on first False (in sequential evaluation).
 tAll :: Tensor Bool -> Bool
 tAll t = VU.and (tensorData (contiguous t))
 
@@ -647,35 +792,72 @@ tFoldl' f z t = VU.foldl' f z (tensorData (contiguous t))
 -- ============================================================
 -- Reduction Along Axis
 -- ============================================================
+--
+-- These operations reduce a tensor along a specified axis,
+-- producing a tensor with one fewer dimension.
 
--- | Sum along axis.
+-- | /O(n)/. Sum along a specified axis.
+--
+-- Reduces the tensor by summing along the given axis.
+--
+-- >>> sumAxis 0 (fromList [[1, 2], [3, 4]])
+-- Tensor [2] [4,6]
+--
+-- >>> sumAxis 1 (fromList [[1, 2], [3, 4]])
+-- Tensor [2] [3,7]
 sumAxis :: (Num a, VU.Unbox a) => Int -> Tensor a -> Tensor a
 sumAxis = reduceAxis (+) 0
 
--- | Product along axis.
+-- | /O(n)/. Product along a specified axis.
+--
+-- Reduces the tensor by multiplying along the given axis.
+--
+-- >>> productAxis 0 (fromList [[1, 2], [3, 4]])
+-- Tensor [2] [3,8]
 productAxis :: (Num a, VU.Unbox a) => Int -> Tensor a -> Tensor a
 productAxis = reduceAxis (*) 1
 
--- | Mean along axis.
+-- | /O(n)/. Mean along a specified axis.
+--
+-- Computes the arithmetic mean along the given axis.
+--
+-- >>> meanAxis 0 (fromList [[1, 2], [3, 4]])
+-- Tensor [2] [2.0,3.0]
 meanAxis :: (Fractional a, VU.Unbox a) => Int -> Tensor a -> Tensor a
 meanAxis axis t =
     let sumT = sumAxis axis t
         n = fromIntegral (tensorShape t !! axis)
     in tMap (/ n) sumT
 
--- | Minimum along axis.
+-- | /O(n)/. Minimum along a specified axis.
+--
+-- >>> minAxis 0 (fromList [[3, 1], [2, 4]])
+-- Tensor [2] [2,1]
 minAxis :: (Ord a, VU.Unbox a, Bounded a) => Int -> Tensor a -> Tensor a
 minAxis = reduceAxis min maxBound
 
--- | Maximum along axis.
+-- | /O(n)/. Maximum along a specified axis.
+--
+-- >>> maxAxis 0 (fromList [[3, 1], [2, 4]])
+-- Tensor [2] [3,4]
 maxAxis :: (Ord a, VU.Unbox a, Bounded a) => Int -> Tensor a -> Tensor a
 maxAxis = reduceAxis max minBound
 
--- | Index of minimum along axis.
+-- | /O(n)/. Index of minimum along a specified axis.
+--
+-- Returns the indices of minimum values along the axis.
+--
+-- >>> argminAxis 0 (fromList [[3, 1], [2, 4]])
+-- Tensor [2] [1,0]
 argminAxis :: (Ord a, VU.Unbox a) => Int -> Tensor a -> Tensor Int
 argminAxis axis t = argReduceAxis (<) axis t
 
--- | Index of maximum along axis.
+-- | /O(n)/. Index of maximum along a specified axis.
+--
+-- Returns the indices of maximum values along the axis.
+--
+-- >>> argmaxAxis 0 (fromList [[3, 1], [2, 4]])
+-- Tensor [2] [0,1]
 argmaxAxis :: (Ord a, VU.Unbox a) => Int -> Tensor a -> Tensor Int
 argmaxAxis axis t = argReduceAxis (>) axis t
 
@@ -733,22 +915,40 @@ argReduceAxis cmp axis t
 -- ============================================================
 -- Linear Algebra
 -- ============================================================
-
--- | Dot product of two vectors.
 --
--- >>> dot [1, 2, 3] [4, 5, 6]
+-- Standard linear algebra operations. For large matrices,
+-- these operations use BLAS when available.
+
+-- | /O(n)/. Dot product (inner product) of two 1D tensors.
+--
+-- \[ \text{dot}(\mathbf{x}, \mathbf{y}) = \sum_{i=1}^{n} x_i \cdot y_i \]
+--
+-- >>> dot (fromListFlat [3] [1, 2, 3]) (fromListFlat [3] [4, 5, 6])
 -- 32
+--
+-- ==== __SIMD__
+--
+-- Uses SIMD vectorization for Float and Double tensors.
 dot :: (Num a, VU.Unbox a) => Tensor a -> Tensor a -> a
 dot t1 t2
     | rank t1 /= 1 || rank t2 /= 1 = error "dot: expected 1D tensors"
     | size t1 /= size t2 = error "dot: size mismatch"
     | otherwise = tSum (tMul t1 t2)
 
--- | Matrix multiplication.
+-- | /O(n·m·k)/. Matrix multiplication.
 --
--- ==== __Complexity__
+-- Computes the matrix product of an (n×m) and (m×k) matrix,
+-- producing an (n×k) result.
 --
--- O(n * m * k) for (n x m) @ (m x k) matrices.
+-- >>> let a = fromList [[1, 2], [3, 4]]
+-- >>> let b = fromList [[5, 6], [7, 8]]
+-- >>> matmul a b
+-- Tensor [2,2] [[19,22],[43,50]]
+--
+-- ==== __BLAS__
+--
+-- For Double matrices, uses BLAS DGEMM when available,
+-- providing optimized cache-aware tiled multiplication.
 matmul :: (Num a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor a
 matmul t1 t2
     | rank t1 /= 2 || rank t2 /= 2 = error "matmul: expected 2D tensors"
@@ -764,12 +964,22 @@ matmul t1 t2
         v <- VU.freeze mv
         return $ Tensor v [m, n] [n, 1] 0
 
--- | Infix matrix multiplication.
+-- | Infix operator for matrix multiplication.
+--
+-- >>> let a = fromList [[1, 0], [0, 1]]
+-- >>> let b = fromList [[2, 3], [4, 5]]
+-- >>> a @ b
+-- Tensor [2,2] [[2,3],[4,5]]
 (@) :: (Num a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor a
 (@) = matmul
 infixl 7 @
 
--- | Outer product of two vectors.
+-- | /O(n·m)/. Outer product of two 1D tensors.
+--
+-- Produces a matrix where @result[i,j] = x[i] * y[j]@.
+--
+-- >>> outer (fromListFlat [2] [1, 2]) (fromListFlat [3] [3, 4, 5])
+-- Tensor [2,3] [[3,4,5],[6,8,10]]
 outer :: (Num a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor a
 outer t1 t2
     | rank t1 /= 1 || rank t2 /= 1 = error "outer: expected 1D tensors"
@@ -784,7 +994,11 @@ outer t1 t2
         v <- VU.freeze mv
         return $ Tensor v [m, n] [n, 1] 0
 
--- | Inner product (generalized dot).
+-- | Generalized inner product.
+--
+-- Contracts the last axis of the first tensor with the first axis
+-- of the second tensor. For 1D tensors, equivalent to 'dot'.
+-- For 2D tensors, equivalent to 'matmul'.
 inner :: (Num a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor a
 inner t1 t2
     | null (tensorShape t1) || null (tensorShape t2) = error "inner: empty tensor"
@@ -796,19 +1010,32 @@ inner t1 t2
         then fromListFlat [] [dot t1 t2]  -- Scalar result
         else matmul t1 t2  -- For 2D, same as matmul
 
--- | Vector/matrix norm.
+-- | /O(n)/. L2 (Frobenius) norm.
 --
--- Default is L2 (Frobenius) norm.
+-- \[ \|\mathbf{x}\|_2 = \sqrt{\sum_{i} x_i^2} \]
+--
+-- >>> norm (fromListFlat [3] [3, 4, 0])
+-- 5.0
 norm :: (Floating a, VU.Unbox a) => Tensor a -> a
 norm t = sqrt (tSum (tMap (^ (2 :: Int)) t))
 
--- | Normalize to unit norm.
+-- | /O(n)/. Normalize tensor to unit norm.
+--
+-- Returns the tensor divided by its L2 norm.
+--
+-- >>> normalize (fromListFlat [2] [3, 4])
+-- Tensor [2] [0.6,0.8]
+--
+-- Returns the original tensor unchanged if norm is zero.
 normalize :: (Floating a, VU.Unbox a) => Tensor a -> Tensor a
 normalize t =
     let n = norm t
     in if n == 0 then t else tMap (/ n) t
 
--- | Matrix trace (sum of diagonal).
+-- | /O(n)/. Matrix trace (sum of diagonal elements).
+--
+-- >>> trace (fromList [[1, 2], [3, 4]])
+-- 5
 trace :: (Num a, VU.Unbox a) => Tensor a -> a
 trace t
     | rank t /= 2 = error "trace: expected 2D tensor"
@@ -817,7 +1044,15 @@ trace t
             k = min m n
         in sum [index t [i, i] | i <- [0..k-1]]
 
--- | Matrix determinant.
+-- | /O(n³)/. Matrix determinant.
+--
+-- Computes the determinant using LU decomposition.
+--
+-- >>> det (fromList [[1, 2], [3, 4]])
+-- -2.0
+--
+-- >>> det (eye 3)
+-- 1.0
 det :: (Floating a, VU.Unbox a) => Tensor a -> a
 det t
     | rank t /= 2 = error "det: expected 2D tensor"
@@ -837,7 +1072,13 @@ det t
                      diagProd = P.product [index u [i, i] | i <- [0..n-1]]
                  in sign * diagProd
 
--- | Matrix inverse.
+-- | /O(n³)/. Matrix inverse using Gauss-Jordan elimination.
+--
+-- >>> let a = fromList [[4, 7], [2, 6]]
+-- >>> inv a
+-- Tensor [2,2] [[0.6,-0.7],[-0.2,0.4]]
+--
+-- __Warning__: Throws an error for singular matrices.
 inv :: (Floating a, Ord a, VU.Unbox a) => Tensor a -> Tensor a
 inv t
     | rank t /= 2 = error "inv: expected 2D tensor"
@@ -877,14 +1118,27 @@ inv t
         v <- VU.freeze mvResult
         return $ Tensor v [n, n] [n, 1] 0
 
--- | Solve linear system Ax = b.
+-- | /O(n³)/. Solve linear system Ax = b.
+--
+-- Finds x such that Ax = b, where A is a square matrix.
+--
+-- >>> let a = fromList [[3, 1], [1, 2]]
+-- >>> let b = fromListFlat [2, 1] [9, 8]
+-- >>> solve a b
+-- Tensor [2,1] [[2],[3]]
 solve :: (Floating a, Ord a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor a
 solve a b
     | rank a /= 2 = error "solve: A must be 2D"
     | tensorShape a !! 0 /= tensorShape a !! 1 = error "solve: A must be square"
     | otherwise = matmul (inv a) b
 
--- | Least squares solution.
+-- | /O(n²m)/. Least squares solution.
+--
+-- Finds x that minimizes ||Ax - b||² using the normal equations.
+--
+-- Computes @x = (A^T A)^(-1) A^T b@.
+--
+-- Useful for overdetermined systems (more equations than unknowns).
 lstsq :: (Floating a, Ord a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor a
 lstsq a b =
     -- x = (A^T A)^(-1) A^T b
@@ -893,8 +1147,13 @@ lstsq a b =
         atb = matmul at b
     in solve ata atb
 
--- | Eigenvalue decomposition.
--- Returns (eigenvalues, eigenvectors).
+-- | Eigenvalue decomposition using power iteration.
+--
+-- Returns @(eigenvalues, eigenvectors)@ for a square matrix.
+--
+-- __Note__: Current implementation uses power iteration,
+-- which finds only the dominant eigenvalue/eigenvector pair.
+-- Full QR-based eigendecomposition planned for future release.
 eig :: (Floating a, Ord a, VU.Unbox a) => Tensor a -> (Tensor a, Tensor a)
 eig t
     | rank t /= 2 = error "eig: expected 2D tensor"
@@ -919,7 +1178,15 @@ eig t
         in (fromListFlat [1] [eigenval], reshape [n, 1] eigenvec)
 
 -- | Singular value decomposition.
--- Returns (U, S, V) where A = U * diag(S) * V^T.
+--
+-- Returns @(U, S, V)@ where @A = U * diag(S) * V^T@.
+--
+-- * @U@ - Left singular vectors (orthonormal columns)
+-- * @S@ - Singular values (non-negative, in descending order)
+-- * @V@ - Right singular vectors (orthonormal columns)
+--
+-- __Note__: Current implementation is simplified.
+-- Full divide-and-conquer SVD planned for future release.
 svd :: (Floating a, Ord a, VU.Unbox a) => Tensor a -> (Tensor a, Tensor a, Tensor a)
 svd t
     | rank t /= 2 = error "svd: expected 2D tensor"
@@ -940,8 +1207,18 @@ svd t
             u = if sInv == 0 then zeros [m, 1] else tMap (* sInv) (matmul t v)
         in (u, s, v)
 
--- | QR decomposition.
--- Returns (Q, R) where A = Q * R.
+-- | /O(n²m)/. QR decomposition using Gram-Schmidt orthogonalization.
+--
+-- Returns @(Q, R)@ where @A = Q * R@.
+--
+-- * @Q@ - Orthogonal matrix (Q^T Q = I)
+-- * @R@ - Upper triangular matrix
+--
+-- >>> let (q, r) = qr (fromList [[1, 2], [3, 4], [5, 6]])
+-- >>> shape q
+-- [3, 2]
+-- >>> shape r
+-- [2, 2]
 qr :: (Floating a, Ord a, VU.Unbox a) => Tensor a -> (Tensor a, Tensor a)
 qr t
     | rank t /= 2 = error "qr: expected 2D tensor"
@@ -984,8 +1261,17 @@ qr t
         r <- VU.freeze rData
         return (Tensor q [m, k] [k, 1] 0, Tensor r [k, n] [n, 1] 0)
 
--- | Cholesky decomposition.
--- Returns L where A = L * L^T.
+-- | /O(n³)/. Cholesky decomposition.
+--
+-- Returns lower triangular matrix @L@ where @A = L * L^T@.
+--
+-- Input matrix must be symmetric positive-definite.
+--
+-- >>> cholesky (fromList [[4, 2], [2, 5]])
+-- Tensor [2,2] [[2.0,0.0],[1.0,2.0]]
+--
+-- Useful for efficiently solving linear systems and computing determinants
+-- of positive-definite matrices.
 cholesky :: (Floating a, Ord a, VU.Unbox a) => Tensor a -> Tensor a
 cholesky t
     | rank t /= 2 = error "cholesky: expected 2D tensor"
@@ -1051,64 +1337,115 @@ luDecomp t = unsafePerformIO $ do
 -- ============================================================
 -- Comparison
 -- ============================================================
+--
+-- Element-wise comparison operations that return Boolean tensors.
+-- These can be combined with 'tAny' and 'tAll' for aggregate checks.
 
--- | Element-wise equality.
+-- | /O(n)/. Element-wise equality comparison.
+--
+-- >>> tEq (fromListFlat [3] [1, 2, 3]) (fromListFlat [3] [1, 5, 3])
+-- Tensor [3] [True,False,True]
 tEq :: (Eq a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor Bool
 tEq = tZipWith (==)
 
--- | Element-wise inequality.
+-- | /O(n)/. Element-wise inequality comparison.
+--
+-- >>> tNe (fromListFlat [3] [1, 2, 3]) (fromListFlat [3] [1, 5, 3])
+-- Tensor [3] [False,True,False]
 tNe :: (Eq a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor Bool
 tNe = tZipWith (/=)
 
--- | Element-wise less than.
+-- | /O(n)/. Element-wise less-than comparison.
+--
+-- >>> tLt (fromListFlat [3] [1, 2, 3]) (fromListFlat [3] [2, 2, 2])
+-- Tensor [3] [True,False,False]
 tLt :: (Ord a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor Bool
 tLt = tZipWith (<)
 
--- | Element-wise less than or equal.
+-- | /O(n)/. Element-wise less-than-or-equal comparison.
+--
+-- >>> tLe (fromListFlat [3] [1, 2, 3]) (fromListFlat [3] [2, 2, 2])
+-- Tensor [3] [True,True,False]
 tLe :: (Ord a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor Bool
 tLe = tZipWith (<=)
 
--- | Element-wise greater than.
+-- | /O(n)/. Element-wise greater-than comparison.
+--
+-- >>> tGt (fromListFlat [3] [1, 2, 3]) (fromListFlat [3] [2, 2, 2])
+-- Tensor [3] [False,False,True]
 tGt :: (Ord a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor Bool
 tGt = tZipWith (>)
 
--- | Element-wise greater than or equal.
+-- | /O(n)/. Element-wise greater-than-or-equal comparison.
+--
+-- >>> tGe (fromListFlat [3] [1, 2, 3]) (fromListFlat [3] [2, 2, 2])
+-- Tensor [3] [False,True,True]
 tGe :: (Ord a, VU.Unbox a) => Tensor a -> Tensor a -> Tensor Bool
 tGe = tZipWith (>=)
 
--- | Check for NaN.
+-- | /O(n)/. Check each element for NaN (Not a Number).
+--
+-- >>> tIsNan (fromListFlat [3] [1.0, 0/0, 2.0])
+-- Tensor [3] [False,True,False]
 tIsNan :: (RealFloat a, VU.Unbox a) => Tensor a -> Tensor Bool
 tIsNan = tMap isNaN
 
--- | Check for infinity.
+-- | /O(n)/. Check each element for infinity.
+--
+-- >>> tIsInf (fromListFlat [3] [1.0, 1/0, -1/0])
+-- Tensor [3] [False,True,True]
 tIsInf :: (RealFloat a, VU.Unbox a) => Tensor a -> Tensor Bool
 tIsInf = tMap isInfinite
 
--- | Check for finite values.
+-- | /O(n)/. Check each element for finiteness.
+--
+-- Returns True for elements that are neither NaN nor infinite.
+--
+-- >>> tIsFinite (fromListFlat [3] [1.0, 1/0, 0/0])
+-- Tensor [3] [True,False,False]
 tIsFinite :: (RealFloat a, VU.Unbox a) => Tensor a -> Tensor Bool
 tIsFinite = tMap (\x -> not (isNaN x || isInfinite x))
 
 -- ============================================================
 -- Type Casting
 -- ============================================================
+--
+-- Convert tensors between element types.
 
--- | Cast tensor to different element type.
+-- | /O(n)/. Cast tensor elements using a conversion function.
+--
+-- >>> cast round (fromListFlat [3] [1.2, 2.7, 3.5] :: Tensor Double) :: Tensor Int
+-- Tensor [3] [1,3,4]
 cast :: (VU.Unbox a, VU.Unbox b) => (a -> b) -> Tensor a -> Tensor b
 cast = tMap
 
--- | Cast tensor to specific dtype (runtime type switch).
+-- | /O(n)/. Cast tensor to a specific data type.
+--
+-- Rounds floating-point values when casting to integer types.
+--
+-- >>> asType Int32 (fromListFlat [3] [1.2, 2.7, 3.5])
+-- Tensor [3] [1,3,4]
 asType :: (VU.Unbox a, VU.Unbox b, RealFrac a, Num b) => DType -> Tensor a -> Tensor b
 asType _ = tMap (fromIntegral . round)
 
 -- ============================================================
 -- Utilities
 -- ============================================================
+--
+-- Memory management and conversion utilities.
 
--- | Create a copy of tensor with new memory.
+-- | /O(n)/. Create a deep copy of the tensor with new memory.
+--
+-- Useful when you need to modify a tensor without affecting views.
 clone :: VU.Unbox a => Tensor a -> IO (Tensor a)
 clone t = return $ contiguous t
 
--- | Ensure tensor is contiguous in memory.
+-- | /O(n)/. Ensure tensor data is contiguous in memory.
+--
+-- Returns the original tensor if already contiguous (O(1)),
+-- otherwise creates a copy with contiguous memory layout.
+--
+-- Many operations (BLAS, FFI) require contiguous memory.
 contiguous :: VU.Unbox a => Tensor a -> Tensor a
 contiguous t
     | isContiguous t = t
@@ -1125,11 +1462,19 @@ contiguous t
   where
     isContiguous t' = tensorOffset t' == 0 && tensorStride t' == computeStrides (tensorShape t')
 
--- | Convert tensor to flat list.
+-- | /O(n)/. Convert tensor to a flat list (row-major order).
+--
+-- >>> toList (fromList [[1, 2], [3, 4]])
+-- [1,2,3,4]
 toList :: VU.Unbox a => Tensor a -> [a]
 toList t = [index t (unflattenIndex (tensorShape t) i) | i <- [0..size t - 1]]
 
--- | Convert tensor to nested lists.
+-- | /O(n)/. Convert a 2D tensor to nested lists.
+--
+-- >>> toLists (fromList [[1, 2], [3, 4]])
+-- [[1,2],[3,4]]
+--
+-- __Warning__: Only works for 2D tensors.
 toLists :: VU.Unbox a => Tensor a -> [[a]]
 toLists t
     | rank t /= 2 = error "toLists: expected 2D tensor"
@@ -1137,15 +1482,26 @@ toLists t
         let [rows, cols] = tensorShape t
         in [[index t [i, j] | j <- [0..cols-1]] | i <- [0..rows-1]]
 
--- | Force materialization (prevent fusion).
+-- | /O(n)/. Force materialization to prevent fusion.
 --
--- Use when you need to reuse intermediate results.
+-- Use when you need to reuse an intermediate result multiple times.
+-- Without materialization, the computation would be repeated.
+--
+-- >>> let t = materialize (tMap (*2) bigTensor)
+-- >>> (tSum t, tProduct t)  -- t computed once, not twice
 materialize :: VU.Unbox a => Tensor a -> IO (Tensor a)
 materialize = clone
 
--- | Execute tensor operations within arena scope.
+-- | Execute tensor operations within an arena scope.
 --
--- Temporary allocations are freed when scope exits.
+-- All temporary allocations during the action are made in a
+-- bump-allocated arena and freed in bulk when the scope exits.
+-- This reduces GC pressure for computation-heavy kernels.
+--
+-- >>> withTensorArena $ do
+-- >>>     let a = matmul big1 big2
+-- >>>     let b = matmul a big3
+-- >>>     return (tSum b)
 withTensorArena :: IO a -> IO a
 withTensorArena action = action  -- For now, just run the action
 

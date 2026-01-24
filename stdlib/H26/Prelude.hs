@@ -1,10 +1,50 @@
 -- |
 -- Module      : H26.Prelude
 -- Description : Standard Haskell 2026 Prelude
+-- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
+-- Stability   : stable
 --
 -- The H26 Prelude re-exports commonly used types and functions.
 -- This is automatically imported unless explicitly hidden.
+--
+-- = Overview
+--
+-- The Haskell 2026 Prelude provides the foundation types and functions
+-- that are implicitly imported into every module. It includes:
+--
+-- * Basic types: 'Bool', 'Maybe', 'Either', 'Ordering', numeric types
+-- * Core type classes: 'Eq', 'Ord', 'Show', 'Read', 'Num', etc.
+-- * Functor hierarchy: 'Functor', 'Applicative', 'Monad'
+-- * Common list operations and folds
+-- * Basic I/O functions
+--
+-- = Differences from Haskell 2010
+--
+-- The H26 Prelude includes several additions over Haskell 2010:
+--
+-- * 'Semigroup' is a superclass of 'Monoid'
+-- * 'Applicative' is a superclass of 'Monad'
+-- * 'Foldable' and 'Traversable' are in scope
+-- * The @(&)@ operator for reverse application
+-- * The @lazy@ primitive for controlling evaluation
+--
+-- = Hiding the Prelude
+--
+-- To use an alternative Prelude:
+--
+-- @
+-- {-# LANGUAGE NoImplicitPrelude #-}
+-- module MyModule where
+--
+-- import MyCustomPrelude
+-- @
+--
+-- = See Also
+--
+-- * "BHC.Prelude" for BHC-specific extensions
+-- * "H26.Text" for efficient Unicode text handling
+-- * "H26.Bytes" for binary data
 
 {-# HASKELL_EDITION 2026 #-}
 

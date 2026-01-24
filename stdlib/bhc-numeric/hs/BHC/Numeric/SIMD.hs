@@ -513,20 +513,35 @@ vMax va vb = fromList [max a b | (a, b) <- P.zip (toList va) (toList vb)]
 -- ============================================================
 -- Fused Multiply-Add
 -- ============================================================
+--
+-- FMA operations compute multiply-add in a single instruction
+-- without intermediate rounding. This provides both better
+-- performance and precision compared to separate operations.
 
--- | Fused multiply-add: a * b + c.
+-- | Fused multiply-add: @a * b + c@ in a single operation.
+--
+-- ==== __Hardware Support__
+--
+-- * AVX2/FMA3: Single @vfmadd@ instruction
+-- * Without FMA: Falls back to mul + add (2 instructions)
+--
+-- ==== __Precision__
+--
+-- FMA maintains full precision for the intermediate @a * b@ result
+-- (no rounding between multiply and add). Results may differ from
+-- @a * b + c@ computed separately.
 vFMA :: (SIMDVec v, Num (Elem v)) => v -> v -> v -> v
 vFMA a b c = fromList [x * y + z | (x, y, z) <- P.zip3 (toList a) (toList b) (toList c)]
 
--- | Fused multiply-subtract: a * b - c.
+-- | Fused multiply-subtract: @a * b - c@ in a single operation.
 vFMS :: (SIMDVec v, Num (Elem v)) => v -> v -> v -> v
 vFMS a b c = fromList [x * y - z | (x, y, z) <- P.zip3 (toList a) (toList b) (toList c)]
 
--- | Fused negate-multiply-add: -(a * b) + c.
+-- | Fused negate-multiply-add: @-(a * b) + c@ in a single operation.
 vFNMA :: (SIMDVec v, Num (Elem v)) => v -> v -> v -> v
 vFNMA a b c = fromList [-(x * y) + z | (x, y, z) <- P.zip3 (toList a) (toList b) (toList c)]
 
--- | Fused negate-multiply-subtract: -(a * b) - c.
+-- | Fused negate-multiply-subtract: @-(a * b) - c@ in a single operation.
 vFNMS :: (SIMDVec v, Num (Elem v)) => v -> v -> v -> v
 vFNMS a b c = fromList [-(x * y) - z | (x, y, z) <- P.zip3 (toList a) (toList b) (toList c)]
 
@@ -567,20 +582,39 @@ vGe va vb = Mask $ P.foldr (\(i, ge) acc -> if ge then acc .|. (1 `shiftL` i) el
 -- ============================================================
 -- Horizontal Operations
 -- ============================================================
+--
+-- Horizontal operations reduce a vector to a scalar. These are
+-- generally slower than vertical operations (between vectors)
+-- because they require cross-lane communication.
 
--- | Sum all elements.
+-- | Sum all elements of the vector (horizontal sum).
+--
+-- >>> vSum (Vec4F32 1 2 3 4)
+-- 10.0
+--
+-- __Performance Note__: Horizontal operations are slower than
+-- vertical operations. Prefer vertical ops when possible.
 vSum :: SIMDVec v => v -> Elem v
 vSum = vSumImpl
 
--- | Product of all elements.
+-- | Product of all elements (horizontal product).
+--
+-- >>> vProduct (Vec4F32 1 2 3 4)
+-- 24.0
 vProduct :: SIMDVec v => v -> Elem v
 vProduct = vProductImpl
 
--- | Minimum of all elements.
+-- | Minimum element of the vector.
+--
+-- >>> vHMin (Vec4F32 3 1 4 2)
+-- 1.0
 vHMin :: (SIMDVec v, Ord (Elem v)) => v -> Elem v
 vHMin v = P.minimum (toList v)
 
--- | Maximum of all elements.
+-- | Maximum element of the vector.
+--
+-- >>> vHMax (Vec4F32 3 1 4 2)
+-- 4.0
 vHMax :: (SIMDVec v, Ord (Elem v)) => v -> Elem v
 vHMax v = P.maximum (toList v)
 

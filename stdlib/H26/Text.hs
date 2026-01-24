@@ -1,10 +1,63 @@
 -- |
 -- Module      : H26.Text
 -- Description : UTF-8 text handling
+-- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
+-- Stability   : stable
 --
--- The H26.Text module provides efficient UTF-8 text processing.
--- Text is stored as UTF-8 encoded bytes with O(1) slicing.
+-- Efficient UTF-8 text processing with O(1) slicing.
+--
+-- = Overview
+--
+-- 'Text' is an immutable Unicode text type stored internally as
+-- UTF-8. It provides efficient operations for text manipulation
+-- including O(1) slicing (creating views without copying).
+--
+-- = Quick Start
+--
+-- @
+-- import H26.Text
+--
+-- greeting :: Text
+-- greeting = "Hello, World!"
+--
+-- -- Convert from\/to String
+-- t = pack "Hello"
+-- s = unpack t
+--
+-- -- Slicing creates views (no copy)
+-- prefix = take 5 greeting     -- \"Hello\"
+-- suffix = drop 7 greeting     -- \"World!\"
+--
+-- -- Text I\/O
+-- main = do
+--     contents <- readFile \"input.txt\"
+--     putStrLn (toUpper contents)
+-- @
+--
+-- = Performance Notes
+--
+-- * Slicing operations ('take', 'drop', 'splitAt') are O(n) in characters
+--   but create views without copying the underlying bytes
+-- * 'length' is O(n) because it counts UTF-8 code points
+-- * Prefer 'Text' over 'String' for better memory efficiency
+--
+-- = Encoding
+--
+-- Text is always valid UTF-8. Use 'decodeUtf8'' for error-checked
+-- conversion from bytes:
+--
+-- @
+-- case decodeUtf8' bytes of
+--     Left err  -> handleError err
+--     Right txt -> process txt
+-- @
+--
+-- = See Also
+--
+-- * "H26.Bytes" for raw binary data
+-- * "BHC.Data.Text" for the underlying implementation
+-- * "BHC.Data.Text.Encoding" for encoding conversions
 
 {-# HASKELL_EDITION 2026 #-}
 

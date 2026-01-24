@@ -1,11 +1,74 @@
 -- |
 -- Module      : H26.Numeric
 -- Description : Numeric types and operations
+-- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
+-- Stability   : stable
 --
--- The H26.Numeric module provides numeric types optimized for
--- high-performance computing: SIMD vectors, complex numbers,
--- fixed-point arithmetic, and numeric utilities.
+-- Numeric types optimized for high-performance computing.
+--
+-- = Overview
+--
+-- This module provides comprehensive numeric support including:
+--
+-- * Primitive types: Int8-64, Word8-64, Float, Double, Half
+-- * Fixed-point arithmetic for DSP applications
+-- * Complex numbers
+-- * SIMD vector types (SSE, AVX, AVX-512)
+-- * Accurate summation algorithms
+-- * Statistical functions
+--
+-- = Quick Start
+--
+-- @
+-- {-# PROFILE Numeric #-}
+-- import H26.Numeric
+--
+-- -- SIMD operations (auto-vectorized)
+-- dotProduct :: [Float] -> [Float] -> Float
+-- dotProduct xs ys = kahanSum (zipWith (*) xs ys)
+--
+-- -- Complex numbers
+-- z :: Complex Double
+-- z = 3 :+ 4              -- 3 + 4i
+-- r = magnitude z         -- 5.0
+-- θ = phase z             -- atan(4/3)
+--
+-- -- SIMD vectors (explicit)
+-- v1 = vec4f32 1 2 3 4
+-- v2 = vec4f32 5 6 7 8
+-- v3 = vMul v1 v2         -- [5, 12, 21, 32]
+-- s = vSum v3             -- 70
+-- @
+--
+-- = SIMD Vector Types
+--
+-- | Type      | Width   | Elements | Instructions |
+-- |-----------|---------|----------|--------------|
+-- | Vec4F32   | 128-bit | 4×f32    | SSE          |
+-- | Vec8F32   | 256-bit | 8×f32    | AVX          |
+-- | Vec16F32  | 512-bit | 16×f32   | AVX-512      |
+-- | Vec2F64   | 128-bit | 2×f64    | SSE          |
+-- | Vec4F64   | 256-bit | 4×f64    | AVX          |
+-- | Vec8F64   | 512-bit | 8×f64    | AVX-512      |
+--
+-- = Accurate Summation
+--
+-- For floating-point summation, use compensated algorithms:
+--
+-- @
+-- -- Naive sum accumulates error
+-- naiveSum [1e16, 1, -1e16]  -- May give 0 due to precision loss
+--
+-- -- Kahan summation compensates for error
+-- kahanSum [1e16, 1, -1e16]  -- Gives 1
+-- @
+--
+-- = See Also
+--
+-- * "H26.Tensor" for tensor operations
+-- * "H26.BLAS" for linear algebra
+-- * "BHC.Numeric.SIMD" for SIMD implementation
 
 {-# HASKELL_EDITION 2026 #-}
 {-# PROFILE Numeric #-}

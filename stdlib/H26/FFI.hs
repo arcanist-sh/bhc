@@ -1,11 +1,84 @@
 -- |
 -- Module      : H26.FFI
 -- Description : Foreign function interface
+-- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
+-- Stability   : stable
 --
--- The H26.FFI module provides safe foreign function interface bindings.
--- Supports calling C code, managing foreign memory, and marshalling
--- data across language boundaries.
+-- Foreign function interface for calling C code and managing foreign memory.
+--
+-- = Overview
+--
+-- This module provides the FFI (Foreign Function Interface) for:
+--
+-- * Calling C functions from Haskell
+-- * Managing foreign memory ('Ptr', 'ForeignPtr')
+-- * Marshalling data between Haskell and C
+-- * Handling C strings and arrays
+--
+-- = Quick Start
+--
+-- @
+-- {-# LANGUAGE ForeignFunctionInterface #-}
+-- import H26.FFI
+--
+-- -- Import a C function
+-- foreign import ccall \"math.h sin\"
+--     c_sin :: CDouble -> CDouble
+--
+-- -- Use it
+-- result = c_sin 3.14159
+--
+-- -- Pass arrays to C
+-- sumArray :: [Double] -> IO Double
+-- sumArray xs = withArray xs $ \\ptr ->
+--     c_sum_array ptr (length xs)
+--
+-- foreign import ccall \"sum_array\"
+--     c_sum_array :: Ptr CDouble -> CInt -> IO CDouble
+-- @
+--
+-- = Memory Management
+--
+-- Use 'ForeignPtr' for automatic cleanup:
+--
+-- @
+-- createBuffer :: Int -> IO (ForeignPtr CChar)
+-- createBuffer n = do
+--     ptr <- mallocBytes n
+--     newForeignPtr finalizerFree ptr
+--
+-- useBuffer :: ForeignPtr CChar -> (Ptr CChar -> IO a) -> IO a
+-- useBuffer = withForeignPtr
+-- @
+--
+-- = Pinned Memory
+--
+-- For memory that must not move (GC-safe pointers to C):
+--
+-- @
+-- withPinnedData :: Bytes -> (Ptr Word8 -> Int -> IO a) -> IO a
+-- withPinnedData bs action = do
+--     let pinned = toPinned bs
+--     withPinnedPtr pinned $ \\ptr ->
+--         action ptr (length bs)
+-- @
+--
+-- = C Types
+--
+-- Standard C type mappings are provided:
+--
+-- @
+-- CInt    ↔ int
+-- CDouble ↔ double
+-- CSize   ↔ size_t
+-- CString ↔ char*
+-- @
+--
+-- = See Also
+--
+-- * "H26.Bytes" for byte array FFI interop
+-- * "BHC.FFI" for additional utilities
 
 {-# HASKELL_EDITION 2026 #-}
 

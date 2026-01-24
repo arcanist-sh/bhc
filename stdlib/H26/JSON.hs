@@ -1,10 +1,67 @@
 -- |
 -- Module      : H26.JSON
 -- Description : Minimal JSON API
+-- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
+-- Stability   : stable
 --
--- The H26.JSON module provides JSON encoding and decoding.
--- Designed for simplicity and interoperability with web services.
+-- JSON encoding and decoding for web service interoperability.
+--
+-- = Overview
+--
+-- This module provides type-safe JSON parsing and generation using:
+--
+-- * 'Value' type for JSON values
+-- * 'ToJSON' class for encoding Haskell types
+-- * 'FromJSON' class for decoding JSON
+-- * Combinators for building parsers
+--
+-- = Quick Start
+--
+-- @
+-- import H26.JSON
+--
+-- -- Decode JSON
+-- case decode \"{\\\"name\\\": \\\"Alice\\\", \\\"age\\\": 30}\" of
+--     Just val -> print (val .: \"name\")
+--     Nothing  -> putStrLn \"Parse error\"
+--
+-- -- Build JSON
+-- let person = object
+--         [ \"name\" .= \"Bob\"
+--         , \"age\" .= (25 :: Int)
+--         , \"active\" .= True
+--         ]
+-- putStrLn (encodePretty person)
+-- @
+--
+-- = Custom Types
+--
+-- Derive or implement 'ToJSON'\/'FromJSON' for your types:
+--
+-- @
+-- data User = User { name :: Text, age :: Int }
+--
+-- instance ToJSON User where
+--     toJSON (User n a) = object [\"name\" .= n, \"age\" .= a]
+--
+-- instance FromJSON User where
+--     parseJSON = withObject \"User\" $ \\o ->
+--         User \<$\> o .: \"name\" \<*\> o .: \"age\"
+-- @
+--
+-- = Operators
+--
+-- * '.:' — Required field lookup (fails if missing)
+-- * '.:?' — Optional field lookup (returns 'Maybe')
+-- * '.!=' — Provide default for optional field
+-- * '.=' — Create key-value pair for 'object'
+--
+-- = See Also
+--
+-- * "BHC.Data.JSON" for the underlying implementation
+-- * "H26.Text" for text handling
+-- * "H26.Bytes" for binary encoding
 
 {-# HASKELL_EDITION 2026 #-}
 

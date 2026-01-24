@@ -4,6 +4,42 @@
 -- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
 -- Stability   : stable
+--
+-- The Writer monad for computations that produce output.
+--
+-- = Overview
+--
+-- The Writer monad represents computations that accumulate output
+-- (such as logs, traces, or audit trails) alongside their return value.
+-- The output type must be a 'Monoid' so outputs can be combined.
+--
+-- = Usage
+--
+-- @
+-- import BHC.Control.Monad.Writer
+--
+-- type Log = [String]
+--
+-- -- Computation that logs its progress
+-- factorial :: Int -> Writer Log Int
+-- factorial 0 = do
+--     tell [\"Base case: 0! = 1\"]
+--     return 1
+-- factorial n = do
+--     tell [\"Computing \" ++ show n ++ \"!\"]
+--     rest <- factorial (n - 1)
+--     return (n * rest)
+--
+-- -- Run and get both result and log
+-- (result, log) = runWriter (factorial 5)
+-- @
+--
+-- = Common Output Types
+--
+-- * @[a]@ — Collect values into a list
+-- * @Sum Int@ — Accumulate a count
+-- * @Endo a@ — Build a function by composition
+-- * @DList a@ — Efficient list building
 
 module BHC.Control.Monad.Writer (
     -- * The Writer monad
@@ -82,31 +118,84 @@ execWriterT = fmap snd . runWriterT
 mapWriterT :: (m (a, w) -> n (b, w')) -> WriterT w m a -> WriterT w' n b
 mapWriterT f (WriterT m) = WriterT (f m)
 
--- | Append to the output.
+-- | /O(1)/. Produce output without a result value.
+--
+-- The output is combined with any previous output using @(\<\>)@.
+--
+-- ==== __Examples__
+--
+-- >>> runWriter $ tell "hello" >> tell " world"
+-- ((), "hello world")
+--
+-- @
+-- logMessage :: String -> Writer [String] ()
+-- logMessage msg = tell [msg]
+-- @
 tell :: (Monad m) => w -> WriterT w m ()
 tell w = WriterT $ return ((), w)
 
--- | Execute and collect the output.
+-- | /O(1)/. Execute a computation and collect its output.
+--
+-- Returns both the computation's result and its output as a pair,
+-- while also including the output in the overall writer state.
+--
+-- ==== __Examples__
+--
+-- >>> runWriter $ listen (tell "hi" >> return 42)
+-- ((42, "hi"), "hi")
 listen :: (Monad m) => WriterT w m a -> WriterT w m (a, w)
 listen (WriterT m) = WriterT $ do
     (a, w) <- m
     return ((a, w), w)
 
--- | Execute with a function that can modify output.
+-- | /O(1)/. Execute a computation that can transform its output.
+--
+-- The computation returns a pair @(result, transform)@. The transform
+-- function is applied to the output before it is committed.
+--
+-- ==== __Examples__
+--
+-- >>> runWriter $ pass (return (42, map toUpper))
+-- (42, "")
+--
+-- @
+-- -- Reverse only this computation's output
+-- reversed :: Writer String a -> Writer String a
+-- reversed m = pass $ do
+--     a <- m
+--     return (a, reverse)
+-- @
 pass :: (Monad m) => WriterT w m (a, w -> w) -> WriterT w m a
 pass (WriterT m) = WriterT $ do
     ((a, f), w) <- m
     return (a, f w)
 
--- | Execute and apply a function to the output.
+-- | /O(1)/. Execute and apply a function to the output.
+--
+-- Combines 'listen' with @fmap@.
+--
+-- ==== __Examples__
+--
+-- >>> runWriter $ listens length (tell "hello")
+-- (((), 5), "hello")
 listens :: (Monad m) => (w -> b) -> WriterT w m a -> WriterT w m (a, b)
 listens f = fmap (\(a, w) -> (a, f w)) . listen
 
--- | Apply a function to the output.
+-- | /O(1)/. Transform the output of a computation.
+--
+-- ==== __Examples__
+--
+-- >>> runWriter $ censor (map toUpper) (tell "hello")
+-- ((), "HELLO")
 censor :: (Monad m) => (w -> w) -> WriterT w m a -> WriterT w m a
 censor f m = pass $ fmap (\a -> (a, f)) m
 
--- | Create writer from a pair.
+-- | /O(1)/. Create a writer from a result and output pair.
+--
+-- ==== __Examples__
+--
+-- >>> runWriter $ writer (42, "answer")
+-- (42, "answer")
 writer :: (Monad m) => (a, w) -> WriterT w m a
 writer = WriterT . return
 

@@ -1,11 +1,70 @@
 -- |
 -- Module      : H26.Tensor
 -- Description : Tensor operations for numeric computing
+-- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
+-- Stability   : stable
 --
--- The H26.Tensor module provides tensor operations required for
--- H26-Numeric conformance. All operations follow the Tensor IR
--- lowering contract specified in H26-SPEC Section 7.
+-- High-performance tensor operations with guaranteed fusion.
+--
+-- = Overview
+--
+-- Tensors are multidimensional arrays optimized for numeric computing.
+-- All operations follow the Tensor IR lowering contract (H26-SPEC
+-- Section 7), with guaranteed fusion for standard patterns.
+--
+-- = Quick Start
+--
+-- @
+-- {-# PROFILE Numeric #-}
+-- import H26.Tensor
+--
+-- -- Create tensors
+-- x = zeros [1000, 1000]        -- 1000x1000 matrix of zeros
+-- y = fromList [3, 3] [1..9]    -- 3x3 matrix from list
+--
+-- -- Elementwise operations (guaranteed to fuse)
+-- z = map (*2) (map (+1) x)     -- Single pass, no intermediate
+--
+-- -- Linear algebra
+-- result = matmul a b           -- Matrix multiplication
+-- d = dot v1 v2                 -- Vector dot product
+--
+-- -- Reductions (fuse with maps)
+-- total = sum (map (*2) x)      -- Single traversal
+-- @
+--
+-- = Fusion Guarantees
+--
+-- In Numeric Profile, these patterns MUST fuse (H26-SPEC 8.1):
+--
+-- @
+-- map f (map g x)               -- → map (f . g) x
+-- zipWith f (map g a) (map h b) -- → single traversal
+-- sum (map f x)                 -- → single traversal
+-- foldl' op z (map f x)         -- → single traversal
+-- @
+--
+-- Fusion failure is a compiler bug.
+--
+-- = Views vs Copies
+--
+-- Operations like 'reshape', 'slice', and 'transpose' create views
+-- that share underlying data (O(1), no allocation):
+--
+-- @
+-- let m = fromList [4, 4] [1..16]
+-- let row0 = slice [(0,1), (0,4)] m   -- View of first row
+-- let t = transpose [1, 0] m          -- Transposed view
+-- @
+--
+-- Use 'materialize' to force a copy when needed.
+--
+-- = See Also
+--
+-- * "H26.Numeric" for SIMD and numeric types
+-- * "H26.BLAS" for linear algebra operations
+-- * "BHC.Numeric.Tensor" for the underlying implementation
 
 {-# HASKELL_EDITION 2026 #-}
 {-# PROFILE Numeric #-}

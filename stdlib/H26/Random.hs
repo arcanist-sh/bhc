@@ -1,11 +1,79 @@
 -- |
 -- Module      : H26.Random
 -- Description : Random number generation
+-- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
+-- Stability   : stable
 --
--- The H26.Random module provides random number generation with
--- support for reproducible sequences, various distributions,
--- and efficient bulk generation for numeric workloads.
+-- Random number generation with reproducibility and distributions.
+--
+-- = Overview
+--
+-- This module provides a fast PRNG (pseudo-random number generator)
+-- suitable for simulations, games, and numeric workloads. Features:
+--
+-- * High-quality SplitMix algorithm
+-- * Reproducible sequences from seeds
+-- * Various distributions (uniform, normal, exponential, etc.)
+-- * Efficient tensor generation (Numeric Profile)
+--
+-- __Note__: For cryptographic purposes, use a dedicated crypto library.
+--
+-- = Quick Start
+--
+-- @
+-- import H26.Random
+--
+-- main :: IO ()
+-- main = do
+--     -- Random values using global generator
+--     n <- randomRIO (1, 100)    -- Int in [1, 100]
+--     f <- randomIO              -- Random Float
+--
+--     -- Reproducible sequence from seed
+--     let g = mkStdGen 12345
+--         (x, g') = random g     -- Same x every time
+--
+--     -- Shuffle a list
+--     shuffled <- shuffleM [1..10]
+--
+--     print (n, f, x, shuffled)
+-- @
+--
+-- = Distributions
+--
+-- @
+-- -- Uniform in [0, 1)
+-- u <- getStdRandom uniformDouble01M
+--
+-- -- Normal (Gaussian) with mean 0, stddev 1
+-- n <- getStdRandom standardNormal
+--
+-- -- Normal with custom mean and stddev
+-- n' <- getStdRandom (normalM 100 15)
+--
+-- -- Exponential with rate λ
+-- e <- getStdRandom (exponentialM 0.5)
+-- @
+--
+-- = Tensor Generation (Numeric Profile)
+--
+-- Efficiently generate random tensors:
+--
+-- @
+-- {-# PROFILE Numeric #-}
+-- import H26.Random
+-- import H26.Tensor
+--
+-- g <- newStdGen
+-- let (t1, g') = randomTensor [100, 100] g      -- Uniform [0,1)
+-- let (t2, _) = normalTensor 0 1 [100, 100] g'  -- Standard normal
+-- @
+--
+-- = See Also
+--
+-- * "BHC.Data.Random" for the underlying implementation
+-- * "H26.Tensor" for tensor operations
 
 {-# HASKELL_EDITION 2026 #-}
 

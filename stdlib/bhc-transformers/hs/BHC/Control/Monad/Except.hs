@@ -4,6 +4,45 @@
 -- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
 -- Stability   : stable
+--
+-- The Except monad for computations that may fail with an error.
+--
+-- = Overview
+--
+-- The Except monad represents computations that may fail with an
+-- error value. Unlike 'Maybe', 'Except' carries information about
+-- /why/ the computation failed.
+--
+-- = Usage
+--
+-- @
+-- import BHC.Control.Monad.Except
+--
+-- data AppError = NotFound String | InvalidInput String
+--
+-- lookupUser :: UserId -> Except AppError User
+-- lookupUser uid = case findUser uid of
+--     Nothing   -> throwE (NotFound $ "User " ++ show uid)
+--     Just user -> return user
+--
+-- -- Handle errors
+-- result = runExcept (lookupUser 42) \`catchE\` \\err ->
+--     case err of
+--         NotFound msg -> return defaultUser
+--         _            -> throwE err
+-- @
+--
+-- = Transformer Usage
+--
+-- @
+-- type App = ExceptT AppError IO
+--
+-- loadConfig :: FilePath -> App Config
+-- loadConfig path = do
+--     exists <- liftIO (doesFileExist path)
+--     unless exists $ throwE (NotFound path)
+--     liftIO (readConfig path)
+-- @
 
 module BHC.Control.Monad.Except (
     -- * The Except monad
@@ -80,11 +119,36 @@ mapExceptT f (ExceptT m) = ExceptT (f m)
 withExceptT :: Functor m => (e -> e') -> ExceptT e m a -> ExceptT e' m a
 withExceptT f = mapExceptT (fmap (either (Left . f) Right))
 
--- | Throw an exception.
+-- | /O(1)/. Signal an error, aborting the computation.
+--
+-- ==== __Examples__
+--
+-- >>> runExcept (throwE "error" :: Except String Int)
+-- Left "error"
+--
+-- @
+-- validate :: Int -> Except String Int
+-- validate n
+--     | n < 0     = throwE "negative number"
+--     | otherwise = return n
+-- @
 throwE :: Monad m => e -> ExceptT e m a
 throwE = ExceptT . return . Left
 
--- | Catch an exception.
+-- | /O(1)/. Handle an error by running a recovery computation.
+--
+-- If the first computation succeeds, its result is returned.
+-- If it fails, the handler is called with the error value.
+--
+-- ==== __Examples__
+--
+-- >>> runExcept (throwE "oops" `catchE` \_ -> return 42)
+-- Right 42
+--
+-- @
+-- withDefault :: a -> Except e a -> Except e a
+-- withDefault def m = m \`catchE\` \\_ -> return def
+-- @
 catchE :: Monad m => ExceptT e m a -> (e -> ExceptT e' m a) -> ExceptT e' m a
 catchE (ExceptT m) handler = ExceptT $ do
     ea <- m

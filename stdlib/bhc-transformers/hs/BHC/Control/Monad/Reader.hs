@@ -4,6 +4,49 @@
 -- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
 -- Stability   : stable
+--
+-- The Reader monad for computations that read from a shared environment.
+--
+-- = Overview
+--
+-- The Reader monad represents computations that depend on some shared
+-- read-only environment. This is useful for:
+--
+-- * Configuration that needs to be available throughout a computation
+-- * Database connections or handles that should be passed implicitly
+-- * Context information like user credentials or request metadata
+--
+-- = Usage
+--
+-- @
+-- import BHC.Control.Monad.Reader
+--
+-- data Config = Config { dbHost :: String, dbPort :: Int }
+--
+-- -- Computations that need configuration
+-- getConnectionString :: Reader Config String
+-- getConnectionString = do
+--     host <- asks dbHost
+--     port <- asks dbPort
+--     return $ host ++ ":" ++ show port
+--
+-- -- Run with a specific config
+-- main = print $ runReader getConnectionString config
+-- @
+--
+-- = Transformer Usage
+--
+-- @
+-- type App = ReaderT Config IO
+--
+-- runApp :: App a -> Config -> IO a
+-- runApp = runReaderT
+--
+-- fetchData :: App Data
+-- fetchData = do
+--     connStr <- asks dbHost
+--     liftIO $ queryDatabase connStr
+-- @
 
 module BHC.Control.Monad.Reader (
     -- * The Reader monad
@@ -33,21 +76,42 @@ import BHC.Control.Monad.Trans
 import BHC.Control.Monad.Identity (Identity(..))
 
 -- | The parameterized reader monad.
+--
+-- @Reader r a@ is a computation that reads a value of type @r@ and
+-- produces a value of type @a@.
 type Reader r = ReaderT r Identity
 
--- | Run a Reader.
+-- | /O(1)/. Run a 'Reader' computation with the given environment.
+--
+-- ==== __Examples__
+--
+-- >>> runReader (asks length) "hello"
+-- 5
 runReader :: Reader r a -> r -> a
 runReader m = runIdentity . runReaderT m
 
--- | Map the return value.
+-- | /O(1)/. Map the return value of a 'Reader'.
+--
+-- ==== __Examples__
+--
+-- >>> runReader (mapReader (*2) (asks length)) "hello"
+-- 10
 mapReader :: (a -> b) -> Reader r a -> Reader r b
 mapReader f = mapReaderT (Identity . f . runIdentity)
 
--- | Transform the environment.
+-- | /O(1)/. Execute a 'Reader' with a modified environment.
+--
+-- ==== __Examples__
+--
+-- >>> runReader (withReader reverse (asks head)) "hello"
+-- 'o'
 withReader :: (r' -> r) -> Reader r a -> Reader r' a
 withReader = withReaderT
 
 -- | The reader monad transformer.
+--
+-- Adds a read-only environment to an underlying monad @m@.
+-- All operations in the underlying monad are available via 'lift'.
 newtype ReaderT r m a = ReaderT { runReaderT :: r -> m a }
 
 instance Functor m => Functor (ReaderT r m) where
@@ -76,19 +140,58 @@ mapReaderT f (ReaderT g) = ReaderT (f . g)
 withReaderT :: (r' -> r) -> ReaderT r m a -> ReaderT r' m a
 withReaderT f (ReaderT g) = ReaderT (g . f)
 
--- | Fetch the environment.
+-- | /O(1)/. Retrieve the entire environment.
+--
+-- ==== __Examples__
+--
+-- >>> runReader ask "hello"
+-- "hello"
+--
+-- @
+-- greet :: Reader String String
+-- greet = do
+--     name <- ask
+--     return $ "Hello, " ++ name
+-- @
 ask :: Monad m => ReaderT r m r
 ask = ReaderT return
 
--- | Run with a modified environment.
+-- | /O(1)/. Execute a computation with a modified environment.
+--
+-- The modification only affects the given computation; subsequent
+-- operations see the original environment.
+--
+-- ==== __Examples__
+--
+-- >>> runReader (local reverse ask) "hello"
+-- "olleh"
+--
+-- @
+-- withUpperCase :: Reader String a -> Reader String a
+-- withUpperCase = local (map toUpper)
+-- @
 local :: (r -> r) -> ReaderT r m a -> ReaderT r m a
 local f (ReaderT g) = ReaderT (g . f)
 
--- | Fetch a function of the environment.
+-- | /O(1)/. Retrieve a function of the environment.
+--
+-- @asks f@ is equivalent to @fmap f ask@, but more efficient.
+--
+-- ==== __Examples__
+--
+-- >>> runReader (asks length) "hello"
+-- 5
+--
+-- @
+-- getPort :: Reader Config Int
+-- getPort = asks configPort
+-- @
 asks :: Monad m => (r -> a) -> ReaderT r m a
 asks f = ReaderT (return . f)
 
--- | Create a reader from a function.
+-- | /O(1)/. Embed a simple reader action into the monad.
+--
+-- Synonym for 'asks'.
 reader :: Monad m => (r -> a) -> ReaderT r m a
 reader = asks
 

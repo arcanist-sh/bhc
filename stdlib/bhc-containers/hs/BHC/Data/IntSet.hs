@@ -7,11 +7,38 @@
 --
 -- An efficient implementation of sets of integers using Patricia tries.
 --
+-- = Performance
+--
+-- Most operations are /O(min(n, W))/ where /W/ is the number of bits
+-- in an 'Int' (typically 64). This uses bitmap compression at the leaves
+-- for additional space efficiency.
+--
+-- | Operation     | Time Complexity |
+-- |---------------|-----------------|
+-- | member        | O(min(n, W))    |
+-- | insert        | O(min(n, W))    |
+-- | delete        | O(min(n, W))    |
+-- | union         | O(n + m)        |
+-- | intersection  | O(n + m)        |
+--
+-- = Usage
+--
 -- This module is designed to be imported qualified:
 --
 -- @
 -- import qualified BHC.Data.IntSet as IS
+--
+-- primes :: IS.IntSet
+-- primes = IS.fromList [2, 3, 5, 7, 11, 13]
+--
+-- isPrime :: Int -> Bool
+-- isPrime = flip IS.member primes
 -- @
+--
+-- = Comparison with Data.Set
+--
+-- Use 'IntSet' when storing 'Int' values. It is significantly faster
+-- than @Set Int@ and uses less memory due to bitmap compression.
 
 {-# LANGUAGE BangPatterns #-}
 

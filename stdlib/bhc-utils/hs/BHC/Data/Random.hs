@@ -6,6 +6,47 @@
 -- Stability   : stable
 --
 -- Fast, high-quality random number generation.
+--
+-- = Overview
+--
+-- This module provides a fast PRNG (pseudo-random number generator)
+-- suitable for simulations, games, and general-purpose randomness.
+-- For cryptographic purposes, use a dedicated crypto library.
+--
+-- = Quick Start
+--
+-- @
+-- import BHC.Data.Random
+--
+-- main :: IO ()
+-- main = do
+--     rng <- newRng           -- Seed from system entropy
+--     n <- range rng 1 100    -- Random int 1-100
+--     f <- nextFloat rng      -- Random float [0, 1)
+--     b <- nextBool rng       -- Random boolean
+--     print (n, f, b)
+-- @
+--
+-- = Reproducibility
+--
+-- For reproducible results (testing, simulations), use 'fromSeed':
+--
+-- @
+-- rng <- fromSeed 12345
+-- -- Same sequence every time with this seed
+-- @
+--
+-- = Distributions
+--
+-- * 'uniform' — Uniform distribution in [0, 1)
+-- * 'normal' — Normal (Gaussian) distribution
+-- * 'exponential' — Exponential distribution
+--
+-- = Collection Operations
+--
+-- * 'choose' — Pick a random element
+-- * 'shuffle' — Randomly reorder a list
+-- * 'sample' — Pick n elements without replacement
 
 module BHC.Data.Random (
     -- * Random number generator

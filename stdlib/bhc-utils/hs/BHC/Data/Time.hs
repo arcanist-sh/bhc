@@ -6,6 +6,51 @@
 -- Stability   : stable
 --
 -- Time representation and manipulation.
+--
+-- = Overview
+--
+-- This module provides types for representing durations, instants
+-- in time, calendar dates, times of day, and combined datetimes.
+-- ISO 8601 parsing and formatting is supported.
+--
+-- = Quick Start
+--
+-- @
+-- import BHC.Data.Time
+--
+-- -- Measure execution time
+-- (result, duration) <- measure someComputation
+-- putStrLn $ "Took " ++ show (toMillis duration) ++ "ms"
+--
+-- -- Create dates and times
+-- let d = date 2026 1 24
+-- let t = time 14 30 0
+-- let dt = dateTime d t
+-- putStrLn $ formatDateTime dt  -- "2026-01-24T14:30:00"
+-- @
+--
+-- = Durations
+--
+-- 'Duration' represents a span of time in nanoseconds. Construct
+-- durations with helpers like 'fromSecs', 'fromMillis', etc.
+--
+-- @
+-- let timeout = fromSecs 30
+-- let delay = fromMillis 100
+-- let total = timeout + delay  -- Durations are additive
+-- @
+--
+-- = Instants
+--
+-- 'Instant' represents a point in time (like a stopwatch reading).
+-- Use 'now' to get the current instant and 'elapsed' to measure
+-- time since an instant.
+--
+-- @
+-- start <- now
+-- performWork
+-- duration <- elapsed start
+-- @
 
 module BHC.Data.Time (
     -- * Duration

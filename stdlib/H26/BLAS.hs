@@ -1,12 +1,75 @@
 -- |
 -- Module      : H26.BLAS
 -- Description : Basic Linear Algebra Subprograms
+-- Copyright   : (c) BHC Contributors, 2026
 -- License     : BSD-3-Clause
+-- Stability   : stable
 --
--- The H26.BLAS module provides linear algebra operations following
--- the BLAS (Basic Linear Algebra Subprograms) interface. Includes
--- Level 1 (vector), Level 2 (matrix-vector), and Level 3 (matrix-matrix)
--- operations with optional bindings to optimized native implementations.
+-- Linear algebra operations following the BLAS interface.
+--
+-- = Overview
+--
+-- This module provides the standard BLAS (Basic Linear Algebra Subprograms)
+-- interface with pluggable backends. Supports:
+--
+-- * Level 1: Vector-vector operations (dot, axpy, nrm2)
+-- * Level 2: Matrix-vector operations (gemv, trsv)
+-- * Level 3: Matrix-matrix operations (gemm, trsm)
+-- * High-level operations (matmul, solve, decompositions)
+--
+-- = Quick Start
+--
+-- @
+-- {-# PROFILE Numeric #-}
+-- import H26.BLAS
+--
+-- -- Matrix multiplication
+-- c = matmul a b
+-- c' = a @@ b              -- Infix version
+--
+-- -- GEMM: C = α·A·B + β·C
+-- d = gemm NoTrans NoTrans 1.0 a b 0.0 c
+--
+-- -- Solve linear system A·X = B
+-- x = solve a b
+--
+-- -- Decompositions
+-- (l, u, p) = lu matrix
+-- (q, r) = qr matrix
+-- (u, s, vt) = svd matrix
+-- @
+--
+-- = Backend Selection
+--
+-- BHC automatically selects the best available BLAS backend:
+--
+-- @
+-- -- Check available backends
+-- backends <- availableBackends
+-- -- [MKL, OpenBLAS, PureHaskell]
+--
+-- -- Force specific backend
+-- setBackend OpenBLAS
+-- @
+--
+-- | Backend          | Description                         |
+-- |------------------|-------------------------------------|
+-- | MKL              | Intel Math Kernel Library           |
+-- | OpenBLAS         | Open-source optimized BLAS          |
+-- | AppleAccelerate  | Apple's Accelerate framework        |
+-- | CUDA             | NVIDIA GPU via cuBLAS               |
+-- | PureHaskell      | Fallback pure implementation        |
+--
+-- = Matrix Storage
+--
+-- Matrices can be stored in row-major (C) or column-major (Fortran) order.
+-- Most operations accept both but may be faster with one or the other.
+--
+-- = See Also
+--
+-- * "H26.Tensor" for general tensor operations
+-- * "H26.Numeric" for SIMD primitives
+-- * "BHC.Numeric.BLAS" for the underlying implementation
 
 {-# HASKELL_EDITION 2026 #-}
 {-# PROFILE Numeric #-}

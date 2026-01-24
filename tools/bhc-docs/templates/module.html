@@ -4,40 +4,6 @@
 
 {% block sidebar %}
 <nav class="nav-tree">
-    <h3>Contents</h3>
-    <ul>
-        {% if module.types | length > 0 %}
-        <li>
-            <a href="#types">Types</a>
-            <ul>
-                {% for item in module.types %}
-                <li><a href="#t:{{ item.name }}">{{ item.name }}</a></li>
-                {% endfor %}
-            </ul>
-        </li>
-        {% endif %}
-        {% if module.classes | length > 0 %}
-        <li>
-            <a href="#classes">Classes</a>
-            <ul>
-                {% for item in module.classes %}
-                <li><a href="#c:{{ item.name }}">{{ item.name }}</a></li>
-                {% endfor %}
-            </ul>
-        </li>
-        {% endif %}
-        {% if module.functions | length > 0 %}
-        <li>
-            <a href="#functions">Functions</a>
-            <ul>
-                {% for item in module.functions %}
-                <li><a href="#v:{{ item.name }}">{{ item.name }}</a></li>
-                {% endfor %}
-            </ul>
-        </li>
-        {% endif %}
-    </ul>
-    <hr>
     <h3>Modules</h3>
     <ul>
         {% for mod in all_modules %}

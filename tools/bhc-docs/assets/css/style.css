@@ -121,6 +121,7 @@
 
   /* Layout */
   --sidebar-width: 280px;
+  --toc-width: 220px;
   --grid-size: 10px;
 }
 
@@ -470,6 +471,19 @@ article {
   padding: 0.75rem 1.5rem;
   border-bottom: 1px solid var(--color-grid);
   background: var(--color-bg-alt);
+}
+
+.page-header__bar--fixed {
+  position: fixed;
+  top: 0;
+  left: var(--sidebar-width);
+  right: var(--toc-width);
+  z-index: 50;
+  transition: top 0.25s ease-out;
+}
+
+.page-header__bar--fixed.hidden {
+  top: -60px;
 }
 
 .page-header__label {

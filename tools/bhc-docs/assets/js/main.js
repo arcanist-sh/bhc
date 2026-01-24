@@ -499,7 +499,64 @@
         });
     }
 
-    // Combine scroll handlers
+    // Page header bar hide/show on scroll
+    let lastScrollY = window.scrollY;
+    let headerHidden = true; // Start hidden until we scroll up
+    let headerFixed = false;
+    const pageHeaderBar = document.querySelector('.page-header__bar');
+    const pageHeader = document.querySelector('.page-header');
+    let headerOriginalTop = 0;
+
+    if (pageHeader) {
+        headerOriginalTop = pageHeader.offsetTop + pageHeaderBar.offsetHeight;
+    }
+
+    function updateHeaderVisibility() {
+        if (!pageHeaderBar) return;
+
+        const currentScrollY = window.scrollY;
+        const scrollDelta = currentScrollY - lastScrollY;
+        const pastHeader = currentScrollY > headerOriginalTop;
+
+        // When scrolled past the original header position
+        if (pastHeader) {
+            // Make it fixed if not already
+            if (!headerFixed) {
+                pageHeaderBar.classList.add('page-header__bar--fixed');
+                pageHeaderBar.classList.add('hidden');
+                headerFixed = true;
+                headerHidden = true;
+            }
+
+            // Scrolling up - show the fixed header
+            if (scrollDelta < -5 && headerHidden) {
+                pageHeaderBar.classList.remove('hidden');
+                headerHidden = false;
+            }
+            // Scrolling down - hide the fixed header
+            else if (scrollDelta > 10 && !headerHidden) {
+                pageHeaderBar.classList.add('hidden');
+                headerHidden = true;
+            }
+        } else {
+            // At top - remove fixed positioning, show normally
+            if (headerFixed) {
+                pageHeaderBar.classList.remove('page-header__bar--fixed');
+                pageHeaderBar.classList.remove('hidden');
+                headerFixed = false;
+                headerHidden = false;
+            }
+        }
+
+        lastScrollY = currentScrollY;
+    }
+
+    // Header visibility needs to update quickly
+    window.addEventListener('scroll', function() {
+        updateHeaderVisibility();
+    }, { passive: true });
+
+    // Combine other scroll handlers with debounce
     window.addEventListener('scroll', function() {
         clearTimeout(scrollTimeout);
         scrollTimeout = setTimeout(() => {

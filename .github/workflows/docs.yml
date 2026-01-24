@@ -42,7 +42,7 @@ jobs:
         with:
           repository: raskell-io/bhc.raskell.io
           path: website
-          token: ${{ secrets.DOCS_DEPLOY_TOKEN }}
+          token: ${{ secrets.DOCS_DEPLOY_TOKEN2 }}
 
       - name: Generate API docs
         run: |

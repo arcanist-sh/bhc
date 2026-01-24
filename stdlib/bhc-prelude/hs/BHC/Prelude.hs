@@ -109,8 +109,27 @@ bool :: a -> a -> Bool -> a
 bool f _ False = f
 bool _ t True  = t
 
--- | Optional values
-data Maybe a = Nothing | Just a
+-- | The 'Maybe' type encapsulates an optional value.
+--
+-- A value of type @Maybe a@ either contains a value of type @a@
+-- (represented as @Just a@), or it is empty (represented as @Nothing@).
+--
+-- Using 'Maybe' is a good way to deal with errors or exceptional cases
+-- without resorting to drastic measures such as 'error'.
+--
+-- ==== __Examples__
+--
+-- >>> Just 42
+-- Just 42
+--
+-- >>> Nothing :: Maybe Int
+-- Nothing
+--
+-- >>> fmap (+1) (Just 41)
+-- Just 42
+data Maybe a
+    = Nothing  -- ^ No value
+    | Just a   -- ^ A value of type @a@
     deriving (Eq, Ord, Show, Read)
 
 instance Functor Maybe where
@@ -126,27 +145,97 @@ instance Monad Maybe where
     Nothing >>= _ = Nothing
     Just x  >>= f = f x
 
+-- | The 'maybe' function takes a default value, a function, and a 'Maybe'
+-- value. If the 'Maybe' value is 'Nothing', the function returns the default
+-- value. Otherwise, it applies the function to the value inside the 'Just'
+-- and returns the result.
+--
+-- ==== __Examples__
+--
+-- >>> maybe 0 (+1) (Just 41)
+-- 42
+--
+-- >>> maybe 0 (+1) Nothing
+-- 0
 maybe :: b -> (a -> b) -> Maybe a -> b
 maybe n _ Nothing  = n
 maybe _ f (Just x) = f x
 
+-- | Returns 'True' iff the argument is of the form @Just _@.
+--
+-- ==== __Examples__
+--
+-- >>> isJust (Just 42)
+-- True
+--
+-- >>> isJust Nothing
+-- False
 isJust :: Maybe a -> Bool
 isJust (Just _) = True
 isJust Nothing  = False
 
+-- | Returns 'True' iff the argument is 'Nothing'.
+--
+-- ==== __Examples__
+--
+-- >>> isNothing Nothing
+-- True
+--
+-- >>> isNothing (Just 42)
+-- False
 isNothing :: Maybe a -> Bool
 isNothing = not . isJust
 
+-- | The 'fromMaybe' function takes a default value and a 'Maybe' value.
+-- If the 'Maybe' is 'Nothing', it returns the default value; otherwise,
+-- it returns the value contained in the 'Maybe'.
+--
+-- ==== __Examples__
+--
+-- >>> fromMaybe 0 (Just 42)
+-- 42
+--
+-- >>> fromMaybe 0 Nothing
+-- 0
 fromMaybe :: a -> Maybe a -> a
 fromMaybe d Nothing  = d
 fromMaybe _ (Just x) = x
 
+-- | Extract the value from a 'Just', throwing an error if the argument
+-- is 'Nothing'.
+--
+-- __Warning__: This is a partial function. Prefer 'fromMaybe' or pattern
+-- matching when possible.
+--
+-- ==== __Examples__
+--
+-- >>> fromJust (Just 42)
+-- 42
 fromJust :: Maybe a -> a
 fromJust (Just x) = x
 fromJust Nothing  = error "fromJust: Nothing"
 
--- | Sum type for error handling
-data Either a b = Left a | Right b
+-- | The 'Either' type represents values with two possibilities: a value of
+-- type @Either a b@ is either @Left a@ or @Right b@.
+--
+-- The 'Either' type is sometimes used to represent a value which is either
+-- correct or an error; by convention, the 'Left' constructor is used to hold
+-- an error value and the 'Right' constructor is used to hold a correct value
+-- (mnemonic: \"right\" also means \"correct\").
+--
+-- ==== __Examples__
+--
+-- >>> Left "error" :: Either String Int
+-- Left "error"
+--
+-- >>> Right 42 :: Either String Int
+-- Right 42
+--
+-- >>> fmap (+1) (Right 41)
+-- Right 42
+data Either a b
+    = Left a   -- ^ Typically an error value
+    | Right b  -- ^ Typically the success value
     deriving (Eq, Ord, Show, Read)
 
 instance Functor (Either a) where
@@ -162,14 +251,43 @@ instance Monad (Either a) where
     Left x  >>= _ = Left x
     Right y >>= f = f y
 
+-- | Case analysis for the 'Either' type. If the value is @Left a@, apply
+-- the first function to @a@; if it is @Right b@, apply the second function
+-- to @b@.
+--
+-- ==== __Examples__
+--
+-- >>> either length (*2) (Left "hello")
+-- 5
+--
+-- >>> either length (*2) (Right 21)
+-- 42
 either :: (a -> c) -> (b -> c) -> Either a b -> c
 either f _ (Left x)  = f x
 either _ g (Right y) = g y
 
+-- | Return 'True' if the given value is a 'Left'-value, 'False' otherwise.
+--
+-- ==== __Examples__
+--
+-- >>> isLeft (Left "error")
+-- True
+--
+-- >>> isLeft (Right 42)
+-- False
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True
 isLeft _        = False
 
+-- | Return 'True' if the given value is a 'Right'-value, 'False' otherwise.
+--
+-- ==== __Examples__
+--
+-- >>> isRight (Right 42)
+-- True
+--
+-- >>> isRight (Left "error")
+-- False
 isRight :: Either a b -> Bool
 isRight (Right _) = True
 isRight _         = False
@@ -178,34 +296,106 @@ isRight _         = False
 data Ordering = LT | EQ | GT
     deriving (Eq, Ord, Show, Read, Enum, Bounded)
 
+-- -----------------------------------------------------------------------------
 -- Tuple operations
+
+-- | Extract the first component of a pair.
+--
+-- ==== __Examples__
+--
+-- >>> fst (1, "hello")
+-- 1
 fst :: (a, b) -> a
 fst (x, _) = x
 
+-- | Extract the second component of a pair.
+--
+-- ==== __Examples__
+--
+-- >>> snd (1, "hello")
+-- "hello"
 snd :: (a, b) -> b
 snd (_, y) = y
 
+-- | 'curry' converts an uncurried function to a curried function.
+--
+-- ==== __Examples__
+--
+-- >>> curry fst 1 2
+-- 1
 curry :: ((a, b) -> c) -> a -> b -> c
 curry f x y = f (x, y)
 
+-- | 'uncurry' converts a curried function to a function on pairs.
+--
+-- ==== __Examples__
+--
+-- >>> uncurry (+) (1, 2)
+-- 3
 uncurry :: (a -> b -> c) -> (a, b) -> c
 uncurry f (x, y) = f x y
 
+-- | Swap the components of a pair.
+--
+-- ==== __Examples__
+--
+-- >>> swap (1, "hello")
+-- ("hello", 1)
 swap :: (a, b) -> (b, a)
 swap (x, y) = (y, x)
 
+-- -----------------------------------------------------------------------------
 -- Type classes
+
+-- | The 'Eq' class defines equality ('==') and inequality ('/=').
+--
+-- All basic datatypes exported by the Prelude are instances of 'Eq',
+-- and 'Eq' may be derived for any datatype whose constituents are also
+-- instances of 'Eq'.
+--
+-- ==== __Minimal complete definition__
+--
+-- Either '==' or '/='.
 class Eq a where
-    (==), (/=) :: a -> a -> Bool
+    -- | Equality test.
+    (==) :: a -> a -> Bool
+    -- | Inequality test.
+    (/=) :: a -> a -> Bool
     x /= y = not (x == y)
     x == y = not (x /= y)
     {-# MINIMAL (==) | (/=) #-}
 
+-- | The 'Ord' class is used for totally ordered datatypes.
+--
+-- Instances of 'Ord' can be derived for any user-defined datatype whose
+-- constituent types are in 'Ord'. The declared order of the constructors
+-- in the data declaration determines the ordering in derived 'Ord' instances.
+--
+-- ==== __Minimal complete definition__
+--
+-- Either 'compare' or '<='.
+--
+-- ==== __Laws__
+--
+-- * Transitivity: if @x <= y && y <= z@ then @x <= z@
+-- * Reflexivity: @x <= x@
+-- * Antisymmetry: if @x <= y && y <= x@ then @x == y@
 class Eq a => Ord a where
+    -- | Compare two values.
     compare :: a -> a -> Ordering
-    (<), (<=), (>), (>=) :: a -> a -> Bool
-    max, min :: a -> a -> a
-    
+    -- | Less than.
+    (<) :: a -> a -> Bool
+    -- | Less than or equal.
+    (<=) :: a -> a -> Bool
+    -- | Greater than.
+    (>) :: a -> a -> Bool
+    -- | Greater than or equal.
+    (>=) :: a -> a -> Bool
+    -- | The larger of two values.
+    max :: a -> a -> a
+    -- | The smaller of two values.
+    min :: a -> a -> a
+
     compare x y
         | x == y    = EQ
         | x <= y    = LT

@@ -2,23 +2,38 @@
 //!
 //! Provides fixed-width SIMD vector types with platform-specific implementations.
 //!
+//! # Platform Support
+//!
+//! This module automatically uses the best available SIMD instructions:
+//!
+//! | Platform | 128-bit | 256-bit | 512-bit |
+//! |----------|---------|---------|---------|
+//! | x86_64   | SSE/SSE2 | AVX/AVX2 | AVX-512 (future) |
+//! | aarch64  | NEON     | -        | SVE (future) |
+//!
+//! On ARM (Apple Silicon, ARM servers), NEON intrinsics are always available
+//! as they are part of the base aarch64 ISA.
+//!
 //! # Vector Types
 //!
 //! ## Float vectors
 //! - `Vec2F32` - 2 x f32 (64-bit)
-//! - `Vec4F32` - 4 x f32 (128-bit, SSE)
+//! - `Vec4F32` - 4 x f32 (128-bit, SSE/NEON)
 //! - `Vec8F32` - 8 x f32 (256-bit, AVX)
-//! - `Vec2F64` - 2 x f64 (128-bit, SSE2)
+//! - `Vec2F64` - 2 x f64 (128-bit, SSE2/NEON)
 //! - `Vec4F64` - 4 x f64 (256-bit, AVX)
 //!
 //! ## Integer vectors
-//! - `Vec4I32` - 4 x i32 (128-bit, SSE2)
+//! - `Vec4I32` - 4 x i32 (128-bit, SSE2/NEON)
 //! - `Vec8I32` - 8 x i32 (256-bit, AVX2)
 //! - `Vec2I64` - 2 x i64 (128-bit, SSE2)
 //! - `Vec4I64` - 4 x i64 (256-bit, AVX2)
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
 
 // ============================================================
 // Vec2F32 - 2 x f32 (64-bit)
@@ -176,6 +191,16 @@ impl Vec4F32 {
                 return result;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let a = vld1q_f32(self.data.as_ptr());
+            let b = vld1q_f32(other.data.as_ptr());
+            let r = vaddq_f32(a, b);
+            let mut result = Self::zero();
+            vst1q_f32(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         Self {
             data: [
                 self.data[0] + other.data[0],
@@ -200,6 +225,16 @@ impl Vec4F32 {
                 return result;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let a = vld1q_f32(self.data.as_ptr());
+            let b = vld1q_f32(other.data.as_ptr());
+            let r = vsubq_f32(a, b);
+            let mut result = Self::zero();
+            vst1q_f32(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         Self {
             data: [
                 self.data[0] - other.data[0],
@@ -224,6 +259,16 @@ impl Vec4F32 {
                 return result;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let a = vld1q_f32(self.data.as_ptr());
+            let b = vld1q_f32(other.data.as_ptr());
+            let r = vmulq_f32(a, b);
+            let mut result = Self::zero();
+            vst1q_f32(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         Self {
             data: [
                 self.data[0] * other.data[0],
@@ -248,6 +293,16 @@ impl Vec4F32 {
                 return result;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let a = vld1q_f32(self.data.as_ptr());
+            let b = vld1q_f32(other.data.as_ptr());
+            let r = vdivq_f32(a, b);
+            let mut result = Self::zero();
+            vst1q_f32(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         Self {
             data: [
                 self.data[0] / other.data[0],
@@ -272,6 +327,16 @@ impl Vec4F32 {
                 return result;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let a = vld1q_f32(self.data.as_ptr());
+            let b = vld1q_f32(other.data.as_ptr());
+            let r = vminq_f32(a, b);
+            let mut result = Self::zero();
+            vst1q_f32(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         Self {
             data: [
                 self.data[0].min(other.data[0]),
@@ -296,6 +361,16 @@ impl Vec4F32 {
                 return result;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let a = vld1q_f32(self.data.as_ptr());
+            let b = vld1q_f32(other.data.as_ptr());
+            let r = vmaxq_f32(a, b);
+            let mut result = Self::zero();
+            vst1q_f32(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         Self {
             data: [
                 self.data[0].max(other.data[0]),
@@ -319,6 +394,15 @@ impl Vec4F32 {
                 return result;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let a = vld1q_f32(self.data.as_ptr());
+            let r = vsqrtq_f32(a);
+            let mut result = Self::zero();
+            vst1q_f32(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         Self {
             data: [
                 self.data[0].sqrt(),
@@ -332,6 +416,15 @@ impl Vec4F32 {
     /// Element-wise absolute value.
     #[inline]
     pub fn abs(self) -> Self {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let a = vld1q_f32(self.data.as_ptr());
+            let r = vabsq_f32(a);
+            let mut result = Self::zero();
+            vst1q_f32(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         Self {
             data: [
                 self.data[0].abs(),
@@ -345,6 +438,15 @@ impl Vec4F32 {
     /// Element-wise negation.
     #[inline]
     pub fn neg(self) -> Self {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let a = vld1q_f32(self.data.as_ptr());
+            let r = vnegq_f32(a);
+            let mut result = Self::zero();
+            vst1q_f32(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         Self {
             data: [
                 -self.data[0],
@@ -370,6 +472,17 @@ impl Vec4F32 {
                 return result;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let av = vld1q_f32(self.data.as_ptr());
+            let bv = vld1q_f32(b.data.as_ptr());
+            let cv = vld1q_f32(c.data.as_ptr());
+            let r = vfmaq_f32(cv, av, bv);
+            let mut result = Self::zero();
+            vst1q_f32(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         self.mul(b).add(c)
     }
 
@@ -615,6 +728,16 @@ impl Vec2F64 {
                 return result;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let a = vld1q_f64(self.data.as_ptr());
+            let b = vld1q_f64(other.data.as_ptr());
+            let r = vaddq_f64(a, b);
+            let mut result = Self::zero();
+            vst1q_f64(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         Self {
             data: [self.data[0] + other.data[0], self.data[1] + other.data[1]],
         }
@@ -634,6 +757,16 @@ impl Vec2F64 {
                 return result;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let a = vld1q_f64(self.data.as_ptr());
+            let b = vld1q_f64(other.data.as_ptr());
+            let r = vsubq_f64(a, b);
+            let mut result = Self::zero();
+            vst1q_f64(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         Self {
             data: [self.data[0] - other.data[0], self.data[1] - other.data[1]],
         }
@@ -653,6 +786,16 @@ impl Vec2F64 {
                 return result;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let a = vld1q_f64(self.data.as_ptr());
+            let b = vld1q_f64(other.data.as_ptr());
+            let r = vmulq_f64(a, b);
+            let mut result = Self::zero();
+            vst1q_f64(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         Self {
             data: [self.data[0] * other.data[0], self.data[1] * other.data[1]],
         }
@@ -672,15 +815,61 @@ impl Vec2F64 {
                 return result;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let a = vld1q_f64(self.data.as_ptr());
+            let b = vld1q_f64(other.data.as_ptr());
+            let r = vdivq_f64(a, b);
+            let mut result = Self::zero();
+            vst1q_f64(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         Self {
             data: [self.data[0] / other.data[0], self.data[1] / other.data[1]],
         }
     }
 
+    /// Fused multiply-add: a * b + c.
+    #[inline]
+    pub fn fma(self, b: Self, c: Self) -> Self {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            if is_x86_feature_detected!("fma") {
+                let av = _mm_loadu_pd(self.data.as_ptr());
+                let bv = _mm_loadu_pd(b.data.as_ptr());
+                let cv = _mm_loadu_pd(c.data.as_ptr());
+                let r = _mm_fmadd_pd(av, bv, cv);
+                let mut result = Self::zero();
+                _mm_storeu_pd(result.data.as_mut_ptr(), r);
+                return result;
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let av = vld1q_f64(self.data.as_ptr());
+            let bv = vld1q_f64(b.data.as_ptr());
+            let cv = vld1q_f64(c.data.as_ptr());
+            let r = vfmaq_f64(cv, av, bv);
+            let mut result = Self::zero();
+            vst1q_f64(result.data.as_mut_ptr(), r);
+            return result;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        self.mul(b).add(c)
+    }
+
     /// Horizontal sum.
     #[inline]
     pub fn sum(self) -> f64 {
-        self.data[0] + self.data[1]
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            return vaddvq_f64(vld1q_f64(self.data.as_ptr()));
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            self.data[0] + self.data[1]
+        }
     }
 
     /// Dot product.
@@ -1130,6 +1319,149 @@ pub extern "C" fn bhc_simd_saxpy(a: f32, x: *const f32, y: *mut f32, len: usize)
     for i in (chunks * 8)..len {
         y_slice[i] = a * x_slice[i] + y_slice[i];
     }
+}
+
+// ============================================================
+// SIMD Feature Detection
+// ============================================================
+
+/// SIMD features available on the current platform.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SimdFeatures {
+    /// SSE support (x86_64)
+    pub sse: bool,
+    /// SSE2 support (x86_64)
+    pub sse2: bool,
+    /// SSE3 support (x86_64)
+    pub sse3: bool,
+    /// SSSE3 support (x86_64)
+    pub ssse3: bool,
+    /// SSE4.1 support (x86_64)
+    pub sse41: bool,
+    /// SSE4.2 support (x86_64)
+    pub sse42: bool,
+    /// AVX support (x86_64)
+    pub avx: bool,
+    /// AVX2 support (x86_64)
+    pub avx2: bool,
+    /// FMA support (x86_64)
+    pub fma: bool,
+    /// AVX-512F support (x86_64)
+    pub avx512f: bool,
+    /// NEON support (aarch64) - always true on aarch64
+    pub neon: bool,
+}
+
+impl SimdFeatures {
+    /// Detect SIMD features available on the current platform.
+    pub fn detect() -> Self {
+        #[cfg(target_arch = "x86_64")]
+        {
+            SimdFeatures {
+                sse: is_x86_feature_detected!("sse"),
+                sse2: is_x86_feature_detected!("sse2"),
+                sse3: is_x86_feature_detected!("sse3"),
+                ssse3: is_x86_feature_detected!("ssse3"),
+                sse41: is_x86_feature_detected!("sse4.1"),
+                sse42: is_x86_feature_detected!("sse4.2"),
+                avx: is_x86_feature_detected!("avx"),
+                avx2: is_x86_feature_detected!("avx2"),
+                fma: is_x86_feature_detected!("fma"),
+                avx512f: is_x86_feature_detected!("avx512f"),
+                neon: false,
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            SimdFeatures {
+                sse: false,
+                sse2: false,
+                sse3: false,
+                ssse3: false,
+                sse41: false,
+                sse42: false,
+                avx: false,
+                avx2: false,
+                fma: false,
+                avx512f: false,
+                neon: true, // NEON is always available on aarch64
+            }
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            SimdFeatures::default()
+        }
+    }
+
+    /// Get the best available vector width for f32 operations (in bits).
+    pub fn best_f32_width(&self) -> u32 {
+        if self.avx512f {
+            512
+        } else if self.avx || self.avx2 {
+            256
+        } else if self.sse || self.neon {
+            128
+        } else {
+            64 // Scalar fallback
+        }
+    }
+
+    /// Get the best available vector width for f64 operations (in bits).
+    pub fn best_f64_width(&self) -> u32 {
+        if self.avx512f {
+            512
+        } else if self.avx || self.avx2 {
+            256
+        } else if self.sse2 || self.neon {
+            128
+        } else {
+            64 // Scalar fallback
+        }
+    }
+}
+
+/// Detect SIMD features on the current platform.
+///
+/// This function returns a `SimdFeatures` struct describing the SIMD
+/// capabilities of the current CPU.
+///
+/// # Example
+///
+/// ```ignore
+/// let features = detect_simd_features();
+/// if features.avx2 {
+///     println!("AVX2 is available!");
+/// }
+/// if features.neon {
+///     println!("NEON is available!");
+/// }
+/// ```
+pub fn detect_simd_features() -> SimdFeatures {
+    SimdFeatures::detect()
+}
+
+/// FFI export for SIMD feature detection.
+///
+/// Returns a bitfield indicating available SIMD features:
+/// - Bit 0: SSE
+/// - Bit 1: SSE2
+/// - Bit 2: AVX
+/// - Bit 3: AVX2
+/// - Bit 4: FMA
+/// - Bit 5: AVX-512F
+/// - Bit 6: NEON
+#[no_mangle]
+pub extern "C" fn bhc_simd_features() -> u32 {
+    let f = SimdFeatures::detect();
+    let mut bits = 0u32;
+    if f.sse { bits |= 1 << 0; }
+    if f.sse2 { bits |= 1 << 1; }
+    if f.avx { bits |= 1 << 2; }
+    if f.avx2 { bits |= 1 << 3; }
+    if f.fma { bits |= 1 << 4; }
+    if f.avx512f { bits |= 1 << 5; }
+    if f.neon { bits |= 1 << 6; }
+    bits
 }
 
 // ============================================================

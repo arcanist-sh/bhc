@@ -9,15 +9,22 @@
 //! Unification proceeds recursively:
 //!
 //! 1. Apply current substitution to both types
-//! 2. If both are variables with same ID, succeed
-//! 3. If one is a variable, bind it (with occurs check)
-//! 4. If both are constructors/functions, unify components
-//! 5. Otherwise, report mismatch
+//! 2. Try to reduce type family applications
+//! 3. If both are variables with same ID, succeed
+//! 4. If one is a variable, bind it (with occurs check)
+//! 5. If both are constructors/functions, unify components
+//! 6. Otherwise, report mismatch
 //!
 //! ## Occurs Check
 //!
 //! The occurs check prevents infinite types. Before binding a variable
 //! `a` to a type `t`, we verify that `a` does not appear in `t`.
+//!
+//! ## Type Family Reduction
+//!
+//! When encountering a type that looks like a type family application
+//! (e.g., `Elem [Int]`), we try to reduce it using the instance definitions
+//! before unification proceeds.
 //!
 //! ## M9 Dependent Types
 //!
@@ -29,6 +36,7 @@
 //! String is a type alias for [Char] in Haskell, so we handle this
 //! equivalence during unification.
 
+use bhc_intern::Symbol;
 use bhc_span::Span;
 use bhc_types::{Ty, TyCon, TyList, TyNat, TyVar};
 
@@ -109,6 +117,94 @@ fn are_compatible_type_aliases(name1: &str, name2: &str) -> bool {
     false
 }
 
+/// Try to reduce a type if it looks like a type family application.
+///
+/// A type family application has the form `F a b c ...` where `F` is
+/// the name of an associated type defined in some class. If we can find
+/// a matching instance, we reduce to the RHS of the type family definition.
+///
+/// For example, given:
+/// ```haskell
+/// class Collection c where
+///   type Elem c
+///
+/// instance Collection [a] where
+///   type Elem [a] = a
+/// ```
+///
+/// Then `Elem [Int]` reduces to `Int`.
+fn try_reduce_type_family(ctx: &TyCtxt, ty: &Ty) -> Ty {
+    // Extract the type constructor name and arguments from the type.
+    // A type family application looks like: App(App(Con(name), arg1), arg2)...
+    let (family_name, args) = match extract_type_family_app(ty) {
+        Some((name, args)) => (name, args),
+        None => return ty.clone(),
+    };
+
+    // Try to reduce using the type environment
+    match ctx.env.reduce_type_family(family_name, &args) {
+        Some(reduced) => {
+            // Successfully reduced! Apply the current substitution to the result
+            // and recursively try to reduce further.
+            let reduced = ctx.apply_subst(&reduced);
+            try_reduce_type_family(ctx, &reduced)
+        }
+        None => ty.clone(),
+    }
+}
+
+/// Check if a type is an unreducible type family application.
+///
+/// Returns `Some((name, args, class_name))` if the type looks like a type family
+/// application that we couldn't reduce. The class_name is the class that defines
+/// this associated type, if found.
+fn check_unreduced_type_family(ctx: &TyCtxt, ty: &Ty) -> Option<(Symbol, Vec<Ty>, Option<Symbol>)> {
+    let (name, args) = extract_type_family_app(ty)?;
+
+    // Check if this is actually a type family (not just a regular type application)
+    let class_info = ctx.env.lookup_assoc_type(name);
+
+    if class_info.is_some() {
+        // This is a type family - check if it could be reduced
+        if ctx.env.reduce_type_family(name, &args).is_none() {
+            // Couldn't reduce - this is an unreduced type family
+            let class_name = class_info.map(|(ci, _)| ci.name);
+            return Some((name, args, class_name));
+        }
+    }
+
+    None
+}
+
+/// Extract the type constructor name and arguments from a potential type family application.
+///
+/// Returns `Some((name, args))` if the type is of the form `Con(name) arg1 arg2 ...`.
+/// Returns `None` if the type is not a type application with a constructor at the head.
+fn extract_type_family_app(ty: &Ty) -> Option<(Symbol, Vec<Ty>)> {
+    let mut current = ty;
+    let mut args = Vec::new();
+
+    // Walk through nested applications to collect arguments
+    loop {
+        match current {
+            Ty::App(func, arg) => {
+                // Collect argument (in reverse order, will reverse at the end)
+                args.push(arg.as_ref().clone());
+                current = func.as_ref();
+            }
+            Ty::Con(tycon) => {
+                // Found the type constructor at the head
+                args.reverse();
+                return Some((tycon.name, args));
+            }
+            _ => {
+                // Not a type application with a constructor head
+                return None;
+            }
+        }
+    }
+}
+
 /// Unify two types, updating the substitution in the context.
 ///
 /// If unification fails, an error diagnostic is emitted and the types
@@ -117,6 +213,10 @@ pub fn unify(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
     // Apply current substitution to both types
     let t1 = ctx.apply_subst(t1);
     let t2 = ctx.apply_subst(t2);
+
+    // Try to reduce type family applications before unifying
+    let t1 = try_reduce_type_family(ctx, &t1);
+    let t2 = try_reduce_type_family(ctx, &t2);
 
     unify_inner(ctx, &t1, &t2, span);
 }
@@ -327,7 +427,15 @@ fn unify_inner(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
 
         // Different type structures: mismatch
         _ => {
-            diagnostics::emit_type_mismatch(ctx, t1, t2, span);
+            // Check if either type is an unreduced type family application.
+            // If so, provide a more specific error message.
+            if let Some((name, args, class_name)) = check_unreduced_type_family(ctx, t1) {
+                diagnostics::emit_type_family_reduction_failed(ctx, name, &args, class_name, span);
+            } else if let Some((name, args, class_name)) = check_unreduced_type_family(ctx, t2) {
+                diagnostics::emit_type_family_reduction_failed(ctx, name, &args, class_name, span);
+            } else {
+                diagnostics::emit_type_mismatch(ctx, t1, t2, span);
+            }
         }
     }
 }
@@ -817,5 +925,225 @@ mod tests {
         assert!(!ctx.has_errors());
         let result = ctx.apply_subst(&Ty::Nat(TyNat::Var(m)));
         assert_eq!(result, Ty::Nat(TyNat::Lit(1024)));
+    }
+
+    // === Type Family Reduction Tests ===
+
+    #[test]
+    fn test_extract_type_family_app_simple() {
+        // Test extracting Elem [Int] = App(Con(Elem), List(Int))
+        let elem_sym = Symbol::intern("Elem");
+        let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
+        let list_int = Ty::List(Box::new(int_ty.clone()));
+
+        let elem_con = Ty::Con(TyCon::new(elem_sym, Kind::star_to_star()));
+        let type_family_app = Ty::App(Box::new(elem_con), Box::new(list_int.clone()));
+
+        let result = extract_type_family_app(&type_family_app);
+        assert!(result.is_some());
+
+        let (name, args) = result.unwrap();
+        assert_eq!(name, elem_sym);
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0], list_int);
+    }
+
+    #[test]
+    fn test_extract_type_family_app_multi_arg() {
+        // Test extracting F a b = App(App(Con(F), a), b)
+        let f_sym = Symbol::intern("F");
+        let a_ty = Ty::Con(TyCon::new(Symbol::intern("A"), Kind::Star));
+        let b_ty = Ty::Con(TyCon::new(Symbol::intern("B"), Kind::Star));
+
+        let f_con = Ty::Con(TyCon::new(f_sym, Kind::Star));
+        let app1 = Ty::App(Box::new(f_con), Box::new(a_ty.clone()));
+        let app2 = Ty::App(Box::new(app1), Box::new(b_ty.clone()));
+
+        let result = extract_type_family_app(&app2);
+        assert!(result.is_some());
+
+        let (name, args) = result.unwrap();
+        assert_eq!(name, f_sym);
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], a_ty);
+        assert_eq!(args[1], b_ty);
+    }
+
+    #[test]
+    fn test_extract_type_family_app_not_app() {
+        // A Ty::Con is extracted as a 0-argument type family application
+        let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
+        let result = extract_type_family_app(&int_ty);
+        assert!(result.is_some());
+        let (name, args) = result.unwrap();
+        assert_eq!(name, Symbol::intern("Int"));
+        assert!(args.is_empty());
+
+        // A Ty::Var is not a type family application
+        let var_ty = Ty::Var(TyVar::new_star(0));
+        assert!(extract_type_family_app(&var_ty).is_none());
+    }
+
+    #[test]
+    fn test_type_family_reduction_in_unify() {
+        use crate::env::{AssocTypeImpl, AssocTypeInfo, ClassInfo, InstanceInfo};
+        use rustc_hash::FxHashMap;
+
+        let mut ctx = test_context();
+
+        // Set up: class Collection c where type Elem c
+        let collection = Symbol::intern("Collection");
+        let elem = Symbol::intern("Elem");
+        let list_sym = Symbol::intern("List");
+        let int_sym = Symbol::intern("Int");
+        let c_var = TyVar::new_star(100);
+        let a_var = TyVar::new_star(101);
+
+        let class_info = ClassInfo {
+            name: collection,
+            params: vec![c_var.clone()],
+            supers: vec![],
+            methods: FxHashMap::default(),
+            fundeps: vec![],
+            assoc_types: vec![AssocTypeInfo {
+                name: elem,
+                params: vec![c_var.clone()],
+                kind: Kind::Star,
+                default: None,
+            }],
+        };
+
+        ctx.env.register_class(class_info);
+
+        // Set up: instance Collection [a] where type Elem [a] = a
+        let list_con = Ty::Con(TyCon::new(list_sym, Kind::star_to_star()));
+        let a_ty = Ty::Var(a_var.clone());
+        let list_a = Ty::App(Box::new(list_con.clone()), Box::new(a_ty.clone()));
+
+        let instance_info = InstanceInfo {
+            class: collection,
+            types: vec![list_a.clone()],
+            methods: FxHashMap::default(),
+            assoc_type_impls: vec![AssocTypeImpl {
+                name: elem,
+                args: vec![list_a.clone()],
+                rhs: a_ty.clone(),
+            }],
+        };
+
+        ctx.env.register_instance(instance_info);
+
+        // Create Elem [Int] = App(Con(Elem), App(Con(List), Con(Int)))
+        let int_ty = Ty::Con(TyCon::new(int_sym, Kind::Star));
+        let list_int = Ty::App(Box::new(list_con.clone()), Box::new(int_ty.clone()));
+        let elem_con = Ty::Con(TyCon::new(elem, Kind::star_to_star()));
+        let elem_list_int = Ty::App(Box::new(elem_con), Box::new(list_int));
+
+        // Unify Elem [Int] with Int - should succeed because Elem [Int] reduces to Int
+        unify(&mut ctx, &elem_list_int, &int_ty, Span::DUMMY);
+
+        // Should have no errors - the type family reduced to Int
+        assert!(!ctx.has_errors(), "Type family reduction should succeed");
+    }
+
+    #[test]
+    fn test_type_family_reduction_failure_emits_error() {
+        use crate::env::{AssocTypeInfo, ClassInfo};
+        use rustc_hash::FxHashMap;
+
+        let mut ctx = test_context();
+
+        // Set up: class Collection c where type Elem c
+        // But no instances!
+        let collection = Symbol::intern("Collection");
+        let elem = Symbol::intern("Elem");
+        let int_sym = Symbol::intern("Int");
+        let c_var = TyVar::new_star(100);
+
+        let class_info = ClassInfo {
+            name: collection,
+            params: vec![c_var.clone()],
+            supers: vec![],
+            methods: FxHashMap::default(),
+            fundeps: vec![],
+            assoc_types: vec![AssocTypeInfo {
+                name: elem,
+                params: vec![c_var.clone()],
+                kind: Kind::Star,
+                default: None,
+            }],
+        };
+
+        ctx.env.register_class(class_info);
+
+        // Try to use Elem Int, but there's no instance Collection Int
+        let int_ty = Ty::Con(TyCon::new(int_sym, Kind::Star));
+        let elem_con = Ty::Con(TyCon::new(elem, Kind::star_to_star()));
+        let elem_int = Ty::App(Box::new(elem_con), Box::new(int_ty.clone()));
+
+        // Try to unify Elem Int with Bool - should fail with type family error
+        let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+        unify(&mut ctx, &elem_int, &bool_ty, Span::DUMMY);
+
+        // Should have an error about type family reduction failure
+        assert!(ctx.has_errors(), "Should emit error for unreduced type family");
+    }
+
+    #[test]
+    fn test_check_unreduced_type_family() {
+        use crate::env::{AssocTypeInfo, ClassInfo};
+        use rustc_hash::FxHashMap;
+
+        let mut ctx = test_context();
+
+        // Set up: class Container c where type Item c
+        let container = Symbol::intern("Container");
+        let item = Symbol::intern("Item");
+        let c_var = TyVar::new_star(100);
+
+        let class_info = ClassInfo {
+            name: container,
+            params: vec![c_var.clone()],
+            supers: vec![],
+            methods: FxHashMap::default(),
+            fundeps: vec![],
+            assoc_types: vec![AssocTypeInfo {
+                name: item,
+                params: vec![c_var.clone()],
+                kind: Kind::Star,
+                default: None,
+            }],
+        };
+
+        ctx.env.register_class(class_info);
+
+        // Create Item Bool with no matching instance
+        let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+        let item_con = Ty::Con(TyCon::new(item, Kind::star_to_star()));
+        let item_bool = Ty::App(Box::new(item_con), Box::new(bool_ty));
+
+        // check_unreduced_type_family should detect this
+        let result = check_unreduced_type_family(&ctx, &item_bool);
+        assert!(result.is_some(), "Should detect unreduced type family");
+
+        let (name, args, class_name) = result.unwrap();
+        assert_eq!(name, item);
+        assert_eq!(args.len(), 1);
+        assert_eq!(class_name, Some(container));
+    }
+
+    #[test]
+    fn test_check_unreduced_type_family_returns_none_for_regular_type() {
+        let ctx = test_context();
+
+        // Regular type applications are not type families
+        let maybe = Symbol::intern("Maybe");
+        let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
+        let maybe_con = Ty::Con(TyCon::new(maybe, Kind::star_to_star()));
+        let maybe_int = Ty::App(Box::new(maybe_con), Box::new(int_ty));
+
+        // Should return None because Maybe is not a type family
+        let result = check_unreduced_type_family(&ctx, &maybe_int);
+        assert!(result.is_none(), "Regular type application is not a type family");
     }
 }

@@ -522,12 +522,33 @@ pub struct ClassDef {
     pub params: Vec<TyVar>,
     /// Functional dependencies (e.g., `| a -> b` means `a` determines `b`).
     pub fundeps: Vec<FunDep>,
+    /// Associated type declarations.
+    pub assoc_types: Vec<AssocTypeSig>,
     /// Superclass constraints.
     pub supers: Vec<Symbol>,
     /// Method signatures.
     pub methods: Vec<MethodSig>,
     /// Default method implementations.
     pub defaults: Vec<ValueDef>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// An associated type signature within a type class.
+///
+/// Example: In `class Collection c where type Elem c`, the `Elem` is an associated type.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AssocTypeSig {
+    /// The unique ID of this associated type.
+    pub id: DefId,
+    /// The name of the associated type.
+    pub name: Symbol,
+    /// Additional type parameters beyond the class parameters.
+    pub params: Vec<TyVar>,
+    /// The result kind (usually `*`).
+    pub kind: bhc_types::Kind,
+    /// Optional default type definition.
+    pub default: Option<Ty>,
     /// Source span.
     pub span: Span,
 }
@@ -552,8 +573,26 @@ pub struct InstanceDef {
     pub types: Vec<Ty>,
     /// Instance constraints.
     pub constraints: Vec<Symbol>,
+    /// Associated type implementations.
+    pub assoc_type_impls: Vec<AssocTypeImpl>,
     /// Method implementations.
     pub methods: Vec<ValueDef>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// An associated type implementation within an instance.
+///
+/// Example: In `instance Collection [a] where type Elem [a] = a`,
+/// the `Elem [a] = a` is an associated type implementation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AssocTypeImpl {
+    /// The name of the associated type.
+    pub name: Symbol,
+    /// Type arguments (patterns matching the instance head).
+    pub args: Vec<Ty>,
+    /// The implementation type (right-hand side).
+    pub rhs: Ty,
     /// Source span.
     pub span: Span,
 }
@@ -744,6 +783,7 @@ mod tests {
             supers: vec![],
             methods: vec![],
             defaults: vec![],
+            assoc_types: vec![],
             span: Span::default(),
         };
 
@@ -782,6 +822,7 @@ mod tests {
             supers: vec![],
             methods: vec![],
             defaults: vec![],
+            assoc_types: vec![],
             span: Span::default(),
         };
 

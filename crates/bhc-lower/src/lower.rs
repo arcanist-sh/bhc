@@ -2047,6 +2047,66 @@ fn lower_type_alias(ctx: &mut LowerContext, type_alias: &ast::TypeAlias) -> Lowe
     })
 }
 
+/// Lower an AST kind to a bhc_types kind.
+fn lower_kind(kind: &ast::Kind) -> bhc_types::Kind {
+    match kind {
+        ast::Kind::Star => bhc_types::Kind::Star,
+        ast::Kind::Arrow(left, right) => bhc_types::Kind::Arrow(
+            Box::new(lower_kind(left)),
+            Box::new(lower_kind(right)),
+        ),
+        ast::Kind::Var(_ident) => {
+            // For now, treat kind variables as Star
+            // A more sophisticated implementation would do kind inference
+            bhc_types::Kind::Star
+        }
+    }
+}
+
+/// Lower an AST associated type declaration to HIR.
+fn lower_assoc_type(ctx: &mut LowerContext, assoc: &ast::AssocType) -> hir::AssocTypeSig {
+    let id = ctx.fresh_def_id();
+
+    // Convert type parameters
+    let params: Vec<bhc_types::TyVar> = assoc.params.iter()
+        .map(|p| bhc_types::TyVar::new_star(p.name.name.as_u32()))
+        .collect();
+
+    // Convert kind, defaulting to Star
+    let kind = assoc.kind.as_ref()
+        .map(lower_kind)
+        .unwrap_or(bhc_types::Kind::Star);
+
+    // Convert optional default type
+    let default = assoc.default.as_ref()
+        .map(|ty| lower_type(ctx, ty));
+
+    hir::AssocTypeSig {
+        id,
+        name: assoc.name.name,
+        params,
+        kind,
+        default,
+        span: assoc.span,
+    }
+}
+
+/// Lower an AST associated type definition to HIR.
+fn lower_assoc_type_def(ctx: &mut LowerContext, def: &ast::AssocTypeDef) -> hir::AssocTypeImpl {
+    let args: Vec<bhc_types::Ty> = def.args.iter()
+        .map(|ty| lower_type(ctx, ty))
+        .collect();
+
+    let rhs = lower_type(ctx, &def.rhs);
+
+    hir::AssocTypeImpl {
+        name: def.name.name,
+        args,
+        rhs,
+        span: def.span,
+    }
+}
+
 /// Lower a class declaration.
 fn lower_class_decl(ctx: &mut LowerContext, class: &ast::ClassDecl) -> LowerResult<hir::ClassDef> {
     let def_id = ctx
@@ -2144,6 +2204,13 @@ fn lower_class_decl(ctx: &mut LowerContext, class: &ast::ClassDecl) -> LowerResu
         })
         .collect();
 
+    // Lower associated type declarations
+    let assoc_types: Vec<hir::AssocTypeSig> = class
+        .assoc_types
+        .iter()
+        .map(|at| lower_assoc_type(ctx, at))
+        .collect();
+
     Ok(hir::ClassDef {
         id: def_id,
         name: class.name.name,
@@ -2152,6 +2219,7 @@ fn lower_class_decl(ctx: &mut LowerContext, class: &ast::ClassDecl) -> LowerResu
         supers,
         methods,
         defaults,
+        assoc_types,
         span: class.span,
     })
 }
@@ -2194,11 +2262,19 @@ fn lower_instance_decl(
         })
         .collect();
 
+    // Lower associated type definitions
+    let assoc_type_impls: Vec<hir::AssocTypeImpl> = instance
+        .assoc_type_defs
+        .iter()
+        .map(|def| lower_assoc_type_def(ctx, def))
+        .collect();
+
     Ok(hir::InstanceDef {
         class: instance.class.name,
         types,
         constraints,
         methods,
+        assoc_type_impls,
         span: instance.span,
     })
 }

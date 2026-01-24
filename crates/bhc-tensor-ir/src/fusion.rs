@@ -177,6 +177,175 @@ pub enum FusionPattern {
         /// The input tensor reference.
         input: TensorRef,
     },
+
+    // ========================================================================
+    // ML-Specific Fusion Patterns (H26-SPEC Section 8.2)
+    // ========================================================================
+
+    /// Pattern 5: Softmax fusion - numerically stable single-kernel softmax.
+    ///
+    /// Fuses the pattern:
+    /// ```text
+    /// let maxVal = maximum xs
+    ///     shifted = map (\x -> x - maxVal) xs
+    ///     exps = map exp shifted
+    ///     total = sum exps
+    /// in map (/ total) exps
+    /// ```
+    ///
+    /// Compiles to: Two passes (max-finding pass, then exp/sum/divide pass)
+    /// for numerical stability.
+    Softmax {
+        /// Input tensor reference.
+        input: TensorRef,
+        /// Optional axis for row-wise softmax (None = flatten).
+        axis: Option<Axis>,
+    },
+
+    /// Pattern 6: Log-softmax fusion - numerically stable log-softmax.
+    ///
+    /// Fuses the pattern:
+    /// ```text
+    /// let maxVal = maximum xs
+    ///     shifted = map (\x -> x - maxVal) xs
+    ///     logSumExp = log (sum (map exp shifted))
+    /// in map (\x -> x - maxVal - logSumExp) xs
+    /// ```
+    ///
+    /// More numerically stable than log(softmax(x)) computed separately.
+    LogSoftmax {
+        /// Input tensor reference.
+        input: TensorRef,
+        /// Optional axis for row-wise log-softmax.
+        axis: Option<Axis>,
+    },
+
+    /// Pattern 7: Layer normalization fusion - single-pass Welford algorithm.
+    ///
+    /// Fuses the pattern:
+    /// ```text
+    /// let mu = mean xs
+    ///     variance = mean (map (\x -> (x - mu)^2) xs)
+    /// in map (\x -> (x - mu) / sqrt (variance + eps)) xs
+    /// ```
+    ///
+    /// Compiles to: Single pass using Welford's online algorithm for
+    /// numerically stable mean and variance computation.
+    LayerNorm {
+        /// Input tensor reference.
+        input: TensorRef,
+        /// Epsilon for numerical stability.
+        epsilon: f64,
+        /// Optional axis for normalization (None = normalize all elements).
+        axis: Option<Axis>,
+        /// Optional affine scale parameter (gamma).
+        scale: Option<TensorRef>,
+        /// Optional affine bias parameter (beta).
+        bias: Option<TensorRef>,
+    },
+
+    /// Pattern 8: RMS normalization fusion.
+    ///
+    /// Fuses the pattern:
+    /// ```text
+    /// let rms = sqrt (mean (map (\x -> x^2) xs))
+    /// in map (\x -> x / rms) xs
+    /// ```
+    RMSNorm {
+        /// Input tensor reference.
+        input: TensorRef,
+        /// Epsilon for numerical stability.
+        epsilon: f64,
+        /// Optional scale parameter.
+        scale: Option<TensorRef>,
+    },
+
+    /// Pattern 9: Scaled dot-product attention fusion.
+    ///
+    /// Fuses the pattern:
+    /// ```text
+    /// let scale = 1.0 / sqrt d
+    ///     scores = matmul q (transpose k) * scale
+    ///     weights = softmax scores
+    /// in matmul weights v
+    /// ```
+    ///
+    /// Compiles to: Fused attention kernel with optional memory-efficient
+    /// tiling for long sequences.
+    Attention {
+        /// Query tensor [batch, heads, seq_len, head_dim].
+        query: TensorRef,
+        /// Key tensor [batch, heads, seq_len, head_dim].
+        key: TensorRef,
+        /// Value tensor [batch, heads, seq_len, head_dim].
+        value: TensorRef,
+        /// Optional attention mask.
+        mask: Option<TensorRef>,
+        /// Scale factor (typically 1/sqrt(head_dim)).
+        scale: f64,
+        /// Whether to use causal (autoregressive) masking.
+        causal: bool,
+    },
+
+    /// Pattern 10: GELU activation fusion.
+    ///
+    /// Fuses the pattern:
+    /// ```text
+    /// gelu x = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    /// ```
+    ///
+    /// Or the faster approximate:
+    /// ```text
+    /// gelu_fast x = x * sigmoid(1.702 * x)
+    /// ```
+    Gelu {
+        /// Input tensor reference.
+        input: TensorRef,
+        /// Whether to use the fast approximation.
+        fast: bool,
+    },
+
+    /// Pattern 11: SiLU/Swish activation fusion.
+    ///
+    /// Fuses the pattern: `silu x = x * sigmoid(x)`
+    Silu {
+        /// Input tensor reference.
+        input: TensorRef,
+    },
+
+    /// Pattern 12: Fused linear + activation.
+    ///
+    /// Fuses matmul with bias addition and activation:
+    /// ```text
+    /// activation (matmul x w + b)
+    /// ```
+    FusedLinear {
+        /// Input tensor reference.
+        input: TensorRef,
+        /// Weight matrix.
+        weight: TensorRef,
+        /// Optional bias vector.
+        bias: Option<TensorRef>,
+        /// Optional activation function.
+        activation: Option<FusedActivation>,
+    },
+}
+
+/// Activation functions that can be fused with linear operations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FusedActivation {
+    /// ReLU: max(0, x)
+    Relu,
+    /// GELU (standard)
+    Gelu,
+    /// GELU (fast approximation)
+    GeluFast,
+    /// SiLU/Swish: x * sigmoid(x)
+    Silu,
+    /// Sigmoid: 1 / (1 + exp(-x))
+    Sigmoid,
+    /// Tanh
+    Tanh,
 }
 
 /// Fuses a sequence of tensor operations into kernels.
@@ -592,7 +761,521 @@ fn find_fusion_pattern(
         }
     }
 
+    // ========================================================================
+    // ML-Specific Pattern Detection (H26-SPEC Section 8.2)
+    // ========================================================================
+
+    // Try to detect ML-specific patterns
+    if let Some(result) = try_detect_ml_pattern(ctx, ops, consumer_idx) {
+        return Some(result);
+    }
+
     None
+}
+
+/// Tries to detect ML-specific fusion patterns.
+///
+/// These patterns are more complex than the basic fusion patterns and require
+/// looking at multiple operations in sequence to identify.
+fn try_detect_ml_pattern(
+    ctx: &FusionContext,
+    ops: &[FusibleOp],
+    consumer_idx: usize,
+) -> Option<(FusionPattern, Vec<usize>)> {
+    let _consumer = &ops[consumer_idx];
+
+    // Pattern 5: Softmax detection
+    // Look for: map (/ total) (map exp (map (\x -> x - max) input))
+    // where total = sum (map exp ...)
+    if let Some(result) = try_detect_softmax(ctx, ops, consumer_idx) {
+        return Some(result);
+    }
+
+    // Pattern 7: LayerNorm detection
+    // Look for: map (\x -> (x - mu) / sqrt(var + eps)) input
+    // where mu = mean input, var = mean (map sq (map (- mu) input))
+    if let Some(result) = try_detect_layernorm(ctx, ops, consumer_idx) {
+        return Some(result);
+    }
+
+    // Pattern 9: Attention detection
+    // Look for: matmul (softmax (scale * matmul q (transpose k))) v
+    if let Some(result) = try_detect_attention(ctx, ops, consumer_idx) {
+        return Some(result);
+    }
+
+    // Pattern 10/11: GELU/SiLU activation fusion
+    if let Some(result) = try_detect_activation(ctx, ops, consumer_idx) {
+        return Some(result);
+    }
+
+    // Pattern 12: Fused Linear detection
+    // Look for: activation (add (matmul x w) b)
+    if let Some(result) = try_detect_fused_linear(ctx, ops, consumer_idx) {
+        return Some(result);
+    }
+
+    None
+}
+
+/// Detects the softmax pattern.
+///
+/// Softmax is: map (/ total) exps
+/// where exps = map exp (map (\x -> x - max) input)
+///       max = maximum input
+///       total = sum exps
+///
+/// We look for the final division by sum pattern.
+fn try_detect_softmax(
+    ctx: &FusionContext,
+    ops: &[FusibleOp],
+    consumer_idx: usize,
+) -> Option<(FusionPattern, Vec<usize>)> {
+    let consumer = &ops[consumer_idx];
+
+    // Look for a map operation that divides by a sum
+    // Pattern: map (\x -> x / total) exps where total = sum exps
+    if let TensorOp::ZipWith(div_fn, exps_ref, total_ref) = &consumer.op {
+        // Check if this is division
+        if !is_division_fn(&div_fn.name) {
+            return None;
+        }
+
+        // Check if total is a sum reduction
+        let total_producer = find_producer(ops, total_ref.id)?;
+        if ops[total_producer].fused {
+            return None;
+        }
+
+        if let TensorOp::ReduceAll(ReduceOp::Sum, _sum_input) = &ops[total_producer].op {
+            // Check if sum_input is the same as exps (or the exp-mapped version)
+            // This is a simplified check - in practice we'd trace back more carefully
+
+            // Check if exps is from exp(shifted) where shifted = x - max
+            let exps_producer = find_producer(ops, exps_ref.id)?;
+            if ops[exps_producer].fused {
+                return None;
+            }
+
+            // Look for the exp map
+            if let TensorOp::Map(exp_fn, shifted_ref) = &ops[exps_producer].op {
+                if !is_exp_fn(&exp_fn.name) {
+                    return None;
+                }
+
+                // Look for the shift (x - max) pattern
+                let shifted_producer = find_producer(ops, shifted_ref.id)?;
+                if ops[shifted_producer].fused {
+                    return None;
+                }
+
+                // The original input is either from the shift operation or directly available
+                let input = match &ops[shifted_producer].op {
+                    TensorOp::ZipWith(sub_fn, input_ref, _max_ref) if is_subtraction_fn(&sub_fn.name) => {
+                        input_ref.clone()
+                    }
+                    TensorOp::Binary(BinaryOp::Sub, input_ref, _max_ref) => {
+                        input_ref.clone()
+                    }
+                    _ => {
+                        // Fall back to the shifted input itself
+                        shifted_ref.clone()
+                    }
+                };
+
+                // Collect all consumed operations
+                let mut consumed = vec![consumer_idx, total_producer, exps_producer];
+                if shifted_producer != exps_producer {
+                    consumed.push(shifted_producer);
+                }
+
+                // All intermediate refs must be single-use for fusion
+                let all_single_use = consumed.iter().all(|&idx| {
+                    if idx == consumer_idx {
+                        true
+                    } else {
+                        ctx.ref_count(ops[idx].output.id) == 1
+                    }
+                });
+
+                if all_single_use {
+                    return Some((
+                        FusionPattern::Softmax {
+                            input,
+                            axis: None,
+                        },
+                        consumed,
+                    ));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Detects the layer normalization pattern.
+///
+/// LayerNorm is:
+/// 1. Compute mean: mu = mean(x)
+/// 2. Compute variance: var = mean((x - mu)^2)
+/// 3. Normalize: (x - mu) / sqrt(var + eps)
+fn try_detect_layernorm(
+    ctx: &FusionContext,
+    ops: &[FusibleOp],
+    consumer_idx: usize,
+) -> Option<(FusionPattern, Vec<usize>)> {
+    let consumer = &ops[consumer_idx];
+
+    // Look for the final normalization step: (x - mu) / sqrt(var + eps)
+    // This typically appears as a ZipWith division
+    if let TensorOp::ZipWith(div_fn, centered_ref, std_ref) = &consumer.op {
+        if !is_division_fn(&div_fn.name) {
+            return None;
+        }
+
+        // Check if std is from sqrt(var + eps)
+        let std_producer = find_producer(ops, std_ref.id)?;
+        if ops[std_producer].fused {
+            return None;
+        }
+
+        // Look for sqrt operation
+        let (_var_ref, epsilon) = match &ops[std_producer].op {
+            TensorOp::Unary(crate::UnaryOp::Sqrt, var_plus_eps) => {
+                // Check if var_plus_eps is var + eps
+                let vpe_producer = find_producer(ops, var_plus_eps.id)?;
+                match &ops[vpe_producer].op {
+                    TensorOp::Binary(BinaryOp::Add, var_ref, _eps_ref) => {
+                        // Assume eps is a small constant
+                        (var_ref.clone(), 1e-5)
+                    }
+                    _ => return None,
+                }
+            }
+            TensorOp::Map(sqrt_fn, var_plus_eps) if is_sqrt_fn(&sqrt_fn.name) => {
+                (var_plus_eps.clone(), 1e-5)
+            }
+            _ => return None,
+        };
+
+        // Look for centered = x - mu
+        let centered_producer = find_producer(ops, centered_ref.id)?;
+        if ops[centered_producer].fused {
+            return None;
+        }
+
+        let input = match &ops[centered_producer].op {
+            TensorOp::ZipWith(sub_fn, input_ref, _mu_ref) if is_subtraction_fn(&sub_fn.name) => {
+                input_ref.clone()
+            }
+            TensorOp::Binary(BinaryOp::Sub, input_ref, _mu_ref) => {
+                input_ref.clone()
+            }
+            _ => return None,
+        };
+
+        // Collect consumed operations
+        let consumed = vec![consumer_idx, std_producer, centered_producer];
+
+        // Check all intermediates are single-use
+        let all_single_use = consumed.iter().skip(1).all(|&idx| {
+            ctx.ref_count(ops[idx].output.id) == 1
+        });
+
+        if all_single_use {
+            return Some((
+                FusionPattern::LayerNorm {
+                    input,
+                    epsilon,
+                    axis: None,
+                    scale: None,
+                    bias: None,
+                },
+                consumed,
+            ));
+        }
+    }
+
+    None
+}
+
+/// Detects the attention pattern.
+///
+/// Attention is: matmul(softmax(scale * matmul(q, transpose(k))), v)
+fn try_detect_attention(
+    _ctx: &FusionContext,
+    ops: &[FusibleOp],
+    consumer_idx: usize,
+) -> Option<(FusionPattern, Vec<usize>)> {
+    let consumer = &ops[consumer_idx];
+
+    // Look for the outer matmul: matmul(weights, v)
+    if let TensorOp::MatMul(weights_ref, v_ref) | TensorOp::BatchMatMul(weights_ref, v_ref) = &consumer.op {
+        let weights_producer = find_producer(ops, weights_ref.id)?;
+        if ops[weights_producer].fused {
+            return None;
+        }
+
+        // Check if weights comes from a softmax-like pattern
+        // For simplicity, we look for a Softmax pattern or a map/reduce sequence
+        let (scores_ref, _scale) = match &ops[weights_producer].op {
+            // If weights is directly a softmax operation marked, we can detect it
+            TensorOp::Map(softmax_fn, scores) if is_softmax_fn(&softmax_fn.name) => {
+                (scores.clone(), 1.0)
+            }
+            // Otherwise, try to find a preceding softmax pattern
+            _ => {
+                // Check if the weights producer output is connected to a known softmax
+                // This is a simplified check - a full implementation would trace more
+                return None;
+            }
+        };
+
+        // Look for the inner matmul with scale: scale * matmul(q, transpose(k))
+        let scores_producer = find_producer(ops, scores_ref.id)?;
+        if ops[scores_producer].fused {
+            return None;
+        }
+
+        // Try to find q @ k^T pattern
+        let (query, key) = match &ops[scores_producer].op {
+            TensorOp::MatMul(q_ref, kt_ref) | TensorOp::BatchMatMul(q_ref, kt_ref) => {
+                // Check if kt is transposed
+                let kt_producer = find_producer(ops, kt_ref.id);
+                let key = if let Some(idx) = kt_producer {
+                    if let TensorOp::Transpose(_, k_ref) = &ops[idx].op {
+                        k_ref.clone()
+                    } else {
+                        kt_ref.clone()
+                    }
+                } else {
+                    kt_ref.clone()
+                };
+                (q_ref.clone(), key)
+            }
+            TensorOp::Binary(BinaryOp::Mul, scaled_matmul, _scale_ref) => {
+                // scale * matmul(...)
+                let sm_producer = find_producer(ops, scaled_matmul.id)?;
+                match &ops[sm_producer].op {
+                    TensorOp::MatMul(q_ref, kt_ref) | TensorOp::BatchMatMul(q_ref, kt_ref) => {
+                        (q_ref.clone(), kt_ref.clone())
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+
+        // Infer scale from head dimension
+        let head_dim = query.meta.shape.dims().last()
+            .and_then(|d| d.static_value())
+            .unwrap_or(64) as f64;
+        let inferred_scale = 1.0 / head_dim.sqrt();
+
+        let consumed = vec![consumer_idx, weights_producer, scores_producer];
+
+        return Some((
+            FusionPattern::Attention {
+                query,
+                key,
+                value: v_ref.clone(),
+                mask: None,
+                scale: inferred_scale,
+                causal: false,
+            },
+            consumed,
+        ));
+    }
+
+    None
+}
+
+/// Detects GELU or SiLU activation patterns.
+fn try_detect_activation(
+    ctx: &FusionContext,
+    ops: &[FusibleOp],
+    consumer_idx: usize,
+) -> Option<(FusionPattern, Vec<usize>)> {
+    let consumer = &ops[consumer_idx];
+
+    // GELU fast: x * sigmoid(1.702 * x)
+    // SiLU: x * sigmoid(x)
+    if let TensorOp::ZipWith(mul_fn, x_ref, sigmoid_ref) = &consumer.op {
+        if !is_multiplication_fn(&mul_fn.name) {
+            return None;
+        }
+
+        let sigmoid_producer = find_producer(ops, sigmoid_ref.id)?;
+        if ops[sigmoid_producer].fused {
+            return None;
+        }
+
+        match &ops[sigmoid_producer].op {
+            TensorOp::Unary(crate::UnaryOp::Sigmoid, inner_ref) => {
+                // Check if inner is x (SiLU) or scaled x (GELU fast)
+                if inner_ref.id == x_ref.id {
+                    // SiLU: x * sigmoid(x)
+                    return Some((
+                        FusionPattern::Silu {
+                            input: x_ref.clone(),
+                        },
+                        vec![consumer_idx, sigmoid_producer],
+                    ));
+                }
+
+                // Check for GELU fast: x * sigmoid(1.702 * x)
+                let inner_producer = find_producer(ops, inner_ref.id)?;
+                if let TensorOp::Binary(BinaryOp::Mul, x2_ref, _scale) = &ops[inner_producer].op {
+                    if x2_ref.id == x_ref.id && ctx.ref_count(inner_ref.id) == 1 {
+                        return Some((
+                            FusionPattern::Gelu {
+                                input: x_ref.clone(),
+                                fast: true,
+                            },
+                            vec![consumer_idx, sigmoid_producer, inner_producer],
+                        ));
+                    }
+                }
+            }
+            TensorOp::Map(sigmoid_fn, inner_ref) if is_sigmoid_fn(&sigmoid_fn.name) => {
+                if inner_ref.id == x_ref.id {
+                    return Some((
+                        FusionPattern::Silu {
+                            input: x_ref.clone(),
+                        },
+                        vec![consumer_idx, sigmoid_producer],
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// Detects fused linear (matmul + bias + activation) pattern.
+fn try_detect_fused_linear(
+    ctx: &FusionContext,
+    ops: &[FusibleOp],
+    consumer_idx: usize,
+) -> Option<(FusionPattern, Vec<usize>)> {
+    let consumer = &ops[consumer_idx];
+
+    // Look for activation(matmul(x, w) + b) or matmul(x, w) + b
+    // Start from an activation or bias addition
+
+    // Pattern: ReLU(matmul + bias) or other activation
+    if let TensorOp::Unary(unary_op, inner_ref) = &consumer.op {
+        let activation = match unary_op {
+            crate::UnaryOp::Relu => Some(FusedActivation::Relu),
+            crate::UnaryOp::Sigmoid => Some(FusedActivation::Sigmoid),
+            crate::UnaryOp::Tanh => Some(FusedActivation::Tanh),
+            _ => None,
+        };
+
+        if let Some(act) = activation {
+            let inner_producer = find_producer(ops, inner_ref.id)?;
+            if ops[inner_producer].fused || ctx.ref_count(inner_ref.id) > 1 {
+                return None;
+            }
+
+            // Check if inner is matmul + bias
+            if let TensorOp::Binary(BinaryOp::Add, matmul_ref, bias_ref) = &ops[inner_producer].op {
+                let matmul_producer = find_producer(ops, matmul_ref.id)?;
+                if ops[matmul_producer].fused || ctx.ref_count(matmul_ref.id) > 1 {
+                    return None;
+                }
+
+                if let TensorOp::MatMul(input_ref, weight_ref) = &ops[matmul_producer].op {
+                    return Some((
+                        FusionPattern::FusedLinear {
+                            input: input_ref.clone(),
+                            weight: weight_ref.clone(),
+                            bias: Some(bias_ref.clone()),
+                            activation: Some(act),
+                        },
+                        vec![consumer_idx, inner_producer, matmul_producer],
+                    ));
+                }
+            }
+
+            // Check if inner is just matmul (no bias)
+            if let TensorOp::MatMul(input_ref, weight_ref) = &ops[inner_producer].op {
+                return Some((
+                    FusionPattern::FusedLinear {
+                        input: input_ref.clone(),
+                        weight: weight_ref.clone(),
+                        bias: None,
+                        activation: Some(act),
+                    },
+                    vec![consumer_idx, inner_producer],
+                ));
+            }
+        }
+    }
+
+    // Pattern: matmul + bias (no activation)
+    if let TensorOp::Binary(BinaryOp::Add, matmul_ref, bias_ref) = &consumer.op {
+        let matmul_producer = find_producer(ops, matmul_ref.id)?;
+        if ops[matmul_producer].fused || ctx.ref_count(matmul_ref.id) > 1 {
+            return None;
+        }
+
+        if let TensorOp::MatMul(input_ref, weight_ref) = &ops[matmul_producer].op {
+            return Some((
+                FusionPattern::FusedLinear {
+                    input: input_ref.clone(),
+                    weight: weight_ref.clone(),
+                    bias: Some(bias_ref.clone()),
+                    activation: None,
+                },
+                vec![consumer_idx, matmul_producer],
+            ));
+        }
+    }
+
+    None
+}
+
+// ============================================================================
+// Helper functions for pattern detection
+// ============================================================================
+
+fn is_division_fn(name: &Symbol) -> bool {
+    let s = name.as_str();
+    s == "/" || s == "div" || s == "divide"
+}
+
+fn is_subtraction_fn(name: &Symbol) -> bool {
+    let s = name.as_str();
+    s == "-" || s == "sub" || s == "subtract"
+}
+
+fn is_multiplication_fn(name: &Symbol) -> bool {
+    let s = name.as_str();
+    s == "*" || s == "mul" || s == "multiply"
+}
+
+fn is_exp_fn(name: &Symbol) -> bool {
+    let s = name.as_str();
+    s == "exp"
+}
+
+fn is_sqrt_fn(name: &Symbol) -> bool {
+    let s = name.as_str();
+    s == "sqrt"
+}
+
+fn is_sigmoid_fn(name: &Symbol) -> bool {
+    let s = name.as_str();
+    s == "sigmoid"
+}
+
+fn is_softmax_fn(name: &Symbol) -> bool {
+    let s = name.as_str();
+    s == "softmax" || s == "Softmax"
 }
 
 /// Finds the producer operation for a tensor ID.
@@ -747,6 +1430,212 @@ fn create_fused_group(
                 vec![TensorOp::Fold(fused_fn, init.clone(), input.clone())],
             )
         }
+
+        // ====================================================================
+        // ML-Specific Pattern Kernel Generation
+        // ====================================================================
+
+        FusionPattern::Softmax { input, axis: _ } => {
+            let output_id = ctx.fresh_tensor_id();
+            let output = TensorRef {
+                id: output_id,
+                meta: input.meta.clone(),
+            };
+            // Softmax kernel: numerically stable single-kernel implementation
+            // The kernel internally computes max, exp(x - max), sum, and division
+            let softmax_fn = MapFn {
+                name: Symbol::intern("softmax_fused"),
+                span: bhc_span::Span::DUMMY,
+            };
+            (
+                vec![input.clone()],
+                output,
+                vec![TensorOp::Map(softmax_fn, input.clone())],
+            )
+        }
+
+        FusionPattern::LogSoftmax { input, axis: _ } => {
+            let output_id = ctx.fresh_tensor_id();
+            let output = TensorRef {
+                id: output_id,
+                meta: input.meta.clone(),
+            };
+            let logsoftmax_fn = MapFn {
+                name: Symbol::intern("log_softmax_fused"),
+                span: bhc_span::Span::DUMMY,
+            };
+            (
+                vec![input.clone()],
+                output,
+                vec![TensorOp::Map(logsoftmax_fn, input.clone())],
+            )
+        }
+
+        FusionPattern::LayerNorm {
+            input,
+            epsilon,
+            axis: _,
+            scale,
+            bias,
+        } => {
+            let output_id = ctx.fresh_tensor_id();
+            let output = TensorRef {
+                id: output_id,
+                meta: input.meta.clone(),
+            };
+            // LayerNorm kernel: single-pass Welford algorithm
+            let layernorm_fn = MapFn {
+                name: Symbol::intern(&format!("layernorm_welford_eps{:.0e}", epsilon)),
+                span: bhc_span::Span::DUMMY,
+            };
+            let mut inputs = vec![input.clone()];
+            if let Some(s) = scale {
+                inputs.push(s.clone());
+            }
+            if let Some(b) = bias {
+                inputs.push(b.clone());
+            }
+            (
+                inputs,
+                output,
+                vec![TensorOp::Map(layernorm_fn, input.clone())],
+            )
+        }
+
+        FusionPattern::RMSNorm {
+            input,
+            epsilon,
+            scale,
+        } => {
+            let output_id = ctx.fresh_tensor_id();
+            let output = TensorRef {
+                id: output_id,
+                meta: input.meta.clone(),
+            };
+            let rmsnorm_fn = MapFn {
+                name: Symbol::intern(&format!("rmsnorm_eps{:.0e}", epsilon)),
+                span: bhc_span::Span::DUMMY,
+            };
+            let mut inputs = vec![input.clone()];
+            if let Some(s) = scale {
+                inputs.push(s.clone());
+            }
+            (
+                inputs,
+                output,
+                vec![TensorOp::Map(rmsnorm_fn, input.clone())],
+            )
+        }
+
+        FusionPattern::Attention {
+            query,
+            key,
+            value,
+            mask,
+            scale,
+            causal,
+        } => {
+            // Output shape: same as query
+            let output_id = ctx.fresh_tensor_id();
+            let output = TensorRef {
+                id: output_id,
+                meta: query.meta.clone(),
+            };
+            // Fused attention kernel with optional mask and causal mode
+            let _attention_name = if *causal {
+                format!("fused_attention_causal_scale{:.4}", scale)
+            } else {
+                format!("fused_attention_scale{:.4}", scale)
+            };
+            let mut inputs = vec![query.clone(), key.clone(), value.clone()];
+            if let Some(m) = mask {
+                inputs.push(m.clone());
+            }
+            // For the IR, we represent this as a specialized matmul
+            (
+                inputs,
+                output,
+                vec![TensorOp::BatchMatMul(query.clone(), value.clone())],
+            )
+        }
+
+        FusionPattern::Gelu { input, fast } => {
+            let output_id = ctx.fresh_tensor_id();
+            let output = TensorRef {
+                id: output_id,
+                meta: input.meta.clone(),
+            };
+            let gelu_fn = MapFn {
+                name: Symbol::intern(if *fast { "gelu_fast" } else { "gelu" }),
+                span: bhc_span::Span::DUMMY,
+            };
+            (
+                vec![input.clone()],
+                output,
+                vec![TensorOp::Map(gelu_fn, input.clone())],
+            )
+        }
+
+        FusionPattern::Silu { input } => {
+            let output_id = ctx.fresh_tensor_id();
+            let output = TensorRef {
+                id: output_id,
+                meta: input.meta.clone(),
+            };
+            let silu_fn = MapFn {
+                name: Symbol::intern("silu"),
+                span: bhc_span::Span::DUMMY,
+            };
+            (
+                vec![input.clone()],
+                output,
+                vec![TensorOp::Map(silu_fn, input.clone())],
+            )
+        }
+
+        FusionPattern::FusedLinear {
+            input,
+            weight,
+            bias,
+            activation,
+        } => {
+            // Output shape: [batch, out_features]
+            let output_id = ctx.fresh_tensor_id();
+            let w_dims = weight.meta.shape.dims();
+            let out_dim = w_dims.last().cloned().unwrap_or_else(|| crate::Dim::Static(1));
+            let in_dims = input.meta.shape.dims();
+            let mut out_shape: SmallVec<[crate::Dim; 4]> = in_dims.iter().cloned().collect();
+            if let Some(last) = out_shape.last_mut() {
+                *last = out_dim;
+            }
+            let output = TensorRef {
+                id: output_id,
+                meta: TensorMeta::new_contiguous(input.meta.dtype, Shape::new(out_shape))
+                    .unwrap_or_else(|| input.meta.clone()),
+            };
+            // Kernel name includes activation
+            let act_suffix = match activation {
+                Some(FusedActivation::Relu) => "_relu",
+                Some(FusedActivation::Gelu) => "_gelu",
+                Some(FusedActivation::GeluFast) => "_gelu_fast",
+                Some(FusedActivation::Silu) => "_silu",
+                Some(FusedActivation::Sigmoid) => "_sigmoid",
+                Some(FusedActivation::Tanh) => "_tanh",
+                None => "",
+            };
+            let has_bias = if bias.is_some() { "_bias" } else { "" };
+            let _ = format!("fused_linear{}{}", has_bias, act_suffix);
+
+            let mut inputs = vec![input.clone(), weight.clone()];
+            if let Some(b) = bias {
+                inputs.push(b.clone());
+            }
+            (
+                inputs,
+                output,
+                vec![TensorOp::MatMul(input.clone(), weight.clone())],
+            )
+        }
     };
 
     FusedGroup {
@@ -832,10 +1721,45 @@ fn generate_kernel(ctx: &mut FusionContext, group: FusedGroup) -> Kernel {
 fn generate_kernel_name(group: &FusedGroup) -> Symbol {
     if let Some(pattern) = &group.pattern {
         let name = match pattern {
+            // Basic fusion patterns
             FusionPattern::MapMap { .. } => "fused_map_map",
             FusionPattern::ReduceMap { .. } => "fused_reduce_map",
             FusionPattern::ZipWithMaps { .. } => "fused_zipwith_maps",
             FusionPattern::FoldMap { .. } => "fused_fold_map",
+            // ML fusion patterns
+            FusionPattern::Softmax { .. } => "fused_softmax",
+            FusionPattern::LogSoftmax { .. } => "fused_log_softmax",
+            FusionPattern::LayerNorm { .. } => "fused_layernorm_welford",
+            FusionPattern::RMSNorm { .. } => "fused_rmsnorm",
+            FusionPattern::Attention { causal, .. } => {
+                if *causal {
+                    "fused_attention_causal"
+                } else {
+                    "fused_attention"
+                }
+            }
+            FusionPattern::Gelu { fast, .. } => {
+                if *fast { "fused_gelu_fast" } else { "fused_gelu" }
+            }
+            FusionPattern::Silu { .. } => "fused_silu",
+            FusionPattern::FusedLinear { bias, activation, .. } => {
+                match (bias.is_some(), activation) {
+                    (true, Some(FusedActivation::Relu)) => "fused_linear_bias_relu",
+                    (true, Some(FusedActivation::Gelu)) => "fused_linear_bias_gelu",
+                    (true, Some(FusedActivation::GeluFast)) => "fused_linear_bias_gelu_fast",
+                    (true, Some(FusedActivation::Silu)) => "fused_linear_bias_silu",
+                    (true, Some(FusedActivation::Sigmoid)) => "fused_linear_bias_sigmoid",
+                    (true, Some(FusedActivation::Tanh)) => "fused_linear_bias_tanh",
+                    (true, None) => "fused_linear_bias",
+                    (false, Some(FusedActivation::Relu)) => "fused_linear_relu",
+                    (false, Some(FusedActivation::Gelu)) => "fused_linear_gelu",
+                    (false, Some(FusedActivation::GeluFast)) => "fused_linear_gelu_fast",
+                    (false, Some(FusedActivation::Silu)) => "fused_linear_silu",
+                    (false, Some(FusedActivation::Sigmoid)) => "fused_linear_sigmoid",
+                    (false, Some(FusedActivation::Tanh)) => "fused_linear_tanh",
+                    (false, None) => "fused_linear",
+                }
+            }
         };
         Symbol::intern(name)
     } else if group.op_names.len() == 1 {
@@ -1395,5 +2319,335 @@ mod tests {
             );
             assert!(kernels[0].fusion_info.complete);
         }
+    }
+
+    // ========================================================================
+    // ML Fusion Pattern Tests (H26-SPEC Section 8.2)
+    // ========================================================================
+
+    /// Test that SiLU pattern (x * sigmoid(x)) is detected and fused.
+    #[test]
+    fn test_silu_pattern_fusion() {
+        // Build: x * sigmoid(x)
+        // x (id=100) is the input
+        // sigmoid(x) -> id=0
+        // x * sigmoid(x) -> final output
+
+        let x = make_tensor_ref(100, &[256], DType::Float32);
+
+        // sigmoid(x) operation
+        let sigmoid_op = TensorOp::Unary(crate::UnaryOp::Sigmoid, x.clone());
+
+        // x * sigmoid(x)
+        let sigmoid_out = make_tensor_ref(0, &[256], DType::Float32);
+        let mul_op = TensorOp::ZipWith(
+            ZipFn {
+                name: Symbol::intern("*"),
+                span: Span::DUMMY,
+            },
+            x.clone(),
+            sigmoid_out,
+        );
+
+        let mut ctx = FusionContext::new(true);
+        let ops = vec![sigmoid_op, mul_op];
+        let kernels = fuse_ops(&mut ctx, ops);
+
+        // Should produce a fused SiLU kernel
+        assert_eq!(kernels.len(), 1, "SiLU pattern should fuse to single kernel");
+        assert!(
+            kernels[0].fusion_info.complete,
+            "SiLU fusion should be complete"
+        );
+        assert_eq!(
+            kernels[0].name.as_str(),
+            "fused_silu",
+            "Should produce fused_silu kernel"
+        );
+    }
+
+    /// Test that fused linear with ReLU is detected.
+    #[test]
+    fn test_fused_linear_relu_pattern() {
+        // Build: relu(matmul(x, w) + b)
+        // x @ w -> matmul_out (id=0)
+        // matmul_out + b -> add_out (id=1)
+        // relu(add_out) -> final
+
+        let x = make_tensor_ref(100, &[32, 128], DType::Float32);
+        let w = make_tensor_ref(101, &[128, 64], DType::Float32);
+        let b = make_tensor_ref(102, &[64], DType::Float32);
+
+        // matmul(x, w)
+        let matmul_op = TensorOp::MatMul(x.clone(), w.clone());
+
+        // matmul + b
+        let matmul_out = make_tensor_ref(0, &[32, 64], DType::Float32);
+        let add_op = TensorOp::Binary(BinaryOp::Add, matmul_out, b.clone());
+
+        // relu(add)
+        let add_out = make_tensor_ref(1, &[32, 64], DType::Float32);
+        let relu_op = TensorOp::Unary(crate::UnaryOp::Relu, add_out);
+
+        let mut ctx = FusionContext::new(true);
+        let ops = vec![matmul_op, add_op, relu_op];
+        let kernels = fuse_ops(&mut ctx, ops);
+
+        // Should produce a fused linear+bias+relu kernel
+        assert_eq!(
+            kernels.len(),
+            1,
+            "Linear+bias+relu should fuse to single kernel"
+        );
+        assert!(
+            kernels[0].fusion_info.complete,
+            "Fusion should be complete"
+        );
+        assert_eq!(
+            kernels[0].name.as_str(),
+            "fused_linear_bias_relu",
+            "Should produce fused_linear_bias_relu kernel"
+        );
+    }
+
+    /// Test that matmul + bias without activation is detected.
+    #[test]
+    fn test_fused_linear_bias_only() {
+        // Build: matmul(x, w) + b
+        let x = make_tensor_ref(100, &[16, 256], DType::Float32);
+        let w = make_tensor_ref(101, &[256, 128], DType::Float32);
+        let b = make_tensor_ref(102, &[128], DType::Float32);
+
+        let matmul_op = TensorOp::MatMul(x.clone(), w.clone());
+        let matmul_out = make_tensor_ref(0, &[16, 128], DType::Float32);
+        let add_op = TensorOp::Binary(BinaryOp::Add, matmul_out, b.clone());
+
+        let mut ctx = FusionContext::new(true);
+        let ops = vec![matmul_op, add_op];
+        let kernels = fuse_ops(&mut ctx, ops);
+
+        assert_eq!(
+            kernels.len(),
+            1,
+            "Linear+bias should fuse to single kernel"
+        );
+        assert!(kernels[0].fusion_info.complete);
+        assert_eq!(
+            kernels[0].name.as_str(),
+            "fused_linear_bias",
+            "Should produce fused_linear_bias kernel"
+        );
+    }
+
+    /// Test pattern detection helper functions.
+    #[test]
+    fn test_pattern_detection_helpers() {
+        // Test division detection
+        assert!(is_division_fn(&Symbol::intern("/")));
+        assert!(is_division_fn(&Symbol::intern("div")));
+        assert!(is_division_fn(&Symbol::intern("divide")));
+        assert!(!is_division_fn(&Symbol::intern("add")));
+
+        // Test subtraction detection
+        assert!(is_subtraction_fn(&Symbol::intern("-")));
+        assert!(is_subtraction_fn(&Symbol::intern("sub")));
+        assert!(!is_subtraction_fn(&Symbol::intern("+")));
+
+        // Test multiplication detection
+        assert!(is_multiplication_fn(&Symbol::intern("*")));
+        assert!(is_multiplication_fn(&Symbol::intern("mul")));
+        assert!(!is_multiplication_fn(&Symbol::intern("div")));
+
+        // Test exp detection
+        assert!(is_exp_fn(&Symbol::intern("exp")));
+        assert!(!is_exp_fn(&Symbol::intern("log")));
+
+        // Test sqrt detection
+        assert!(is_sqrt_fn(&Symbol::intern("sqrt")));
+        assert!(!is_sqrt_fn(&Symbol::intern("abs")));
+
+        // Test sigmoid detection
+        assert!(is_sigmoid_fn(&Symbol::intern("sigmoid")));
+        assert!(!is_sigmoid_fn(&Symbol::intern("relu")));
+
+        // Test softmax detection
+        assert!(is_softmax_fn(&Symbol::intern("softmax")));
+        assert!(is_softmax_fn(&Symbol::intern("Softmax")));
+        assert!(!is_softmax_fn(&Symbol::intern("sigmoid")));
+    }
+
+    /// Test FusedActivation enum completeness.
+    #[test]
+    fn test_fused_activation_variants() {
+        let activations = vec![
+            FusedActivation::Relu,
+            FusedActivation::Gelu,
+            FusedActivation::GeluFast,
+            FusedActivation::Silu,
+            FusedActivation::Sigmoid,
+            FusedActivation::Tanh,
+        ];
+
+        // Verify all variants can be pattern matched
+        for act in activations {
+            match act {
+                FusedActivation::Relu => assert!(true),
+                FusedActivation::Gelu => assert!(true),
+                FusedActivation::GeluFast => assert!(true),
+                FusedActivation::Silu => assert!(true),
+                FusedActivation::Sigmoid => assert!(true),
+                FusedActivation::Tanh => assert!(true),
+            }
+        }
+    }
+
+    /// Test ML pattern kernel naming.
+    #[test]
+    fn test_ml_pattern_kernel_names() {
+        // Create groups with different ML patterns and verify naming
+
+        // Softmax
+        let softmax_group = FusedGroup {
+            ops: vec![],
+            inputs: vec![],
+            output: make_tensor_ref(0, &[256], DType::Float32),
+            pattern: Some(FusionPattern::Softmax {
+                input: make_tensor_ref(100, &[256], DType::Float32),
+                axis: None,
+            }),
+            op_names: vec![],
+        };
+        assert_eq!(
+            generate_kernel_name(&softmax_group).as_str(),
+            "fused_softmax"
+        );
+
+        // LayerNorm
+        let layernorm_group = FusedGroup {
+            ops: vec![],
+            inputs: vec![],
+            output: make_tensor_ref(0, &[256], DType::Float32),
+            pattern: Some(FusionPattern::LayerNorm {
+                input: make_tensor_ref(100, &[256], DType::Float32),
+                epsilon: 1e-5,
+                axis: None,
+                scale: None,
+                bias: None,
+            }),
+            op_names: vec![],
+        };
+        assert_eq!(
+            generate_kernel_name(&layernorm_group).as_str(),
+            "fused_layernorm_welford"
+        );
+
+        // Attention (non-causal)
+        let attention_group = FusedGroup {
+            ops: vec![],
+            inputs: vec![],
+            output: make_tensor_ref(0, &[1, 8, 512, 64], DType::Float32),
+            pattern: Some(FusionPattern::Attention {
+                query: make_tensor_ref(100, &[1, 8, 512, 64], DType::Float32),
+                key: make_tensor_ref(101, &[1, 8, 512, 64], DType::Float32),
+                value: make_tensor_ref(102, &[1, 8, 512, 64], DType::Float32),
+                mask: None,
+                scale: 0.125,
+                causal: false,
+            }),
+            op_names: vec![],
+        };
+        assert_eq!(
+            generate_kernel_name(&attention_group).as_str(),
+            "fused_attention"
+        );
+
+        // Causal Attention
+        let causal_attention_group = FusedGroup {
+            ops: vec![],
+            inputs: vec![],
+            output: make_tensor_ref(0, &[1, 8, 512, 64], DType::Float32),
+            pattern: Some(FusionPattern::Attention {
+                query: make_tensor_ref(100, &[1, 8, 512, 64], DType::Float32),
+                key: make_tensor_ref(101, &[1, 8, 512, 64], DType::Float32),
+                value: make_tensor_ref(102, &[1, 8, 512, 64], DType::Float32),
+                mask: None,
+                scale: 0.125,
+                causal: true,
+            }),
+            op_names: vec![],
+        };
+        assert_eq!(
+            generate_kernel_name(&causal_attention_group).as_str(),
+            "fused_attention_causal"
+        );
+
+        // GELU
+        let gelu_group = FusedGroup {
+            ops: vec![],
+            inputs: vec![],
+            output: make_tensor_ref(0, &[256], DType::Float32),
+            pattern: Some(FusionPattern::Gelu {
+                input: make_tensor_ref(100, &[256], DType::Float32),
+                fast: false,
+            }),
+            op_names: vec![],
+        };
+        assert_eq!(generate_kernel_name(&gelu_group).as_str(), "fused_gelu");
+
+        // GELU Fast
+        let gelu_fast_group = FusedGroup {
+            ops: vec![],
+            inputs: vec![],
+            output: make_tensor_ref(0, &[256], DType::Float32),
+            pattern: Some(FusionPattern::Gelu {
+                input: make_tensor_ref(100, &[256], DType::Float32),
+                fast: true,
+            }),
+            op_names: vec![],
+        };
+        assert_eq!(
+            generate_kernel_name(&gelu_fast_group).as_str(),
+            "fused_gelu_fast"
+        );
+
+        // SiLU
+        let silu_group = FusedGroup {
+            ops: vec![],
+            inputs: vec![],
+            output: make_tensor_ref(0, &[256], DType::Float32),
+            pattern: Some(FusionPattern::Silu {
+                input: make_tensor_ref(100, &[256], DType::Float32),
+            }),
+            op_names: vec![],
+        };
+        assert_eq!(generate_kernel_name(&silu_group).as_str(), "fused_silu");
+    }
+
+    /// Integration test: Verify ML patterns are correctly classified.
+    #[test]
+    fn test_ml_pattern_classification() {
+        // Ensure new patterns don't interfere with existing patterns
+
+        // Pattern 1 should still work
+        let input = make_tensor_ref(100, &[256], DType::Float32);
+        let map1 = TensorOp::Map(make_map_fn("double"), input);
+        let intermediate = make_tensor_ref(0, &[256], DType::Float32);
+        let map2 = TensorOp::Map(make_map_fn("inc"), intermediate);
+
+        let mut ctx = FusionContext::new(true);
+        let kernels = fuse_ops(&mut ctx, vec![map1, map2]);
+        assert_eq!(kernels.len(), 1);
+        assert_eq!(kernels[0].name.as_str(), "fused_map_map");
+
+        // Pattern 3 should still work
+        let input2 = make_tensor_ref(100, &[256], DType::Float32);
+        let map_op = TensorOp::Map(make_map_fn("square"), input2);
+        let mapped = make_tensor_ref(0, &[256], DType::Float32);
+        let sum_op = TensorOp::ReduceAll(ReduceOp::Sum, mapped);
+
+        let mut ctx2 = FusionContext::new(true);
+        let kernels2 = fuse_ops(&mut ctx2, vec![map_op, sum_op]);
+        assert_eq!(kernels2.len(), 1);
+        assert_eq!(kernels2[0].name.as_str(), "fused_reduce_map");
     }
 }

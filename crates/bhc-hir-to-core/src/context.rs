@@ -31,6 +31,28 @@ pub struct ConstructorInfo {
     pub tag: u32,
     /// The number of fields this constructor has.
     pub arity: u32,
+    /// Field names for record constructors (in canonical order).
+    /// Empty for positional constructors.
+    pub field_names: Vec<Symbol>,
+}
+
+/// Metadata about a record field selector function.
+///
+/// This stores information needed to generate field access code.
+#[derive(Clone, Debug)]
+pub struct FieldSelectorInfo {
+    /// The field name.
+    pub field_name: Symbol,
+    /// The constructor's DefId.
+    pub con_id: DefId,
+    /// The constructor's name.
+    pub con_name: Symbol,
+    /// The data type name.
+    pub type_name: Symbol,
+    /// The field's index within the constructor (0-based).
+    pub field_index: usize,
+    /// The total number of fields in the constructor.
+    pub total_fields: usize,
 }
 
 use crate::expr::lower_expr;
@@ -50,6 +72,10 @@ pub struct LowerContext {
     /// Constructor metadata (DefId -> ConstructorInfo).
     /// This maps constructor DefIds to their metadata including tag and type.
     constructor_map: FxHashMap<DefId, ConstructorInfo>,
+
+    /// Field selector metadata (field name -> FieldSelectorInfo).
+    /// This maps field names to their selector information for generating field access code.
+    field_selector_map: FxHashMap<Symbol, FieldSelectorInfo>,
 
     /// Stack of in-scope dictionary variables.
     ///
@@ -78,6 +104,7 @@ impl LowerContext {
             var_map: FxHashMap::default(),
             type_schemes: FxHashMap::default(),
             constructor_map: FxHashMap::default(),
+            field_selector_map: FxHashMap::default(),
             dict_scope: vec![FxHashMap::default()], // Start with empty root scope
             class_registry: ClassRegistry::new(),
             errors: Vec::new(),
@@ -123,12 +150,14 @@ impl LowerContext {
             type_name: bool_sym,
             tag: 1,
             arity: 0,
+            field_names: vec![],
         });
         self.constructor_map.insert(DefId::new(10), ConstructorInfo {
             name: Symbol::intern("False"),
             type_name: bool_sym,
             tag: 0,
             arity: 0,
+            field_names: vec![],
         });
 
         // Maybe: Nothing = 0, Just = 1
@@ -138,12 +167,14 @@ impl LowerContext {
             type_name: maybe_sym,
             tag: 0,
             arity: 0,
+            field_names: vec![],
         });
         self.constructor_map.insert(DefId::new(12), ConstructorInfo {
             name: Symbol::intern("Just"),
             type_name: maybe_sym,
             tag: 1,
             arity: 1,
+            field_names: vec![],
         });
 
         // Either: Left = 0, Right = 1
@@ -153,12 +184,14 @@ impl LowerContext {
             type_name: either_sym,
             tag: 0,
             arity: 1,
+            field_names: vec![],
         });
         self.constructor_map.insert(DefId::new(14), ConstructorInfo {
             name: Symbol::intern("Right"),
             type_name: either_sym,
             tag: 1,
             arity: 1,
+            field_names: vec![],
         });
 
         // List: [] = 0, : = 1
@@ -168,12 +201,14 @@ impl LowerContext {
             type_name: list_sym,
             tag: 0,
             arity: 0,
+            field_names: vec![],
         });
         self.constructor_map.insert(DefId::new(16), ConstructorInfo {
             name: Symbol::intern(":"),
             type_name: list_sym,
             tag: 1,
             arity: 2,
+            field_names: vec![],
         });
 
         // Unit: () = 0
@@ -183,6 +218,7 @@ impl LowerContext {
             type_name: unit_sym,
             tag: 0,
             arity: 0,
+            field_names: vec![],
         });
     }
 
@@ -289,6 +325,7 @@ impl LowerContext {
             method_types: FxHashMap::default(),
             superclasses: vec![],
             defaults: FxHashMap::default(),
+            assoc_types: vec![],
         };
         self.class_registry.register_class(eq_class);
 
@@ -309,6 +346,7 @@ impl LowerContext {
             method_types: FxHashMap::default(),
             superclasses: vec![Symbol::intern("Eq")],
             defaults: FxHashMap::default(),
+            assoc_types: vec![],
         };
         self.class_registry.register_class(ord_class);
 
@@ -329,6 +367,7 @@ impl LowerContext {
             method_types: FxHashMap::default(),
             superclasses: vec![],
             defaults: FxHashMap::default(),
+            assoc_types: vec![],
         };
         self.class_registry.register_class(num_class);
 
@@ -345,6 +384,7 @@ impl LowerContext {
             method_types: FxHashMap::default(),
             superclasses: vec![Symbol::intern("Num")],
             defaults: FxHashMap::default(),
+            assoc_types: vec![],
         };
         self.class_registry.register_class(fractional_class);
 
@@ -357,6 +397,7 @@ impl LowerContext {
             method_types: FxHashMap::default(),
             superclasses: vec![],
             defaults: FxHashMap::default(),
+            assoc_types: vec![],
         };
         self.class_registry.register_class(show_class);
 
@@ -431,6 +472,7 @@ impl LowerContext {
             instance_types: vec![instance_type.clone()],
             methods: method_map,
             superclass_instances,
+            assoc_type_impls: FxHashMap::default(),
         };
 
         self.class_registry.register_instance(instance_info);
@@ -525,6 +567,17 @@ impl LowerContext {
     #[must_use]
     pub fn lookup_constructor(&self, def_id: DefId) -> Option<&ConstructorInfo> {
         self.constructor_map.get(&def_id)
+    }
+
+    /// Register a field selector function.
+    pub fn register_field_selector(&mut self, field_name: Symbol, info: FieldSelectorInfo) {
+        self.field_selector_map.insert(field_name, info);
+    }
+
+    /// Look up field selector metadata for a given field name.
+    #[must_use]
+    pub fn lookup_field_selector(&self, field_name: Symbol) -> Option<&FieldSelectorInfo> {
+        self.field_selector_map.get(&field_name)
     }
 
     /// Push a new dictionary scope.
@@ -750,6 +803,8 @@ impl LowerContext {
 
     /// Register a type class definition in the class registry.
     fn register_class_def(&mut self, class_def: &bhc_hir::ClassDef) {
+        use crate::dictionary::AssocTypeInfo;
+
         let mut method_types = FxHashMap::default();
         let mut method_names = Vec::new();
 
@@ -765,12 +820,25 @@ impl LowerContext {
             defaults.insert(default_def.name, default_def.id);
         }
 
+        // Collect associated type declarations
+        let assoc_types: Vec<AssocTypeInfo> = class_def
+            .assoc_types
+            .iter()
+            .map(|assoc| AssocTypeInfo {
+                name: assoc.name,
+                params: assoc.params.clone(),
+                kind: assoc.kind.clone(),
+                default: assoc.default.clone(),
+            })
+            .collect();
+
         let class_info = ClassInfo {
             name: class_def.name,
             methods: method_names,
             method_types,
             superclasses: class_def.supers.clone(),
             defaults,
+            assoc_types,
         };
 
         self.class_registry.register_class(class_info);
@@ -786,6 +854,12 @@ impl LowerContext {
             // Also register the method implementation as a variable
             let var = self.named_var(method_def.name, Ty::Error);
             self.register_var(method_def.id, var);
+        }
+
+        // Collect associated type implementations
+        let mut assoc_type_impls = FxHashMap::default();
+        for assoc_impl in &instance_def.assoc_type_impls {
+            assoc_type_impls.insert(assoc_impl.name, assoc_impl.rhs.clone());
         }
 
         // Get the instance type (first type in the types list)
@@ -808,6 +882,7 @@ impl LowerContext {
             instance_types: vec![instance_type],
             methods,
             superclass_instances,
+            assoc_type_impls,
         };
 
         self.class_registry.register_instance(instance_info);
@@ -854,10 +929,32 @@ impl LowerContext {
                         let var = self.named_var(con.name, Ty::Error);
                         self.register_var(con.id, var);
 
-                        // Calculate arity based on field type
-                        let arity = match &con.fields {
-                            bhc_hir::ConFields::Positional(fields) => fields.len() as u32,
-                            bhc_hir::ConFields::Named(fields) => fields.len() as u32,
+                        // Calculate arity and field names based on field type
+                        let (arity, field_names) = match &con.fields {
+                            bhc_hir::ConFields::Positional(fields) => {
+                                (fields.len() as u32, vec![])
+                            }
+                            bhc_hir::ConFields::Named(fields) => {
+                                // Register field selector functions
+                                for field in fields {
+                                    let selector_var = self.named_var(field.name, Ty::Error);
+                                    self.register_var(field.id, selector_var);
+                                    // Also register field metadata for later lookup
+                                    self.register_field_selector(
+                                        field.name,
+                                        FieldSelectorInfo {
+                                            field_name: field.name,
+                                            con_id: con.id,
+                                            con_name: con.name,
+                                            type_name: data_def.name,
+                                            field_index: fields.iter().position(|f| f.id == field.id).unwrap_or(0),
+                                            total_fields: fields.len(),
+                                        },
+                                    );
+                                }
+                                let names: Vec<Symbol> = fields.iter().map(|f| f.name).collect();
+                                (fields.len() as u32, names)
+                            }
                         };
 
                         // Register constructor metadata
@@ -866,6 +963,7 @@ impl LowerContext {
                             type_name: data_def.name,
                             tag: tag as u32,
                             arity,
+                            field_names,
                         });
                     }
 

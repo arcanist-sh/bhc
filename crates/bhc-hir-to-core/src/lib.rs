@@ -307,6 +307,7 @@ mod tests {
                 },
             ],
             defaults: vec![],
+            assoc_types: vec![],
             span: Span::default(),
         };
 
@@ -364,6 +365,7 @@ mod tests {
                     span: Span::default(),
                 },
             ],
+            assoc_type_impls: vec![],
             span: Span::default(),
         };
 
@@ -398,10 +400,10 @@ mod tests {
         assert!(class_info.superclasses.is_empty(), "No superclasses");
 
         // Verify the instance is registered
-        let instance_info = registry.resolve_instance(Symbol::intern("MyEq"), &int_ty);
-        assert!(instance_info.is_some(), "MyEq Int instance should be registered");
+        let result = registry.resolve_instance(Symbol::intern("MyEq"), &int_ty);
+        assert!(result.is_some(), "MyEq Int instance should be registered");
 
-        let instance_info = instance_info.unwrap();
+        let (instance_info, _subst) = result.unwrap();
         assert_eq!(instance_info.class, Symbol::intern("MyEq"));
         assert_eq!(instance_info.methods.len(), 2);
         assert!(instance_info.methods.contains_key(&Symbol::intern("myEq")));
@@ -612,6 +614,7 @@ mod tests {
                 span: Span::default(),
             }],
             defaults: vec![],
+            assoc_types: vec![],
             span: Span::default(),
         };
 
@@ -638,6 +641,7 @@ mod tests {
                 }],
                 span: Span::default(),
             }],
+            assoc_type_impls: vec![],
             span: Span::default(),
         };
 
@@ -793,14 +797,14 @@ mod tests {
         // Check Eq Int instance
         let eq_int = registry.resolve_instance(Symbol::intern("Eq"), &int_ty);
         assert!(eq_int.is_some(), "Eq Int instance should be registered");
-        let eq_int = eq_int.unwrap();
+        let (eq_int, _) = eq_int.unwrap();
         assert!(eq_int.methods.contains_key(&Symbol::intern("==")));
         assert!(eq_int.methods.contains_key(&Symbol::intern("/=")));
 
         // Check Num Int instance
         let num_int = registry.resolve_instance(Symbol::intern("Num"), &int_ty);
         assert!(num_int.is_some(), "Num Int instance should be registered");
-        let num_int = num_int.unwrap();
+        let (num_int, _) = num_int.unwrap();
         assert!(num_int.methods.contains_key(&Symbol::intern("+")));
         assert!(num_int.methods.contains_key(&Symbol::intern("-")));
         assert!(num_int.methods.contains_key(&Symbol::intern("*")));
@@ -808,7 +812,7 @@ mod tests {
         // Check Fractional Float instance
         let frac_float = registry.resolve_instance(Symbol::intern("Fractional"), &float_ty);
         assert!(frac_float.is_some(), "Fractional Float instance should be registered");
-        let frac_float = frac_float.unwrap();
+        let (frac_float, _) = frac_float.unwrap();
         assert!(frac_float.methods.contains_key(&Symbol::intern("/")));
 
         // Check Eq Bool instance
@@ -952,6 +956,7 @@ mod tests {
                 }],
                 span: Span::default(),
             }],
+            assoc_types: vec![],
             span: Span::default(),
         };
 

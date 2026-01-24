@@ -35,8 +35,21 @@ use bhc_hir::DefId;
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
-use bhc_types::{Constraint, Kind, Scheme, Ty, TyCon};
+use bhc_types::{Constraint, Kind, Scheme, Subst, Ty, TyCon, TyVar};
 use rustc_hash::FxHashMap;
+
+/// Information about an associated type in a class.
+#[derive(Clone, Debug)]
+pub struct AssocTypeInfo {
+    /// The name of the associated type.
+    pub name: Symbol,
+    /// Additional type parameters beyond the class parameters.
+    pub params: Vec<TyVar>,
+    /// The result kind (usually `*`).
+    pub kind: Kind,
+    /// Optional default type definition.
+    pub default: Option<Ty>,
+}
 
 /// Information about a type class for dictionary construction.
 #[derive(Clone, Debug)]
@@ -51,6 +64,8 @@ pub struct ClassInfo {
     pub superclasses: Vec<Symbol>,
     /// Default method implementations (method name -> DefId).
     pub defaults: FxHashMap<Symbol, DefId>,
+    /// Associated type declarations.
+    pub assoc_types: Vec<AssocTypeInfo>,
 }
 
 /// Information about a type class instance.
@@ -65,6 +80,8 @@ pub struct InstanceInfo {
     pub methods: FxHashMap<Symbol, DefId>,
     /// Superclass instance types for resolving superclass dictionaries.
     pub superclass_instances: Vec<Ty>,
+    /// Associated type implementations (assoc type name -> concrete type).
+    pub assoc_type_impls: FxHashMap<Symbol, Ty>,
 }
 
 impl InstanceInfo {
@@ -75,6 +92,7 @@ impl InstanceInfo {
             instance_types: vec![instance_type],
             methods,
             superclass_instances: vec![],
+            assoc_type_impls: FxHashMap::default(),
         }
     }
 
@@ -85,12 +103,34 @@ impl InstanceInfo {
             instance_types,
             methods,
             superclass_instances: vec![],
+            assoc_type_impls: FxHashMap::default(),
+        }
+    }
+
+    /// Create a new instance with associated types.
+    pub fn new_with_assoc_types(
+        class: Symbol,
+        instance_types: Vec<Ty>,
+        methods: FxHashMap<Symbol, DefId>,
+        assoc_type_impls: FxHashMap<Symbol, Ty>,
+    ) -> Self {
+        Self {
+            class,
+            instance_types,
+            methods,
+            superclass_instances: vec![],
+            assoc_type_impls,
         }
     }
 
     /// Get the first instance type (for backward compatibility with single-param classes).
     pub fn first_type(&self) -> Option<&Ty> {
         self.instance_types.first()
+    }
+
+    /// Look up an associated type implementation.
+    pub fn lookup_assoc_type(&self, name: Symbol) -> Option<&Ty> {
+        self.assoc_type_impls.get(&name)
     }
 }
 
@@ -133,9 +173,9 @@ impl ClassRegistry {
     /// Resolve an instance for a class and a single concrete type.
     ///
     /// This is a convenience method for single-parameter type classes.
-    /// Returns the instance info if found.
+    /// Returns the instance info and the substitution binding type variables.
     #[must_use]
-    pub fn resolve_instance(&self, class: Symbol, ty: &Ty) -> Option<&InstanceInfo> {
+    pub fn resolve_instance(&self, class: Symbol, ty: &Ty) -> Option<(&InstanceInfo, Subst)> {
         self.resolve_instance_multi(class, &[ty.clone()])
     }
 
@@ -143,13 +183,22 @@ impl ClassRegistry {
     ///
     /// For example, `resolve_instance_multi("Convert", &[Int, String])` would
     /// find `instance Convert Int String`.
+    ///
+    /// Returns both the instance and a substitution mapping type variables
+    /// in the instance head to concrete types. For example, matching
+    /// `instance Eq a => Eq [a]` against `Eq [Int]` returns the substitution
+    /// `{a -> Int}`.
     #[must_use]
-    pub fn resolve_instance_multi(&self, class: Symbol, types: &[Ty]) -> Option<&InstanceInfo> {
+    pub fn resolve_instance_multi(
+        &self,
+        class: Symbol,
+        types: &[Ty],
+    ) -> Option<(&InstanceInfo, Subst)> {
         let instances = self.instances.get(&class)?;
 
         for inst in instances {
-            if types_match_multi(&inst.instance_types, types) {
-                return Some(inst);
+            if let Some(subst) = types_match_multi(&inst.instance_types, types) {
+                return Some((inst, subst));
             }
         }
         None
@@ -172,41 +221,187 @@ impl ClassRegistry {
             .map(|c| c.superclasses.clone())
             .unwrap_or_default()
     }
+
+    /// Get associated types for a class.
+    #[must_use]
+    pub fn class_assoc_types(&self, class: Symbol) -> Vec<Symbol> {
+        self.classes
+            .get(&class)
+            .map(|c| c.assoc_types.iter().map(|at| at.name).collect())
+            .unwrap_or_default()
+    }
+
+    /// Look up which class defines an associated type.
+    #[must_use]
+    pub fn lookup_assoc_type_class(&self, assoc_name: Symbol) -> Option<Symbol> {
+        for (class_name, class_info) in &self.classes {
+            for assoc in &class_info.assoc_types {
+                if assoc.name == assoc_name {
+                    return Some(*class_name);
+                }
+            }
+        }
+        None
+    }
+
+    /// Get information about an associated type.
+    #[must_use]
+    pub fn lookup_assoc_type(&self, assoc_name: Symbol) -> Option<&AssocTypeInfo> {
+        for class_info in self.classes.values() {
+            for assoc in &class_info.assoc_types {
+                if assoc.name == assoc_name {
+                    return Some(assoc);
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve an associated type for a given instance.
+    ///
+    /// Given an associated type name and concrete type arguments, looks up
+    /// the matching instance and returns the concrete type that the associated
+    /// type resolves to.
+    ///
+    /// For example, `resolve_assoc_type("Elem", &[List Int])` would return `Int`
+    /// if there's an instance `instance Collection [a] where type Elem [a] = a`.
+    #[must_use]
+    pub fn resolve_assoc_type(&self, assoc_name: Symbol, types: &[Ty]) -> Option<Ty> {
+        // Find which class defines this associated type
+        let class_name = self.lookup_assoc_type_class(assoc_name)?;
+
+        // Find the matching instance and get the substitution
+        let (instance, subst) = self.resolve_instance_multi(class_name, types)?;
+
+        // Look up the associated type implementation
+        if let Some(ty) = instance.assoc_type_impls.get(&assoc_name) {
+            // Apply the substitution to get the concrete type
+            return Some(subst.apply(ty));
+        }
+
+        // Check for default (also apply substitution)
+        let assoc_info = self.lookup_assoc_type(assoc_name)?;
+        assoc_info.default.as_ref().map(|ty| subst.apply(ty))
+    }
 }
 
-/// Check if two types match for instance resolution.
+/// Match a pattern type against a target type, returning a substitution.
 ///
-/// This is a simplified matcher that checks structural equality.
-/// A full implementation would handle type variables and unification.
-fn types_match(pattern: &Ty, target: &Ty) -> bool {
+/// This performs one-way pattern matching where type variables in the pattern
+/// are bound to concrete types in the target. This enables polymorphic instance
+/// matching like `instance Eq a => Eq [a]` to match `Eq [Int]` with `{a -> Int}`.
+///
+/// # Arguments
+/// * `pattern` - The instance type pattern (may contain type variables)
+/// * `target` - The concrete type to match against
+///
+/// # Returns
+/// `Some(subst)` if the match succeeds, where `subst` maps type variables to types.
+/// `None` if the types cannot be matched.
+fn types_match(pattern: &Ty, target: &Ty) -> Option<Subst> {
+    let mut subst = Subst::new();
+    if types_match_with_subst(pattern, target, &mut subst) {
+        Some(subst)
+    } else {
+        None
+    }
+}
+
+/// Helper function that accumulates substitutions during matching.
+fn types_match_with_subst(pattern: &Ty, target: &Ty, subst: &mut Subst) -> bool {
     match (pattern, target) {
+        // Type variable in pattern: bind to target type
+        (Ty::Var(v), _) => {
+            // Check if this variable is already bound
+            if let Some(bound_ty) = subst.get(v) {
+                // Must match the existing binding
+                types_equal(bound_ty, target)
+            } else {
+                // Bind the variable to the target type
+                subst.insert(v, target.clone());
+                true
+            }
+        }
+
+        // Type constructors must match by name
         (Ty::Con(c1), Ty::Con(c2)) => c1.name == c2.name,
-        (Ty::Var(_), _) => true, // Type variable matches anything
+
+        // Primitive types must match exactly
+        (Ty::Prim(p1), Ty::Prim(p2)) => p1 == p2,
+
+        // Type applications: match both the function and argument
         (Ty::App(f1, a1), Ty::App(f2, a2)) => {
-            types_match(f1, f2) && types_match(a1, a2)
+            types_match_with_subst(f1, f2, subst) && types_match_with_subst(a1, a2, subst)
         }
+
+        // Function types: match argument and result types
         (Ty::Fun(a1, r1), Ty::Fun(a2, r2)) => {
-            types_match(a1, a2) && types_match(r1, r2)
+            types_match_with_subst(a1, a2, subst) && types_match_with_subst(r1, r2, subst)
         }
-        (Ty::Tuple(ts1), Ty::Tuple(ts2)) if ts1.len() == ts2.len() => {
-            ts1.iter().zip(ts2.iter()).all(|(t1, t2)| types_match(t1, t2))
+
+        // Tuple types: must have same length and matching elements
+        (Ty::Tuple(ts1), Ty::Tuple(ts2)) if ts1.len() == ts2.len() => ts1
+            .iter()
+            .zip(ts2.iter())
+            .all(|(t1, t2)| types_match_with_subst(t1, t2, subst)),
+
+        // List types: match element types
+        (Ty::List(e1), Ty::List(e2)) => types_match_with_subst(e1, e2, subst),
+
+        // Forall types: complex case, simplified for now
+        (Ty::Forall(_, body1), Ty::Forall(_, body2)) => {
+            // For now, just match the bodies (full implementation would
+            // need alpha-renaming)
+            types_match_with_subst(body1, body2, subst)
         }
-        (Ty::List(e1), Ty::List(e2)) => types_match(e1, e2),
+
+        // Type-level naturals
+        (Ty::Nat(n1), Ty::Nat(n2)) => n1 == n2,
+
+        // Type-level lists
+        (Ty::TyList(l1), Ty::TyList(l2)) => l1 == l2,
+
+        // Error types match anything (to avoid cascading errors)
+        (Ty::Error, _) | (_, Ty::Error) => true,
+
+        // All other combinations don't match
         _ => false,
     }
 }
 
-/// Check if two type lists match for multi-parameter instance resolution.
-///
-/// Both lists must have the same length, and each corresponding pair must match.
-fn types_match_multi(patterns: &[Ty], targets: &[Ty]) -> bool {
-    if patterns.len() != targets.len() {
-        return false;
+/// Check if two types are structurally equal (used for consistency checking).
+fn types_equal(t1: &Ty, t2: &Ty) -> bool {
+    match (t1, t2) {
+        (Ty::Var(v1), Ty::Var(v2)) => v1.id == v2.id,
+        (Ty::Con(c1), Ty::Con(c2)) => c1.name == c2.name,
+        (Ty::Prim(p1), Ty::Prim(p2)) => p1 == p2,
+        (Ty::App(f1, a1), Ty::App(f2, a2)) => types_equal(f1, f2) && types_equal(a1, a2),
+        (Ty::Fun(a1, r1), Ty::Fun(a2, r2)) => types_equal(a1, a2) && types_equal(r1, r2),
+        (Ty::Tuple(ts1), Ty::Tuple(ts2)) if ts1.len() == ts2.len() => {
+            ts1.iter().zip(ts2.iter()).all(|(t1, t2)| types_equal(t1, t2))
+        }
+        (Ty::List(e1), Ty::List(e2)) => types_equal(e1, e2),
+        (Ty::Error, Ty::Error) => true,
+        _ => false,
     }
-    patterns
-        .iter()
-        .zip(targets.iter())
-        .all(|(p, t)| types_match(p, t))
+}
+
+/// Match multiple pattern types against target types, returning combined substitution.
+///
+/// Both lists must have the same length. The resulting substitution combines
+/// all bindings from matching each pair.
+fn types_match_multi(patterns: &[Ty], targets: &[Ty]) -> Option<Subst> {
+    if patterns.len() != targets.len() {
+        return None;
+    }
+
+    let mut subst = Subst::new();
+    for (pattern, target) in patterns.iter().zip(targets.iter()) {
+        if !types_match_with_subst(pattern, target, &mut subst) {
+            return None;
+        }
+    }
+    Some(subst)
 }
 
 /// Context for dictionary construction during lowering.
@@ -259,6 +454,12 @@ impl<'a> DictContext<'a> {
     ///
     /// For multi-parameter classes like `Convert Int String`, all type
     /// arguments are used to resolve the instance.
+    ///
+    /// For polymorphic instances like `instance Eq a => Eq [a]`, matching
+    /// against `Eq [Int]` will:
+    /// 1. Find the instance with substitution `{a -> Int}`
+    /// 2. Apply the substitution to get the superclass constraint `Eq Int`
+    /// 3. Recursively construct the `Eq Int` dictionary
     pub fn get_dictionary(
         &mut self,
         constraint: &Constraint,
@@ -276,11 +477,15 @@ impl<'a> DictContext<'a> {
         }
 
         // Try to resolve the instance using all type arguments
-        let instance = self.registry.resolve_instance_multi(constraint.class, &constraint.args)?;
+        // This returns both the instance and a substitution mapping type variables
+        // to concrete types (e.g., {a -> Int} when matching Eq [a] against Eq [Int])
+        let (instance, subst) =
+            self.registry.resolve_instance_multi(constraint.class, &constraint.args)?;
         let class = self.registry.lookup_class(constraint.class)?;
 
-        // Construct the dictionary
-        let dict_expr = self.construct_dictionary(class, instance, span)?;
+        // Construct the dictionary, applying the substitution to resolve
+        // type variables in superclass constraints
+        let dict_expr = self.construct_dictionary(class, instance, &subst, span)?;
 
         // Create a variable for this dictionary and cache it
         let type_names: Vec<String> = constraint.args.iter().map(type_name).collect();
@@ -305,21 +510,32 @@ impl<'a> DictContext<'a> {
     /// The dictionary is a tuple containing:
     /// 1. Superclass dictionaries (if any)
     /// 2. Method implementations
+    ///
+    /// The `subst` parameter maps type variables in the instance to concrete types.
+    /// This is crucial for polymorphic instances: when we match `instance Eq a => Eq [a]`
+    /// against `Eq [Int]`, the substitution is `{a -> Int}`, and we need to
+    /// recursively construct the dictionary for `Eq Int` (not `Eq a`).
     fn construct_dictionary(
         &mut self,
         class: &ClassInfo,
         instance: &InstanceInfo,
+        subst: &Subst,
         span: Span,
     ) -> Option<core::Expr> {
         let mut fields: Vec<core::Expr> = Vec::new();
 
         // First, add superclass dictionaries
         for (i, superclass) in class.superclasses.iter().enumerate() {
-            // Get the superclass instance type
+            // Get the superclass instance type (may contain type variables)
             let super_ty = instance.superclass_instances.get(i)?;
 
-            // Recursively get the superclass dictionary
-            let super_constraint = Constraint::new(*superclass, super_ty.clone(), span);
+            // Apply the substitution to get the concrete superclass type
+            // e.g., for `instance Eq a => Eq [a]` matching `Eq [Int]`,
+            // super_ty is `a` and subst maps `a -> Int`, so we get `Int`
+            let concrete_super_ty = subst.apply(super_ty);
+
+            // Recursively get the superclass dictionary for the concrete type
+            let super_constraint = Constraint::new(*superclass, concrete_super_ty, span);
             let super_dict = self.get_dictionary(&super_constraint, span)?;
             fields.push(super_dict);
         }
@@ -333,13 +549,21 @@ impl<'a> DictContext<'a> {
                 // Use default implementation
                 self.method_reference(default_def_id, span)
             } else {
-                // No implementation - this is an error, but we'll use a placeholder
-                let error_var = Var {
-                    name: Symbol::intern("$missing_method"),
-                    id: VarId::new(0),
-                    ty: Ty::Error,
-                };
-                core::Expr::Var(error_var, span)
+                // No implementation and no default - generate a runtime error
+                // This should normally be caught at type checking, but we generate
+                // a proper error expression rather than a placeholder variable
+                let error_msg = format!(
+                    "No implementation for method '{}' in instance {} {}",
+                    method_name.as_str(),
+                    instance.class.as_str(),
+                    instance
+                        .instance_types
+                        .iter()
+                        .map(|t| format!("{:?}", t))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+                make_error_expr(&error_msg, span)
             };
             fields.push(method_expr);
         }
@@ -453,6 +677,28 @@ fn make_tuple(fields: Vec<core::Expr>, span: Span) -> core::Expr {
     result
 }
 
+/// Create an error expression that will fail at runtime with a message.
+///
+/// This generates `error "message"` which will throw an exception at runtime.
+/// Used for cases that should have been caught at type checking but weren't.
+fn make_error_expr(msg: &str, span: Span) -> core::Expr {
+    let error_var = Var {
+        name: Symbol::intern("error"),
+        id: VarId::new(0),
+        ty: Ty::Error,
+    };
+    let msg_lit = core::Expr::Lit(
+        core::Literal::String(Symbol::intern(msg)),
+        Ty::Error,
+        span,
+    );
+    core::Expr::App(
+        Box::new(core::Expr::Var(error_var, span)),
+        Box::new(msg_lit),
+        span,
+    )
+}
+
 /// Create a field selector expression for a tuple.
 ///
 /// This generates a case expression that extracts the field at the given index.
@@ -495,8 +741,10 @@ mod tests {
         let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
         let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
 
-        assert!(types_match(&int_ty, &int_ty));
-        assert!(!types_match(&int_ty, &bool_ty));
+        // Same types match with empty substitution
+        assert!(types_match(&int_ty, &int_ty).is_some());
+        // Different types don't match
+        assert!(types_match(&int_ty, &bool_ty).is_none());
     }
 
     #[test]
@@ -510,6 +758,7 @@ mod tests {
             method_types: FxHashMap::default(),
             superclasses: vec![],
             defaults: FxHashMap::default(),
+            assoc_types: vec![],
         };
         registry.register_class(eq_class);
 
@@ -523,13 +772,18 @@ mod tests {
             instance_types: vec![Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star))],
             methods,
             superclass_instances: vec![],
+            assoc_type_impls: FxHashMap::default(),
         };
         registry.register_instance(eq_int);
 
         // Test lookup
         let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
-        let instance = registry.resolve_instance(Symbol::intern("Eq"), &int_ty);
-        assert!(instance.is_some());
+        let result = registry.resolve_instance(Symbol::intern("Eq"), &int_ty);
+        assert!(result.is_some());
+        let (instance, subst) = result.unwrap();
+        assert_eq!(instance.class, Symbol::intern("Eq"));
+        // For concrete type matching, substitution should be empty
+        assert!(subst.is_empty());
 
         let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
         let no_instance = registry.resolve_instance(Symbol::intern("Eq"), &bool_ty);
@@ -547,6 +801,7 @@ mod tests {
             method_types: FxHashMap::default(),
             superclasses: vec![],
             defaults: FxHashMap::default(),
+            assoc_types: vec![],
         };
         registry.register_class(convert_class);
 
@@ -576,19 +831,20 @@ mod tests {
         registry.register_instance(convert_int_bool);
 
         // Test multi-param lookup: Convert Int String should resolve
-        let instance = registry.resolve_instance_multi(
+        let result = registry.resolve_instance_multi(
             Symbol::intern("Convert"),
             &[int_ty.clone(), string_ty.clone()],
         );
-        assert!(instance.is_some());
-        assert_eq!(instance.unwrap().instance_types.len(), 2);
+        assert!(result.is_some());
+        let (instance, _subst) = result.unwrap();
+        assert_eq!(instance.instance_types.len(), 2);
 
         // Test multi-param lookup: Convert Int Bool should resolve
-        let instance2 = registry.resolve_instance_multi(
+        let result2 = registry.resolve_instance_multi(
             Symbol::intern("Convert"),
             &[int_ty.clone(), bool_ty.clone()],
         );
-        assert!(instance2.is_some());
+        assert!(result2.is_some());
 
         // Test multi-param lookup: Convert String Int should NOT resolve
         let no_instance = registry.resolve_instance_multi(
@@ -611,26 +867,26 @@ mod tests {
         let string_ty = Ty::Con(TyCon::new(Symbol::intern("String"), Kind::Star));
         let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
 
-        // Same types match
-        assert!(types_match_multi(
+        // Same types match (returns Some with empty substitution)
+        let result = types_match_multi(
             &[int_ty.clone(), string_ty.clone()],
-            &[int_ty.clone(), string_ty.clone()]
-        ));
+            &[int_ty.clone(), string_ty.clone()],
+        );
+        assert!(result.is_some());
+        assert!(result.unwrap().is_empty());
 
         // Different types don't match
-        assert!(!types_match_multi(
+        assert!(types_match_multi(
             &[int_ty.clone(), string_ty.clone()],
             &[int_ty.clone(), bool_ty.clone()]
-        ));
+        )
+        .is_none());
 
         // Different lengths don't match
-        assert!(!types_match_multi(
-            &[int_ty.clone(), string_ty.clone()],
-            &[int_ty.clone()]
-        ));
+        assert!(types_match_multi(&[int_ty.clone(), string_ty.clone()], &[int_ty.clone()]).is_none());
 
         // Empty matches empty
-        assert!(types_match_multi(&[], &[]));
+        assert!(types_match_multi(&[], &[]).is_some());
     }
 
     #[test]
@@ -656,5 +912,217 @@ mod tests {
         );
         assert_eq!(multi.instance_types.len(), 2);
         assert!(multi.first_type().is_some());
+    }
+
+    #[test]
+    fn test_associated_types() {
+        let mut registry = ClassRegistry::new();
+
+        // Create a class with an associated type:
+        // class Container c where
+        //   type Element c
+        //   empty :: c
+        //   insert :: Element c -> c -> c
+        let container_class = ClassInfo {
+            name: Symbol::intern("Container"),
+            methods: vec![Symbol::intern("empty"), Symbol::intern("insert")],
+            method_types: FxHashMap::default(),
+            superclasses: vec![],
+            defaults: FxHashMap::default(),
+            assoc_types: vec![AssocTypeInfo {
+                name: Symbol::intern("Element"),
+                params: vec![],
+                kind: Kind::Star,
+                default: None,
+            }],
+        };
+        registry.register_class(container_class);
+
+        // Register instance Container [a] where type Element [a] = a
+        let a_tyvar = bhc_types::TyVar::new_star(0);
+        let list_a = Ty::App(
+            Box::new(Ty::Con(TyCon::new(Symbol::intern("[]"), Kind::Star))),
+            Box::new(Ty::Var(a_tyvar.clone())),
+        );
+
+        let a_ty = Ty::Var(a_tyvar);
+
+        let mut methods = FxHashMap::default();
+        methods.insert(Symbol::intern("empty"), DefId::new(500));
+        methods.insert(Symbol::intern("insert"), DefId::new(501));
+
+        let mut assoc_impls = FxHashMap::default();
+        assoc_impls.insert(Symbol::intern("Element"), a_ty.clone());
+
+        let list_instance = InstanceInfo {
+            class: Symbol::intern("Container"),
+            instance_types: vec![list_a.clone()],
+            methods,
+            superclass_instances: vec![],
+            assoc_type_impls: assoc_impls,
+        };
+        registry.register_instance(list_instance);
+
+        // Test associated type lookup
+        let assoc_types = registry.class_assoc_types(Symbol::intern("Container"));
+        assert_eq!(assoc_types.len(), 1);
+        assert_eq!(assoc_types[0], Symbol::intern("Element"));
+
+        // Test lookup_assoc_type_class
+        let class_name = registry.lookup_assoc_type_class(Symbol::intern("Element"));
+        assert_eq!(class_name, Some(Symbol::intern("Container")));
+
+        // Test lookup_assoc_type
+        let assoc_info = registry.lookup_assoc_type(Symbol::intern("Element"));
+        assert!(assoc_info.is_some());
+        assert_eq!(assoc_info.unwrap().name, Symbol::intern("Element"));
+
+        // Test that non-existent associated types return None
+        let no_assoc = registry.lookup_assoc_type(Symbol::intern("NotAnAssocType"));
+        assert!(no_assoc.is_none());
+    }
+
+    #[test]
+    fn test_polymorphic_instance_matching() {
+        let mut registry = ClassRegistry::new();
+
+        // Register Eq class
+        let eq_class = ClassInfo {
+            name: Symbol::intern("Eq"),
+            methods: vec![Symbol::intern("==")],
+            method_types: FxHashMap::default(),
+            superclasses: vec![],
+            defaults: FxHashMap::default(),
+            assoc_types: vec![],
+        };
+        registry.register_class(eq_class);
+
+        // Register a polymorphic instance: instance Eq a => Eq [a]
+        // This means: if we have Eq a, we can derive Eq [a]
+        let a_tyvar = bhc_types::TyVar::new_star(0);
+        let a_ty = Ty::Var(a_tyvar.clone());
+
+        // [a] type = List applied to a
+        let list_a = Ty::App(
+            Box::new(Ty::Con(TyCon::new(Symbol::intern("[]"), Kind::Star))),
+            Box::new(a_ty.clone()),
+        );
+
+        let mut methods = FxHashMap::default();
+        methods.insert(Symbol::intern("=="), DefId::new(100));
+
+        let eq_list_instance = InstanceInfo {
+            class: Symbol::intern("Eq"),
+            instance_types: vec![list_a.clone()],
+            methods,
+            // Superclass instance: the Eq a constraint gets stored here as just `a`
+            // When we match Eq [Int], we substitute a -> Int to get Eq Int
+            superclass_instances: vec![a_ty.clone()],
+            assoc_type_impls: FxHashMap::default(),
+        };
+        registry.register_instance(eq_list_instance);
+
+        // Now try to resolve Eq [Int]
+        let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
+        let list_int = Ty::App(
+            Box::new(Ty::Con(TyCon::new(Symbol::intern("[]"), Kind::Star))),
+            Box::new(int_ty.clone()),
+        );
+
+        let result = registry.resolve_instance(Symbol::intern("Eq"), &list_int);
+        assert!(result.is_some(), "Should find Eq [Int] via Eq [a] instance");
+
+        let (instance, subst) = result.unwrap();
+        assert_eq!(instance.class, Symbol::intern("Eq"));
+
+        // The substitution should map type variable 'a' (id=0) to Int
+        assert!(!subst.is_empty(), "Substitution should not be empty");
+
+        // Apply the substitution to the superclass instance type
+        // This should give us Int (the type for the Eq a constraint)
+        let superclass_ty = &instance.superclass_instances[0];
+        let concrete_superclass_ty = subst.apply(superclass_ty);
+
+        // The concrete superclass type should be Int
+        match &concrete_superclass_ty {
+            Ty::Con(c) => assert_eq!(c.name, Symbol::intern("Int")),
+            _ => panic!("Expected Int type, got {:?}", concrete_superclass_ty),
+        }
+    }
+
+    #[test]
+    fn test_polymorphic_multi_param_instance() {
+        let mut registry = ClassRegistry::new();
+
+        // Register a multi-param class: class Convert a b where convert :: a -> b
+        let convert_class = ClassInfo {
+            name: Symbol::intern("Convert"),
+            methods: vec![Symbol::intern("convert")],
+            method_types: FxHashMap::default(),
+            superclasses: vec![],
+            defaults: FxHashMap::default(),
+            assoc_types: vec![],
+        };
+        registry.register_class(convert_class);
+
+        // Register a polymorphic instance: instance Convert a [a]
+        // This converts any type to a singleton list
+        let a_tyvar = bhc_types::TyVar::new_star(0);
+        let a_ty = Ty::Var(a_tyvar.clone());
+
+        let list_a = Ty::App(
+            Box::new(Ty::Con(TyCon::new(Symbol::intern("[]"), Kind::Star))),
+            Box::new(a_ty.clone()),
+        );
+
+        let mut methods = FxHashMap::default();
+        methods.insert(Symbol::intern("convert"), DefId::new(200));
+
+        let convert_a_lista = InstanceInfo::new_multi(
+            Symbol::intern("Convert"),
+            vec![a_ty.clone(), list_a.clone()],
+            methods,
+        );
+        registry.register_instance(convert_a_lista);
+
+        // Try to resolve Convert Int [Int]
+        let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
+        let list_int = Ty::App(
+            Box::new(Ty::Con(TyCon::new(Symbol::intern("[]"), Kind::Star))),
+            Box::new(int_ty.clone()),
+        );
+
+        let result = registry.resolve_instance_multi(
+            Symbol::intern("Convert"),
+            &[int_ty.clone(), list_int.clone()],
+        );
+        assert!(result.is_some(), "Should find Convert Int [Int] via Convert a [a]");
+
+        let (instance, subst) = result.unwrap();
+        assert_eq!(instance.class, Symbol::intern("Convert"));
+        assert!(!subst.is_empty(), "Substitution should map a -> Int");
+
+        // Apply substitution to 'a' should give Int
+        let applied = subst.apply(&a_ty);
+        match &applied {
+            Ty::Con(c) => assert_eq!(c.name, Symbol::intern("Int")),
+            _ => panic!("Expected Int, got {:?}", applied),
+        }
+
+        // Try to resolve Convert Int [Bool] - should NOT match
+        let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+        let list_bool = Ty::App(
+            Box::new(Ty::Con(TyCon::new(Symbol::intern("[]"), Kind::Star))),
+            Box::new(bool_ty.clone()),
+        );
+
+        let no_match = registry.resolve_instance_multi(
+            Symbol::intern("Convert"),
+            &[int_ty.clone(), list_bool],
+        );
+        assert!(
+            no_match.is_none(),
+            "Convert Int [Bool] should NOT match Convert a [a]"
+        );
     }
 }

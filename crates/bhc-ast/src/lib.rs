@@ -23,9 +23,59 @@ define_index! {
     pub struct DeclId;
 }
 
+// ============================================================
+// Documentation Comments
+// ============================================================
+
+/// The kind of documentation comment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocKind {
+    /// Preceding documentation: `-- |` or `{- | -}`
+    /// Documents the following item.
+    Preceding,
+    /// Trailing documentation: `-- ^` or `{- ^ -}`
+    /// Documents the preceding item.
+    Trailing,
+}
+
+/// A Haddock-style documentation comment.
+#[derive(Clone, Debug)]
+pub struct DocComment {
+    /// The raw text content of the documentation.
+    pub text: String,
+    /// The kind of documentation (preceding or trailing).
+    pub kind: DocKind,
+    /// The span of the comment in source.
+    pub span: Span,
+}
+
+impl DocComment {
+    /// Create a new preceding documentation comment.
+    #[must_use]
+    pub fn preceding(text: String, span: Span) -> Self {
+        Self {
+            text,
+            kind: DocKind::Preceding,
+            span,
+        }
+    }
+
+    /// Create a new trailing documentation comment.
+    #[must_use]
+    pub fn trailing(text: String, span: Span) -> Self {
+        Self {
+            text,
+            kind: DocKind::Trailing,
+            span,
+        }
+    }
+}
+
 /// A Haskell module.
 #[derive(Clone, Debug)]
 pub struct Module {
+    /// Module documentation comment.
+    pub doc: Option<DocComment>,
     /// Module pragmas (LANGUAGE, OPTIONS_GHC, etc.).
     pub pragmas: Vec<Pragma>,
     /// Module name.
@@ -388,6 +438,8 @@ pub enum Decl {
 /// A type signature.
 #[derive(Clone, Debug)]
 pub struct TypeSig {
+    /// Documentation comment.
+    pub doc: Option<DocComment>,
     /// The names being typed.
     pub names: Vec<Ident>,
     /// The type.
@@ -399,6 +451,8 @@ pub struct TypeSig {
 /// A function binding.
 #[derive(Clone, Debug)]
 pub struct FunBind {
+    /// Documentation comment.
+    pub doc: Option<DocComment>,
     /// The function name.
     pub name: Ident,
     /// The clauses (pattern matches).
@@ -462,6 +516,8 @@ impl Guard {
 /// A data type declaration.
 #[derive(Clone, Debug)]
 pub struct DataDecl {
+    /// Documentation comment.
+    pub doc: Option<DocComment>,
     /// The type name.
     pub name: Ident,
     /// Type parameters.
@@ -477,6 +533,8 @@ pub struct DataDecl {
 /// A data constructor declaration.
 #[derive(Clone, Debug)]
 pub struct ConDecl {
+    /// Documentation comment.
+    pub doc: Option<DocComment>,
     /// Constructor name.
     pub name: Ident,
     /// Constructor fields.
@@ -497,6 +555,8 @@ pub enum ConFields {
 /// A record field declaration.
 #[derive(Clone, Debug)]
 pub struct FieldDecl {
+    /// Documentation comment.
+    pub doc: Option<DocComment>,
     /// Field name.
     pub name: Ident,
     /// Field type.
@@ -508,6 +568,8 @@ pub struct FieldDecl {
 /// A type alias declaration.
 #[derive(Clone, Debug)]
 pub struct TypeAlias {
+    /// Documentation comment.
+    pub doc: Option<DocComment>,
     /// The alias name.
     pub name: Ident,
     /// Type parameters.
@@ -521,6 +583,8 @@ pub struct TypeAlias {
 /// A newtype declaration.
 #[derive(Clone, Debug)]
 pub struct NewtypeDecl {
+    /// Documentation comment.
+    pub doc: Option<DocComment>,
     /// The type name.
     pub name: Ident,
     /// Type parameters.
@@ -536,6 +600,8 @@ pub struct NewtypeDecl {
 /// A type class declaration.
 #[derive(Clone, Debug)]
 pub struct ClassDecl {
+    /// Documentation comment.
+    pub doc: Option<DocComment>,
     /// Superclass constraints.
     pub context: Vec<Constraint>,
     /// Class name.
@@ -544,10 +610,40 @@ pub struct ClassDecl {
     pub params: Vec<TyVar>,
     /// Functional dependencies.
     pub fundeps: Vec<FunDep>,
+    /// Associated type declarations.
+    pub assoc_types: Vec<AssocType>,
     /// Method signatures and default implementations.
     pub methods: Vec<Decl>,
     /// The span.
     pub span: Span,
+}
+
+/// An associated type declaration within a type class.
+///
+/// Example: `type Elem c` in `class Collection c where type Elem c`
+#[derive(Clone, Debug)]
+pub struct AssocType {
+    /// The name of the associated type.
+    pub name: Ident,
+    /// Type parameters (in addition to class params).
+    pub params: Vec<TyVar>,
+    /// Optional kind signature.
+    pub kind: Option<Kind>,
+    /// Optional default type.
+    pub default: Option<Type>,
+    /// The span.
+    pub span: Span,
+}
+
+/// A kind (for kind signatures).
+#[derive(Clone, Debug)]
+pub enum Kind {
+    /// The kind of types: `*` or `Type`.
+    Star,
+    /// Function kind: `k1 -> k2`.
+    Arrow(Box<Kind>, Box<Kind>),
+    /// Named kind variable.
+    Var(Ident),
 }
 
 /// A functional dependency in a type class.
@@ -564,14 +660,33 @@ pub struct FunDep {
 /// An instance declaration.
 #[derive(Clone, Debug)]
 pub struct InstanceDecl {
+    /// Documentation comment.
+    pub doc: Option<DocComment>,
     /// Instance constraints.
     pub context: Vec<Constraint>,
     /// Class name.
     pub class: Ident,
     /// Instance type.
     pub ty: Type,
+    /// Associated type definitions.
+    pub assoc_type_defs: Vec<AssocTypeDef>,
     /// Method implementations.
     pub methods: Vec<Decl>,
+    /// The span.
+    pub span: Span,
+}
+
+/// An associated type definition within an instance.
+///
+/// Example: `type Elem [a] = a` in `instance Collection [a] where type Elem [a] = a`
+#[derive(Clone, Debug)]
+pub struct AssocTypeDef {
+    /// The name of the associated type.
+    pub name: Ident,
+    /// Type arguments (patterns for the associated type).
+    pub args: Vec<Type>,
+    /// The definition (right-hand side).
+    pub rhs: Type,
     /// The span.
     pub span: Span,
 }
@@ -579,6 +694,8 @@ pub struct InstanceDecl {
 /// A foreign declaration.
 #[derive(Clone, Debug)]
 pub struct ForeignDecl {
+    /// Documentation comment.
+    pub doc: Option<DocComment>,
     /// Import or export.
     pub kind: ForeignKind,
     /// Calling convention.

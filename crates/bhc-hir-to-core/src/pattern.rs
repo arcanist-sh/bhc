@@ -161,70 +161,97 @@ pub fn lower_pat_to_alt(
         }
 
         Pat::RecordCon(def_ref, field_pats, _) => {
-            // Record constructor pattern
-            // For now, treat field patterns similarly to sub-patterns
-            // TODO: Properly handle out-of-order fields by looking up field indices
-            let mut binders = Vec::with_capacity(field_pats.len());
+            // Record constructor pattern with proper field ordering
+            // Look up the constructor's canonical field order and reorder binders accordingly
+
+            // Get constructor metadata
+            let (con_name, type_name, tag, canonical_fields) =
+                if let Some(info) = ctx.lookup_constructor(def_ref.def_id) {
+                    (info.name, info.type_name, info.tag, info.field_names.clone())
+                } else if let Some(var) = ctx.lookup_var(def_ref.def_id) {
+                    let tag = get_constructor_tag(var.name.as_str(), def_ref.def_id.index() as u32);
+                    (var.name, Symbol::intern("DataType"), tag, vec![])
+                } else {
+                    let name = Symbol::intern("Con");
+                    (name, Symbol::intern("DataType"), def_ref.def_id.index() as u32, vec![])
+                };
+
+            // Build a map from field name to its pattern
+            let mut field_map: std::collections::HashMap<Symbol, &hir::FieldPat> =
+                field_pats.iter().map(|fp| (fp.name, fp)).collect();
+
+            // Determine the arity - use canonical fields if available, otherwise pattern count
+            let arity = if canonical_fields.is_empty() {
+                field_pats.len()
+            } else {
+                canonical_fields.len()
+            };
+
+            // Create binders in canonical order
+            let mut binders = Vec::with_capacity(arity);
             let mut inner_rhs = rhs;
 
-            // Process field patterns from right to left
-            for (i, fp) in field_pats.iter().enumerate().rev() {
+            // Process fields in canonical order (or pattern order if no canonical info)
+            let field_order: Vec<Symbol> = if canonical_fields.is_empty() {
+                // No canonical order known, use pattern order
+                field_pats.iter().map(|fp| fp.name).collect()
+            } else {
+                canonical_fields
+            };
+
+            // Process fields from right to left to build nested cases correctly
+            for (i, field_name) in field_order.iter().enumerate().rev() {
                 let binder_name = format!("field_{}", i);
                 let binder = ctx.fresh_var(&binder_name, Ty::Error, span);
 
-                match &fp.pat {
-                    Pat::Var(name, def_id, _) => {
-                        let var = if let Some(registered) = ctx.lookup_var(*def_id) {
-                            registered.clone()
-                        } else {
-                            Var {
-                                name: *name,
-                                id: ctx.fresh_id(),
-                                ty: Ty::Error,
-                            }
-                        };
-                        binders.push(var);
+                if let Some(fp) = field_map.get(field_name) {
+                    // Field is bound in the pattern
+                    match &fp.pat {
+                        Pat::Var(name, def_id, _) => {
+                            let var = if let Some(registered) = ctx.lookup_var(*def_id) {
+                                registered.clone()
+                            } else {
+                                Var {
+                                    name: *name,
+                                    id: ctx.fresh_id(),
+                                    ty: Ty::Error,
+                                }
+                            };
+                            binders.push(var);
+                        }
+                        Pat::Wild(_) => {
+                            binders.push(binder);
+                        }
+                        _ => {
+                            let sub_alt = lower_pat_to_alt(ctx, &fp.pat, inner_rhs.clone(), span)?;
+                            let default_alt = Alt {
+                                con: AltCon::Default,
+                                binders: vec![],
+                                rhs: make_pattern_error(span),
+                            };
+                            inner_rhs = core::Expr::Case(
+                                Box::new(core::Expr::Var(binder.clone(), span)),
+                                vec![sub_alt, default_alt],
+                                Ty::Error,
+                                span,
+                            );
+                            binders.push(binder);
+                        }
                     }
-                    Pat::Wild(_) => {
-                        binders.push(binder);
-                    }
-                    _ => {
-                        let sub_alt = lower_pat_to_alt(ctx, &fp.pat, inner_rhs.clone(), span)?;
-                        let default_alt = Alt {
-                            con: AltCon::Default,
-                            binders: vec![],
-                            rhs: make_pattern_error(span),
-                        };
-                        inner_rhs = core::Expr::Case(
-                            Box::new(core::Expr::Var(binder.clone(), span)),
-                            vec![sub_alt, default_alt],
-                            Ty::Error,
-                            span,
-                        );
-                        binders.push(binder);
-                    }
+                } else {
+                    // Field not mentioned in pattern - use wildcard
+                    binders.push(binder);
                 }
             }
 
             binders.reverse();
-
-            // Create the data constructor using metadata from context
-            let (con_name, type_name, tag) = if let Some(info) = ctx.lookup_constructor(def_ref.def_id) {
-                (info.name, info.type_name, info.tag)
-            } else if let Some(var) = ctx.lookup_var(def_ref.def_id) {
-                let tag = get_constructor_tag(var.name.as_str(), def_ref.def_id.index() as u32);
-                (var.name, Symbol::intern("DataType"), tag)
-            } else {
-                let name = Symbol::intern("Con");
-                (name, Symbol::intern("DataType"), def_ref.def_id.index() as u32)
-            };
 
             let tycon = TyCon::new(type_name, Kind::Star);
             let con = DataCon {
                 name: con_name,
                 ty_con: tycon,
                 tag,
-                arity: field_pats.len() as u32,
+                arity: arity as u32,
             };
 
             Ok(Alt {
@@ -265,13 +292,19 @@ pub fn lower_pat_to_alt(
             })
         }
 
-        Pat::Or(left, right, _) => {
-            // Or-pattern: try left, then right
-            // This is complex because both branches must bind the same variables
-            // For now, we generate a nested case structure
-            // TODO: Proper or-pattern compilation
+        Pat::Or(_left, _right, _) => {
+            // Or-pattern: both branches should match with the same RHS
+            // For now, we only support or-patterns at the top level of case alternatives,
+            // where they can be expanded into multiple alternatives.
+            // Nested or-patterns are more complex and require pattern flattening.
+            //
+            // The proper handling is done in `lower_or_pattern_to_alts` which
+            // expands or-patterns into multiple alternatives.
+            //
+            // If we reach here, it means an or-pattern appeared in a nested position
+            // (e.g., inside a constructor pattern). For now, we don't support this.
             ctx.error(LowerError::PatternError {
-                message: "or-patterns not yet supported".into(),
+                message: "nested or-patterns not yet supported; use top-level or-patterns in case alternatives".into(),
                 span,
             });
             Ok(Alt {
@@ -333,9 +366,9 @@ pub fn compile_match(
                 rhs,
             });
         } else if eq.pats.len() == 1 {
-            // Single pattern
-            let alt = lower_pat_to_alt(ctx, &eq.pats[0], rhs, eq.span)?;
-            alts.push(alt);
+            // Single pattern - expand or-patterns into multiple alternatives
+            let expanded_alts = lower_pat_with_or_to_alts(ctx, &eq.pats[0], rhs, eq.span)?;
+            alts.extend(expanded_alts);
         } else {
             // Multiple patterns - need tuple pattern
             let tuple_alt = compile_tuple_pattern(ctx, &eq.pats, rhs, eq.span)?;
@@ -422,20 +455,33 @@ pub fn bind_pattern_vars(ctx: &mut LowerContext, pat: &hir::Pat, arg_var: Option
 }
 
 /// Compile a guarded RHS into nested conditionals.
+///
+/// In Haskell, guards on the same equation are ANDed together:
+/// ```haskell
+/// f x | g1, g2 = e  -- means: if g1 && g2 then e
+/// ```
 fn compile_guarded_rhs(
     ctx: &mut LowerContext,
     guards: &[hir::Guard],
     rhs: &hir::Expr,
     span: Span,
 ) -> LowerResult<core::Expr> {
+    if guards.is_empty() {
+        return lower_expr(ctx, rhs);
+    }
+
     let rhs_core = lower_expr(ctx, rhs)?;
 
-    // Build nested ifs from right to left
-    let mut result = make_pattern_error(span);
+    // Multiple guards on the same RHS are ANDed together
+    // f x | g1, g2 = e  compiles to: if g1 then (if g2 then e else error) else error
+    // This is equivalent to: if (g1 && g2) then e else error
+    let mut result = rhs_core;
 
+    // Process guards in reverse order to build nested ifs correctly
+    // The innermost if checks the last guard
     for guard in guards.iter().rev() {
         let cond = lower_expr(ctx, &guard.cond)?;
-        result = make_if(cond, rhs_core.clone(), result, span);
+        result = make_if(cond, result, make_pattern_error(span), span);
     }
 
     Ok(result)
@@ -579,6 +625,43 @@ fn get_constructor_tag(name: &str, fallback: u32) -> u32 {
     }
 }
 
+/// Expand or-patterns into multiple alternatives.
+///
+/// Given a pattern like `Left x | Right x`, this produces alternatives
+/// for both `Left x` and `Right x` with the same RHS.
+pub fn expand_or_patterns(pat: &hir::Pat) -> Vec<&hir::Pat> {
+    match pat {
+        Pat::Or(left, right, _) => {
+            let mut result = expand_or_patterns(left);
+            result.extend(expand_or_patterns(right));
+            result
+        }
+        _ => vec![pat],
+    }
+}
+
+/// Lower a pattern that may contain top-level or-patterns to multiple alternatives.
+///
+/// For `Left x | Right x -> e`, this produces:
+/// - `Left x -> e`
+/// - `Right x -> e`
+pub fn lower_pat_with_or_to_alts(
+    ctx: &mut LowerContext,
+    pat: &hir::Pat,
+    rhs: core::Expr,
+    span: Span,
+) -> LowerResult<Vec<Alt>> {
+    let expanded = expand_or_patterns(pat);
+    let mut alts = Vec::with_capacity(expanded.len());
+
+    for sub_pat in expanded {
+        let alt = lower_pat_to_alt(ctx, sub_pat, rhs.clone(), span)?;
+        alts.push(alt);
+    }
+
+    Ok(alts)
+}
+
 /// Create a pattern match error expression.
 pub fn make_pattern_error(span: Span) -> core::Expr {
     let error_var = Var {
@@ -645,5 +728,97 @@ mod tests {
         assert!(matches!(alt.con, AltCon::Default));
         assert_eq!(alt.binders.len(), 1);
         assert_eq!(alt.binders[0].name, x);
+    }
+
+    #[test]
+    fn test_expand_or_patterns() {
+        let span = Span::default();
+        let def_id = DefId::new(100);
+        let x = Symbol::intern("x");
+
+        // Simple pattern - no expansion
+        let simple_pat = Pat::Var(x, def_id, span);
+        let expanded = expand_or_patterns(&simple_pat);
+        assert_eq!(expanded.len(), 1);
+
+        // Or-pattern - should expand to 2
+        let left = Box::new(Pat::Lit(hir::Lit::Int(1), span));
+        let right = Box::new(Pat::Lit(hir::Lit::Int(2), span));
+        let or_pat = Pat::Or(left, right, span);
+        let expanded = expand_or_patterns(&or_pat);
+        assert_eq!(expanded.len(), 2);
+    }
+
+    #[test]
+    fn test_lower_or_pattern_to_alts() {
+        let mut ctx = LowerContext::new();
+        let span = Span::default();
+        let rhs = core::Expr::Lit(Literal::Int(42), Ty::Error, span);
+
+        // Or-pattern: 1 | 2 -> 42
+        let left = Box::new(Pat::Lit(hir::Lit::Int(1), span));
+        let right = Box::new(Pat::Lit(hir::Lit::Int(2), span));
+        let or_pat = Pat::Or(left, right, span);
+
+        let result = lower_pat_with_or_to_alts(&mut ctx, &or_pat, rhs, span);
+        assert!(result.is_ok());
+
+        let alts = result.unwrap();
+        assert_eq!(alts.len(), 2);
+        assert!(matches!(alts[0].con, AltCon::Lit(Literal::Int(1))));
+        assert!(matches!(alts[1].con, AltCon::Lit(Literal::Int(2))));
+    }
+
+    #[test]
+    fn test_record_pattern_with_field_ordering() {
+        use crate::context::ConstructorInfo;
+
+        let mut ctx = LowerContext::new();
+        let span = Span::default();
+
+        // Register a constructor with named fields: MkPerson { name, age }
+        let con_id = DefId::new(200);
+        let name_sym = Symbol::intern("name");
+        let age_sym = Symbol::intern("age");
+        let person_sym = Symbol::intern("Person");
+        let mk_person_sym = Symbol::intern("MkPerson");
+
+        ctx.register_constructor(con_id, ConstructorInfo {
+            name: mk_person_sym,
+            type_name: person_sym,
+            tag: 0,
+            arity: 2,
+            field_names: vec![name_sym, age_sym], // canonical order: name, age
+        });
+
+        // Create a record pattern with fields in different order: { age = a, name = n }
+        let n_def_id = DefId::new(201);
+        let a_def_id = DefId::new(202);
+        let n = Symbol::intern("n");
+        let a = Symbol::intern("a");
+
+        let field_pats = vec![
+            hir::FieldPat {
+                name: age_sym,  // Out of order
+                pat: Pat::Var(a, a_def_id, span),
+                span,
+            },
+            hir::FieldPat {
+                name: name_sym,
+                pat: Pat::Var(n, n_def_id, span),
+                span,
+            },
+        ];
+
+        let def_ref = DefRef { def_id: con_id, span };
+        let pat = Pat::RecordCon(def_ref, field_pats, span);
+        let rhs = core::Expr::Lit(Literal::Int(1), Ty::Error, span);
+
+        let result = lower_pat_to_alt(&mut ctx, &pat, rhs, span);
+        assert!(result.is_ok());
+
+        let alt = result.unwrap();
+        // Should have 2 binders in canonical order (name, age)
+        assert_eq!(alt.binders.len(), 2);
     }
 }

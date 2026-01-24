@@ -12,11 +12,60 @@ use bhc_hir::{self as hir, DefRef, Expr, Lit};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
-use bhc_types::{Kind, Ty, TyCon};
+use bhc_types::{Constraint, Kind, Ty, TyCon};
 
 use crate::context::LowerContext;
 use crate::pattern::lower_pat_to_alt;
 use crate::{LowerError, LowerResult};
+
+/// Format a constraint for error messages.
+fn format_constraint(constraint: &Constraint) -> String {
+    if constraint.args.is_empty() {
+        constraint.class.as_str().to_string()
+    } else {
+        format!(
+            "{} {}",
+            constraint.class.as_str(),
+            constraint
+                .args
+                .iter()
+                .map(format_type)
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    }
+}
+
+/// Format a type for error messages.
+fn format_type(ty: &Ty) -> String {
+    match ty {
+        Ty::Con(c) => c.name.as_str().to_string(),
+        Ty::Var(v) => format!("t{}", v.id),
+        Ty::App(f, a) => format!("({} {})", format_type(f), format_type(a)),
+        Ty::Fun(a, r) => format!("({} -> {})", format_type(a), format_type(r)),
+        Ty::Tuple(ts) => format!(
+            "({})",
+            ts.iter().map(format_type).collect::<Vec<_>>().join(", ")
+        ),
+        Ty::List(e) => format!("[{}]", format_type(e)),
+        _ => "?".to_string(),
+    }
+}
+
+/// Create an error expression that will fail at runtime with a message.
+fn make_error_expr(msg: &str, span: Span) -> core::Expr {
+    let error_var = Var {
+        name: Symbol::intern("error"),
+        id: VarId::new(0),
+        ty: Ty::Error,
+    };
+    let msg_lit = core::Expr::Lit(Literal::String(Symbol::intern(msg)), Ty::Error, span);
+    core::Expr::App(
+        Box::new(core::Expr::Var(error_var, span)),
+        Box::new(msg_lit),
+        span,
+    )
+}
 
 /// Lower a HIR expression to Core.
 pub fn lower_expr(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<core::Expr> {
@@ -162,17 +211,23 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                         def_ref.span,
                     );
                 } else {
-                    // Dictionary not available - create a placeholder
-                    // This could be a type error or an unresolved polymorphic context
-                    let placeholder_name = format!("$dict_{}", constraint.class.as_str());
-                    let placeholder_var = Var {
-                        name: Symbol::intern(&placeholder_name),
-                        id: VarId::new(0),
-                        ty: Ty::Error,
-                    };
+                    // Dictionary not available - this indicates either:
+                    // 1. A type error that should have been caught earlier
+                    // 2. A constraint on a type variable where the dictionary should
+                    //    come from an enclosing scope but doesn't
+                    //
+                    // Generate an error expression that will fail at runtime with
+                    // a clear message. This is better than a placeholder variable
+                    // that would cause confusing "not in scope" errors.
+                    let error_msg = format!(
+                        "No {} dictionary available for constraint {}",
+                        constraint.class.as_str(),
+                        format_constraint(constraint)
+                    );
+                    let error_expr = make_error_expr(&error_msg, def_ref.span);
                     result = core::Expr::App(
                         Box::new(result),
-                        Box::new(core::Expr::Var(placeholder_var, def_ref.span)),
+                        Box::new(error_expr),
                         def_ref.span,
                     );
                 }
@@ -637,44 +692,207 @@ fn lower_record(
 }
 
 /// Lower field access to Core.
+///
+/// Field access `r.field` is compiled to a case expression that extracts
+/// the appropriate field from the constructor.
 fn lower_field_access(
     ctx: &mut LowerContext,
     expr: &hir::Expr,
     field: Symbol,
     span: Span,
 ) -> LowerResult<core::Expr> {
-    // Field access becomes selector function application
     let expr_core = lower_expr(ctx, expr)?;
 
-    let selector_var = Var {
-        name: field,
-        id: VarId::new(0),
-        ty: Ty::Error,
-    };
+    // Try to find the field selector information (clone to avoid borrow issues)
+    let field_info = ctx.lookup_field_selector(field).cloned();
 
-    Ok(core::Expr::App(
-        Box::new(core::Expr::Var(selector_var, span)),
-        Box::new(expr_core),
-        span,
-    ))
+    if let Some(info) = field_info {
+        // Generate a case expression to extract the field
+        // case r of Con x0 x1 ... xn -> xi (where xi is the field we want)
+
+        // Create binder variables for all fields
+        let mut binders = Vec::with_capacity(info.total_fields);
+        let mut result_var = None;
+
+        for i in 0..info.total_fields {
+            let var_name = format!("$field_{}", i);
+            let var = ctx.fresh_var(&var_name, Ty::Error, span);
+            if i == info.field_index {
+                result_var = Some(var.clone());
+            }
+            binders.push(var);
+        }
+
+        let result_var = result_var.unwrap_or_else(|| {
+            // Shouldn't happen, but handle it gracefully
+            binders.first().cloned().unwrap_or_else(|| {
+                ctx.fresh_var("$error", Ty::Error, span)
+            })
+        });
+
+        // Look up constructor info for the data constructor
+        let con_info = ctx.lookup_constructor(info.con_id).cloned();
+        let (con_name, tycon, tag) = if let Some(ci) = con_info {
+            (ci.name, TyCon::new(ci.type_name, Kind::Star), ci.tag)
+        } else {
+            (info.con_name, TyCon::new(info.type_name, Kind::Star), 0)
+        };
+
+        let data_con = core::DataCon {
+            name: con_name,
+            ty_con: tycon,
+            tag,
+            arity: info.total_fields as u32,
+        };
+
+        // Create the case alternative
+        let alt = core::Alt {
+            con: core::AltCon::DataCon(data_con),
+            binders,
+            rhs: core::Expr::Var(result_var, span),
+        };
+
+        // Add a default case for safety
+        let default_alt = core::Alt {
+            con: core::AltCon::Default,
+            binders: vec![],
+            rhs: make_pattern_error(span),
+        };
+
+        Ok(core::Expr::Case(
+            Box::new(expr_core),
+            vec![alt, default_alt],
+            Ty::Error,
+            span,
+        ))
+    } else {
+        // Fallback: use selector function (works for imported types where we don't have full info)
+        let selector_var = Var {
+            name: field,
+            id: VarId::new(0),
+            ty: Ty::Error,
+        };
+
+        Ok(core::Expr::App(
+            Box::new(core::Expr::Var(selector_var, span)),
+            Box::new(expr_core),
+            span,
+        ))
+    }
 }
 
 /// Lower record update to Core.
+///
+/// Record update `r { field1 = e1, field2 = e2 }` is compiled to a case expression
+/// that extracts all fields, applies updates, and reconstructs the record.
 fn lower_record_update(
     ctx: &mut LowerContext,
     expr: &hir::Expr,
     fields: &[hir::FieldExpr],
     span: Span,
 ) -> LowerResult<core::Expr> {
-    // Record update is complex - it needs to know the record type
-    // For now, generate a placeholder that will be filled in during type checking
-    let _ = lower_expr(ctx, expr)?;
+    if fields.is_empty() {
+        // No fields to update - just return the original expression
+        return lower_expr(ctx, expr);
+    }
 
-    // TODO: Implement proper record update
-    // This requires knowing the record type to generate the correct case expression
-    ctx.error(LowerError::Internal("record update not yet implemented".into()));
+    let expr_core = lower_expr(ctx, expr)?;
 
-    Ok(make_pattern_error(span))
+    // Try to find the field selector information for the first field (clone to avoid borrow issues)
+    let first_field = &fields[0];
+    let field_info = ctx.lookup_field_selector(first_field.name).cloned();
+
+    if let Some(info) = field_info {
+        // Build a map of field name -> new value expression
+        let mut updates: std::collections::HashMap<Symbol, core::Expr> =
+            std::collections::HashMap::new();
+        for field in fields {
+            let value_core = lower_expr(ctx, &field.value)?;
+            updates.insert(field.name, value_core);
+        }
+
+        // Create binder variables for all fields
+        let mut binders = Vec::with_capacity(info.total_fields);
+        for i in 0..info.total_fields {
+            let var_name = format!("$old_{}", i);
+            let var = ctx.fresh_var(&var_name, Ty::Error, span);
+            binders.push(var);
+        }
+
+        // Look up constructor info (clone to avoid borrow issues)
+        let con_info = ctx.lookup_constructor(info.con_id).cloned();
+        let field_names: Vec<Symbol> = con_info
+            .as_ref()
+            .map(|ci| ci.field_names.clone())
+            .unwrap_or_default();
+
+        let (con_name, tycon, tag, arity) = if let Some(ref ci) = con_info {
+            (ci.name, TyCon::new(ci.type_name, Kind::Star), ci.tag, ci.arity)
+        } else {
+            (info.con_name, TyCon::new(info.type_name, Kind::Star), 0, info.total_fields as u32)
+        };
+
+        // Build the constructor application with updated fields
+        let data_con = core::DataCon {
+            name: con_name,
+            ty_con: tycon.clone(),
+            tag,
+            arity,
+        };
+
+        let con_var = Var {
+            name: con_name,
+            id: VarId::new(0),
+            ty: Ty::Error,
+        };
+        let mut result = core::Expr::Var(con_var, span);
+
+        // Apply each field (using updated value if present, otherwise old value)
+        for (i, binder) in binders.iter().enumerate() {
+            let field_name = field_names.get(i).copied();
+            let field_value = if let Some(fname) = field_name {
+                if let Some(new_val) = updates.get(&fname) {
+                    new_val.clone()
+                } else {
+                    core::Expr::Var(binder.clone(), span)
+                }
+            } else {
+                core::Expr::Var(binder.clone(), span)
+            };
+
+            result = core::Expr::App(Box::new(result), Box::new(field_value), span);
+        }
+
+        // Create the case alternative
+        let alt = core::Alt {
+            con: core::AltCon::DataCon(data_con),
+            binders,
+            rhs: result,
+        };
+
+        // Add a default case for safety
+        let default_alt = core::Alt {
+            con: core::AltCon::Default,
+            binders: vec![],
+            rhs: make_pattern_error(span),
+        };
+
+        Ok(core::Expr::Case(
+            Box::new(expr_core),
+            vec![alt, default_alt],
+            Ty::Error,
+            span,
+        ))
+    } else {
+        // No field info available - cannot compile record update
+        ctx.error(LowerError::Internal(
+            format!(
+                "cannot compile record update: no information for field '{}'",
+                first_field.name.as_str()
+            ),
+        ));
+        Ok(make_pattern_error(span))
+    }
 }
 
 /// Create a pattern match error expression.

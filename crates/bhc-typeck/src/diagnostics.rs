@@ -278,6 +278,127 @@ pub fn emit_no_instance(ctx: &mut TyCtxt, class: Symbol, ty: &Ty, span: Span) {
     ctx.emit_error(diag);
 }
 
+// === Type Family Errors (E0041-E0049) ===
+
+/// Emit a type family reduction failure error.
+///
+/// Called when an associated type family cannot be reduced because no
+/// matching instance was found.
+///
+/// For example: `Elem Bool` when there's no `instance Collection Bool`.
+pub fn emit_type_family_reduction_failed(
+    ctx: &mut TyCtxt,
+    family_name: Symbol,
+    args: &[Ty],
+    class_name: Option<Symbol>,
+    span: Span,
+) {
+    let family_str = family_name.as_str();
+    let args_str: Vec<_> = args.iter().map(pretty_ty).collect();
+    let applied_str = if args_str.is_empty() {
+        family_str.to_string()
+    } else {
+        format!("{} {}", family_str, args_str.join(" "))
+    };
+
+    let mut diag = Diagnostic::error(format!(
+        "cannot reduce type family `{applied_str}`"
+    ))
+    .with_code("E0041")
+    .with_label(ctx.full_span(span), "type family cannot be reduced");
+
+    if let Some(class) = class_name {
+        let class_str = class.as_str();
+        diag = diag.with_note(format!(
+            "`{family_str}` is an associated type of class `{class_str}`.\n\
+             No matching instance of `{class_str}` was found for the given types.\n\
+             Consider adding an instance declaration."
+        ));
+    } else {
+        diag = diag.with_note(format!(
+            "No matching type family instance was found for `{applied_str}`.\n\
+             Consider adding a type family instance declaration."
+        ));
+    }
+
+    ctx.emit_error(diag);
+}
+
+/// Emit an error when a type family is not defined.
+pub fn emit_type_family_not_found(ctx: &mut TyCtxt, name: Symbol, span: Span) {
+    let name_str = name.as_str();
+
+    let diag = Diagnostic::error(format!(
+        "type family `{name_str}` not found"
+    ))
+    .with_code("E0042")
+    .with_label(ctx.full_span(span), "unknown type family")
+    .with_note(
+        "Type families must be declared in a class definition or as standalone type family declarations."
+    );
+
+    ctx.emit_error(diag);
+}
+
+/// Emit an error when an associated type is missing from an instance.
+///
+/// Called when an instance doesn't provide an implementation for an
+/// associated type and the class has no default.
+pub fn emit_missing_assoc_type_impl(
+    ctx: &mut TyCtxt,
+    class_name: Symbol,
+    assoc_type: Symbol,
+    instance_types: &[Ty],
+    span: Span,
+) {
+    let class_str = class_name.as_str();
+    let assoc_str = assoc_type.as_str();
+    let types_str: Vec<_> = instance_types.iter().map(pretty_ty).collect();
+    let instance_str = format!("{} {}", class_str, types_str.join(" "));
+
+    let diag = Diagnostic::error(format!(
+        "missing associated type `{assoc_str}` in instance `{instance_str}`"
+    ))
+    .with_code("E0043")
+    .with_label(ctx.full_span(span), format!("missing `type {assoc_str} = ...`"))
+    .with_note(format!(
+        "The class `{class_str}` requires an implementation for associated type `{assoc_str}`,\n\
+         but this instance doesn't provide one and the class has no default.\n\n\
+         Add a type definition:\n    type {assoc_str} ... = <your type>"
+    ));
+
+    ctx.emit_error(diag);
+}
+
+/// Emit an error when a type family instance overlaps with another.
+#[allow(dead_code)]
+pub fn emit_type_family_overlap(
+    ctx: &mut TyCtxt,
+    family_name: Symbol,
+    args: &[Ty],
+    span: Span,
+) {
+    let family_str = family_name.as_str();
+    let args_str: Vec<_> = args.iter().map(pretty_ty).collect();
+    let applied_str = if args_str.is_empty() {
+        family_str.to_string()
+    } else {
+        format!("{} {}", family_str, args_str.join(" "))
+    };
+
+    let diag = Diagnostic::error(format!(
+        "overlapping type family instances for `{applied_str}`"
+    ))
+    .with_code("E0044")
+    .with_label(ctx.full_span(span), "overlapping instance")
+    .with_note(
+        "Multiple type family instances match these arguments.\n\
+         Type family instances must not overlap."
+    );
+
+    ctx.emit_error(diag);
+}
+
 // === M10 Phase 2: Function arity errors (E0008-E0010) ===
 
 /// Emit a function arity mismatch error.

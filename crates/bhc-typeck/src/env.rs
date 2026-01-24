@@ -37,6 +37,19 @@ pub struct FunDep {
     pub to: Vec<usize>,
 }
 
+/// Information about an associated type within a class.
+#[derive(Clone, Debug)]
+pub struct AssocTypeInfo {
+    /// The name of the associated type.
+    pub name: Symbol,
+    /// Additional type parameters beyond the class parameters.
+    pub params: Vec<TyVar>,
+    /// The result kind (usually `*`).
+    pub kind: bhc_types::Kind,
+    /// Optional default type definition.
+    pub default: Option<Ty>,
+}
+
 /// Information about a type class.
 #[derive(Clone, Debug)]
 pub struct ClassInfo {
@@ -50,6 +63,19 @@ pub struct ClassInfo {
     pub supers: Vec<Symbol>,
     /// Method signatures (name -> type scheme).
     pub methods: FxHashMap<Symbol, Scheme>,
+    /// Associated type declarations.
+    pub assoc_types: Vec<AssocTypeInfo>,
+}
+
+/// An associated type implementation within an instance.
+#[derive(Clone, Debug)]
+pub struct AssocTypeImpl {
+    /// The name of the associated type.
+    pub name: Symbol,
+    /// Type arguments (patterns matching the instance head).
+    pub args: Vec<Ty>,
+    /// The implementation type (right-hand side).
+    pub rhs: Ty,
 }
 
 /// Information about a type class instance.
@@ -61,6 +87,8 @@ pub struct InstanceInfo {
     pub types: Vec<Ty>,
     /// Method implementations (name -> DefId of the implementation).
     pub methods: FxHashMap<Symbol, DefId>,
+    /// Associated type implementations.
+    pub assoc_type_impls: Vec<AssocTypeImpl>,
 }
 
 /// The type environment during type checking.
@@ -309,6 +337,186 @@ impl TypeEnv {
 
         vars
     }
+
+    /// Look up which class defines an associated type.
+    ///
+    /// Returns the class info and the associated type info if found.
+    #[must_use]
+    pub fn lookup_assoc_type(&self, name: Symbol) -> Option<(&ClassInfo, &AssocTypeInfo)> {
+        for class in self.classes.values() {
+            for assoc in &class.assoc_types {
+                if assoc.name == name {
+                    return Some((class, assoc));
+                }
+            }
+        }
+        None
+    }
+
+    /// Try to reduce a type family application.
+    ///
+    /// Given an associated type family name and its arguments, tries to find
+    /// a matching instance and reduce to the concrete type.
+    ///
+    /// For example, if we have:
+    /// - `class Collection c where type Elem c`
+    /// - `instance Collection [a] where type Elem [a] = a`
+    ///
+    /// Then `reduce_type_family("Elem", [List Int])` returns `Some(Int)`.
+    ///
+    /// If an instance doesn't provide an implementation but the class has
+    /// a default, the default is used instead:
+    /// - `class Wrapper w where type Unwrap w; type Unwrap w = w`
+    /// - `instance Wrapper Int`  -- no type Unwrap Int provided
+    ///
+    /// Then `reduce_type_family("Unwrap", [Int])` returns `Some(Int)`.
+    #[must_use]
+    pub fn reduce_type_family(&self, family_name: Symbol, args: &[Ty]) -> Option<Ty> {
+        // Find which class defines this associated type
+        let (class_info, assoc_info) = self.lookup_assoc_type(family_name)?;
+
+        // Get all instances for this class
+        let instances = self.instances.get(&class_info.name)?;
+
+        // Try to find a matching instance
+        for instance in instances {
+            // Try to match the instance types against our arguments
+            if let Some(subst) = self.match_instance_types(&instance.types, args, &class_info.params) {
+                // Find the associated type implementation in this instance
+                for impl_ in &instance.assoc_type_impls {
+                    if impl_.name == family_name {
+                        // Apply the substitution to the RHS
+                        return Some(subst.apply(&impl_.rhs));
+                    }
+                }
+
+                // Instance matched but doesn't provide this associated type.
+                // Check if the class has a default.
+                if let Some(default_ty) = &assoc_info.default {
+                    // The default is written in terms of class type parameters.
+                    // We need to substitute those with the concrete instance types.
+                    //
+                    // For example, if:
+                    //   class Wrapper w where type Unwrap w = w
+                    //   instance Wrapper Int
+                    //
+                    // The default `w` needs to be substituted with `Int`.
+                    let default_subst = self.build_class_param_subst(&class_info.params, args);
+                    return Some(default_subst.apply(default_ty));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Build a substitution from class type parameters to concrete argument types.
+    ///
+    /// For example, if class params are [a, b] and args are [Int, Bool],
+    /// returns a substitution { a -> Int, b -> Bool }.
+    fn build_class_param_subst(&self, class_params: &[TyVar], args: &[Ty]) -> bhc_types::Subst {
+        use bhc_types::Subst;
+
+        let mut subst = Subst::new();
+        for (param, arg) in class_params.iter().zip(args.iter()) {
+            subst.insert(param, arg.clone());
+        }
+        subst
+    }
+
+    /// Try to match instance types against arguments.
+    ///
+    /// Returns a substitution from type variables to concrete types if successful.
+    fn match_instance_types(
+        &self,
+        instance_types: &[Ty],
+        args: &[Ty],
+        _class_params: &[TyVar],
+    ) -> Option<bhc_types::Subst> {
+        use bhc_types::Subst;
+
+        if instance_types.len() != args.len() {
+            return None;
+        }
+
+        // Collect all free type variables from the instance types.
+        // These are the bindable variables for pattern matching.
+        let mut bindable_vars = Vec::new();
+        for inst_ty in instance_types {
+            for v in inst_ty.free_vars() {
+                if !bindable_vars.contains(&v) {
+                    bindable_vars.push(v);
+                }
+            }
+        }
+
+        let mut subst = Subst::new();
+
+        for (inst_ty, arg_ty) in instance_types.iter().zip(args.iter()) {
+            // Try to unify the instance type with the argument
+            if let Some(s) = self.match_types(inst_ty, arg_ty, &bindable_vars) {
+                subst = subst.compose(&s);
+            } else {
+                return None;
+            }
+        }
+
+        Some(subst)
+    }
+
+    /// Match a single type pattern against a concrete type.
+    ///
+    /// This is a simple one-way pattern match (instance type is a pattern).
+    fn match_types(&self, pattern: &Ty, concrete: &Ty, bound_vars: &[TyVar]) -> Option<bhc_types::Subst> {
+        use bhc_types::Subst;
+
+        match (pattern, concrete) {
+            // Type variable in pattern: bind it
+            (Ty::Var(v), ty) => {
+                // Check if this is a bound variable from the instance
+                let is_bound = bound_vars.iter().any(|bv| bv.id == v.id);
+                if is_bound || pattern == concrete {
+                    let mut subst = Subst::new();
+                    subst.insert(v, ty.clone());
+                    Some(subst)
+                } else {
+                    None
+                }
+            }
+            // Same constructors: match recursively
+            (Ty::Con(c1), Ty::Con(c2)) if c1.name == c2.name => {
+                Some(Subst::new())
+            }
+            // Application: match both parts
+            (Ty::App(f1, a1), Ty::App(f2, a2)) => {
+                let s1 = self.match_types(f1, f2, bound_vars)?;
+                let a1_applied = s1.apply(a1);
+                let s2 = self.match_types(&a1_applied, a2, bound_vars)?;
+                Some(s1.compose(&s2))
+            }
+            // Function types: match both sides
+            (Ty::Fun(a1, r1), Ty::Fun(a2, r2)) => {
+                let s1 = self.match_types(a1, a2, bound_vars)?;
+                let r1_applied = s1.apply(r1);
+                let s2 = self.match_types(&r1_applied, r2, bound_vars)?;
+                Some(s1.compose(&s2))
+            }
+            // Tuples: match element-wise
+            (Ty::Tuple(ts1), Ty::Tuple(ts2)) if ts1.len() == ts2.len() => {
+                let mut subst = Subst::new();
+                for (t1, t2) in ts1.iter().zip(ts2.iter()) {
+                    let t1_applied = subst.apply(t1);
+                    let s = self.match_types(&t1_applied, t2, bound_vars)?;
+                    subst = subst.compose(&s);
+                }
+                Some(subst)
+            }
+            // Exact match for other cases
+            (t1, t2) if t1 == t2 => Some(Subst::new()),
+            // No match
+            _ => None,
+        }
+    }
 }
 
 /// Collect free type variables from a scheme.
@@ -379,5 +587,364 @@ mod tests {
 
         let found = env.lookup_type_con(name).unwrap();
         assert_eq!(found.name, name);
+    }
+
+    #[test]
+    fn test_lookup_assoc_type() {
+        let mut env = TypeEnv::new();
+
+        // Register a class with an associated type
+        let collection = Symbol::intern("Collection");
+        let elem = Symbol::intern("Elem");
+        let c_var = TyVar::new_star(0);
+
+        let class_info = ClassInfo {
+            name: collection,
+            params: vec![c_var.clone()],
+            supers: vec![],
+            methods: FxHashMap::default(),
+            fundeps: vec![],
+            assoc_types: vec![AssocTypeInfo {
+                name: elem,
+                params: vec![c_var.clone()],
+                kind: Kind::Star,
+                default: None,
+            }],
+        };
+
+        env.classes.insert(collection, class_info);
+
+        // Should find the associated type
+        let result = env.lookup_assoc_type(elem);
+        assert!(result.is_some());
+        let (class_info, assoc_info) = result.unwrap();
+        assert_eq!(class_info.name, collection);
+        assert_eq!(assoc_info.name, elem);
+    }
+
+    #[test]
+    fn test_lookup_assoc_type_not_found() {
+        let env = TypeEnv::new();
+        let unknown = Symbol::intern("Unknown");
+
+        // Should not find a non-existent associated type
+        assert!(env.lookup_assoc_type(unknown).is_none());
+    }
+
+    #[test]
+    fn test_reduce_type_family_simple() {
+        let mut env = TypeEnv::new();
+
+        // Set up: class Collection c where type Elem c
+        let collection = Symbol::intern("Collection");
+        let elem = Symbol::intern("Elem");
+        let list_tycon = Symbol::intern("List");
+        let int_tycon = Symbol::intern("Int");
+        let c_var = TyVar::new_star(0);
+        let a_var = TyVar::new_star(1);
+
+        let class_info = ClassInfo {
+            name: collection,
+            params: vec![c_var.clone()],
+            supers: vec![],
+            methods: FxHashMap::default(),
+            fundeps: vec![],
+            assoc_types: vec![AssocTypeInfo {
+                name: elem,
+                params: vec![c_var.clone()],
+                kind: Kind::Star,
+                default: None,
+            }],
+        };
+
+        env.classes.insert(collection, class_info);
+
+        // Set up: instance Collection [a] where type Elem [a] = a
+        // The instance type is List a (which is Ty::App(List, a))
+        let list_con = Ty::Con(TyCon::new(list_tycon, Kind::star_to_star()));
+        let a_ty = Ty::Var(a_var.clone());
+        let list_a = Ty::App(Box::new(list_con.clone()), Box::new(a_ty.clone()));
+
+        let instance_info = InstanceInfo {
+            class: collection,
+            types: vec![list_a.clone()],
+            methods: FxHashMap::default(),
+            assoc_type_impls: vec![AssocTypeImpl {
+                name: elem,
+                args: vec![list_a.clone()],
+                rhs: a_ty.clone(),
+            }],
+        };
+
+        env.instances
+            .entry(collection)
+            .or_default()
+            .push(instance_info);
+
+        // Now reduce: Elem [Int] -> Int
+        let int_ty = Ty::Con(TyCon::new(int_tycon, Kind::Star));
+        let list_int = Ty::App(Box::new(list_con), Box::new(int_ty.clone()));
+
+        let result = env.reduce_type_family(elem, &[list_int]);
+        assert!(result.is_some());
+        // The result should be Int (the substituted type)
+        let reduced = result.unwrap();
+        assert_eq!(reduced, int_ty);
+    }
+
+    #[test]
+    fn test_reduce_type_family_no_matching_instance() {
+        let mut env = TypeEnv::new();
+
+        // Set up: class Collection c where type Elem c
+        let collection = Symbol::intern("Collection");
+        let elem = Symbol::intern("Elem");
+        let c_var = TyVar::new_star(0);
+
+        let class_info = ClassInfo {
+            name: collection,
+            params: vec![c_var.clone()],
+            supers: vec![],
+            methods: FxHashMap::default(),
+            fundeps: vec![],
+            assoc_types: vec![AssocTypeInfo {
+                name: elem,
+                params: vec![c_var],
+                kind: Kind::Star,
+                default: None,
+            }],
+        };
+
+        env.classes.insert(collection, class_info);
+
+        // No instances registered - should return None
+        let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
+        let result = env.reduce_type_family(elem, &[int_ty]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_match_types_variable() {
+        let env = TypeEnv::new();
+        let a_var = TyVar::new_star(0);
+        let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
+
+        // Pattern: a, Concrete: Int, should bind a -> Int
+        let pattern = Ty::Var(a_var.clone());
+        let result = env.match_types(&pattern, &int_ty, &[a_var.clone()]);
+
+        assert!(result.is_some());
+        let subst = result.unwrap();
+        assert_eq!(subst.apply(&pattern), int_ty);
+    }
+
+    #[test]
+    fn test_match_types_constructor() {
+        let env = TypeEnv::new();
+        let int_sym = Symbol::intern("Int");
+        let int_ty = Ty::Con(TyCon::new(int_sym, Kind::Star));
+
+        // Pattern: Int, Concrete: Int, should match
+        let result = env.match_types(&int_ty, &int_ty, &[]);
+        assert!(result.is_some());
+
+        // Pattern: Int, Concrete: Bool, should not match
+        let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+        let result = env.match_types(&int_ty, &bool_ty, &[]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_match_types_application() {
+        let env = TypeEnv::new();
+        let a_var = TyVar::new_star(0);
+        let list_sym = Symbol::intern("List");
+        let int_sym = Symbol::intern("Int");
+
+        // Pattern: List a
+        let list_con = Ty::Con(TyCon::new(list_sym, Kind::star_to_star()));
+        let pattern = Ty::App(Box::new(list_con.clone()), Box::new(Ty::Var(a_var.clone())));
+
+        // Concrete: List Int
+        let int_ty = Ty::Con(TyCon::new(int_sym, Kind::Star));
+        let concrete = Ty::App(Box::new(list_con), Box::new(int_ty.clone()));
+
+        let result = env.match_types(&pattern, &concrete, &[a_var.clone()]);
+        assert!(result.is_some());
+        let subst = result.unwrap();
+        assert_eq!(subst.apply(&Ty::Var(a_var)), int_ty);
+    }
+
+    #[test]
+    fn test_reduce_type_family_with_default() {
+        let mut env = TypeEnv::new();
+
+        // Set up: class Wrapper w where type Unwrap w; type Unwrap w = w
+        // The default says: Unwrap w defaults to w itself
+        let wrapper = Symbol::intern("Wrapper");
+        let unwrap = Symbol::intern("Unwrap");
+        let int_tycon = Symbol::intern("Int");
+        let w_var = TyVar::new_star(0);
+
+        let class_info = ClassInfo {
+            name: wrapper,
+            params: vec![w_var.clone()],
+            supers: vec![],
+            methods: FxHashMap::default(),
+            fundeps: vec![],
+            assoc_types: vec![AssocTypeInfo {
+                name: unwrap,
+                params: vec![w_var.clone()],
+                kind: Kind::Star,
+                // Default: type Unwrap w = w
+                default: Some(Ty::Var(w_var.clone())),
+            }],
+        };
+
+        env.classes.insert(wrapper, class_info);
+
+        // Set up: instance Wrapper Int (no type Unwrap Int provided)
+        let int_ty = Ty::Con(TyCon::new(int_tycon, Kind::Star));
+
+        let instance_info = InstanceInfo {
+            class: wrapper,
+            types: vec![int_ty.clone()],
+            methods: FxHashMap::default(),
+            // No associated type implementation - should use default
+            assoc_type_impls: vec![],
+        };
+
+        env.instances
+            .entry(wrapper)
+            .or_default()
+            .push(instance_info);
+
+        // Now reduce: Unwrap Int -> Int (using the default)
+        let result = env.reduce_type_family(unwrap, &[int_ty.clone()]);
+        assert!(result.is_some());
+        // The default is `w`, which gets substituted with `Int`
+        let reduced = result.unwrap();
+        assert_eq!(reduced, int_ty);
+    }
+
+    #[test]
+    fn test_reduce_type_family_explicit_overrides_default() {
+        let mut env = TypeEnv::new();
+
+        // Set up: class Wrapper w where type Unwrap w; type Unwrap w = w
+        let wrapper = Symbol::intern("Wrapper");
+        let unwrap = Symbol::intern("Unwrap");
+        let maybe_tycon = Symbol::intern("Maybe");
+        let a_var = TyVar::new_star(0);
+        let w_var = TyVar::new_star(1);
+
+        let class_info = ClassInfo {
+            name: wrapper,
+            params: vec![w_var.clone()],
+            supers: vec![],
+            methods: FxHashMap::default(),
+            fundeps: vec![],
+            assoc_types: vec![AssocTypeInfo {
+                name: unwrap,
+                params: vec![w_var.clone()],
+                kind: Kind::Star,
+                // Default: type Unwrap w = w
+                default: Some(Ty::Var(w_var.clone())),
+            }],
+        };
+
+        env.classes.insert(wrapper, class_info);
+
+        // Set up: instance Wrapper (Maybe a) where type Unwrap (Maybe a) = a
+        // This OVERRIDES the default
+        let maybe_con = Ty::Con(TyCon::new(maybe_tycon, Kind::star_to_star()));
+        let a_ty = Ty::Var(a_var.clone());
+        let maybe_a = Ty::App(Box::new(maybe_con.clone()), Box::new(a_ty.clone()));
+
+        let instance_info = InstanceInfo {
+            class: wrapper,
+            types: vec![maybe_a.clone()],
+            methods: FxHashMap::default(),
+            // Explicit implementation overrides default
+            assoc_type_impls: vec![AssocTypeImpl {
+                name: unwrap,
+                args: vec![maybe_a.clone()],
+                rhs: a_ty.clone(),
+            }],
+        };
+
+        env.instances
+            .entry(wrapper)
+            .or_default()
+            .push(instance_info);
+
+        // Now reduce: Unwrap (Maybe Int) -> Int (using the explicit impl, not default)
+        let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
+        let maybe_int = Ty::App(Box::new(maybe_con), Box::new(int_ty.clone()));
+
+        let result = env.reduce_type_family(unwrap, &[maybe_int]);
+        assert!(result.is_some());
+        // The explicit implementation gives `a`, which gets substituted with `Int`
+        let reduced = result.unwrap();
+        assert_eq!(reduced, int_ty);
+    }
+
+    #[test]
+    fn test_reduce_type_family_default_with_complex_type() {
+        let mut env = TypeEnv::new();
+
+        // Set up: class Container c where type Element c; type Element c = c
+        // Here the default is the container itself
+        let container = Symbol::intern("Container");
+        let element = Symbol::intern("Element");
+        let list_tycon = Symbol::intern("List");
+        let int_tycon = Symbol::intern("Int");
+        let c_var = TyVar::new_star(0);
+        let a_var = TyVar::new_star(1);
+
+        let class_info = ClassInfo {
+            name: container,
+            params: vec![c_var.clone()],
+            supers: vec![],
+            methods: FxHashMap::default(),
+            fundeps: vec![],
+            assoc_types: vec![AssocTypeInfo {
+                name: element,
+                params: vec![c_var.clone()],
+                kind: Kind::Star,
+                // Default: type Element c = c (identity)
+                default: Some(Ty::Var(c_var.clone())),
+            }],
+        };
+
+        env.classes.insert(container, class_info);
+
+        // Set up: instance Container [a] (no type Element [a] provided)
+        let list_con = Ty::Con(TyCon::new(list_tycon, Kind::star_to_star()));
+        let a_ty = Ty::Var(a_var.clone());
+        let list_a = Ty::App(Box::new(list_con.clone()), Box::new(a_ty));
+
+        let instance_info = InstanceInfo {
+            class: container,
+            types: vec![list_a.clone()],
+            methods: FxHashMap::default(),
+            // No implementation - uses default
+            assoc_type_impls: vec![],
+        };
+
+        env.instances
+            .entry(container)
+            .or_default()
+            .push(instance_info);
+
+        // Now reduce: Element [Int] -> [Int] (the default is the container itself)
+        let int_ty = Ty::Con(TyCon::new(int_tycon, Kind::Star));
+        let list_int = Ty::App(Box::new(list_con), Box::new(int_ty));
+
+        let result = env.reduce_type_family(element, &[list_int.clone()]);
+        assert!(result.is_some());
+        // The default is `c`, which gets substituted with `[Int]`
+        let reduced = result.unwrap();
+        assert_eq!(reduced, list_int);
     }
 }

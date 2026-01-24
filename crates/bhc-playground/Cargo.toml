@@ -1,0 +1,48 @@
+[package]
+name = "bhc-playground"
+description = "Browser-based Haskell interpreter for BHC playground"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Internal crates - frontend pipeline (no LLVM dependencies)
+bhc-span = { workspace = true }
+bhc-intern = { workspace = true }
+bhc-index = { workspace = true }
+bhc-arena = { workspace = true }
+bhc-data-structures = { workspace = true }
+bhc-diagnostics = { workspace = true }
+bhc-lexer = { workspace = true }
+bhc-ast = { workspace = true }
+bhc-parser = { workspace = true }
+bhc-types = { workspace = true }
+bhc-hir = { workspace = true }
+bhc-lower = { workspace = true }
+bhc-typeck = { workspace = true }
+bhc-core = { workspace = true }
+bhc-hir-to-core = { workspace = true }
+bhc-session = { workspace = true }
+
+# External dependencies
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# WASM-specific dependencies
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+wee_alloc = "0.4"
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+
+[features]
+default = []
+# Enable WASM bindings
+wasm = []

@@ -15,8 +15,8 @@ impl<'src> Parser<'src> {
         // Parse pragmas at the start of the module
         let pragmas = self.parse_pragmas();
 
-        // Skip doc comments that may appear before the module declaration (Haddock)
-        self.skip_doc_comments();
+        // Collect doc comments that may appear before the module declaration (Haddock)
+        let doc = self.collect_doc_comments();
 
         // Optional module header
         let (name, exports) = if self.eat(&TokenKind::Module) {
@@ -78,6 +78,7 @@ impl<'src> Parser<'src> {
         let decls = self.merge_function_clauses(decls);
 
         Ok(Module {
+            doc,
             pragmas,
             name,
             exports,
@@ -575,8 +576,8 @@ impl<'src> Parser<'src> {
 
     /// Parse a top-level declaration.
     fn parse_top_decl(&mut self) -> ParseResult<Decl> {
-        // Skip Haddock documentation comments before declarations
-        self.skip_doc_comments();
+        // Collect Haddock documentation comments before declarations
+        let doc = self.collect_doc_comments();
 
         // After doc comments, there may be a VirtualSemi if the next token
         // is at the same indentation level. Skip it.
@@ -587,20 +588,20 @@ impl<'src> Parser<'src> {
         })?;
 
         match &tok.node.kind {
-            TokenKind::Data => self.parse_data_decl(),
-            TokenKind::Type => self.parse_type_alias(),
-            TokenKind::Newtype => self.parse_newtype_decl(),
-            TokenKind::Class => self.parse_class_decl(),
-            TokenKind::Instance => self.parse_instance_decl(),
-            TokenKind::Foreign => self.parse_foreign_decl(),
+            TokenKind::Data => self.parse_data_decl_with_doc(doc),
+            TokenKind::Type => self.parse_type_alias_with_doc(doc),
+            TokenKind::Newtype => self.parse_newtype_decl_with_doc(doc),
+            TokenKind::Class => self.parse_class_decl_with_doc(doc),
+            TokenKind::Instance => self.parse_instance_decl_with_doc(doc),
+            TokenKind::Foreign => self.parse_foreign_decl_with_doc(doc),
             TokenKind::Infix | TokenKind::Infixl | TokenKind::Infixr => self.parse_fixity_decl(),
             TokenKind::Ident(_) => {
                 // Could be type signature or binding
-                self.parse_value_decl()
+                self.parse_value_decl_with_doc(doc)
             }
             TokenKind::LParen => {
                 // Operator type signature or binding: (<+>) :: ... or (<+>) = ...
-                self.parse_value_decl()
+                self.parse_value_decl_with_doc(doc)
             }
             _ => Err(ParseError::Unexpected {
                 found: tok.node.kind.description().to_string(),
@@ -659,9 +660,13 @@ impl<'src> Parser<'src> {
 
     /// Parse a value declaration (type signature or binding).
     fn parse_value_decl(&mut self) -> ParseResult<Decl> {
-        // Skip Haddock documentation comments before value declarations
-        self.skip_doc_comments();
+        // Collect Haddock documentation comments before value declarations
+        let doc = self.collect_doc_comments();
+        self.parse_value_decl_with_doc(doc)
+    }
 
+    /// Parse a value declaration with an optional doc comment.
+    fn parse_value_decl_with_doc(&mut self, doc: Option<DocComment>) -> ParseResult<Decl> {
         // After doc comments, there may be a VirtualSemi if the next token
         // is at the same indentation level. Skip it.
         self.eat(&TokenKind::VirtualSemi);
@@ -729,7 +734,7 @@ impl<'src> Parser<'src> {
                 // Type signature
                 let ty = self.parse_type()?;
                 let span = start.to(ty.span());
-                return Ok(Decl::TypeSig(TypeSig { names, ty, span }));
+                return Ok(Decl::TypeSig(TypeSig { doc, names, ty, span }));
             } else if names.len() > 1 {
                 // We parsed multiple names but no ::, this is an error
                 let tok = self.current().unwrap();
@@ -783,6 +788,7 @@ impl<'src> Parser<'src> {
                 };
 
                 return Ok(Decl::FunBind(FunBind {
+                    doc: doc.clone(),
                     name: Ident::from_str("$patbind"),
                     clauses: vec![clause],
                     span,
@@ -824,6 +830,7 @@ impl<'src> Parser<'src> {
             };
 
             Ok(Decl::FunBind(FunBind {
+                doc,
                 name: actual_name,
                 clauses: vec![clause],
                 span,
@@ -866,6 +873,7 @@ impl<'src> Parser<'src> {
         // The generated name `$patbind` is not a valid Haskell identifier
         // so it won't conflict with user-defined names.
         Ok(Decl::FunBind(FunBind {
+            doc: None, // Pattern bindings don't have documentation
             name: Ident::from_str("$patbind"),
             clauses: vec![clause],
             span,
@@ -1074,6 +1082,11 @@ impl<'src> Parser<'src> {
 
     /// Parse a data declaration.
     fn parse_data_decl(&mut self) -> ParseResult<Decl> {
+        self.parse_data_decl_with_doc(None)
+    }
+
+    /// Parse a data declaration with optional documentation.
+    fn parse_data_decl_with_doc(&mut self, doc: Option<DocComment>) -> ParseResult<Decl> {
         let start = self.current_span();
         self.expect(&TokenKind::Data)?;
 
@@ -1088,6 +1101,7 @@ impl<'src> Parser<'src> {
         let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
 
         Ok(Decl::DataDecl(DataDecl {
+            doc,
             name,
             params,
             constrs,
@@ -1136,14 +1150,32 @@ impl<'src> Parser<'src> {
     /// Parse data constructors.
     fn parse_constructors(&mut self) -> ParseResult<Vec<ConDecl>> {
         let mut constrs = vec![self.parse_constructor()?];
-        // Skip doc comments after constructor (e.g., `-- ^ description`)
-        self.skip_doc_comments();
+        // Collect trailing doc comments after constructor (e.g., `-- ^ description`)
+        if let Some(trailing_doc) = self.collect_doc_comments() {
+            // Attach trailing doc to the last constructor
+            if let Some(last) = constrs.last_mut() {
+                if last.doc.is_none() {
+                    last.doc = Some(trailing_doc);
+                }
+            }
+        }
         while self.eat(&TokenKind::Pipe) {
-            // Skip doc comments before next constructor
-            self.skip_doc_comments();
-            constrs.push(self.parse_constructor()?);
-            // Skip doc comments after constructor
-            self.skip_doc_comments();
+            // Collect doc comments before next constructor
+            let doc = self.collect_doc_comments();
+            let mut constr = self.parse_constructor()?;
+            // If there was a preceding doc, use it
+            if constr.doc.is_none() && doc.is_some() {
+                constr.doc = doc;
+            }
+            constrs.push(constr);
+            // Collect trailing doc comments after constructor
+            if let Some(trailing_doc) = self.collect_doc_comments() {
+                if let Some(last) = constrs.last_mut() {
+                    if last.doc.is_none() {
+                        last.doc = Some(trailing_doc);
+                    }
+                }
+            }
         }
         Ok(constrs)
     }
@@ -1210,7 +1242,7 @@ impl<'src> Parser<'src> {
         };
 
         let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
-        Ok(ConDecl { name, fields, span })
+        Ok(ConDecl { doc: None, name, fields, span })
     }
 
     /// Parse constructor argument types.
@@ -1257,7 +1289,7 @@ impl<'src> Parser<'src> {
         self.expect(&TokenKind::DoubleColon)?;
         let ty = self.parse_type()?;
         let span = start.to(ty.span());
-        Ok(FieldDecl { name, ty, span })
+        Ok(FieldDecl { doc: None, name, ty, span })
     }
 
     /// Parse all deriving clauses (there may be multiple in a row).
@@ -1346,6 +1378,11 @@ impl<'src> Parser<'src> {
 
     /// Parse a type alias.
     fn parse_type_alias(&mut self) -> ParseResult<Decl> {
+        self.parse_type_alias_with_doc(None)
+    }
+
+    /// Parse a type alias with optional documentation.
+    fn parse_type_alias_with_doc(&mut self, doc: Option<DocComment>) -> ParseResult<Decl> {
         let start = self.current_span();
         self.expect(&TokenKind::Type)?;
 
@@ -1357,6 +1394,7 @@ impl<'src> Parser<'src> {
 
         let span = start.to(ty.span());
         Ok(Decl::TypeAlias(TypeAlias {
+            doc,
             name,
             params,
             ty,
@@ -1366,6 +1404,11 @@ impl<'src> Parser<'src> {
 
     /// Parse a newtype declaration.
     fn parse_newtype_decl(&mut self) -> ParseResult<Decl> {
+        self.parse_newtype_decl_with_doc(None)
+    }
+
+    /// Parse a newtype declaration with optional documentation.
+    fn parse_newtype_decl_with_doc(&mut self, doc: Option<DocComment>) -> ParseResult<Decl> {
         let start = self.current_span();
         self.expect(&TokenKind::Newtype)?;
 
@@ -1378,6 +1421,7 @@ impl<'src> Parser<'src> {
 
         let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
         Ok(Decl::Newtype(NewtypeDecl {
+            doc,
             name,
             params,
             constr,
@@ -1393,6 +1437,11 @@ impl<'src> Parser<'src> {
     ///   - `class (Show a, Typeable a) => LayoutClass layout a where ...`
     ///   - `class MonadState s m | m -> s where ...`
     fn parse_class_decl(&mut self) -> ParseResult<Decl> {
+        self.parse_class_decl_with_doc(None)
+    }
+
+    /// Parse a class declaration with optional documentation.
+    fn parse_class_decl_with_doc(&mut self, doc: Option<DocComment>) -> ParseResult<Decl> {
         let start = self.current_span();
         self.expect(&TokenKind::Class)?;
 
@@ -1420,19 +1469,21 @@ impl<'src> Parser<'src> {
 
         // The `where` clause is optional in Haskell
         // e.g., `class Foo a` with no methods
-        let methods = if self.eat(&TokenKind::Where) {
-            self.parse_class_methods()?
+        let (methods, assoc_types) = if self.eat(&TokenKind::Where) {
+            self.parse_class_body()?
         } else {
-            vec![]
+            (vec![], vec![])
         };
 
         let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
         Ok(Decl::ClassDecl(ClassDecl {
+            doc,
             context,
             name,
             params,
             fundeps,
             methods,
+            assoc_types,
             span,
         }))
     }
@@ -1607,14 +1658,171 @@ impl<'src> Parser<'src> {
         Ok(None)
     }
 
-    /// Parse class methods.
+    /// Parse class body (methods and associated type declarations).
+    /// Returns (methods, assoc_types).
+    fn parse_class_body(&mut self) -> ParseResult<(Vec<Decl>, Vec<AssocType>)> {
+        let mut methods = Vec::new();
+        let mut assoc_types = Vec::new();
+
+        if self.eat(&TokenKind::LBrace) {
+            // Explicit braces
+            if !self.check(&TokenKind::RBrace) {
+                self.parse_class_body_item(&mut methods, &mut assoc_types)?;
+                while self.eat(&TokenKind::Semi) {
+                    if self.check(&TokenKind::RBrace) {
+                        break;
+                    }
+                    self.parse_class_body_item(&mut methods, &mut assoc_types)?;
+                }
+            }
+            self.expect(&TokenKind::RBrace)?;
+        } else if self.eat(&TokenKind::VirtualLBrace) {
+            // Layout-based declarations
+            if !self.check(&TokenKind::VirtualRBrace) {
+                self.parse_class_body_item(&mut methods, &mut assoc_types)?;
+                while self.eat(&TokenKind::VirtualSemi) {
+                    if self.check(&TokenKind::VirtualRBrace) {
+                        break;
+                    }
+                    self.parse_class_body_item(&mut methods, &mut assoc_types)?;
+                }
+            }
+            self.eat(&TokenKind::VirtualRBrace);
+        }
+
+        // Merge multi-clause functions
+        methods = self.merge_function_clauses(methods);
+
+        Ok((methods, assoc_types))
+    }
+
+    /// Parse a single class body item (either a method or an associated type).
+    fn parse_class_body_item(
+        &mut self,
+        methods: &mut Vec<Decl>,
+        assoc_types: &mut Vec<AssocType>,
+    ) -> ParseResult<()> {
+        // Skip doc comments
+        self.skip_doc_comments();
+        self.eat(&TokenKind::VirtualSemi);
+
+        // Check for associated type: `type Name params`
+        if self.check(&TokenKind::Type) {
+            let assoc_type = self.parse_assoc_type_decl()?;
+            assoc_types.push(assoc_type);
+        } else {
+            let decl = self.parse_value_decl()?;
+            methods.push(decl);
+        }
+        Ok(())
+    }
+
+    /// Parse an associated type declaration within a class.
+    /// Example: `type Elem c` or `type Elem c :: * -> *` or `type Elem c = [c]`
+    fn parse_assoc_type_decl(&mut self) -> ParseResult<AssocType> {
+        let start = self.current_span();
+        self.expect(&TokenKind::Type)?;
+
+        let name = self.parse_conid()?;
+
+        // Parse type parameters
+        let mut params = Vec::new();
+        while self.check_ident() {
+            let tok = self.current().unwrap();
+            if let TokenKind::Ident(sym) = &tok.node.kind {
+                let param_name = Ident::new(*sym);
+                let span = tok.span;
+                self.advance();
+                params.push(TyVar { name: param_name, span });
+            }
+        }
+
+        // Parse optional kind signature: `:: * -> *`
+        let kind = if self.eat(&TokenKind::DoubleColon) {
+            Some(self.parse_kind()?)
+        } else {
+            None
+        };
+
+        // Parse optional default type: `= Type`
+        let default = if self.eat(&TokenKind::Eq) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+        let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+        Ok(AssocType {
+            name,
+            params,
+            kind,
+            default,
+            span,
+        })
+    }
+
+    /// Parse a kind (for kind signatures).
+    fn parse_kind(&mut self) -> ParseResult<Kind> {
+        let kind = self.parse_kind_atom()?;
+
+        // Check for arrow
+        if self.eat(&TokenKind::Arrow) {
+            let right = self.parse_kind()?;
+            Ok(Kind::Arrow(Box::new(kind), Box::new(right)))
+        } else {
+            Ok(kind)
+        }
+    }
+
+    /// Parse an atomic kind.
+    fn parse_kind_atom(&mut self) -> ParseResult<Kind> {
+        // Check for `*` or `Type`
+        if let Some(TokenKind::Operator(sym)) = self.current_kind() {
+            if sym.as_str() == "*" {
+                self.advance();
+                return Ok(Kind::Star);
+            }
+        }
+
+        if let Some(TokenKind::ConId(sym)) = self.current_kind() {
+            if sym.as_str() == "Type" {
+                self.advance();
+                return Ok(Kind::Star);
+            }
+            // Named kind variable
+            let name = Ident::new(*sym);
+            self.advance();
+            return Ok(Kind::Var(name));
+        }
+
+        // Parenthesized kind
+        if self.eat(&TokenKind::LParen) {
+            let kind = self.parse_kind()?;
+            self.expect(&TokenKind::RParen)?;
+            return Ok(kind);
+        }
+
+        Err(ParseError::Unexpected {
+            found: self.current().map(|t| t.node.kind.description().to_string())
+                .unwrap_or("end of file".to_string()),
+            expected: "kind (*, Type, or kind variable)".to_string(),
+            span: self.current_span(),
+        })
+    }
+
+    /// Parse class methods (legacy, for compatibility).
     fn parse_class_methods(&mut self) -> ParseResult<Vec<Decl>> {
-        // Simplified
+        // Simplified - just parse as local decls
         self.parse_local_decls()
     }
 
     /// Parse an instance declaration.
     fn parse_instance_decl(&mut self) -> ParseResult<Decl> {
+        self.parse_instance_decl_with_doc(None)
+    }
+
+    /// Parse an instance declaration with optional documentation.
+    fn parse_instance_decl_with_doc(&mut self, doc: Option<DocComment>) -> ParseResult<Decl> {
         let start = self.current_span();
         self.expect(&TokenKind::Instance)?;
 
@@ -1624,24 +1832,123 @@ impl<'src> Parser<'src> {
 
         // The `where` clause is optional in Haskell
         // e.g., `instance Message Resize` with no methods
-        let methods = if self.eat(&TokenKind::Where) {
-            self.parse_class_methods()?
+        let (methods, assoc_type_defs) = if self.eat(&TokenKind::Where) {
+            self.parse_instance_body()?
         } else {
-            vec![]
+            (vec![], vec![])
         };
 
         let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
         Ok(Decl::InstanceDecl(InstanceDecl {
+            doc,
             context,
             class,
             ty,
             methods,
+            assoc_type_defs,
             span,
         }))
     }
 
+    /// Parse instance body (methods and associated type definitions).
+    /// Returns (methods, assoc_type_defs).
+    fn parse_instance_body(&mut self) -> ParseResult<(Vec<Decl>, Vec<AssocTypeDef>)> {
+        let mut methods = Vec::new();
+        let mut assoc_type_defs = Vec::new();
+
+        if self.eat(&TokenKind::LBrace) {
+            // Explicit braces
+            if !self.check(&TokenKind::RBrace) {
+                self.parse_instance_body_item(&mut methods, &mut assoc_type_defs)?;
+                while self.eat(&TokenKind::Semi) {
+                    if self.check(&TokenKind::RBrace) {
+                        break;
+                    }
+                    self.parse_instance_body_item(&mut methods, &mut assoc_type_defs)?;
+                }
+            }
+            self.expect(&TokenKind::RBrace)?;
+        } else if self.eat(&TokenKind::VirtualLBrace) {
+            // Layout-based declarations
+            if !self.check(&TokenKind::VirtualRBrace) {
+                self.parse_instance_body_item(&mut methods, &mut assoc_type_defs)?;
+                while self.eat(&TokenKind::VirtualSemi) {
+                    if self.check(&TokenKind::VirtualRBrace) {
+                        break;
+                    }
+                    self.parse_instance_body_item(&mut methods, &mut assoc_type_defs)?;
+                }
+            }
+            self.eat(&TokenKind::VirtualRBrace);
+        }
+
+        // Merge multi-clause functions
+        methods = self.merge_function_clauses(methods);
+
+        Ok((methods, assoc_type_defs))
+    }
+
+    /// Parse a single instance body item (either a method or an associated type definition).
+    fn parse_instance_body_item(
+        &mut self,
+        methods: &mut Vec<Decl>,
+        assoc_type_defs: &mut Vec<AssocTypeDef>,
+    ) -> ParseResult<()> {
+        // Skip doc comments
+        self.skip_doc_comments();
+        self.eat(&TokenKind::VirtualSemi);
+
+        // Check for associated type definition: `type Name args = rhs`
+        if self.check(&TokenKind::Type) {
+            let assoc_type_def = self.parse_assoc_type_def()?;
+            assoc_type_defs.push(assoc_type_def);
+        } else {
+            let decl = self.parse_value_decl()?;
+            methods.push(decl);
+        }
+        Ok(())
+    }
+
+    /// Parse an associated type definition within an instance.
+    /// Example: `type Elem [a] = a`
+    fn parse_assoc_type_def(&mut self) -> ParseResult<AssocTypeDef> {
+        let start = self.current_span();
+        self.expect(&TokenKind::Type)?;
+
+        let name = self.parse_conid()?;
+
+        // Parse type arguments (the patterns for the associated type)
+        let mut args = Vec::new();
+        while !self.check(&TokenKind::Eq) && !self.at_eof() {
+            // Stop if we see operators or other delimiters
+            if let Some(TokenKind::Semi | TokenKind::VirtualSemi | TokenKind::RBrace | TokenKind::VirtualRBrace) = self.current_kind() {
+                break;
+            }
+            let arg = self.parse_atype()?;
+            args.push(arg);
+        }
+
+        self.expect(&TokenKind::Eq)?;
+
+        let rhs = self.parse_type()?;
+
+        let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+        Ok(AssocTypeDef {
+            name,
+            args,
+            rhs,
+            span,
+        })
+    }
+
     /// Parse a foreign declaration.
     fn parse_foreign_decl(&mut self) -> ParseResult<Decl> {
+        self.parse_foreign_decl_with_doc(None)
+    }
+
+    /// Parse a foreign declaration with optional documentation.
+    #[allow(unused_variables)]
+    fn parse_foreign_decl_with_doc(&mut self, doc: Option<DocComment>) -> ParseResult<Decl> {
         let start = self.current_span();
         self.expect(&TokenKind::Foreign)?;
 

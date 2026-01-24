@@ -992,12 +992,25 @@ impl TyCtxt {
             })
             .collect();
 
+        // Convert associated type declarations
+        let assoc_types = class
+            .assoc_types
+            .iter()
+            .map(|at| crate::env::AssocTypeInfo {
+                name: at.name,
+                params: at.params.clone(),
+                kind: at.kind.clone(),
+                default: at.default.clone(),
+            })
+            .collect();
+
         let info = ClassInfo {
             name: class.name,
             params: class.params.clone(),
             fundeps,
             supers: class.supers.clone(),
             methods: methods.clone(),
+            assoc_types,
         };
 
         self.env.register_class(info);
@@ -1026,10 +1039,22 @@ impl TyCtxt {
             .map(|m| (m.name, m.id))
             .collect();
 
+        // Convert associated type implementations
+        let assoc_type_impls = instance
+            .assoc_type_impls
+            .iter()
+            .map(|impl_| crate::env::AssocTypeImpl {
+                name: impl_.name,
+                args: impl_.args.clone(),
+                rhs: impl_.rhs.clone(),
+            })
+            .collect();
+
         let info = InstanceInfo {
             class: instance.class,
             types: instance.types.clone(),
             methods,
+            assoc_type_impls,
         };
 
         self.env.register_instance(info);

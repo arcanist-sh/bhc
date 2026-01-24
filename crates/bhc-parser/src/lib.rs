@@ -204,6 +204,81 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// Collect doc comments, returning them as a `DocComment` if present.
+    ///
+    /// This collects all consecutive doc comments and merges them into a single
+    /// documentation string. Supports both line comments (`-- |`) and block
+    /// comments (`{- | ... -}`).
+    fn collect_doc_comments(&mut self) -> Option<bhc_ast::DocComment> {
+        let mut texts = Vec::new();
+        let mut first_span: Option<Span> = None;
+        let mut last_span: Option<Span> = None;
+        let mut kind = bhc_ast::DocKind::Preceding;
+
+        while let Some(tok) = self.current() {
+            match &tok.node.kind {
+                TokenKind::DocCommentLine(text) => {
+                    let span = tok.span;
+                    let text = text.clone();
+                    self.advance();
+
+                    // Check if it's a trailing comment (starts with ^)
+                    let trimmed = text.trim_start();
+                    let (actual_text, doc_kind) = if trimmed.starts_with('^') {
+                        (trimmed.strip_prefix('^').unwrap_or(trimmed).trim().to_string(), bhc_ast::DocKind::Trailing)
+                    } else if trimmed.starts_with('|') {
+                        (trimmed.strip_prefix('|').unwrap_or(trimmed).trim().to_string(), bhc_ast::DocKind::Preceding)
+                    } else {
+                        (trimmed.to_string(), bhc_ast::DocKind::Preceding)
+                    };
+
+                    if first_span.is_none() {
+                        first_span = Some(span);
+                        kind = doc_kind;
+                    }
+                    last_span = Some(span);
+                    texts.push(actual_text);
+                }
+                TokenKind::DocCommentBlock(text) => {
+                    let span = tok.span;
+                    let text = text.clone();
+                    self.advance();
+
+                    // Check if it's a trailing comment (starts with ^)
+                    let trimmed = text.trim();
+                    let (actual_text, doc_kind) = if trimmed.starts_with('^') {
+                        (trimmed.strip_prefix('^').unwrap_or(trimmed).trim().to_string(), bhc_ast::DocKind::Trailing)
+                    } else if trimmed.starts_with('|') {
+                        (trimmed.strip_prefix('|').unwrap_or(trimmed).trim().to_string(), bhc_ast::DocKind::Preceding)
+                    } else {
+                        (trimmed.to_string(), bhc_ast::DocKind::Preceding)
+                    };
+
+                    if first_span.is_none() {
+                        first_span = Some(span);
+                        kind = doc_kind;
+                    }
+                    last_span = Some(span);
+                    texts.push(actual_text);
+                }
+                _ => break,
+            }
+        }
+
+        if texts.is_empty() {
+            return None;
+        }
+
+        let combined_text = texts.join("\n");
+        let span = first_span.unwrap().to(last_span.unwrap());
+
+        Some(bhc_ast::DocComment {
+            text: combined_text,
+            kind,
+            span,
+        })
+    }
+
     /// Expect a token of the given kind.
     fn expect(&mut self, kind: &TokenKind) -> ParseResult<Spanned<Token>> {
         if self.check(kind) {
@@ -1341,6 +1416,75 @@ class ExtensionClass a where
         assert!(diags2.is_empty(), "Class with MINIMAL pragma should parse");
         let module2 = module2.expect("Should parse");
         assert_eq!(module2.decls.len(), 1);
+    }
+
+    #[test]
+    fn test_class_with_associated_type() {
+        // Test class with associated type declaration
+        let src = r#"
+class Collection c where
+    type Elem c
+    empty :: c
+    insert :: Elem c -> c -> c
+"#;
+        let (module, diags) = parse_module(src, FileId::new(0));
+        for d in &diags {
+            eprintln!("Error: {:?}", d);
+        }
+        assert!(diags.is_empty(), "Class with associated type should parse");
+        let module = module.expect("Should parse");
+        assert_eq!(module.decls.len(), 1);
+        if let bhc_ast::Decl::ClassDecl(class) = &module.decls[0] {
+            assert_eq!(class.name.name.as_str(), "Collection");
+            assert_eq!(class.assoc_types.len(), 1);
+            assert_eq!(class.assoc_types[0].name.name.as_str(), "Elem");
+        } else {
+            panic!("Expected class declaration");
+        }
+    }
+
+    #[test]
+    fn test_class_with_associated_type_default() {
+        // Test class with associated type with default
+        let src = r#"
+class Container c where
+    type Element c = Int
+    size :: c -> Int
+"#;
+        let (module, diags) = parse_module(src, FileId::new(0));
+        for d in &diags {
+            eprintln!("Error: {:?}", d);
+        }
+        assert!(diags.is_empty(), "Class with associated type default should parse");
+        let module = module.expect("Should parse");
+        if let bhc_ast::Decl::ClassDecl(class) = &module.decls[0] {
+            assert_eq!(class.assoc_types.len(), 1);
+            assert!(class.assoc_types[0].default.is_some());
+        } else {
+            panic!("Expected class declaration");
+        }
+    }
+
+    #[test]
+    fn test_instance_with_associated_type_def() {
+        // Test instance with associated type definition
+        let src = r#"
+instance Collection [a] where
+    type Elem [a] = a
+    empty = []
+"#;
+        let (module, diags) = parse_module(src, FileId::new(0));
+        for d in &diags {
+            eprintln!("Error: {:?}", d);
+        }
+        assert!(diags.is_empty(), "Instance with associated type should parse");
+        let module = module.expect("Should parse");
+        if let bhc_ast::Decl::InstanceDecl(inst) = &module.decls[0] {
+            assert_eq!(inst.assoc_type_defs.len(), 1);
+            assert_eq!(inst.assoc_type_defs[0].name.name.as_str(), "Elem");
+        } else {
+            panic!("Expected instance declaration");
+        }
     }
 
     #[test]

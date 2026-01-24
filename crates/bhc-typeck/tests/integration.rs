@@ -951,6 +951,7 @@ fn test_class_declaration() {
             span: Span::DUMMY,
         }],
         defaults: vec![],
+        assoc_types: vec![],
         span: Span::DUMMY,
     };
 
@@ -1003,6 +1004,7 @@ fn test_class_with_multiple_methods() {
             },
         ],
         defaults: vec![],
+        assoc_types: vec![],
         span: Span::DUMMY,
     };
 
@@ -1037,6 +1039,7 @@ fn test_instance_declaration() {
             span: Span::DUMMY,
         }],
         defaults: vec![],
+        assoc_types: vec![],
         span: Span::DUMMY,
     };
 
@@ -1066,6 +1069,7 @@ fn test_instance_declaration() {
         types: vec![int_ty],
         constraints: vec![],
         methods: vec![myeq_impl],
+        assoc_type_impls: vec![],
         span: Span::DUMMY,
     };
 
@@ -1114,6 +1118,7 @@ fn test_instance_with_multiple_methods() {
             },
         ],
         defaults: vec![],
+        assoc_types: vec![],
         span: Span::DUMMY,
     };
 
@@ -1155,6 +1160,7 @@ fn test_instance_with_multiple_methods() {
         types: vec![int_ty],
         constraints: vec![],
         methods: vec![is_zero_impl, is_positive_impl],
+        assoc_type_impls: vec![],
         span: Span::DUMMY,
     };
 
@@ -1197,6 +1203,7 @@ fn test_functional_dependency_type_inference() {
             span: Span::DUMMY,
         }],
         defaults: vec![],
+        assoc_types: vec![],
         span: Span::DUMMY,
     };
 
@@ -1222,6 +1229,7 @@ fn test_functional_dependency_type_inference() {
         types: vec![int_ty, string_ty],
         constraints: vec![],
         methods: vec![convert_impl],
+        assoc_type_impls: vec![],
         span: Span::DUMMY,
     };
 
@@ -1285,6 +1293,7 @@ fn test_fundep_bidirectional() {
             },
         ],
         defaults: vec![],
+        assoc_types: vec![],
         span: Span::DUMMY,
     };
 

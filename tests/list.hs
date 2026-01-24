@@ -1,0 +1,1 @@
+main = print (length [1,2,3])

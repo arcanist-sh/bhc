@@ -1069,6 +1069,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// For now, we detect the type at codegen time and call the appropriate
     /// print function. This is a simplification - real Haskell uses type classes.
     fn lower_builtin_print(&mut self, val_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Get the type of the expression to decide how to print
+        let expr_ty = val_expr.ty();
+
         let val = self.lower_expr(val_expr)?.ok_or_else(|| {
             CodegenError::Internal("print: value has no result".to_string())
         })?;
@@ -1106,16 +1109,50 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .map_err(|e| CodegenError::Internal(format!("failed to call print_double: {:?}", e)))?;
             }
             BasicValueEnum::PointerValue(p) => {
-                // Could be a string, ADT, or boxed value
-                // Try to detect ADT (Bool, Maybe, etc.) by checking tag
-                // For now, assume it's a string if it's a pointer
-                let print_fn = self.functions.get(&VarId::new(1002)).ok_or_else(|| {
-                    CodegenError::Internal("bhc_print_string_ln not declared".to_string())
-                })?;
+                // Pointer could be a boxed value from closure call, string, or ADT.
+                // Use the expression's type to decide how to print.
+                if self.is_int_type(&expr_ty) || self.is_type_variable_or_error(&expr_ty) {
+                    // Boxed integer (or polymorphic type that might be int) - unbox and print as int.
+                    // For type variables from closures, we assume int since that's the most common case.
+                    // This is safe because boxed ints use int_to_ptr which stores the value in the
+                    // pointer bits, not as an actual memory reference.
+                    let int_val = self.builder()
+                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_int")
+                        .map_err(|e| CodegenError::Internal(format!("failed to unbox int: {:?}", e)))?;
 
-                self.builder()
-                    .build_call(*print_fn, &[p.into()], "")
-                    .map_err(|e| CodegenError::Internal(format!("failed to call print_string: {:?}", e)))?;
+                    let print_fn = self.functions.get(&VarId::new(1000)).ok_or_else(|| {
+                        CodegenError::Internal("bhc_print_int_ln not declared".to_string())
+                    })?;
+
+                    self.builder()
+                        .build_call(*print_fn, &[int_val.into()], "")
+                        .map_err(|e| CodegenError::Internal(format!("failed to call print_int: {:?}", e)))?;
+                } else if self.is_float_type(&expr_ty) {
+                    // Boxed float - unbox and print as double
+                    let bits = self.builder()
+                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_float_bits")
+                        .map_err(|e| CodegenError::Internal(format!("failed to unbox float: {:?}", e)))?;
+                    let float_val = self.builder()
+                        .build_bit_cast(bits, self.type_mapper().f64_type(), "to_double")
+                        .map_err(|e| CodegenError::Internal(format!("failed to cast to double: {:?}", e)))?;
+
+                    let print_fn = self.functions.get(&VarId::new(1001)).ok_or_else(|| {
+                        CodegenError::Internal("bhc_print_double_ln not declared".to_string())
+                    })?;
+
+                    self.builder()
+                        .build_call(*print_fn, &[float_val.into()], "")
+                        .map_err(|e| CodegenError::Internal(format!("failed to call print_double: {:?}", e)))?;
+                } else {
+                    // Assume it's a string or other pointer type
+                    let print_fn = self.functions.get(&VarId::new(1002)).ok_or_else(|| {
+                        CodegenError::Internal("bhc_print_string_ln not declared".to_string())
+                    })?;
+
+                    self.builder()
+                        .build_call(*print_fn, &[p.into()], "")
+                        .map_err(|e| CodegenError::Internal(format!("failed to call print_string: {:?}", e)))?;
+                }
             }
             _ => {
                 return Err(CodegenError::Unsupported(
@@ -1126,6 +1163,53 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Return unit
         Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+    }
+
+    /// Check if a type is an integer type.
+    fn is_int_type(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Con(con) => {
+                let name = con.name.as_str();
+                matches!(name, "Int" | "Int#" | "Int64" | "Int32" | "Integer" | "Word" | "Word64" | "Word32")
+            }
+            Ty::Prim(prim) => {
+                use bhc_types::PrimTy;
+                matches!(prim, PrimTy::I32 | PrimTy::I64 | PrimTy::U32 | PrimTy::U64)
+            }
+            Ty::App(f, _) => self.is_int_type(f),
+            Ty::Forall(_, body) => self.is_int_type(body),
+            _ => false,
+        }
+    }
+
+    /// Check if a type is a float type.
+    fn is_float_type(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Con(con) => {
+                let name = con.name.as_str();
+                matches!(name, "Float" | "Float#" | "Double" | "Double#")
+            }
+            Ty::Prim(prim) => {
+                use bhc_types::PrimTy;
+                matches!(prim, PrimTy::F32 | PrimTy::F64)
+            }
+            Ty::App(f, _) => self.is_float_type(f),
+            Ty::Forall(_, body) => self.is_float_type(body),
+            _ => false,
+        }
+    }
+
+    /// Check if a type is a type variable (polymorphic) or error type.
+    /// We treat error types the same as type variables since we don't know
+    /// the concrete type and should default to treating it as a potential integer.
+    fn is_type_variable_or_error(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Var(_) => true,
+            Ty::Error => true,  // Error type might be unresolved - treat as unknown
+            Ty::App(f, _) => self.is_type_variable_or_error(f),
+            Ty::Forall(_, body) => self.is_type_variable_or_error(body),
+            _ => false,
+        }
     }
 
     /// Lower `getLine` - read a line from stdin.
@@ -1661,6 +1745,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Expr::Lit(lit, _ty, _span) => self.lower_literal(lit).map(Some),
 
             Expr::Var(var, _span) => {
+                let name = var.name.as_str();
+
+                // First, check if this is a nullary constructor (like [], True, False, Nothing)
+                if let Some((tag, arity)) = self.constructor_info(name) {
+                    if arity == 0 {
+                        // Nullary constructor - allocate ADT value with just a tag
+                        return self.lower_constructor_application(tag, 0, &[]);
+                    }
+                    // Non-nullary constructor referenced without args - return as closure/function
+                    // This case is handled below when the constructor is used in an application
+                }
+
                 // Look up the variable in the environment
                 if let Some(val) = self.env.get(&var.id) {
                     Ok(Some(*val))
@@ -1670,7 +1766,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 } else {
                     Err(CodegenError::Internal(format!(
                         "unbound variable: {}",
-                        var.name.as_str()
+                        name
                     )))
                 }
             }

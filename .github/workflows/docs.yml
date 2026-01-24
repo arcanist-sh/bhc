@@ -37,28 +37,28 @@ jobs:
       - name: Build bhc-docs
         run: cargo build -p bhc-docs --release
 
-      - name: Checkout website repo
+      - name: Checkout docs repo
         uses: actions/checkout@v4
         with:
-          repository: raskell-io/bhc.raskell.io
-          path: website
+          repository: raskell-io/bhc.raskell.io-docs
+          path: docs-site
           token: ${{ secrets.DOCS_DEPLOY_TOKEN2 }}
 
       - name: Generate API docs
         run: |
-          mkdir -p website/static/docs/api
+          mkdir -p docs-site/static/api
           ./target/release/bhc-docs build stdlib \
-            -o website/static/docs/api \
+            -o docs-site/static/api \
             --base-url "/docs/api" \
             --version "${{ github.ref_name }}" \
             --source-url "https://github.com/raskell-io/bhc/blob/${{ github.sha }}"
 
       - name: Commit and push docs
         run: |
-          cd website
+          cd docs-site
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add static/docs/api
+          git add static/api
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else

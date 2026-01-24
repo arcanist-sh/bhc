@@ -972,6 +972,7 @@ impl<'src> Parser<'src> {
 
     /// Check if the current token starts an infix operator for bindings.
     /// This includes operators like `-->` and backtick-quoted identifiers like `` `elem` ``.
+    #[allow(dead_code)]
     fn is_infix_op_start(&self) -> bool {
         match self.current_kind() {
             Some(TokenKind::Operator(_)) | Some(TokenKind::ConOperator(_)) => true,
@@ -1095,6 +1096,7 @@ impl<'src> Parser<'src> {
     }
 
     /// Parse a data declaration.
+    #[allow(dead_code)]
     fn parse_data_decl(&mut self) -> ParseResult<Decl> {
         self.parse_data_decl_with_doc(None)
     }
@@ -1391,6 +1393,7 @@ impl<'src> Parser<'src> {
     }
 
     /// Parse a type alias.
+    #[allow(dead_code)]
     fn parse_type_alias(&mut self) -> ParseResult<Decl> {
         self.parse_type_alias_with_doc(None)
     }
@@ -1417,6 +1420,7 @@ impl<'src> Parser<'src> {
     }
 
     /// Parse a newtype declaration.
+    #[allow(dead_code)]
     fn parse_newtype_decl(&mut self) -> ParseResult<Decl> {
         self.parse_newtype_decl_with_doc(None)
     }
@@ -1450,6 +1454,7 @@ impl<'src> Parser<'src> {
     ///   - `class Eq a where ...`
     ///   - `class (Show a, Typeable a) => LayoutClass layout a where ...`
     ///   - `class MonadState s m | m -> s where ...`
+    #[allow(dead_code)]
     fn parse_class_decl(&mut self) -> ParseResult<Decl> {
         self.parse_class_decl_with_doc(None)
     }
@@ -1825,12 +1830,14 @@ impl<'src> Parser<'src> {
     }
 
     /// Parse class methods (legacy, for compatibility).
+    #[allow(dead_code)]
     fn parse_class_methods(&mut self) -> ParseResult<Vec<Decl>> {
         // Simplified - just parse as local decls
         self.parse_local_decls()
     }
 
     /// Parse an instance declaration.
+    #[allow(dead_code)]
     fn parse_instance_decl(&mut self) -> ParseResult<Decl> {
         self.parse_instance_decl_with_doc(None)
     }
@@ -1956,6 +1963,7 @@ impl<'src> Parser<'src> {
     }
 
     /// Parse a foreign declaration.
+    #[allow(dead_code)]
     fn parse_foreign_decl(&mut self) -> ParseResult<Decl> {
         self.parse_foreign_decl_with_doc(None)
     }

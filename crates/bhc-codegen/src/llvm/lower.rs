@@ -3484,25 +3484,61 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower case alternatives (shared logic for RHS generation).
+    ///
+    /// Uses a two-pass approach to avoid inserting instructions after terminators:
+    /// 1. First pass: lower all RHS expressions and collect (value, block) pairs
+    /// 2. Second pass: coerce values if needed, then build branches
     fn lower_case_alternatives(
         &mut self,
         alts: &[Alt],
         blocks: &[inkwell::basic_block::BasicBlock<'ctx>],
         merge_block: inkwell::basic_block::BasicBlock<'ctx>,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let mut phi_values = Vec::new();
+        // Pass 1: Lower all expressions and collect values WITHOUT building branches
+        let mut collected: Vec<(Option<BasicValueEnum<'ctx>>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
 
         for (i, alt) in alts.iter().enumerate() {
             self.builder().position_at_end(blocks[i]);
 
-            if let Some(val) = self.lower_expr(&alt.rhs)? {
-                // Get the ACTUAL current block (lower_expr may have created nested blocks)
-                let current_block = self.builder().get_insert_block()
-                    .ok_or_else(|| CodegenError::Internal("no current block after lower_expr".to_string()))?;
-                phi_values.push((val, current_block));
+            let result = self.lower_expr(&alt.rhs)?;
+
+            // Get the ACTUAL current block (lower_expr may have created nested blocks)
+            let current_block = self.builder().get_insert_block()
+                .ok_or_else(|| CodegenError::Internal("no current block after lower_expr".to_string()))?;
+
+            collected.push((result, current_block));
+        }
+
+        // Determine target type from first non-None value
+        let target_type = collected.iter()
+            .find_map(|(val, _)| val.map(|v| v.get_type()));
+
+        // Pass 2: Coerce values and build branches
+        let mut phi_values: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+
+        for (result, block) in collected {
+            // Position at the end of the block where the value was produced
+            self.builder().position_at_end(block);
+
+            if let Some(val) = result {
+                // Coerce if needed (BEFORE building the branch)
+                let final_val = if let Some(target) = target_type {
+                    if val.get_type() != target {
+                        self.coerce_to_type(val, target)?
+                    } else {
+                        val
+                    }
+                } else {
+                    val
+                };
+
+                // Get the current block
+                let final_block = self.builder().get_insert_block()
+                    .ok_or_else(|| CodegenError::Internal("no current block after coercion".to_string()))?;
+                phi_values.push((final_val, final_block));
             }
 
-            // Jump to merge block
+            // NOW build the branch (after any coercion)
             self.builder()
                 .build_unconditional_branch(merge_block)
                 .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -3514,36 +3550,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if phi_values.is_empty() {
             Ok(None)
         } else {
-            let target_type = phi_values[0].0.get_type();
-
-            // Coerce all values to the target type (first value's type)
-            let mut coerced_values: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
-
-            for (val, block) in &phi_values {
-                if val.get_type() == target_type {
-                    coerced_values.push((*val, *block));
-                } else {
-                    // Need to insert coercion in the source block, before the branch
-                    let terminator = block.get_terminator();
-                    if let Some(term) = terminator {
-                        self.builder().position_before(&term);
-                        let coerced = self.coerce_to_type(*val, target_type)?;
-                        coerced_values.push((coerced, *block));
-                    } else {
-                        coerced_values.push((*val, *block));
-                    }
-                }
-            }
-
-            // Position back at merge block for the PHI
-            self.builder().position_at_end(merge_block);
-
+            let phi_type = phi_values[0].0.get_type();
             let phi = self
                 .builder()
-                .build_phi(target_type, "case_result")
+                .build_phi(phi_type, "case_result")
                 .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
 
-            for (val, block) in &coerced_values {
+            for (val, block) in &phi_values {
                 phi.add_incoming(&[(val, *block)]);
             }
 
@@ -3553,6 +3566,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower a Bool case expression when the scrutinee is an integer (from comparison).
     /// True is represented as non-zero (typically 1), False as 0.
+    ///
+    /// Uses a two-pass approach to avoid inserting instructions after terminators.
     fn lower_case_bool_as_int(
         &mut self,
         scrut_val: BasicValueEnum<'ctx>,
@@ -3611,9 +3626,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_conditional_branch(is_true, true_block, false_block)
             .map_err(|e| CodegenError::Internal(format!("failed to build cond branch: {:?}", e)))?;
 
-        let mut phi_values = Vec::new();
-
-        // Generate code for True branch
+        // Pass 1: Lower both branches and collect values WITHOUT building terminators
+        // True branch
         self.builder().position_at_end(true_block);
         let true_rhs = if let Some(alt) = true_alt {
             self.lower_expr(&alt.rhs)?
@@ -3622,17 +3636,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         } else {
             None
         };
-        if let Some(val) = true_rhs {
-            // Get the ACTUAL current block (lower_expr may have created nested blocks)
-            let current_block = self.builder().get_insert_block()
-                .ok_or_else(|| CodegenError::Internal("no current block after lower_expr".to_string()))?;
-            phi_values.push((val, current_block));
-        }
-        self.builder()
-            .build_unconditional_branch(merge_block)
-            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+        let true_end_block = self.builder().get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no current block after lower_expr".to_string()))?;
 
-        // Generate code for False branch
+        // False branch
         self.builder().position_at_end(false_block);
         let false_rhs = if let Some(alt) = false_alt {
             self.lower_expr(&alt.rhs)?
@@ -3641,11 +3648,51 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         } else {
             None
         };
+        let false_end_block = self.builder().get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no current block after lower_expr".to_string()))?;
+
+        // Determine target type from the first available value
+        let target_type = true_rhs.map(|v| v.get_type())
+            .or_else(|| false_rhs.map(|v| v.get_type()));
+
+        // Pass 2: Coerce values and build branches
+        let mut phi_values: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+
+        // True branch: coerce and terminate
+        self.builder().position_at_end(true_end_block);
+        if let Some(val) = true_rhs {
+            let final_val = if let Some(target) = target_type {
+                if val.get_type() != target {
+                    self.coerce_to_type(val, target)?
+                } else {
+                    val
+                }
+            } else {
+                val
+            };
+            let final_block = self.builder().get_insert_block()
+                .ok_or_else(|| CodegenError::Internal("no current block after coercion".to_string()))?;
+            phi_values.push((final_val, final_block));
+        }
+        self.builder()
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // False branch: coerce and terminate
+        self.builder().position_at_end(false_end_block);
         if let Some(val) = false_rhs {
-            // Get the ACTUAL current block (lower_expr may have created nested blocks)
-            let current_block = self.builder().get_insert_block()
-                .ok_or_else(|| CodegenError::Internal("no current block after lower_expr".to_string()))?;
-            phi_values.push((val, current_block));
+            let final_val = if let Some(target) = target_type {
+                if val.get_type() != target {
+                    self.coerce_to_type(val, target)?
+                } else {
+                    val
+                }
+            } else {
+                val
+            };
+            let final_block = self.builder().get_insert_block()
+                .ok_or_else(|| CodegenError::Internal("no current block after coercion".to_string()))?;
+            phi_values.push((final_val, final_block));
         }
         self.builder()
             .build_unconditional_branch(merge_block)
@@ -3657,35 +3704,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if phi_values.is_empty() {
             Ok(None)
         } else {
-            let target_type = phi_values[0].0.get_type();
-
-            // Coerce all values to the target type (first value's type)
-            let mut coerced_values: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
-
-            for (val, block) in &phi_values {
-                if val.get_type() == target_type {
-                    coerced_values.push((*val, *block));
-                } else {
-                    let terminator = block.get_terminator();
-                    if let Some(term) = terminator {
-                        self.builder().position_before(&term);
-                        let coerced = self.coerce_to_type(*val, target_type)?;
-                        coerced_values.push((coerced, *block));
-                    } else {
-                        coerced_values.push((*val, *block));
-                    }
-                }
-            }
-
-            // Position back at merge block for the PHI
-            self.builder().position_at_end(merge_block);
+            let phi_type = phi_values[0].0.get_type();
 
             let phi = self
                 .builder()
-                .build_phi(target_type, "bool_result")
+                .build_phi(phi_type, "bool_result")
                 .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
 
-            for (val, block) in &coerced_values {
+            for (val, block) in &phi_values {
                 phi.add_incoming(&[(val, *block)]);
             }
 
@@ -3694,6 +3720,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower case alternatives with DataCon patterns (extracts fields and binds variables).
+    ///
+    /// Uses a two-pass approach:
+    /// 1. First pass: lower all RHS expressions and collect (value, block) pairs WITHOUT building branches
+    /// 2. Second pass: determine target type, coerce values if needed, then build branches
     fn lower_case_datacon_alternatives(
         &mut self,
         alts: &[Alt],
@@ -3702,7 +3732,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         scrut_ptr: PointerValue<'ctx>,
         datacon_info: &[Option<&DataCon>],
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let mut phi_values = Vec::new();
+        // Pass 1: Lower all expressions and collect values WITHOUT building branches
+        // We collect (Option<value>, block) so we know which block each value came from
+        let mut collected: Vec<(Option<BasicValueEnum<'ctx>>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
 
         for (i, alt) in alts.iter().enumerate() {
             self.builder().position_at_end(blocks[i]);
@@ -3731,14 +3763,43 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.env.remove(&binder.id);
             }
 
+            // Get the ACTUAL current block (lower_expr may have created nested blocks)
+            let current_block = self.builder().get_insert_block()
+                .ok_or_else(|| CodegenError::Internal("no current block after lower_expr".to_string()))?;
+
+            collected.push((result, current_block));
+        }
+
+        // Determine target type from first non-None value
+        let target_type = collected.iter()
+            .find_map(|(val, _)| val.map(|v| v.get_type()));
+
+        // Pass 2: Coerce values and build branches
+        let mut phi_values: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+
+        for (result, block) in collected {
+            // Position at the end of the block where the value was produced
+            self.builder().position_at_end(block);
+
             if let Some(val) = result {
-                // Get the ACTUAL current block (lower_expr may have created nested blocks)
-                let current_block = self.builder().get_insert_block()
-                    .ok_or_else(|| CodegenError::Internal("no current block after lower_expr".to_string()))?;
-                phi_values.push((val, current_block));
+                // Coerce if needed (BEFORE building the branch)
+                let final_val = if let Some(target) = target_type {
+                    if val.get_type() != target {
+                        self.coerce_to_type(val, target)?
+                    } else {
+                        val
+                    }
+                } else {
+                    val
+                };
+
+                // Get the current block (coercion doesn't change it)
+                let final_block = self.builder().get_insert_block()
+                    .ok_or_else(|| CodegenError::Internal("no current block after coercion".to_string()))?;
+                phi_values.push((final_val, final_block));
             }
 
-            // Jump to merge block
+            // NOW build the branch (after any coercion)
             self.builder()
                 .build_unconditional_branch(merge_block)
                 .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -3750,39 +3811,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if phi_values.is_empty() {
             Ok(None)
         } else {
-            let target_type = phi_values[0].0.get_type();
-
-            // Coerce all values to the target type (first value's type)
-            // This handles cases like: Nothing -> 0 (i64) vs Just x -> x (ptr)
-            let mut coerced_values: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
-
-            for (val, block) in &phi_values {
-                if val.get_type() == target_type {
-                    coerced_values.push((*val, *block));
-                } else {
-                    // Need to insert coercion in the source block, before the branch
-                    // Position just before the terminator
-                    let terminator = block.get_terminator();
-                    if let Some(term) = terminator {
-                        self.builder().position_before(&term);
-                        let coerced = self.coerce_to_type(*val, target_type)?;
-                        coerced_values.push((coerced, *block));
-                    } else {
-                        // No terminator - this shouldn't happen, but handle gracefully
-                        coerced_values.push((*val, *block));
-                    }
-                }
-            }
-
-            // Position back at merge block for the PHI
-            self.builder().position_at_end(merge_block);
-
+            let phi_type = phi_values[0].0.get_type();
             let phi = self
                 .builder()
-                .build_phi(target_type, "case_result")
+                .build_phi(phi_type, "case_result")
                 .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
 
-            for (val, block) in &coerced_values {
+            for (val, block) in &phi_values {
                 phi.add_incoming(&[(val, *block)]);
             }
 

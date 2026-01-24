@@ -708,6 +708,7 @@ impl<'src> Parser<'src> {
     }
 
     /// Convert an expression to a pattern (for generators).
+    #[allow(dead_code)]
     fn expr_to_pat(&self, expr: Expr) -> ParseResult<Pat> {
         match expr {
             Expr::Var(id, span) => Ok(Pat::Var(id, span)),

@@ -104,58 +104,173 @@ foreign import ccall "bhc_text_singleton" singleton :: Char -> Text
 foreign import ccall "bhc_text_eq" eqText :: Text -> Text -> Bool
 foreign import ccall "bhc_text_compare" compareText :: Text -> Text -> Ordering
 
+-- ------------------------------------------------------------
 -- Basic interface
+-- ------------------------------------------------------------
+
+-- | /O(n)/. Prepend a character to a 'Text'.
+--
+-- >>> cons 'H' (pack "ello")
+-- "Hello"
 cons :: Char -> Text -> Text
 cons c t = singleton c `append` t
 
+-- | /O(n)/. Append a character to a 'Text'.
+--
+-- >>> snoc (pack "Hell") 'o'
+-- "Hello"
 snoc :: Text -> Char -> Text
 snoc t c = t `append` singleton c
 
+-- | /O(n)/. Append two 'Text' values.
+--
+-- >>> append (pack "Hello") (pack " World")
+-- "Hello World"
 foreign import ccall "bhc_text_append" append :: Text -> Text -> Text
 
+-- | /O(1)/. Decompose a 'Text' into its first character and the rest.
+-- Returns 'Nothing' if the 'Text' is empty.
+--
+-- >>> uncons (pack "Hello")
+-- Just ('H',"ello")
+-- >>> uncons empty
+-- Nothing
 uncons :: Text -> Maybe (Char, Text)
 uncons t
     | null t    = Nothing
     | otherwise = Just (head t, tail t)
 
+-- | /O(1)/. Decompose a 'Text' into its initial portion and last character.
+-- Returns 'Nothing' if the 'Text' is empty.
+--
+-- >>> unsnoc (pack "Hello")
+-- Just ("Hell",'o')
 unsnoc :: Text -> Maybe (Text, Char)
 unsnoc t
     | null t    = Nothing
     | otherwise = Just (init t, last t)
 
+-- | /O(1)/. Extract the first character of a 'Text'.
+--
+-- __Warning__: Partial function. Throws an error on empty 'Text'.
+--
+-- >>> head (pack "Hello")
+-- 'H'
 foreign import ccall "bhc_text_head" head :: Text -> Char
+
+-- | /O(1)/. Extract the last character of a 'Text'.
+--
+-- __Warning__: Partial function. Throws an error on empty 'Text'.
+--
+-- >>> last (pack "Hello")
+-- 'o'
 foreign import ccall "bhc_text_last" last :: Text -> Char
+
+-- | /O(1)/. Return all characters after the head of a 'Text'.
+--
+-- __Warning__: Partial function. Throws an error on empty 'Text'.
+--
+-- >>> tail (pack "Hello")
+-- "ello"
 foreign import ccall "bhc_text_tail" tail :: Text -> Text
+
+-- | /O(1)/. Return all characters except the last of a 'Text'.
+--
+-- __Warning__: Partial function. Throws an error on empty 'Text'.
+--
+-- >>> init (pack "Hello")
+-- "Hell"
 foreign import ccall "bhc_text_init" init :: Text -> Text
+
+-- | /O(1)/. Test whether a 'Text' is empty.
+--
+-- >>> null empty
+-- True
+-- >>> null (pack "Hello")
+-- False
 foreign import ccall "bhc_text_null" null :: Text -> Bool
+
+-- | /O(1)/. Return the length of a 'Text' in characters.
+--
+-- >>> length (pack "Hello")
+-- 5
 foreign import ccall "bhc_text_length" length :: Text -> Int
 
+-- | /O(1)/. Compare the length of a 'Text' to an 'Int'.
+-- More efficient than @compare (length t) n@ when you only care
+-- about the ordering.
+--
+-- >>> compareLength (pack "Hello") 3
+-- GT
 compareLength :: Text -> Int -> Ordering
 compareLength t n = compare (length t) n
 
+-- ------------------------------------------------------------
 -- Transformations
+-- ------------------------------------------------------------
+
+-- | /O(n)/. Apply a function to each character in a 'Text'.
+--
+-- >>> map toUpper (pack "hello")
+-- "HELLO"
 foreign import ccall "bhc_text_map" map :: (Char -> Char) -> Text -> Text
 
+-- | /O(n)/. Join a list of 'Text' values with a separator.
+--
+-- >>> intercalate (pack ", ") [pack "one", pack "two", pack "three"]
+-- "one, two, three"
 intercalate :: Text -> [Text] -> Text
 intercalate sep = concat . go
   where go []     = []
         go [x]    = [x]
         go (x:xs) = x : sep : go xs
 
+-- | /O(n)/. Insert a character between adjacent characters.
+--
+-- >>> intersperse '-' (pack "HELLO")
+-- "H-E-L-L-O"
 intersperse :: Char -> Text -> Text
 intersperse c = pack . go . unpack
   where go []     = []
         go [x]    = [x]
         go (x:xs) = x : c : go xs
 
+-- | /O(n)/. Reverse a 'Text'.
+--
+-- >>> reverse (pack "Hello")
+-- "olleH"
 foreign import ccall "bhc_text_reverse" reverse :: Text -> Text
 
+-- | /O(n*m)/. Replace all occurrences of a needle with a replacement.
+--
+-- >>> replace (pack "world") (pack "Haskell") (pack "Hello world")
+-- "Hello Haskell"
 replace :: Text -> Text -> Text -> Text
 replace needle replacement haystack = intercalate replacement (splitOn needle haystack)
 
+-- | /O(n)/. Case fold: convert to a canonical lowercase form for
+-- case-insensitive comparisons.
+--
+-- >>> toCaseFold (pack "Hello WORLD")
+-- "hello world"
 foreign import ccall "bhc_text_to_case_fold" toCaseFold :: Text -> Text
+
+-- | /O(n)/. Convert to lowercase.
+--
+-- >>> toLower (pack "Hello WORLD")
+-- "hello world"
 foreign import ccall "bhc_text_to_lower" toLower :: Text -> Text
+
+-- | /O(n)/. Convert to uppercase.
+--
+-- >>> toUpper (pack "Hello World")
+-- "HELLO WORLD"
 foreign import ccall "bhc_text_to_upper" toUpper :: Text -> Text
+
+-- | /O(n)/. Convert to title case (first letter of each word uppercase).
+--
+-- >>> toTitle (pack "hello world")
+-- "Hello World"
 foreign import ccall "bhc_text_to_title" toTitle :: Text -> Text
 
 justifyLeft :: Int -> Char -> Text -> Text
@@ -217,39 +332,97 @@ maximum = P.maximum . unpack
 minimum :: Text -> Char
 minimum = P.minimum . unpack
 
+-- ------------------------------------------------------------
 -- Substrings
+-- ------------------------------------------------------------
+
+-- | /O(1)/. Take the first @n@ characters of a 'Text'.
+--
+-- >>> take 5 (pack "Hello World")
+-- "Hello"
 foreign import ccall "bhc_text_take" take :: Int -> Text -> Text
+
+-- | /O(1)/. Take the last @n@ characters of a 'Text'.
+--
+-- >>> takeEnd 5 (pack "Hello World")
+-- "World"
 foreign import ccall "bhc_text_take_end" takeEnd :: Int -> Text -> Text
+
+-- | /O(1)/. Drop the first @n@ characters of a 'Text'.
+--
+-- >>> drop 6 (pack "Hello World")
+-- "World"
 foreign import ccall "bhc_text_drop" drop :: Int -> Text -> Text
+
+-- | /O(1)/. Drop the last @n@ characters of a 'Text'.
+--
+-- >>> dropEnd 6 (pack "Hello World")
+-- "Hello"
 foreign import ccall "bhc_text_drop_end" dropEnd :: Int -> Text -> Text
 
+-- | /O(n)/. Take characters while the predicate holds.
+--
+-- >>> takeWhile (/= ' ') (pack "Hello World")
+-- "Hello"
 takeWhile :: (Char -> Bool) -> Text -> Text
 takeWhile p = pack . P.takeWhile p . unpack
 
+-- | /O(n)/. Take characters from the end while the predicate holds.
+--
+-- >>> takeWhileEnd (/= ' ') (pack "Hello World")
+-- "World"
 takeWhileEnd :: (Char -> Bool) -> Text -> Text
 takeWhileEnd p = reverse . takeWhile p . reverse
 
+-- | /O(n)/. Drop characters while the predicate holds.
+--
+-- >>> dropWhile (== ' ') (pack "   Hello")
+-- "Hello"
 dropWhile :: (Char -> Bool) -> Text -> Text
 dropWhile p = pack . P.dropWhile p . unpack
 
+-- | /O(n)/. Drop characters from the end while the predicate holds.
+--
+-- >>> dropWhileEnd (== ' ') (pack "Hello   ")
+-- "Hello"
 dropWhileEnd :: (Char -> Bool) -> Text -> Text
 dropWhileEnd p = reverse . dropWhile p . reverse
 
+-- | /O(n)/. Drop characters from both ends while the predicate holds.
+--
+-- >>> dropAround (== ' ') (pack "  Hello  ")
+-- "Hello"
 dropAround :: (Char -> Bool) -> Text -> Text
 dropAround p = dropWhile p . dropWhileEnd p
 
+-- | /O(n)/. Remove leading and trailing whitespace.
+--
+-- >>> strip (pack "  Hello World  ")
+-- "Hello World"
 strip :: Text -> Text
 strip = dropAround isSpace
   where isSpace c = c `P.elem` " \t\n\r"
 
+-- | /O(n)/. Remove leading whitespace.
+--
+-- >>> stripStart (pack "  Hello")
+-- "Hello"
 stripStart :: Text -> Text
 stripStart = dropWhile isSpace
   where isSpace c = c `P.elem` " \t\n\r"
 
+-- | /O(n)/. Remove trailing whitespace.
+--
+-- >>> stripEnd (pack "Hello  ")
+-- "Hello"
 stripEnd :: Text -> Text
 stripEnd = dropWhileEnd isSpace
   where isSpace c = c `P.elem` " \t\n\r"
 
+-- | /O(1)/. Split a 'Text' at the given position.
+--
+-- >>> splitAt 5 (pack "Hello World")
+-- ("Hello"," World")
 splitAt :: Int -> Text -> (Text, Text)
 splitAt n t = (take n t, drop n t)
 
@@ -309,9 +482,32 @@ unlines = concat . P.map (`snoc` '\n')
 unwords :: [Text] -> Text
 unwords = intercalate (singleton ' ')
 
+-- ------------------------------------------------------------
 -- Predicates
+-- ------------------------------------------------------------
+
+-- | /O(n)/. Test whether the first 'Text' is a prefix of the second.
+--
+-- >>> isPrefixOf (pack "Hello") (pack "Hello World")
+-- True
+-- >>> isPrefixOf (pack "World") (pack "Hello World")
+-- False
 foreign import ccall "bhc_text_is_prefix_of" isPrefixOf :: Text -> Text -> Bool
+
+-- | /O(n)/. Test whether the first 'Text' is a suffix of the second.
+--
+-- >>> isSuffixOf (pack "World") (pack "Hello World")
+-- True
+-- >>> isSuffixOf (pack "Hello") (pack "Hello World")
+-- False
 foreign import ccall "bhc_text_is_suffix_of" isSuffixOf :: Text -> Text -> Bool
+
+-- | /O(n*m)/. Test whether the first 'Text' is contained within the second.
+--
+-- >>> isInfixOf (pack "lo Wo") (pack "Hello World")
+-- True
+-- >>> isInfixOf (pack "xyz") (pack "Hello World")
+-- False
 foreign import ccall "bhc_text_is_infix_of" isInfixOf :: Text -> Text -> Bool
 
 -- View patterns

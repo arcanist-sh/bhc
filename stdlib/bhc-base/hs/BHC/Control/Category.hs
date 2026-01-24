@@ -14,23 +14,47 @@ module BHC.Control.Category (
 
 import BHC.Prelude (id, (.))
 
--- | A category.
+-- ------------------------------------------------------------
+-- Category class
+-- ------------------------------------------------------------
+
+-- | A category is a mathematical structure with identity and composition.
+-- The function arrow @(->)@ is the canonical example.
+--
+-- Laws:
+--
+-- * @id . f = f@ (left identity)
+-- * @f . id = f@ (right identity)
+-- * @(f . g) . h = f . (g . h)@ (associativity)
 class Category cat where
-    -- | Identity morphism
+    -- | Identity morphism. For functions, this is @\x -> x@.
     id :: cat a a
-    -- | Morphism composition
+    -- | Morphism composition. For functions, this is @(f . g) x = f (g x)@.
     (.) :: cat b c -> cat a b -> cat a c
 
 instance Category (->) where
     id = BHC.Prelude.id
     (.) = (BHC.Prelude..)
 
--- | Right-to-left composition
+-- ------------------------------------------------------------
+-- Composition operators
+-- ------------------------------------------------------------
+
+-- | Right-to-left composition. Same as @(.)@.
+--
+-- >>> ((*2) <<< (+1)) 3
+-- 8
 (<<<) :: Category cat => cat b c -> cat a b -> cat a c
 (<<<) = (.)
 infixr 1 <<<
 
--- | Left-to-right composition
+-- | Left-to-right composition. Flipped @(.)@.
+-- Often more readable for pipelines.
+--
+-- >>> ((+1) >>> (*2)) 3
+-- 8
+-- >>> (show >>> length) 12345
+-- 5
 (>>>) :: Category cat => cat a b -> cat b c -> cat a c
 f >>> g = g . f
 infixr 1 >>>

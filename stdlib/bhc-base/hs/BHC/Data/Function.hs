@@ -21,7 +21,36 @@ module BHC.Data.Function (
 
 import BHC.Prelude (id, const, (.), flip, ($), (&), on, fix, Bool(..))
 
--- | Conditionally apply a function.
+-- ------------------------------------------------------------
+-- Basic combinators (re-exported from Prelude)
+-- ------------------------------------------------------------
+
+-- id :: a -> a
+-- const :: a -> b -> a
+-- (.) :: (b -> c) -> (a -> b) -> a -> c
+-- flip :: (a -> b -> c) -> b -> a -> c
+-- ($) :: (a -> b) -> a -> b
+-- (&) :: a -> (a -> b) -> b
+-- on :: (b -> b -> c) -> (a -> b) -> a -> a -> c
+-- fix :: (a -> a) -> a
+
+-- ------------------------------------------------------------
+-- Apply helpers
+-- ------------------------------------------------------------
+
+-- | /O(1)/. Conditionally apply a function.
+-- @applyWhen True f x = f x@, @applyWhen False f x = x@.
+--
+-- >>> applyWhen True (+1) 5
+-- 6
+-- >>> applyWhen False (+1) 5
+-- 5
+--
+-- Useful for optional transformations:
+--
+-- >>> let addPrefix flag = applyWhen flag ("prefix_" ++)
+-- >>> addPrefix True "name"
+-- "prefix_name"
 applyWhen :: Bool -> (a -> a) -> a -> a
 applyWhen True  f x = f x
 applyWhen False _ x = x

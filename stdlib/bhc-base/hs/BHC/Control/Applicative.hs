@@ -29,20 +29,50 @@ module BHC.Control.Applicative (
 
 import BHC.Prelude
 
--- | Flip of '<*>'.
+-- ------------------------------------------------------------
+-- Utility functions
+-- ------------------------------------------------------------
+
+-- | /O(1)/. Flip of '<*>'. Apply a wrapped function to a wrapped value
+-- where the arguments are reversed.
+--
+-- >>> Just 5 <**> Just (+1)
+-- Just 6
 (<**>) :: Applicative f => f a -> f (a -> b) -> f b
 (<**>) = liftA2 (\a f -> f a)
 infixl 4 <**>
 
--- | Zero or one.
+-- | /O(1)/. Zero or one. Turns an 'Alternative' into an optional value.
+--
+-- >>> optional (Just 5)
+-- Just (Just 5)
+-- >>> optional Nothing :: Maybe (Maybe Int)
+-- Just Nothing
+--
+-- Commonly used with parser combinators.
 optional :: Alternative f => f a -> f (Maybe a)
 optional v = Just <$> v <|> pure Nothing
 
--- | Combine alternatives.
+-- | /O(n)/. Combine alternatives using '<|>'.
+--
+-- >>> asum [Nothing, Just 1, Just 2]
+-- Just 1
+-- >>> asum [[], [1, 2], [3]]
+-- [1,2,3]
 asum :: (Foldable t, Alternative f) => t (f a) -> f a
 asum = foldr (<|>) empty
 
--- | Constant functor.
+-- ------------------------------------------------------------
+-- Const functor
+-- ------------------------------------------------------------
+
+-- | The constant functor. Ignores the second type parameter.
+-- Useful for implementing 'Traversable' instances.
+--
+-- >>> fmap (+1) (Const "hello")
+-- Const "hello"
+-- >>> getConst (Const "hello" <*> Const " world")
+-- "hello world"
 newtype Const a b = Const { getConst :: a }
     deriving (Eq, Ord, Show, Read, Bounded)
 
@@ -53,7 +83,20 @@ instance Monoid a => Applicative (Const a) where
     pure _ = Const mempty
     Const f <*> Const x = Const (f <> x)
 
--- | Lists with zippy Applicative.
+-- ------------------------------------------------------------
+-- ZipList
+-- ------------------------------------------------------------
+
+-- | Lists with a zippy 'Applicative'. Unlike the default list instance,
+-- @ZipList@ applies functions elementwise.
+--
+-- >>> ZipList [(+1), (*2)] <*> ZipList [1, 2, 3]
+-- ZipList {getZipList = [2,4]}
+--
+-- Compare with regular lists:
+--
+-- >>> [(+1), (*2)] <*> [1, 2, 3]
+-- [2,3,4,2,4,6]
 newtype ZipList a = ZipList { getZipList :: [a] }
     deriving (Eq, Ord, Show, Read)
 

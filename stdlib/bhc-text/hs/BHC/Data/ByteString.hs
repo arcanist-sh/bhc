@@ -228,15 +228,28 @@ data ByteArray
 -- Construction
 -- ============================================================
 
--- | The empty 'ByteString'.
+-- | /O(1)/. The empty 'ByteString'.
+--
+-- >>> null empty
+-- True
+-- >>> length empty
+-- 0
 empty :: ByteString
 empty = pack []
 
--- | A 'ByteString' containing a single byte.
+-- | /O(1)/. A 'ByteString' containing a single byte.
+--
+-- >>> singleton 65
+-- [65]
+-- >>> length (singleton 0)
+-- 1
 singleton :: Word8 -> ByteString
 singleton w = pack [w]
 
--- | Convert a list of bytes to a 'ByteString'.
+-- | /O(n)/. Convert a list of bytes to a 'ByteString'.
+--
+-- >>> pack [72, 101, 108, 108, 111]
+-- [72,101,108,108,111]
 pack :: [Word8] -> ByteString
 pack ws = createBS (P.length ws) $ \ptr ->
     pokeList ptr ws 0
@@ -246,7 +259,10 @@ pack ws = createBS (P.length ws) $ \ptr ->
         pokeByteOff ptr i x
         pokeList ptr xs (i + 1)
 
--- | Convert a 'ByteString' to a list of bytes.
+-- | /O(n)/. Convert a 'ByteString' to a list of bytes.
+--
+-- >>> unpack (pack [72, 101, 108, 108, 111])
+-- [72,101,108,108,111]
 unpack :: ByteString -> [Word8]
 unpack (BS arr off len) = go 0
   where
@@ -266,15 +282,24 @@ toStrict = id
 -- Basic interface
 -- ============================================================
 
--- | Prepend a byte to a 'ByteString'.
+-- | /O(n)/. Prepend a byte to a 'ByteString'.
+--
+-- >>> cons 72 (pack [101, 108, 108, 111])
+-- [72,101,108,108,111]
 cons :: Word8 -> ByteString -> ByteString
 cons w bs = singleton w `append` bs
 
--- | Append a byte to a 'ByteString'.
+-- | /O(n)/. Append a byte to a 'ByteString'.
+--
+-- >>> snoc (pack [72, 101, 108, 108]) 111
+-- [72,101,108,108,111]
 snoc :: ByteString -> Word8 -> ByteString
 snoc bs w = bs `append` singleton w
 
--- | Append two 'ByteString's.
+-- | /O(n)/. Append two 'ByteString's.
+--
+-- >>> append (pack [1,2,3]) (pack [4,5,6])
+-- [1,2,3,4,5,6]
 append :: ByteString -> ByteString -> ByteString
 append (BS arr1 off1 len1) (BS arr2 off2 len2)
     | len1 == 0 = BS arr2 off2 len2
@@ -283,47 +308,85 @@ append (BS arr1 off1 len1) (BS arr2 off2 len2)
         copyBytes ptr arr1 off1 len1
         copyBytes (plusPtr ptr len1) arr2 off2 len2
 
--- | Extract the first byte of a 'ByteString' (partial function).
+-- | /O(1)/. Extract the first byte of a 'ByteString'.
+--
+-- __Warning__: Partial function. Throws an error on empty 'ByteString'.
+--
+-- >>> head (pack [72, 101, 108, 108, 111])
+-- 72
 head :: ByteString -> Word8
 head (BS arr off len)
     | len <= 0  = error "ByteString.head: empty ByteString"
     | otherwise = indexBS arr off
 
--- | Decompose a 'ByteString' into its head and tail.
+-- | /O(1)/. Decompose a 'ByteString' into its head and tail.
+--
+-- >>> uncons (pack [1,2,3])
+-- Just (1,[2,3])
+-- >>> uncons empty
+-- Nothing
 uncons :: ByteString -> Maybe (Word8, ByteString)
 uncons bs
     | null bs   = Nothing
     | otherwise = Just (head bs, tail bs)
 
--- | Decompose a 'ByteString' into its init and last.
+-- | /O(1)/. Decompose a 'ByteString' into its init and last.
+--
+-- >>> unsnoc (pack [1,2,3])
+-- Just ([1,2],3)
+-- >>> unsnoc empty
+-- Nothing
 unsnoc :: ByteString -> Maybe (ByteString, Word8)
 unsnoc bs
     | null bs   = Nothing
     | otherwise = Just (init bs, last bs)
 
--- | Extract the last byte of a 'ByteString' (partial function).
+-- | /O(1)/. Extract the last byte of a 'ByteString'.
+--
+-- __Warning__: Partial function. Throws an error on empty 'ByteString'.
+--
+-- >>> last (pack [72, 101, 108, 108, 111])
+-- 111
 last :: ByteString -> Word8
 last (BS arr off len)
     | len <= 0  = error "ByteString.last: empty ByteString"
     | otherwise = indexBS arr (off + len - 1)
 
--- | Extract the bytes after the head of a 'ByteString' (partial function).
+-- | /O(1)/. Extract the bytes after the head of a 'ByteString'.
+--
+-- __Warning__: Partial function. Throws an error on empty 'ByteString'.
+--
+-- >>> tail (pack [1,2,3])
+-- [2,3]
 tail :: ByteString -> ByteString
 tail (BS arr off len)
     | len <= 0  = error "ByteString.tail: empty ByteString"
     | otherwise = BS arr (off + 1) (len - 1)
 
--- | All bytes except the last (partial function).
+-- | /O(1)/. All bytes except the last.
+--
+-- __Warning__: Partial function. Throws an error on empty 'ByteString'.
+--
+-- >>> init (pack [1,2,3])
+-- [1,2]
 init :: ByteString -> ByteString
 init (BS arr off len)
     | len <= 0  = error "ByteString.init: empty ByteString"
     | otherwise = BS arr off (len - 1)
 
--- | Test whether a 'ByteString' is empty.
+-- | /O(1)/. Test whether a 'ByteString' is empty.
+--
+-- >>> null empty
+-- True
+-- >>> null (pack [1])
+-- False
 null :: ByteString -> Bool
 null (BS _ _ len) = len == 0
 
--- | The length of a 'ByteString'.
+-- | /O(1)/. The length of a 'ByteString'.
+--
+-- >>> length (pack [1,2,3,4,5])
+-- 5
 length :: ByteString -> Int
 length (BS _ _ len) = len
 
@@ -497,35 +560,51 @@ unfoldrN n f z = (pack ws, final)
 -- Substrings
 -- ============================================================
 
--- | Take first n bytes.
+-- | /O(1)/. Take the first @n@ bytes of a 'ByteString'.
+-- Returns the entire 'ByteString' if @n >= length bs@.
+--
+-- >>> take 3 (pack [1,2,3,4,5])
+-- [1,2,3]
 take :: Int -> ByteString -> ByteString
 take n (BS arr off len)
     | n <= 0    = empty
     | n >= len  = BS arr off len
     | otherwise = BS arr off n
 
--- | Take last n bytes.
+-- | /O(1)/. Take the last @n@ bytes of a 'ByteString'.
+--
+-- >>> takeEnd 3 (pack [1,2,3,4,5])
+-- [3,4,5]
 takeEnd :: Int -> ByteString -> ByteString
 takeEnd n bs@(BS arr off len)
     | n <= 0    = empty
     | n >= len  = bs
     | otherwise = BS arr (off + len - n) n
 
--- | Drop first n bytes.
+-- | /O(1)/. Drop the first @n@ bytes of a 'ByteString'.
+--
+-- >>> drop 2 (pack [1,2,3,4,5])
+-- [3,4,5]
 drop :: Int -> ByteString -> ByteString
 drop n (BS arr off len)
     | n <= 0    = BS arr off len
     | n >= len  = empty
     | otherwise = BS arr (off + n) (len - n)
 
--- | Drop last n bytes.
+-- | /O(1)/. Drop the last @n@ bytes of a 'ByteString'.
+--
+-- >>> dropEnd 2 (pack [1,2,3,4,5])
+-- [1,2,3]
 dropEnd :: Int -> ByteString -> ByteString
 dropEnd n bs@(BS arr off len)
     | n <= 0    = bs
     | n >= len  = empty
     | otherwise = BS arr off (len - n)
 
--- | Split at position n.
+-- | /O(1)/. Split a 'ByteString' at position @n@.
+--
+-- >>> splitAt 3 (pack [1,2,3,4,5])
+-- ([1,2,3],[4,5])
 splitAt :: Int -> ByteString -> (ByteString, ByteString)
 splitAt n bs = (take n bs, drop n bs)
 

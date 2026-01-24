@@ -236,58 +236,84 @@ instance MatrixElem Double where
 -- Construction
 -- ============================================================
 
--- | Create matrix of zeros.
+-- | /O(r*c)/. Create a matrix of zeros.
+--
+-- >>> zeros 2 3
+-- [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
 zeros :: MatrixElem a => Int -> Int -> Matrix a
 zeros r c = unsafePerformIO $ matrixZeros r c
 {-# NOINLINE zeros #-}
 
--- | Create matrix of ones.
+-- | /O(r*c)/. Create a matrix of ones.
+--
+-- >>> ones 2 3
+-- [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]
 ones :: (Num a, MatrixElem a) => Int -> Int -> Matrix a
 ones r c = full r c 1
 
--- | Create matrix filled with value.
+-- | /O(r*c)/. Create a matrix filled with a constant value.
+--
+-- >>> full 2 3 5.0
+-- [[5.0, 5.0, 5.0], [5.0, 5.0, 5.0]]
 full :: MatrixElem a => Int -> Int -> a -> Matrix a
 full r c x = fromList r c (P.replicate (r * c) x)
 
--- | Create matrix from nested lists.
+-- | /O(r*c)/. Create a matrix from nested lists (row-major order).
 --
--- >>> fromLists [[1, 2], [3, 4]]
--- Matrix 2x2 [[1, 2], [3, 4]]
+-- >>> fromLists [[1, 2, 3], [4, 5, 6]]
+-- [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 fromLists :: MatrixElem a => [[a]] -> Matrix a
 fromLists xss =
     let r = P.length xss
         c = if r > 0 then P.length (P.head xss) else 0
     in fromList r c (P.concat xss)
 
--- | Create matrix from flat list with dimensions.
+-- | /O(r*c)/. Create a matrix from a flat list with specified dimensions.
+--
+-- >>> fromList 2 3 [1, 2, 3, 4, 5, 6]
+-- [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 fromList :: MatrixElem a => Int -> Int -> [a] -> Matrix a
 fromList r c xs = unsafePerformIO $ matrixFromList r c xs
 {-# NOINLINE fromList #-}
 
--- | Create matrix from row vectors.
+-- | /O(r*c)/. Create a matrix from a list of row vectors.
+--
+-- >>> fromRows [fromList [1, 2], fromList [3, 4]]
+-- [[1.0, 2.0], [3.0, 4.0]]
 fromRows :: (V.VectorElem a, MatrixElem a) => [V.Vector a] -> Matrix a
 fromRows vs =
     let r = P.length vs
         c = if r > 0 then V.length (P.head vs) else 0
     in fromList r c (P.concatMap V.toList vs)
 
--- | Create matrix from column vectors.
+-- | /O(r*c)/. Create a matrix from a list of column vectors.
+--
+-- >>> fromCols [fromList [1, 3], fromList [2, 4]]
+-- [[1.0, 2.0], [3.0, 4.0]]
 fromCols :: (V.VectorElem a, MatrixElem a) => [V.Vector a] -> Matrix a
 fromCols vs = transpose (fromRows vs)
 
--- | Identity matrix.
+-- | /O(n²)/. Create an n×n identity matrix.
 --
 -- >>> identity 3
--- Matrix 3x3 [[1,0,0], [0,1,0], [0,0,1]]
+-- [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+--
+-- ==== __Properties__
+--
+-- prop> m @@ identity n == m  (for n = cols m)
+-- prop> identity n @@ m == m  (for n = rows m)
 identity :: MatrixElem a => Int -> Matrix a
 identity n = unsafePerformIO $ matrixIdentity n
 {-# NOINLINE identity #-}
 
--- | Identity matrix (alias for identity).
+-- | /O(n²)/. Identity matrix (alias for 'identity').
 eye :: MatrixElem a => Int -> Matrix a
 eye = identity
 
--- | Diagonal matrix from list.
+-- | /O(n²)/. Create a diagonal matrix from a list of elements.
+--
+-- >>> diag [1, 2, 3]
+-- [[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]]
 diag :: (Num a, MatrixElem a) => [a] -> Matrix a
 diag xs =
     let n = P.length xs
@@ -295,7 +321,10 @@ diag xs =
         elems = [if i == j then xs P.!! i else 0 | (i, j) <- indices]
     in fromList n n elems
 
--- | Diagonal matrix from vector.
+-- | /O(n²)/. Create a diagonal matrix from a vector.
+--
+-- >>> diagFrom (fromList [1, 2, 3])
+-- [[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]]
 diagFrom :: (Num a, V.VectorElem a, MatrixElem a) => V.Vector a -> Matrix a
 diagFrom v = diag (V.toList v)
 
@@ -303,19 +332,31 @@ diagFrom v = diag (V.toList v)
 -- Properties
 -- ============================================================
 
--- | Number of rows.
+-- | /O(1)/. The number of rows in a matrix.
+--
+-- >>> rows (zeros 3 4)
+-- 3
 rows :: Matrix a -> Int
 rows = matRows
 
--- | Number of columns.
+-- | /O(1)/. The number of columns in a matrix.
+--
+-- >>> cols (zeros 3 4)
+-- 4
 cols :: Matrix a -> Int
 cols = matCols
 
--- | Total number of elements.
+-- | /O(1)/. The total number of elements in a matrix.
+--
+-- >>> size (zeros 3 4)
+-- 12
 size :: Matrix a -> Int
 size m = rows m * cols m
 
--- | Shape as (rows, cols).
+-- | /O(1)/. The shape of a matrix as a (rows, cols) tuple.
+--
+-- >>> shape (zeros 3 4)
+-- (3, 4)
 shape :: Matrix a -> (Int, Int)
 shape m = (rows m, cols m)
 
@@ -323,35 +364,56 @@ shape m = (rows m, cols m)
 -- Indexing
 -- ============================================================
 
--- | Index into matrix (unsafe).
+-- | /O(1)/. Index into a matrix (unsafe).
+--
+-- __Warning__: Throws an error if indices are out of bounds.
+--
+-- >>> fromLists [[1, 2], [3, 4]] ! (0, 1)
+-- 2.0
+-- >>> fromLists [[1, 2], [3, 4]] ! (1, 0)
+-- 3.0
 (!) :: MatrixElem a => Matrix a -> (Int, Int) -> a
 m ! (i, j) = unsafePerformIO $ matrixGet m i j
 {-# NOINLINE (!) #-}
 
--- | Index into matrix (safe).
+-- | /O(1)/. Safe indexing into a matrix.
+--
+-- >>> fromLists [[1, 2], [3, 4]] !? (0, 1)
+-- Just 2.0
+-- >>> fromLists [[1, 2], [3, 4]] !? (5, 0)
+-- Nothing
 (!?) :: MatrixElem a => Matrix a -> (Int, Int) -> Maybe a
 m !? (i, j)
     | i < 0 || i >= rows m = Nothing
     | j < 0 || j >= cols m = Nothing
     | otherwise = Just (m ! (i, j))
 
--- | Extract single row as vector.
+-- | /O(c)/. Extract a single row as a vector.
+--
+-- >>> toList (row 1 (fromLists [[1, 2, 3], [4, 5, 6]]))
+-- [4.0, 5.0, 6.0]
 row :: (MatrixElem a, V.VectorElem a) => Int -> Matrix a -> V.Vector a
 row i m = V.fromList [m ! (i, j) | j <- [0..cols m - 1]]
 
--- | Extract single column as vector.
+-- | /O(r)/. Extract a single column as a vector.
+--
+-- >>> toList (col 1 (fromLists [[1, 2, 3], [4, 5, 6]]))
+-- [2.0, 5.0]
 col :: (MatrixElem a, V.VectorElem a) => Int -> Matrix a -> V.Vector a
 col j m = V.fromList [m ! (i, j) | i <- [0..rows m - 1]]
 
--- | Get row (alias for row).
+-- | /O(c)/. Get a row (alias for 'row').
 getRow :: (MatrixElem a, V.VectorElem a) => Int -> Matrix a -> V.Vector a
 getRow = row
 
--- | Get column (alias for col).
+-- | /O(r)/. Get a column (alias for 'col').
 getCol :: (MatrixElem a, V.VectorElem a) => Int -> Matrix a -> V.Vector a
 getCol = col
 
--- | Get main diagonal.
+-- | /O(min(r,c))/. Get the main diagonal as a vector.
+--
+-- >>> toList (getDiag (fromLists [[1, 2, 3], [4, 5, 6], [7, 8, 9]]))
+-- [1.0, 5.0, 9.0]
 getDiag :: (MatrixElem a, V.VectorElem a) => Matrix a -> V.Vector a
 getDiag m = V.fromList [m ! (i, i) | i <- [0.. P.min (rows m) (cols m) - 1]]
 
@@ -511,25 +573,40 @@ scale k m = unsafePerformIO $ matrixScale k m
 -- Matrix Multiplication
 -- ============================================================
 
--- | Matrix multiplication.
+-- | /O(n·m·k)/. Matrix multiplication.
 --
--- ==== __Complexity__
+-- Computes the matrix product of an (n×m) matrix and an (m×k) matrix.
 --
--- O(n * m * k) for (n x m) @@ (m x k)
+-- >>> let a = fromLists [[1, 2], [3, 4]]
+-- >>> let b = fromLists [[5, 6], [7, 8]]
+-- >>> mul a b
+-- [[19.0, 22.0], [43.0, 50.0]]
 --
--- Uses BLAS DGEMM when available.
+-- ==== __BLAS__
+--
+-- Uses BLAS DGEMM for Double matrices when available,
+-- providing significant performance improvements for large matrices.
 mul :: MatrixElem a => Matrix a -> Matrix a -> Matrix a
 mul a b = unsafePerformIO $ matrixMatmul a b
 {-# NOINLINE mul #-}
 
--- | Matrix multiplication operator.
+-- | /O(n·m·k)/. Matrix multiplication operator.
+--
+-- >>> fromLists [[1, 2]] @@ fromLists [[3], [4]]
+-- [[11.0]]
 (@@) :: MatrixElem a => Matrix a -> Matrix a -> Matrix a
 (@@) = mul
 infixl 7 @@
 
--- | Matrix-vector multiplication.
+-- | /O(n·m)/. Matrix-vector multiplication.
 --
--- >>> mulV m v  -- m @ v
+-- Multiplies an (n×m) matrix by an m-element vector,
+-- producing an n-element vector.
+--
+-- >>> let m = fromLists [[1, 2, 3], [4, 5, 6]]
+-- >>> let v = fromList [1, 2, 3]
+-- >>> toList (mulV m v)
+-- [14.0, 32.0]
 mulV :: (Num a, MatrixElem a, V.VectorElem a) => Matrix a -> V.Vector a -> V.Vector a
 mulV m v =
     let r = rows m
@@ -540,14 +617,28 @@ mulV m v =
 -- Linear Algebra
 -- ============================================================
 
--- | Matrix trace (sum of diagonal).
+-- | /O(n)/. Matrix trace (sum of diagonal elements).
+--
+-- \[ \text{tr}(A) = \sum_{i=1}^{n} a_{ii} \]
+--
+-- >>> trace (fromLists [[1, 2], [3, 4]])
+-- 5.0
+--
+-- >>> trace (identity 3)
+-- 3.0
 trace :: MatrixElem a => Matrix a -> a
 trace m = unsafePerformIO $ matrixTrace m
 {-# NOINLINE trace #-}
 
--- | Matrix determinant.
+-- | /O(n³)/. Matrix determinant.
 --
--- Uses LU decomposition for n>2.
+-- Uses LU decomposition with partial pivoting for matrices larger than 2×2.
+--
+-- >>> det (fromLists [[1, 2], [3, 4]])
+-- -2.0
+--
+-- >>> det (identity 4)
+-- 1.0
 det :: (Fractional a, Ord a, MatrixElem a) => Matrix a -> a
 det m
     | rows m /= cols m = error "Determinant requires square matrix"
@@ -564,19 +655,28 @@ det m
   where
     n = rows m
 
--- | Matrix rank.
+-- | /O(n³)/. Matrix rank via SVD.
 --
--- Computed via SVD (count of non-zero singular values).
+-- The rank is the number of non-zero singular values (above a tolerance).
+--
+-- >>> rank (fromLists [[1, 0], [0, 1]])
+-- 2
+--
+-- >>> rank (fromLists [[1, 2], [2, 4]])  -- Linearly dependent rows
+-- 1
 rank :: (Floating a, Ord a, MatrixElem a, V.VectorElem a) => Matrix a -> Int
 rank m =
     let (_, s, _) = svd m
         tolerance = 1e-10 * V.maximum (V.map P.abs s)
     in V.length (V.filter (\x -> P.abs x > tolerance) s)
 
--- | Matrix inverse.
+-- | /O(n³)/. Matrix inverse using Gauss-Jordan elimination.
 --
--- Throws error if matrix is singular.
--- Uses Gauss-Jordan elimination.
+-- >>> let m = fromLists [[4, 7], [2, 6]]
+-- >>> m @@ inv m  -- Should be identity
+-- [[1.0, 0.0], [0.0, 1.0]]
+--
+-- __Throws__: Error if the matrix is singular (non-invertible).
 inv :: (Fractional a, Ord a, MatrixElem a) => Matrix a -> Matrix a
 inv m
     | rows m /= cols m = error "Inverse requires square matrix"

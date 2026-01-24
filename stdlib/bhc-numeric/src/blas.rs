@@ -327,11 +327,23 @@ impl BlasProviderF64 for PureRustBlas {
         let n = n as usize;
         let incx = incx as usize;
 
-        (0..n)
-            .max_by(|&i, &j| {
-                x[i * incx].abs().partial_cmp(&x[j * incx].abs()).unwrap()
-            })
-            .unwrap_or(0) as i32
+        if n == 0 {
+            return 0;
+        }
+
+        let mut max_idx = 0;
+        let mut max_val = x[0].abs();
+
+        for i in 1..n {
+            let val = x[i * incx].abs();
+            // Only update if strictly greater (keeps first occurrence in ties)
+            if val > max_val {
+                max_val = val;
+                max_idx = i;
+            }
+        }
+
+        max_idx as i32
     }
 }
 

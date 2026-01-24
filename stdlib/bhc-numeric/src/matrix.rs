@@ -116,6 +116,27 @@ impl<T: Clone> Matrix<T> {
         })
     }
 
+    /// Create a matrix from data with shape (rows, cols).
+    ///
+    /// This is a convenience constructor where dimensions come first.
+    /// Data must be in row-major order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `data.len() != rows * cols`.
+    pub fn from_data(rows: usize, cols: usize, data: Vec<T>) -> Self {
+        assert_eq!(
+            data.len(),
+            rows * cols,
+            "Data length {} does not match {}x{} = {}",
+            data.len(),
+            rows,
+            cols,
+            rows * cols
+        );
+        Self { data, rows, cols }
+    }
+
     /// Create a matrix of zeros
     pub fn zeros(rows: usize, cols: usize) -> Self
     where
@@ -183,6 +204,18 @@ impl<T: Clone> Matrix<T> {
             Some((0..self.rows).map(|r| self.data[r * self.cols + col].clone()).collect())
         } else {
             None
+        }
+    }
+
+    /// Swap two rows in place
+    pub fn swap_rows(&mut self, row1: usize, row2: usize) {
+        if row1 >= self.rows || row2 >= self.rows || row1 == row2 {
+            return;
+        }
+        let start1 = row1 * self.cols;
+        let start2 = row2 * self.cols;
+        for i in 0..self.cols {
+            self.data.swap(start1 + i, start2 + i);
         }
     }
 

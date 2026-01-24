@@ -46,10 +46,19 @@
 //!
 //! # Features
 //!
-//! - **SIMD**: SSE, AVX, AVX2, FMA intrinsics
-//! - **BLAS**: Optional BLAS backend integration
+//! - **SIMD**: SSE, AVX, AVX2, FMA intrinsics (x86_64) and NEON (aarch64)
+//! - **BLAS**: Optional BLAS backend integration (OpenBLAS, Accelerate on macOS)
 //! - **Arena**: Hot arena for kernel temporaries
+//! - **Decompositions**: LU, QR, and Cholesky matrix decompositions
 //! - **Portable**: Scalar fallbacks for all operations
+//!
+//! # Cargo Features
+//!
+//! - `simd` (default): Enable SIMD optimizations
+//! - `openblas`: Use OpenBLAS for BLAS operations
+//! - `accelerate`: Use Apple Accelerate framework (macOS only)
+//! - `mkl`: Use Intel MKL for BLAS operations
+//! - `neon`: Enable ARM NEON SIMD support (aarch64)
 
 #![warn(missing_docs)]
 #![allow(unsafe_code)] // SIMD and arena require unsafe
@@ -61,3 +70,17 @@ pub mod simd;
 pub mod sparse;
 pub mod tensor;
 pub mod vector;
+
+// BLAS providers
+#[cfg(feature = "openblas")]
+pub mod blas_openblas;
+
+#[cfg(all(target_os = "macos", feature = "accelerate"))]
+pub mod blas_accelerate;
+
+// ARM NEON SIMD support
+#[cfg(target_arch = "aarch64")]
+pub mod simd_neon;
+
+// Matrix decompositions (LU, QR, Cholesky)
+pub mod decomp;

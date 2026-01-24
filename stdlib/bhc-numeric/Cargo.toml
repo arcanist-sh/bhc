@@ -26,4 +26,6 @@ default = ["simd"]
 simd = []
 blas = []
 openblas = ["blas"]
+accelerate = ["blas"]  # macOS only - uses Apple Accelerate framework
 mkl = ["blas"]
+neon = []  # ARM NEON SIMD support (aarch64)

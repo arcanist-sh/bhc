@@ -32,7 +32,7 @@ module BHC.Control.Monad.Writer (
 
 import BHC.Prelude
 import BHC.Control.Monad.Trans
-import BHC.Control.Monad.Reader (Identity(..))
+import BHC.Control.Monad.Identity (Identity(..))
 
 -- | The writer monad.
 type Writer w = WriterT w Identity

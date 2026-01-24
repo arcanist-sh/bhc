@@ -28,7 +28,7 @@ module BHC.Control.Monad.Except (
 
 import BHC.Prelude
 import BHC.Control.Monad.Trans
-import BHC.Control.Monad.Reader (Identity(..))
+import BHC.Control.Monad.Identity (Identity(..))
 
 -- | The exception monad.
 type Except e = ExceptT e Identity

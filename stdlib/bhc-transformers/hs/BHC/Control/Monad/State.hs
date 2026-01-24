@@ -36,7 +36,7 @@ module BHC.Control.Monad.State (
 
 import BHC.Prelude
 import BHC.Control.Monad.Trans
-import BHC.Control.Monad.Reader (Identity(..))
+import BHC.Control.Monad.Identity (Identity(..))
 
 -- | The state monad.
 type State s = StateT s Identity

@@ -30,6 +30,7 @@ module BHC.Control.Monad.Reader (
 
 import BHC.Prelude
 import BHC.Control.Monad.Trans
+import BHC.Control.Monad.Identity (Identity(..))
 
 -- | The parameterized reader monad.
 type Reader r = ReaderT r Identity
@@ -103,16 +104,3 @@ instance Monad m => MonadReader r (ReaderT r m) where
     askM = ask
     localM = local
     readerM = reader
-
--- Identity monad
-newtype Identity a = Identity { runIdentity :: a }
-
-instance Functor Identity where
-    fmap f (Identity x) = Identity (f x)
-
-instance Applicative Identity where
-    pure = Identity
-    Identity f <*> Identity x = Identity (f x)
-
-instance Monad Identity where
-    Identity x >>= f = f x

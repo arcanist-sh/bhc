@@ -46,13 +46,12 @@ impl<'src> Parser<'src> {
         // Declarations
         let mut decls = Vec::new();
         while !self.at_eof() {
-            // Skip any virtual tokens, doc comments, pragmas, and explicit semicolons between declarations
+            // Skip any virtual tokens, pragmas, and explicit semicolons between declarations
+            // Note: We do NOT skip doc comments here, since parse_top_decl collects them
             self.skip_virtual_tokens();
-            self.skip_doc_comments();
             self.skip_standalone_pragmas();
             while self.eat(&TokenKind::Semi) || self.eat(&TokenKind::VirtualSemi) {
                 self.skip_virtual_tokens();
-                self.skip_doc_comments();
                 self.skip_standalone_pragmas();
             }
             if self.at_eof() {

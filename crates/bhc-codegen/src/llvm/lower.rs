@@ -4037,11 +4037,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let int_scrut = match scrut_val {
                 BasicValueEnum::IntValue(_) => scrut_val,
                 BasicValueEnum::PointerValue(p) => {
-                    // Boxed boolean - unbox to integer
-                    let int_val = self.builder()
-                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_bool")
-                        .map_err(|e| CodegenError::Internal(format!("failed to unbox bool: {:?}", e)))?;
-                    int_val.into()
+                    // Boxed boolean - load the tag from the ADT
+                    // Bool is arity 0, so ADT structure is { i64 tag, [0 x ptr] }
+                    let adt_ty = self.adt_type(0);
+                    let tag_ptr = self.builder()
+                        .build_struct_gep(adt_ty, p, 0, "bool_tag_ptr")
+                        .map_err(|e| CodegenError::Internal(format!("failed to get bool tag ptr: {:?}", e)))?;
+                    let tag_val = self.builder()
+                        .build_load(self.type_mapper().i64_type(), tag_ptr, "bool_tag")
+                        .map_err(|e| CodegenError::Internal(format!("failed to load bool tag: {:?}", e)))?;
+                    tag_val
                 }
                 _ => scrut_val, // Fall through to datacon handling
             };

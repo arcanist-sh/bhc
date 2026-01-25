@@ -132,21 +132,33 @@ impl<'src> Parser<'src> {
     /// Parse pragmas at the start of a module.
     ///
     /// Consumes all consecutive Pragma tokens and parses their contents.
+    /// Skips virtual tokens (VirtualSemi) between pragmas.
     fn parse_pragmas(&mut self) -> Vec<Pragma> {
         let mut pragmas = Vec::new();
 
-        while let Some(tok) = self.current() {
-            if let TokenKind::Pragma(content) = &tok.node.kind {
-                let span = tok.span;
-                let content = content.clone();
-                self.advance();
-
-                if let Some(pragma) = self.parse_pragma_content(&content, span) {
-                    pragmas.push(pragma);
+        loop {
+            // Skip virtual tokens between pragmas
+            while let Some(kind) = self.current_kind() {
+                if kind.is_virtual() {
+                    self.advance();
+                } else {
+                    break;
                 }
-            } else {
-                break;
             }
+
+            if let Some(tok) = self.current() {
+                if let TokenKind::Pragma(content) = &tok.node.kind {
+                    let span = tok.span;
+                    let content = content.clone();
+                    self.advance();
+
+                    if let Some(pragma) = self.parse_pragma_content(&content, span) {
+                        pragmas.push(pragma);
+                    }
+                    continue;
+                }
+            }
+            break;
         }
 
         pragmas

@@ -142,9 +142,8 @@ impl<'ctx> LlvmModule<'ctx> {
         self.builder.build_call(rts_init, &[argc.into(), argv.into()], "")
             .map_err(|e| CodegenError::Internal(format!("failed to build rts_init call: {:?}", e)))?;
 
-        // Call Haskell main with null env pointer (uniform calling convention)
-        let null_env = ptr_type.const_null();
-        self.builder.build_call(haskell_main, &[null_env.into()], "")
+        // Call Haskell main (returns void or a value we ignore)
+        self.builder.build_call(haskell_main, &[], "")
             .map_err(|e| CodegenError::Internal(format!("failed to build call: {:?}", e)))?;
 
         // Call bhc_shutdown()

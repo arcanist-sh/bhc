@@ -89,6 +89,8 @@ pub struct Lexer<'src> {
     eof_returned: bool,
     /// Previous token kind (for detecting \case).
     prev_token_kind: Option<TokenKind>,
+    /// Whether this is the first real token (skip VirtualSemi before it).
+    first_token: bool,
 }
 
 impl<'src> Lexer<'src> {
@@ -110,6 +112,7 @@ impl<'src> Lexer<'src> {
             line_start_column: 1,
             expect_layout_block: false,
             at_line_start: true,
+            first_token: true, // Track if we've emitted any tokens yet
             line: 1,
             column: 1,
             eof_returned: false,
@@ -1221,9 +1224,10 @@ impl<'src> Lexer<'src> {
                     ));
                 } else if column == ctx_col {
                     // Same indentation: new item in the block
-                    // BUT don't insert VirtualSemi for continuation tokens
-                    // (these indicate we're in the middle of a multi-line construct)
-                    if !Self::is_continuation_token(&token.kind) {
+                    // BUT don't insert VirtualSemi for:
+                    // - continuation tokens (in middle of multi-line construct)
+                    // - the first token in the file
+                    if !Self::is_continuation_token(&token.kind) && !self.first_token {
                         self.pending.push(Spanned::new(
                             Token::new(TokenKind::VirtualSemi),
                             Span::from_raw(self.pos as u32, self.pos as u32),
@@ -1247,13 +1251,14 @@ impl<'src> Lexer<'src> {
             self.expect_layout_block = true;
         }
 
-        // Handle explicit open brace - push explicit context
-        if token.kind == TokenKind::LBrace {
+        // Handle explicit open brace/paren/bracket - push explicit context
+        // Layout is suspended inside (), [], and {}
+        if matches!(token.kind, TokenKind::LBrace | TokenKind::LParen | TokenKind::LBracket) {
             self.layout_stack.push((0, true)); // Explicit context
         }
 
-        // Handle explicit close brace
-        if token.kind == TokenKind::RBrace {
+        // Handle explicit close brace/paren/bracket
+        if matches!(token.kind, TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket) {
             // Close any implicit contexts until we find explicit one
             while let Some(&(_, is_explicit)) = self.layout_stack.last() {
                 if is_explicit {
@@ -1463,6 +1468,8 @@ impl<'src> Iterator for Lexer<'src> {
         if let Some(tok) = self.lex_raw_token() {
             // Track the previous token kind for \case detection
             self.prev_token_kind = Some(tok.node.kind.clone());
+            // Clear first_token flag after emitting any real token
+            self.first_token = false;
             return Some(tok);
         }
 
@@ -1614,7 +1621,8 @@ mod tests {
 
     #[test]
     fn test_comments() {
-        let kinds = lex_kinds("x -- comment\ny");
+        // Use no_layout since we just want to test comment handling, not layout
+        let kinds = lex_kinds_no_layout("x -- comment\ny");
         assert!(matches!(kinds[0], TokenKind::Ident(_)));
         assert!(matches!(kinds[1], TokenKind::Ident(_)));
     }
@@ -1622,12 +1630,12 @@ mod tests {
     #[test]
     fn test_dash_line_comment() {
         // A line of dashes is a comment, not an operator
-        let kinds = lex_kinds("x\n-------------------------------------\ny");
+        // Use no_layout since we just want to test comment handling
+        let kinds = lex_kinds_no_layout("x\n-------------------------------------\ny");
         // x and y should be identifiers, the dashes are a comment
         assert!(matches!(kinds[0], TokenKind::Ident(_)));
         assert!(matches!(kinds[1], TokenKind::Ident(_)));
-        // 2 identifiers + Eof, unless layout inserts virtual tokens
-        assert!(kinds.len() >= 2);
+        assert_eq!(kinds.len(), 2);
         assert!(!kinds.iter().any(|k| matches!(k, TokenKind::Operator(_))));
     }
 
@@ -1654,7 +1662,8 @@ mod tests {
 
     #[test]
     fn test_pragmas() {
-        let kinds = lex_kinds("{-# LANGUAGE GADTs #-}\nmodule");
+        // Use no_layout since we just want to test pragma handling
+        let kinds = lex_kinds_no_layout("{-# LANGUAGE GADTs #-}\nmodule");
         assert!(matches!(kinds[0], TokenKind::Pragma(_)));
         assert_eq!(kinds[1], TokenKind::Module);
     }

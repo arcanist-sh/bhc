@@ -3057,8 +3057,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Build the function type for the eval function:
         // fn(env: *mut u8) -> *mut u8
         // The env pointer points to the captured variables array
-        let tm = self.type_mapper();
-        let ptr_type = tm.ptr_type();
+        // Extract types early to avoid borrow conflicts with self.env
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+        let env_array_type = ptr_type.array_type(captured.len() as u32);
 
         let fn_type = ptr_type.fn_type(&[ptr_type.into()], false);
 
@@ -3083,11 +3085,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let elem_ptr = unsafe {
                     self.builder()
                         .build_in_bounds_gep(
-                            tm.ptr_type().array_type(captured.len() as u32),
+                            env_array_type,
                             env_ptr,
                             &[
-                                tm.i64_type().const_zero(),
-                                tm.i64_type().const_int(i as u64, false),
+                                i64_type.const_zero(),
+                                i64_type.const_int(i as u64, false),
                             ],
                             &format!("thunk_env_load_{}", i),
                         )
@@ -3096,7 +3098,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
                 let elem_val = self
                     .builder()
-                    .build_load(tm.ptr_type(), elem_ptr, &format!("thunk_env_val_{}", i))
+                    .build_load(ptr_type, elem_ptr, &format!("thunk_env_val_{}", i))
                     .map_err(|e| CodegenError::Internal(format!("failed to load env elem: {:?}", e)))?;
 
                 self.env.insert(*var_id, elem_val);

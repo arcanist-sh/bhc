@@ -28,8 +28,8 @@ jobs:
             artifact_name: bhc
             asset_name: bhc-x86_64-linux
 
-          # macOS x86_64 (Intel)
-          - os: macos-13-large
+          # macOS x86_64 (Intel) - cross-compiled on ARM runner
+          - os: macos-14
             target: x86_64-apple-darwin
             artifact_name: bhc
             asset_name: bhc-x86_64-darwin

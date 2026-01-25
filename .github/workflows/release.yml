@@ -68,14 +68,18 @@ jobs:
             target
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} -p bhc
+      - name: Build release binary and RTS
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p bhc
+          cargo build --release --target ${{ matrix.target }} -p bhc-rts
 
       - name: Prepare artifact
         run: |
-          mkdir -p dist
+          mkdir -p dist/lib
           cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} dist/
           chmod +x dist/${{ matrix.artifact_name }}
+          # Copy RTS static library
+          cp target/${{ matrix.target }}/release/libbhc_rts.a dist/lib/
           cd dist && tar -czvf ../${{ matrix.asset_name }}.tar.gz *
 
       - name: Upload artifact

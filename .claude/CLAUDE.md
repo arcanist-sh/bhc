@@ -406,7 +406,7 @@ The compiler is functional end-to-end. Native code generation works via LLVM. Th
 
 **Exit Criteria:** ✅ `bhc Main.hs -o main && ./main` prints "Hello, World!"
 
-### Phase 2: Language Completeness 🟡 ~90% COMPLETE
+### Phase 2: Language Completeness ✅ COMPLETE
 
 **Goal:** Compile real Haskell programs (e.g., small utilities).
 
@@ -415,10 +415,10 @@ The compiler is functional end-to-end. Native code generation works via LLVM. Th
 | 2.1 Pattern Matching Codegen | 🟢 | bhc-codegen | Full ADT matching, nested patterns, tag dispatch |
 | 2.2 Closures | 🟢 | bhc-codegen | Free variable capture, closure allocation/invocation |
 | 2.3 Thunks & Laziness | 🟢 | bhc-rts | Thunk creation, forcing, blackhole detection |
-| 2.4 Type Classes | 🟡 | bhc-typeck | Dictionary passing works, some edge cases remain |
+| 2.4 Type Classes | 🟢 | bhc-typeck | Dictionary passing, default methods, superclass propagation |
 | 2.5 Let/Where Bindings | 🟢 | bhc-codegen | Recursive and non-recursive, proper scoping |
 | 2.6 Recursion | 🟢 | bhc-codegen | Mutual recursion, tail call optimization |
-| 2.7 Prelude | 🟡 | stdlib | 50+ builtins (map, filter, fold, IO, etc.) |
+| 2.7 Prelude | 🟢 | stdlib | Full instances for Int/Float/Double/Char, FFI primitives in RTS |
 
 **Exit Criteria:** ✅ Recursive Fibonacci compiles and runs correctly.
 

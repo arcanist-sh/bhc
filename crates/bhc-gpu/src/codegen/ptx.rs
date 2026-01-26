@@ -39,7 +39,9 @@ use super::{dtype_to_gpu_type, KernelParams};
 use crate::device::DeviceInfo;
 use crate::kernel::CompiledModule;
 use crate::GpuResult;
-use bhc_tensor_ir::{BinaryOp, DType, Kernel, KernelBody, TensorOp, UnaryOp};
+use bhc_tensor_ir::{
+    BinaryOp, DType, Kernel, KernelBody, MapFn, ReduceOp, TensorOp, UnaryOp, ZipFn,
+};
 use std::fmt::Write;
 
 /// PTX version to target.
@@ -67,11 +69,7 @@ pub fn compile_kernel(kernel: &Kernel, device: &DeviceInfo) -> GpuResult<Compile
     // Generate kernel entry point
     generate_kernel_entry(&mut code, &params, kernel)?;
 
-    let mut module = CompiledModule::from_text(
-        params.name.clone(),
-        code,
-        device.arch_name(),
-    );
+    let mut module = CompiledModule::from_text(params.name.clone(), code, device.arch_name());
     module.add_entry_point(params.name);
 
     Ok(module)
@@ -87,15 +85,16 @@ fn generate_kernel_entry(
     writeln!(code, ".visible .entry {}(", params.name).unwrap();
 
     // Parameters
-    let all_params: Vec<_> = params
-        .inputs
-        .iter()
-        .chain(params.outputs.iter())
-        .collect();
+    let all_params: Vec<_> = params.inputs.iter().chain(params.outputs.iter()).collect();
 
     for (i, param) in all_params.iter().enumerate() {
         let sep = if i < all_params.len() - 1 { "," } else { "" };
-        writeln!(code, "    .param .u64 ptr_{}{}  // {}", param.name, sep, param.name).unwrap();
+        writeln!(
+            code,
+            "    .param .u64 ptr_{}{}  // {}",
+            param.name, sep, param.name
+        )
+        .unwrap();
     }
 
     // Add size parameter
@@ -134,11 +133,7 @@ fn generate_kernel_entry(
 }
 
 /// Generate code for fused operations.
-fn generate_fused_ops(
-    code: &mut String,
-    ops: &[TensorOp],
-    _params: &KernelParams,
-) -> GpuResult<()> {
+fn generate_fused_ops(code: &mut String, ops: &[TensorOp], params: &KernelParams) -> GpuResult<()> {
     writeln!(code, "    // Fused operations").unwrap();
 
     for (i, op) in ops.iter().enumerate() {
@@ -154,14 +149,25 @@ fn generate_fused_ops(
                 writeln!(code, "    // Binary: {:?}", binary_op).unwrap();
                 generate_binary_op(code, *binary_op, dtype, i)?;
             }
-            TensorOp::Map(map_fn, _input) => {
+            TensorOp::Map(map_fn, input) => {
+                let dtype = input.meta.dtype;
                 writeln!(code, "    // Map: {}", map_fn.name.as_str()).unwrap();
+                generate_map_op(code, map_fn, dtype, params, i)?;
             }
-            TensorOp::ZipWith(zip_fn, _left, _right) => {
+            TensorOp::ZipWith(zip_fn, left, _right) => {
+                let dtype = left.meta.dtype;
                 writeln!(code, "    // ZipWith: {}", zip_fn.name.as_str()).unwrap();
+                generate_zipwith_op(code, zip_fn, dtype, params, i)?;
             }
-            TensorOp::Reduce(reduce_op, axis, _input) => {
+            TensorOp::Reduce(reduce_op, axis, input) => {
+                let dtype = input.meta.dtype;
                 writeln!(code, "    // Reduce: {:?} axis={}", reduce_op, axis.0).unwrap();
+                generate_reduce_op(code, *reduce_op, dtype, params, i)?;
+            }
+            TensorOp::ReduceAll(reduce_op, input) => {
+                let dtype = input.meta.dtype;
+                writeln!(code, "    // ReduceAll: {:?}", reduce_op).unwrap();
+                generate_reduce_all_op(code, *reduce_op, dtype, params, i)?;
             }
             _ => {
                 writeln!(code, "    // Unsupported op").unwrap();
@@ -184,12 +190,7 @@ fn generate_loop_nest(
 }
 
 /// Generate a unary operation.
-fn generate_unary_op(
-    code: &mut String,
-    op: UnaryOp,
-    dtype: DType,
-    idx: usize,
-) -> GpuResult<()> {
+fn generate_unary_op(code: &mut String, op: UnaryOp, dtype: DType, idx: usize) -> GpuResult<()> {
     let ty = dtype_to_gpu_type(dtype);
     let reg_in = format!("%in{}", idx);
     let reg_out = format!("%out{}", idx);
@@ -228,12 +229,7 @@ fn generate_unary_op(
 }
 
 /// Generate a binary operation.
-fn generate_binary_op(
-    code: &mut String,
-    op: BinaryOp,
-    dtype: DType,
-    idx: usize,
-) -> GpuResult<()> {
+fn generate_binary_op(code: &mut String, op: BinaryOp, dtype: DType, idx: usize) -> GpuResult<()> {
     let ty = dtype_to_gpu_type(dtype);
     let reg_a = format!("%a{}", idx);
     let reg_b = format!("%b{}", idx);
@@ -250,7 +246,12 @@ fn generate_binary_op(
             writeln!(code, "    mul.{} {}, {}, {};", ty, reg_out, reg_a, reg_b).unwrap();
         }
         BinaryOp::Div => {
-            writeln!(code, "    div.approx.{} {}, {}, {};", ty, reg_out, reg_a, reg_b).unwrap();
+            writeln!(
+                code,
+                "    div.approx.{} {}, {}, {};",
+                ty, reg_out, reg_a, reg_b
+            )
+            .unwrap();
         }
         BinaryOp::Max => {
             writeln!(code, "    max.{} {}, {}, {};", ty, reg_out, reg_a, reg_b).unwrap();
@@ -264,6 +265,816 @@ fn generate_binary_op(
     }
 
     Ok(())
+}
+
+/// Generate a map operation.
+///
+/// Maps a function over each element of the input tensor.
+/// Common patterns: (*2), (+1), (negate), (abs), etc.
+fn generate_map_op(
+    code: &mut String,
+    map_fn: &MapFn,
+    dtype: DType,
+    params: &KernelParams,
+    idx: usize,
+) -> GpuResult<()> {
+    let ty = dtype_to_gpu_type(dtype);
+    let fn_name = map_fn.name.as_str();
+
+    // Declare registers for this operation
+    writeln!(code, "    .reg .{} %map_in{}, %map_out{};", ty, idx, idx).unwrap();
+    writeln!(code, "    .reg .u64 %map_addr{};", idx).unwrap();
+
+    // Bounds check
+    let size_param = params
+        .inputs
+        .first()
+        .map(|p| &p.name)
+        .unwrap_or(&"n".to_string());
+    writeln!(code, "    ld.param.u64 %n, [{}];", size_param).unwrap();
+    writeln!(code, "    setp.ge.u64 %p, %idx, %n;").unwrap();
+    writeln!(code, "    @%p bra map_done{};", idx).unwrap();
+    writeln!(code).unwrap();
+
+    // Load input element
+    let elem_size = dtype_element_size(dtype);
+    if let Some(input) = params.inputs.first() {
+        writeln!(code, "    // Load input element").unwrap();
+        writeln!(
+            code,
+            "    ld.param.u64 %map_addr{}, [ptr_{}];",
+            idx, input.name
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    shl.b64 %map_addr{0}, %idx, {};  // idx * elem_size",
+            idx,
+            elem_size.trailing_zeros()
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    add.u64 %map_addr{0}, %map_addr{0}, %map_addr{0};",
+            idx
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    ld.global.{} %map_in{}, [%map_addr{}];",
+            ty, idx, idx
+        )
+        .unwrap();
+    }
+    writeln!(code).unwrap();
+
+    // Apply the map function based on pattern matching the name
+    writeln!(code, "    // Apply map function: {}", fn_name).unwrap();
+    match parse_map_function(fn_name) {
+        MapPattern::MulConst(c) => {
+            writeln!(code, "    .reg .{} %map_const{};", ty, idx).unwrap();
+            writeln!(
+                code,
+                "    mov.{} %map_const{}, {};",
+                ty,
+                idx,
+                format_const(c, dtype)
+            )
+            .unwrap();
+            writeln!(
+                code,
+                "    mul.{} %map_out{}, %map_in{}, %map_const{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+        MapPattern::AddConst(c) => {
+            writeln!(code, "    .reg .{} %map_const{};", ty, idx).unwrap();
+            writeln!(
+                code,
+                "    mov.{} %map_const{}, {};",
+                ty,
+                idx,
+                format_const(c, dtype)
+            )
+            .unwrap();
+            writeln!(
+                code,
+                "    add.{} %map_out{}, %map_in{}, %map_const{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+        MapPattern::Negate => {
+            writeln!(code, "    neg.{} %map_out{}, %map_in{};", ty, idx, idx).unwrap();
+        }
+        MapPattern::Abs => {
+            writeln!(code, "    abs.{} %map_out{}, %map_in{};", ty, idx, idx).unwrap();
+        }
+        MapPattern::Sqrt => {
+            writeln!(
+                code,
+                "    sqrt.approx.{} %map_out{}, %map_in{};",
+                ty, idx, idx
+            )
+            .unwrap();
+        }
+        MapPattern::Exp => {
+            writeln!(
+                code,
+                "    ex2.approx.{} %map_out{}, %map_in{};",
+                ty, idx, idx
+            )
+            .unwrap();
+        }
+        MapPattern::Log => {
+            writeln!(
+                code,
+                "    lg2.approx.{} %map_out{}, %map_in{};",
+                ty, idx, idx
+            )
+            .unwrap();
+        }
+        MapPattern::Unknown => {
+            // Default: just copy input to output (identity)
+            writeln!(
+                code,
+                "    mov.{} %map_out{}, %map_in{};  // Unknown fn, using identity",
+                ty, idx, idx
+            )
+            .unwrap();
+        }
+    }
+    writeln!(code).unwrap();
+
+    // Store output element
+    if let Some(output) = params.outputs.first() {
+        writeln!(code, "    // Store output element").unwrap();
+        writeln!(
+            code,
+            "    ld.param.u64 %map_addr{}, [ptr_{}];",
+            idx, output.name
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    shl.b64 %map_addr{0}, %idx, {};",
+            idx,
+            elem_size.trailing_zeros()
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    add.u64 %map_addr{0}, %map_addr{0}, %map_addr{0};",
+            idx
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    st.global.{} [%map_addr{}], %map_out{};",
+            ty, idx, idx
+        )
+        .unwrap();
+    }
+
+    writeln!(code, "map_done{}:", idx).unwrap();
+    Ok(())
+}
+
+/// Generate a zipwith operation.
+///
+/// Combines two tensors element-wise using a binary function.
+fn generate_zipwith_op(
+    code: &mut String,
+    zip_fn: &ZipFn,
+    dtype: DType,
+    params: &KernelParams,
+    idx: usize,
+) -> GpuResult<()> {
+    let ty = dtype_to_gpu_type(dtype);
+    let fn_name = zip_fn.name.as_str();
+
+    // Declare registers
+    writeln!(
+        code,
+        "    .reg .{} %zip_a{}, %zip_b{}, %zip_out{};",
+        ty, idx, idx, idx
+    )
+    .unwrap();
+    writeln!(
+        code,
+        "    .reg .u64 %zip_addr_a{}, %zip_addr_b{}, %zip_addr_out{};",
+        idx, idx, idx
+    )
+    .unwrap();
+
+    // Bounds check
+    writeln!(code, "    setp.ge.u64 %p, %idx, %n;").unwrap();
+    writeln!(code, "    @%p bra zip_done{};", idx).unwrap();
+    writeln!(code).unwrap();
+
+    let elem_size = dtype_element_size(dtype);
+
+    // Load first input
+    if params.inputs.len() >= 1 {
+        let input_a = &params.inputs[0];
+        writeln!(code, "    // Load first input").unwrap();
+        writeln!(
+            code,
+            "    ld.param.u64 %zip_addr_a{}, [ptr_{}];",
+            idx, input_a.name
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    mul.wide.u32 %zip_addr_a{0}, %idx, {};",
+            idx, elem_size
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    add.u64 %zip_addr_a{0}, %zip_addr_a{0}, %zip_addr_a{0};",
+            idx
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    ld.global.{} %zip_a{}, [%zip_addr_a{}];",
+            ty, idx, idx
+        )
+        .unwrap();
+    }
+
+    // Load second input
+    if params.inputs.len() >= 2 {
+        let input_b = &params.inputs[1];
+        writeln!(code, "    // Load second input").unwrap();
+        writeln!(
+            code,
+            "    ld.param.u64 %zip_addr_b{}, [ptr_{}];",
+            idx, input_b.name
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    mul.wide.u32 %zip_addr_b{0}, %idx, {};",
+            idx, elem_size
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    add.u64 %zip_addr_b{0}, %zip_addr_b{0}, %zip_addr_b{0};",
+            idx
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    ld.global.{} %zip_b{}, [%zip_addr_b{}];",
+            ty, idx, idx
+        )
+        .unwrap();
+    }
+    writeln!(code).unwrap();
+
+    // Apply the zip function
+    writeln!(code, "    // Apply zip function: {}", fn_name).unwrap();
+    match parse_zip_function(fn_name) {
+        ZipPattern::Add => {
+            writeln!(
+                code,
+                "    add.{} %zip_out{}, %zip_a{}, %zip_b{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+        ZipPattern::Sub => {
+            writeln!(
+                code,
+                "    sub.{} %zip_out{}, %zip_a{}, %zip_b{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+        ZipPattern::Mul => {
+            writeln!(
+                code,
+                "    mul.{} %zip_out{}, %zip_a{}, %zip_b{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+        ZipPattern::Div => {
+            writeln!(
+                code,
+                "    div.approx.{} %zip_out{}, %zip_a{}, %zip_b{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+        ZipPattern::Max => {
+            writeln!(
+                code,
+                "    max.{} %zip_out{}, %zip_a{}, %zip_b{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+        ZipPattern::Min => {
+            writeln!(
+                code,
+                "    min.{} %zip_out{}, %zip_a{}, %zip_b{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+        ZipPattern::Unknown => {
+            // Default: add
+            writeln!(
+                code,
+                "    add.{} %zip_out{}, %zip_a{}, %zip_b{};  // Unknown fn, using add",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+    }
+    writeln!(code).unwrap();
+
+    // Store output
+    if let Some(output) = params.outputs.first() {
+        writeln!(code, "    // Store output").unwrap();
+        writeln!(
+            code,
+            "    ld.param.u64 %zip_addr_out{}, [ptr_{}];",
+            idx, output.name
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    mul.wide.u32 %zip_addr_out{0}, %idx, {};",
+            idx, elem_size
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    add.u64 %zip_addr_out{0}, %zip_addr_out{0}, %zip_addr_out{0};",
+            idx
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    st.global.{} [%zip_addr_out{}], %zip_out{};",
+            ty, idx, idx
+        )
+        .unwrap();
+    }
+
+    writeln!(code, "zip_done{}:", idx).unwrap();
+    Ok(())
+}
+
+/// Generate a reduction operation along an axis.
+///
+/// Uses parallel reduction with shared memory.
+fn generate_reduce_op(
+    code: &mut String,
+    reduce_op: ReduceOp,
+    dtype: DType,
+    params: &KernelParams,
+    idx: usize,
+) -> GpuResult<()> {
+    // For axis reduction, we generate a block-based parallel reduction
+    generate_parallel_reduction(code, reduce_op, dtype, params, idx, false)
+}
+
+/// Generate a full reduction to scalar.
+fn generate_reduce_all_op(
+    code: &mut String,
+    reduce_op: ReduceOp,
+    dtype: DType,
+    params: &KernelParams,
+    idx: usize,
+) -> GpuResult<()> {
+    generate_parallel_reduction(code, reduce_op, dtype, params, idx, true)
+}
+
+/// Generate parallel reduction kernel code.
+///
+/// This implements a tree-based parallel reduction using shared memory:
+/// 1. Each thread loads one element
+/// 2. Tree reduction within each block using shared memory
+/// 3. Final atomic operation to combine block results
+fn generate_parallel_reduction(
+    code: &mut String,
+    reduce_op: ReduceOp,
+    dtype: DType,
+    params: &KernelParams,
+    idx: usize,
+    _is_full: bool,
+) -> GpuResult<()> {
+    let ty = dtype_to_gpu_type(dtype);
+    let elem_size = dtype_element_size(dtype);
+
+    // Shared memory declaration (256 elements per block)
+    writeln!(code, "    .shared .{} sdata{}[256];", ty, idx).unwrap();
+    writeln!(code, "    .reg .{} %red_val{}, %red_tmp{};", ty, idx, idx).unwrap();
+    writeln!(code, "    .reg .u64 %red_addr{};", idx).unwrap();
+    writeln!(code, "    .reg .u32 %red_tid{}, %red_stride{};", idx, idx).unwrap();
+    writeln!(code, "    .reg .pred %red_p{};", idx).unwrap();
+    writeln!(code).unwrap();
+
+    // Initialize with identity element
+    let identity = reduce_identity(reduce_op, dtype);
+    writeln!(code, "    // Initialize with identity element").unwrap();
+    writeln!(code, "    mov.{} %red_val{}, {};", ty, idx, identity).unwrap();
+    writeln!(code).unwrap();
+
+    // Bounds check and load
+    writeln!(code, "    // Load element if in bounds").unwrap();
+    writeln!(code, "    setp.lt.u64 %red_p{}, %idx, %n;", idx).unwrap();
+    writeln!(code, "    @!%red_p{} bra red_store{};", idx, idx).unwrap();
+
+    if let Some(input) = params.inputs.first() {
+        writeln!(
+            code,
+            "    ld.param.u64 %red_addr{}, [ptr_{}];",
+            idx, input.name
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    mul.wide.u32 %red_addr{0}, %idx, {};",
+            idx, elem_size
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    add.u64 %red_addr{0}, %red_addr{0}, %red_addr{0};",
+            idx
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    ld.global.{} %red_val{}, [%red_addr{}];",
+            ty, idx, idx
+        )
+        .unwrap();
+    }
+
+    writeln!(code, "red_store{}:", idx).unwrap();
+    writeln!(code).unwrap();
+
+    // Store to shared memory
+    writeln!(code, "    // Store to shared memory").unwrap();
+    writeln!(code, "    mov.u32 %red_tid{}, %tid;", idx).unwrap();
+    writeln!(
+        code,
+        "    mul.lo.u32 %red_stride{}, %red_tid{}, {};",
+        idx, idx, elem_size
+    )
+    .unwrap();
+    writeln!(
+        code,
+        "    st.shared.{} [sdata{} + %red_stride{}], %red_val{};",
+        ty, idx, idx, idx
+    )
+    .unwrap();
+    writeln!(code, "    bar.sync 0;").unwrap();
+    writeln!(code).unwrap();
+
+    // Tree reduction in shared memory
+    writeln!(code, "    // Tree reduction").unwrap();
+    for s in [128, 64, 32, 16, 8, 4, 2, 1] {
+        writeln!(
+            code,
+            "    setp.lt.u32 %red_p{}, %red_tid{}, {};",
+            idx, idx, s
+        )
+        .unwrap();
+        writeln!(code, "    @!%red_p{} bra red_sync{}{};", idx, idx, s).unwrap();
+
+        // Load neighbor value
+        writeln!(
+            code,
+            "    add.u32 %red_stride{}, %red_tid{}, {};",
+            idx, idx, s
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    mul.lo.u32 %red_stride{0}, %red_stride{0}, {};",
+            idx, elem_size
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    ld.shared.{} %red_tmp{}, [sdata{} + %red_stride{}];",
+            ty, idx, idx, idx
+        )
+        .unwrap();
+
+        // Load own value
+        writeln!(
+            code,
+            "    mul.lo.u32 %red_stride{}, %red_tid{}, {};",
+            idx, idx, elem_size
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    ld.shared.{} %red_val{}, [sdata{} + %red_stride{}];",
+            ty, idx, idx, idx
+        )
+        .unwrap();
+
+        // Combine
+        generate_reduce_combine(code, reduce_op, dtype, idx)?;
+
+        // Store back
+        writeln!(
+            code,
+            "    st.shared.{} [sdata{} + %red_stride{}], %red_val{};",
+            ty, idx, idx, idx
+        )
+        .unwrap();
+
+        writeln!(code, "red_sync{}{}:", idx, s).unwrap();
+        if s > 1 {
+            writeln!(code, "    bar.sync 0;").unwrap();
+        }
+    }
+    writeln!(code).unwrap();
+
+    // Thread 0 writes final result with atomic operation
+    writeln!(code, "    // Write final result").unwrap();
+    writeln!(code, "    setp.eq.u32 %red_p{}, %red_tid{}, 0;", idx, idx).unwrap();
+    writeln!(code, "    @!%red_p{} bra red_done{};", idx, idx).unwrap();
+
+    if let Some(output) = params.outputs.first() {
+        writeln!(
+            code,
+            "    ld.shared.{} %red_val{}, [sdata{}];",
+            ty, idx, idx
+        )
+        .unwrap();
+        writeln!(
+            code,
+            "    ld.param.u64 %red_addr{}, [ptr_{}];",
+            idx, output.name
+        )
+        .unwrap();
+        // Use atomic for combining across blocks
+        generate_atomic_reduce(code, reduce_op, dtype, idx)?;
+    }
+
+    writeln!(code, "red_done{}:", idx).unwrap();
+
+    Ok(())
+}
+
+/// Generate the combine operation for reduction.
+fn generate_reduce_combine(
+    code: &mut String,
+    reduce_op: ReduceOp,
+    dtype: DType,
+    idx: usize,
+) -> GpuResult<()> {
+    let ty = dtype_to_gpu_type(dtype);
+
+    match reduce_op {
+        ReduceOp::Sum | ReduceOp::Mean => {
+            writeln!(
+                code,
+                "    add.{} %red_val{}, %red_val{}, %red_tmp{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+        ReduceOp::Prod => {
+            writeln!(
+                code,
+                "    mul.{} %red_val{}, %red_val{}, %red_tmp{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+        ReduceOp::Max => {
+            writeln!(
+                code,
+                "    max.{} %red_val{}, %red_val{}, %red_tmp{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+        ReduceOp::Min => {
+            writeln!(
+                code,
+                "    min.{} %red_val{}, %red_val{}, %red_tmp{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+        ReduceOp::All => {
+            writeln!(
+                code,
+                "    and.b32 %red_val{}, %red_val{}, %red_tmp{};",
+                idx, idx, idx
+            )
+            .unwrap();
+        }
+        ReduceOp::Any => {
+            writeln!(
+                code,
+                "    or.b32 %red_val{}, %red_val{}, %red_tmp{};",
+                idx, idx, idx
+            )
+            .unwrap();
+        }
+    }
+
+    Ok(())
+}
+
+/// Generate atomic operation for final reduction across blocks.
+fn generate_atomic_reduce(
+    code: &mut String,
+    reduce_op: ReduceOp,
+    dtype: DType,
+    idx: usize,
+) -> GpuResult<()> {
+    let ty = dtype_to_gpu_type(dtype);
+
+    match reduce_op {
+        ReduceOp::Sum | ReduceOp::Mean => {
+            // PTX atomic add for floats
+            if dtype == DType::Float32 || dtype == DType::Float64 {
+                writeln!(
+                    code,
+                    "    atom.global.add.{} %red_tmp{}, [%red_addr{}], %red_val{};",
+                    ty, idx, idx, idx
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    code,
+                    "    atom.global.add.{} %red_tmp{}, [%red_addr{}], %red_val{};",
+                    ty, idx, idx, idx
+                )
+                .unwrap();
+            }
+        }
+        ReduceOp::Max => {
+            writeln!(
+                code,
+                "    atom.global.max.{} %red_tmp{}, [%red_addr{}], %red_val{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+        ReduceOp::Min => {
+            writeln!(
+                code,
+                "    atom.global.min.{} %red_tmp{}, [%red_addr{}], %red_val{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
+        }
+        _ => {
+            // For other ops, just store (single block case)
+            writeln!(
+                code,
+                "    st.global.{} [%red_addr{}], %red_val{};",
+                ty, idx, idx
+            )
+            .unwrap();
+        }
+    }
+
+    Ok(())
+}
+
+/// Get the identity element for a reduction operation.
+fn reduce_identity(reduce_op: ReduceOp, dtype: DType) -> String {
+    match reduce_op {
+        ReduceOp::Sum | ReduceOp::Mean => {
+            if dtype == DType::Float32 || dtype == DType::Float64 {
+                "0.0".to_string()
+            } else {
+                "0".to_string()
+            }
+        }
+        ReduceOp::Prod => {
+            if dtype == DType::Float32 || dtype == DType::Float64 {
+                "1.0".to_string()
+            } else {
+                "1".to_string()
+            }
+        }
+        ReduceOp::Max => {
+            match dtype {
+                DType::Float32 => "0ff7f7ffff".to_string(), // -FLT_MAX in hex
+                DType::Float64 => "0dffefffffffffffff".to_string(), // -DBL_MAX
+                DType::Int32 => "-2147483648".to_string(),
+                DType::Int64 => "-9223372036854775808".to_string(),
+                _ => "0".to_string(),
+            }
+        }
+        ReduceOp::Min => {
+            match dtype {
+                DType::Float32 => "0x7f7fffff".to_string(), // FLT_MAX
+                DType::Float64 => "0x7fefffffffffffff".to_string(), // DBL_MAX
+                DType::Int32 => "2147483647".to_string(),
+                DType::Int64 => "9223372036854775807".to_string(),
+                _ => "0".to_string(),
+            }
+        }
+        ReduceOp::All => "1".to_string(),
+        ReduceOp::Any => "0".to_string(),
+    }
+}
+
+/// Get element size in bytes for a dtype.
+fn dtype_element_size(dtype: DType) -> u32 {
+    match dtype {
+        DType::Float16 | DType::BFloat16 => 2,
+        DType::Float32 | DType::Int32 | DType::UInt32 => 4,
+        DType::Float64 | DType::Int64 | DType::UInt64 => 8,
+        _ => 4,
+    }
+}
+
+/// Format a constant for PTX.
+fn format_const(value: f64, dtype: DType) -> String {
+    match dtype {
+        DType::Float32 | DType::Float64 => format!("{:.6}", value),
+        _ => format!("{}", value as i64),
+    }
+}
+
+/// Patterns recognized in map functions.
+#[derive(Debug)]
+enum MapPattern {
+    MulConst(f64),
+    AddConst(f64),
+    Negate,
+    Abs,
+    Sqrt,
+    Exp,
+    Log,
+    Unknown,
+}
+
+/// Parse a map function name to determine the operation.
+fn parse_map_function(name: &str) -> MapPattern {
+    let name = name.trim();
+
+    // Try to parse (*n) or (n*) patterns
+    if name.starts_with("(*") && name.ends_with(')') {
+        if let Ok(n) = name[2..name.len() - 1].trim().parse::<f64>() {
+            return MapPattern::MulConst(n);
+        }
+    }
+    if name.starts_with("(+") && name.ends_with(')') {
+        if let Ok(n) = name[2..name.len() - 1].trim().parse::<f64>() {
+            return MapPattern::AddConst(n);
+        }
+    }
+
+    // Named functions
+    match name {
+        "negate" | "neg" | "(negate)" => MapPattern::Negate,
+        "abs" | "(abs)" => MapPattern::Abs,
+        "sqrt" | "(sqrt)" => MapPattern::Sqrt,
+        "exp" | "(exp)" => MapPattern::Exp,
+        "log" | "(log)" => MapPattern::Log,
+        _ => MapPattern::Unknown,
+    }
+}
+
+/// Patterns recognized in zip functions.
+#[derive(Debug)]
+enum ZipPattern {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Max,
+    Min,
+    Unknown,
+}
+
+/// Parse a zip function name to determine the operation.
+fn parse_zip_function(name: &str) -> ZipPattern {
+    let name = name.trim();
+
+    match name {
+        "(+)" | "add" | "+" => ZipPattern::Add,
+        "(-)" | "sub" | "-" => ZipPattern::Sub,
+        "(*)" | "mul" | "*" => ZipPattern::Mul,
+        "(/)" | "div" | "/" => ZipPattern::Div,
+        "max" | "(max)" => ZipPattern::Max,
+        "min" | "(min)" => ZipPattern::Min,
+        _ => ZipPattern::Unknown,
+    }
 }
 
 /// Generate a simple elementwise kernel.

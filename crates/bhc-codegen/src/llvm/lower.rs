@@ -528,6 +528,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "append" | "++" => Some(2),
             "enumFromTo" => Some(2),
             "replicate" => Some(2),
+            "sum" => Some(1),
+            "product" => Some(1),
+            "map" => Some(2),
+            "filter" => Some(2),
+            "foldr" => Some(3),
+            "foldl" => Some(3),
 
             // Tuple operations
             "fst" => Some(1),
@@ -559,6 +565,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "putChar" => Some(1),
             "print" => Some(1),
             "getLine" => Some(0),
+
+            // Monadic operations
+            ">>=" => Some(2),
+            ">>" => Some(2),
+            "return" => Some(1),
+            "pure" => Some(1),
 
             _ => {
                 // Check for field selector pattern: $sel_N where N is a digit
@@ -615,6 +627,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "append" | "++" => self.lower_builtin_append(args[0], args[1]),
             "enumFromTo" => self.lower_builtin_enum_from_to(args[0], args[1]),
             "replicate" => self.lower_builtin_replicate(args[0], args[1]),
+            "sum" => self.lower_builtin_sum(args[0]),
+            "product" => self.lower_builtin_product(args[0]),
+            "map" => self.lower_builtin_map(args[0], args[1]),
+            "filter" => self.lower_builtin_filter(args[0], args[1]),
+            "foldr" => self.lower_builtin_foldr(args[0], args[1], args[2]),
+            "foldl" => self.lower_builtin_foldl(args[0], args[1], args[2]),
 
             // Tuple operations
             "fst" => self.lower_builtin_fst(args[0]),
@@ -646,6 +664,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "putChar" => self.lower_builtin_put_char(args[0]),
             "print" => self.lower_builtin_print(args[0]),
             "getLine" => self.lower_builtin_get_line(),
+
+            // Monadic operations
+            ">>=" => self.lower_builtin_bind(args[0], args[1]),
+            ">>" => self.lower_builtin_then(args[0], args[1]),
+            "return" | "pure" => self.lower_builtin_return(args[0]),
 
             _ => {
                 // Check for field selector pattern: $sel_N
@@ -1465,6 +1488,679 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(cons_ptr)
     }
 
+    /// Lower `sum` - sum all elements of a list.
+    /// sum [] = 0
+    /// sum (x:xs) = x + sum xs
+    fn lower_builtin_sum(&mut self, list_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let list_val = self.lower_expr(list_expr)?.ok_or_else(|| {
+            CodegenError::Internal("sum: list has no value".to_string())
+        })?;
+
+        let list_ptr = match list_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError("sum expects a list".to_string())),
+        };
+
+        let tm = self.type_mapper();
+        let current_fn = self.builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let entry_block = self.builder().get_insert_block().ok_or_else(|| {
+            CodegenError::Internal("no current block".to_string())
+        })?;
+        let loop_header = self.llvm_ctx.append_basic_block(current_fn, "sum_header");
+        let loop_body = self.llvm_ctx.append_basic_block(current_fn, "sum_body");
+        let loop_exit = self.llvm_ctx.append_basic_block(current_fn, "sum_exit");
+
+        // Jump to loop header
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Loop header: phi for accumulator and current list pointer
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder()
+            .build_phi(tm.i64_type(), "sum_acc")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        let list_phi = self.builder()
+            .build_phi(tm.ptr_type(), "sum_list")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+
+        // Check if list is empty (tag == 0)
+        let tag = self.extract_adt_tag(list_phi.as_basic_value().into_pointer_value())?;
+        let is_empty = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, tm.i64_type().const_zero(), "is_empty")
+            .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
+
+        self.builder().build_conditional_branch(is_empty, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Loop body: extract head, add to accumulator, continue with tail
+        self.builder().position_at_end(loop_body);
+        let head_ptr = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
+        let head_val = self.builder()
+            .build_ptr_to_int(head_ptr, tm.i64_type(), "head_val")
+            .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
+        let tail_ptr = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+
+        let new_acc = self.builder()
+            .build_int_add(acc_phi.as_basic_value().into_int_value(), head_val, "new_acc")
+            .map_err(|e| CodegenError::Internal(format!("failed to add: {:?}", e)))?;
+
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Add incoming values to phi nodes
+        acc_phi.add_incoming(&[(&tm.i64_type().const_zero(), entry_block), (&new_acc, loop_body)]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, loop_body)]);
+
+        // Exit: return accumulator (boxed as pointer)
+        self.builder().position_at_end(loop_exit);
+        let result = self.builder()
+            .build_int_to_ptr(acc_phi.as_basic_value().into_int_value(), tm.ptr_type(), "result")
+            .map_err(|e| CodegenError::Internal(format!("failed to int_to_ptr: {:?}", e)))?;
+        Ok(Some(result.into()))
+    }
+
+    /// Lower `product` - multiply all elements of a list.
+    /// product [] = 1
+    /// product (x:xs) = x * product xs
+    fn lower_builtin_product(&mut self, list_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let list_val = self.lower_expr(list_expr)?.ok_or_else(|| {
+            CodegenError::Internal("product: list has no value".to_string())
+        })?;
+
+        let list_ptr = match list_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError("product expects a list".to_string())),
+        };
+
+        let tm = self.type_mapper();
+        let current_fn = self.builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let entry_block = self.builder().get_insert_block().ok_or_else(|| {
+            CodegenError::Internal("no current block".to_string())
+        })?;
+        let loop_header = self.llvm_ctx.append_basic_block(current_fn, "prod_header");
+        let loop_body = self.llvm_ctx.append_basic_block(current_fn, "prod_body");
+        let loop_exit = self.llvm_ctx.append_basic_block(current_fn, "prod_exit");
+
+        // Jump to loop header
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Loop header: phi for accumulator and current list pointer
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder()
+            .build_phi(tm.i64_type(), "prod_acc")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        let list_phi = self.builder()
+            .build_phi(tm.ptr_type(), "prod_list")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+
+        // Check if list is empty (tag == 0)
+        let tag = self.extract_adt_tag(list_phi.as_basic_value().into_pointer_value())?;
+        let is_empty = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, tm.i64_type().const_zero(), "is_empty")
+            .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
+
+        self.builder().build_conditional_branch(is_empty, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Loop body: extract head, multiply with accumulator, continue with tail
+        self.builder().position_at_end(loop_body);
+        let head_ptr = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
+        let head_val = self.builder()
+            .build_ptr_to_int(head_ptr, tm.i64_type(), "head_val")
+            .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
+        let tail_ptr = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+
+        let new_acc = self.builder()
+            .build_int_mul(acc_phi.as_basic_value().into_int_value(), head_val, "new_acc")
+            .map_err(|e| CodegenError::Internal(format!("failed to mul: {:?}", e)))?;
+
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Add incoming values to phi nodes (start with 1 for product)
+        acc_phi.add_incoming(&[(&tm.i64_type().const_int(1, false), entry_block), (&new_acc, loop_body)]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, loop_body)]);
+
+        // Exit: return accumulator (boxed as pointer)
+        self.builder().position_at_end(loop_exit);
+        let result = self.builder()
+            .build_int_to_ptr(acc_phi.as_basic_value().into_int_value(), tm.ptr_type(), "result")
+            .map_err(|e| CodegenError::Internal(format!("failed to int_to_ptr: {:?}", e)))?;
+        Ok(Some(result.into()))
+    }
+
+    /// Lower `map` - apply a function to each element of a list.
+    /// map f [] = []
+    /// map f (x:xs) = f x : map f xs
+    fn lower_builtin_map(&mut self, fn_expr: &Expr, list_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Lower the function (should be a closure)
+        let fn_val = self.lower_expr(fn_expr)?.ok_or_else(|| {
+            CodegenError::Internal("map: function has no value".to_string())
+        })?;
+
+        let fn_ptr = match fn_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError("map: function must be a closure".to_string())),
+        };
+
+        let list_val = self.lower_expr(list_expr)?.ok_or_else(|| {
+            CodegenError::Internal("map: list has no value".to_string())
+        })?;
+
+        let list_ptr = match list_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError("map expects a list".to_string())),
+        };
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let current_fn = self.builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let entry_block = self.builder().get_insert_block().ok_or_else(|| {
+            CodegenError::Internal("no current block".to_string())
+        })?;
+        let loop_header = self.llvm_ctx.append_basic_block(current_fn, "map_header");
+        let loop_body = self.llvm_ctx.append_basic_block(current_fn, "map_body");
+        let loop_exit = self.llvm_ctx.append_basic_block(current_fn, "map_exit");
+
+        // Build nil in entry block before branching
+        let nil = self.build_nil()?;
+
+        // Build result list in reverse (we'll reverse at the end)
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Loop header
+        self.builder().position_at_end(loop_header);
+        let result_phi = self.builder()
+            .build_phi(ptr_type, "map_result")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        let list_phi = self.builder()
+            .build_phi(ptr_type, "map_list")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+
+        // Check if list is empty
+        let tag = self.extract_adt_tag(list_phi.as_basic_value().into_pointer_value())?;
+        let is_empty = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, tm.i64_type().const_zero(), "is_empty")
+            .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
+
+        self.builder().build_conditional_branch(is_empty, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Loop body: apply function to head, cons result onto accumulator
+        self.builder().position_at_end(loop_body);
+        let head_ptr = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
+        let tail_ptr = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+
+        // Call the function closure: fn_ptr(fn_ptr, head)
+        let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        let mapped_val = self.builder()
+            .build_indirect_call(fn_type, closure_fn_ptr, &[fn_ptr.into(), head_ptr.into()], "mapped")
+            .map_err(|e| CodegenError::Internal(format!("failed to call map fn: {:?}", e)))?
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CodegenError::Internal("map function returned void".to_string()))?;
+
+        // Build new cons cell
+        let new_cons = self.build_cons(mapped_val, result_phi.as_basic_value())?;
+
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Add phi incoming values (nil was built in entry block before branching)
+        result_phi.add_incoming(&[(&nil, entry_block), (&new_cons, loop_body)]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, loop_body)]);
+
+        // Exit: reverse the result (we built it in reverse order)
+        self.builder().position_at_end(loop_exit);
+
+        // Call builtin reverse - but we need to do it inline to avoid recursion issues
+        // For simplicity, we'll use an iterative reverse
+        let rev_header = self.llvm_ctx.append_basic_block(current_fn, "rev_header");
+        let rev_body = self.llvm_ctx.append_basic_block(current_fn, "rev_body");
+        let rev_exit = self.llvm_ctx.append_basic_block(current_fn, "rev_exit");
+
+        // Build nil2 before branching
+        let nil2 = self.build_nil()?;
+
+        self.builder().build_unconditional_branch(rev_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        self.builder().position_at_end(rev_header);
+        let rev_acc = self.builder()
+            .build_phi(ptr_type, "rev_acc")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        let rev_list = self.builder()
+            .build_phi(ptr_type, "rev_list")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+
+        let rev_tag = self.extract_adt_tag(rev_list.as_basic_value().into_pointer_value())?;
+        let rev_is_empty = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, rev_tag, tm.i64_type().const_zero(), "rev_is_empty")
+            .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
+
+        self.builder().build_conditional_branch(rev_is_empty, rev_exit, rev_body)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        self.builder().position_at_end(rev_body);
+        let rev_head = self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
+        let rev_tail = self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
+
+        self.builder().build_unconditional_branch(rev_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // nil2 was built in loop_exit before branching
+        rev_acc.add_incoming(&[(&nil2, loop_exit), (&rev_new_cons, rev_body)]);
+        rev_list.add_incoming(&[(&result_phi.as_basic_value(), loop_exit), (&rev_tail, rev_body)]);
+
+        self.builder().position_at_end(rev_exit);
+        Ok(Some(rev_acc.as_basic_value()))
+    }
+
+    /// Lower `filter` - keep elements that satisfy a predicate.
+    /// filter p [] = []
+    /// filter p (x:xs) = if p x then x : filter p xs else filter p xs
+    fn lower_builtin_filter(&mut self, pred_expr: &Expr, list_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Lower the predicate (should be a closure)
+        let pred_val = self.lower_expr(pred_expr)?.ok_or_else(|| {
+            CodegenError::Internal("filter: predicate has no value".to_string())
+        })?;
+
+        let pred_ptr = match pred_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError("filter: predicate must be a closure".to_string())),
+        };
+
+        let list_val = self.lower_expr(list_expr)?.ok_or_else(|| {
+            CodegenError::Internal("filter: list has no value".to_string())
+        })?;
+
+        let list_ptr = match list_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError("filter expects a list".to_string())),
+        };
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let current_fn = self.builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let entry_block = self.builder().get_insert_block().ok_or_else(|| {
+            CodegenError::Internal("no current block".to_string())
+        })?;
+        let loop_header = self.llvm_ctx.append_basic_block(current_fn, "filter_header");
+        let loop_body = self.llvm_ctx.append_basic_block(current_fn, "filter_body");
+        let loop_keep = self.llvm_ctx.append_basic_block(current_fn, "filter_keep");
+        let loop_skip = self.llvm_ctx.append_basic_block(current_fn, "filter_skip");
+        let loop_exit = self.llvm_ctx.append_basic_block(current_fn, "filter_exit");
+
+        // Build nil in entry block before branching
+        let nil = self.build_nil()?;
+
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Loop header
+        self.builder().position_at_end(loop_header);
+        let result_phi = self.builder()
+            .build_phi(ptr_type, "filter_result")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        let list_phi = self.builder()
+            .build_phi(ptr_type, "filter_list")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+
+        // Check if list is empty
+        let tag = self.extract_adt_tag(list_phi.as_basic_value().into_pointer_value())?;
+        let is_empty = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, tm.i64_type().const_zero(), "is_empty")
+            .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
+
+        self.builder().build_conditional_branch(is_empty, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Loop body: check predicate
+        self.builder().position_at_end(loop_body);
+        let head_ptr = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
+        let tail_ptr = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+
+        // Call predicate: pred_ptr(pred_ptr, head)
+        let pred_fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        let pred_result = self.builder()
+            .build_indirect_call(fn_type, pred_fn_ptr, &[pred_ptr.into(), head_ptr.into()], "pred_result")
+            .map_err(|e| CodegenError::Internal(format!("failed to call predicate: {:?}", e)))?
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CodegenError::Internal("predicate returned void".to_string()))?;
+
+        // Check if predicate returned True (non-zero value)
+        // Bools are boxed as int_to_ptr, so we need to convert back with ptr_to_int
+        let pred_bool = self.builder()
+            .build_ptr_to_int(pred_result.into_pointer_value(), tm.i64_type(), "pred_bool")
+            .map_err(|e| CodegenError::Internal(format!("failed to unbox pred result: {:?}", e)))?;
+        let is_true = self.builder()
+            .build_int_compare(inkwell::IntPredicate::NE, pred_bool, tm.i64_type().const_zero(), "is_true")
+            .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
+
+        self.builder().build_conditional_branch(is_true, loop_keep, loop_skip)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Keep: cons head onto result
+        self.builder().position_at_end(loop_keep);
+        let new_cons = self.build_cons(head_ptr.into(), result_phi.as_basic_value())?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Skip: just continue
+        self.builder().position_at_end(loop_skip);
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Add phi incoming values (nil was built in entry block)
+        result_phi.add_incoming(&[
+            (&nil, entry_block),
+            (&new_cons, loop_keep),
+            (&result_phi.as_basic_value(), loop_skip),
+        ]);
+        list_phi.add_incoming(&[
+            (&list_ptr, entry_block),
+            (&tail_ptr, loop_keep),
+            (&tail_ptr, loop_skip),
+        ]);
+
+        // Exit: reverse the result
+        self.builder().position_at_end(loop_exit);
+
+        // Inline reverse
+        let rev_header = self.llvm_ctx.append_basic_block(current_fn, "rev_header");
+        let rev_body = self.llvm_ctx.append_basic_block(current_fn, "rev_body");
+        let rev_exit = self.llvm_ctx.append_basic_block(current_fn, "rev_exit");
+
+        // Build nil2 before branching
+        let nil2 = self.build_nil()?;
+
+        self.builder().build_unconditional_branch(rev_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        self.builder().position_at_end(rev_header);
+        let rev_acc = self.builder()
+            .build_phi(ptr_type, "rev_acc")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        let rev_list = self.builder()
+            .build_phi(ptr_type, "rev_list")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+
+        let rev_tag = self.extract_adt_tag(rev_list.as_basic_value().into_pointer_value())?;
+        let rev_is_empty = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, rev_tag, tm.i64_type().const_zero(), "rev_is_empty")
+            .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
+
+        self.builder().build_conditional_branch(rev_is_empty, rev_exit, rev_body)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        self.builder().position_at_end(rev_body);
+        let rev_head = self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
+        let rev_tail = self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
+
+        self.builder().build_unconditional_branch(rev_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // nil2 was built in loop_exit before branching
+        rev_acc.add_incoming(&[(&nil2, loop_exit), (&rev_new_cons, rev_body)]);
+        rev_list.add_incoming(&[(&result_phi.as_basic_value(), loop_exit), (&rev_tail, rev_body)]);
+
+        self.builder().position_at_end(rev_exit);
+        Ok(Some(rev_acc.as_basic_value()))
+    }
+
+    /// Lower `foldl` - left fold over a list.
+    /// foldl f z [] = z
+    /// foldl f z (x:xs) = foldl f (f z x) xs
+    ///
+    /// Iterative implementation: accumulates from left to right
+    fn lower_builtin_foldl(&mut self, func_expr: &Expr, init_expr: &Expr, list_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Lower the function (should be a closure)
+        let func_val = self.lower_expr(func_expr)?.ok_or_else(|| {
+            CodegenError::Internal("foldl: function has no value".to_string())
+        })?;
+
+        let func_ptr = match func_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError("foldl: function must be a closure".to_string())),
+        };
+
+        // Lower the initial value
+        let init_val = self.lower_expr(init_expr)?.ok_or_else(|| {
+            CodegenError::Internal("foldl: initial value has no value".to_string())
+        })?;
+        let init_ptr = self.value_to_ptr(init_val)?;
+
+        // Lower the list
+        let list_val = self.lower_expr(list_expr)?.ok_or_else(|| {
+            CodegenError::Internal("foldl: list has no value".to_string())
+        })?;
+
+        let list_ptr = match list_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError("foldl expects a list".to_string())),
+        };
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let current_fn = self.builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let entry_block = self.builder().get_insert_block().ok_or_else(|| {
+            CodegenError::Internal("no current block".to_string())
+        })?;
+        let loop_header = self.llvm_ctx.append_basic_block(current_fn, "foldl_header");
+        let loop_body = self.llvm_ctx.append_basic_block(current_fn, "foldl_body");
+        let loop_exit = self.llvm_ctx.append_basic_block(current_fn, "foldl_exit");
+
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Loop header
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder()
+            .build_phi(ptr_type, "foldl_acc")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        let list_phi = self.builder()
+            .build_phi(ptr_type, "foldl_list")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+
+        // Check if list is empty
+        let tag = self.extract_adt_tag(list_phi.as_basic_value().into_pointer_value())?;
+        let is_empty = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, tm.i64_type().const_zero(), "is_empty")
+            .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
+
+        self.builder().build_conditional_branch(is_empty, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Loop body: acc = f acc head; list = tail
+        self.builder().position_at_end(loop_body);
+        let head_ptr = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
+        let tail_ptr = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+
+        // Call f acc head - function takes (closure_ptr, acc, head) and returns new acc
+        // The closure stores the function pointer which expects all args at once
+        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let new_acc = self.builder()
+            .build_indirect_call(fn_type, fn_ptr, &[func_ptr.into(), acc_phi.as_basic_value().into(), head_ptr.into()], "foldl_result")
+            .map_err(|e| CodegenError::Internal(format!("failed to call function: {:?}", e)))?
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CodegenError::Internal("foldl: function returned void".to_string()))?;
+
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Add phi incoming values
+        acc_phi.add_incoming(&[(&init_ptr, entry_block), (&new_acc, loop_body)]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, loop_body)]);
+
+        // Exit: return accumulator
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
+    /// Lower `foldr` - right fold over a list.
+    /// foldr f z [] = z
+    /// foldr f z (x:xs) = f x (foldr f z xs)
+    ///
+    /// Implementation: reverse the list first, then fold left with swapped args
+    fn lower_builtin_foldr(&mut self, func_expr: &Expr, init_expr: &Expr, list_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Lower the function (should be a closure)
+        let func_val = self.lower_expr(func_expr)?.ok_or_else(|| {
+            CodegenError::Internal("foldr: function has no value".to_string())
+        })?;
+
+        let func_ptr = match func_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError("foldr: function must be a closure".to_string())),
+        };
+
+        // Lower the initial value
+        let init_val = self.lower_expr(init_expr)?.ok_or_else(|| {
+            CodegenError::Internal("foldr: initial value has no value".to_string())
+        })?;
+        let init_ptr = self.value_to_ptr(init_val)?;
+
+        // Lower the list
+        let list_val = self.lower_expr(list_expr)?.ok_or_else(|| {
+            CodegenError::Internal("foldr: list has no value".to_string())
+        })?;
+
+        let list_ptr = match list_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError("foldr expects a list".to_string())),
+        };
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let current_fn = self.builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        // First, reverse the list
+        let rev_entry = self.builder().get_insert_block().ok_or_else(|| {
+            CodegenError::Internal("no current block".to_string())
+        })?;
+        let rev_header = self.llvm_ctx.append_basic_block(current_fn, "foldr_rev_header");
+        let rev_body = self.llvm_ctx.append_basic_block(current_fn, "foldr_rev_body");
+        let rev_exit = self.llvm_ctx.append_basic_block(current_fn, "foldr_rev_exit");
+
+        // Build nil before branching
+        let nil = self.build_nil()?;
+
+        self.builder().build_unconditional_branch(rev_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Reverse loop
+        self.builder().position_at_end(rev_header);
+        let rev_acc = self.builder()
+            .build_phi(ptr_type, "rev_acc")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        let rev_list = self.builder()
+            .build_phi(ptr_type, "rev_list")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+
+        let rev_tag = self.extract_adt_tag(rev_list.as_basic_value().into_pointer_value())?;
+        let rev_is_empty = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, rev_tag, tm.i64_type().const_zero(), "rev_is_empty")
+            .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
+
+        self.builder().build_conditional_branch(rev_is_empty, rev_exit, rev_body)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        self.builder().position_at_end(rev_body);
+        let rev_head = self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 0)?;
+        let rev_tail = self.extract_adt_field(rev_list.as_basic_value().into_pointer_value(), 2, 1)?;
+        let rev_new_cons = self.build_cons(rev_head.into(), rev_acc.as_basic_value())?;
+
+        self.builder().build_unconditional_branch(rev_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        rev_acc.add_incoming(&[(&nil, rev_entry), (&rev_new_cons, rev_body)]);
+        rev_list.add_incoming(&[(&list_ptr, rev_entry), (&rev_tail, rev_body)]);
+
+        // Now fold the reversed list with f applied as f elem acc
+        self.builder().position_at_end(rev_exit);
+
+        let fold_header = self.llvm_ctx.append_basic_block(current_fn, "foldr_fold_header");
+        let fold_body = self.llvm_ctx.append_basic_block(current_fn, "foldr_fold_body");
+        let fold_exit = self.llvm_ctx.append_basic_block(current_fn, "foldr_fold_exit");
+
+        self.builder().build_unconditional_branch(fold_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Fold loop
+        self.builder().position_at_end(fold_header);
+        let acc_phi = self.builder()
+            .build_phi(ptr_type, "foldr_acc")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        let list_phi = self.builder()
+            .build_phi(ptr_type, "foldr_list")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+
+        let tag = self.extract_adt_tag(list_phi.as_basic_value().into_pointer_value())?;
+        let is_empty = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, tm.i64_type().const_zero(), "is_empty")
+            .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
+
+        self.builder().build_conditional_branch(is_empty, fold_exit, fold_body)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        self.builder().position_at_end(fold_body);
+        let head_ptr = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
+        let tail_ptr = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+
+        // Call f head acc - function takes (closure_ptr, elem, acc) and returns new acc
+        // Note: for foldr, the function signature is (a -> b -> b), so elem comes first, then acc
+        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let new_acc = self.builder()
+            .build_indirect_call(fn_type, fn_ptr, &[func_ptr.into(), head_ptr.into(), acc_phi.as_basic_value().into()], "foldr_result")
+            .map_err(|e| CodegenError::Internal(format!("failed to call function: {:?}", e)))?
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CodegenError::Internal("foldr: function returned void".to_string()))?;
+
+        self.builder().build_unconditional_branch(fold_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Add phi incoming values
+        acc_phi.add_incoming(&[(&init_ptr, rev_exit), (&new_acc, fold_body)]);
+        list_phi.add_incoming(&[(&rev_acc.as_basic_value(), rev_exit), (&tail_ptr, fold_body)]);
+
+        // Exit: return accumulator
+        self.builder().position_at_end(fold_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
     /// Lower `fst` - extract first element of a pair.
     fn lower_builtin_fst(&mut self, pair_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let pair_val = self.lower_expr(pair_expr)?.ok_or_else(|| {
@@ -1891,14 +2587,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         match val {
             BasicValueEnum::IntValue(i) => {
-                // Print as integer
-                let print_fn = self.functions.get(&VarId::new(1000)).ok_or_else(|| {
-                    CodegenError::Internal("bhc_print_int_ln not declared".to_string())
-                })?;
+                // Check if this is a boolean (from comparison or boolean function)
+                if self.is_bool_type(&expr_ty) || self.expr_looks_like_bool(val_expr) {
+                    // Print as boolean (True/False)
+                    let print_fn = self.functions.get(&VarId::new(1008)).ok_or_else(|| {
+                        CodegenError::Internal("bhc_print_bool_ln not declared".to_string())
+                    })?;
 
-                self.builder()
-                    .build_call(*print_fn, &[i.into()], "")
-                    .map_err(|e| CodegenError::Internal(format!("failed to call print_int: {:?}", e)))?;
+                    self.builder()
+                        .build_call(*print_fn, &[i.into()], "")
+                        .map_err(|e| CodegenError::Internal(format!("failed to call print_bool: {:?}", e)))?;
+                } else {
+                    // Print as integer
+                    let print_fn = self.functions.get(&VarId::new(1000)).ok_or_else(|| {
+                        CodegenError::Internal("bhc_print_int_ln not declared".to_string())
+                    })?;
+
+                    self.builder()
+                        .build_call(*print_fn, &[i.into()], "")
+                        .map_err(|e| CodegenError::Internal(format!("failed to call print_int: {:?}", e)))?;
+                }
             }
             BasicValueEnum::FloatValue(f) => {
                 // Print as double
@@ -1924,7 +2632,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::PointerValue(p) => {
                 // Pointer could be a boxed value from closure call, string, or ADT.
                 // Use the expression's type to decide how to print.
-                if self.is_int_type(&expr_ty) || self.is_type_variable_or_error(&expr_ty) {
+                // Check list first - by type or by expression structure (for when type is Error)
+                if self.is_list_type(&expr_ty) || self.expr_looks_like_list(val_expr) {
+                    // Print list: [el1, el2, ...]
+                    self.print_list(p)?;
+                } else if self.is_int_type(&expr_ty) || self.is_type_variable_or_error(&expr_ty) {
                     // Boxed integer (or polymorphic type that might be int) - unbox and print as int.
                     // For type variables from closures, we assume int since that's the most common case.
                     // This is safe because boxed ints use int_to_ptr which stores the value in the
@@ -1956,6 +2668,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     self.builder()
                         .build_call(*print_fn, &[float_val.into()], "")
                         .map_err(|e| CodegenError::Internal(format!("failed to call print_double: {:?}", e)))?;
+                } else if self.is_bool_type(&expr_ty) || self.expr_looks_like_bool(val_expr) {
+                    // Boxed bool - unbox (ptr_to_int) and print as True/False
+                    // Bools are boxed via int_to_ptr (the value is in the pointer bits)
+                    let bool_val = self.builder()
+                        .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_bool")
+                        .map_err(|e| CodegenError::Internal(format!("failed to unbox bool: {:?}", e)))?;
+
+                    let print_fn = self.functions.get(&VarId::new(1008)).ok_or_else(|| {
+                        CodegenError::Internal("bhc_print_bool_ln not declared".to_string())
+                    })?;
+
+                    self.builder()
+                        .build_call(*print_fn, &[bool_val.into()], "")
+                        .map_err(|e| CodegenError::Internal(format!("failed to call print_bool: {:?}", e)))?;
                 } else {
                     // Assume it's a string or other pointer type
                     let print_fn = self.functions.get(&VarId::new(1002)).ok_or_else(|| {
@@ -2012,6 +2738,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Check if a type is a Bool type.
+    fn is_bool_type(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Con(con) => {
+                let name = con.name.as_str();
+                matches!(name, "Bool" | "Boolean")
+            }
+            Ty::App(f, _) => self.is_bool_type(f),
+            Ty::Forall(_, body) => self.is_bool_type(body),
+            _ => false,
+        }
+    }
+
     /// Check if a type is a type variable (polymorphic) or error type.
     /// We treat error types the same as type variables since we don't know
     /// the concrete type and should default to treating it as a potential integer.
@@ -2025,6 +2764,187 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Check if a type is a list type.
+    fn is_list_type(&self, ty: &Ty) -> bool {
+        match ty {
+            // Direct list type
+            Ty::List(_) => true,
+            // Type application form: [] a
+            Ty::App(f, _) => {
+                // Check if the type constructor is []
+                if let Ty::Con(con) = f.as_ref() {
+                    con.name.as_str() == "[]" || con.name.as_str() == "List"
+                } else {
+                    false
+                }
+            }
+            // Just "[]" without argument (unlikely but handle it)
+            Ty::Con(con) => {
+                con.name.as_str() == "[]" || con.name.as_str() == "List"
+            }
+            Ty::Forall(_, body) => self.is_list_type(body),
+            _ => false,
+        }
+    }
+
+    /// Check if an expression looks like a list based on its structure.
+    /// This is used when type information is unavailable (Error type).
+    fn expr_looks_like_list(&self, expr: &Expr) -> bool {
+        match expr {
+            // Application of a constructor or function
+            Expr::App(f, _, _) => self.expr_looks_like_list(f),
+            // Type application
+            Expr::TyApp(e, _, _) => self.expr_looks_like_list(e),
+            // Let binding - check the body
+            Expr::Let(_, body, _) => self.expr_looks_like_list(body),
+            // Variable that's a list constructor or function returning a list
+            Expr::Var(var, _) => {
+                let name = var.name.as_str();
+                // List constructors and functions that return lists
+                matches!(name, ":" | "[]" | "Nil" | "Cons" |
+                         "map" | "filter" | "reverse" | "take" | "drop" |
+                         "enumFromTo" | "replicate" | "append" | "tail")
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if an expression looks like a boolean based on its structure.
+    /// This is used when type information is unavailable (Error type).
+    fn expr_looks_like_bool(&self, expr: &Expr) -> bool {
+        match expr {
+            // Application of comparison or boolean function
+            Expr::App(f, _, _) => self.expr_looks_like_bool(f),
+            // Type application
+            Expr::TyApp(e, _, _) => self.expr_looks_like_bool(e),
+            // Let binding - check the body
+            Expr::Let(_, body, _) => self.expr_looks_like_bool(body),
+            // Variable that's a comparison operator or boolean function
+            Expr::Var(var, _) => {
+                let name = var.name.as_str();
+                // Comparison operators and boolean functions
+                matches!(name, ">" | "<" | ">=" | "<=" | "==" | "/=" |
+                         "True" | "False" | "not" | "&&" | "||" | "and" | "or" |
+                         "isJust" | "isNothing" | "isLeft" | "isRight" |
+                         "null" | "elem" | "notElem" | "even" | "odd" |
+                         "greaterThan" | "lessThan" | "equals")
+            }
+            _ => false,
+        }
+    }
+
+    /// Print a list value: [el1, el2, ...]
+    fn print_list(&mut self, list_ptr: inkwell::values::PointerValue<'ctx>) -> CodegenResult<()> {
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+
+        let current_fn = self.builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        // Get print functions
+        let print_char_fn = self.functions.get(&VarId::new(1009)).ok_or_else(|| {
+            CodegenError::Internal("bhc_print_char not declared".to_string())
+        })?;
+        let print_int_fn = self.functions.get(&VarId::new(1003)).ok_or_else(|| {
+            CodegenError::Internal("bhc_print_int not declared".to_string())
+        })?;
+
+        // Print opening bracket (print_char takes i32)
+        self.builder()
+            .build_call(*print_char_fn, &[tm.i32_type().const_int('[' as u64, false).into()], "")
+            .map_err(|e| CodegenError::Internal(format!("failed to print char: {:?}", e)))?;
+
+        // Create loop blocks
+        let entry_block = self.builder().get_insert_block().ok_or_else(|| {
+            CodegenError::Internal("no current block".to_string())
+        })?;
+        let loop_header = self.llvm_ctx.append_basic_block(current_fn, "print_list_header");
+        let loop_body = self.llvm_ctx.append_basic_block(current_fn, "print_list_body");
+        let loop_exit = self.llvm_ctx.append_basic_block(current_fn, "print_list_exit");
+
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Loop header: phi for list and first flag
+        self.builder().position_at_end(loop_header);
+        let list_phi = self.builder()
+            .build_phi(ptr_type, "print_list_ptr")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        let is_first_phi = self.builder()
+            .build_phi(tm.i64_type(), "is_first")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+
+        // Check if list is empty
+        let tag = self.extract_adt_tag(list_phi.as_basic_value().into_pointer_value())?;
+        let is_empty = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, tm.i64_type().const_zero(), "is_empty")
+            .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
+
+        self.builder().build_conditional_branch(is_empty, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Loop body: print separator if not first, then print element
+        self.builder().position_at_end(loop_body);
+
+        // Check if we need to print ", "
+        let need_separator = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, is_first_phi.as_basic_value().into_int_value(), tm.i64_type().const_zero(), "need_sep")
+            .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
+
+        let sep_block = self.llvm_ctx.append_basic_block(current_fn, "print_sep");
+        let after_sep = self.llvm_ctx.append_basic_block(current_fn, "after_sep");
+
+        self.builder().build_conditional_branch(need_separator, sep_block, after_sep)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Print ", "
+        self.builder().position_at_end(sep_block);
+        self.builder()
+            .build_call(*print_char_fn, &[tm.i32_type().const_int(',' as u64, false).into()], "")
+            .map_err(|e| CodegenError::Internal(format!("failed to print char: {:?}", e)))?;
+        self.builder()
+            .build_call(*print_char_fn, &[tm.i32_type().const_int(' ' as u64, false).into()], "")
+            .map_err(|e| CodegenError::Internal(format!("failed to print char: {:?}", e)))?;
+        self.builder().build_unconditional_branch(after_sep)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Continue printing element
+        self.builder().position_at_end(after_sep);
+        let head_ptr = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
+        let tail_ptr = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
+
+        // Print head as int (for now assume list of ints)
+        let head_int = self.builder()
+            .build_ptr_to_int(head_ptr, tm.i64_type(), "head_int")
+            .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
+        self.builder()
+            .build_call(*print_int_fn, &[head_int.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("failed to print int: {:?}", e)))?;
+
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Update phi nodes
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, after_sep)]);
+        is_first_phi.add_incoming(&[
+            (&tm.i64_type().const_int(1, false), entry_block),
+            (&tm.i64_type().const_zero(), after_sep),
+        ]);
+
+        // Loop exit: print closing bracket and newline
+        self.builder().position_at_end(loop_exit);
+        self.builder()
+            .build_call(*print_char_fn, &[tm.i32_type().const_int(']' as u64, false).into()], "")
+            .map_err(|e| CodegenError::Internal(format!("failed to print char: {:?}", e)))?;
+        self.builder()
+            .build_call(*print_char_fn, &[tm.i32_type().const_int('\n' as u64, false).into()], "")
+            .map_err(|e| CodegenError::Internal(format!("failed to print char: {:?}", e)))?;
+
+        Ok(())
+    }
+
     /// Lower `getLine` - read a line from stdin.
     ///
     /// For now, this is a placeholder that returns an empty string.
@@ -2033,6 +2953,61 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Return empty string for now (placeholder)
         let empty_str = self.module.add_global_string("empty_string", "");
         Ok(Some(empty_str.into()))
+    }
+
+    /// Lower `>>=` (bind) for monads.
+    /// For IO: execute first action, pass result to function, execute result.
+    fn lower_builtin_bind(&mut self, action_expr: &Expr, func_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Execute the first action
+        let action_result = self.lower_expr(action_expr)?.ok_or_else(|| {
+            CodegenError::Internal(">>=: action has no value".to_string())
+        })?;
+
+        // Lower the function
+        let func_val = self.lower_expr(func_expr)?.ok_or_else(|| {
+            CodegenError::Internal(">>=: function has no value".to_string())
+        })?;
+
+        // Apply the function to the action's result
+        let func_ptr = match func_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError(">>=: function must be a closure".to_string())),
+        };
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+
+        // Convert action result to pointer for uniform calling convention
+        let action_ptr = self.value_to_ptr(action_result)?;
+
+        // Call the function with the action result
+        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        let result = self.builder()
+            .build_indirect_call(fn_type, fn_ptr, &[func_ptr.into(), action_ptr.into()], "bind_result")
+            .map_err(|e| CodegenError::Internal(format!("failed to call bind function: {:?}", e)))?
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CodegenError::Internal(">>=: function returned void".to_string()))?;
+
+        Ok(Some(result))
+    }
+
+    /// Lower `>>` (then) for monads.
+    /// For IO: execute first action, ignore result, execute second action.
+    fn lower_builtin_then(&mut self, action1_expr: &Expr, action2_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Execute the first action (result is discarded)
+        let _action1_result = self.lower_expr(action1_expr)?;
+
+        // Execute the second action and return its result
+        self.lower_expr(action2_expr)
+    }
+
+    /// Lower `return` / `pure` for monads.
+    /// For IO: just return the value wrapped (identity for our simple model).
+    fn lower_builtin_return(&mut self, value_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // For our simple IO model, return is identity
+        self.lower_expr(value_expr)
     }
 
     /// Check if a name is a data constructor and return (tag, arity).
@@ -2749,30 +3724,39 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Lower the function body, handling lambda parameters
         let result = self.lower_function_body(fn_val, expr)?;
 
-        // Build return based on function's declared return type, not the computed result
-        // This handles cases like IO () which produces a value but should return void
-        let ret_type = fn_val.get_type().get_return_type();
-        if ret_type.is_none() {
-            // Void return type - don't return a value
-            self.builder()
-                .build_return(None)
-                .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
-        } else if let Some(val) = result {
-            // Convert to pointer if return type is pointer (uniform calling convention)
-            let ret_val: BasicValueEnum<'ctx> = if ret_type == Some(self.type_mapper().ptr_type().into()) {
-                self.value_to_ptr(val)?.into()
+        // Check if the current block already has a terminator (e.g., from `error` or `unreachable`)
+        // If so, don't add another terminator
+        let current_block = self.builder().get_insert_block();
+        let has_terminator = current_block
+            .map(|bb| bb.get_terminator().is_some())
+            .unwrap_or(false);
+
+        if !has_terminator {
+            // Build return based on function's declared return type, not the computed result
+            // This handles cases like IO () which produces a value but should return void
+            let ret_type = fn_val.get_type().get_return_type();
+            if ret_type.is_none() {
+                // Void return type - don't return a value
+                self.builder()
+                    .build_return(None)
+                    .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
+            } else if let Some(val) = result {
+                // Convert to pointer if return type is pointer (uniform calling convention)
+                let ret_val: BasicValueEnum<'ctx> = if ret_type == Some(self.type_mapper().ptr_type().into()) {
+                    self.value_to_ptr(val)?.into()
+                } else {
+                    val
+                };
+                self.builder()
+                    .build_return(Some(&ret_val))
+                    .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
             } else {
-                val
-            };
-            self.builder()
-                .build_return(Some(&ret_val))
-                .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
-        } else {
-            // Function expects a return value but body produced none
-            // This shouldn't happen with correct type checking
-            self.builder()
-                .build_return(None)
-                .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
+                // Function expects a return value but body produced none
+                // This shouldn't happen with correct type checking
+                self.builder()
+                    .build_return(None)
+                    .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
+            }
         }
 
         Ok(())
@@ -2823,6 +3807,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         let closure_ptr = self.alloc_closure(fn_ptr, &[])?;
                         Ok(Some(closure_ptr.into()))
                     }
+                } else if let Some((primop, arity)) = self.primitive_op_info(name) {
+                    // Primop used as a value - create a wrapper closure
+                    self.create_primop_closure(primop, arity, name)
+                } else if let Some(arity) = self.builtin_info(name) {
+                    // Builtin used as a value - create a wrapper closure
+                    self.create_builtin_closure(name, arity)
                 } else {
                     Err(CodegenError::Internal(format!(
                         "unbound variable: {}",
@@ -3185,6 +4175,389 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             _ => None,
         }
+    }
+
+    /// Create a closure wrapping a primitive operation.
+    /// This is used when a primop like (+) is used as a first-class value.
+    fn create_primop_closure(
+        &mut self,
+        primop: PrimOp,
+        arity: u32,
+        name: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let i64_type = tm.i64_type();
+
+        // Create a unique name for the wrapper function
+        let wrapper_name = format!("primop_wrapper_{}", name.replace(|c: char| !c.is_alphanumeric(), "_"));
+
+        // Check if wrapper already exists
+        let wrapper_fn = if let Some(existing) = self.module.llvm_module().get_function(&wrapper_name) {
+            existing
+        } else {
+            // Create wrapper function: (ptr env, ptr arg1, [ptr arg2]) -> ptr
+            let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
+            param_types.push(ptr_type.into()); // env/closure pointer
+            for _ in 0..arity {
+                param_types.push(ptr_type.into());
+            }
+
+            let wrapper_fn_type = ptr_type.fn_type(&param_types, false);
+            let wrapper_fn = self.module.llvm_module().add_function(&wrapper_name, wrapper_fn_type, None);
+
+            // Build the wrapper function body
+            let entry_bb = self.llvm_ctx.append_basic_block(wrapper_fn, "entry");
+            let current_bb = self.builder().get_insert_block();
+
+            self.builder().position_at_end(entry_bb);
+
+            // Load arguments (skip env at index 0)
+            let args: Vec<BasicValueEnum<'ctx>> = (1..=arity)
+                .map(|i| wrapper_fn.get_nth_param(i).unwrap())
+                .collect();
+
+            // Perform the primop
+            let result = self.lower_primop_direct(primop, &args)?;
+
+            // Box the result and return
+            let result_ptr = self.value_to_ptr(result)?;
+            self.builder()
+                .build_return(Some(&result_ptr))
+                .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
+
+            // Restore insertion point
+            if let Some(bb) = current_bb {
+                self.builder().position_at_end(bb);
+            }
+
+            wrapper_fn
+        };
+
+        // Create a closure wrapping the primop function
+        let fn_ptr = wrapper_fn.as_global_value().as_pointer_value();
+        let closure_ptr = self.alloc_closure(fn_ptr, &[])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// Create a closure wrapping a builtin operation.
+    /// This is used when a builtin like (>>) is used as a first-class value.
+    fn create_builtin_closure(
+        &mut self,
+        name: &str,
+        arity: u32,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+
+        // Create a unique name for the wrapper function
+        let wrapper_name = format!("builtin_wrapper_{}", name.replace(|c: char| !c.is_alphanumeric(), "_"));
+
+        // Check if wrapper already exists
+        let wrapper_fn = if let Some(existing) = self.module.llvm_module().get_function(&wrapper_name) {
+            existing
+        } else {
+            // Create wrapper function: (ptr env, ptr arg1, ptr arg2, ...) -> ptr
+            let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
+            param_types.push(ptr_type.into()); // env/closure pointer
+            for _ in 0..arity {
+                param_types.push(ptr_type.into());
+            }
+
+            let wrapper_fn_type = ptr_type.fn_type(&param_types, false);
+            let wrapper_fn = self.module.llvm_module().add_function(&wrapper_name, wrapper_fn_type, None);
+
+            // Build the wrapper function body
+            let entry_bb = self.llvm_ctx.append_basic_block(wrapper_fn, "entry");
+            let current_bb = self.builder().get_insert_block();
+
+            self.builder().position_at_end(entry_bb);
+
+            // Load arguments (skip env at index 0)
+            let args: Vec<BasicValueEnum<'ctx>> = (1..=arity)
+                .map(|i| wrapper_fn.get_nth_param(i).unwrap())
+                .collect();
+
+            // Perform the builtin operation
+            let result = self.lower_builtin_direct(name, &args)?;
+
+            // Return the result
+            let result_ptr = match result {
+                Some(v) => v.into_pointer_value(),
+                None => ptr_type.const_null(), // Unit/void result
+            };
+            self.builder()
+                .build_return(Some(&result_ptr))
+                .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
+
+            // Restore insertion point
+            if let Some(bb) = current_bb {
+                self.builder().position_at_end(bb);
+            }
+
+            wrapper_fn
+        };
+
+        // Create a closure wrapping the builtin function
+        let fn_ptr = wrapper_fn.as_global_value().as_pointer_value();
+        let closure_ptr = self.alloc_closure(fn_ptr, &[])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// Execute a builtin operation directly on LLVM values (already lowered).
+    /// This is for when builtins are used as values and receive runtime arguments.
+    fn lower_builtin_direct(
+        &mut self,
+        name: &str,
+        args: &[BasicValueEnum<'ctx>],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+
+        match name {
+            ">>" => {
+                // (>>) :: m a -> m b -> m b
+                // Execute first action (arg1), ignore result, return second (arg2)
+                // For our simple model, arg1 and arg2 are thunks/values
+                // We just evaluate both and return the second
+                // Since args are already evaluated values, we just return arg2
+                // Note: If these were actual IO thunks, we'd need to force them
+                Ok(Some(args[1]))
+            }
+            ">>=" => {
+                // (>>=) :: m a -> (a -> m b) -> m b
+                // Execute first action, pass result to function, return result of function
+                let action_result = args[0]; // Result of first action
+                let func = args[1].into_pointer_value(); // Function closure
+
+                // Call the function with the action result
+                let fn_ptr = self.extract_closure_fn_ptr(func)?;
+                let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                let result = self.builder()
+                    .build_indirect_call(fn_type, fn_ptr, &[func.into(), action_result.into()], "bind_result")
+                    .map_err(|e| CodegenError::Internal(format!("failed to call bind function: {:?}", e)))?
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| CodegenError::Internal(">>=: function returned void".to_string()))?;
+                Ok(Some(result))
+            }
+            "=<<" => {
+                // (=<<) :: (a -> m b) -> m a -> m b (flipped >>=)
+                let func = args[0].into_pointer_value();
+                let action_result = args[1];
+
+                let fn_ptr = self.extract_closure_fn_ptr(func)?;
+                let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                let result = self.builder()
+                    .build_indirect_call(fn_type, fn_ptr, &[func.into(), action_result.into()], "bind_result")
+                    .map_err(|e| CodegenError::Internal(format!("failed to call bind function: {:?}", e)))?
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| CodegenError::Internal("=<<: function returned void".to_string()))?;
+                Ok(Some(result))
+            }
+            "return" | "pure" => {
+                // return :: a -> m a
+                // For our simple IO model, just return the value
+                Ok(Some(args[0]))
+            }
+            _ => Err(CodegenError::Internal(format!(
+                "lower_builtin_direct: unhandled builtin '{}'",
+                name
+            ))),
+        }
+    }
+
+    /// Execute a primitive operation directly on LLVM values.
+    fn lower_primop_direct(
+        &mut self,
+        op: PrimOp,
+        args: &[BasicValueEnum<'ctx>],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let tm = self.type_mapper();
+
+        match op {
+            // Binary arithmetic operations
+            PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div |
+            PrimOp::Mod | PrimOp::Rem | PrimOp::Quot => {
+                // Unbox arguments
+                let lhs = self.ptr_to_int(args[0].into_pointer_value())?;
+                let rhs = self.ptr_to_int(args[1].into_pointer_value())?;
+
+                let result = match op {
+                    PrimOp::Add => self.builder().build_int_add(lhs, rhs, "add"),
+                    PrimOp::Sub => self.builder().build_int_sub(lhs, rhs, "sub"),
+                    PrimOp::Mul => self.builder().build_int_mul(lhs, rhs, "mul"),
+                    PrimOp::Div | PrimOp::Quot => self.builder().build_int_signed_div(lhs, rhs, "div"),
+                    PrimOp::Mod | PrimOp::Rem => self.builder().build_int_signed_rem(lhs, rhs, "rem"),
+                    _ => unreachable!(),
+                }.map_err(|e| CodegenError::Internal(format!("failed to build arithmetic: {:?}", e)))?;
+
+                Ok(result.into())
+            }
+
+            // Comparison operations
+            PrimOp::Eq | PrimOp::Ne | PrimOp::Lt | PrimOp::Le |
+            PrimOp::Gt | PrimOp::Ge => {
+                let lhs = self.ptr_to_int(args[0].into_pointer_value())?;
+                let rhs = self.ptr_to_int(args[1].into_pointer_value())?;
+
+                let predicate = match op {
+                    PrimOp::Eq => inkwell::IntPredicate::EQ,
+                    PrimOp::Ne => inkwell::IntPredicate::NE,
+                    PrimOp::Lt => inkwell::IntPredicate::SLT,
+                    PrimOp::Le => inkwell::IntPredicate::SLE,
+                    PrimOp::Gt => inkwell::IntPredicate::SGT,
+                    PrimOp::Ge => inkwell::IntPredicate::SGE,
+                    _ => unreachable!(),
+                };
+
+                let cmp = self.builder()
+                    .build_int_compare(predicate, lhs, rhs, "cmp")
+                    .map_err(|e| CodegenError::Internal(format!("failed to build compare: {:?}", e)))?;
+
+                let result = self.builder()
+                    .build_int_z_extend(cmp, tm.i64_type(), "cmp_ext")
+                    .map_err(|e| CodegenError::Internal(format!("failed to extend: {:?}", e)))?;
+
+                Ok(result.into())
+            }
+
+            // Boolean operations
+            PrimOp::And => {
+                let lhs = self.ptr_to_int(args[0].into_pointer_value())?;
+                let rhs = self.ptr_to_int(args[1].into_pointer_value())?;
+                let result = self.builder()
+                    .build_and(lhs, rhs, "and")
+                    .map_err(|e| CodegenError::Internal(format!("failed to build and: {:?}", e)))?;
+                Ok(result.into())
+            }
+
+            PrimOp::Or => {
+                let lhs = self.ptr_to_int(args[0].into_pointer_value())?;
+                let rhs = self.ptr_to_int(args[1].into_pointer_value())?;
+                let result = self.builder()
+                    .build_or(lhs, rhs, "or")
+                    .map_err(|e| CodegenError::Internal(format!("failed to build or: {:?}", e)))?;
+                Ok(result.into())
+            }
+
+            // Unary operations
+            PrimOp::Negate => {
+                let val = self.ptr_to_int(args[0].into_pointer_value())?;
+                let result = self.builder()
+                    .build_int_neg(val, "neg")
+                    .map_err(|e| CodegenError::Internal(format!("failed to build neg: {:?}", e)))?;
+                Ok(result.into())
+            }
+
+            PrimOp::Abs => {
+                let val = self.ptr_to_int(args[0].into_pointer_value())?;
+                let neg = self.builder()
+                    .build_int_neg(val, "neg")
+                    .map_err(|e| CodegenError::Internal(format!("failed to build neg: {:?}", e)))?;
+                let is_neg = self.builder()
+                    .build_int_compare(inkwell::IntPredicate::SLT, val, tm.i64_type().const_zero(), "is_neg")
+                    .map_err(|e| CodegenError::Internal(format!("failed to build compare: {:?}", e)))?;
+                let result = self.builder()
+                    .build_select(is_neg, neg, val, "abs")
+                    .map_err(|e| CodegenError::Internal(format!("failed to build select: {:?}", e)))?;
+                Ok(result)
+            }
+
+            PrimOp::Signum => {
+                let val = self.ptr_to_int(args[0].into_pointer_value())?;
+                let zero = tm.i64_type().const_zero();
+                let one = tm.i64_type().const_int(1, false);
+                let neg_one = tm.i64_type().const_int(-1i64 as u64, true);
+
+                let is_neg = self.builder()
+                    .build_int_compare(inkwell::IntPredicate::SLT, val, zero, "is_neg")
+                    .map_err(|e| CodegenError::Internal(format!("failed: {:?}", e)))?;
+                let is_pos = self.builder()
+                    .build_int_compare(inkwell::IntPredicate::SGT, val, zero, "is_pos")
+                    .map_err(|e| CodegenError::Internal(format!("failed: {:?}", e)))?;
+
+                let tmp = self.builder()
+                    .build_select(is_neg, neg_one, zero, "tmp")
+                    .map_err(|e| CodegenError::Internal(format!("failed: {:?}", e)))?;
+                let result = self.builder()
+                    .build_select(is_pos, one, tmp.into_int_value(), "signum")
+                    .map_err(|e| CodegenError::Internal(format!("failed: {:?}", e)))?;
+                Ok(result)
+            }
+
+            PrimOp::Not => {
+                let val = self.ptr_to_int(args[0].into_pointer_value())?;
+                let is_zero = self.builder()
+                    .build_int_compare(inkwell::IntPredicate::EQ, val, tm.i64_type().const_zero(), "is_zero")
+                    .map_err(|e| CodegenError::Internal(format!("failed: {:?}", e)))?;
+                let result = self.builder()
+                    .build_int_z_extend(is_zero, tm.i64_type(), "not")
+                    .map_err(|e| CodegenError::Internal(format!("failed: {:?}", e)))?;
+                Ok(result.into())
+            }
+
+            // Bitwise operations
+            PrimOp::BitAnd => {
+                let lhs = self.ptr_to_int(args[0].into_pointer_value())?;
+                let rhs = self.ptr_to_int(args[1].into_pointer_value())?;
+                let result = self.builder()
+                    .build_and(lhs, rhs, "bitand")
+                    .map_err(|e| CodegenError::Internal(format!("failed: {:?}", e)))?;
+                Ok(result.into())
+            }
+
+            PrimOp::BitOr => {
+                let lhs = self.ptr_to_int(args[0].into_pointer_value())?;
+                let rhs = self.ptr_to_int(args[1].into_pointer_value())?;
+                let result = self.builder()
+                    .build_or(lhs, rhs, "bitor")
+                    .map_err(|e| CodegenError::Internal(format!("failed: {:?}", e)))?;
+                Ok(result.into())
+            }
+
+            PrimOp::BitXor => {
+                let lhs = self.ptr_to_int(args[0].into_pointer_value())?;
+                let rhs = self.ptr_to_int(args[1].into_pointer_value())?;
+                let result = self.builder()
+                    .build_xor(lhs, rhs, "bitxor")
+                    .map_err(|e| CodegenError::Internal(format!("failed: {:?}", e)))?;
+                Ok(result.into())
+            }
+
+            PrimOp::ShiftL => {
+                let val = self.ptr_to_int(args[0].into_pointer_value())?;
+                let amt = self.ptr_to_int(args[1].into_pointer_value())?;
+                let result = self.builder()
+                    .build_left_shift(val, amt, "shl")
+                    .map_err(|e| CodegenError::Internal(format!("failed: {:?}", e)))?;
+                Ok(result.into())
+            }
+
+            PrimOp::ShiftR => {
+                let val = self.ptr_to_int(args[0].into_pointer_value())?;
+                let amt = self.ptr_to_int(args[1].into_pointer_value())?;
+                let result = self.builder()
+                    .build_right_shift(val, amt, true, "shr")
+                    .map_err(|e| CodegenError::Internal(format!("failed: {:?}", e)))?;
+                Ok(result.into())
+            }
+
+            PrimOp::Complement => {
+                let val = self.ptr_to_int(args[0].into_pointer_value())?;
+                let result = self.builder()
+                    .build_not(val, "complement")
+                    .map_err(|e| CodegenError::Internal(format!("failed: {:?}", e)))?;
+                Ok(result.into())
+            }
+        }
+    }
+
+    /// Convert a pointer to an integer (unbox).
+    fn ptr_to_int(&self, ptr: PointerValue<'ctx>) -> CodegenResult<IntValue<'ctx>> {
+        self.builder()
+            .build_ptr_to_int(ptr, self.type_mapper().i64_type(), "unbox")
+            .map_err(|e| CodegenError::Internal(format!("failed to unbox: {:?}", e)))
     }
 
     /// Check if an expression is a saturated primitive operation.
@@ -3725,6 +5098,174 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         fn_val: FunctionValue<'ctx>,
         args: &[&Expr],
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Get the function's expected parameter count (excluding env pointer)
+        let fn_type = fn_val.get_type();
+        let expected_params = fn_type.count_param_types() as usize;
+        let expected_args = if expected_params > 0 { expected_params - 1 } else { 0 }; // Subtract env pointer
+
+        // Check for over-application: more args than the function expects
+        if args.len() > expected_args {
+            // Split args: first part goes to this function, rest goes to the returned closure
+            let (fn_args, remaining_args) = args.split_at(expected_args);
+
+            // Call the function with its expected args
+            let closure_result = self.lower_direct_call_inner(fn_val, fn_args)?;
+
+            // The result should be a closure - call it with remaining args
+            if let Some(closure_val) = closure_result {
+                return self.lower_closure_call(closure_val, remaining_args);
+            } else {
+                return Err(CodegenError::Internal(
+                    "function returned no value for over-application".to_string(),
+                ));
+            }
+        }
+
+        // Check for under-application: fewer args than the function expects
+        if args.len() < expected_args {
+            return self.lower_partial_application(fn_val, args, expected_args);
+        }
+
+        // Exact application
+        self.lower_direct_call_inner(fn_val, args)
+    }
+
+    /// Lower a partial application (under-application) to a PAP closure.
+    ///
+    /// Creates a PAP wrapper function that takes the remaining args and calls
+    /// the original function with all args combined.
+    fn lower_partial_application(
+        &mut self,
+        fn_val: FunctionValue<'ctx>,
+        applied_args: &[&Expr],
+        expected_args: usize,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let i64_type = tm.i64_type();
+
+        let num_applied = applied_args.len();
+        let num_remaining = expected_args - num_applied;
+
+        // Lower the applied arguments
+        let was_tail = self.in_tail_position;
+        self.in_tail_position = false;
+
+        let mut applied_vals: Vec<(VarId, BasicValueEnum<'ctx>)> = Vec::new();
+        for (i, arg_expr) in applied_args.iter().enumerate() {
+            if let Some(val) = self.lower_expr(arg_expr)? {
+                // Use a dummy VarId for PAP captured args
+                applied_vals.push((VarId::new(10000 + i), val));
+            }
+        }
+
+        self.in_tail_position = was_tail;
+
+        // Create the PAP wrapper function
+        // Signature: (ptr env, ptr arg1, ptr arg2, ...) -> ptr
+        let fn_name = fn_val.get_name().to_str().unwrap_or("fn");
+        let wrapper_name = format!("pap_{}_{}", fn_name, num_applied);
+
+        // Check if wrapper already exists
+        let wrapper_fn = if let Some(existing) = self.module.llvm_module().get_function(&wrapper_name) {
+            existing
+        } else {
+            // Create param types: env + remaining args
+            let mut wrapper_param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
+            wrapper_param_types.push(ptr_type.into()); // env/closure pointer
+            for _ in 0..num_remaining {
+                wrapper_param_types.push(ptr_type.into());
+            }
+
+            let wrapper_fn_type = ptr_type.fn_type(&wrapper_param_types, false);
+            let wrapper_fn = self.module.llvm_module().add_function(&wrapper_name, wrapper_fn_type, None);
+
+            // Build the wrapper function body
+            let entry_bb = self.llvm_ctx.append_basic_block(wrapper_fn, "entry");
+            let current_bb = self.builder().get_insert_block();
+
+            self.builder().position_at_end(entry_bb);
+
+            // Extract applied args from closure environment
+            let closure_ptr = wrapper_fn.get_first_param().unwrap().into_pointer_value();
+            let closure_ty = self.closure_type(num_applied as u32);
+
+            let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
+            // Original function expects null env for direct calls
+            call_args.push(ptr_type.const_null().into());
+
+            // Load applied args from env
+            for i in 0..num_applied {
+                let env_slot = self
+                    .builder()
+                    .build_struct_gep(closure_ty, closure_ptr, 2, "env_slot")
+                    .map_err(|e| CodegenError::Internal(format!("PAP gep failed: {:?}", e)))?;
+
+                let elem_ptr = unsafe {
+                    self.builder()
+                        .build_in_bounds_gep(
+                            ptr_type.array_type(num_applied as u32),
+                            env_slot,
+                            &[i64_type.const_zero(), i64_type.const_int(i as u64, false)],
+                            &format!("pap_arg_{}", i),
+                        )
+                        .map_err(|e| CodegenError::Internal(format!("PAP elem gep failed: {:?}", e)))?
+                };
+
+                let arg_val = self
+                    .builder()
+                    .build_load(ptr_type, elem_ptr, &format!("pap_load_{}", i))
+                    .map_err(|e| CodegenError::Internal(format!("PAP load failed: {:?}", e)))?;
+
+                call_args.push(arg_val.into());
+            }
+
+            // Add remaining args from wrapper params
+            for i in 0..num_remaining {
+                let param = wrapper_fn.get_nth_param((i + 1) as u32).unwrap(); // +1 to skip env
+                call_args.push(param.into());
+            }
+
+            // Call the original function
+            let result = self
+                .builder()
+                .build_call(fn_val, &call_args, "pap_call")
+                .map_err(|e| CodegenError::Internal(format!("PAP call failed: {:?}", e)))?
+                .try_as_basic_value()
+                .left();
+
+            // Return the result
+            if let Some(ret_val) = result {
+                self.builder()
+                    .build_return(Some(&ret_val))
+                    .map_err(|e| CodegenError::Internal(format!("PAP return failed: {:?}", e)))?;
+            } else {
+                self.builder()
+                    .build_return(Some(&ptr_type.const_null()))
+                    .map_err(|e| CodegenError::Internal(format!("PAP return failed: {:?}", e)))?;
+            }
+
+            // Restore insertion point
+            if let Some(bb) = current_bb {
+                self.builder().position_at_end(bb);
+            }
+
+            wrapper_fn
+        };
+
+        // Create closure pointing to the wrapper with applied args as env
+        let wrapper_ptr = wrapper_fn.as_global_value().as_pointer_value();
+        let closure_ptr = self.alloc_closure(wrapper_ptr, &applied_vals)?;
+
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// Inner implementation of direct call (doesn't handle over-application).
+    fn lower_direct_call_inner(
+        &mut self,
+        fn_val: FunctionValue<'ctx>,
+        args: &[&Expr],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // Arguments are not in tail position
         let was_tail = self.in_tail_position;
         self.in_tail_position = false;
@@ -3929,21 +5470,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Handle lambda parameters
         let result = self.lower_function_body(fn_val, expr)?;
 
-        // Build return - convert to pointer if return type is pointer (uniform calling convention)
-        let ret_type = fn_val.get_type().get_return_type();
-        if let Some(val) = result {
-            let ret_val: BasicValueEnum<'ctx> = if ret_type == Some(self.type_mapper().ptr_type().into()) {
-                self.value_to_ptr(val)?.into()
+        // Check if the current block already has a terminator (e.g., from `error` or `unreachable`)
+        // If so, don't add another terminator
+        let current_block = self.builder().get_insert_block();
+        let has_terminator = current_block
+            .map(|bb| bb.get_terminator().is_some())
+            .unwrap_or(false);
+
+        if !has_terminator {
+            // Build return - convert to pointer if return type is pointer (uniform calling convention)
+            let ret_type = fn_val.get_type().get_return_type();
+            if let Some(val) = result {
+                let ret_val: BasicValueEnum<'ctx> = if ret_type == Some(self.type_mapper().ptr_type().into()) {
+                    self.value_to_ptr(val)?.into()
+                } else {
+                    val
+                };
+                self.builder()
+                    .build_return(Some(&ret_val))
+                    .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
             } else {
-                val
-            };
-            self.builder()
-                .build_return(Some(&ret_val))
-                .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
-        } else {
-            self.builder()
-                .build_return(None)
-                .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
+                self.builder()
+                    .build_return(None)
+                    .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
+            }
         }
 
         Ok(())
@@ -3960,20 +5510,119 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let mut current = expr;
         let mut param_idx = 1;
 
-        while let Expr::Lam(param, body, _span) = current {
-            if let Some(arg) = fn_val.get_nth_param(param_idx) {
-                self.env.insert(param.id, arg);
+        // Unwrap lambdas, type lambdas, and trivial case expressions.
+        // - Lambdas (Lam): bind parameter to function argument
+        // - Type lambdas (TyLam): erased at runtime, skip
+        // - Trivial Case: pattern matching on a variable we just bound, rebind and continue
+        loop {
+            match current {
+                Expr::Lam(param, body, _span) => {
+                    // Term lambda - bind parameter to function argument
+                    if let Some(arg) = fn_val.get_nth_param(param_idx) {
+                        self.env.insert(param.id, arg);
+                    }
+                    param_idx += 1;
+                    current = body.as_ref();
+                }
+                Expr::TyLam(_tyvar, body, _span) => {
+                    // Type lambda - skip (erased at runtime)
+                    current = body.as_ref();
+                }
+                Expr::Case(scrut, alts, _ty, _span) => {
+                    // Check if this is a "trivial" case that just rebinds a variable.
+                    // This pattern comes from HIR->Core lowering for pattern matching
+                    // on function parameters.
+                    //
+                    // Pattern: case x of { _ -> body } or case x of { y -> body }
+                    // where x is a variable we already have bound
+                    if let Expr::Var(scrut_var, _) = scrut.as_ref() {
+                        // Find the first Default alternative
+                        if let Some(alt) = alts.iter().find(|a| matches!(a.con, AltCon::Default)) {
+                            // If the alternative has a binder, bind it to the same value as scrut
+                            for binder in &alt.binders {
+                                if let Some(val) = self.env.get(&scrut_var.id) {
+                                    self.env.insert(binder.id, *val);
+                                }
+                            }
+                            current = &alt.rhs;
+                            continue;
+                        }
+                    }
+                    // Not a trivial case, stop unwrapping
+                    break;
+                }
+                _ => break,
             }
-            param_idx += 1;
-            current = body.as_ref();
         }
 
-        // Lower the body in tail position (enables tail call optimization)
+        // Check if there are remaining LLVM parameters that weren't bound to lambdas.
+        // This happens for definitions like `add5 = add 5` where the body is not a lambda
+        // but the type implies it takes arguments. We need to eta-expand at codegen.
+        let total_params = fn_val.count_params() as u32;
+        let remaining_params: Vec<_> = (param_idx..total_params)
+            .filter_map(|i| fn_val.get_nth_param(i))
+            .collect();
+
+        // Lower the body
         let was_tail = self.in_tail_position;
-        self.in_tail_position = true;
-        let result = self.lower_expr(current);
+        self.in_tail_position = remaining_params.is_empty(); // Only tail if no eta-expansion needed
+        let result = self.lower_expr(current)?;
         self.in_tail_position = was_tail;
-        result
+
+        // If there are remaining parameters, the body should evaluate to a closure.
+        // Apply the remaining parameters to it (eta-expansion).
+        if !remaining_params.is_empty() {
+            if let Some(closure_val) = result {
+                // The result should be a closure - call it with remaining params
+                let tm = self.type_mapper();
+                let ptr_type = tm.ptr_type();
+
+                let closure_ptr = match closure_val {
+                    BasicValueEnum::PointerValue(p) => p,
+                    _ => {
+                        return Err(CodegenError::Internal(
+                            "eta-expansion: expected closure but got non-pointer".to_string(),
+                        ))
+                    }
+                };
+
+                // Extract function pointer from closure
+                let fn_ptr = self.extract_closure_fn_ptr(closure_ptr)?;
+
+                // Build function type for the call
+                let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
+                param_types.push(ptr_type.into()); // closure/env pointer
+                for _ in &remaining_params {
+                    param_types.push(ptr_type.into());
+                }
+                let fn_type = ptr_type.fn_type(&param_types, false);
+
+                // Build args: closure ptr + remaining params
+                let mut llvm_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
+                llvm_args.push(closure_ptr.into());
+                for param in &remaining_params {
+                    // Convert to pointer if needed
+                    let ptr_val = self.value_to_ptr(*param)?;
+                    llvm_args.push(ptr_val.into());
+                }
+
+                // Build indirect call
+                let call = self
+                    .builder()
+                    .build_indirect_call(fn_type, fn_ptr, &llvm_args, "eta_call")
+                    .map_err(|e| {
+                        CodegenError::Internal(format!("failed to build eta-expansion call: {:?}", e))
+                    })?;
+
+                return Ok(call.try_as_basic_value().left());
+            } else {
+                return Err(CodegenError::Internal(
+                    "eta-expansion: body has no value".to_string(),
+                ));
+            }
+        }
+
+        Ok(result)
     }
 
     /// Lower a case expression.

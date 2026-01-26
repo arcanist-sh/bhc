@@ -268,6 +268,58 @@ pub extern "C" fn bhc_print_double_ln(d: f64) {
     println!("{}", d);
 }
 
+/// Print a single character (without newline).
+///
+/// # Arguments
+///
+/// * `c` - Character code to print (as i32)
+///
+/// # Safety
+///
+/// This function is safe to call from C code.
+#[no_mangle]
+pub extern "C" fn bhc_print_char(c: i32) {
+    if let Some(ch) = char::from_u32(c as u32) {
+        print!("{}", ch);
+    }
+}
+
+/// Print a boolean value (without newline).
+///
+/// # Arguments
+///
+/// * `b` - Boolean value (0 = False, non-zero = True)
+///
+/// # Safety
+///
+/// This function is safe to call from C code.
+#[no_mangle]
+pub extern "C" fn bhc_print_bool(b: i64) {
+    if b == 0 {
+        print!("False");
+    } else {
+        print!("True");
+    }
+}
+
+/// Print a boolean value (with newline).
+///
+/// # Arguments
+///
+/// * `b` - Boolean value (0 = False, non-zero = True)
+///
+/// # Safety
+///
+/// This function is safe to call from C code.
+#[no_mangle]
+pub extern "C" fn bhc_print_bool_ln(b: i64) {
+    if b == 0 {
+        println!("False");
+    } else {
+        println!("True");
+    }
+}
+
 /// Runtime panic handler.
 ///
 /// Called when an unrecoverable error occurs.

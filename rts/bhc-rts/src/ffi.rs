@@ -515,6 +515,641 @@ pub unsafe extern "C" fn bhc_is_thunk(obj: *const u8) -> c_int {
     }
 }
 
+// ============================================================================
+// Primitive Operations for Haskell Type Classes
+// ============================================================================
+//
+// These functions implement the primitive operations used by Haskell
+// type class instances (Eq, Ord, Num, etc.) for basic types.
+//
+// Conventions:
+// - Bool: i32 where 0 = False, 1 = True
+// - Ordering: i32 where -1 = LT, 0 = EQ, 1 = GT
+// - Int: i64 (64-bit signed integer)
+// - Integer: i64 (simplified, should be arbitrary precision)
+// - Float: f32
+// - Double: f64
+// - Char: u32 (Unicode code point)
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Int Primitives
+// ----------------------------------------------------------------------------
+
+/// Int equality
+#[no_mangle]
+pub extern "C" fn bhc_eq_int(a: i64, b: i64) -> i32 {
+    if a == b { 1 } else { 0 }
+}
+
+/// Int comparison (returns Ordering: -1=LT, 0=EQ, 1=GT)
+#[no_mangle]
+pub extern "C" fn bhc_compare_int(a: i64, b: i64) -> i32 {
+    match a.cmp(&b) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+/// Int less than
+#[no_mangle]
+pub extern "C" fn bhc_lt_int(a: i64, b: i64) -> i32 {
+    if a < b { 1 } else { 0 }
+}
+
+/// Int less than or equal
+#[no_mangle]
+pub extern "C" fn bhc_le_int(a: i64, b: i64) -> i32 {
+    if a <= b { 1 } else { 0 }
+}
+
+/// Int greater than
+#[no_mangle]
+pub extern "C" fn bhc_gt_int(a: i64, b: i64) -> i32 {
+    if a > b { 1 } else { 0 }
+}
+
+/// Int greater than or equal
+#[no_mangle]
+pub extern "C" fn bhc_ge_int(a: i64, b: i64) -> i32 {
+    if a >= b { 1 } else { 0 }
+}
+
+/// Int addition
+#[no_mangle]
+pub extern "C" fn bhc_add_int(a: i64, b: i64) -> i64 {
+    a.wrapping_add(b)
+}
+
+/// Int subtraction
+#[no_mangle]
+pub extern "C" fn bhc_sub_int(a: i64, b: i64) -> i64 {
+    a.wrapping_sub(b)
+}
+
+/// Int multiplication
+#[no_mangle]
+pub extern "C" fn bhc_mul_int(a: i64, b: i64) -> i64 {
+    a.wrapping_mul(b)
+}
+
+/// Int negation
+#[no_mangle]
+pub extern "C" fn bhc_negate_int(a: i64) -> i64 {
+    a.wrapping_neg()
+}
+
+/// Int quotient (truncated toward zero)
+#[no_mangle]
+pub extern "C" fn bhc_quot_int(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        panic!("divide by zero");
+    }
+    a / b
+}
+
+/// Int remainder (truncated toward zero)
+#[no_mangle]
+pub extern "C" fn bhc_rem_int(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        panic!("divide by zero");
+    }
+    a % b
+}
+
+/// Int division (truncated toward negative infinity)
+#[no_mangle]
+pub extern "C" fn bhc_div_int(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        panic!("divide by zero");
+    }
+    a.div_euclid(b)
+}
+
+/// Int modulus (Euclidean)
+#[no_mangle]
+pub extern "C" fn bhc_mod_int(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        panic!("divide by zero");
+    }
+    a.rem_euclid(b)
+}
+
+/// Minimum Int value
+#[no_mangle]
+pub extern "C" fn bhc_min_int() -> i64 {
+    i64::MIN
+}
+
+/// Maximum Int value
+#[no_mangle]
+pub extern "C" fn bhc_max_int() -> i64 {
+    i64::MAX
+}
+
+/// Int to Integer (for now, just returns the same value)
+#[no_mangle]
+pub extern "C" fn bhc_int_to_integer(a: i64) -> i64 {
+    a
+}
+
+/// Integer to Int (for now, just returns the same value)
+#[no_mangle]
+pub extern "C" fn bhc_integer_to_int(a: i64) -> i64 {
+    a
+}
+
+/// Show Int - returns a heap-allocated string
+#[no_mangle]
+pub extern "C" fn bhc_show_int(n: i64) -> *mut c_char {
+    let s = format!("{}", n);
+    let c_string = std::ffi::CString::new(s).unwrap();
+    c_string.into_raw()
+}
+
+// ----------------------------------------------------------------------------
+// Float Primitives
+// ----------------------------------------------------------------------------
+
+/// Float equality
+#[no_mangle]
+pub extern "C" fn bhc_eq_float(a: f32, b: f32) -> i32 {
+    if a == b { 1 } else { 0 }
+}
+
+/// Float comparison
+#[no_mangle]
+pub extern "C" fn bhc_compare_float(a: f32, b: f32) -> i32 {
+    match a.partial_cmp(&b) {
+        Some(std::cmp::Ordering::Less) => -1,
+        Some(std::cmp::Ordering::Equal) => 0,
+        Some(std::cmp::Ordering::Greater) => 1,
+        None => 0, // NaN comparison
+    }
+}
+
+/// Float less than
+#[no_mangle]
+pub extern "C" fn bhc_lt_float(a: f32, b: f32) -> i32 {
+    if a < b { 1 } else { 0 }
+}
+
+/// Float less than or equal
+#[no_mangle]
+pub extern "C" fn bhc_le_float(a: f32, b: f32) -> i32 {
+    if a <= b { 1 } else { 0 }
+}
+
+/// Float greater than
+#[no_mangle]
+pub extern "C" fn bhc_gt_float(a: f32, b: f32) -> i32 {
+    if a > b { 1 } else { 0 }
+}
+
+/// Float greater than or equal
+#[no_mangle]
+pub extern "C" fn bhc_ge_float(a: f32, b: f32) -> i32 {
+    if a >= b { 1 } else { 0 }
+}
+
+/// Float addition
+#[no_mangle]
+pub extern "C" fn bhc_add_float(a: f32, b: f32) -> f32 {
+    a + b
+}
+
+/// Float subtraction
+#[no_mangle]
+pub extern "C" fn bhc_sub_float(a: f32, b: f32) -> f32 {
+    a - b
+}
+
+/// Float multiplication
+#[no_mangle]
+pub extern "C" fn bhc_mul_float(a: f32, b: f32) -> f32 {
+    a * b
+}
+
+/// Float division
+#[no_mangle]
+pub extern "C" fn bhc_div_float(a: f32, b: f32) -> f32 {
+    a / b
+}
+
+/// Float negation
+#[no_mangle]
+pub extern "C" fn bhc_negate_float(a: f32) -> f32 {
+    -a
+}
+
+/// Float absolute value
+#[no_mangle]
+pub extern "C" fn bhc_abs_float(a: f32) -> f32 {
+    a.abs()
+}
+
+/// Integer to Float
+#[no_mangle]
+pub extern "C" fn bhc_integer_to_float(a: i64) -> f32 {
+    a as f32
+}
+
+// Transcendental functions for Float
+
+#[no_mangle]
+pub extern "C" fn bhc_exp_float(a: f32) -> f32 {
+    a.exp()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_log_float(a: f32) -> f32 {
+    a.ln()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_sqrt_float(a: f32) -> f32 {
+    a.sqrt()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_pow_float(a: f32, b: f32) -> f32 {
+    a.powf(b)
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_sin_float(a: f32) -> f32 {
+    a.sin()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_cos_float(a: f32) -> f32 {
+    a.cos()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_tan_float(a: f32) -> f32 {
+    a.tan()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_asin_float(a: f32) -> f32 {
+    a.asin()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_acos_float(a: f32) -> f32 {
+    a.acos()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_atan_float(a: f32) -> f32 {
+    a.atan()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_sinh_float(a: f32) -> f32 {
+    a.sinh()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_cosh_float(a: f32) -> f32 {
+    a.cosh()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_tanh_float(a: f32) -> f32 {
+    a.tanh()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_asinh_float(a: f32) -> f32 {
+    a.asinh()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_acosh_float(a: f32) -> f32 {
+    a.acosh()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_atanh_float(a: f32) -> f32 {
+    a.atanh()
+}
+
+/// Truncate Float to Int
+#[no_mangle]
+pub extern "C" fn bhc_truncate_float(a: f32) -> i64 {
+    a.trunc() as i64
+}
+
+/// Round Float to Int
+#[no_mangle]
+pub extern "C" fn bhc_round_float(a: f32) -> i64 {
+    a.round() as i64
+}
+
+/// Ceiling of Float
+#[no_mangle]
+pub extern "C" fn bhc_ceiling_float(a: f32) -> i64 {
+    a.ceil() as i64
+}
+
+/// Floor of Float
+#[no_mangle]
+pub extern "C" fn bhc_floor_float(a: f32) -> i64 {
+    a.floor() as i64
+}
+
+/// Show Float
+#[no_mangle]
+pub extern "C" fn bhc_show_float(n: f32) -> *mut c_char {
+    let s = format!("{}", n);
+    let c_string = std::ffi::CString::new(s).unwrap();
+    c_string.into_raw()
+}
+
+// ----------------------------------------------------------------------------
+// Double Primitives
+// ----------------------------------------------------------------------------
+
+/// Double equality
+#[no_mangle]
+pub extern "C" fn bhc_eq_double(a: f64, b: f64) -> i32 {
+    if a == b { 1 } else { 0 }
+}
+
+/// Double comparison
+#[no_mangle]
+pub extern "C" fn bhc_compare_double(a: f64, b: f64) -> i32 {
+    match a.partial_cmp(&b) {
+        Some(std::cmp::Ordering::Less) => -1,
+        Some(std::cmp::Ordering::Equal) => 0,
+        Some(std::cmp::Ordering::Greater) => 1,
+        None => 0, // NaN comparison
+    }
+}
+
+/// Double less than
+#[no_mangle]
+pub extern "C" fn bhc_lt_double(a: f64, b: f64) -> i32 {
+    if a < b { 1 } else { 0 }
+}
+
+/// Double less than or equal
+#[no_mangle]
+pub extern "C" fn bhc_le_double(a: f64, b: f64) -> i32 {
+    if a <= b { 1 } else { 0 }
+}
+
+/// Double greater than
+#[no_mangle]
+pub extern "C" fn bhc_gt_double(a: f64, b: f64) -> i32 {
+    if a > b { 1 } else { 0 }
+}
+
+/// Double greater than or equal
+#[no_mangle]
+pub extern "C" fn bhc_ge_double(a: f64, b: f64) -> i32 {
+    if a >= b { 1 } else { 0 }
+}
+
+/// Double addition
+#[no_mangle]
+pub extern "C" fn bhc_add_double(a: f64, b: f64) -> f64 {
+    a + b
+}
+
+/// Double subtraction
+#[no_mangle]
+pub extern "C" fn bhc_sub_double(a: f64, b: f64) -> f64 {
+    a - b
+}
+
+/// Double multiplication
+#[no_mangle]
+pub extern "C" fn bhc_mul_double(a: f64, b: f64) -> f64 {
+    a * b
+}
+
+/// Double division
+#[no_mangle]
+pub extern "C" fn bhc_div_double(a: f64, b: f64) -> f64 {
+    a / b
+}
+
+/// Double negation
+#[no_mangle]
+pub extern "C" fn bhc_negate_double(a: f64) -> f64 {
+    -a
+}
+
+/// Double absolute value
+#[no_mangle]
+pub extern "C" fn bhc_abs_double(a: f64) -> f64 {
+    a.abs()
+}
+
+/// Integer to Double
+#[no_mangle]
+pub extern "C" fn bhc_integer_to_double(a: i64) -> f64 {
+    a as f64
+}
+
+// Transcendental functions for Double
+
+#[no_mangle]
+pub extern "C" fn bhc_exp_double(a: f64) -> f64 {
+    a.exp()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_log_double(a: f64) -> f64 {
+    a.ln()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_sqrt_double(a: f64) -> f64 {
+    a.sqrt()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_pow_double(a: f64, b: f64) -> f64 {
+    a.powf(b)
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_sin_double(a: f64) -> f64 {
+    a.sin()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_cos_double(a: f64) -> f64 {
+    a.cos()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_tan_double(a: f64) -> f64 {
+    a.tan()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_asin_double(a: f64) -> f64 {
+    a.asin()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_acos_double(a: f64) -> f64 {
+    a.acos()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_atan_double(a: f64) -> f64 {
+    a.atan()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_sinh_double(a: f64) -> f64 {
+    a.sinh()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_cosh_double(a: f64) -> f64 {
+    a.cosh()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_tanh_double(a: f64) -> f64 {
+    a.tanh()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_asinh_double(a: f64) -> f64 {
+    a.asinh()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_acosh_double(a: f64) -> f64 {
+    a.acosh()
+}
+
+#[no_mangle]
+pub extern "C" fn bhc_atanh_double(a: f64) -> f64 {
+    a.atanh()
+}
+
+/// Truncate Double to Int
+#[no_mangle]
+pub extern "C" fn bhc_truncate_double(a: f64) -> i64 {
+    a.trunc() as i64
+}
+
+/// Round Double to Int
+#[no_mangle]
+pub extern "C" fn bhc_round_double(a: f64) -> i64 {
+    a.round() as i64
+}
+
+/// Ceiling of Double
+#[no_mangle]
+pub extern "C" fn bhc_ceiling_double(a: f64) -> i64 {
+    a.ceil() as i64
+}
+
+/// Floor of Double
+#[no_mangle]
+pub extern "C" fn bhc_floor_double(a: f64) -> i64 {
+    a.floor() as i64
+}
+
+/// Show Double
+#[no_mangle]
+pub extern "C" fn bhc_show_double(n: f64) -> *mut c_char {
+    let s = format!("{}", n);
+    let c_string = std::ffi::CString::new(s).unwrap();
+    c_string.into_raw()
+}
+
+// ----------------------------------------------------------------------------
+// Char Primitives
+// ----------------------------------------------------------------------------
+
+/// Char equality
+#[no_mangle]
+pub extern "C" fn bhc_eq_char(a: u32, b: u32) -> i32 {
+    if a == b { 1 } else { 0 }
+}
+
+/// Char comparison
+#[no_mangle]
+pub extern "C" fn bhc_compare_char(a: u32, b: u32) -> i32 {
+    match a.cmp(&b) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+/// Char less than
+#[no_mangle]
+pub extern "C" fn bhc_lt_char(a: u32, b: u32) -> i32 {
+    if a < b { 1 } else { 0 }
+}
+
+/// Char less than or equal
+#[no_mangle]
+pub extern "C" fn bhc_le_char(a: u32, b: u32) -> i32 {
+    if a <= b { 1 } else { 0 }
+}
+
+/// Char greater than
+#[no_mangle]
+pub extern "C" fn bhc_gt_char(a: u32, b: u32) -> i32 {
+    if a > b { 1 } else { 0 }
+}
+
+/// Char greater than or equal
+#[no_mangle]
+pub extern "C" fn bhc_ge_char(a: u32, b: u32) -> i32 {
+    if a >= b { 1 } else { 0 }
+}
+
+/// Char to Int (Unicode code point)
+#[no_mangle]
+pub extern "C" fn bhc_char_to_int(c: u32) -> i64 {
+    c as i64
+}
+
+/// Int to Char (Unicode code point)
+#[no_mangle]
+pub extern "C" fn bhc_int_to_char(n: i64) -> u32 {
+    n as u32
+}
+
+/// Show Char - returns the character representation with quotes
+#[no_mangle]
+pub extern "C" fn bhc_show_char(c: u32) -> *mut c_char {
+    let s = if let Some(ch) = char::from_u32(c) {
+        format!("'{}'", ch.escape_default())
+    } else {
+        format!("'\\x{:x}'", c)
+    };
+    let c_string = std::ffi::CString::new(s).unwrap();
+    c_string.into_raw()
+}
+
+// ----------------------------------------------------------------------------
+// String Memory Management
+// ----------------------------------------------------------------------------
+
+/// Free a string allocated by show functions
+#[no_mangle]
+pub unsafe extern "C" fn bhc_free_string(s: *mut c_char) {
+    if !s.is_null() {
+        let _ = unsafe { std::ffi::CString::from_raw(s) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,5 +1188,103 @@ mod tests {
         let slice = unsafe { std::slice::from_raw_parts(ptr, 1024) };
         assert!(slice.iter().all(|&b| b == 0));
         unsafe { bhc_free(ptr, 1024) };
+    }
+
+    // Tests for Int primitives
+    #[test]
+    fn test_int_eq() {
+        assert_eq!(bhc_eq_int(42, 42), 1);
+        assert_eq!(bhc_eq_int(42, 43), 0);
+    }
+
+    #[test]
+    fn test_int_compare() {
+        assert_eq!(bhc_compare_int(1, 2), -1); // LT
+        assert_eq!(bhc_compare_int(2, 2), 0);  // EQ
+        assert_eq!(bhc_compare_int(3, 2), 1);  // GT
+    }
+
+    #[test]
+    fn test_int_arithmetic() {
+        assert_eq!(bhc_add_int(2, 3), 5);
+        assert_eq!(bhc_sub_int(5, 3), 2);
+        assert_eq!(bhc_mul_int(4, 5), 20);
+        assert_eq!(bhc_negate_int(42), -42);
+        assert_eq!(bhc_quot_int(7, 3), 2);
+        assert_eq!(bhc_rem_int(7, 3), 1);
+        assert_eq!(bhc_div_int(-7, 3), -3);  // Euclidean division
+        assert_eq!(bhc_mod_int(-7, 3), 2);   // Euclidean modulus
+    }
+
+    #[test]
+    fn test_int_bounds() {
+        assert_eq!(bhc_min_int(), i64::MIN);
+        assert_eq!(bhc_max_int(), i64::MAX);
+    }
+
+    // Tests for Float primitives
+    #[test]
+    fn test_float_arithmetic() {
+        assert!((bhc_add_float(1.5, 2.5) - 4.0).abs() < 0.001);
+        assert!((bhc_sub_float(5.0, 2.0) - 3.0).abs() < 0.001);
+        assert!((bhc_mul_float(2.0, 3.0) - 6.0).abs() < 0.001);
+        assert!((bhc_div_float(6.0, 2.0) - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_float_transcendentals() {
+        assert!((bhc_sqrt_float(4.0) - 2.0).abs() < 0.001);
+        assert!((bhc_sin_float(0.0)).abs() < 0.001);
+        assert!((bhc_cos_float(0.0) - 1.0).abs() < 0.001);
+        assert!((bhc_exp_float(0.0) - 1.0).abs() < 0.001);
+        assert!((bhc_log_float(1.0)).abs() < 0.001);
+    }
+
+    // Tests for Double primitives
+    #[test]
+    fn test_double_arithmetic() {
+        assert!((bhc_add_double(1.5, 2.5) - 4.0).abs() < 0.0001);
+        assert!((bhc_sub_double(5.0, 2.0) - 3.0).abs() < 0.0001);
+        assert!((bhc_mul_double(2.0, 3.0) - 6.0).abs() < 0.0001);
+        assert!((bhc_div_double(6.0, 2.0) - 3.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_double_rounding() {
+        assert_eq!(bhc_truncate_double(3.7), 3);
+        assert_eq!(bhc_truncate_double(-3.7), -3);
+        assert_eq!(bhc_round_double(3.5), 4);
+        assert_eq!(bhc_ceiling_double(3.1), 4);
+        assert_eq!(bhc_floor_double(3.9), 3);
+    }
+
+    // Tests for Char primitives
+    #[test]
+    fn test_char_eq() {
+        assert_eq!(bhc_eq_char('a' as u32, 'a' as u32), 1);
+        assert_eq!(bhc_eq_char('a' as u32, 'b' as u32), 0);
+    }
+
+    #[test]
+    fn test_char_conversion() {
+        assert_eq!(bhc_char_to_int('A' as u32), 65);
+        assert_eq!(bhc_int_to_char(65), 'A' as u32);
+    }
+
+    // Tests for Show functions
+    #[test]
+    fn test_show_int() {
+        let s = bhc_show_int(42);
+        let cstr = unsafe { std::ffi::CStr::from_ptr(s) };
+        assert_eq!(cstr.to_str().unwrap(), "42");
+        unsafe { bhc_free_string(s) };
+    }
+
+    #[test]
+    fn test_show_char() {
+        let s = bhc_show_char('a' as u32);
+        let cstr = unsafe { std::ffi::CStr::from_ptr(s) };
+        assert_eq!(cstr.to_str().unwrap(), "'a'");
+        unsafe { bhc_free_string(s) };
     }
 }

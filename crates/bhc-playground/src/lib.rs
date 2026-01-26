@@ -632,6 +632,59 @@ mod tests {
     }
 
     #[test]
+    fn test_foldr_with_inline_lambda() {
+        // Test foldr with inline lambda: foldr (\x acc -> x + acc) 0 [1,2,3] = 6
+        let result = compile_and_run(r"main = foldr (\x acc -> x + acc) 0 [1, 2, 3]");
+        assert!(result.is_ok(), "foldr with lambda should compile: {:?}", result.err());
+        assert_eq!(result.unwrap().display, "6");
+    }
+
+    #[test]
+    fn test_foldl_with_inline_lambda() {
+        // Test foldl with inline lambda: foldl (\acc x -> acc + x) 0 [1,2,3] = 6
+        let result = compile_and_run(r"main = foldl (\acc x -> acc + x) 0 [1, 2, 3]");
+        assert!(result.is_ok(), "foldl with lambda should compile: {:?}", result.err());
+        assert_eq!(result.unwrap().display, "6");
+    }
+
+    #[test]
+    fn test_foldr_with_operator_section() {
+        // Test foldr with (+): foldr (+) 0 [1,2,3] = 6
+        let result = compile_and_run("main = foldr (+) 0 [1, 2, 3]");
+        assert!(result.is_ok(), "foldr with (+) should compile: {:?}", result.err());
+        assert_eq!(result.unwrap().display, "6");
+    }
+
+    // =========================================================================
+    // Print type inference tests
+    // =========================================================================
+
+    #[test]
+    fn test_print_int() {
+        let result = compile_and_run("main = print 42");
+        assert!(result.is_ok(), "print Int should compile: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_print_list() {
+        let result = compile_and_run("main = print [1, 2, 3]");
+        assert!(result.is_ok(), "print [Int] should compile: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_print_polymorphic_expression() {
+        // Test printing the result of a polymorphic function
+        let result = compile_and_run("main = print (length [1, 2, 3])");
+        assert!(result.is_ok(), "print (length ...) should compile: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_print_sum() {
+        let result = compile_and_run("main = print (sum [1, 2, 3])");
+        assert!(result.is_ok(), "print (sum ...) should compile: {:?}", result.err());
+    }
+
+    #[test]
     fn test_parse_error() {
         // Use syntax that definitely fails to parse
         let result = compile_and_run("main = (((");

@@ -109,6 +109,8 @@ pub enum OutputType {
     LlvmBitcode,
     /// Assembly (.s).
     Assembly,
+    /// WebAssembly module (.wasm).
+    Wasm,
 }
 
 /// Compiler options that can be set via CLI or configuration.
@@ -322,6 +324,7 @@ impl Session {
                 OutputType::LlvmIr => "ll",
                 OutputType::LlvmBitcode => "bc",
                 OutputType::Assembly => "s",
+                OutputType::Wasm => "wasm",
             };
             if ext.is_empty() {
                 Utf8PathBuf::from(stem)

@@ -242,6 +242,52 @@ impl TyCtxt {
                     ("Fractional", "Float") | ("Fractional", "Double")
                 )
             }
+            // List instances: Eq [a], Ord [a], Show [a] if element type has the instance
+            Ty::List(elem) => {
+                matches!(class_name, "Eq" | "Ord" | "Show") && self.is_builtin_instance(class, elem)
+            }
+            // Tuple instances: Eq (a, b), Ord (a, b), Show (a, b) if all elements have the instance
+            Ty::Tuple(elems) => {
+                matches!(class_name, "Eq" | "Ord" | "Show")
+                    && elems.iter().all(|elem| self.is_builtin_instance(class, elem))
+            }
+            // Maybe instances: handled via App pattern
+            // Either instances: handled via App pattern
+            Ty::App(con, arg) => {
+                // Check for Maybe a, Either a b, etc.
+                if let Ty::Con(tycon) = con.as_ref() {
+                    let type_name = tycon.name.as_str();
+                    match (class_name, type_name) {
+                        // Maybe a has Eq, Ord, Show if a does
+                        ("Eq", "Maybe") | ("Ord", "Maybe") | ("Show", "Maybe") => {
+                            self.is_builtin_instance(class, arg)
+                        }
+                        // IO a has Show (for debugging)
+                        ("Show", "IO") => true,
+                        _ => false,
+                    }
+                } else if let Ty::App(inner_con, inner_arg) = con.as_ref() {
+                    // Handle Either a b (nested application)
+                    if let Ty::Con(tycon) = inner_con.as_ref() {
+                        let type_name = tycon.name.as_str();
+                        match (class_name, type_name) {
+                            // Either a b has Eq, Ord, Show if both a and b do
+                            ("Eq", "Either") | ("Ord", "Either") | ("Show", "Either") => {
+                                self.is_builtin_instance(class, inner_arg)
+                                    && self.is_builtin_instance(class, arg)
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            // Type variables can satisfy constraints in some contexts
+            // (deferred to constraint solving)
+            Ty::Var(_) => false,
             _ => false,
         }
     }
@@ -903,6 +949,34 @@ impl TyCtxt {
                 "maximum" | "minimum" => {
                     let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                     Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
+                }
+                // last :: [a] -> a
+                "last" => {
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
+                }
+                // init :: [a] -> [a]
+                "init" => {
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone()], Ty::fun(list_a.clone(), list_a))
+                }
+                // concat :: [[a]] -> [a]
+                "concat" => {
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    let list_list_a = Ty::List(Box::new(list_a.clone()));
+                    Scheme::poly(vec![a.clone()], Ty::fun(list_list_a, list_a))
+                }
+                // concatMap :: (a -> [b]) -> [a] -> [b]
+                "concatMap" => {
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(
+                            Ty::fun(Ty::Var(a.clone()), list_b.clone()),
+                            Ty::fun(list_a, list_b),
+                        ),
+                    )
                 }
                 // id :: a -> a
                 "id" => Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),

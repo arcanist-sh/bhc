@@ -469,6 +469,77 @@ impl WasmModule {
         self.data_segments.push((offset, data));
     }
 
+    /// Add WASI imports for system interface support.
+    ///
+    /// This adds the standard WASI imports needed for IO and process control:
+    /// - `fd_write`: Write to a file descriptor (for stdout/stderr)
+    /// - `proc_exit`: Exit the process
+    pub fn add_wasi_imports(&mut self) {
+        use crate::wasi;
+        for import in wasi::generate_wasi_imports() {
+            self.add_import(import);
+        }
+    }
+
+    /// Add runtime functions for WASI programs.
+    ///
+    /// This adds:
+    /// - `alloc`: Bump allocator for linear memory
+    /// - `print_i32`: Print an i32 to stdout
+    /// - `_start`: Entry point that calls main
+    ///
+    /// Note: This must be called AFTER `add_wasi_imports()` for correct function indices.
+    pub fn add_runtime_functions(&mut self) {
+        use crate::wasi;
+
+        // Count imported functions to determine function indices
+        let num_imports = self.imports.iter()
+            .filter(|i| matches!(i.kind, WasmImportKind::Func(_)))
+            .count() as u32;
+
+        // WASI import indices (these are the first functions)
+        let fd_write_idx = wasi::FD_WRITE_IDX;
+        let proc_exit_idx = wasi::PROC_EXIT_IDX;
+
+        // Add the heap pointer global
+        let heap_ptr_idx = self.add_global(WasmGlobal {
+            name: Some("heap_ptr".to_string()),
+            ty: WasmType::I32,
+            mutable: true,
+            init: WasmInstr::I32Const(65536), // Start heap at 64KB
+        });
+
+        // Add allocator function (first defined function)
+        let alloc_func = wasi::generate_alloc_function(heap_ptr_idx);
+        let _alloc_idx = self.add_function(alloc_func);
+
+        // Add print_i32 function
+        let print_func = wasi::generate_print_i32(fd_write_idx);
+        let _print_i32_idx = self.add_function(print_func);
+
+        // Add a placeholder main function
+        let main_func = wasi::generate_placeholder_main();
+        let main_idx = self.add_function(main_func);
+
+        // Add _start function (entry point) - must be last so we know main's index
+        let start_func = wasi::generate_start_function(main_idx, proc_exit_idx);
+        self.add_function(start_func);
+    }
+
+    /// Write the WASM binary to a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if encoding fails or the file cannot be written.
+    pub fn write_wasm(&self, path: impl AsRef<Path>) -> WasmResult<()> {
+        use std::fs;
+
+        let binary = self.to_wasm()?;
+        fs::write(path.as_ref(), binary).map_err(|e| {
+            crate::WasmError::Internal(format!("failed to write WASM file: {}", e))
+        })
+    }
+
     /// Generate WAT (WebAssembly Text) format.
     #[must_use]
     pub fn to_wat(&self) -> String {

@@ -761,6 +761,25 @@ fn find_fusion_pattern(
         }
     }
 
+    // Pattern 4: foldl' op z (map f x)
+    if let TensorOp::Fold(fold_fn, init_ref, inner_ref) = &consumer.op {
+        if let Some(producer_idx) = find_producer(ops, inner_ref.id) {
+            if !ops[producer_idx].fused && ctx.ref_count(inner_ref.id) == 1 {
+                if let TensorOp::Map(map_fn, input_ref) = &ops[producer_idx].op {
+                    return Some((
+                        FusionPattern::FoldMap {
+                            fold_fn: fold_fn.name,
+                            init: init_ref.clone(),
+                            map_fn: map_fn.clone(),
+                            input: input_ref.clone(),
+                        },
+                        vec![consumer_idx, producer_idx],
+                    ));
+                }
+            }
+        }
+    }
+
     // ========================================================================
     // ML-Specific Pattern Detection (H26-SPEC Section 8.2)
     // ========================================================================
@@ -1946,6 +1965,49 @@ mod tests {
         assert!(
             kernels[0].fusion_info.complete,
             "fusion should be complete"
+        );
+    }
+
+    #[test]
+    fn test_pattern4_fold_map_fusion() {
+        // foldl' op z (map f x) should fuse to single traversal
+        //
+        // x (id=100) -> [map f] -> intermediate (id=0) -> [fold op z] -> result
+        //
+        // Per H26-SPEC Section 8.1 Pattern 4, this MUST fuse.
+
+        // Use high ID for original input
+        let input = make_tensor_ref(100, &[100], DType::Float32);
+        let map_op = TensorOp::Map(make_map_fn("double"), input);
+
+        // Initial accumulator value (scalar)
+        let init = make_tensor_ref(101, &[], DType::Float32);
+
+        // Intermediate will get id=0, fold consumes id=0
+        let mapped = make_tensor_ref(0, &[100], DType::Float32);
+        let fold_fn = crate::FoldFn {
+            name: Symbol::intern("+"),
+            span: Span::DUMMY,
+        };
+        let fold_op = TensorOp::Fold(fold_fn, init, mapped);
+
+        let mut ctx = FusionContext::new(true);
+        let ops = vec![map_op, fold_op];
+        let kernels = fuse_ops(&mut ctx, ops);
+
+        assert_eq!(
+            kernels.len(),
+            1,
+            "Pattern 4 (fold-map) should fuse to single kernel"
+        );
+        assert!(
+            kernels[0].fusion_info.complete,
+            "fusion should be complete"
+        );
+        assert_eq!(
+            kernels[0].name.as_str(),
+            "fused_fold_map",
+            "Should produce fused_fold_map kernel"
         );
     }
 

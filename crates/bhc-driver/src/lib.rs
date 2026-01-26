@@ -64,6 +64,7 @@ use bhc_loop_ir::{
     vectorize::{VectorizeConfig, VectorizePass, VectorizeReport},
     LoopId, TargetArch,
 };
+use bhc_wasm::{WasmConfig, WasmModule};
 use rustc_hash::FxHashMap;
 use bhc_lower::LowerContext;
 use bhc_session::{Options, OutputType, Profile, Session, SessionRef};
@@ -457,7 +458,57 @@ impl Compiler {
             }
         }
 
-        // Phase 5: Code generation
+        // Check for WASM target - use WASM backend instead of LLVM
+        if self.is_wasm_target() {
+            self.callbacks.on_phase_start(CompilePhase::Codegen, &unit.module_name);
+
+            // Create WASM config based on profile
+            let wasm_config = WasmConfig::for_profile(self.session.profile());
+
+            // Get target spec for WASM
+            let target = self.get_target_spec();
+
+            // Create WASM module
+            let mut wasm_module = WasmModule::new(unit.module_name.clone(), wasm_config, target);
+
+            // Add WASI imports for system interface
+            wasm_module.add_wasi_imports();
+
+            // Add runtime functions (allocator, print, _start)
+            wasm_module.add_runtime_functions();
+
+            // TODO: When Loop IR lowering is complete, lower each kernel:
+            // for loop_ir in &loop_irs {
+            //     let func = bhc_wasm::lower::lower_function(loop_ir, &wasm_config)?;
+            //     wasm_module.add_function(func);
+            // }
+
+            // For now, generate a minimal module that works with WASI
+            // This will be enhanced when Loop IR → WASM lowering is connected
+
+            // Determine output path
+            let output_path = if let Some(ref path) = self.session.options.output_path {
+                path.clone()
+            } else {
+                Utf8PathBuf::from(format!("{}.wasm", unit.module_name))
+            };
+
+            // Write the WASM binary
+            wasm_module
+                .write_wasm(&output_path)
+                .map_err(|e| CompileError::CodegenError(format!("WASM codegen failed: {}", e)))?;
+
+            self.callbacks.on_phase_complete(CompilePhase::Codegen, &unit.module_name);
+
+            info!(module = %unit.module_name, output = %output_path, "WASM compilation complete");
+
+            return Ok(CompileOutput {
+                path: output_path,
+                output_type: OutputType::Wasm,
+            });
+        }
+
+        // Phase 5: Code generation (native via LLVM)
         self.callbacks.on_phase_start(CompilePhase::Codegen, &unit.module_name);
         let object_path = self.codegen(&unit.module_name, &core)?;
         debug!(module = %unit.module_name, object = %object_path.display(), "code generation complete");
@@ -1022,6 +1073,17 @@ impl Compiler {
             // Fall back to generic (scalar) for unknown targets
             TargetArch::Generic
         }
+    }
+
+    /// Check if the target is WebAssembly.
+    ///
+    /// Returns true if the target triple contains "wasm" (e.g., "wasm32-wasi").
+    fn is_wasm_target(&self) -> bool {
+        self.session
+            .options
+            .target_triple
+            .as_ref()
+            .map_or(false, |t| t.contains("wasm"))
     }
 
     /// Compile multiple source files in parallel.

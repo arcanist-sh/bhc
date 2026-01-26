@@ -72,7 +72,9 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod codegen;
+pub mod lower;
 pub mod runtime;
+pub mod wasi;
 
 use bhc_codegen::{CodegenBackend, CodegenConfig, CodegenError, CodegenResult};
 use bhc_target::{Arch, TargetSpec};
@@ -165,6 +167,23 @@ impl WasmConfig {
             export_memory: true,
             debug_names: true,
             optimize_size: false,
+        }
+    }
+
+    /// Create a config based on the compilation profile.
+    #[must_use]
+    pub fn for_profile(profile: bhc_session::Profile) -> Self {
+        match profile {
+            bhc_session::Profile::Edge => Self::edge_profile(),
+            bhc_session::Profile::Numeric => Self {
+                simd_enabled: true,
+                initial_memory_pages: 32, // 2MB initial for numeric workloads
+                max_memory_pages: Some(512), // 32MB max
+                export_memory: true,
+                debug_names: true,
+                optimize_size: false,
+            },
+            _ => Self::default(),
         }
     }
 }

@@ -685,6 +685,22 @@ mod tests {
     }
 
     #[test]
+    fn test_zipwith_with_lambda() {
+        // zipWith with inline lambda for dot product (result: 1*4 + 2*5 + 3*6 = 32)
+        let result = compile_and_run(r"main = sum (zipWith (\x y -> x * y) [1, 2, 3] [4, 5, 6])");
+        assert!(result.is_ok(), "zipWith with lambda should compile: {:?}", result.err());
+        assert_eq!(result.unwrap().display, "32");
+    }
+
+    #[test]
+    fn test_zipwith_with_operator() {
+        // zipWith with operator section (result: 1*4 + 2*5 + 3*6 = 32)
+        let result = compile_and_run("main = sum (zipWith (*) [1, 2, 3] [4, 5, 6])");
+        assert!(result.is_ok(), "zipWith with (*) should compile: {:?}", result.err());
+        assert_eq!(result.unwrap().display, "32");
+    }
+
+    #[test]
     fn test_parse_error() {
         // Use syntax that definitely fails to parse
         let result = compile_and_run("main = (((");

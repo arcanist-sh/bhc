@@ -462,6 +462,7 @@ impl TyCtxt {
         // Type variables for polymorphic types
         let a = TyVar::new_star(0xFFFF_0000);
         let b = TyVar::new_star(0xFFFF_0001);
+        let c = TyVar::new_star(0xFFFF_0002);
 
         // First pass: register data constructors
         for (_def_id, def_info) in defs.iter() {
@@ -872,6 +873,30 @@ impl TyCtxt {
                             Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))),
                             Ty::fun(Ty::Var(b.clone()), Ty::fun(list_a, Ty::Var(b.clone()))),
                         ),
+                    )
+                }
+                // zipWith :: (a -> b -> c) -> [a] -> [b] -> [c]
+                "zipWith" => {
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
+                    let list_c = Ty::List(Box::new(Ty::Var(c.clone())));
+                    Scheme::poly(
+                        vec![a.clone(), b.clone(), c.clone()],
+                        Ty::fun(
+                            Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(c.clone()))),
+                            Ty::fun(list_a, Ty::fun(list_b, list_c)),
+                        ),
+                    )
+                }
+                // zip :: [a] -> [b] -> [(a, b)]
+                "zip" => {
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
+                    let pair_ab = Ty::Tuple(vec![Ty::Var(a.clone()), Ty::Var(b.clone())]);
+                    let list_pair = Ty::List(Box::new(pair_ab));
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(list_a, Ty::fun(list_b, list_pair)),
                     )
                 }
                 // maximum, minimum :: [a] -> a

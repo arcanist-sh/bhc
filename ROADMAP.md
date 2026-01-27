@@ -495,35 +495,37 @@ main = withScope $ \scope -> do
 
 ---
 
-## Phase 6: GPU Backend 🟡 65% COMPLETE
+## Phase 6: GPU Backend 🟡 80% COMPLETE
 
 **Objective:** Tensor operations run on GPU.
 
-### 6.1 PTX Codegen 🟡
+### 6.1 PTX Codegen ✅
 
 **Crate:** `bhc-gpu`
-**Location:** `codegen/ptx.rs`
+**Location:** `codegen/ptx.rs` (1,168 lines)
 
 Tasks:
 - [x] PTX module header generation
 - [x] Kernel entry point signatures
 - [x] Parameter marshalling
 - [x] Type mapping (`dtype_to_gpu_type`)
-- [ ] **Loop nest code generation (TODO in code)**
-- [ ] Full expression codegen
-- [ ] Test: Simple kernel compiles
+- [x] Loop nest code generation (`generate_loop_nest()`)
+- [x] Map/ZipWith/Reduce operations
+- [x] Parallel reduction with shared memory
+- [ ] Test: Simple kernel compiles (blocked by LLVM)
 
-### 6.2 AMDGCN Codegen 🟡
+### 6.2 AMDGCN Codegen ✅
 
 **Crate:** `bhc-gpu`
-**Location:** `codegen/amdgcn.rs`
+**Location:** `codegen/amdgcn.rs` (580 lines)
 
 Tasks:
 - [x] AMDGCN module header
 - [x] Kernel entry generation
 - [x] Parameter handling
-- [ ] **Loop nest code generation (TODO in code)**
-- [ ] Test: Simple kernel compiles
+- [x] Loop nest code generation (`generate_loop_nest_amd()`)
+- [x] Unary/binary operations
+- [ ] Test: Simple kernel compiles (blocked by LLVM)
 
 ### 6.3 Device Memory Management ✅
 
@@ -581,9 +583,9 @@ main = do
   print $ sum $ zipWith (+) a b
 ```
 
-**Blockers:** Loop nest code generation not implemented for PTX/AMDGCN.
+**Blockers:** LLVM version mismatch prevents full testing.
 
-**Remaining effort:** 2-3 weeks
+**Remaining effort:** ~1 week (kernel execution pipeline, testing)
 
 ---
 
@@ -710,7 +712,7 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 | 3 | Numeric Profile | ✅ Complete | 100% |
 | 4 | WASM Backend | 🟡 In Progress | 85% |
 | 5 | Server Profile | 🟡 In Progress | 90% |
-| 6 | GPU Backend | 🟡 In Progress | 65% |
+| 6 | GPU Backend | 🟡 In Progress | 80% |
 | 7 | Advanced Profiles | 🟡 In Progress | 60% |
 | 8 | Ecosystem | ✅ Complete | 100% |
 

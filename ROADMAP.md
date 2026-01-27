@@ -18,6 +18,10 @@ This document provides a detailed implementation plan to deliver all features pr
 | WASM Codegen | 🟡 Partial | ~3,300 LOC, incomplete |
 | GPU Codegen | 🔴 Skeleton | ~880 LOC stubs |
 | Runtime | ✅ Working | Mark-sweep GC, basic IO primitives |
+| REPL (bhci) | ✅ Working | Interactive evaluation |
+| Package Manager | ✅ Working | Dependency resolution, registry |
+| LSP Server | ✅ Working | Diagnostics, go-to-def, hover, completions |
+| Documentation | ✅ Complete | User guide, language reference, examples |
 
 ---
 
@@ -587,31 +591,50 @@ Tasks:
 
 ---
 
-## Phase 8: Ecosystem
+## Phase 8: Ecosystem ✅ COMPLETE
 
-### 8.1 REPL
-
-Tasks:
-- [ ] Interactive evaluation loop
-- [ ] Expression type inference
-- [ ] Value pretty-printing
-- [ ] Test: `:t map` shows type
-
-### 8.2 Package Manager
+### 8.1 REPL ✅
 
 Tasks:
-- [ ] Package description format
-- [ ] Dependency resolution
-- [ ] Build orchestration
-- [ ] Registry integration
+- [x] Interactive evaluation loop
+- [x] Expression type inference
+- [x] Value pretty-printing
+- [x] Test: `:t map` shows type
 
-### 8.3 LSP Server
+### 8.2 Package Manager ✅
 
 Tasks:
-- [ ] Diagnostics
-- [ ] Go to definition
-- [ ] Hover information
-- [ ] Completions
+- [x] Package description format
+- [x] Dependency resolution
+- [x] Build orchestration
+- [x] Registry integration
+
+### 8.3 LSP Server ✅
+
+Tasks:
+- [x] Diagnostics
+- [x] Go to definition
+- [x] Hover information
+- [x] Completions
+
+### 8.4 Documentation ✅
+
+Tasks:
+- [x] User-facing documentation (getting-started, language, profiles, examples)
+- [x] Developer documentation (LSP server architecture)
+- [x] API documentation for new crates
+
+### Phase 8 Exit Criteria ✅
+
+```bash
+$ bhci
+bhci> :t map
+map :: (a -> b) -> [a] -> [b]
+
+$ bhc-lsp  # Starts LSP server for IDE integration
+```
+
+**Completed!**
 
 **Total estimated effort:** 8-12 weeks
 
@@ -619,24 +642,26 @@ Tasks:
 
 ## Summary Timeline
 
-| Phase | Description | Effort | Cumulative |
-|-------|-------------|--------|------------|
-| 1 | Native Hello World | 4-6 weeks | 4-6 weeks |
-| 2 | Language Completeness | 6-10 weeks | 10-16 weeks |
-| 3 | Numeric Profile | 8-12 weeks | 18-28 weeks |
-| 4 | WASM Backend | 4-6 weeks | 22-34 weeks |
-| 5 | Server Profile | 6-8 weeks | 28-42 weeks |
-| 6 | GPU Backend | 8-12 weeks | 36-54 weeks |
-| 7 | Advanced Profiles | 6-10 weeks | 42-64 weeks |
-| 8 | Ecosystem | 8-12 weeks | 50-76 weeks |
+| Phase | Description | Effort | Status |
+|-------|-------------|--------|--------|
+| 1 | Native Hello World | 4-6 weeks | ✅ Complete |
+| 2 | Language Completeness | 6-10 weeks | 🔴 Not started |
+| 3 | Numeric Profile | 8-12 weeks | 🟡 Partial |
+| 4 | WASM Backend | 4-6 weeks | 🟡 Partial |
+| 5 | Server Profile | 6-8 weeks | 🔴 Not started |
+| 6 | GPU Backend | 8-12 weeks | 🔴 Not started |
+| 7 | Advanced Profiles | 6-10 weeks | 🔴 Not started |
+| 8 | Ecosystem | 8-12 weeks | ✅ Complete |
 
-**Total: 12-18 months for full feature parity with website claims.**
+**Note:** Phases 3 (Numeric) and 4 (WASM) have significant infrastructure in place but need integration work.
 
 ---
 
 ## Immediate Next Steps
 
-Phase 1 is complete! The compiler can now build and run native executables.
+Phase 1 and Phase 8 are complete! The compiler has a working native backend and full developer ecosystem tooling (REPL, package manager, LSP server, documentation).
+
+**Priority: Phase 2 - Language Completeness**
 
 1. **Pattern matching codegen** - Extend Case to handle data constructors
 2. **Closures** - Implement closure allocation and capture
@@ -644,3 +669,7 @@ Phase 1 is complete! The compiler can now build and run native executables.
 4. **Type class dictionaries** - Dictionary-passing for Eq, Ord, Show, etc.
 
 The goal is to compile real Haskell programs like Fibonacci or list operations.
+
+**Parallel work possible:**
+- Phase 3 (Numeric Profile) - Fusion infrastructure is ~90% complete
+- Phase 4 (WASM Backend) - WASM emitter and lowering are implemented

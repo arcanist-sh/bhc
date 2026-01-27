@@ -411,7 +411,7 @@ Hello, World!
 
 ---
 
-## Phase 5: Server Profile 🟡 90% COMPLETE
+## Phase 5: Server Profile 🟡 95% COMPLETE
 
 **Objective:** Structured concurrency with proper cancellation.
 
@@ -714,12 +714,12 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 | 2 | Language Completeness | ✅ Complete | 100% |
 | 3 | Numeric Profile | ✅ Complete | 100% |
 | 4 | WASM Backend | 🟡 In Progress | 95% |
-| 5 | Server Profile | 🟡 In Progress | 90% |
+| 5 | Server Profile | 🟡 In Progress | 95% |
 | 6 | GPU Backend | 🟡 In Progress | 95% |
 | 7 | Advanced Profiles | 🟡 In Progress | 90% |
 | 8 | Ecosystem | ✅ Complete | 100% |
 
-**Overall: ~96% complete**
+**Overall: ~97% complete**
 
 ---
 
@@ -732,10 +732,12 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 4. Verify runtime code size < 100KB
 5. End-to-end test with wasmtime (blocked by LLVM)
 
-### Phase 5 (Server) - 1-2 weeks
-1. Implement STM `retry` primitive
-2. Implement STM `orElse` combinator
-3. Complete transaction conflict detection
+### Phase 5 (Server) - ~1 week
+1. ~~Implement STM `retry` primitive~~ ✅ (`stm.rs` lines 480-482)
+2. ~~Implement STM `orElse` combinator~~ ✅ (`stm.rs` lines 505-514)
+3. ~~Complete transaction conflict detection~~ ✅ (`Transaction::commit()`)
+4. Observability hooks (tracing integration)
+5. Integration testing
 
 ### Phase 6 (GPU) - ~2-3 days
 1. ~~Implement PTX loop nest codegen~~ ✅ (`codegen/ptx.rs:generate_loop_nest()`)

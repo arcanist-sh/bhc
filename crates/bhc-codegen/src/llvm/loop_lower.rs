@@ -235,7 +235,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?;
                 alloca
             }
-            AllocRegion::Pinned | AllocRegion::Device => {
+            AllocRegion::Pinned | AllocRegion::DeviceMemory(_) => {
                 // These would need malloc/device allocation
                 // For now, fall back to stack
                 let array_ty = elem_ty.array_type(1024);
@@ -284,6 +284,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                 self.builder
                     .build_fence(
                         inkwell::AtomicOrdering::SequentiallyConsistent,
+                        0, // syncscope ID (0 = system scope)
                         "fence",
                     )
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?;
@@ -491,7 +492,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
             .map_err(|e| CodegenError::LlvmError(e.to_string()))?;
 
         if let Some(vid) = result {
-            if let Some(ret_val) = call_result.try_as_basic_value().left() {
+            if let Some(ret_val) = call_result.try_as_basic_value().basic() {
                 self.values.insert(vid, ret_val);
             }
         }
@@ -765,21 +766,21 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
         // LLVM handles vectorization automatically
         let elem_ty = lhs.get_type().get_element_type();
 
-        let result = if elem_ty.is_int_type() {
+        let result: BasicValueEnum<'ctx> = if elem_ty.is_int_type() {
             match op {
                 BinOp::Add => self
                     .builder
-                    .build_int_add(lhs.into(), rhs.into(), "vadd")
+                    .build_int_add(lhs, rhs, "vadd")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .into(),
                 BinOp::Sub => self
                     .builder
-                    .build_int_sub(lhs.into(), rhs.into(), "vsub")
+                    .build_int_sub(lhs, rhs, "vsub")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .into(),
                 BinOp::Mul => self
                     .builder
-                    .build_int_mul(lhs.into(), rhs.into(), "vmul")
+                    .build_int_mul(lhs, rhs, "vmul")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .into(),
                 _ => {
@@ -793,22 +794,22 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
             match op {
                 BinOp::Add => self
                     .builder
-                    .build_float_add(lhs.into(), rhs.into(), "vfadd")
+                    .build_float_add(lhs, rhs, "vfadd")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .into(),
                 BinOp::Sub => self
                     .builder
-                    .build_float_sub(lhs.into(), rhs.into(), "vfsub")
+                    .build_float_sub(lhs, rhs, "vfsub")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .into(),
                 BinOp::Mul => self
                     .builder
-                    .build_float_mul(lhs.into(), rhs.into(), "vfmul")
+                    .build_float_mul(lhs, rhs, "vfmul")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .into(),
                 BinOp::FDiv => self
                     .builder
-                    .build_float_div(lhs.into(), rhs.into(), "vfdiv")
+                    .build_float_div(lhs, rhs, "vfdiv")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .into(),
                 _ => {
@@ -831,13 +832,8 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
             BasicValueEnum::IntValue(i) => self.lower_int_unary(op, i)?,
             BasicValueEnum::FloatValue(f) => self.lower_float_unary(op, f)?,
             BasicValueEnum::VectorValue(vec) => {
-                // Handle vector unary ops element-wise
-                let elem_ty = vec.get_type().get_element_type();
-                if elem_ty.is_float_type() {
-                    self.lower_float_unary(op, vec.into())?
-                } else {
-                    self.lower_int_unary(op, vec.into())?
-                }
+                // Handle vector unary ops
+                self.lower_vector_unary(op, vec)?
             }
             _ => {
                 return Err(CodegenError::TypeError(format!(
@@ -916,7 +912,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                     .build_call(fn_val, &[val.into()], "fabs")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| {
                         CodegenError::Internal("fabs returned void".to_string())
                     })?
@@ -935,7 +931,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                     .build_call(fn_val, &[val.into()], "sqrt")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| {
                         CodegenError::Internal("sqrt returned void".to_string())
                     })?
@@ -954,7 +950,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                     .build_call(fn_val, &[val.into()], "floor")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| {
                         CodegenError::Internal("floor returned void".to_string())
                     })?
@@ -973,7 +969,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                     .build_call(fn_val, &[val.into()], "ceil")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| {
                         CodegenError::Internal("ceil returned void".to_string())
                     })?
@@ -992,7 +988,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                     .build_call(fn_val, &[val.into()], "round")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| {
                         CodegenError::Internal("round returned void".to_string())
                     })?
@@ -1011,7 +1007,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                     .build_call(fn_val, &[val.into()], "trunc")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| {
                         CodegenError::Internal("trunc returned void".to_string())
                     })?
@@ -1030,7 +1026,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                     .build_call(fn_val, &[val.into()], "exp")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| {
                         CodegenError::Internal("exp returned void".to_string())
                     })?
@@ -1049,7 +1045,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                     .build_call(fn_val, &[val.into()], "log")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| {
                         CodegenError::Internal("log returned void".to_string())
                     })?
@@ -1068,7 +1064,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                     .build_call(fn_val, &[val.into()], "sin")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| {
                         CodegenError::Internal("sin returned void".to_string())
                     })?
@@ -1087,7 +1083,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                     .build_call(fn_val, &[val.into()], "cos")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| {
                         CodegenError::Internal("cos returned void".to_string())
                     })?
@@ -1108,7 +1104,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                     .build_call(fn_val, &[val.into()], "sqrt")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| {
                         CodegenError::Internal("sqrt returned void".to_string())
                     })?
@@ -1126,6 +1122,83 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
             }
         };
         Ok(result.into())
+    }
+
+    /// Lower a vector unary operation.
+    fn lower_vector_unary(
+        &mut self,
+        op: UnOp,
+        vec: VectorValue<'ctx>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let elem_ty = vec.get_type().get_element_type();
+        let result = if elem_ty.is_float_type() {
+            match op {
+                UnOp::FNeg | UnOp::Neg => self
+                    .builder
+                    .build_float_neg(vec, "vfneg")
+                    .map_err(|e| CodegenError::LlvmError(e.to_string()))?
+                    .into(),
+                UnOp::FAbs | UnOp::Abs => {
+                    let intrinsic = Intrinsic::find("llvm.fabs").ok_or_else(|| {
+                        CodegenError::Internal("llvm.fabs not found".to_string())
+                    })?;
+                    let fn_val = intrinsic
+                        .get_declaration(self.module.llvm_module(), &[vec.get_type().into()])
+                        .ok_or_else(|| {
+                            CodegenError::Internal("Failed to get fabs declaration".to_string())
+                        })?;
+                    self.builder
+                        .build_call(fn_val, &[vec.into()], "vfabs")
+                        .map_err(|e| CodegenError::LlvmError(e.to_string()))?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| CodegenError::Internal("vfabs returned void".to_string()))?
+                }
+                UnOp::Sqrt => {
+                    let intrinsic = Intrinsic::find("llvm.sqrt").ok_or_else(|| {
+                        CodegenError::Internal("llvm.sqrt not found".to_string())
+                    })?;
+                    let fn_val = intrinsic
+                        .get_declaration(self.module.llvm_module(), &[vec.get_type().into()])
+                        .ok_or_else(|| {
+                            CodegenError::Internal("Failed to get sqrt declaration".to_string())
+                        })?;
+                    self.builder
+                        .build_call(fn_val, &[vec.into()], "vsqrt")
+                        .map_err(|e| CodegenError::LlvmError(e.to_string()))?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| CodegenError::Internal("vsqrt returned void".to_string()))?
+                }
+                _ => {
+                    return Err(CodegenError::TypeError(format!(
+                        "Unsupported float vector unary op {:?}",
+                        op
+                    )))
+                }
+            }
+        } else {
+            // Integer vector
+            match op {
+                UnOp::Neg => self
+                    .builder
+                    .build_int_neg(vec, "vneg")
+                    .map_err(|e| CodegenError::LlvmError(e.to_string()))?
+                    .into(),
+                UnOp::Not => self
+                    .builder
+                    .build_not(vec, "vnot")
+                    .map_err(|e| CodegenError::LlvmError(e.to_string()))?
+                    .into(),
+                _ => {
+                    return Err(CodegenError::TypeError(format!(
+                        "Unsupported int vector unary op {:?}",
+                        op
+                    )))
+                }
+            }
+        };
+        Ok(result)
     }
 
     /// Lower a comparison operation.
@@ -1456,7 +1529,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                         .build_call(fn_val, &[zero.into(), vec.into()], "vreduce.fadd")
                         .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .ok_or_else(|| {
                             CodegenError::Internal("reduce returned void".to_string())
                         })?
@@ -1476,7 +1549,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                         .build_call(fn_val, &[one.into(), vec.into()], "vreduce.fmul")
                         .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .ok_or_else(|| {
                             CodegenError::Internal("reduce returned void".to_string())
                         })?
@@ -1495,7 +1568,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                         .build_call(fn_val, &[vec.into()], "vreduce.fmin")
                         .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .ok_or_else(|| {
                             CodegenError::Internal("reduce returned void".to_string())
                         })?
@@ -1514,7 +1587,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                         .build_call(fn_val, &[vec.into()], "vreduce.fmax")
                         .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .ok_or_else(|| {
                             CodegenError::Internal("reduce returned void".to_string())
                         })?
@@ -1543,7 +1616,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                         .build_call(fn_val, &[vec.into()], "vreduce.add")
                         .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .ok_or_else(|| {
                             CodegenError::Internal("reduce returned void".to_string())
                         })?
@@ -1562,7 +1635,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                         .build_call(fn_val, &[vec.into()], "vreduce.mul")
                         .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .ok_or_else(|| {
                             CodegenError::Internal("reduce returned void".to_string())
                         })?
@@ -1581,7 +1654,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                         .build_call(fn_val, &[vec.into()], "vreduce.and")
                         .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .ok_or_else(|| {
                             CodegenError::Internal("reduce returned void".to_string())
                         })?
@@ -1600,7 +1673,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                         .build_call(fn_val, &[vec.into()], "vreduce.or")
                         .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .ok_or_else(|| {
                             CodegenError::Internal("reduce returned void".to_string())
                         })?
@@ -1619,7 +1692,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                         .build_call(fn_val, &[vec.into()], "vreduce.xor")
                         .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .ok_or_else(|| {
                             CodegenError::Internal("reduce returned void".to_string())
                         })?
@@ -1666,7 +1739,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                     .build_call(fn_val, &[af.into(), bf.into(), cf.into()], "fma")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| CodegenError::Internal("fma returned void".to_string()))?;
                 Ok(result)
             }
@@ -1689,7 +1762,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                     .build_call(fn_val, &[av.into(), bv.into(), cv.into()], "vfma")
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| CodegenError::Internal("vfma returned void".to_string()))?;
                 Ok(result)
             }
@@ -1829,21 +1902,21 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
 }
 
 /// Lower a complete Loop IR module to LLVM.
-pub fn lower_loop_ir(
-    ctx: &LlvmContext,
-    module: &LlvmModule,
+pub fn lower_loop_ir<'a>(
+    ctx: &'a LlvmContext,
+    module: &'a LlvmModule<'a>,
     ir: &LoopIR,
-) -> CodegenResult<FunctionValue> {
+) -> CodegenResult<FunctionValue<'a>> {
     let mut lowering = LoopLowering::new(ctx, module);
     lowering.lower_function(ir)
 }
 
 /// Lower multiple Loop IR functions.
-pub fn lower_loop_irs(
-    ctx: &LlvmContext,
-    module: &LlvmModule,
+pub fn lower_loop_irs<'a>(
+    ctx: &'a LlvmContext,
+    module: &'a LlvmModule<'a>,
     irs: &[LoopIR],
-) -> CodegenResult<Vec<FunctionValue>> {
+) -> CodegenResult<Vec<FunctionValue<'a>>> {
     let mut lowering = LoopLowering::new(ctx, module);
     irs.iter().map(|ir| lowering.lower_function(ir)).collect()
 }

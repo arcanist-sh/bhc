@@ -251,7 +251,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_call(*alloc_fn, &[size_val.into()], "adt_alloc")
             .map_err(|e| CodegenError::Internal(format!("failed to call bhc_alloc: {:?}", e)))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CodegenError::Internal("bhc_alloc returned void".to_string()))?;
 
         let ptr = raw_ptr.into_pointer_value();
@@ -1447,7 +1447,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let alloc_call = self.builder()
             .build_call(*alloc_fn, &[size.into()], "nil_alloc")
             .map_err(|e| CodegenError::Internal(format!("failed to call alloc: {:?}", e)))?;
-        let nil_ptr = alloc_call.try_as_basic_value().left().ok_or_else(|| {
+        let nil_ptr = alloc_call.try_as_basic_value().basic().ok_or_else(|| {
             CodegenError::Internal("alloc returned void".to_string())
         })?.into_pointer_value();
 
@@ -1471,7 +1471,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let alloc_call = self.builder()
             .build_call(*alloc_fn, &[size.into()], "cons_alloc")
             .map_err(|e| CodegenError::Internal(format!("failed to call alloc: {:?}", e)))?;
-        let cons_ptr = alloc_call.try_as_basic_value().left().ok_or_else(|| {
+        let cons_ptr = alloc_call.try_as_basic_value().basic().ok_or_else(|| {
             CodegenError::Internal("alloc returned void".to_string())
         })?.into_pointer_value();
 
@@ -1762,7 +1762,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_indirect_call(fn_type, closure_fn_ptr, &[fn_ptr.into(), head_ptr.into()], "mapped")
             .map_err(|e| CodegenError::Internal(format!("failed to call map fn: {:?}", e)))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CodegenError::Internal("map function returned void".to_string()))?;
 
         // Build new cons cell
@@ -1897,7 +1897,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_indirect_call(fn_type, pred_fn_ptr, &[pred_ptr.into(), head_ptr.into()], "pred_result")
             .map_err(|e| CodegenError::Internal(format!("failed to call predicate: {:?}", e)))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CodegenError::Internal("predicate returned void".to_string()))?;
 
         // Check if predicate returned True (non-zero value)
@@ -2061,7 +2061,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_indirect_call(fn_type, fn_ptr, &[func_ptr.into(), acc_phi.as_basic_value().into(), head_ptr.into()], "foldl_result")
             .map_err(|e| CodegenError::Internal(format!("failed to call function: {:?}", e)))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CodegenError::Internal("foldl: function returned void".to_string()))?;
 
         self.builder().build_unconditional_branch(loop_header)
@@ -2196,7 +2196,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_indirect_call(fn_type, fn_ptr, &[func_ptr.into(), head_ptr.into(), acc_phi.as_basic_value().into()], "foldr_result")
             .map_err(|e| CodegenError::Internal(format!("failed to call function: {:?}", e)))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CodegenError::Internal("foldr: function returned void".to_string()))?;
 
         self.builder().build_unconditional_branch(fold_header)
@@ -2325,7 +2325,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_indirect_call(fn_type, closure_fn_ptr, &[func_ptr.into(), head1_ptr.into(), head2_ptr.into()], "mapped")
             .map_err(|e| CodegenError::Internal(format!("failed to call function: {:?}", e)))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CodegenError::Internal("zipWith: function returned void".to_string()))?;
 
         // Build cons cell
@@ -2535,7 +2535,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let alloc_call = self.builder()
             .build_call(*alloc_fn, &[size.into()], "pair_alloc")
             .map_err(|e| CodegenError::Internal(format!("failed to call alloc: {:?}", e)))?;
-        let pair_ptr = alloc_call.try_as_basic_value().left().ok_or_else(|| {
+        let pair_ptr = alloc_call.try_as_basic_value().basic().ok_or_else(|| {
             CodegenError::Internal("alloc returned void".to_string())
         })?.into_pointer_value();
 
@@ -3121,7 +3121,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_indirect_call(fn_type, closure_fn_ptr, &[func_ptr.into(), head_ptr.into()], "f_result")
             .map_err(|e| CodegenError::Internal(format!("failed to call function: {:?}", e)))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CodegenError::Internal("concatMap: function returned void".to_string()))?;
 
         self.builder().build_unconditional_branch(inner_header)
@@ -4037,7 +4037,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_indirect_call(fn_type, fn_ptr, &[func_ptr.into(), action_ptr.into()], "bind_result")
             .map_err(|e| CodegenError::Internal(format!("failed to call bind function: {:?}", e)))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CodegenError::Internal(">>=: function returned void".to_string()))?;
 
         Ok(Some(result))
@@ -4309,7 +4309,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_call(*alloc_fn, &[size_val.into()], "closure_alloc")
             .map_err(|e| CodegenError::Internal(format!("failed to call bhc_alloc: {:?}", e)))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CodegenError::Internal("bhc_alloc returned void".to_string()))?;
 
         let closure_ptr = raw_ptr.into_pointer_value();
@@ -4485,7 +4485,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_call(*alloc_fn, &[size_val.into()], "thunk_alloc")
             .map_err(|e| CodegenError::Internal(format!("failed to call bhc_alloc: {:?}", e)))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CodegenError::Internal("bhc_alloc returned void".to_string()))?;
 
         let thunk_ptr = raw_ptr.into_pointer_value();
@@ -4572,7 +4572,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_call(*force_fn, &[ptr.into()], "forced")
             .map_err(|e| CodegenError::Internal(format!("failed to call bhc_force: {:?}", e)))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CodegenError::Internal("bhc_force returned void".to_string()))?;
 
         Ok(result)
@@ -4870,7 +4870,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             .build_call(*fn_val, &[null_env.into()], "caf_result")
                             .map_err(|e| CodegenError::Internal(format!("failed to call CAF: {:?}", e)))?;
                         // Get the return value
-                        if let Some(ret_val) = call_result.try_as_basic_value().left() {
+                        if let Some(ret_val) = call_result.try_as_basic_value().basic() {
                             Ok(Some(ret_val))
                         } else {
                             // Void function - shouldn't happen for CAFs
@@ -5411,7 +5411,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .build_indirect_call(fn_type, fn_ptr, &[func.into(), action_result.into()], "bind_result")
                     .map_err(|e| CodegenError::Internal(format!("failed to call bind function: {:?}", e)))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| CodegenError::Internal(">>=: function returned void".to_string()))?;
                 Ok(Some(result))
             }
@@ -5426,7 +5426,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .build_indirect_call(fn_type, fn_ptr, &[func.into(), action_result.into()], "bind_result")
                     .map_err(|e| CodegenError::Internal(format!("failed to call bind function: {:?}", e)))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| CodegenError::Internal("=<<: function returned void".to_string()))?;
                 Ok(Some(result))
             }
@@ -6456,7 +6456,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .build_call(fn_val, &call_args, "pap_call")
                 .map_err(|e| CodegenError::Internal(format!("PAP call failed: {:?}", e)))?
                 .try_as_basic_value()
-                .left();
+                .basic();
 
             // Return the result
             if let Some(ret_val) = result {
@@ -6523,7 +6523,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             call.set_tail_call(true);
         }
 
-        Ok(call.try_as_basic_value().left())
+        Ok(call.try_as_basic_value().basic())
     }
 
     /// Lower a closure call (indirect call through closure struct).
@@ -6590,7 +6590,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             call.set_tail_call(true);
         }
 
-        Ok(call.try_as_basic_value().left())
+        Ok(call.try_as_basic_value().basic())
     }
 
     /// Lower a constructor application to an ADT value.
@@ -6838,7 +6838,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         CodegenError::Internal(format!("failed to build eta-expansion call: {:?}", e))
                     })?;
 
-                return Ok(call.try_as_basic_value().left());
+                return Ok(call.try_as_basic_value().basic());
             } else {
                 return Err(CodegenError::Internal(
                     "eta-expansion: body has no value".to_string(),
@@ -7255,7 +7255,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 )
                 .map_err(|e| CodegenError::Internal(format!("failed to call strcmp: {:?}", e)))?
                 .try_as_basic_value()
-                .left()
+                .basic()
                 .ok_or_else(|| CodegenError::Internal("strcmp returned void".to_string()))?;
 
             // strcmp returns 0 for equal strings

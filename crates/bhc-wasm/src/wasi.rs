@@ -800,7 +800,7 @@ mod tests {
         assert_eq!(func.name.as_deref(), Some("getenv"));
         assert!(func.exported);
         // Function should have proper signature (2 params, 1 result)
-        assert_eq!(func.func_type.params.len(), 2);
-        assert_eq!(func.func_type.results.len(), 1);
+        assert_eq!(func.ty.params.len(), 2);
+        assert_eq!(func.ty.results.len(), 1);
     }
 }

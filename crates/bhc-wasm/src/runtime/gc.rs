@@ -614,7 +614,7 @@ mod tests {
         assert_eq!(func.name.as_deref(), Some("gc_stats"));
         assert!(func.exported);
         // Should return i64
-        assert_eq!(func.func_type.results.len(), 1);
-        assert_eq!(func.func_type.results[0], WasmType::I64);
+        assert_eq!(func.ty.results.len(), 1);
+        assert_eq!(func.ty.results[0], WasmType::I64);
     }
 }

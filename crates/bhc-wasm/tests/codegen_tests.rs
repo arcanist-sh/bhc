@@ -492,7 +492,7 @@ mod loop_ir_lowering {
 
     /// Create an add function: fn add(a: i32, b: i32) -> i32 { return a + b; }
     fn make_add_function() -> LoopIR {
-        use bhc_loop_ir::{BinOp, Expr};
+        use bhc_loop_ir::{BinOp, Op};
 
         LoopIR {
             name: Symbol::intern("add"),
@@ -515,8 +515,7 @@ mod loop_ir_lowering {
                     // result = a + b
                     Stmt::Assign(
                         ValueId::new(2),
-                        LoopType::Scalar(ScalarType::I32),
-                        Expr::BinOp(
+                        Op::Binary(
                             BinOp::Add,
                             Value::Var(ValueId::new(0), LoopType::Scalar(ScalarType::I32)),
                             Value::Var(ValueId::new(1), LoopType::Scalar(ScalarType::I32)),
@@ -535,7 +534,7 @@ mod loop_ir_lowering {
 
     /// Create a float multiply function: fn fmul(a: f32, b: f32) -> f32 { return a * b; }
     fn make_fmul_function() -> LoopIR {
-        use bhc_loop_ir::{BinOp, Expr};
+        use bhc_loop_ir::{BinOp, Op};
 
         LoopIR {
             name: Symbol::intern("fmul"),
@@ -557,8 +556,7 @@ mod loop_ir_lowering {
                 stmts: vec![
                     Stmt::Assign(
                         ValueId::new(2),
-                        LoopType::Scalar(ScalarType::F32),
-                        Expr::BinOp(
+                        Op::Binary(
                             BinOp::Mul,
                             Value::Var(ValueId::new(0), LoopType::Scalar(ScalarType::F32)),
                             Value::Var(ValueId::new(1), LoopType::Scalar(ScalarType::F32)),

@@ -358,6 +358,14 @@ pub enum WasmInstr {
     F32Load(u32, u32),
     /// Load f64 from memory.
     F64Load(u32, u32),
+    /// Load 8-bit unsigned to i32.
+    I32Load8U(u32, u32),
+    /// Load 8-bit signed to i32.
+    I32Load8S(u32, u32),
+    /// Load 16-bit unsigned to i32.
+    I32Load16U(u32, u32),
+    /// Load 16-bit signed to i32.
+    I32Load16S(u32, u32),
     /// Store i32 to memory.
     I32Store(u32, u32),
     /// Store i64 to memory.
@@ -366,6 +374,10 @@ pub enum WasmInstr {
     F32Store(u32, u32),
     /// Store f64 to memory.
     F64Store(u32, u32),
+    /// Store low 8 bits of i32.
+    I32Store8(u32, u32),
+    /// Store low 16 bits of i32.
+    I32Store16(u32, u32),
     /// Memory size.
     MemorySize,
     /// Memory grow.
@@ -784,10 +796,16 @@ impl WasmInstr {
             Self::I64Load(align, offset) => format!("i64.load offset={offset} align={align}"),
             Self::F32Load(align, offset) => format!("f32.load offset={offset} align={align}"),
             Self::F64Load(align, offset) => format!("f64.load offset={offset} align={align}"),
+            Self::I32Load8U(align, offset) => format!("i32.load8_u offset={offset} align={align}"),
+            Self::I32Load8S(align, offset) => format!("i32.load8_s offset={offset} align={align}"),
+            Self::I32Load16U(align, offset) => format!("i32.load16_u offset={offset} align={align}"),
+            Self::I32Load16S(align, offset) => format!("i32.load16_s offset={offset} align={align}"),
             Self::I32Store(align, offset) => format!("i32.store offset={offset} align={align}"),
             Self::I64Store(align, offset) => format!("i64.store offset={offset} align={align}"),
             Self::F32Store(align, offset) => format!("f32.store offset={offset} align={align}"),
             Self::F64Store(align, offset) => format!("f64.store offset={offset} align={align}"),
+            Self::I32Store8(align, offset) => format!("i32.store8 offset={offset} align={align}"),
+            Self::I32Store16(align, offset) => format!("i32.store16 offset={offset} align={align}"),
             Self::MemorySize => "memory.size".to_string(),
             Self::MemoryGrow => "memory.grow".to_string(),
 

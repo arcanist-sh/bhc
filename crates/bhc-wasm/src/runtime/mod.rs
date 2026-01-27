@@ -449,11 +449,14 @@ mod tests {
         func_idx += 1;
 
         // 6. Add GC alloc function
+        // Args: gc_collect_idx, heap_ptr_global, heap_end_global
+        let gc_collect_idx = func_idx + 3; // gc_collect function added later
+        let heap_ptr_global_idx = 0; // First global
+        let heap_end_global_idx = 1; // Second global
         let gc_alloc = gc::generate_gc_alloc(
-            gc_config.heap_start,
-            gc_config.heap_end,
-            gc_config.gc_threshold,
-            func_idx + 3, // gc_collect index (added later)
+            gc_collect_idx,
+            heap_ptr_global_idx,
+            heap_end_global_idx,
         );
         module.add_function(gc_alloc);
         func_idx += 1;
@@ -464,7 +467,12 @@ mod tests {
         func_idx += 1;
 
         // 8. Add GC sweep function
-        let gc_sweep = gc::generate_gc_sweep(gc_config.heap_start, gc_config.heap_end);
+        // Args: heap_start, heap_ptr_global, free_list_offset
+        let gc_sweep = gc::generate_gc_sweep(
+            gc_config.heap_start,
+            heap_ptr_global_idx,
+            gc::FREE_LIST_OFFSET,
+        );
         module.add_function(gc_sweep);
         func_idx += 1;
 

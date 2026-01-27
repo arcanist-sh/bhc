@@ -1162,6 +1162,26 @@ impl BinaryEncoder {
                 self.encode_uleb128(*align);
                 self.encode_uleb128(*offset);
             }
+            WasmInstr::I32Load8S(align, offset) => {
+                self.output.push(0x2C);
+                self.encode_uleb128(*align);
+                self.encode_uleb128(*offset);
+            }
+            WasmInstr::I32Load8U(align, offset) => {
+                self.output.push(0x2D);
+                self.encode_uleb128(*align);
+                self.encode_uleb128(*offset);
+            }
+            WasmInstr::I32Load16S(align, offset) => {
+                self.output.push(0x2E);
+                self.encode_uleb128(*align);
+                self.encode_uleb128(*offset);
+            }
+            WasmInstr::I32Load16U(align, offset) => {
+                self.output.push(0x2F);
+                self.encode_uleb128(*align);
+                self.encode_uleb128(*offset);
+            }
             WasmInstr::I32Store(align, offset) => {
                 self.output.push(0x36);
                 self.encode_uleb128(*align);
@@ -1179,6 +1199,16 @@ impl BinaryEncoder {
             }
             WasmInstr::F64Store(align, offset) => {
                 self.output.push(0x39);
+                self.encode_uleb128(*align);
+                self.encode_uleb128(*offset);
+            }
+            WasmInstr::I32Store8(align, offset) => {
+                self.output.push(0x3A);
+                self.encode_uleb128(*align);
+                self.encode_uleb128(*offset);
+            }
+            WasmInstr::I32Store16(align, offset) => {
+                self.output.push(0x3B);
                 self.encode_uleb128(*align);
                 self.encode_uleb128(*offset);
             }

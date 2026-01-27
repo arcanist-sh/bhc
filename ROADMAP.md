@@ -341,7 +341,7 @@ main = print $ sum $ map (*2) [1..10000000]
 
 ---
 
-## Phase 4: WASM Backend 🟡 90% COMPLETE
+## Phase 4: WASM Backend 🟡 95% COMPLETE
 
 **Objective:** `bhc --target=wasi Main.hs` produces working WebAssembly.
 
@@ -756,20 +756,23 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 
 ## Immediate Next Steps
 
-**Priority 1: WASM Backend (Phase 4)**
-- Fastest path to completion
-- All infrastructure exists, just needs driver wiring
-- Enables serverless/browser deployment
+**Primary Blocker: LLVM Version Mismatch**
+- System has LLVM 21, but `llvm-sys` expects LLVM 18
+- Blocks end-to-end testing for WASM, GPU, and Embedded profiles
+- Resolution: Install LLVM 18 or update `llvm-sys` dependency
 
-**Priority 2: Server Profile (Phase 5)**
-- STM primitives need completion
-- Scheduler and concurrency already work
+**Once LLVM is resolved:**
 
-**Priority 3: GPU Backend (Phase 6)**
-- Loop codegen is the main blocker
-- Memory management and runtime already complete
+1. **WASM Backend (Phase 4)** - ~2-3 days
+   - Verify runtime code size < 100KB
+   - End-to-end test with wasmtime
 
-**Priority 4: Advanced Profiles (Phase 7)**
-- Incremental GC wired into main collector ✅
-- Escape analysis implemented ✅
-- Driver integration for embedded profile remaining
+2. **GPU Backend (Phase 6)** - ~2-3 days
+   - End-to-end GPU kernel execution test
+
+3. **Server Profile (Phase 5)** - ~1 week
+   - Add observability/tracing hooks
+   - Integration testing
+
+4. **Advanced Profiles (Phase 7)** - ~1-2 days
+   - Bare-metal testing for Embedded profile

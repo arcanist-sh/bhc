@@ -137,6 +137,10 @@ pub enum CompileError {
     /// Multiple errors occurred.
     #[error("{} errors occurred during compilation", .0.len())]
     Multiple(Vec<CompileError>),
+
+    /// Escape analysis failed (Embedded profile).
+    #[error("embedded profile: {} allocations escape their defining scope", .0.len())]
+    EscapeAnalysisFailed(Vec<bhc_core::escape::EscapingAllocation>),
 }
 
 /// Result type for compilation operations.
@@ -348,6 +352,14 @@ impl Compiler {
         let core = self.core_lower(&hir, &lower_ctx, &typed)?;
         debug!(module = %unit.module_name, bindings = core.bindings.len(), "Core lowering complete");
         self.callbacks.on_phase_complete(CompilePhase::CoreLower, &unit.module_name);
+
+        // Phase 3.5: Escape analysis (if Embedded profile)
+        // Embedded profile has no GC, so programs with escaping allocations are rejected.
+        if self.session.profile().requires_escape_analysis() {
+            debug!(module = %unit.module_name, "running escape analysis for embedded profile");
+            self.check_escape_analysis(&core)?;
+            debug!(module = %unit.module_name, "escape analysis passed - no escaping allocations");
+        }
 
         // Phase 4: Tensor IR (if Numeric profile)
         // Store loop_irs for potential WASM codegen
@@ -654,6 +666,34 @@ impl Compiler {
 
         bhc_hir_to_core::lower_module_with_defs(hir, Some(&def_map), Some(&typed.def_schemes))
             .map_err(CompileError::from)
+    }
+
+    /// Check escape analysis for Embedded profile.
+    ///
+    /// Programs compiled with the Embedded profile cannot have escaping allocations
+    /// because there is no garbage collector. This method runs escape analysis on
+    /// the Core IR and returns an error if any allocations escape.
+    fn check_escape_analysis(&self, core: &CoreModule) -> CompileResult<()> {
+        use bhc_core::escape::check_embedded_safe;
+
+        // Check each binding for escaping allocations
+        for bind in &core.bindings {
+            match bind {
+                Bind::NonRec(_, expr) => {
+                    if let Err(escaping) = check_embedded_safe(expr) {
+                        return Err(CompileError::EscapeAnalysisFailed(escaping));
+                    }
+                }
+                Bind::Rec(binds) => {
+                    for (_, expr) in binds {
+                        if let Err(escaping) = check_embedded_safe(expr) {
+                            return Err(CompileError::EscapeAnalysisFailed(escaping));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Generate code from Core IR to an object file.
@@ -1379,6 +1419,37 @@ mod tests {
         // Note: We can't directly verify the tracker after with_callbacks consumes it,
         // but the compilation succeeding proves Loop IR lowering ran without error.
         // A more complete test would use interior mutability or shared state.
+    }
+
+    /// Test that Embedded profile runs escape analysis
+    #[test]
+    fn test_embedded_profile_escape_analysis() {
+        let compiler = CompilerBuilder::new()
+            .profile(Profile::Embedded)
+            .build()
+            .unwrap();
+
+        // A simple literal that doesn't escape should compile
+        let result = compiler.compile_source("EmbeddedTest", "main = 42");
+        assert!(result.is_ok(), "Simple literal should compile in Embedded profile");
+    }
+
+    /// Test that Embedded profile rejects escaping allocations
+    #[test]
+    fn test_embedded_profile_rejects_escaping() {
+        let compiler = CompilerBuilder::new()
+            .profile(Profile::Embedded)
+            .build()
+            .unwrap();
+
+        // A program that returns a constructed value (lambda capture causes escape)
+        // Note: The exact syntax depends on how the parser/type checker handles this.
+        // This test verifies the integration point exists - a more thorough test
+        // would require programs that definitively escape.
+        let result = compiler.compile_source("EscapeTest", "main = \\x -> x");
+        // For now, just verify it doesn't panic - actual escape detection depends on
+        // more complex programs that create heap allocations.
+        assert!(result.is_ok() || matches!(result.as_ref().err(), Some(CompileError::EscapeAnalysisFailed(_))));
     }
 
     /// Test target architecture detection

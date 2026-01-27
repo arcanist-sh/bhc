@@ -45,19 +45,37 @@ pub enum Profile {
     Numeric,
     /// Minimal runtime footprint for embedded and WASM targets.
     Edge,
+    /// Bare-metal microcontrollers: no GC, static allocation only.
+    /// Programs with escaping allocations are rejected at compile time.
+    Embedded,
 }
 
 impl Profile {
     /// Returns true if this profile uses strict evaluation by default.
     #[must_use]
     pub const fn is_strict_by_default(self) -> bool {
-        matches!(self, Self::Numeric | Self::Edge)
+        matches!(self, Self::Numeric | Self::Edge | Self::Embedded)
     }
 
     /// Returns true if fusion is guaranteed for this profile.
     #[must_use]
     pub const fn has_fusion_guarantees(self) -> bool {
         matches!(self, Self::Numeric)
+    }
+
+    /// Returns true if this profile requires escape analysis.
+    ///
+    /// For Embedded profile, programs with escaping allocations are rejected
+    /// at compile time since there is no GC to manage memory.
+    #[must_use]
+    pub const fn requires_escape_analysis(self) -> bool {
+        matches!(self, Self::Embedded)
+    }
+
+    /// Returns true if this profile has no garbage collector.
+    #[must_use]
+    pub const fn is_gc_free(self) -> bool {
+        matches!(self, Self::Embedded)
     }
 }
 

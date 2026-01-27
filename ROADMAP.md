@@ -589,7 +589,7 @@ main = do
 
 ---
 
-## Phase 7: Advanced Profiles 🟡 75% COMPLETE
+## Phase 7: Advanced Profiles 🟡 85% COMPLETE
 
 ### 7.1 Realtime (Bounded GC) ✅
 
@@ -618,15 +618,16 @@ Tasks:
 
 ### 7.3 Embedded (No GC) 🟡
 
-**Crate:** `bhc-rts-alloc`
-**Location:** `static_alloc.rs` (200+ lines)
+**Crate:** `bhc-rts-alloc`, `bhc-core`
+**Location:** `static_alloc.rs` (200+ lines), `escape.rs` (585 lines)
 
 Tasks:
 - [x] Static allocator with fixed-size buffer
 - [x] Bump pointer allocation (O(1))
 - [x] No-GC design for embedded
-- [ ] **Implement escape analysis**
-- [ ] Reject programs requiring GC at compile time
+- [x] Escape analysis (`analyze_escape()`, `check_embedded_safe()`)
+- [x] EscapeStatus enum (NoEscape/EscapeReturn/EscapeCapture/EscapeStore/EscapeExternal)
+- [ ] Wire escape analysis into embedded profile compilation path
 - [ ] Test: Bare-metal program
 
 ### 7.4 Arena Allocation ✅
@@ -640,9 +641,9 @@ Tasks:
 
 ### Phase 7 Exit Criteria
 
-**Blockers:** Escape analysis not implemented (for embedded profile).
+**Blockers:** Wire escape analysis into driver, bare-metal testing.
 
-**Remaining effort:** 1-2 weeks
+**Remaining effort:** ~1 week (driver integration, testing)
 
 ---
 
@@ -713,10 +714,10 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 | 4 | WASM Backend | 🟡 In Progress | 85% |
 | 5 | Server Profile | 🟡 In Progress | 90% |
 | 6 | GPU Backend | 🟡 In Progress | 80% |
-| 7 | Advanced Profiles | 🟡 In Progress | 60% |
+| 7 | Advanced Profiles | 🟡 In Progress | 85% |
 | 8 | Ecosystem | ✅ Complete | 100% |
 
-**Overall: ~80% complete**
+**Overall: ~88% complete**
 
 ---
 
@@ -739,10 +740,11 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 3. Complete Tensor IR → GPU kernel lowering
 4. End-to-end GPU test
 
-### Phase 7 (Advanced) - 2-3 weeks
-1. Wire incremental mark loop into GC
-2. Add pause time measurement
-3. Implement escape analysis for embedded profile
+### Phase 7 (Advanced) - ~1 week
+1. ~~Wire incremental mark loop into GC~~ ✅
+2. ~~Implement escape analysis for embedded profile~~ ✅
+3. Wire escape analysis into embedded profile compilation path
+4. Bare-metal testing for embedded profile
 
 ---
 
@@ -762,5 +764,6 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 - Memory management and runtime already complete
 
 **Priority 4: Advanced Profiles (Phase 7)**
-- Incremental GC framework exists
-- Escape analysis is new work
+- Incremental GC wired into main collector ✅
+- Escape analysis implemented ✅
+- Driver integration for embedded profile remaining

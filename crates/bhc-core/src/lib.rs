@@ -61,6 +61,7 @@
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
 
+pub mod escape;
 pub mod eval;
 pub mod uarray;
 

@@ -341,7 +341,7 @@ main = print $ sum $ map (*2) [1..10000000]
 
 ---
 
-## Phase 4: WASM Backend 🟡 60% COMPLETE
+## Phase 4: WASM Backend 🟡 85% COMPLETE
 
 **Objective:** `bhc --target=wasi Main.hs` produces working WebAssembly.
 
@@ -385,16 +385,17 @@ Tasks:
 - [ ] Minimize code size verification
 - [ ] Test: Runtime < 100KB
 
-### 4.4 Driver Integration 🔴 MISSING
+### 4.4 Driver Integration ✅
 
 **Crate:** `bhc-driver`
+**Location:** `lib.rs` lines 467-537, 1109-1115
 
 Tasks:
-- [ ] **Add `--target=wasi` flag handling**
-- [ ] **Wire WASM backend into compilation pipeline**
-- [ ] **Register wasm32-wasi target**
-- [ ] Generate `.wasm` output files
-- [ ] Test: End-to-end compilation
+- [x] Add `--target=wasi` flag handling (`is_wasm_target()` at line 1109)
+- [x] Wire WASM backend into compilation pipeline (lines 467-537)
+- [x] Register wasm32-wasi target (detected via "wasm" in target triple)
+- [x] Generate `.wasm` output files (`write_wasm()` at line 525-527)
+- [ ] Test: End-to-end compilation (blocked by LLVM version mismatch)
 
 ### Phase 4 Exit Criteria
 
@@ -404,9 +405,9 @@ $ wasmtime app.wasm
 Hello, World!
 ```
 
-**Blocker:** Driver integration missing. All infrastructure exists but isn't connected.
+**Blocker:** LLVM version mismatch (system has LLVM 21, llvm-sys expects LLVM 18) prevents full testing.
 
-**Remaining effort:** 1-2 weeks
+**Remaining effort:** ~1 week (resolve LLVM version, end-to-end testing)
 
 ---
 
@@ -707,7 +708,7 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 | 1 | Native Hello World | ✅ Complete | 100% |
 | 2 | Language Completeness | ✅ Complete | 100% |
 | 3 | Numeric Profile | ✅ Complete | 100% |
-| 4 | WASM Backend | 🟡 In Progress | 60% |
+| 4 | WASM Backend | 🟡 In Progress | 85% |
 | 5 | Server Profile | 🟡 In Progress | 70% |
 | 6 | GPU Backend | 🟡 In Progress | 65% |
 | 7 | Advanced Profiles | 🟡 In Progress | 60% |

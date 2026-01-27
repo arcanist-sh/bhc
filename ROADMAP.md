@@ -15,7 +15,7 @@ This document provides a detailed implementation plan to deliver all features pr
 | Tensor IR | ✅ Complete | Lowering, fusion, all 4 patterns |
 | Loop IR | ✅ Complete | Vectorization, parallelization |
 | Native Codegen | ✅ Complete | LLVM backend, 8,178 LOC in lower.rs |
-| WASM Codegen | 🟡 95% | Emitter + WASI + GC + driver complete, testing blocked by LLVM |
+| WASM Codegen | 🟡 98% | Emitter + WASI + GC + driver + code size test complete, end-to-end blocked by LLVM |
 | GPU Codegen | 🟡 95% | PTX/AMDGCN codegen + launch complete, testing blocked by LLVM |
 | Runtime | ✅ Complete | Generational GC, incremental GC, arena, scheduler |
 | REPL (bhci) | ✅ Complete | Interactive evaluation |
@@ -763,9 +763,9 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 
 **Once LLVM is resolved:**
 
-1. **WASM Backend (Phase 4)** - ~2-3 days
-   - Verify runtime code size < 100KB
-   - End-to-end test with wasmtime
+1. **WASM Backend (Phase 4)** - ~1 day
+   - ✅ Code size verification test added (`test_runtime_code_size_under_100kb`)
+   - Run end-to-end test with wasmtime
 
 2. **GPU Backend (Phase 6)** - ~2-3 days
    - End-to-end GPU kernel execution test

@@ -341,7 +341,7 @@ main = print $ sum $ map (*2) [1..10000000]
 
 ---
 
-## Phase 4: WASM Backend 🟡 85% COMPLETE
+## Phase 4: WASM Backend 🟡 90% COMPLETE
 
 **Objective:** `bhc --target=wasi Main.hs` produces working WebAssembly.
 
@@ -359,17 +359,17 @@ Tasks:
 - [x] WAT text generation
 - [x] Test: Valid WASM binary output
 
-### 4.2 WASI Runtime Integration 🟡
+### 4.2 WASI Runtime Integration ✅
 
 **Crate:** `bhc-wasm`
-**Location:** `wasi.rs` (415 lines)
+**Location:** `wasi.rs` (800+ lines)
 
 Tasks:
-- [x] Import WASI functions (fd_write, fd_read, proc_exit)
+- [x] Import WASI functions (fd_write, fd_read, proc_exit, args_*, environ_*)
 - [x] Map IO primitives to WASI calls (`generate_print_i32()`, `generate_print_str()`)
 - [x] Bump allocator (`generate_alloc_function()`)
-- [ ] Handle command-line arguments (args_get, args_sizes_get)
-- [ ] Handle environment variables (environ_get)
+- [x] Handle command-line arguments (`generate_init_args()`, `generate_get_argc()`, `generate_get_argv()`)
+- [x] Handle environment variables (`generate_init_environ()`, `generate_getenv()`)
 - [x] Test: Basic print works
 
 ### 4.3 Edge Profile RTS 🟡
@@ -713,23 +713,23 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 | 1 | Native Hello World | ✅ Complete | 100% |
 | 2 | Language Completeness | ✅ Complete | 100% |
 | 3 | Numeric Profile | ✅ Complete | 100% |
-| 4 | WASM Backend | 🟡 In Progress | 85% |
+| 4 | WASM Backend | 🟡 In Progress | 90% |
 | 5 | Server Profile | 🟡 In Progress | 90% |
 | 6 | GPU Backend | 🟡 In Progress | 80% |
 | 7 | Advanced Profiles | 🟡 In Progress | 90% |
 | 8 | Ecosystem | ✅ Complete | 100% |
 
-**Overall: ~90% complete**
+**Overall: ~91% complete**
 
 ---
 
 ## Remaining Work
 
-### Phase 4 (WASM) - 1-2 weeks
-1. Wire `--target=wasi` in bhc-driver
-2. Complete Loop IR → WASM lowering integration
-3. Add args/environ WASI support
-4. End-to-end test with wasmtime
+### Phase 4 (WASM) - ~1 week
+1. ~~Wire `--target=wasi` in bhc-driver~~ ✅
+2. ~~Add args/environ WASI support~~ ✅
+3. Complete GC within linear memory
+4. End-to-end test with wasmtime (blocked by LLVM)
 
 ### Phase 5 (Server) - 1-2 weeks
 1. Implement STM `retry` primitive

@@ -411,7 +411,7 @@ Hello, World!
 
 ---
 
-## Phase 5: Server Profile 🟡 70% COMPLETE
+## Phase 5: Server Profile 🟡 90% COMPLETE
 
 **Objective:** Structured concurrency with proper cancellation.
 
@@ -450,19 +450,19 @@ Tasks:
 - [x] Implement `check_cancelled()` cooperative checking
 - [x] Test: Cancelled task stops
 
-### 5.4 STM 🟡 80%
+### 5.4 STM ✅
 
 **Crate:** `bhc-concurrent`
-**Location:** `stm.rs` (26KB)
+**Location:** `stdlib/bhc-concurrent/src/stm.rs` (971 lines)
 
 Tasks:
-- [x] Implement `TVar` type with atomic versioning
-- [x] Implement `atomically()` stub
+- [x] Implement `TVar` type with atomic versioning (lines 84-179)
+- [x] Implement `atomically()` with retry/conflict handling (lines 393-460)
 - [x] SATB write barriers
-- [ ] **Implement `retry` primitive**
-- [ ] **Implement `orElse` combinator**
-- [ ] Implement full conflict detection
-- [ ] Test: Bank transfer example
+- [x] Implement `retry` primitive (lines 480-482)
+- [x] Implement `orElse` combinator (lines 505-514)
+- [x] Implement conflict detection (validation in `Transaction::commit()`)
+- [x] Tests: 13 tests including bank transfer, producer-consumer (lines 782-970)
 
 ### 5.5 Deadlines ✅
 
@@ -489,9 +489,9 @@ main = withScope $ \scope -> do
   print (r1 + r2)
 ```
 
-**Blockers:** STM `retry` and `orElse` not fully implemented.
+**Blockers:** None - core functionality complete.
 
-**Remaining effort:** 1-2 weeks
+**Remaining effort:** ~1 week (observability hooks, integration testing)
 
 ---
 
@@ -709,7 +709,7 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 | 2 | Language Completeness | ✅ Complete | 100% |
 | 3 | Numeric Profile | ✅ Complete | 100% |
 | 4 | WASM Backend | 🟡 In Progress | 85% |
-| 5 | Server Profile | 🟡 In Progress | 70% |
+| 5 | Server Profile | 🟡 In Progress | 90% |
 | 6 | GPU Backend | 🟡 In Progress | 65% |
 | 7 | Advanced Profiles | 🟡 In Progress | 60% |
 | 8 | Ecosystem | ✅ Complete | 100% |

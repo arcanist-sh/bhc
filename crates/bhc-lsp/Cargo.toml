@@ -1,13 +1,13 @@
 [package]
-name = "bhci"
-description = "Basel Haskell Compiler Interactive REPL"
+name = "bhc-lsp"
+description = "Language Server Protocol implementation for BHC"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "bhci"
+name = "bhc-lsp"
 path = "src/main.rs"
 
 [dependencies]
@@ -21,17 +21,20 @@ bhc-types = { workspace = true }
 bhc-typeck = { workspace = true }
 bhc-hir = { workspace = true }
 bhc-lower = { workspace = true }
-bhc-core = { workspace = true }
-bhc-hir-to-core = { workspace = true }
 bhc-session = { workspace = true }
 
-clap = { workspace = true }
+lsp-types = "0.97"
+lsp-server = "0.7"
+serde = { workspace = true }
+serde_json = { workspace = true }
+crossbeam-channel = "0.5"
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-rustyline = "14"
-dirs = "5"
+dashmap = "6"
+ropey = "1"
+camino = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

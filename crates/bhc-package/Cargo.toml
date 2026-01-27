@@ -14,6 +14,15 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 camino = { workspace = true }
 semver = { workspace = true }
+sha2 = "0.10"
+hex = "0.4"
+ureq = { version = "2", features = ["json"] }
+flate2 = "1"
+tar = "0.4"
+dirs = "5"
+tracing = { workspace = true }
+once_cell = "1"
+urlencoding = "2"
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

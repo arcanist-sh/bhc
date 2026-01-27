@@ -34,7 +34,10 @@
 
 #![warn(missing_docs)]
 
+pub mod commands;
 pub mod lockfile;
+pub mod registry;
+pub mod resolve;
 
 use bhc_session::Profile;
 use camino::{Utf8Path, Utf8PathBuf};

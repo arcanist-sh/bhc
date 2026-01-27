@@ -15,11 +15,19 @@ bhc-span = { workspace = true }
 bhc-intern = { workspace = true }
 bhc-diagnostics = { workspace = true }
 bhc-ast = { workspace = true }
+bhc-hir = { workspace = true }
+bhc-core = { workspace = true }
+bhc-tensor-ir = { workspace = true }
+bhc-loop-ir = { workspace = true }
 
 clap = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
+colored = "2"
+similar = "2"
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

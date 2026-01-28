@@ -223,6 +223,10 @@ main = print (fib 30)
 
 **Completed!** Commit `745bbac` (Jan 26, 2026)
 
+**Bug Fix (Jan 28, 2026):** Fixed two pattern matching bugs in `lower.rs` (commit `7db9592`):
+1. Switch default block was using error fallback instead of user's wildcard
+2. Trivial case optimization was bypassing literal pattern matching
+
 ---
 
 ## Phase 3: Numeric Profile ✅ COMPLETE
@@ -387,15 +391,16 @@ Tasks:
 
 ### 4.4 Driver Integration ✅
 
-**Crate:** `bhc-driver`
-**Location:** `lib.rs` lines 467-537, 1109-1115
+**Crate:** `bhc-driver`, `bhc` (CLI)
+**Location:** `lib.rs` lines 467-537, 1109-1115; `main.rs`
 
 Tasks:
 - [x] Add `--target=wasi` flag handling (`is_wasm_target()` at line 1109)
 - [x] Wire WASM backend into compilation pipeline (lines 467-537)
 - [x] Register wasm32-wasi target (detected via "wasm" in target triple)
 - [x] Generate `.wasm` output files (`write_wasm()` at line 525-527)
-- [ ] Test: End-to-end compilation
+- [x] Add `--target` and `--emit` CLI flags to bhc binary (commit `7db9592`)
+- [ ] Test: End-to-end compilation with wasmtime
 
 ### Phase 4 Exit Criteria
 
@@ -512,7 +517,7 @@ Tasks:
 - [x] Loop nest code generation (`generate_loop_nest()`)
 - [x] Map/ZipWith/Reduce operations
 - [x] Parallel reduction with shared memory
-- [ ] Test: Simple kernel compiles (blocked by LLVM)
+- [ ] Test: Simple kernel compiles (requires CUDA)
 
 ### 6.2 AMDGCN Codegen ✅
 
@@ -525,7 +530,7 @@ Tasks:
 - [x] Parameter handling
 - [x] Loop nest code generation (`generate_loop_nest_amd()`)
 - [x] Unary/binary operations
-- [ ] Test: Simple kernel compiles (blocked by LLVM)
+- [ ] Test: Simple kernel compiles (requires ROCm)
 
 ### 6.3 Device Memory Management ✅
 
@@ -560,7 +565,7 @@ Tasks:
 - [x] `LaunchConfig` for grid/block dimensions
 - [x] Launch parameter setup
 - [x] Full kernel execution pipeline (`GpuContext::launch()` → `runtime::cuda::launch_kernel()`)
-- [ ] Test: Kernel executes on GPU (blocked by LLVM)
+- [ ] Test: Kernel executes on GPU (requires CUDA hardware)
 
 ### 6.6 Runtime Support ✅
 
@@ -583,9 +588,9 @@ main = do
   print $ sum $ zipWith (+) a b
 ```
 
-**Blockers:** LLVM version mismatch prevents full testing.
+**Blockers:** Requires CUDA/ROCm hardware for end-to-end testing.
 
-**Remaining effort:** ~2-3 days (end-to-end testing once LLVM fixed)
+**Remaining effort:** ~2-3 days (end-to-end testing with GPU hardware)
 
 ---
 
@@ -630,7 +635,7 @@ Tasks:
 - [x] Profile::Embedded with `is_gc_free()` and `requires_escape_analysis()`
 - [x] CompileError::EscapeAnalysisFailed in driver
 - [x] check_escape_analysis() in compilation pipeline
-- [ ] Test: Bare-metal program (blocked by LLVM version)
+- [ ] Test: Bare-metal program (requires bare-metal target)
 
 ### 7.4 Arena Allocation ✅
 
@@ -643,9 +648,9 @@ Tasks:
 
 ### Phase 7 Exit Criteria
 
-**Blockers:** Bare-metal testing (blocked by LLVM version mismatch).
+**Blockers:** Requires bare-metal target hardware for testing.
 
-**Remaining effort:** ~1-2 days (bare-metal testing once LLVM fixed)
+**Remaining effort:** ~1-2 days (bare-metal testing with appropriate hardware)
 
 ---
 
@@ -713,7 +718,7 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 | 1 | Native Hello World | ✅ Complete | 100% |
 | 2 | Language Completeness | ✅ Complete | 100% |
 | 3 | Numeric Profile | ✅ Complete | 100% |
-| 4 | WASM Backend | 🟡 In Progress | 95% |
+| 4 | WASM Backend | 🟡 In Progress | 98% |
 | 5 | Server Profile | 🟡 In Progress | 95% |
 | 6 | GPU Backend | 🟡 In Progress | 95% |
 | 7 | Advanced Profiles | 🟡 In Progress | 90% |
@@ -725,12 +730,13 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 
 ## Remaining Work
 
-### Phase 4 (WASM) - ~2-3 days
+### Phase 4 (WASM) - ~1 day
 1. ~~Wire `--target=wasi` in bhc-driver~~ ✅
 2. ~~Add args/environ WASI support~~ ✅
 3. ~~Complete GC within linear memory~~ ✅ (mark-sweep GC in `runtime/gc.rs`)
-4. Verify runtime code size < 100KB
-5. End-to-end test with wasmtime (blocked by LLVM)
+4. ~~Verify runtime code size < 100KB~~ ✅ (`test_runtime_code_size_under_100kb`)
+5. ~~Add `--target` CLI flag~~ ✅ (commit `7db9592`)
+6. End-to-end test with wasmtime
 
 ### Phase 5 (Server) - ~1 week
 1. ~~Implement STM `retry` primitive~~ ✅ (`stm.rs` lines 480-482)
@@ -744,27 +750,32 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 2. ~~Implement AMDGCN loop nest codegen~~ ✅ (`codegen/amdgcn.rs`)
 3. ~~Complete Tensor IR → GPU kernel lowering~~ ✅ (`lower.rs`)
 4. ~~Full kernel execution pipeline~~ ✅ (`context.rs`, `runtime/cuda.rs`)
-5. End-to-end GPU test (blocked by LLVM)
+5. End-to-end GPU test (requires CUDA hardware)
 
 ### Phase 7 (Advanced) - ~1-2 days
 1. ~~Wire incremental mark loop into GC~~ ✅
 2. ~~Implement escape analysis for embedded profile~~ ✅
 3. ~~Wire escape analysis into embedded profile compilation path~~ ✅
-4. Bare-metal testing for embedded profile (blocked by LLVM)
+4. Bare-metal testing for embedded profile
 
 ---
 
 ## Immediate Next Steps
 
-**Primary Blocker: LLVM Version Mismatch**
-- System has LLVM 21, but `llvm-sys` expects LLVM 18
-- Blocks end-to-end testing for WASM, GPU, and Embedded profiles
-- Resolution: Install LLVM 18 or update `llvm-sys` dependency
+**LLVM Blocker: ✅ RESOLVED**
+- Upgraded inkwell from 0.5 (LLVM 18) to 0.8 (LLVM 21) in commit `db4368f`
+- Native code generation fully functional
 
-**Once LLVM is resolved:**
+**E2E Testing Framework: ✅ COMPLETE**
+- Comprehensive E2E test suite in `bhc-e2e-tests` crate (commit `a7b62c8`)
+- Native tests: 6 passing (hello, arithmetic, fibonacci, print_sequence, discovery tests)
+- Tests must run serially (`--test-threads=1`) due to concurrent cargo invocations
+
+**Remaining Work:**
 
 1. **WASM Backend (Phase 4)** - ~1 day
    - ✅ Code size verification test added (`test_runtime_code_size_under_100kb`)
+   - ✅ `--target` CLI flag added
    - Run end-to-end test with wasmtime
 
 2. **GPU Backend (Phase 6)** - ~2-3 days

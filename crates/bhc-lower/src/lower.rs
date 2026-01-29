@@ -612,7 +612,42 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
 
                         // For simple bindings (no parameters)
                         if fb.clauses.len() == 1 && fb.clauses[0].pats.is_empty() {
-                            let rhs_expr = lower_rhs(ctx, &fb.clauses[0].rhs);
+                            let inner_clause = &fb.clauses[0];
+                            let rhs_expr = if !inner_clause.wheres.is_empty() {
+                                // Handle nested where bindings
+                                ctx.enter_scope();
+                                for nested_decl in &inner_clause.wheres {
+                                    if let ast::Decl::FunBind(nested_fb) = nested_decl {
+                                        let nested_def_id = ctx.fresh_def_id();
+                                        ctx.define(nested_def_id, nested_fb.name.name, DefKind::Value, nested_fb.span);
+                                        ctx.bind_value(nested_fb.name.name, nested_def_id);
+                                    }
+                                }
+                                let body = lower_rhs(ctx, &inner_clause.rhs);
+                                let nested_bindings: Vec<hir::Binding> = inner_clause.wheres
+                                    .iter()
+                                    .filter_map(|d| {
+                                        if let ast::Decl::FunBind(nested_fb) = d {
+                                            let nested_def_id = ctx.lookup_value(nested_fb.name.name)
+                                                .expect("nested where binding should be bound");
+                                            if nested_fb.clauses.len() == 1 && nested_fb.clauses[0].pats.is_empty() {
+                                                let nested_rhs = lower_rhs(ctx, &nested_fb.clauses[0].rhs);
+                                                return Some(hir::Binding {
+                                                    pat: hir::Pat::Var(nested_fb.name.name, nested_def_id, nested_fb.span),
+                                                    sig: None,
+                                                    rhs: nested_rhs,
+                                                    span: nested_fb.span,
+                                                });
+                                            }
+                                        }
+                                        None
+                                    })
+                                    .collect();
+                                ctx.exit_scope();
+                                hir::Expr::Let(nested_bindings, Box::new(body), fb.span)
+                            } else {
+                                lower_rhs(ctx, &inner_clause.rhs)
+                            };
                             return Some(hir::Binding {
                                 pat: hir::Pat::Var(fb.name.name, def_id, fb.span),
                                 sig: None,
@@ -634,7 +669,45 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                             for p in &clause.pats {
                                 pats.push(lower_pat(ctx, p));
                             }
-                            let body = lower_rhs(ctx, &clause.rhs);
+
+                            // Handle nested where bindings
+                            let body = if !clause.wheres.is_empty() {
+                                ctx.enter_scope();
+                                // Pre-bind nested where names
+                                for nested_decl in &clause.wheres {
+                                    if let ast::Decl::FunBind(nested_fb) = nested_decl {
+                                        let nested_def_id = ctx.fresh_def_id();
+                                        ctx.define(nested_def_id, nested_fb.name.name, DefKind::Value, nested_fb.span);
+                                        ctx.bind_value(nested_fb.name.name, nested_def_id);
+                                    }
+                                }
+                                let rhs_expr = lower_rhs(ctx, &clause.rhs);
+                                // Lower nested where bindings into a Let
+                                let nested_bindings: Vec<hir::Binding> = clause.wheres
+                                    .iter()
+                                    .filter_map(|d| {
+                                        if let ast::Decl::FunBind(nested_fb) = d {
+                                            let nested_def_id = ctx.lookup_value(nested_fb.name.name)
+                                                .expect("nested where binding should be bound");
+                                            if nested_fb.clauses.len() == 1 && nested_fb.clauses[0].pats.is_empty() {
+                                                let nested_rhs = lower_rhs(ctx, &nested_fb.clauses[0].rhs);
+                                                return Some(hir::Binding {
+                                                    pat: hir::Pat::Var(nested_fb.name.name, nested_def_id, nested_fb.span),
+                                                    sig: None,
+                                                    rhs: nested_rhs,
+                                                    span: nested_fb.span,
+                                                });
+                                            }
+                                        }
+                                        None
+                                    })
+                                    .collect();
+                                ctx.exit_scope();
+                                hir::Expr::Let(nested_bindings, Box::new(rhs_expr), fb.span)
+                            } else {
+                                lower_rhs(ctx, &clause.rhs)
+                            };
+
                             ctx.exit_scope();
                             // Create a lambda expression
                             let lam = hir::Expr::Lam(pats, Box::new(body), fb.span);

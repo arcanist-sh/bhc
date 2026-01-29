@@ -389,7 +389,7 @@ cargo bench
 
 ### Current Status: Beta
 
-The compiler is feature-complete through Phase 7. Native code generation works via LLVM. WebAssembly compilation works via bhc-wasm. The runtime system includes a generational GC with incremental marking support, work-stealing scheduler, and full STM support. Structured concurrency with cancellation propagation is implemented. Real Haskell programs compile and run on native and WASM targets. Realtime profile supports bounded-pause GC (<1ms). Embedded profile supports static-only allocation with no GC.
+The compiler builds cleanly (33 crates, 0 errors) and compiles real Haskell programs to native executables via LLVM. E2E tests verify hello world, arithmetic, fibonacci, and IO sequencing all work. The runtime system includes a generational GC with incremental marking support, work-stealing scheduler, and full STM support. WASM backend has substantial code but generated binaries fail wasmtime validation. GPU backend passes mock tests but requires CUDA hardware for real testing. REPL and tools compile but have stubbed evaluation.
 
 ### Phase 1: Core Compilation ✅ COMPLETE
 
@@ -440,19 +440,21 @@ The compiler is feature-complete through Phase 7. Native code generation works v
 
 **Exit Criteria:** `sum (map (*2) [1..1000000])` fuses to single loop, runs 10x faster than interpreted.
 
-### Phase 4: WASM Backend ✅ COMPLETE
+### Phase 4: WASM Backend 🟡 70% COMPLETE
 
 **Goal:** Compile to WebAssembly with WASI support.
 
 | Task | Status | Crate | Description |
 |------|--------|-------|-------------|
-| 4.1 WASM Emitter | 🟢 | bhc-wasm | Binary emission, instruction encoding, WAT generation |
+| 4.1 WASM Emitter | 🟡 | bhc-wasm | Binary emission exists but output fails wasmtime validation |
 | 4.2 WASI Runtime | 🟢 | bhc-wasm | fd_write, proc_exit, print_i32, alloc, _start |
 | 4.3 Loop IR Lowering | 🟢 | bhc-wasm | Complete statement/loop/op lowering to WASM |
 | 4.4 Memory Model | 🟢 | bhc-wasm | LinearMemory, MemoryLayout, WasmArena |
 | 4.5 Driver Integration | 🟢 | bhc-driver | Loop IR → WASM pipeline wiring |
 
 **Exit Criteria:** `bhc --target=wasi Main.hs -o app.wasm && wasmtime app.wasm` works.
+
+**Notes:** All 6 WASM E2E tests fail with "WebAssembly translation error". The emitter produces output but the WASM binary format is not valid.
 
 ### Phase 5: Server Profile ✅ COMPLETE
 
@@ -469,7 +471,7 @@ The compiler is feature-complete through Phase 7. Native code generation works v
 
 **Exit Criteria:** ✅ All M5 exit criteria tests pass (11 tests), structured concurrency guarantees verified.
 
-### Phase 6: GPU Backend ✅ IN PROGRESS
+### Phase 6: GPU Backend 🟡 80% COMPLETE
 
 **Goal:** Offload numeric kernels to GPU.
 
@@ -483,7 +485,7 @@ The compiler is feature-complete through Phase 7. Native code generation works v
 
 **Exit Criteria:** Matrix multiplication runs on GPU, 100x faster than CPU for large matrices.
 
-**Notes:** End-to-end testing blocked by LLVM version mismatch (system LLVM 21 vs expected LLVM 18)
+**Notes:** 2/2 GPU mock tests pass (PTX validation). End-to-end testing requires CUDA hardware.
 
 ### Phase 7: Advanced Profiles ✅ IN PROGRESS
 
@@ -500,17 +502,17 @@ The compiler is feature-complete through Phase 7. Native code generation works v
 
 **Notes:** Realtime and Embedded profiles added to RTS. Pause tracking with P99 percentiles, threshold violations, and ring buffer history. Incremental marking supports time-budgeted work increments (default 500μs).
 
-### Phase 8: Ecosystem
+### Phase 8: Ecosystem 🟡 60% COMPLETE
 
 **Goal:** Production-ready tooling.
 
 | Task | Status | Crate | Description |
 |------|--------|-------|-------------|
-| 8.1 REPL | 🟡 | bhci | Interactive evaluation |
-| 8.2 IR Inspector | 🟡 | bhi | Debug IR visualizer |
-| 8.3 Package Manager | 🔴 | bhc-package | Dependency resolution |
-| 8.4 LSP Server | 🔴 | bhc-lsp | IDE integration |
-| 8.5 Documentation | 🔴 | - | User guide, API docs |
+| 8.1 REPL | 🟡 | bhci | Compiles, but evaluation is stubbed |
+| 8.2 IR Inspector | 🟡 | bhi | Compiles, needs integration testing |
+| 8.3 Package Manager | 🟡 | bhc-package | Code exists, test imports fixed |
+| 8.4 LSP Server | 🟡 | bhc-lsp | Code exists, needs testing |
+| 8.5 Documentation | 🟡 | - | User docs exist, API docs incomplete |
 
 **Exit Criteria:** Developers can build, test, and deploy BHC projects.
 

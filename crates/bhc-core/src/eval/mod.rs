@@ -113,6 +113,8 @@ pub struct Evaluator {
     /// containing all the recursive bindings here, so that closures can find
     /// their recursive references.
     rec_env_stack: RefCell<Vec<Env>>,
+    /// Captured IO output from print/putStrLn/putStr operations.
+    io_output: RefCell<String>,
 }
 
 impl Evaluator {
@@ -129,6 +131,7 @@ impl Evaluator {
             depth: RefCell::new(0),
             module_env: RefCell::new(None),
             rec_env_stack: RefCell::new(Vec::new()),
+            io_output: RefCell::new(String::new()),
         }
     }
 
@@ -184,6 +187,12 @@ impl Evaluator {
     /// Clears the module-level environment.
     pub fn clear_module_env(&self) {
         *self.module_env.borrow_mut() = None;
+    }
+
+    /// Returns the captured IO output from print/putStrLn/putStr operations.
+    #[must_use]
+    pub fn take_io_output(&self) -> String {
+        self.io_output.borrow_mut().split_off(0)
     }
 
     /// Registers primitive operations in the environment.
@@ -1270,6 +1279,11 @@ impl Evaluator {
                 // putStrLn :: String -> IO ()
                 let s = self.value_to_string(&args[0])?;
                 println!("{s}");
+                {
+                    let mut buf = self.io_output.borrow_mut();
+                    buf.push_str(&s);
+                    buf.push('\n');
+                }
                 Ok(Value::unit())
             }
 
@@ -1279,6 +1293,7 @@ impl Evaluator {
                 let s = self.value_to_string(&args[0])?;
                 print!("{s}");
                 std::io::stdout().flush().ok();
+                self.io_output.borrow_mut().push_str(&s);
                 Ok(Value::unit())
             }
 
@@ -1286,6 +1301,11 @@ impl Evaluator {
                 // print :: Show a => a -> IO ()
                 let displayed = self.display_value(&args[0])?;
                 println!("{displayed}");
+                {
+                    let mut buf = self.io_output.borrow_mut();
+                    buf.push_str(&displayed);
+                    buf.push('\n');
+                }
                 Ok(Value::unit())
             }
 

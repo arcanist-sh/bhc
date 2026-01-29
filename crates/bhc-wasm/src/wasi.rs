@@ -376,7 +376,7 @@ pub fn generate_start_function(main_func_idx: u32, proc_exit_idx: u32) -> WasmFu
     func.emit(WasmInstr::Call(main_func_idx));
 
     // Drop result if main returns something
-    // (we assume main returns void or we ignore result)
+    func.emit(WasmInstr::Drop);
 
     // Call proc_exit(0)
     func.emit(WasmInstr::I32Const(0));

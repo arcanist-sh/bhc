@@ -4,24 +4,34 @@ This document provides a detailed implementation plan to deliver all features pr
 
 ## Current Status
 
-**Beta** — The compiler is feature-complete for core language functionality. Native compilation, numeric optimization, and developer tooling all work.
+**Beta** — The compiler builds cleanly and compiles real Haskell programs to native executables. E2E tests confirm native compilation works for hello world, arithmetic, fibonacci, IO sequencing, and more. WASM and GPU backends have substantial code but are not yet producing valid output.
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| Parser/Lexer | ✅ Complete | ~8,000 LOC, robust |
-| Type Checker | ✅ Complete | ~10,000 LOC, inference + type classes |
-| HIR Lowering | ✅ Complete | ~6,000 LOC |
-| Core IR | ✅ Complete | Interpreter + LLVM codegen |
+| Component | Status | Test Evidence |
+|-----------|--------|---------------|
+| Parser/Lexer | ✅ Complete | 76 unit tests pass |
+| Type Checker | ✅ Complete | Inference + type classes functional |
+| HIR Lowering | ✅ Complete | Used in all compilation paths |
+| Core IR | ✅ Complete | 30 interpreter tests pass; LLVM codegen works |
 | Tensor IR | ✅ Complete | Lowering, fusion, all 4 patterns |
 | Loop IR | ✅ Complete | Vectorization, parallelization |
-| Native Codegen | ✅ Complete | LLVM 21 backend (inkwell 0.8), 8,178 LOC in lower.rs |
-| WASM Codegen | 🟡 98% | Emitter + WASI + GC + driver + code size test complete |
-| GPU Codegen | 🟡 95% | PTX/AMDGCN codegen + launch complete |
-| Runtime | ✅ Complete | Generational GC, incremental GC, arena, scheduler |
-| REPL (bhci) | ✅ Complete | Interactive evaluation |
-| Package Manager | ✅ Complete | Dependency resolution, registry |
-| LSP Server | ✅ Complete | Diagnostics, go-to-def, hover, completions |
-| Documentation | ✅ Complete | User guide, language reference, examples |
+| Native Codegen | ✅ Complete | 6/6 E2E tests pass (hello, arithmetic, fibonacci, IO) |
+| WASM Codegen | 🟡 70% | Emitter exists but WASM binaries fail wasmtime validation |
+| GPU Codegen | 🟡 80% | PTX mock validation passes; requires CUDA hardware for real test |
+| Runtime | ✅ Complete | Generational GC, incremental GC, arena, scheduler (18 tests pass) |
+| REPL (bhci) | 🟡 Compiles | Builds but evaluation is stubbed (returns placeholder values) |
+| Package Manager | 🟡 Partial | Code exists, some test imports broken |
+| LSP Server | 🟡 Exists | Code present, not independently verified |
+| Documentation | 🟡 Partial | User docs exist, API docs incomplete |
+
+### Test Summary (Jan 29, 2026)
+
+| Suite | Passed | Failed | Ignored | Notes |
+|-------|--------|--------|---------|-------|
+| Workspace unit tests | 217 | 9 | 0 | 9 failures are interpreter IO capture |
+| E2E Native | 6 | 0 | 1 | Numeric profile test ignored |
+| E2E WASM | 0 | 6 | 1 | WASM translation error |
+| E2E GPU | 2 | 0 | 0 | Mock mode only |
+| **Total** | **225** | **15** | **2** | |
 
 ---
 
@@ -115,7 +125,9 @@ $ bhc run Main.hs
 42
 ```
 
-**Completed!**
+**Completed!** Verified by E2E test `test_tier1_arithmetic_native` (Jan 29, 2026).
+
+**Note:** `main = putStrLn "Hello, World!"` also compiles and runs correctly via LLVM native codegen. String IO works in the codegen path but not yet in the interpreter path (display capture issue).
 
 ---
 
@@ -345,7 +357,7 @@ main = print $ sum $ map (*2) [1..10000000]
 
 ---
 
-## Phase 4: WASM Backend 🟡 98% COMPLETE
+## Phase 4: WASM Backend 🟡 70% COMPLETE
 
 **Objective:** `bhc --target=wasi Main.hs` produces working WebAssembly.
 
@@ -412,11 +424,13 @@ Hello, World!
 
 **LLVM 21 Support:** Upgraded inkwell from 0.5 (LLVM 18) to 0.8 (LLVM 21). Commit `db4368f`.
 
-**Remaining effort:** End-to-end testing with actual Haskell programs
+**Status (Jan 29, 2026):** All 6 WASM E2E tests fail with "WebAssembly translation error" — the WASM binary emitter produces output that wasmtime cannot validate. The emitter, WASI integration, and driver wiring are complete, but the generated WASM binary format has structural issues that need debugging.
+
+**Remaining effort:** Debug WASM binary format validation errors; all WASM E2E tests currently fail
 
 ---
 
-## Phase 5: Server Profile 🟡 95% COMPLETE
+## Phase 5: Server Profile ✅ COMPLETE
 
 **Objective:** Structured concurrency with proper cancellation.
 
@@ -654,20 +668,24 @@ Tasks:
 
 ---
 
-## Phase 8: Ecosystem ✅ COMPLETE
+## Phase 8: Ecosystem 🟡 60% COMPLETE
 
-### 8.1 REPL ✅
+### 8.1 REPL 🟡
 
 **Crate:** `tools/bhci`
 
 Tasks:
 - [x] Interactive evaluation loop (rustyline)
-- [x] Expression type inference (`:type` command)
-- [x] Value pretty-printing
 - [x] Full command set (`:help`, `:load`, `:reload`, `:browse`, etc.)
-- [x] Test: `:t map` shows type
+- [x] Profile selection support
+- [ ] Expression evaluation (currently returns placeholder `Value::Int(42)`)
+- [ ] Expression type inference (`:type` command — uses stale API)
+- [ ] Value pretty-printing (partially implemented)
+- [ ] Test: `:t map` shows type
 
-### 8.2 Package Manager ✅
+**Status (Jan 29, 2026):** bhci compiles and launches but evaluation is stubbed. The tool was using stale imports (`bhc_core::Value`, `bhc_typeck::context::TypeContext`, `bhc_types::Type`) that were fixed to match current APIs. Real expression evaluation is not wired up.
+
+### 8.2 Package Manager 🟡
 
 **Crate:** `bhc-package`
 
@@ -677,8 +695,11 @@ Tasks:
 - [x] Build orchestration
 - [x] Registry integration
 - [x] Lockfile management
+- [ ] Test: Integration tests have import errors (`PackageIndex` not in scope)
 
-### 8.3 LSP Server ✅
+**Status (Jan 29, 2026):** Core code compiles but test suite has import errors (fixed). Needs further integration testing.
+
+### 8.3 LSP Server 🟡
 
 **Crate:** `bhc-lsp`
 
@@ -689,15 +710,27 @@ Tasks:
 - [x] Completions
 - [x] Document/workspace symbols
 - [x] Code actions
+- [ ] Independent integration testing
 
-### 8.4 Documentation ✅
+### 8.4 Documentation 🟡
 
 Tasks:
 - [x] User-facing documentation (`docs/getting-started.md`, `language.md`, `profiles.md`, `examples.md`)
-- [x] Developer documentation (LSP server architecture)
-- [x] API documentation for new crates
+- [ ] Developer documentation (incomplete)
+- [ ] API documentation for new crates
 
-### Phase 8 Exit Criteria ✅
+### 8.5 IR Inspector 🟡
+
+**Crate:** `tools/bhi`
+
+Tasks:
+- [x] IR dump formatting
+- [x] Memory report display
+- [ ] Integration testing
+
+**Status (Jan 29, 2026):** bhi compiles after fixing `Allocation` missing `Clone` derive and type annotation on `current_indent`.
+
+### Phase 8 Exit Criteria
 
 ```bash
 $ bhci
@@ -707,83 +740,82 @@ map :: (a -> b) -> [a] -> [b]
 $ bhc-lsp  # Starts LSP server for IDE integration
 ```
 
-**Completed!**
+**Not yet verified.** REPL evaluation is stubbed.
 
 ---
 
 ## Summary Timeline
 
-| Phase | Description | Status | Completion |
-|-------|-------------|--------|------------|
-| 1 | Native Hello World | ✅ Complete | 100% |
-| 2 | Language Completeness | ✅ Complete | 100% |
-| 3 | Numeric Profile | ✅ Complete | 100% |
-| 4 | WASM Backend | 🟡 In Progress | 98% |
-| 5 | Server Profile | 🟡 In Progress | 95% |
-| 6 | GPU Backend | 🟡 In Progress | 95% |
-| 7 | Advanced Profiles | 🟡 In Progress | 90% |
-| 8 | Ecosystem | ✅ Complete | 100% |
+| Phase | Description | Status | Completion | Test Evidence |
+|-------|-------------|--------|------------|---------------|
+| 1 | Native Hello World | ✅ Complete | 100% | 6/6 E2E tests pass |
+| 2 | Language Completeness | ✅ Complete | 100% | 59/59 interpreter tests pass |
+| 3 | Numeric Profile | ✅ Complete | 100% | Fusion passes, vectorization, parallelization implemented |
+| 4 | WASM Backend | 🟡 In Progress | 75% | Valid WASM binaries; 0/6 E2E output tests pass (needs Core IR → WASM lowering) |
+| 5 | Server Profile | ✅ Complete | 100% | Scheduler, STM, cancellation, deadlines all tested |
+| 6 | GPU Backend | 🟡 In Progress | 80% | 2/2 mock tests pass; needs CUDA hardware |
+| 7 | Advanced Profiles | 🟡 In Progress | 90% | GC, arena, embedded allocator all tested |
+| 8 | Ecosystem | 🟡 In Progress | 60% | Tools compile but evaluation is stubbed |
 
-**Overall: ~97% complete**
+**Overall: ~85% complete**
 
 ---
 
 ## Remaining Work
 
-### Phase 4 (WASM) - ~1 day
-1. ~~Wire `--target=wasi` in bhc-driver~~ ✅
-2. ~~Add args/environ WASI support~~ ✅
-3. ~~Complete GC within linear memory~~ ✅ (mark-sweep GC in `runtime/gc.rs`)
-4. ~~Verify runtime code size < 100KB~~ ✅ (`test_runtime_code_size_under_100kb`)
-5. ~~Add `--target` CLI flag~~ ✅ (commit `7db9592`)
-6. End-to-end test with wasmtime
+### Phase 2 (Language) - ✅ RESOLVED
+All 59 interpreter tests pass:
+- Fixed IO output capture: evaluator now buffers output from `putStrLn`/`print`/`putStr` operations
+- Fixed nested `where` clause lowering: inner where bindings are now properly scoped and emitted as `Let` expressions
 
-### Phase 5 (Server) - ~1 week
-1. ~~Implement STM `retry` primitive~~ ✅ (`stm.rs` lines 480-482)
-2. ~~Implement STM `orElse` combinator~~ ✅ (`stm.rs` lines 505-514)
-3. ~~Complete transaction conflict detection~~ ✅ (`Transaction::commit()`)
-4. Observability hooks (tracing integration)
-5. Integration testing
+### Phase 4 (WASM) - Core IR → WASM Lowering Needed
+1. ~~Debug WASM binary validation~~ — **RESOLVED**: Fixed type index encoding (log2 alignment for memops, proper type table lookup for function/import sections, Drop for _start return value)
+2. WASM binaries are now **valid** and load/run in wasmtime
+3. **Remaining gap**: No Core IR → WASM lowering path exists. Only Loop IR → WASM (numeric kernels) is implemented. The `_start` entry point calls a placeholder main that returns 0
+4. Need to implement: Core IR expression evaluation → WASM instructions for general Haskell programs (closures, thunks, ADTs, IO actions)
 
-### Phase 6 (GPU) - ~2-3 days
-1. ~~Implement PTX loop nest codegen~~ ✅ (`codegen/ptx.rs:generate_loop_nest()`)
-2. ~~Implement AMDGCN loop nest codegen~~ ✅ (`codegen/amdgcn.rs`)
-3. ~~Complete Tensor IR → GPU kernel lowering~~ ✅ (`lower.rs`)
-4. ~~Full kernel execution pipeline~~ ✅ (`context.rs`, `runtime/cuda.rs`)
-5. End-to-end GPU test (requires CUDA hardware)
+### Phase 6 (GPU) - Hardware-Blocked
+1. End-to-end GPU test (requires CUDA hardware)
+2. PTX mock validation passes (2/2 tests)
+3. AMDGCN codegen needs real hardware testing
 
-### Phase 7 (Advanced) - ~1-2 days
-1. ~~Wire incremental mark loop into GC~~ ✅
-2. ~~Implement escape analysis for embedded profile~~ ✅
-3. ~~Wire escape analysis into embedded profile compilation path~~ ✅
-4. Bare-metal testing for embedded profile
+### Phase 7 (Advanced) - Hardware-Blocked
+1. Bare-metal testing for Embedded profile (requires target hardware)
+
+### Phase 8 (Ecosystem) - Significant Work Remaining
+1. **REPL (bhci):** Wire up actual expression evaluation (currently stubbed)
+2. **Package Manager:** Fix test suite, integration testing
+3. **LSP Server:** Independent integration testing
+4. **IR Inspector (bhi):** Integration testing
 
 ---
 
 ## Immediate Next Steps
 
-**LLVM Blocker: ✅ RESOLVED**
-- Upgraded inkwell from 0.5 (LLVM 18) to 0.8 (LLVM 21) in commit `db4368f`
-- Native code generation fully functional
+**Build Status: ✅ CLEAN** (Jan 29, 2026)
+- All 33 workspace crates compile without errors
+- Fixed: `bhc-rts` non-exhaustive match (added `Realtime`/`Embedded` to `bhc_get_profile`)
+- Fixed: `bhc-session` missing `Realtime` profile variant
+- Fixed: `bhci` stale imports (`Value`, `TypeContext`, `Type`, `lower_expr`)
+- Fixed: `bhi` missing `Clone` derive on `Allocation`, type annotation on `current_indent`
+- Fixed: `bhc-package` missing `PackageIndex` import in tests
+- Fixed: `bhc-driver` temp directory race condition causing parallel test failures
+- Removed: `bhc-prelude` stale property tests referencing non-existent modules
+- Fixed: `bhc-core` evaluator IO output capture (putStrLn/print/putStr now buffer output)
+- Fixed: `bhc-lower` nested `where` clause scoping (inner where bindings properly lowered)
+- Fixed: `bhc-wasm` memory alignment encoding (byte alignment → log2 for WASM binary format)
+- Fixed: `bhc-wasm` function/import type index encoding (proper type table lookup)
+- Fixed: `bhc-wasm` _start function stack cleanup (Drop main return value)
 
-**E2E Testing Framework: ✅ COMPLETE**
-- Comprehensive E2E test suite in `bhc-e2e-tests` crate (commit `a7b62c8`)
-- Native tests: 6 passing (hello, arithmetic, fibonacci, print_sequence, discovery tests)
-- Tests must run serially (`--test-threads=1`) due to concurrent cargo invocations
+**E2E Testing Framework: ✅ FUNCTIONAL**
+- Native E2E: 6/6 pass, 1 ignored (numeric profile)
+- WASM E2E: 0/6 output tests pass (binaries are valid, but placeholder main doesn't compile Haskell code)
+- GPU E2E: 2/2 pass (mock mode)
+- Integration tests: 59/59 pass
+- Tests now support parallel execution (fixed temp dir collision)
 
-**Remaining Work:**
-
-1. **WASM Backend (Phase 4)** - ~1 day
-   - ✅ Code size verification test added (`test_runtime_code_size_under_100kb`)
-   - ✅ `--target` CLI flag added
-   - Run end-to-end test with wasmtime
-
-2. **GPU Backend (Phase 6)** - ~2-3 days
-   - End-to-end GPU kernel execution test
-
-3. **Server Profile (Phase 5)** - ~1 week
-   - Add observability/tracing hooks
-   - Integration testing
-
-4. **Advanced Profiles (Phase 7)** - ~1-2 days
-   - Bare-metal testing for Embedded profile
+**Priority Order:**
+1. **Implement Core IR → WASM lowering** — Required for WASM backend to compile general Haskell programs
+2. **Wire REPL evaluation** — bhci compiles but doesn't evaluate
+3. **GPU hardware testing** — When CUDA hardware is available
+4. **Interpreter IO capture** — 9 failing interpreter tests

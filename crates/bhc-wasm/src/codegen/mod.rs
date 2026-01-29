@@ -738,14 +738,17 @@ impl BinaryEncoder {
         // Version 1
         self.output.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
 
+        // Build unified type table for consistent type index references
+        let type_table = Self::collect_type_table(module);
+
         // Type section
-        self.encode_type_section(module)?;
+        self.encode_type_section(&type_table)?;
 
         // Import section
-        self.encode_import_section(module)?;
+        self.encode_import_section(module, &type_table)?;
 
         // Function section
-        self.encode_function_section(module)?;
+        self.encode_function_section(module, &type_table)?;
 
         // Memory section
         self.encode_memory_section(module)?;
@@ -763,6 +766,14 @@ impl BinaryEncoder {
         self.encode_data_section(module)?;
 
         Ok(())
+    }
+
+    /// Encode a memory operation's alignment and offset.
+    /// WASM binary format requires alignment as log2(byte_alignment).
+    fn encode_memarg(&mut self, byte_align: u32, offset: u32) {
+        let log2_align = if byte_align == 0 { 0 } else { byte_align.trailing_zeros() };
+        self.encode_uleb128(log2_align);
+        self.encode_uleb128(offset);
     }
 
     fn encode_uleb128(&mut self, mut value: u32) {
@@ -827,24 +838,45 @@ impl BinaryEncoder {
         self.output.extend(content);
     }
 
-    fn encode_type_section(&mut self, module: &WasmModule) -> WasmResult<()> {
-        if module.types.is_empty() && module.functions.is_empty() {
+    /// Collect all unique function types from the module and return them with
+    /// an index map for lookup. The type table includes types from:
+    /// 1. Explicit module types
+    /// 2. Imported function types
+    /// 3. Module function types
+    fn collect_type_table(module: &WasmModule) -> Vec<WasmFuncType> {
+        let mut types: Vec<WasmFuncType> = module.types.clone();
+        // Add import function types
+        for import in &module.imports {
+            if let WasmImportKind::Func(ty) = &import.kind {
+                if !types.contains(ty) {
+                    types.push(ty.clone());
+                }
+            }
+        }
+        // Add module function types
+        for func in &module.functions {
+            if !types.contains(&func.ty) {
+                types.push(func.ty.clone());
+            }
+        }
+        types
+    }
+
+    /// Find the index of a function type in the type table.
+    fn find_type_index(type_table: &[WasmFuncType], ty: &WasmFuncType) -> u32 {
+        type_table.iter().position(|t| t == ty).unwrap_or(0) as u32
+    }
+
+    fn encode_type_section(&mut self, type_table: &[WasmFuncType]) -> WasmResult<()> {
+        if type_table.is_empty() {
             return Ok(());
         }
 
         let mut content = Vec::new();
         let mut encoder = BinaryEncoder { output: content };
 
-        // Collect all unique function types
-        let mut types: Vec<&WasmFuncType> = module.types.iter().collect();
-        for func in &module.functions {
-            if !types.contains(&&func.ty) {
-                types.push(&func.ty);
-            }
-        }
-
-        encoder.encode_uleb128(types.len() as u32);
-        for ty in types {
+        encoder.encode_uleb128(type_table.len() as u32);
+        for ty in type_table {
             encoder.output.push(0x60); // func type
             encoder.encode_uleb128(ty.params.len() as u32);
             for param in &ty.params {
@@ -861,7 +893,7 @@ impl BinaryEncoder {
         Ok(())
     }
 
-    fn encode_import_section(&mut self, module: &WasmModule) -> WasmResult<()> {
+    fn encode_import_section(&mut self, module: &WasmModule, type_table: &[WasmFuncType]) -> WasmResult<()> {
         if module.imports.is_empty() {
             return Ok(());
         }
@@ -875,9 +907,9 @@ impl BinaryEncoder {
             encoder.encode_string(&import.name);
 
             match &import.kind {
-                WasmImportKind::Func(_ty) => {
+                WasmImportKind::Func(ty) => {
                     encoder.output.push(0x00); // func import
-                    encoder.encode_uleb128(0); // type index (simplified)
+                    encoder.encode_uleb128(Self::find_type_index(type_table, ty));
                 }
                 WasmImportKind::Memory(min, max) => {
                     encoder.output.push(0x02); // memory import
@@ -915,7 +947,7 @@ impl BinaryEncoder {
         Ok(())
     }
 
-    fn encode_function_section(&mut self, module: &WasmModule) -> WasmResult<()> {
+    fn encode_function_section(&mut self, module: &WasmModule, type_table: &[WasmFuncType]) -> WasmResult<()> {
         if module.functions.is_empty() {
             return Ok(());
         }
@@ -924,10 +956,8 @@ impl BinaryEncoder {
         let mut encoder = BinaryEncoder { output: content };
 
         encoder.encode_uleb128(module.functions.len() as u32);
-        for (i, _func) in module.functions.iter().enumerate() {
-            // For simplicity, we assume each function has its own type
-            // In a real implementation, we'd look up the type index
-            encoder.encode_uleb128(i as u32);
+        for func in &module.functions {
+            encoder.encode_uleb128(Self::find_type_index(type_table, &func.ty));
         }
 
         content = encoder.output;
@@ -1141,76 +1171,62 @@ impl BinaryEncoder {
                 self.encode_uleb128(*idx);
             }
 
-            // Memory
+            // Memory (alignment is in bytes, encode as log2)
             WasmInstr::I32Load(align, offset) => {
                 self.output.push(0x28);
-                self.encode_uleb128(*align);
-                self.encode_uleb128(*offset);
+                self.encode_memarg(*align, *offset);
             }
             WasmInstr::I64Load(align, offset) => {
                 self.output.push(0x29);
-                self.encode_uleb128(*align);
-                self.encode_uleb128(*offset);
+                self.encode_memarg(*align, *offset);
             }
             WasmInstr::F32Load(align, offset) => {
                 self.output.push(0x2A);
-                self.encode_uleb128(*align);
-                self.encode_uleb128(*offset);
+                self.encode_memarg(*align, *offset);
             }
             WasmInstr::F64Load(align, offset) => {
                 self.output.push(0x2B);
-                self.encode_uleb128(*align);
-                self.encode_uleb128(*offset);
+                self.encode_memarg(*align, *offset);
             }
             WasmInstr::I32Load8S(align, offset) => {
                 self.output.push(0x2C);
-                self.encode_uleb128(*align);
-                self.encode_uleb128(*offset);
+                self.encode_memarg(*align, *offset);
             }
             WasmInstr::I32Load8U(align, offset) => {
                 self.output.push(0x2D);
-                self.encode_uleb128(*align);
-                self.encode_uleb128(*offset);
+                self.encode_memarg(*align, *offset);
             }
             WasmInstr::I32Load16S(align, offset) => {
                 self.output.push(0x2E);
-                self.encode_uleb128(*align);
-                self.encode_uleb128(*offset);
+                self.encode_memarg(*align, *offset);
             }
             WasmInstr::I32Load16U(align, offset) => {
                 self.output.push(0x2F);
-                self.encode_uleb128(*align);
-                self.encode_uleb128(*offset);
+                self.encode_memarg(*align, *offset);
             }
             WasmInstr::I32Store(align, offset) => {
                 self.output.push(0x36);
-                self.encode_uleb128(*align);
-                self.encode_uleb128(*offset);
+                self.encode_memarg(*align, *offset);
             }
             WasmInstr::I64Store(align, offset) => {
                 self.output.push(0x37);
-                self.encode_uleb128(*align);
-                self.encode_uleb128(*offset);
+                self.encode_memarg(*align, *offset);
             }
             WasmInstr::F32Store(align, offset) => {
                 self.output.push(0x38);
-                self.encode_uleb128(*align);
-                self.encode_uleb128(*offset);
+                self.encode_memarg(*align, *offset);
             }
             WasmInstr::F64Store(align, offset) => {
                 self.output.push(0x39);
-                self.encode_uleb128(*align);
-                self.encode_uleb128(*offset);
+                self.encode_memarg(*align, *offset);
             }
             WasmInstr::I32Store8(align, offset) => {
                 self.output.push(0x3A);
-                self.encode_uleb128(*align);
-                self.encode_uleb128(*offset);
+                self.encode_memarg(*align, *offset);
             }
             WasmInstr::I32Store16(align, offset) => {
                 self.output.push(0x3B);
-                self.encode_uleb128(*align);
-                self.encode_uleb128(*offset);
+                self.encode_memarg(*align, *offset);
             }
             WasmInstr::MemorySize => {
                 self.output.push(0x3F);

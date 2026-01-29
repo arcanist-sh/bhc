@@ -305,7 +305,7 @@ pub struct MemoryReport {
     pub summary: MemorySummary,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Allocation {
     pub site: String,
     pub region: String,
@@ -1571,7 +1571,7 @@ fn pretty_print(file: &PathBuf, stage: Option<IrStage>, width: usize, indent: us
     println!();
 
     // Simple pretty-printing with indentation
-    let mut current_indent = 0;
+    let mut current_indent: usize = 0;
     for line in content.lines() {
         let trimmed = line.trim();
 

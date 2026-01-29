@@ -45,6 +45,8 @@ pub enum Profile {
     Numeric,
     /// Minimal runtime footprint for embedded and WASM targets.
     Edge,
+    /// Realtime profile: bounded GC pauses (<1ms), arena per-frame.
+    Realtime,
     /// Bare-metal microcontrollers: no GC, static allocation only.
     /// Programs with escaping allocations are rejected at compile time.
     Embedded,

@@ -20,16 +20,14 @@
 
 use anyhow::Result;
 use bhc_ast::Expr as AstExpr;
-use bhc_core::{eval::Evaluator, Value};
+use bhc_core::eval::{Evaluator, EvalMode, Value};
 use bhc_diagnostics::{DiagnosticRenderer, SourceMap};
-use bhc_hir_to_core::lower_expr;
 use bhc_intern::kw;
-use bhc_lower::lower_expr as lower_ast_to_hir;
 use bhc_parser::parse_expr;
 use bhc_session::Profile;
 use bhc_span::FileId;
-use bhc_typeck::context::TypeContext;
-use bhc_types::Type;
+use bhc_typeck::TyCtxt;
+use bhc_types::Ty;
 use clap::Parser;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -84,7 +82,7 @@ struct ReplState {
     /// Source map for error reporting
     source_map: SourceMap,
     /// Type checking context
-    type_ctx: TypeContext,
+    type_ctx: TyCtxt,
     /// Evaluator
     evaluator: Evaluator,
     /// Currently loaded files
@@ -98,7 +96,7 @@ struct ReplState {
     /// Binding counter for let expressions
     binding_counter: u32,
     /// User-defined bindings
-    bindings: Vec<(String, Type, Value)>,
+    bindings: Vec<(String, Ty, Value)>,
 }
 
 /// REPL configuration options
@@ -133,10 +131,12 @@ impl ReplState {
         let mut options = ReplOptions::default();
         options.verbose = verbose;
 
+        let source_map = SourceMap::new();
+        let file_id = FileId(0);
         Self {
-            source_map: SourceMap::new(),
-            type_ctx: TypeContext::new(),
-            evaluator: Evaluator::new(),
+            source_map,
+            type_ctx: TyCtxt::new(file_id),
+            evaluator: Evaluator::new(EvalMode::from(profile)),
             loaded_files: Vec::new(),
             modules_in_scope: HashSet::from(["Prelude".to_string()]),
             profile,
@@ -614,10 +614,10 @@ fn eval_input(state: &mut ReplState, input: &str) {
     }
 }
 
-fn infer_type(state: &mut ReplState, _expr: &AstExpr) -> Result<Type, String> {
+fn infer_type(state: &mut ReplState, _expr: &AstExpr) -> Result<Ty, String> {
     // Use type context to infer type
     // For now, return a placeholder
-    Ok(Type::var(state.type_ctx.fresh_type_var()))
+    Ok(state.type_ctx.fresh_ty())
 }
 
 fn evaluate_expr(state: &mut ReplState, _expr: &AstExpr) -> Result<Value, String> {
@@ -945,26 +945,26 @@ fn run_shell_command(cmd: &str) {
     }
 }
 
-fn format_type(ty: &Type) -> String {
-    ty.to_string()
+fn format_type(ty: &Ty) -> String {
+    format!("{:?}", ty)
 }
 
 fn print_value(value: &Value) {
     match value {
         Value::Int(n) => println!("{}", n),
         Value::Float(f) => println!("{}", f),
-        Value::Bool(b) => println!("{}", if *b { "True" } else { "False" }),
+        Value::Double(d) => println!("{}", d),
         Value::Char(c) => println!("'{}'", c),
         Value::String(s) => println!("\"{}\"", s),
-        Value::List(items) => {
-            let formatted: Vec<String> = items.iter().map(|v| format_value(v)).collect();
-            println!("[{}]", formatted.join(", "));
+        Value::Data(d) => {
+            let name = d.con.name.as_str();
+            match (name, d.args.as_slice()) {
+                ("True", []) => println!("True"),
+                ("False", []) => println!("False"),
+                ("()", []) => println!("()"),
+                _ => println!("{:?}", value),
+            }
         }
-        Value::Tuple(items) => {
-            let formatted: Vec<String> = items.iter().map(|v| format_value(v)).collect();
-            println!("({})", formatted.join(", "));
-        }
-        Value::Unit => println!("()"),
         _ => println!("{:?}", value),
     }
 }
@@ -973,18 +973,9 @@ fn format_value(value: &Value) -> String {
     match value {
         Value::Int(n) => n.to_string(),
         Value::Float(f) => f.to_string(),
-        Value::Bool(b) => if *b { "True" } else { "False" }.to_string(),
+        Value::Double(d) => d.to_string(),
         Value::Char(c) => format!("'{}'", c),
         Value::String(s) => format!("\"{}\"", s),
-        Value::List(items) => {
-            let formatted: Vec<String> = items.iter().map(|v| format_value(v)).collect();
-            format!("[{}]", formatted.join(", "))
-        }
-        Value::Tuple(items) => {
-            let formatted: Vec<String> = items.iter().map(|v| format_value(v)).collect();
-            format!("({})", formatted.join(", "))
-        }
-        Value::Unit => "()".to_string(),
         _ => format!("{:?}", value),
     }
 }

@@ -388,6 +388,8 @@ pub extern "C" fn bhc_get_profile() -> c_int {
         Profile::Server => 1,
         Profile::Numeric => 2,
         Profile::Edge => 3,
+        Profile::Realtime => 4,
+        Profile::Embedded => 5,
     }
 }
 

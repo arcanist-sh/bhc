@@ -576,7 +576,7 @@ pub fn requirements_compatible(req1: &VersionReq, req2: &VersionReq) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{PackageVersionInfo, RegistryConfig};
+    use crate::registry::{PackageIndex, PackageVersionInfo, RegistryConfig};
 
     // Mock registry for testing
     struct MockRegistry {

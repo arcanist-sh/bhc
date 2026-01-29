@@ -798,8 +798,13 @@ impl Compiler {
             CodegenOutputType::LlvmBitcode => "bc",
         };
 
-        // Create temp directory if needed
-        let output_dir = std::env::temp_dir().join("bhc");
+        // Create a unique temp directory to avoid collisions during parallel compilation
+        let unique_id = std::process::id();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let output_dir = std::env::temp_dir().join(format!("bhc-{}-{}", unique_id, timestamp));
         std::fs::create_dir_all(&output_dir)
             .map_err(|e| CompileError::CodegenError(format!("failed to create output dir: {}", e)))?;
 
@@ -1041,8 +1046,17 @@ impl Compiler {
         // Force the result to WHNF
         let forced = evaluator.force(result)?;
 
-        // Generate display string (deeply forces thunks)
-        let display = evaluator.display_value(&forced)?;
+        // Collect captured IO output and the value's display representation
+        let io_output = evaluator.take_io_output();
+        let value_display = evaluator.display_value(&forced)?;
+
+        // If there was IO output, use that as the display string;
+        // otherwise fall back to the value's display representation
+        let display = if io_output.is_empty() {
+            value_display
+        } else {
+            io_output
+        };
 
         Ok((forced, display))
     }

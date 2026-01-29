@@ -142,6 +142,10 @@ pub enum CompileError {
     /// Escape analysis failed (Embedded profile).
     #[error("embedded profile: {} allocations escape their defining scope", .0.len())]
     EscapeAnalysisFailed(Vec<bhc_core::escape::EscapingAllocation>),
+
+    /// Other compilation error.
+    #[error("{0}")]
+    Other(String),
 }
 
 /// Result type for compilation operations.
@@ -676,10 +680,25 @@ impl Compiler {
         let mut ctx = LowerContext::with_builtins();
 
         // Configure the lowering pass with search paths from session
+        let mut search_paths = self.session.options.import_paths.clone();
+
+        // Add stdlib path for Prelude resolution if configured
+        if let Some(ref stdlib_path) = self.session.options.stdlib_path {
+            search_paths.push(stdlib_path.clone());
+        }
+
+        // Also check BHC_STDLIB_PATH environment variable
+        if let Ok(env_path) = std::env::var("BHC_STDLIB_PATH") {
+            let env_path = Utf8PathBuf::from(env_path);
+            if !search_paths.contains(&env_path) {
+                search_paths.push(env_path);
+            }
+        }
+
         let config = bhc_lower::LowerConfig {
             include_builtins: true,
             warn_unused: self.session.options.warn_all,
-            search_paths: self.session.options.import_paths.clone(),
+            search_paths,
         };
 
         let hir = bhc_lower::lower_module(&mut ctx, ast, &config)?;
@@ -1311,6 +1330,139 @@ impl Compiler {
         } else {
             Err(CompileError::Multiple(errors))
         }
+    }
+
+    /// Compile multiple source files in dependency order.
+    ///
+    /// This method parses all files to extract import dependencies, computes a
+    /// topological ordering, and compiles modules in order so that each module's
+    /// dependencies are compiled first. Type information from previously compiled
+    /// modules is available to later ones through the import search paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any file fails to compile or if there is a circular
+    /// dependency between modules.
+    #[instrument(skip(self, paths))]
+    pub fn compile_files_ordered(
+        &self,
+        paths: impl IntoIterator<Item = impl AsRef<Utf8Path>>,
+    ) -> CompileResult<Vec<CompileOutput>> {
+        let paths: Vec<Utf8PathBuf> = paths
+            .into_iter()
+            .map(|p| p.as_ref().to_path_buf())
+            .collect();
+
+        if paths.len() <= 1 {
+            // Single file or empty — no ordering needed
+            return self.compile_files(paths);
+        }
+
+        // Phase 1: Parse all files to extract module names and imports
+        let mut module_info: Vec<(Utf8PathBuf, String, Vec<String>)> = Vec::new();
+        let file_id = FileId::new(0);
+
+        for path in &paths {
+            let unit = CompilationUnit::from_path(path.clone())?;
+            let ast = self.parse(&unit, file_id)?;
+
+            let module_name = ast.name.as_ref().map_or_else(
+                || unit.module_name.clone(),
+                |n| {
+                    n.parts
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                },
+            );
+
+            let imports: Vec<String> = ast
+                .imports
+                .iter()
+                .map(|imp| {
+                    imp.module
+                        .parts
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                })
+                .collect();
+
+            module_info.push((path.clone(), module_name, imports));
+        }
+
+        // Phase 2: Build dependency graph and topological sort
+        let ordered = Self::topological_sort(&module_info)?;
+
+        // Phase 3: Compile in dependency order
+        let mut outputs = Vec::new();
+        for idx in ordered {
+            let path = &module_info[idx].0;
+            let output = self.compile_file(path)?;
+            outputs.push(output);
+        }
+
+        Ok(outputs)
+    }
+
+    /// Compute a topological ordering of modules based on import dependencies.
+    ///
+    /// Returns indices into the input slice in compilation order (dependencies first).
+    fn topological_sort(
+        modules: &[(Utf8PathBuf, String, Vec<String>)],
+    ) -> CompileResult<Vec<usize>> {
+        // Build name -> index mapping
+        let name_to_idx: FxHashMap<&str, usize> = modules
+            .iter()
+            .enumerate()
+            .map(|(i, (_, name, _))| (name.as_str(), i))
+            .collect();
+
+        let n = modules.len();
+        // Compute in-degree for each module (only counting local dependencies)
+        let mut in_degree = vec![0usize; n];
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+        for (i, (_, _, imports)) in modules.iter().enumerate() {
+            for imp in imports {
+                if let Some(&dep_idx) = name_to_idx.get(imp.as_str()) {
+                    // dep_idx must be compiled before i
+                    adj[dep_idx].push(i);
+                    in_degree[i] += 1;
+                }
+                // External imports (not in our file set) are ignored
+            }
+        }
+
+        // Kahn's algorithm for topological sort
+        let mut queue: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
+        let mut result = Vec::with_capacity(n);
+
+        while let Some(node) = queue.pop() {
+            result.push(node);
+            for &neighbor in &adj[node] {
+                in_degree[neighbor] -= 1;
+                if in_degree[neighbor] == 0 {
+                    queue.push(neighbor);
+                }
+            }
+        }
+
+        if result.len() != n {
+            // Circular dependency detected
+            let unvisited: Vec<String> = (0..n)
+                .filter(|i| in_degree[*i] > 0)
+                .map(|i| modules[i].1.clone())
+                .collect();
+            return Err(CompileError::Other(format!(
+                "circular module dependency involving: {}",
+                unvisited.join(", ")
+            )));
+        }
+
+        Ok(result)
     }
 }
 

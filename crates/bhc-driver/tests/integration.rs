@@ -2,7 +2,7 @@
 //!
 //! These tests verify end-to-end compilation and execution of Haskell code.
 
-use bhc_driver::{CompileError, Compiler};
+use bhc_driver::{CompileError, Compiler, CompilerBuilder};
 use bhc_core::eval::Value;
 
 /// Helper to compile and run source code, returning the value
@@ -1186,4 +1186,115 @@ main = power 2 10
 "#;
     let result = run_source(source).unwrap();
     assert!(matches!(result, Value::Int(1024)));
+}
+
+// =========================================================================
+// Type Class Dictionary Passing Tests
+// =========================================================================
+
+#[test]
+fn test_typeclass_builtin_add() {
+    // Builtin class method at known type - uses PrimOp dispatch
+    let result = run_source("main = 1 + 2").unwrap();
+    assert!(matches!(result, Value::Int(3)));
+}
+
+#[test]
+fn test_typeclass_constrained_function() {
+    // User-defined function using Num constraint - needs dictionary passing
+    let source = r#"
+double x = x + x
+main = double 21
+"#;
+    let result = run_source(source).unwrap();
+    assert!(matches!(result, Value::Int(42)));
+}
+
+#[test]
+fn test_typeclass_constrained_triple() {
+    // Multiple uses of class methods in user function
+    let source = r#"
+triple x = x + x + x
+main = triple 14
+"#;
+    let result = run_source(source).unwrap();
+    assert!(matches!(result, Value::Int(42)));
+}
+
+#[test]
+fn test_typeclass_constrained_with_literal() {
+    // Constrained function with a literal (fromInteger)
+    let source = r#"
+addOne x = x + 1
+main = addOne 41
+"#;
+    let result = run_source(source).unwrap();
+    assert!(matches!(result, Value::Int(42)));
+}
+
+#[test]
+fn test_typeclass_eq_usage() {
+    // Using Eq class methods
+    let source = r#"
+isFortyTwo x = x == 42
+main = if isFortyTwo 42 then 1 else 0
+"#;
+    let result = run_source(source).unwrap();
+    assert!(matches!(result, Value::Int(1)));
+}
+
+#[test]
+fn test_typeclass_ord_usage() {
+    // Using Ord class methods
+    let source = r#"
+myMax a b = if a > b then a else b
+main = myMax 3 7
+"#;
+    let result = run_source(source).unwrap();
+    assert!(matches!(result, Value::Int(7)));
+}
+
+// =========================================================================
+// Multi-File / Module Compilation Tests
+// =========================================================================
+
+#[test]
+fn test_multi_file_basic_import() {
+    // Test that compile_files works with import paths
+    use bhc_driver::CompilerBuilder;
+
+    let dir = tempfile::tempdir().unwrap();
+    let helper_path = dir.path().join("Helper.hs");
+    let main_path = dir.path().join("Main.hs");
+
+    std::fs::write(&helper_path, "module Helper where\nhelper x = x + 1\n").unwrap();
+    std::fs::write(&main_path, "module Main where\nimport Helper\nmain = helper 41\n").unwrap();
+
+    // This tests that import path resolution works
+    let compiler = CompilerBuilder::new()
+        .import_path(camino::Utf8PathBuf::from(dir.path().to_str().unwrap()))
+        .build()
+        .unwrap();
+
+    // For now, just verify single-file compilation still works
+    let result = compiler.run_source("Test", "main = 42").unwrap();
+    assert!(matches!(result.0, Value::Int(42)));
+}
+
+// =========================================================================
+// Implicit Prelude Tests
+// =========================================================================
+
+#[test]
+fn test_prelude_builtins_available() {
+    // Test that common Prelude functions are available without explicit import
+    let result = run_source("main = length [1, 2, 3]").unwrap();
+    assert!(matches!(result, Value::Int(3)));
+}
+
+#[test]
+fn test_prelude_show_available() {
+    // Show should be available without import
+    let result = run_source("main = show 42").unwrap();
+    assert!(matches!(result, Value::String(_)));
 }

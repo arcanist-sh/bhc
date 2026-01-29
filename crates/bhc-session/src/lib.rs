@@ -162,6 +162,9 @@ pub struct Options {
     pub emit_kernel_report: bool,
     /// Dump intermediate representations.
     pub dump_ir: IrDumpOptions,
+    /// Path to the BHC standard library.
+    /// Used for implicit Prelude loading and module resolution.
+    pub stdlib_path: Option<Utf8PathBuf>,
 }
 
 impl Default for Options {
@@ -180,6 +183,7 @@ impl Default for Options {
             deny_warnings: false,
             emit_kernel_report: false,
             dump_ir: IrDumpOptions::default(),
+            stdlib_path: None,
         }
     }
 }

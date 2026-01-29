@@ -45,8 +45,53 @@ pub fn lower_module(
     // Create a module cache for this lowering session
     let mut cache = ModuleCache::new();
 
+    // Determine if we should inject an implicit Prelude import.
+    // Skip if:
+    // 1. The module is the Prelude itself
+    // 2. The module has {-# LANGUAGE NoImplicitPrelude #-}
+    // 3. The module already explicitly imports Prelude
+    let module_name_str = module.name.as_ref().map(|n| n.to_string());
+    let is_prelude_module = module_name_str.as_deref() == Some("Prelude")
+        || module_name_str.as_deref() == Some("BHC.Prelude");
+
+    let has_no_implicit_prelude = module.pragmas.iter().any(|p| {
+        if let ast::PragmaKind::Language(exts) = &p.kind {
+            exts.iter().any(|e| e.as_str() == "NoImplicitPrelude")
+        } else {
+            false
+        }
+    });
+
+    let already_imports_prelude = module.imports.iter().any(|imp| {
+        let name = imp.module.parts.iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        name == "Prelude"
+    });
+
+    let should_inject_prelude = !is_prelude_module
+        && !has_no_implicit_prelude
+        && !already_imports_prelude;
+
+    // Build the effective imports list, possibly prepending an implicit Prelude import
+    let mut effective_imports = Vec::new();
+    if should_inject_prelude {
+        effective_imports.push(ast::ImportDecl {
+            module: ast::ModuleName {
+                parts: vec![Symbol::intern("Prelude")],
+                span: Span::default(),
+            },
+            qualified: false,
+            alias: None,
+            spec: None,
+            span: Span::default(),
+        });
+    }
+    effective_imports.extend(module.imports.iter().cloned());
+
     // Process imports first to register aliases
-    process_imports(ctx, &module.imports, &config.search_paths, &mut cache);
+    process_imports(ctx, &effective_imports, &config.search_paths, &mut cache);
 
     // First pass: collect all top-level definitions
     collect_module_definitions(ctx, module);
@@ -201,6 +246,38 @@ fn process_imports(
 /// It registers common functions from well-known modules.
 fn register_standard_module_exports(ctx: &mut LowerContext, module_name: &str) {
     let exports: &[&str] = match module_name {
+        "Prelude" => &[
+            // Numeric
+            "+", "-", "*", "negate", "abs", "signum", "fromInteger", "fromIntegral",
+            "div", "mod", "even", "odd", "sum", "product",
+            // Comparison
+            "==", "/=", "<", "<=", ">", ">=", "compare", "min", "max",
+            // Boolean
+            "&&", "||", "not", "otherwise",
+            // List operations
+            "map", "filter", "head", "tail", "last", "init", "null", "length",
+            "reverse", "foldl", "foldl'", "foldr", "concat", "concatMap",
+            "zip", "zipWith", "unzip", "take", "drop", "splitAt",
+            "takeWhile", "dropWhile", "span", "break", "elem", "notElem",
+            "lookup", "replicate", "iterate", "repeat", "cycle",
+            "any", "all", "and", "or", "lines", "unlines", "words", "unwords",
+            "++",
+            // Tuple
+            "fst", "snd", "curry", "uncurry", "swap",
+            // Function
+            "id", "const", "flip", "$", ".", "seq", "error", "undefined",
+            // Maybe
+            "maybe", "fromMaybe", "isJust", "isNothing",
+            // Either
+            "either",
+            // IO
+            "putStrLn", "putStr", "print", "getLine",
+            ">>", ">>=", "return",
+            // Show
+            "show",
+            // Enum
+            "enumFromTo",
+        ],
         "Data.Map" | "Data.Map.Strict" => &[
             "empty", "singleton", "insert", "insertWith", "delete", "lookup",
             "member", "null", "size", "union", "intersection", "difference",

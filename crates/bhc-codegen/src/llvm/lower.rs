@@ -676,6 +676,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         let intset_is_subset = self.module.llvm_module().add_function("bhc_intset_is_subset_of", i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
         self.functions.insert(VarId::new(1159), intset_is_subset);
+
+        // Container iteration helpers (for toList/fromList)
+        // bhc_map_keys_count(map_ptr) -> i64
+        let map_keys_count = self.module.llvm_module().add_function("bhc_map_keys_count", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1160), map_keys_count);
+        // bhc_map_key_at(map_ptr, index) -> i64
+        let map_key_at = self.module.llvm_module().add_function("bhc_map_key_at", i64_type.fn_type(&[ptr_type.into(), i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1161), map_key_at);
+        // bhc_map_value_at(map_ptr, index) -> ptr
+        let map_value_at = self.module.llvm_module().add_function("bhc_map_value_at", ptr_type.fn_type(&[ptr_type.into(), i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1162), map_value_at);
+        // bhc_set_elem_count(set_ptr) -> i64
+        let set_elem_count = self.module.llvm_module().add_function("bhc_set_elem_count", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1163), set_elem_count);
+        // bhc_set_elem_at(set_ptr, index) -> i64
+        let set_elem_at = self.module.llvm_module().add_function("bhc_set_elem_at", i64_type.fn_type(&[ptr_type.into(), i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1164), set_elem_at);
     }
 
     // ========================================================================
@@ -1613,20 +1630,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.Map.intersection" => self.lower_builtin_map_intersection(args[0], args[1]),
                 "Data.Map.difference" => self.lower_builtin_map_difference(args[0], args[1]),
                 "Data.Map.isSubmapOf" => self.lower_builtin_map_is_submap_of(args[0], args[1]),
+                "Data.Map.map" => self.lower_builtin_map_map(args[0], args[1]),
+                "Data.Map.filter" => self.lower_builtin_map_filter(args[0], args[1]),
+                "Data.Map.foldr" => self.lower_builtin_map_foldr(args[0], args[1], args[2]),
+                "Data.Map.foldl" => self.lower_builtin_map_foldl(args[0], args[1], args[2]),
                 "Data.Map.insertWith" | "Data.Map.adjust" | "Data.Map.update" | "Data.Map.alter"
                 | "Data.Map.unionWith" | "Data.Map.unionWithKey" | "Data.Map.unions"
                 | "Data.Map.intersectionWith" | "Data.Map.differenceWith"
-                | "Data.Map.map" | "Data.Map.mapWithKey" | "Data.Map.mapKeys"
-                | "Data.Map.filter" | "Data.Map.filterWithKey"
-                | "Data.Map.foldr" | "Data.Map.foldl" | "Data.Map.foldrWithKey" | "Data.Map.foldlWithKey"
+                | "Data.Map.mapWithKey" | "Data.Map.mapKeys"
+                | "Data.Map.filterWithKey"
+                | "Data.Map.foldrWithKey" | "Data.Map.foldlWithKey"
                 | "Data.Map.fromListWith" => {
                     let arg_exprs: Vec<&Expr> = args.iter().copied().collect();
                     self.lower_builtin_container_ho_stub(&arg_exprs, name)
                 }
-                "Data.Map.keys" | "Data.Map.elems" | "Data.Map.assocs"
-                | "Data.Map.toList" | "Data.Map.toAscList" | "Data.Map.toDescList"
-                | "Data.Map.keysSet" => {
+                "Data.Map.keys" => self.lower_builtin_map_keys(args[0]),
+                "Data.Map.elems" => self.lower_builtin_map_elems(args[0]),
+                "Data.Map.assocs" | "Data.Map.toList" | "Data.Map.toAscList"
+                | "Data.Map.toDescList" => {
                     self.lower_builtin_map_to_list(args[0])
+                }
+                "Data.Map.keysSet" => {
+                    // keysSet returns a Set, not a list — stub for now
+                    self.lower_builtin_set_empty()
                 }
                 "Data.Map.fromList" => self.lower_builtin_map_from_list(args[0]),
 
@@ -1649,8 +1675,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.Set.deleteMax" => self.lower_builtin_set_delete_extremum(args[0], 1135, "set_delete_max"),
                 "Data.Set.lookupMin" => self.lower_builtin_set_lookup_extremum(args[0], 1132, "set_lookup_min"),
                 "Data.Set.lookupMax" => self.lower_builtin_set_lookup_extremum(args[0], 1133, "set_lookup_max"),
-                "Data.Set.unions" | "Data.Set.map" | "Data.Set.filter" | "Data.Set.partition"
-                | "Data.Set.foldr" | "Data.Set.foldl" => {
+                "Data.Set.map" => self.lower_builtin_set_map(args[0], args[1]),
+                "Data.Set.filter" => self.lower_builtin_set_filter(args[0], args[1]),
+                "Data.Set.foldr" => self.lower_builtin_set_foldr(args[0], args[1], args[2]),
+                "Data.Set.foldl" => self.lower_builtin_set_foldl(args[0], args[1], args[2]),
+                "Data.Set.unions" | "Data.Set.partition" => {
                     let arg_exprs: Vec<&Expr> = args.iter().copied().collect();
                     self.lower_builtin_container_ho_stub(&arg_exprs, name)
                 }
@@ -1688,7 +1717,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     let arg_exprs: Vec<&Expr> = args.iter().copied().collect();
                     self.lower_builtin_container_ho_stub(&arg_exprs, name)
                 }
-                "Data.IntMap.keys" | "Data.IntMap.elems" | "Data.IntMap.toList" | "Data.IntMap.toAscList" => {
+                "Data.IntMap.keys" => self.lower_builtin_map_keys(args[0]),
+                "Data.IntMap.elems" => self.lower_builtin_map_elems(args[0]),
+                "Data.IntMap.toList" | "Data.IntMap.toAscList" => {
                     self.lower_builtin_map_to_list(args[0])
                 }
                 "Data.IntMap.fromList" => self.lower_builtin_map_from_list(args[0]),
@@ -7583,6 +7614,868 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(self.int_to_ptr(result.into_int_value())?.into()))
     }
 
+
+    // ========================================================================
+    // Container Higher-Order Operations
+    // ========================================================================
+    //
+    // These iterate over container elements using RTS indexed access,
+    // calling closures via indirect LLVM calls.
+
+    /// Lower `Data.Map.map` — applies closure to each value, building new map.
+    fn lower_builtin_map_map(
+        &mut self,
+        fn_expr: &Expr,
+        map_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let fn_val = self.lower_expr(fn_expr)?
+            .ok_or_else(|| CodegenError::Internal("map_map: no function".to_string()))?;
+        let fn_ptr = self.value_to_ptr(fn_val)?;
+        let map_val = self.lower_expr(map_expr)?
+            .ok_or_else(|| CodegenError::Internal("map_map: no map".to_string()))?;
+        let map_ptr = self.value_to_ptr(map_val)?;
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        // Get element count
+        let count_fn = self.functions.get(&VarId::new(1160)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_keys_count not declared".to_string())
+        })?;
+        let count = self.builder()
+            .build_call(*count_fn, &[map_ptr.into()], "count")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+
+        let key_at_fn = *self.functions.get(&VarId::new(1161)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_key_at not declared".to_string())
+        })?;
+        let val_at_fn = *self.functions.get(&VarId::new(1162)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_value_at not declared".to_string())
+        })?;
+        let insert_fn = *self.functions.get(&VarId::new(1107)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_insert not declared".to_string())
+        })?;
+
+        // Start with empty map
+        let empty_fn = self.functions.get(&VarId::new(1100)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_empty not declared".to_string())
+        })?;
+        let empty_map = self.builder()
+            .build_call(*empty_fn, &[], "empty")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        // Extract function pointer from closure
+        let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
+        let call_fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "mm_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "mm_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "mm_exit");
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(ptr_type, "acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "idx")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SGE, idx, count, "done")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        // Loop body: get key and value, apply fn to value, insert (key, new_val)
+        self.builder().position_at_end(loop_body);
+        let key_i64 = self.builder()
+            .build_call(key_at_fn, &[map_ptr.into(), idx.into()], "key")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+        let val = self.builder()
+            .build_call(val_at_fn, &[map_ptr.into(), idx.into()], "val")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        // Call closure: fn_ptr(closure, val)
+        let mapped_val = self.builder()
+            .build_indirect_call(call_fn_type, closure_fn_ptr, &[fn_ptr.into(), val.into()], "mapped")
+            .map_err(|e| CodegenError::Internal(format!("indirect call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
+
+        let mapped_ptr = self.value_to_ptr(mapped_val)?;
+        let acc_ptr = acc_phi.as_basic_value().into_pointer_value();
+        let new_map = self.builder()
+            .build_call(insert_fn, &[key_i64.into(), mapped_ptr.into(), acc_ptr.into()], "new_map")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        let new_idx = self.builder()
+            .build_int_add(idx, tm.i64_type().const_int(1, false), "new_idx")
+            .map_err(|e| CodegenError::Internal(format!("add failed: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&empty_map, entry_block), (&new_map, loop_body)]);
+        idx_phi.add_incoming(&[(&tm.i64_type().const_zero(), entry_block), (&new_idx, loop_body)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
+    /// Lower `Data.Map.filter` — applies predicate to each value, keeping matches.
+    fn lower_builtin_map_filter(
+        &mut self,
+        fn_expr: &Expr,
+        map_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let fn_val = self.lower_expr(fn_expr)?
+            .ok_or_else(|| CodegenError::Internal("map_filter: no function".to_string()))?;
+        let fn_ptr = self.value_to_ptr(fn_val)?;
+        let map_val = self.lower_expr(map_expr)?
+            .ok_or_else(|| CodegenError::Internal("map_filter: no map".to_string()))?;
+        let map_ptr = self.value_to_ptr(map_val)?;
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let count_fn = self.functions.get(&VarId::new(1160)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_keys_count not declared".to_string())
+        })?;
+        let count = self.builder()
+            .build_call(*count_fn, &[map_ptr.into()], "count")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+
+        let key_at_fn = *self.functions.get(&VarId::new(1161)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_key_at not declared".to_string())
+        })?;
+        let val_at_fn = *self.functions.get(&VarId::new(1162)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_value_at not declared".to_string())
+        })?;
+        let insert_fn = *self.functions.get(&VarId::new(1107)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_insert not declared".to_string())
+        })?;
+
+        let empty_fn = self.functions.get(&VarId::new(1100)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_empty not declared".to_string())
+        })?;
+        let empty_map = self.builder()
+            .build_call(*empty_fn, &[], "empty")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
+        let call_fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "mf_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "mf_body");
+        let loop_insert = self.llvm_context().append_basic_block(current_fn, "mf_insert");
+        let loop_skip = self.llvm_context().append_basic_block(current_fn, "mf_skip");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "mf_exit");
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(ptr_type, "acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "idx")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SGE, idx, count, "done")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_body);
+        let key_i64 = self.builder()
+            .build_call(key_at_fn, &[map_ptr.into(), idx.into()], "key")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+        let val = self.builder()
+            .build_call(val_at_fn, &[map_ptr.into(), idx.into()], "val")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        // Call predicate: fn_ptr(closure, val) -> Bool (tag 0=False, 1=True)
+        let pred_result = self.builder()
+            .build_indirect_call(call_fn_type, closure_fn_ptr, &[fn_ptr.into(), val.into()], "pred")
+            .map_err(|e| CodegenError::Internal(format!("indirect call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
+
+        // Check if predicate returned True (non-zero tag)
+        let pred_ptr = self.value_to_ptr(pred_result)?;
+        let pred_tag = self.extract_adt_tag(pred_ptr)?;
+        let is_true = self.builder()
+            .build_int_compare(inkwell::IntPredicate::NE, pred_tag, tm.i64_type().const_zero(), "is_true")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(is_true, loop_insert, loop_skip)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        // Insert branch: add (key, val) to accumulator map
+        self.builder().position_at_end(loop_insert);
+        let val_ptr = self.value_to_ptr(val)?;
+        let acc_ptr_ins = acc_phi.as_basic_value().into_pointer_value();
+        let inserted = self.builder()
+            .build_call(insert_fn, &[key_i64.into(), val_ptr.into(), acc_ptr_ins.into()], "inserted")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+        self.builder().build_unconditional_branch(loop_skip)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        // Skip/merge block
+        self.builder().position_at_end(loop_skip);
+        let merge_phi = self.builder().build_phi(ptr_type, "merge_acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        merge_phi.add_incoming(&[(&inserted, loop_insert), (&acc_phi.as_basic_value(), loop_body)]);
+
+        let new_idx = self.builder()
+            .build_int_add(idx, tm.i64_type().const_int(1, false), "new_idx")
+            .map_err(|e| CodegenError::Internal(format!("add failed: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&empty_map, entry_block), (&merge_phi.as_basic_value(), loop_skip)]);
+        idx_phi.add_incoming(&[(&tm.i64_type().const_zero(), entry_block), (&new_idx, loop_skip)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
+    /// Lower `Data.Map.foldr` — right fold over map values.
+    fn lower_builtin_map_foldr(
+        &mut self,
+        fn_expr: &Expr,
+        init_expr: &Expr,
+        map_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let fn_val = self.lower_expr(fn_expr)?
+            .ok_or_else(|| CodegenError::Internal("map_foldr: no function".to_string()))?;
+        let fn_ptr = self.value_to_ptr(fn_val)?;
+        let init_val = self.lower_expr(init_expr)?
+            .ok_or_else(|| CodegenError::Internal("map_foldr: no init".to_string()))?;
+        let map_val = self.lower_expr(map_expr)?
+            .ok_or_else(|| CodegenError::Internal("map_foldr: no map".to_string()))?;
+        let map_ptr = self.value_to_ptr(map_val)?;
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let count_fn = self.functions.get(&VarId::new(1160)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_keys_count not declared".to_string())
+        })?;
+        let count = self.builder()
+            .build_call(*count_fn, &[map_ptr.into()], "count")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+
+        let val_at_fn = *self.functions.get(&VarId::new(1162)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_value_at not declared".to_string())
+        })?;
+
+        let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
+        // foldr fn takes 2 args: value, accumulator
+        let call_fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+
+        // Iterate backwards for right fold
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "mfr_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "mfr_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "mfr_exit");
+
+        let start_idx = self.builder()
+            .build_int_sub(count, tm.i64_type().const_int(1, false), "start_idx")
+            .map_err(|e| CodegenError::Internal(format!("sub failed: {:?}", e)))?;
+
+        let init_ptr = self.value_to_ptr(init_val)?;
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(ptr_type, "acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "idx")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SLT, idx, tm.i64_type().const_zero(), "done")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_body);
+        let val = self.builder()
+            .build_call(val_at_fn, &[map_ptr.into(), idx.into()], "val")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        // Call closure: fn_ptr(closure, val, acc)
+        let acc_val = acc_phi.as_basic_value();
+        let new_acc = self.builder()
+            .build_indirect_call(call_fn_type, closure_fn_ptr, &[fn_ptr.into(), val.into(), acc_val.into()], "new_acc")
+            .map_err(|e| CodegenError::Internal(format!("indirect call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
+
+        let new_idx = self.builder()
+            .build_int_sub(idx, tm.i64_type().const_int(1, false), "new_idx")
+            .map_err(|e| CodegenError::Internal(format!("sub failed: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&init_ptr, entry_block), (&new_acc, loop_body)]);
+        idx_phi.add_incoming(&[(&start_idx, entry_block), (&new_idx, loop_body)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
+    /// Lower `Data.Map.foldl'` — strict left fold over map values.
+    fn lower_builtin_map_foldl(
+        &mut self,
+        fn_expr: &Expr,
+        init_expr: &Expr,
+        map_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let fn_val = self.lower_expr(fn_expr)?
+            .ok_or_else(|| CodegenError::Internal("map_foldl: no function".to_string()))?;
+        let fn_ptr = self.value_to_ptr(fn_val)?;
+        let init_val = self.lower_expr(init_expr)?
+            .ok_or_else(|| CodegenError::Internal("map_foldl: no init".to_string()))?;
+        let map_val = self.lower_expr(map_expr)?
+            .ok_or_else(|| CodegenError::Internal("map_foldl: no map".to_string()))?;
+        let map_ptr = self.value_to_ptr(map_val)?;
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let count_fn = self.functions.get(&VarId::new(1160)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_keys_count not declared".to_string())
+        })?;
+        let count = self.builder()
+            .build_call(*count_fn, &[map_ptr.into()], "count")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+
+        let val_at_fn = *self.functions.get(&VarId::new(1162)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_value_at not declared".to_string())
+        })?;
+
+        let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
+        // foldl fn takes 2 args: accumulator, value
+        let call_fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "mfl_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "mfl_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "mfl_exit");
+
+        let init_ptr = self.value_to_ptr(init_val)?;
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(ptr_type, "acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "idx")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SGE, idx, count, "done")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_body);
+        let val = self.builder()
+            .build_call(val_at_fn, &[map_ptr.into(), idx.into()], "val")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        // Call closure: fn_ptr(closure, acc, val)
+        let acc_val = acc_phi.as_basic_value();
+        let new_acc = self.builder()
+            .build_indirect_call(call_fn_type, closure_fn_ptr, &[fn_ptr.into(), acc_val.into(), val.into()], "new_acc")
+            .map_err(|e| CodegenError::Internal(format!("indirect call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
+
+        let new_idx = self.builder()
+            .build_int_add(idx, tm.i64_type().const_int(1, false), "new_idx")
+            .map_err(|e| CodegenError::Internal(format!("add failed: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&init_ptr, entry_block), (&new_acc, loop_body)]);
+        idx_phi.add_incoming(&[(&tm.i64_type().const_zero(), entry_block), (&new_idx, loop_body)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
+    /// Lower `Data.Set.map` — applies closure to each element, building new set.
+    fn lower_builtin_set_map(
+        &mut self,
+        fn_expr: &Expr,
+        set_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let fn_val = self.lower_expr(fn_expr)?
+            .ok_or_else(|| CodegenError::Internal("set_map: no function".to_string()))?;
+        let fn_ptr = self.value_to_ptr(fn_val)?;
+        let set_val = self.lower_expr(set_expr)?
+            .ok_or_else(|| CodegenError::Internal("set_map: no set".to_string()))?;
+        let set_ptr = self.value_to_ptr(set_val)?;
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let count_fn = self.functions.get(&VarId::new(1163)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_elem_count not declared".to_string())
+        })?;
+        let count = self.builder()
+            .build_call(*count_fn, &[set_ptr.into()], "count")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+
+        let elem_at_fn = *self.functions.get(&VarId::new(1164)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_elem_at not declared".to_string())
+        })?;
+        let insert_fn = *self.functions.get(&VarId::new(1125)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_insert not declared".to_string())
+        })?;
+
+        let empty_fn = self.functions.get(&VarId::new(1120)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_empty not declared".to_string())
+        })?;
+        let empty_set = self.builder()
+            .build_call(*empty_fn, &[], "empty")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
+        let call_fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "sm_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "sm_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "sm_exit");
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(ptr_type, "acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "idx")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SGE, idx, count, "done")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_body);
+        let elem_i64 = self.builder()
+            .build_call(elem_at_fn, &[set_ptr.into(), idx.into()], "elem")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+        let elem_ptr = self.int_to_ptr(elem_i64)?;
+
+        // Call closure: fn_ptr(closure, elem)
+        let mapped_val = self.builder()
+            .build_indirect_call(call_fn_type, closure_fn_ptr, &[fn_ptr.into(), elem_ptr.into()], "mapped")
+            .map_err(|e| CodegenError::Internal(format!("indirect call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
+
+        let mapped_int = self.coerce_to_int(mapped_val)?;
+        let acc_ptr = acc_phi.as_basic_value().into_pointer_value();
+        let new_set = self.builder()
+            .build_call(insert_fn, &[mapped_int.into(), acc_ptr.into()], "new_set")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        let new_idx = self.builder()
+            .build_int_add(idx, tm.i64_type().const_int(1, false), "new_idx")
+            .map_err(|e| CodegenError::Internal(format!("add failed: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&empty_set, entry_block), (&new_set, loop_body)]);
+        idx_phi.add_incoming(&[(&tm.i64_type().const_zero(), entry_block), (&new_idx, loop_body)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
+    /// Lower `Data.Set.filter` — applies predicate, keeping matching elements.
+    fn lower_builtin_set_filter(
+        &mut self,
+        fn_expr: &Expr,
+        set_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let fn_val = self.lower_expr(fn_expr)?
+            .ok_or_else(|| CodegenError::Internal("set_filter: no function".to_string()))?;
+        let fn_ptr = self.value_to_ptr(fn_val)?;
+        let set_val = self.lower_expr(set_expr)?
+            .ok_or_else(|| CodegenError::Internal("set_filter: no set".to_string()))?;
+        let set_ptr = self.value_to_ptr(set_val)?;
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let count_fn = self.functions.get(&VarId::new(1163)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_elem_count not declared".to_string())
+        })?;
+        let count = self.builder()
+            .build_call(*count_fn, &[set_ptr.into()], "count")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+
+        let elem_at_fn = *self.functions.get(&VarId::new(1164)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_elem_at not declared".to_string())
+        })?;
+        let insert_fn = *self.functions.get(&VarId::new(1125)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_insert not declared".to_string())
+        })?;
+
+        let empty_fn = self.functions.get(&VarId::new(1120)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_empty not declared".to_string())
+        })?;
+        let empty_set = self.builder()
+            .build_call(*empty_fn, &[], "empty")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
+        let call_fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "sf_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "sf_body");
+        let loop_insert = self.llvm_context().append_basic_block(current_fn, "sf_insert");
+        let loop_skip = self.llvm_context().append_basic_block(current_fn, "sf_skip");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "sf_exit");
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(ptr_type, "acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "idx")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SGE, idx, count, "done")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_body);
+        let elem_i64 = self.builder()
+            .build_call(elem_at_fn, &[set_ptr.into(), idx.into()], "elem")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+        let elem_ptr = self.int_to_ptr(elem_i64)?;
+
+        // Call predicate: fn_ptr(closure, elem)
+        let pred_result = self.builder()
+            .build_indirect_call(call_fn_type, closure_fn_ptr, &[fn_ptr.into(), elem_ptr.into()], "pred")
+            .map_err(|e| CodegenError::Internal(format!("indirect call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
+
+        let pred_ptr = self.value_to_ptr(pred_result)?;
+        let pred_tag = self.extract_adt_tag(pred_ptr)?;
+        let is_true = self.builder()
+            .build_int_compare(inkwell::IntPredicate::NE, pred_tag, tm.i64_type().const_zero(), "is_true")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(is_true, loop_insert, loop_skip)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_insert);
+        let acc_ptr_ins = acc_phi.as_basic_value().into_pointer_value();
+        let inserted = self.builder()
+            .build_call(insert_fn, &[elem_i64.into(), acc_ptr_ins.into()], "inserted")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+        self.builder().build_unconditional_branch(loop_skip)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_skip);
+        let merge_phi = self.builder().build_phi(ptr_type, "merge_acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        merge_phi.add_incoming(&[(&inserted, loop_insert), (&acc_phi.as_basic_value(), loop_body)]);
+
+        let new_idx = self.builder()
+            .build_int_add(idx, tm.i64_type().const_int(1, false), "new_idx")
+            .map_err(|e| CodegenError::Internal(format!("add failed: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&empty_set, entry_block), (&merge_phi.as_basic_value(), loop_skip)]);
+        idx_phi.add_incoming(&[(&tm.i64_type().const_zero(), entry_block), (&new_idx, loop_skip)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
+    /// Lower `Data.Set.foldr` — right fold over set elements.
+    fn lower_builtin_set_foldr(
+        &mut self,
+        fn_expr: &Expr,
+        init_expr: &Expr,
+        set_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let fn_val = self.lower_expr(fn_expr)?
+            .ok_or_else(|| CodegenError::Internal("set_foldr: no function".to_string()))?;
+        let fn_ptr = self.value_to_ptr(fn_val)?;
+        let init_val = self.lower_expr(init_expr)?
+            .ok_or_else(|| CodegenError::Internal("set_foldr: no init".to_string()))?;
+        let set_val = self.lower_expr(set_expr)?
+            .ok_or_else(|| CodegenError::Internal("set_foldr: no set".to_string()))?;
+        let set_ptr = self.value_to_ptr(set_val)?;
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let count_fn = self.functions.get(&VarId::new(1163)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_elem_count not declared".to_string())
+        })?;
+        let count = self.builder()
+            .build_call(*count_fn, &[set_ptr.into()], "count")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+
+        let elem_at_fn = *self.functions.get(&VarId::new(1164)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_elem_at not declared".to_string())
+        })?;
+
+        let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
+        let call_fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "sfr_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "sfr_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "sfr_exit");
+
+        let start_idx = self.builder()
+            .build_int_sub(count, tm.i64_type().const_int(1, false), "start_idx")
+            .map_err(|e| CodegenError::Internal(format!("sub failed: {:?}", e)))?;
+
+        let init_ptr = self.value_to_ptr(init_val)?;
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(ptr_type, "acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "idx")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SLT, idx, tm.i64_type().const_zero(), "done")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_body);
+        let elem_i64 = self.builder()
+            .build_call(elem_at_fn, &[set_ptr.into(), idx.into()], "elem")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+        let elem_ptr = self.int_to_ptr(elem_i64)?;
+
+        let acc_val = acc_phi.as_basic_value();
+        let new_acc = self.builder()
+            .build_indirect_call(call_fn_type, closure_fn_ptr, &[fn_ptr.into(), elem_ptr.into(), acc_val.into()], "new_acc")
+            .map_err(|e| CodegenError::Internal(format!("indirect call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
+
+        let new_idx = self.builder()
+            .build_int_sub(idx, tm.i64_type().const_int(1, false), "new_idx")
+            .map_err(|e| CodegenError::Internal(format!("sub failed: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&init_ptr, entry_block), (&new_acc, loop_body)]);
+        idx_phi.add_incoming(&[(&start_idx, entry_block), (&new_idx, loop_body)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
+    /// Lower `Data.Set.foldl'` — strict left fold over set elements.
+    fn lower_builtin_set_foldl(
+        &mut self,
+        fn_expr: &Expr,
+        init_expr: &Expr,
+        set_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let fn_val = self.lower_expr(fn_expr)?
+            .ok_or_else(|| CodegenError::Internal("set_foldl: no function".to_string()))?;
+        let fn_ptr = self.value_to_ptr(fn_val)?;
+        let init_val = self.lower_expr(init_expr)?
+            .ok_or_else(|| CodegenError::Internal("set_foldl: no init".to_string()))?;
+        let set_val = self.lower_expr(set_expr)?
+            .ok_or_else(|| CodegenError::Internal("set_foldl: no set".to_string()))?;
+        let set_ptr = self.value_to_ptr(set_val)?;
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let count_fn = self.functions.get(&VarId::new(1163)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_elem_count not declared".to_string())
+        })?;
+        let count = self.builder()
+            .build_call(*count_fn, &[set_ptr.into()], "count")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+
+        let elem_at_fn = *self.functions.get(&VarId::new(1164)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_elem_at not declared".to_string())
+        })?;
+
+        let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
+        let call_fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "sfl_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "sfl_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "sfl_exit");
+
+        let init_ptr = self.value_to_ptr(init_val)?;
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(ptr_type, "acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "idx")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SGE, idx, count, "done")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_body);
+        let elem_i64 = self.builder()
+            .build_call(elem_at_fn, &[set_ptr.into(), idx.into()], "elem")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+        let elem_ptr = self.int_to_ptr(elem_i64)?;
+
+        let acc_val = acc_phi.as_basic_value();
+        let new_acc = self.builder()
+            .build_indirect_call(call_fn_type, closure_fn_ptr, &[fn_ptr.into(), acc_val.into(), elem_ptr.into()], "new_acc")
+            .map_err(|e| CodegenError::Internal(format!("indirect call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
+
+        let new_idx = self.builder()
+            .build_int_add(idx, tm.i64_type().const_int(1, false), "new_idx")
+            .map_err(|e| CodegenError::Internal(format!("add failed: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&init_ptr, entry_block), (&new_acc, loop_body)]);
+        idx_phi.add_incoming(&[(&tm.i64_type().const_zero(), entry_block), (&new_idx, loop_body)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
+
     /// Lower container operations that need higher-order functions (stub).
     /// Covers: insertWith, adjust, update, alter, unionWith, unionWithKey,
     /// unions, intersectionWith, differenceWith, map, mapWithKey, mapKeys,
@@ -7612,23 +8505,330 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         map_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        // Stub: evaluate map and return it as-is (not a proper list conversion)
-        // Full implementation would iterate the map and construct a Haskell list
         let map_val = self.lower_expr(map_expr)?
             .ok_or_else(|| CodegenError::Internal("map_toList: no map".to_string()))?;
-        // Return an empty list as stub
-        let nil = self.alloc_adt(0, 0)?;
-        let _ = map_val;
-        Ok(Some(nil.into()))
+        let map_ptr = self.value_to_ptr(map_val)?;
+
+        let tm = self.type_mapper();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        // Get element count
+        let count_fn = self.functions.get(&VarId::new(1160)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_keys_count not declared".to_string())
+        })?;
+        let count = self.builder()
+            .build_call(*count_fn, &[map_ptr.into()], "map_count")
+            .map_err(|e| CodegenError::Internal(format!("map_count call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("map_count: returned void".to_string()))?
+            .into_int_value();
+
+        let key_at_fn = *self.functions.get(&VarId::new(1161)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_key_at not declared".to_string())
+        })?;
+        let val_at_fn = *self.functions.get(&VarId::new(1162)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_value_at not declared".to_string())
+        })?;
+
+        // Build list backwards: iterate from (count-1) down to 0, consing (key,value) tuples
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "mtl_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "mtl_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "mtl_exit");
+
+        let nil = self.build_nil()?;
+        let start_idx = self.builder()
+            .build_int_sub(count, tm.i64_type().const_int(1, false), "start_idx")
+            .map_err(|e| CodegenError::Internal(format!("sub failed: {:?}", e)))?;
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        // Loop header with PHI nodes
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(tm.ptr_type(), "acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "idx")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SLT, idx, tm.i64_type().const_zero(), "done")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        // Loop body: get key and value at index, build (key, value) tuple, cons onto acc
+        self.builder().position_at_end(loop_body);
+        let key_i64 = self.builder()
+            .build_call(key_at_fn, &[map_ptr.into(), idx.into()], "key")
+            .map_err(|e| CodegenError::Internal(format!("key_at call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("key_at: void".to_string()))?
+            .into_int_value();
+        let val_ptr = self.builder()
+            .build_call(val_at_fn, &[map_ptr.into(), idx.into()], "val")
+            .map_err(|e| CodegenError::Internal(format!("val_at call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("val_at: void".to_string()))?;
+
+        // Build a (key, value) pair as a 2-tuple ADT (tag=0, arity=2)
+        let key_ptr = self.int_to_ptr(key_i64)?;
+        let pair = self.alloc_adt(0, 2)?;
+        self.store_adt_field(pair, 2, 0, key_ptr.into())?;
+        self.store_adt_field(pair, 2, 1, val_ptr)?;
+
+        // Cons pair onto accumulator
+        let new_acc = self.build_cons(pair.into(), acc_phi.as_basic_value())?;
+        let new_idx = self.builder()
+            .build_int_sub(idx, tm.i64_type().const_int(1, false), "new_idx")
+            .map_err(|e| CodegenError::Internal(format!("sub failed: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&nil, entry_block), (&new_acc, loop_body)]);
+        idx_phi.add_incoming(&[(&start_idx, entry_block), (&new_idx, loop_body)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
     }
 
-    /// Lower `Data.Map.fromList` (stub - creates empty map).
+    /// Lower `Data.Map.fromList` — iterates the list, inserting each (k,v) pair.
     fn lower_builtin_map_from_list(
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let _ = self.lower_expr(list_expr)?;
-        self.lower_builtin_map_empty()
+        let list_val = self.lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("map_fromList: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+
+        let tm = self.type_mapper();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        // Start with empty map
+        let empty_fn = self.functions.get(&VarId::new(1100)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_empty not declared".to_string())
+        })?;
+        let empty_map = self.builder()
+            .build_call(*empty_fn, &[], "empty_map")
+            .map_err(|e| CodegenError::Internal(format!("empty call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("empty: void".to_string()))?;
+
+        let insert_fn = *self.functions.get(&VarId::new(1107)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_insert not declared".to_string())
+        })?;
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "mfl_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "mfl_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "mfl_exit");
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        // Loop header
+        self.builder().position_at_end(loop_header);
+        let map_phi = self.builder().build_phi(tm.ptr_type(), "map_acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let cur_phi = self.builder().build_phi(tm.ptr_type(), "cur_list")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        // Check if current list is nil (tag == 0)
+        let cur_ptr = cur_phi.as_basic_value().into_pointer_value();
+        let tag = self.builder()
+            .build_load(tm.i64_type(), cur_ptr, "tag")
+            .map_err(|e| CodegenError::Internal(format!("load tag failed: {:?}", e)))?
+            .into_int_value();
+        let is_nil = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, tm.i64_type().const_zero(), "is_nil")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(is_nil, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        // Loop body: extract (key, value) pair from head, insert into map
+        self.builder().position_at_end(loop_body);
+        // head = field 0 of cons cell (a pair)
+        let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
+        // tail = field 1 of cons cell
+        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+
+        // pair is an ADT with (key, value) — extract key (field 0) and value (field 1)
+        let key_ptr = self.extract_adt_field(head_ptr, 2, 0)?;
+        let val_ptr = self.extract_adt_field(head_ptr, 2, 1)?;
+
+        let key_int = self.coerce_to_int(key_ptr.into())?;
+        let map_ptr = map_phi.as_basic_value().into_pointer_value();
+
+        let new_map = self.builder()
+            .build_call(insert_fn, &[key_int.into(), val_ptr.into(), map_ptr.into()], "new_map")
+            .map_err(|e| CodegenError::Internal(format!("insert call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("insert: void".to_string()))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        map_phi.add_incoming(&[(&empty_map, entry_block), (&new_map, loop_body)]);
+        cur_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, loop_body)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(map_phi.as_basic_value()))
+    }
+
+    /// Lower `Data.Map.keys` — returns list of keys only.
+    fn lower_builtin_map_keys(
+        &mut self,
+        map_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let map_val = self.lower_expr(map_expr)?
+            .ok_or_else(|| CodegenError::Internal("map_keys: no map".to_string()))?;
+        let map_ptr = self.value_to_ptr(map_val)?;
+
+        let tm = self.type_mapper();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let count_fn = self.functions.get(&VarId::new(1160)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_keys_count not declared".to_string())
+        })?;
+        let count = self.builder()
+            .build_call(*count_fn, &[map_ptr.into()], "map_count")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+
+        let key_at_fn = *self.functions.get(&VarId::new(1161)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_key_at not declared".to_string())
+        })?;
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "mk_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "mk_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "mk_exit");
+
+        let nil = self.build_nil()?;
+        let start_idx = self.builder()
+            .build_int_sub(count, tm.i64_type().const_int(1, false), "start_idx")
+            .map_err(|e| CodegenError::Internal(format!("sub failed: {:?}", e)))?;
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(tm.ptr_type(), "acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "idx")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SLT, idx, tm.i64_type().const_zero(), "done")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_body);
+        let key_i64 = self.builder()
+            .build_call(key_at_fn, &[map_ptr.into(), idx.into()], "key")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+        let key_ptr = self.int_to_ptr(key_i64)?;
+
+        let new_acc = self.build_cons(key_ptr.into(), acc_phi.as_basic_value())?;
+        let new_idx = self.builder()
+            .build_int_sub(idx, tm.i64_type().const_int(1, false), "new_idx")
+            .map_err(|e| CodegenError::Internal(format!("sub failed: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&nil, entry_block), (&new_acc, loop_body)]);
+        idx_phi.add_incoming(&[(&start_idx, entry_block), (&new_idx, loop_body)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
+    /// Lower `Data.Map.elems` — returns list of values only.
+    fn lower_builtin_map_elems(
+        &mut self,
+        map_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let map_val = self.lower_expr(map_expr)?
+            .ok_or_else(|| CodegenError::Internal("map_elems: no map".to_string()))?;
+        let map_ptr = self.value_to_ptr(map_val)?;
+
+        let tm = self.type_mapper();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let count_fn = self.functions.get(&VarId::new(1160)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_keys_count not declared".to_string())
+        })?;
+        let count = self.builder()
+            .build_call(*count_fn, &[map_ptr.into()], "map_count")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+
+        let val_at_fn = *self.functions.get(&VarId::new(1162)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_value_at not declared".to_string())
+        })?;
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "me_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "me_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "me_exit");
+
+        let nil = self.build_nil()?;
+        let start_idx = self.builder()
+            .build_int_sub(count, tm.i64_type().const_int(1, false), "start_idx")
+            .map_err(|e| CodegenError::Internal(format!("sub failed: {:?}", e)))?;
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(tm.ptr_type(), "acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "idx")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SLT, idx, tm.i64_type().const_zero(), "done")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_body);
+        let val = self.builder()
+            .build_call(val_at_fn, &[map_ptr.into(), idx.into()], "val")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        let new_acc = self.build_cons(val, acc_phi.as_basic_value())?;
+        let new_idx = self.builder()
+            .build_int_sub(idx, tm.i64_type().const_int(1, false), "new_idx")
+            .map_err(|e| CodegenError::Internal(format!("sub failed: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&nil, entry_block), (&new_acc, loop_body)]);
+        idx_phi.add_incoming(&[(&start_idx, entry_block), (&new_idx, loop_body)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
     }
 
     // --- Data.Set handlers ---
@@ -7869,18 +9069,156 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         set_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let _ = self.lower_expr(set_expr)?;
-        let nil = self.alloc_adt(0, 0)?;
-        Ok(Some(nil.into()))
+        let set_val = self.lower_expr(set_expr)?
+            .ok_or_else(|| CodegenError::Internal("set_toList: no set".to_string()))?;
+        let set_ptr = self.value_to_ptr(set_val)?;
+
+        let tm = self.type_mapper();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        // Get element count
+        let count_fn = self.functions.get(&VarId::new(1163)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_elem_count not declared".to_string())
+        })?;
+        let count = self.builder()
+            .build_call(*count_fn, &[set_ptr.into()], "set_count")
+            .map_err(|e| CodegenError::Internal(format!("set_count call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("set_count: void".to_string()))?
+            .into_int_value();
+
+        let elem_at_fn = *self.functions.get(&VarId::new(1164)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_elem_at not declared".to_string())
+        })?;
+
+        // Build list backwards: iterate from (count-1) down to 0
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "stl_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "stl_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "stl_exit");
+
+        let nil = self.build_nil()?;
+        let start_idx = self.builder()
+            .build_int_sub(count, tm.i64_type().const_int(1, false), "start_idx")
+            .map_err(|e| CodegenError::Internal(format!("sub failed: {:?}", e)))?;
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(tm.ptr_type(), "acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "idx")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SLT, idx, tm.i64_type().const_zero(), "done")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        // Loop body: get element at index, cons onto accumulator
+        self.builder().position_at_end(loop_body);
+        let elem_i64 = self.builder()
+            .build_call(elem_at_fn, &[set_ptr.into(), idx.into()], "elem")
+            .map_err(|e| CodegenError::Internal(format!("elem_at call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("elem_at: void".to_string()))?
+            .into_int_value();
+        let elem_ptr = self.int_to_ptr(elem_i64)?;
+
+        let new_acc = self.build_cons(elem_ptr.into(), acc_phi.as_basic_value())?;
+        let new_idx = self.builder()
+            .build_int_sub(idx, tm.i64_type().const_int(1, false), "new_idx")
+            .map_err(|e| CodegenError::Internal(format!("sub failed: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&nil, entry_block), (&new_acc, loop_body)]);
+        idx_phi.add_incoming(&[(&start_idx, entry_block), (&new_idx, loop_body)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
     }
 
-    /// Lower `Data.Set.fromList` (stub).
+    /// Lower `Data.Set.fromList` — iterates list, inserting each element.
     fn lower_builtin_set_from_list(
         &mut self,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let _ = self.lower_expr(list_expr)?;
-        self.lower_builtin_set_empty()
+        let list_val = self.lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("set_fromList: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+
+        let tm = self.type_mapper();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        // Start with empty set
+        let empty_fn = self.functions.get(&VarId::new(1120)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_empty not declared".to_string())
+        })?;
+        let empty_set = self.builder()
+            .build_call(*empty_fn, &[], "empty_set")
+            .map_err(|e| CodegenError::Internal(format!("empty call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("empty: void".to_string()))?;
+
+        let insert_fn = *self.functions.get(&VarId::new(1125)).ok_or_else(|| {
+            CodegenError::Internal("bhc_set_insert not declared".to_string())
+        })?;
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "sfl_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "sfl_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "sfl_exit");
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_header);
+        let set_phi = self.builder().build_phi(tm.ptr_type(), "set_acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let cur_phi = self.builder().build_phi(tm.ptr_type(), "cur_list")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        // Check if current list is nil (tag == 0)
+        let cur_ptr = cur_phi.as_basic_value().into_pointer_value();
+        let tag = self.builder()
+            .build_load(tm.i64_type(), cur_ptr, "tag")
+            .map_err(|e| CodegenError::Internal(format!("load tag failed: {:?}", e)))?
+            .into_int_value();
+        let is_nil = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, tm.i64_type().const_zero(), "is_nil")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(is_nil, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        // Loop body: extract head element, insert into set
+        self.builder().position_at_end(loop_body);
+        let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
+        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+
+        let elem_int = self.coerce_to_int(head_ptr.into())?;
+        let set_ptr = set_phi.as_basic_value().into_pointer_value();
+
+        let new_set = self.builder()
+            .build_call(insert_fn, &[elem_int.into(), set_ptr.into()], "new_set")
+            .map_err(|e| CodegenError::Internal(format!("insert call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("insert: void".to_string()))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        set_phi.add_incoming(&[(&empty_set, entry_block), (&new_set, loop_body)]);
+        cur_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, loop_body)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(set_phi.as_basic_value()))
     }
 
     /// Lower `Data.Set.lookupMin` / `lookupMax` - returns Maybe.

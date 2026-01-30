@@ -5,12 +5,71 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bhc_intern::Symbol;
 
 use crate::uarray::UArray;
 use crate::{DataCon, Expr, Var};
+
+/// The kind of a file handle (System.IO).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleKind {
+    Stdin,
+    Stdout,
+    Stderr,
+    File,
+}
+
+/// A file handle wrapping a Rust file or stdio stream.
+pub struct HandleValue {
+    /// The kind of handle.
+    pub kind: HandleKind,
+    /// The underlying file, if any (None for closed handles).
+    pub file: Mutex<Option<std::fs::File>>,
+    /// Whether this is a read or write handle.
+    pub readable: bool,
+    /// Whether this is writable.
+    pub writable: bool,
+}
+
+impl HandleValue {
+    /// Create a handle for stdin.
+    pub fn stdin() -> Self {
+        Self { kind: HandleKind::Stdin, file: Mutex::new(None), readable: true, writable: false }
+    }
+    /// Create a handle for stdout.
+    pub fn stdout() -> Self {
+        Self { kind: HandleKind::Stdout, file: Mutex::new(None), readable: false, writable: true }
+    }
+    /// Create a handle for stderr.
+    pub fn stderr() -> Self {
+        Self { kind: HandleKind::Stderr, file: Mutex::new(None), readable: false, writable: true }
+    }
+    /// Create a file handle.
+    pub fn from_file(file: std::fs::File, readable: bool, writable: bool) -> Self {
+        Self { kind: HandleKind::File, file: Mutex::new(Some(file)), readable, writable }
+    }
+}
+
+impl fmt::Debug for HandleValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<handle {:?}>", self.kind)
+    }
+}
+
+impl Clone for HandleValue {
+    fn clone(&self) -> Self {
+        // Handles are shared via Arc, so cloning just copies metadata.
+        // The file itself is not cloned — stdin/stdout/stderr are singletons.
+        Self {
+            kind: self.kind,
+            file: Mutex::new(None), // Cloned handles lose file reference
+            readable: self.readable,
+            writable: self.writable,
+        }
+    }
+}
 
 /// A runtime value produced by evaluating Core IR.
 #[derive(Clone)]
@@ -66,6 +125,12 @@ pub enum Value {
 
     /// An integer set (Data.IntSet) backed by BTreeSet<i64>.
     IntSet(Arc<BTreeSet<i64>>),
+
+    /// A file handle (System.IO).
+    Handle(Arc<HandleValue>),
+
+    /// A mutable reference (Data.IORef).
+    IORef(Arc<Mutex<Value>>),
 }
 
 impl fmt::Debug for Value {
@@ -96,6 +161,8 @@ impl fmt::Debug for Value {
             Self::Set(s) => write!(f, "Set[size={}]", s.len()),
             Self::IntMap(m) => write!(f, "IntMap[size={}]", m.len()),
             Self::IntSet(s) => write!(f, "IntSet[size={}]", s.len()),
+            Self::Handle(h) => write!(f, "{h:?}"),
+            Self::IORef(_) => write!(f, "<IORef>"),
         }
     }
 }
@@ -728,6 +795,222 @@ pub enum PrimOp {
     /// interact :: (String -> String) -> IO ()
     Interact,
 
+    // System.IO handle operations
+    /// stdin :: Handle
+    Stdin,
+    /// stdout :: Handle
+    Stdout,
+    /// stderr :: Handle
+    Stderr,
+    /// openFile :: FilePath -> IOMode -> IO Handle
+    OpenFile,
+    /// hClose :: Handle -> IO ()
+    HClose,
+    /// hGetChar :: Handle -> IO Char
+    HGetChar,
+    /// hGetLine :: Handle -> IO String
+    HGetLine,
+    /// hGetContents :: Handle -> IO String
+    HGetContents,
+    /// hPutChar :: Handle -> Char -> IO ()
+    HPutChar,
+    /// hPutStr :: Handle -> String -> IO ()
+    HPutStr,
+    /// hPutStrLn :: Handle -> String -> IO ()
+    HPutStrLn,
+    /// hPrint :: Show a => Handle -> a -> IO ()
+    HPrint,
+    /// hFlush :: Handle -> IO ()
+    HFlush,
+    /// hIsEOF :: Handle -> IO Bool
+    HIsEOF,
+    /// hSetBuffering :: Handle -> BufferMode -> IO ()
+    HSetBuffering,
+    /// hGetBuffering :: Handle -> IO BufferMode
+    HGetBuffering,
+    /// hSeek :: Handle -> SeekMode -> Integer -> IO ()
+    HSeek,
+    /// hTell :: Handle -> IO Integer
+    HTell,
+    /// hFileSize :: Handle -> IO Integer
+    HFileSize,
+    /// withFile :: FilePath -> IOMode -> (Handle -> IO r) -> IO r
+    WithFile,
+
+    // Data.IORef operations
+    /// newIORef :: a -> IO (IORef a)
+    NewIORef,
+    /// readIORef :: IORef a -> IO a
+    ReadIORef,
+    /// writeIORef :: IORef a -> a -> IO ()
+    WriteIORef,
+    /// modifyIORef :: IORef a -> (a -> a) -> IO ()
+    ModifyIORef,
+    /// modifyIORef' :: IORef a -> (a -> a) -> IO ()
+    ModifyIORefStrict,
+    /// atomicModifyIORef :: IORef a -> (a -> (a, b)) -> IO b
+    AtomicModifyIORef,
+    /// atomicModifyIORef' :: IORef a -> (a -> (a, b)) -> IO b
+    AtomicModifyIORefStrict,
+
+    // System.Exit operations
+    /// exitSuccess :: IO a
+    ExitSuccess,
+    /// exitFailure :: IO a
+    ExitFailure,
+    /// exitWith :: ExitCode -> IO a
+    ExitWith,
+
+    // System.Environment operations
+    /// getArgs :: IO [String]
+    GetArgs,
+    /// getProgName :: IO String
+    GetProgName,
+    /// getEnv :: String -> IO String
+    GetEnv,
+    /// lookupEnv :: String -> IO (Maybe String)
+    LookupEnv,
+    /// setEnv :: String -> String -> IO ()
+    SetEnv,
+
+    // System.Directory operations
+    /// doesFileExist :: FilePath -> IO Bool
+    DoesFileExist,
+    /// doesDirectoryExist :: FilePath -> IO Bool
+    DoesDirectoryExist,
+    /// createDirectory :: FilePath -> IO ()
+    CreateDirectory,
+    /// createDirectoryIfMissing :: Bool -> FilePath -> IO ()
+    CreateDirectoryIfMissing,
+    /// removeFile :: FilePath -> IO ()
+    RemoveFile,
+    /// removeDirectory :: FilePath -> IO ()
+    RemoveDirectory,
+    /// getCurrentDirectory :: IO String
+    GetCurrentDirectory,
+    /// setCurrentDirectory :: FilePath -> IO ()
+    SetCurrentDirectory,
+
+    // ---- Control.Monad ----
+    /// when :: Bool -> IO () -> IO ()
+    MonadWhen,
+    /// unless :: Bool -> IO () -> IO ()
+    MonadUnless,
+    /// guard :: Bool -> [()]  (for list monad / MonadPlus)
+    MonadGuard,
+    /// void :: Functor f => f a -> f ()
+    MonadVoid,
+    /// join :: Monad m => m (m a) -> m a
+    MonadJoin,
+    /// ap :: Monad m => m (a -> b) -> m a -> m b
+    MonadAp,
+    /// liftM :: Monad m => (a -> b) -> m a -> m b
+    LiftM,
+    /// liftM2 :: Monad m => (a -> b -> c) -> m a -> m b -> m c
+    LiftM2,
+    /// liftM3 :: Monad m => (a -> b -> c -> d) -> m a -> m b -> m c -> m d
+    LiftM3,
+    /// liftM4 :: (a -> b -> c -> d -> e) -> m a -> m b -> m c -> m d -> m e
+    LiftM4,
+    /// liftM5 :: (a -> b -> c -> d -> e -> f) -> m a -> m b -> m c -> m d -> m e -> m f
+    LiftM5,
+    /// filterM :: Monad m => (a -> m Bool) -> [a] -> m [a]
+    FilterM,
+    /// mapAndUnzipM :: Monad m => (a -> m (b, c)) -> [a] -> m ([b], [c])
+    MapAndUnzipM,
+    /// zipWithM :: Monad m => (a -> b -> m c) -> [a] -> [b] -> m [c]
+    ZipWithM,
+    /// zipWithM_ :: Monad m => (a -> b -> m c) -> [a] -> [b] -> m ()
+    ZipWithM_,
+    /// foldM :: Monad m => (b -> a -> m b) -> b -> [a] -> m b
+    FoldM,
+    /// foldM_ :: Monad m => (b -> a -> m b) -> b -> [a] -> m ()
+    FoldM_,
+    /// replicateM :: Monad m => Int -> m a -> m [a]
+    ReplicateM,
+    /// replicateM_ :: Monad m => Int -> m a -> m ()
+    ReplicateM_,
+    /// forever :: Monad m => m a -> m b
+    Forever,
+    /// mzero :: MonadPlus m => m a
+    Mzero,
+    /// mplus :: MonadPlus m => m a -> m a -> m a
+    Mplus,
+    /// msum :: MonadPlus m => [m a] -> m a
+    Msum,
+    /// mfilter :: MonadPlus m => (a -> Bool) -> m a -> m a
+    Mfilter,
+    /// (>=>) :: Monad m => (a -> m b) -> (b -> m c) -> a -> m c
+    KleisliCompose,
+    /// (<=<) :: Monad m => (b -> m c) -> (a -> m b) -> a -> m c
+    KleisliComposeFlip,
+
+    // ---- Control.Applicative ----
+    /// liftA :: Applicative f => (a -> b) -> f a -> f b
+    LiftA,
+    /// liftA2 :: Applicative f => (a -> b -> c) -> f a -> f b -> f c
+    LiftA2,
+    /// liftA3 :: Applicative f => (a -> b -> c -> d) -> f a -> f b -> f c -> f d
+    LiftA3,
+    /// optional :: Alternative f => f a -> f (Maybe a)
+    Optional,
+
+    // ---- Control.Exception ----
+    /// catch :: IO a -> (SomeException -> IO a) -> IO a
+    ExnCatch,
+    /// try :: IO a -> IO (Either SomeException a)
+    ExnTry,
+    /// throw :: SomeException -> a
+    ExnThrow,
+    /// throwIO :: SomeException -> IO a
+    ExnThrowIO,
+    /// bracket :: IO a -> (a -> IO b) -> (a -> IO c) -> IO c
+    ExnBracket,
+    /// bracket_ :: IO a -> IO b -> IO c -> IO c
+    ExnBracket_,
+    /// bracketOnError :: IO a -> (a -> IO b) -> (a -> IO c) -> IO c
+    ExnBracketOnError,
+    /// finally :: IO a -> IO b -> IO a
+    ExnFinally,
+    /// onException :: IO a -> IO b -> IO a
+    ExnOnException,
+    /// handle :: (SomeException -> IO a) -> IO a -> IO a
+    ExnHandle,
+    /// handleJust :: (SomeException -> Maybe b) -> (b -> IO a) -> IO a -> IO a
+    ExnHandleJust,
+    /// evaluate :: a -> IO a
+    ExnEvaluate,
+    /// mask :: ((IO a -> IO a) -> IO b) -> IO b
+    ExnMask,
+    /// mask_ :: IO a -> IO a
+    ExnMask_,
+    /// uninterruptibleMask :: ((IO a -> IO a) -> IO b) -> IO b
+    ExnUninterruptibleMask,
+    /// uninterruptibleMask_ :: IO a -> IO a
+    ExnUninterruptibleMask_,
+
+    // ---- Control.Concurrent ----
+    /// forkIO :: IO () -> IO ThreadId
+    ForkIO,
+    /// threadDelay :: Int -> IO ()
+    ThreadDelay,
+    /// myThreadId :: IO ThreadId
+    MyThreadId,
+    /// newMVar :: a -> IO (MVar a)
+    NewMVar,
+    /// newEmptyMVar :: IO (MVar a)
+    NewEmptyMVar,
+    /// takeMVar :: MVar a -> IO a
+    TakeMVar,
+    /// putMVar :: MVar a -> a -> IO ()
+    PutMVar,
+    /// readMVar :: MVar a -> IO a
+    ReadMVar,
+    /// throwTo :: ThreadId -> SomeException -> IO ()
+    ThrowTo,
+    /// killThread :: ThreadId -> IO ()
+    KillThread,
+
     // Prelude: otherwise and misc
     /// otherwise :: Bool (always True)
     Otherwise,
@@ -1169,7 +1452,19 @@ impl PrimOp {
             | Self::MapEmpty
             | Self::SetEmpty
             | Self::IntMapEmpty
-            | Self::IntSetEmpty => 0,
+            | Self::IntSetEmpty
+            // IO arity 0
+            | Self::Stdin
+            | Self::Stdout
+            | Self::Stderr
+            | Self::ExitSuccess
+            | Self::ExitFailure
+            | Self::GetArgs
+            | Self::GetProgName
+            | Self::GetCurrentDirectory
+            | Self::Mzero
+            | Self::MyThreadId
+            | Self::NewEmptyMVar => 0,
             // Arity 1
             Self::NegInt
             | Self::NegDouble
@@ -1315,7 +1610,43 @@ impl PrimOp {
             | Self::IntSetSize
             | Self::IntSetSingleton
             | Self::IntSetToList
-            | Self::IntSetFromList => 1,
+            | Self::IntSetFromList
+            // IO arity 1
+            | Self::HClose
+            | Self::HGetChar
+            | Self::HGetLine
+            | Self::HGetContents
+            | Self::HFlush
+            | Self::HIsEOF
+            | Self::HGetBuffering
+            | Self::HTell
+            | Self::HFileSize
+            | Self::NewIORef
+            | Self::ReadIORef
+            | Self::ExitWith
+            | Self::GetEnv
+            | Self::LookupEnv
+            | Self::DoesFileExist
+            | Self::DoesDirectoryExist
+            | Self::CreateDirectory
+            | Self::RemoveFile
+            | Self::RemoveDirectory
+            | Self::SetCurrentDirectory
+            | Self::MonadVoid
+            | Self::MonadJoin
+            | Self::Forever
+            | Self::Optional
+            | Self::ExnThrow
+            | Self::ExnThrowIO
+            | Self::ExnEvaluate
+            | Self::ExnMask_
+            | Self::ExnUninterruptibleMask_
+            | Self::ForkIO
+            | Self::ThreadDelay
+            | Self::NewMVar
+            | Self::TakeMVar
+            | Self::ReadMVar
+            | Self::KillThread => 1,
             // Arity 2
             Self::UArrayMap
             | Self::UArrayRange
@@ -1432,7 +1763,42 @@ impl PrimOp {
             | Self::IntSetIntersection
             | Self::IntSetDifference
             | Self::IntSetIsSubsetOf
-            | Self::IntSetFilter => 2,
+            | Self::IntSetFilter
+            // IO arity 2
+            | Self::OpenFile
+            | Self::HPutChar
+            | Self::HPutStr
+            | Self::HPutStrLn
+            | Self::HPrint
+            | Self::HSetBuffering
+            | Self::WriteIORef
+            | Self::ModifyIORef
+            | Self::ModifyIORefStrict
+            | Self::AtomicModifyIORef
+            | Self::AtomicModifyIORefStrict
+            | Self::SetEnv
+            | Self::CreateDirectoryIfMissing
+            | Self::MonadWhen
+            | Self::MonadUnless
+            | Self::MonadGuard
+            | Self::MonadAp
+            | Self::LiftM
+            | Self::LiftA
+            | Self::FilterM
+            | Self::ReplicateM
+            | Self::ReplicateM_
+            | Self::Mplus
+            | Self::Msum
+            | Self::Mfilter
+            | Self::ExnCatch
+            | Self::ExnTry
+            | Self::ExnFinally
+            | Self::ExnOnException
+            | Self::ExnHandle
+            | Self::ExnMask
+            | Self::ExnUninterruptibleMask
+            | Self::PutMVar
+            | Self::ThrowTo => 2,
             // Arity 3
             Self::UArrayZipWith
             | Self::UArrayFold
@@ -1477,11 +1843,33 @@ impl PrimOp {
             | Self::MapUnionWithKey
             | Self::MapFoldrWithKey
             | Self::MapFoldlWithKey
-            | Self::IntMapFoldlWithKey => 3,
+            | Self::IntMapFoldlWithKey
+            | Self::LiftM2
+            | Self::LiftA2
+            | Self::MapAndUnzipM
+            | Self::ZipWithM
+            | Self::ZipWithM_
+            | Self::FoldM
+            | Self::FoldM_
+            | Self::KleisliCompose
+            | Self::KleisliComposeFlip
+            | Self::ExnBracket
+            | Self::ExnBracket_
+            | Self::ExnBracketOnError
+            | Self::ExnHandleJust
+            // IO arity 3
+            | Self::WithFile
+            | Self::HSeek => 3,
             // Arity 4
             Self::ZipWith3
             | Self::MapInsertWith
-            | Self::IntMapInsertWith => 4,
+            | Self::IntMapInsertWith
+            | Self::LiftM3
+            | Self::LiftA3 => 4,
+            // Arity 5
+            Self::LiftM4 => 5,
+            // Arity 6
+            Self::LiftM5 => 6,
             // Default arity 2 for arithmetic/comparison ops
             _ => 2,
         }
@@ -1636,6 +2024,54 @@ impl PrimOp {
             "writeFile" => Some(Self::WriteFile),
             "appendFile" => Some(Self::AppendFile),
             "interact" => Some(Self::Interact),
+            // System.IO handles
+            "stdin" => Some(Self::Stdin),
+            "stdout" => Some(Self::Stdout),
+            "stderr" => Some(Self::Stderr),
+            "openFile" | "System.IO.openFile" => Some(Self::OpenFile),
+            "hClose" | "System.IO.hClose" => Some(Self::HClose),
+            "hGetChar" | "System.IO.hGetChar" => Some(Self::HGetChar),
+            "hGetLine" | "System.IO.hGetLine" => Some(Self::HGetLine),
+            "hGetContents" | "System.IO.hGetContents" => Some(Self::HGetContents),
+            "hPutChar" | "System.IO.hPutChar" => Some(Self::HPutChar),
+            "hPutStr" | "System.IO.hPutStr" => Some(Self::HPutStr),
+            "hPutStrLn" | "System.IO.hPutStrLn" => Some(Self::HPutStrLn),
+            "hPrint" | "System.IO.hPrint" => Some(Self::HPrint),
+            "hFlush" | "System.IO.hFlush" => Some(Self::HFlush),
+            "hIsEOF" | "System.IO.hIsEOF" => Some(Self::HIsEOF),
+            "hSetBuffering" | "System.IO.hSetBuffering" => Some(Self::HSetBuffering),
+            "hGetBuffering" | "System.IO.hGetBuffering" => Some(Self::HGetBuffering),
+            "hSeek" | "System.IO.hSeek" => Some(Self::HSeek),
+            "hTell" | "System.IO.hTell" => Some(Self::HTell),
+            "hFileSize" | "System.IO.hFileSize" => Some(Self::HFileSize),
+            "withFile" | "System.IO.withFile" => Some(Self::WithFile),
+            // Data.IORef
+            "newIORef" | "Data.IORef.newIORef" => Some(Self::NewIORef),
+            "readIORef" | "Data.IORef.readIORef" => Some(Self::ReadIORef),
+            "writeIORef" | "Data.IORef.writeIORef" => Some(Self::WriteIORef),
+            "modifyIORef" | "Data.IORef.modifyIORef" => Some(Self::ModifyIORef),
+            "modifyIORef'" | "Data.IORef.modifyIORef'" => Some(Self::ModifyIORefStrict),
+            "atomicModifyIORef" | "Data.IORef.atomicModifyIORef" => Some(Self::AtomicModifyIORef),
+            "atomicModifyIORef'" | "Data.IORef.atomicModifyIORef'" => Some(Self::AtomicModifyIORefStrict),
+            // System.Exit
+            "exitSuccess" | "System.Exit.exitSuccess" => Some(Self::ExitSuccess),
+            "exitFailure" | "System.Exit.exitFailure" => Some(Self::ExitFailure),
+            "exitWith" | "System.Exit.exitWith" => Some(Self::ExitWith),
+            // System.Environment
+            "getArgs" | "System.Environment.getArgs" => Some(Self::GetArgs),
+            "getProgName" | "System.Environment.getProgName" => Some(Self::GetProgName),
+            "getEnv" | "System.Environment.getEnv" => Some(Self::GetEnv),
+            "lookupEnv" | "System.Environment.lookupEnv" => Some(Self::LookupEnv),
+            "setEnv" | "System.Environment.setEnv" => Some(Self::SetEnv),
+            // System.Directory
+            "doesFileExist" | "System.Directory.doesFileExist" => Some(Self::DoesFileExist),
+            "doesDirectoryExist" | "System.Directory.doesDirectoryExist" => Some(Self::DoesDirectoryExist),
+            "createDirectory" | "System.Directory.createDirectory" => Some(Self::CreateDirectory),
+            "createDirectoryIfMissing" | "System.Directory.createDirectoryIfMissing" => Some(Self::CreateDirectoryIfMissing),
+            "removeFile" | "System.Directory.removeFile" => Some(Self::RemoveFile),
+            "removeDirectory" | "System.Directory.removeDirectory" => Some(Self::RemoveDirectory),
+            "getCurrentDirectory" | "System.Directory.getCurrentDirectory" => Some(Self::GetCurrentDirectory),
+            "setCurrentDirectory" | "System.Directory.setCurrentDirectory" => Some(Self::SetCurrentDirectory),
             // Misc Prelude
             "otherwise" => Some(Self::Otherwise),
             "until" => Some(Self::Until),
@@ -1843,6 +2279,66 @@ impl PrimOp {
             "Data.IntSet.foldr" | "IntSet.foldr" => Some(Self::IntSetFoldr),
             "Data.IntSet.toList" | "IntSet.toList" => Some(Self::IntSetToList),
             "Data.IntSet.fromList" | "IntSet.fromList" => Some(Self::IntSetFromList),
+            // Control.Monad
+            "when" | "Control.Monad.when" => Some(Self::MonadWhen),
+            "unless" | "Control.Monad.unless" => Some(Self::MonadUnless),
+            "guard" | "Control.Monad.guard" => Some(Self::MonadGuard),
+            "void" | "Control.Monad.void" | "Data.Functor.void" => Some(Self::MonadVoid),
+            "join" | "Control.Monad.join" => Some(Self::MonadJoin),
+            "ap" | "Control.Monad.ap" => Some(Self::MonadAp),
+            "liftM" | "Control.Monad.liftM" => Some(Self::LiftM),
+            "liftM2" | "Control.Monad.liftM2" => Some(Self::LiftM2),
+            "liftM3" | "Control.Monad.liftM3" => Some(Self::LiftM3),
+            "liftM4" | "Control.Monad.liftM4" => Some(Self::LiftM4),
+            "liftM5" | "Control.Monad.liftM5" => Some(Self::LiftM5),
+            "filterM" | "Control.Monad.filterM" => Some(Self::FilterM),
+            "mapAndUnzipM" | "Control.Monad.mapAndUnzipM" => Some(Self::MapAndUnzipM),
+            "zipWithM" | "Control.Monad.zipWithM" => Some(Self::ZipWithM),
+            "zipWithM_" | "Control.Monad.zipWithM_" => Some(Self::ZipWithM_),
+            "foldM" | "Control.Monad.foldM" => Some(Self::FoldM),
+            "foldM_" | "Control.Monad.foldM_" => Some(Self::FoldM_),
+            "replicateM" | "Control.Monad.replicateM" => Some(Self::ReplicateM),
+            "replicateM_" | "Control.Monad.replicateM_" => Some(Self::ReplicateM_),
+            "forever" | "Control.Monad.forever" => Some(Self::Forever),
+            "mzero" | "Control.Monad.mzero" => Some(Self::Mzero),
+            "mplus" | "Control.Monad.mplus" => Some(Self::Mplus),
+            "msum" | "Control.Monad.msum" => Some(Self::Msum),
+            "mfilter" | "Control.Monad.mfilter" => Some(Self::Mfilter),
+            ">=>" | "Control.Monad.>=>" => Some(Self::KleisliCompose),
+            "<=<" | "Control.Monad.<=<" => Some(Self::KleisliComposeFlip),
+            // Control.Applicative
+            "liftA" | "Control.Applicative.liftA" => Some(Self::LiftA),
+            "liftA2" | "Control.Applicative.liftA2" => Some(Self::LiftA2),
+            "liftA3" | "Control.Applicative.liftA3" => Some(Self::LiftA3),
+            "optional" | "Control.Applicative.optional" => Some(Self::Optional),
+            // Control.Exception
+            "catch" | "Control.Exception.catch" => Some(Self::ExnCatch),
+            "try" | "Control.Exception.try" => Some(Self::ExnTry),
+            "throw" | "Control.Exception.throw" => Some(Self::ExnThrow),
+            "throwIO" | "Control.Exception.throwIO" => Some(Self::ExnThrowIO),
+            "bracket" | "Control.Exception.bracket" => Some(Self::ExnBracket),
+            "bracket_" | "Control.Exception.bracket_" => Some(Self::ExnBracket_),
+            "bracketOnError" | "Control.Exception.bracketOnError" => Some(Self::ExnBracketOnError),
+            "finally" | "Control.Exception.finally" => Some(Self::ExnFinally),
+            "onException" | "Control.Exception.onException" => Some(Self::ExnOnException),
+            "handle" | "Control.Exception.handle" => Some(Self::ExnHandle),
+            "handleJust" | "Control.Exception.handleJust" => Some(Self::ExnHandleJust),
+            "evaluate" | "Control.Exception.evaluate" => Some(Self::ExnEvaluate),
+            "mask" | "Control.Exception.mask" => Some(Self::ExnMask),
+            "mask_" | "Control.Exception.mask_" => Some(Self::ExnMask_),
+            "uninterruptibleMask" | "Control.Exception.uninterruptibleMask" => Some(Self::ExnUninterruptibleMask),
+            "uninterruptibleMask_" | "Control.Exception.uninterruptibleMask_" => Some(Self::ExnUninterruptibleMask_),
+            // Control.Concurrent
+            "forkIO" | "Control.Concurrent.forkIO" => Some(Self::ForkIO),
+            "threadDelay" | "Control.Concurrent.threadDelay" => Some(Self::ThreadDelay),
+            "myThreadId" | "Control.Concurrent.myThreadId" => Some(Self::MyThreadId),
+            "newMVar" | "Control.Concurrent.MVar.newMVar" => Some(Self::NewMVar),
+            "newEmptyMVar" | "Control.Concurrent.MVar.newEmptyMVar" => Some(Self::NewEmptyMVar),
+            "takeMVar" | "Control.Concurrent.MVar.takeMVar" => Some(Self::TakeMVar),
+            "putMVar" | "Control.Concurrent.MVar.putMVar" => Some(Self::PutMVar),
+            "readMVar" | "Control.Concurrent.MVar.readMVar" => Some(Self::ReadMVar),
+            "throwTo" | "Control.Concurrent.throwTo" | "Control.Exception.throwTo" => Some(Self::ThrowTo),
+            "killThread" | "Control.Concurrent.killThread" => Some(Self::KillThread),
             _ => None,
         }
     }

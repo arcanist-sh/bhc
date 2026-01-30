@@ -922,6 +922,29 @@ impl LowerContext {
             "Data.IntSet.toList",
             "Data.IntSet.fromList",
             // Note: X11/System.Posix stubs are now in define_stubs()
+            // ---- Phase 3: IO PrimOps (genuinely new) ----
+            "hGetChar",
+            "hPutChar",
+            "hSetBuffering",
+            "hGetBuffering",
+            "hSeek",
+            "hTell",
+            "hFileSize",
+            "setEnv",
+            // ---- Phase 4: Control.* PrimOps (genuinely new) ----
+            "liftM3",
+            "liftM4",
+            "liftM5",
+            "mzero",
+            "mplus",
+            "mfilter",
+            ">=>",
+            "<=<",
+            "liftA",
+            "liftA2",
+            "liftA3",
+            "myThreadId",
+            "throwTo",
         ];
 
         for name in builtin_funcs {
@@ -1261,9 +1284,7 @@ impl LowerContext {
             "openEndedPipe",
             // System.Locale
             "setLocale",
-            // System.IO (stubs)
-            "hSetBuffering",
-            "hFlush",
+            // System.IO (stubs) - hSetBuffering and hFlush moved to builtin_funcs
             "flush",
             // Data.Map/Set qualified functions (stubs)
             "M.fromListWith",

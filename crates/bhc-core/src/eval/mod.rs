@@ -23,11 +23,11 @@ mod env;
 mod value;
 
 pub use env::Env;
-pub use value::{Closure, DataValue, OrdValue, PrimOp, Thunk, Value};
+pub use value::{Closure, DataValue, HandleKind, HandleValue, OrdValue, PrimOp, Thunk, Value};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bhc_index::Idx;
 use bhc_intern::Symbol;
@@ -574,6 +574,226 @@ impl Evaluator {
         ];
 
         for (name, op) in container_ops {
+            prims.insert(Symbol::intern(name), Value::PrimOp(*op));
+        }
+
+        // Register IO PrimOps (System.IO, Data.IORef, System.Exit, System.Environment, System.Directory)
+        let io_ops: &[(&str, PrimOp)] = &[
+            // System.IO handles
+            ("stdin", PrimOp::Stdin),
+            ("stdout", PrimOp::Stdout),
+            ("stderr", PrimOp::Stderr),
+            ("openFile", PrimOp::OpenFile),
+            ("System.IO.openFile", PrimOp::OpenFile),
+            ("hClose", PrimOp::HClose),
+            ("System.IO.hClose", PrimOp::HClose),
+            ("hGetChar", PrimOp::HGetChar),
+            ("System.IO.hGetChar", PrimOp::HGetChar),
+            ("hGetLine", PrimOp::HGetLine),
+            ("System.IO.hGetLine", PrimOp::HGetLine),
+            ("hGetContents", PrimOp::HGetContents),
+            ("System.IO.hGetContents", PrimOp::HGetContents),
+            ("hPutChar", PrimOp::HPutChar),
+            ("System.IO.hPutChar", PrimOp::HPutChar),
+            ("hPutStr", PrimOp::HPutStr),
+            ("System.IO.hPutStr", PrimOp::HPutStr),
+            ("hPutStrLn", PrimOp::HPutStrLn),
+            ("System.IO.hPutStrLn", PrimOp::HPutStrLn),
+            ("hPrint", PrimOp::HPrint),
+            ("System.IO.hPrint", PrimOp::HPrint),
+            ("hFlush", PrimOp::HFlush),
+            ("System.IO.hFlush", PrimOp::HFlush),
+            ("hIsEOF", PrimOp::HIsEOF),
+            ("System.IO.hIsEOF", PrimOp::HIsEOF),
+            ("hSetBuffering", PrimOp::HSetBuffering),
+            ("System.IO.hSetBuffering", PrimOp::HSetBuffering),
+            ("hGetBuffering", PrimOp::HGetBuffering),
+            ("System.IO.hGetBuffering", PrimOp::HGetBuffering),
+            ("hSeek", PrimOp::HSeek),
+            ("System.IO.hSeek", PrimOp::HSeek),
+            ("hTell", PrimOp::HTell),
+            ("System.IO.hTell", PrimOp::HTell),
+            ("hFileSize", PrimOp::HFileSize),
+            ("System.IO.hFileSize", PrimOp::HFileSize),
+            ("withFile", PrimOp::WithFile),
+            ("System.IO.withFile", PrimOp::WithFile),
+            // Data.IORef
+            ("newIORef", PrimOp::NewIORef),
+            ("Data.IORef.newIORef", PrimOp::NewIORef),
+            ("readIORef", PrimOp::ReadIORef),
+            ("Data.IORef.readIORef", PrimOp::ReadIORef),
+            ("writeIORef", PrimOp::WriteIORef),
+            ("Data.IORef.writeIORef", PrimOp::WriteIORef),
+            ("modifyIORef", PrimOp::ModifyIORef),
+            ("Data.IORef.modifyIORef", PrimOp::ModifyIORef),
+            ("modifyIORef'", PrimOp::ModifyIORefStrict),
+            ("Data.IORef.modifyIORef'", PrimOp::ModifyIORefStrict),
+            ("atomicModifyIORef", PrimOp::AtomicModifyIORef),
+            ("Data.IORef.atomicModifyIORef", PrimOp::AtomicModifyIORef),
+            ("atomicModifyIORef'", PrimOp::AtomicModifyIORefStrict),
+            ("Data.IORef.atomicModifyIORef'", PrimOp::AtomicModifyIORefStrict),
+            // System.Exit
+            ("exitSuccess", PrimOp::ExitSuccess),
+            ("System.Exit.exitSuccess", PrimOp::ExitSuccess),
+            ("exitFailure", PrimOp::ExitFailure),
+            ("System.Exit.exitFailure", PrimOp::ExitFailure),
+            ("exitWith", PrimOp::ExitWith),
+            ("System.Exit.exitWith", PrimOp::ExitWith),
+            // System.Environment
+            ("getArgs", PrimOp::GetArgs),
+            ("System.Environment.getArgs", PrimOp::GetArgs),
+            ("getProgName", PrimOp::GetProgName),
+            ("System.Environment.getProgName", PrimOp::GetProgName),
+            ("getEnv", PrimOp::GetEnv),
+            ("System.Environment.getEnv", PrimOp::GetEnv),
+            ("lookupEnv", PrimOp::LookupEnv),
+            ("System.Environment.lookupEnv", PrimOp::LookupEnv),
+            ("setEnv", PrimOp::SetEnv),
+            ("System.Environment.setEnv", PrimOp::SetEnv),
+            // System.Directory
+            ("doesFileExist", PrimOp::DoesFileExist),
+            ("System.Directory.doesFileExist", PrimOp::DoesFileExist),
+            ("doesDirectoryExist", PrimOp::DoesDirectoryExist),
+            ("System.Directory.doesDirectoryExist", PrimOp::DoesDirectoryExist),
+            ("createDirectory", PrimOp::CreateDirectory),
+            ("System.Directory.createDirectory", PrimOp::CreateDirectory),
+            ("createDirectoryIfMissing", PrimOp::CreateDirectoryIfMissing),
+            ("System.Directory.createDirectoryIfMissing", PrimOp::CreateDirectoryIfMissing),
+            ("removeFile", PrimOp::RemoveFile),
+            ("System.Directory.removeFile", PrimOp::RemoveFile),
+            ("removeDirectory", PrimOp::RemoveDirectory),
+            ("System.Directory.removeDirectory", PrimOp::RemoveDirectory),
+            ("getCurrentDirectory", PrimOp::GetCurrentDirectory),
+            ("System.Directory.getCurrentDirectory", PrimOp::GetCurrentDirectory),
+            ("setCurrentDirectory", PrimOp::SetCurrentDirectory),
+            ("System.Directory.setCurrentDirectory", PrimOp::SetCurrentDirectory),
+        ];
+        for (name, op) in io_ops {
+            prims.insert(Symbol::intern(name), Value::PrimOp(*op));
+        }
+
+        // Control.* operations
+        let control_ops: &[(&str, PrimOp)] = &[
+            // Control.Monad
+            ("when", PrimOp::MonadWhen),
+            ("Control.Monad.when", PrimOp::MonadWhen),
+            ("unless", PrimOp::MonadUnless),
+            ("Control.Monad.unless", PrimOp::MonadUnless),
+            ("guard", PrimOp::MonadGuard),
+            ("Control.Monad.guard", PrimOp::MonadGuard),
+            ("void", PrimOp::MonadVoid),
+            ("Control.Monad.void", PrimOp::MonadVoid),
+            ("Data.Functor.void", PrimOp::MonadVoid),
+            ("join", PrimOp::MonadJoin),
+            ("Control.Monad.join", PrimOp::MonadJoin),
+            ("ap", PrimOp::MonadAp),
+            ("Control.Monad.ap", PrimOp::MonadAp),
+            ("liftM", PrimOp::LiftM),
+            ("Control.Monad.liftM", PrimOp::LiftM),
+            ("liftM2", PrimOp::LiftM2),
+            ("Control.Monad.liftM2", PrimOp::LiftM2),
+            ("liftM3", PrimOp::LiftM3),
+            ("Control.Monad.liftM3", PrimOp::LiftM3),
+            ("liftM4", PrimOp::LiftM4),
+            ("Control.Monad.liftM4", PrimOp::LiftM4),
+            ("liftM5", PrimOp::LiftM5),
+            ("Control.Monad.liftM5", PrimOp::LiftM5),
+            ("filterM", PrimOp::FilterM),
+            ("Control.Monad.filterM", PrimOp::FilterM),
+            ("mapAndUnzipM", PrimOp::MapAndUnzipM),
+            ("Control.Monad.mapAndUnzipM", PrimOp::MapAndUnzipM),
+            ("zipWithM", PrimOp::ZipWithM),
+            ("Control.Monad.zipWithM", PrimOp::ZipWithM),
+            ("zipWithM_", PrimOp::ZipWithM_),
+            ("Control.Monad.zipWithM_", PrimOp::ZipWithM_),
+            ("foldM", PrimOp::FoldM),
+            ("Control.Monad.foldM", PrimOp::FoldM),
+            ("foldM_", PrimOp::FoldM_),
+            ("Control.Monad.foldM_", PrimOp::FoldM_),
+            ("replicateM", PrimOp::ReplicateM),
+            ("Control.Monad.replicateM", PrimOp::ReplicateM),
+            ("replicateM_", PrimOp::ReplicateM_),
+            ("Control.Monad.replicateM_", PrimOp::ReplicateM_),
+            ("forever", PrimOp::Forever),
+            ("Control.Monad.forever", PrimOp::Forever),
+            ("mzero", PrimOp::Mzero),
+            ("Control.Monad.mzero", PrimOp::Mzero),
+            ("mplus", PrimOp::Mplus),
+            ("Control.Monad.mplus", PrimOp::Mplus),
+            ("msum", PrimOp::Msum),
+            ("Control.Monad.msum", PrimOp::Msum),
+            ("mfilter", PrimOp::Mfilter),
+            ("Control.Monad.mfilter", PrimOp::Mfilter),
+            (">=>", PrimOp::KleisliCompose),
+            ("Control.Monad.>=>", PrimOp::KleisliCompose),
+            ("<=<", PrimOp::KleisliComposeFlip),
+            ("Control.Monad.<=<", PrimOp::KleisliComposeFlip),
+            // Control.Applicative
+            ("liftA", PrimOp::LiftA),
+            ("Control.Applicative.liftA", PrimOp::LiftA),
+            ("liftA2", PrimOp::LiftA2),
+            ("Control.Applicative.liftA2", PrimOp::LiftA2),
+            ("liftA3", PrimOp::LiftA3),
+            ("Control.Applicative.liftA3", PrimOp::LiftA3),
+            ("optional", PrimOp::Optional),
+            ("Control.Applicative.optional", PrimOp::Optional),
+            // Control.Exception
+            ("catch", PrimOp::ExnCatch),
+            ("Control.Exception.catch", PrimOp::ExnCatch),
+            ("try", PrimOp::ExnTry),
+            ("Control.Exception.try", PrimOp::ExnTry),
+            ("throw", PrimOp::ExnThrow),
+            ("Control.Exception.throw", PrimOp::ExnThrow),
+            ("throwIO", PrimOp::ExnThrowIO),
+            ("Control.Exception.throwIO", PrimOp::ExnThrowIO),
+            ("bracket", PrimOp::ExnBracket),
+            ("Control.Exception.bracket", PrimOp::ExnBracket),
+            ("bracket_", PrimOp::ExnBracket_),
+            ("Control.Exception.bracket_", PrimOp::ExnBracket_),
+            ("bracketOnError", PrimOp::ExnBracketOnError),
+            ("Control.Exception.bracketOnError", PrimOp::ExnBracketOnError),
+            ("finally", PrimOp::ExnFinally),
+            ("Control.Exception.finally", PrimOp::ExnFinally),
+            ("onException", PrimOp::ExnOnException),
+            ("Control.Exception.onException", PrimOp::ExnOnException),
+            ("handle", PrimOp::ExnHandle),
+            ("Control.Exception.handle", PrimOp::ExnHandle),
+            ("handleJust", PrimOp::ExnHandleJust),
+            ("Control.Exception.handleJust", PrimOp::ExnHandleJust),
+            ("evaluate", PrimOp::ExnEvaluate),
+            ("Control.Exception.evaluate", PrimOp::ExnEvaluate),
+            ("mask", PrimOp::ExnMask),
+            ("Control.Exception.mask", PrimOp::ExnMask),
+            ("mask_", PrimOp::ExnMask_),
+            ("Control.Exception.mask_", PrimOp::ExnMask_),
+            ("uninterruptibleMask", PrimOp::ExnUninterruptibleMask),
+            ("Control.Exception.uninterruptibleMask", PrimOp::ExnUninterruptibleMask),
+            ("uninterruptibleMask_", PrimOp::ExnUninterruptibleMask_),
+            ("Control.Exception.uninterruptibleMask_", PrimOp::ExnUninterruptibleMask_),
+            // Control.Concurrent
+            ("forkIO", PrimOp::ForkIO),
+            ("Control.Concurrent.forkIO", PrimOp::ForkIO),
+            ("threadDelay", PrimOp::ThreadDelay),
+            ("Control.Concurrent.threadDelay", PrimOp::ThreadDelay),
+            ("myThreadId", PrimOp::MyThreadId),
+            ("Control.Concurrent.myThreadId", PrimOp::MyThreadId),
+            ("newMVar", PrimOp::NewMVar),
+            ("Control.Concurrent.MVar.newMVar", PrimOp::NewMVar),
+            ("newEmptyMVar", PrimOp::NewEmptyMVar),
+            ("Control.Concurrent.MVar.newEmptyMVar", PrimOp::NewEmptyMVar),
+            ("takeMVar", PrimOp::TakeMVar),
+            ("Control.Concurrent.MVar.takeMVar", PrimOp::TakeMVar),
+            ("putMVar", PrimOp::PutMVar),
+            ("Control.Concurrent.MVar.putMVar", PrimOp::PutMVar),
+            ("readMVar", PrimOp::ReadMVar),
+            ("Control.Concurrent.MVar.readMVar", PrimOp::ReadMVar),
+            ("throwTo", PrimOp::ThrowTo),
+            ("Control.Concurrent.throwTo", PrimOp::ThrowTo),
+            ("Control.Exception.throwTo", PrimOp::ThrowTo),
+            ("killThread", PrimOp::KillThread),
+            ("Control.Concurrent.killThread", PrimOp::KillThread),
+        ];
+        for (name, op) in control_ops {
             prims.insert(Symbol::intern(name), Value::PrimOp(*op));
         }
 
@@ -4121,6 +4341,1216 @@ impl Evaluator {
             PrimOp::IntSetFoldr => { let f = self.force(args[0].clone())?; let z = self.force(args[1].clone())?; let s = self.force(args[2].clone())?; match &s { Value::IntSet(set) => { let mut acc = z; for v in set.iter().rev() { let tmp = self.apply(f.clone(), Value::Int(*v))?; acc = self.apply(tmp, acc)?; } Ok(acc) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
             PrimOp::IntSetToList => { let s = self.force(args[0].clone())?; match &s { Value::IntSet(set) => { let vals: Vec<Value> = set.iter().map(|v| Value::Int(*v)).collect(); Ok(Value::from_list(vals)) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
             PrimOp::IntSetFromList => { let list = self.force(args[0].clone())?; let items = self.force_list(list)?; let set: BTreeSet<i64> = items.into_iter().filter_map(|v| v.as_int()).collect(); Ok(Value::IntSet(Arc::new(set))) }
+
+            // === System.IO PrimOps ===
+            PrimOp::Stdin => {
+                Ok(Value::Handle(Arc::new(HandleValue::stdin())))
+            }
+            PrimOp::Stdout => {
+                Ok(Value::Handle(Arc::new(HandleValue::stdout())))
+            }
+            PrimOp::Stderr => {
+                Ok(Value::Handle(Arc::new(HandleValue::stderr())))
+            }
+            PrimOp::OpenFile => {
+                let path_val = self.force(args[0].clone())?;
+                let mode_val = self.force(args[1].clone())?;
+                let path = match &path_val {
+                    Value::String(s) => s.to_string(),
+                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path_val:?}") }),
+                };
+                // Parse IOMode from Data constructor
+                let (readable, writable, append) = match &mode_val {
+                    Value::Data(d) => match d.con.name.as_str() {
+                        "ReadMode" => (true, false, false),
+                        "WriteMode" => (false, true, false),
+                        "AppendMode" => (false, true, true),
+                        "ReadWriteMode" => (true, true, false),
+                        _ => (true, false, false),
+                    },
+                    _ => (true, false, false),
+                };
+                let file = if append {
+                    std::fs::OpenOptions::new().append(true).create(true).open(&path)
+                } else if writable {
+                    std::fs::File::create(&path)
+                } else {
+                    std::fs::File::open(&path)
+                };
+                match file {
+                    Ok(f) => Ok(Value::Handle(Arc::new(HandleValue::from_file(f, readable, writable)))),
+                    Err(e) => Err(EvalError::UserError(format!("openFile: {e}"))),
+                }
+            }
+            PrimOp::HClose => {
+                let h = self.force(args[0].clone())?;
+                match &h {
+                    Value::Handle(handle) => {
+                        let mut guard = handle.file.lock().unwrap();
+                        *guard = None; // Drop the file to close it
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                }
+            }
+            PrimOp::HGetChar => {
+                use std::io::Read;
+                let h = self.force(args[0].clone())?;
+                match &h {
+                    Value::Handle(handle) => {
+                        if handle.kind == HandleKind::Stdin {
+                            let mut buf = [0u8; 1];
+                            std::io::stdin().read_exact(&mut buf).map_err(|e| EvalError::UserError(format!("hGetChar: {e}")))?;
+                            Ok(Value::Char(buf[0] as char))
+                        } else {
+                            let mut guard = handle.file.lock().unwrap();
+                            if let Some(ref mut f) = *guard {
+                                let mut buf = [0u8; 1];
+                                f.read_exact(&mut buf).map_err(|e| EvalError::UserError(format!("hGetChar: {e}")))?;
+                                Ok(Value::Char(buf[0] as char))
+                            } else {
+                                Err(EvalError::UserError("hGetChar: handle closed".into()))
+                            }
+                        }
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                }
+            }
+            PrimOp::HGetLine => {
+                use std::io::BufRead;
+                let h = self.force(args[0].clone())?;
+                match &h {
+                    Value::Handle(handle) => {
+                        if handle.kind == HandleKind::Stdin {
+                            let mut line = String::new();
+                            std::io::stdin().lock().read_line(&mut line).map_err(|e| EvalError::UserError(format!("hGetLine: {e}")))?;
+                            if line.ends_with('\n') { line.pop(); }
+                            if line.ends_with('\r') { line.pop(); }
+                            Ok(Value::String(Arc::from(line.as_str())))
+                        } else {
+                            let mut guard = handle.file.lock().unwrap();
+                            if let Some(ref mut f) = *guard {
+                                let mut line = String::new();
+                                std::io::BufReader::new(f).read_line(&mut line).map_err(|e| EvalError::UserError(format!("hGetLine: {e}")))?;
+                                if line.ends_with('\n') { line.pop(); }
+                                if line.ends_with('\r') { line.pop(); }
+                                Ok(Value::String(Arc::from(line.as_str())))
+                            } else {
+                                Err(EvalError::UserError("hGetLine: handle closed".into()))
+                            }
+                        }
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                }
+            }
+            PrimOp::HGetContents => {
+                use std::io::Read;
+                let h = self.force(args[0].clone())?;
+                match &h {
+                    Value::Handle(handle) => {
+                        if handle.kind == HandleKind::Stdin {
+                            let mut contents = String::new();
+                            std::io::stdin().lock().read_to_string(&mut contents).map_err(|e| EvalError::UserError(format!("hGetContents: {e}")))?;
+                            Ok(Value::String(Arc::from(contents.as_str())))
+                        } else {
+                            let mut guard = handle.file.lock().unwrap();
+                            if let Some(ref mut f) = *guard {
+                                let mut contents = String::new();
+                                f.read_to_string(&mut contents).map_err(|e| EvalError::UserError(format!("hGetContents: {e}")))?;
+                                Ok(Value::String(Arc::from(contents.as_str())))
+                            } else {
+                                Err(EvalError::UserError("hGetContents: handle closed".into()))
+                            }
+                        }
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                }
+            }
+            PrimOp::HPutChar => {
+                use std::io::Write;
+                let h = self.force(args[0].clone())?;
+                let c = self.force(args[1].clone())?;
+                let ch = match &c {
+                    Value::Char(c) => *c,
+                    _ => return Err(EvalError::TypeError { expected: "Char".into(), got: format!("{c:?}") }),
+                };
+                match &h {
+                    Value::Handle(handle) => {
+                        if handle.kind == HandleKind::Stdout {
+                            print!("{ch}");
+                        } else if handle.kind == HandleKind::Stderr {
+                            eprint!("{ch}");
+                        } else {
+                            let mut guard = handle.file.lock().unwrap();
+                            if let Some(ref mut f) = *guard {
+                                write!(f, "{ch}").map_err(|e| EvalError::UserError(format!("hPutChar: {e}")))?;
+                            } else {
+                                return Err(EvalError::UserError("hPutChar: handle closed".into()));
+                            }
+                        }
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                }
+            }
+            PrimOp::HPutStr => {
+                use std::io::Write;
+                let h = self.force(args[0].clone())?;
+                let s = self.force(args[1].clone())?;
+                let text = match &s {
+                    Value::String(s) => s.to_string(),
+                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{s:?}") }),
+                };
+                match &h {
+                    Value::Handle(handle) => {
+                        if handle.kind == HandleKind::Stdout {
+                            print!("{text}");
+                        } else if handle.kind == HandleKind::Stderr {
+                            eprint!("{text}");
+                        } else {
+                            let mut guard = handle.file.lock().unwrap();
+                            if let Some(ref mut f) = *guard {
+                                write!(f, "{text}").map_err(|e| EvalError::UserError(format!("hPutStr: {e}")))?;
+                            } else {
+                                return Err(EvalError::UserError("hPutStr: handle closed".into()));
+                            }
+                        }
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                }
+            }
+            PrimOp::HPutStrLn => {
+                use std::io::Write;
+                let h = self.force(args[0].clone())?;
+                let s = self.force(args[1].clone())?;
+                let text = match &s {
+                    Value::String(s) => s.to_string(),
+                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{s:?}") }),
+                };
+                match &h {
+                    Value::Handle(handle) => {
+                        if handle.kind == HandleKind::Stdout {
+                            println!("{text}");
+                        } else if handle.kind == HandleKind::Stderr {
+                            eprintln!("{text}");
+                        } else {
+                            let mut guard = handle.file.lock().unwrap();
+                            if let Some(ref mut f) = *guard {
+                                writeln!(f, "{text}").map_err(|e| EvalError::UserError(format!("hPutStrLn: {e}")))?;
+                            } else {
+                                return Err(EvalError::UserError("hPutStrLn: handle closed".into()));
+                            }
+                        }
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                }
+            }
+            PrimOp::HPrint => {
+                use std::io::Write;
+                let h = self.force(args[0].clone())?;
+                let v = self.force(args[1].clone())?;
+                let text = self.display_value(&v)?;
+                match &h {
+                    Value::Handle(handle) => {
+                        if handle.kind == HandleKind::Stdout {
+                            println!("{text}");
+                        } else if handle.kind == HandleKind::Stderr {
+                            eprintln!("{text}");
+                        } else {
+                            let mut guard = handle.file.lock().unwrap();
+                            if let Some(ref mut f) = *guard {
+                                writeln!(f, "{text}").map_err(|e| EvalError::UserError(format!("hPrint: {e}")))?;
+                            } else {
+                                return Err(EvalError::UserError("hPrint: handle closed".into()));
+                            }
+                        }
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                }
+            }
+            PrimOp::HFlush => {
+                use std::io::Write;
+                let h = self.force(args[0].clone())?;
+                match &h {
+                    Value::Handle(handle) => {
+                        if handle.kind == HandleKind::Stdout {
+                            std::io::stdout().flush().map_err(|e| EvalError::UserError(format!("hFlush: {e}")))?;
+                        } else if handle.kind == HandleKind::Stderr {
+                            std::io::stderr().flush().map_err(|e| EvalError::UserError(format!("hFlush: {e}")))?;
+                        } else {
+                            let mut guard = handle.file.lock().unwrap();
+                            if let Some(ref mut f) = *guard {
+                                f.flush().map_err(|e| EvalError::UserError(format!("hFlush: {e}")))?;
+                            }
+                        }
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                }
+            }
+            PrimOp::HIsEOF => {
+                // Simplified: returns False for stdin, checks file position for file handles
+                let h = self.force(args[0].clone())?;
+                match &h {
+                    Value::Handle(handle) => {
+                        if handle.kind == HandleKind::Stdin {
+                            Ok(Value::bool(false))
+                        } else {
+                            use std::io::Seek;
+                            let mut guard = handle.file.lock().unwrap();
+                            if let Some(ref mut f) = *guard {
+                                let pos = f.stream_position().unwrap_or(0);
+                                let len = f.seek(std::io::SeekFrom::End(0)).unwrap_or(0);
+                                let _ = f.seek(std::io::SeekFrom::Start(pos));
+                                Ok(Value::bool(pos >= len))
+                            } else {
+                                Ok(Value::bool(true))
+                            }
+                        }
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                }
+            }
+            PrimOp::HSetBuffering | PrimOp::HGetBuffering => {
+                // Simplified: buffering is a no-op in the interpreter
+                let h = self.force(args[0].clone())?;
+                match &h {
+                    Value::Handle(_) => {
+                        if matches!(op, PrimOp::HGetBuffering) {
+                            // Return LineBuffering as default
+                            Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("LineBuffering"), tag: 1, ty_con: bhc_types::TyCon::new(Symbol::intern("BufferMode"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                        } else {
+                            Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                        }
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                }
+            }
+            PrimOp::HSeek => {
+                use std::io::Seek;
+                let h = self.force(args[0].clone())?;
+                let _mode = self.force(args[1].clone())?;
+                let pos = self.force(args[2].clone())?;
+                let offset = pos.as_int().unwrap_or(0);
+                match &h {
+                    Value::Handle(handle) => {
+                        let mut guard = handle.file.lock().unwrap();
+                        if let Some(ref mut f) = *guard {
+                            f.seek(std::io::SeekFrom::Start(offset as u64)).map_err(|e| EvalError::UserError(format!("hSeek: {e}")))?;
+                        }
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                }
+            }
+            PrimOp::HTell => {
+                use std::io::Seek;
+                let h = self.force(args[0].clone())?;
+                match &h {
+                    Value::Handle(handle) => {
+                        let mut guard = handle.file.lock().unwrap();
+                        if let Some(ref mut f) = *guard {
+                            let pos = f.stream_position().map_err(|e| EvalError::UserError(format!("hTell: {e}")))?;
+                            Ok(Value::Integer(pos as i128))
+                        } else {
+                            Err(EvalError::UserError("hTell: handle closed".into()))
+                        }
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                }
+            }
+            PrimOp::HFileSize => {
+                let h = self.force(args[0].clone())?;
+                match &h {
+                    Value::Handle(handle) => {
+                        let guard = handle.file.lock().unwrap();
+                        if let Some(ref f) = *guard {
+                            let metadata = f.metadata().map_err(|e| EvalError::UserError(format!("hFileSize: {e}")))?;
+                            Ok(Value::Integer(metadata.len() as i128))
+                        } else {
+                            Err(EvalError::UserError("hFileSize: handle closed".into()))
+                        }
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                }
+            }
+            PrimOp::WithFile => {
+                let path_val = self.force(args[0].clone())?;
+                let mode_val = self.force(args[1].clone())?;
+                let action = self.force(args[2].clone())?;
+                // Open the file
+                let handle_result = self.apply_primop(PrimOp::OpenFile, vec![path_val, mode_val])?;
+                // Apply action to handle
+                let result = self.apply(action, handle_result.clone())?;
+                let result = self.force(result)?;
+                // Close the handle
+                if let Value::Handle(_) = &handle_result {
+                    let _ = self.apply_primop(PrimOp::HClose, vec![handle_result]);
+                }
+                Ok(result)
+            }
+
+            // === Data.IORef PrimOps ===
+            PrimOp::NewIORef => {
+                let v = self.force(args[0].clone())?;
+                Ok(Value::IORef(Arc::new(Mutex::new(v))))
+            }
+            PrimOp::ReadIORef => {
+                let r = self.force(args[0].clone())?;
+                match &r {
+                    Value::IORef(ref_cell) => {
+                        let guard = ref_cell.lock().unwrap();
+                        Ok(guard.clone())
+                    }
+                    _ => Err(EvalError::TypeError { expected: "IORef".into(), got: format!("{r:?}") }),
+                }
+            }
+            PrimOp::WriteIORef => {
+                let r = self.force(args[0].clone())?;
+                let v = self.force(args[1].clone())?;
+                match &r {
+                    Value::IORef(ref_cell) => {
+                        let mut guard = ref_cell.lock().unwrap();
+                        *guard = v;
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "IORef".into(), got: format!("{r:?}") }),
+                }
+            }
+            PrimOp::ModifyIORef | PrimOp::ModifyIORefStrict => {
+                let r = self.force(args[0].clone())?;
+                let f = self.force(args[1].clone())?;
+                match &r {
+                    Value::IORef(ref_cell) => {
+                        let old = {
+                            let guard = ref_cell.lock().unwrap();
+                            guard.clone()
+                        };
+                        let new_val = self.apply(f, old)?;
+                        let new_val = if matches!(op, PrimOp::ModifyIORefStrict) {
+                            self.force(new_val)?
+                        } else {
+                            new_val
+                        };
+                        let mut guard = ref_cell.lock().unwrap();
+                        *guard = new_val;
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "IORef".into(), got: format!("{r:?}") }),
+                }
+            }
+            PrimOp::AtomicModifyIORef | PrimOp::AtomicModifyIORefStrict => {
+                let r = self.force(args[0].clone())?;
+                let f = self.force(args[1].clone())?;
+                match &r {
+                    Value::IORef(ref_cell) => {
+                        let old = {
+                            let guard = ref_cell.lock().unwrap();
+                            guard.clone()
+                        };
+                        let result = self.apply(f, old)?;
+                        let result = self.force(result)?;
+                        // Result should be a pair (new_value, return_value)
+                        match &result {
+                            Value::Data(d) if d.args.len() >= 2 => {
+                                let new_val = if matches!(op, PrimOp::AtomicModifyIORefStrict) {
+                                    self.force(d.args[0].clone())?
+                                } else {
+                                    d.args[0].clone()
+                                };
+                                let ret_val = d.args[1].clone();
+                                let mut guard = ref_cell.lock().unwrap();
+                                *guard = new_val;
+                                Ok(ret_val)
+                            }
+                            _ => Err(EvalError::UserError("atomicModifyIORef: function must return a pair".into())),
+                        }
+                    }
+                    _ => Err(EvalError::TypeError { expected: "IORef".into(), got: format!("{r:?}") }),
+                }
+            }
+
+            // === System.Exit PrimOps ===
+            PrimOp::ExitSuccess => {
+                std::process::exit(0);
+            }
+            PrimOp::ExitFailure => {
+                std::process::exit(1);
+            }
+            PrimOp::ExitWith => {
+                let code = self.force(args[0].clone())?;
+                match &code {
+                    Value::Data(d) => match d.con.name.as_str() {
+                        "ExitSuccess" => std::process::exit(0),
+                        "ExitFailure" => {
+                            let n = if !d.args.is_empty() {
+                                self.force(d.args[0].clone())?.as_int().unwrap_or(1) as i32
+                            } else {
+                                1
+                            };
+                            std::process::exit(n);
+                        }
+                        _ => std::process::exit(1),
+                    },
+                    Value::Int(n) => std::process::exit(*n as i32),
+                    _ => std::process::exit(1),
+                }
+            }
+
+            // === System.Environment PrimOps ===
+            PrimOp::GetArgs => {
+                let args_list: Vec<Value> = std::env::args().skip(1).map(|s| Value::String(Arc::from(s.as_str()))).collect();
+                Ok(Value::from_list(args_list))
+            }
+            PrimOp::GetProgName => {
+                let name = std::env::args().next().unwrap_or_default();
+                Ok(Value::String(Arc::from(name.as_str())))
+            }
+            PrimOp::GetEnv => {
+                let key = self.force(args[0].clone())?;
+                let key_str = match &key {
+                    Value::String(s) => s.to_string(),
+                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{key:?}") }),
+                };
+                match std::env::var(&key_str) {
+                    Ok(val) => Ok(Value::String(Arc::from(val.as_str()))),
+                    Err(_) => Err(EvalError::UserError(format!("getEnv: {key_str}: does not exist"))),
+                }
+            }
+            PrimOp::LookupEnv => {
+                let key = self.force(args[0].clone())?;
+                let key_str = match &key {
+                    Value::String(s) => s.to_string(),
+                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{key:?}") }),
+                };
+                match std::env::var(&key_str) {
+                    Ok(val) => Ok(self.make_just(Value::String(Arc::from(val.as_str())))),
+                    Err(_) => Ok(self.make_nothing()),
+                }
+            }
+            PrimOp::SetEnv => {
+                let key = self.force(args[0].clone())?;
+                let val = self.force(args[1].clone())?;
+                let key_str = match &key {
+                    Value::String(s) => s.to_string(),
+                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{key:?}") }),
+                };
+                let val_str = match &val {
+                    Value::String(s) => s.to_string(),
+                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{val:?}") }),
+                };
+                // SAFETY: This is unsafe in Rust but we're in a single-threaded interpreter
+                unsafe { std::env::set_var(&key_str, &val_str); }
+                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+            }
+
+            // === System.Directory PrimOps ===
+            PrimOp::DoesFileExist => {
+                let path = self.force(args[0].clone())?;
+                let path_str = match &path {
+                    Value::String(s) => s.to_string(),
+                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
+                };
+                Ok(Value::bool(std::path::Path::new(&path_str).is_file()))
+            }
+            PrimOp::DoesDirectoryExist => {
+                let path = self.force(args[0].clone())?;
+                let path_str = match &path {
+                    Value::String(s) => s.to_string(),
+                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
+                };
+                Ok(Value::bool(std::path::Path::new(&path_str).is_dir()))
+            }
+            PrimOp::CreateDirectory => {
+                let path = self.force(args[0].clone())?;
+                let path_str = match &path {
+                    Value::String(s) => s.to_string(),
+                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
+                };
+                std::fs::create_dir(&path_str).map_err(|e| EvalError::UserError(format!("createDirectory: {e}")))?;
+                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+            }
+            PrimOp::CreateDirectoryIfMissing => {
+                let parents = self.force(args[0].clone())?;
+                let path = self.force(args[1].clone())?;
+                let path_str = match &path {
+                    Value::String(s) => s.to_string(),
+                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
+                };
+                let create_parents = parents.as_bool().unwrap_or(false);
+                if create_parents {
+                    std::fs::create_dir_all(&path_str).map_err(|e| EvalError::UserError(format!("createDirectoryIfMissing: {e}")))?;
+                } else if !std::path::Path::new(&path_str).exists() {
+                    std::fs::create_dir(&path_str).map_err(|e| EvalError::UserError(format!("createDirectoryIfMissing: {e}")))?;
+                }
+                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+            }
+            PrimOp::RemoveFile => {
+                let path = self.force(args[0].clone())?;
+                let path_str = match &path {
+                    Value::String(s) => s.to_string(),
+                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
+                };
+                std::fs::remove_file(&path_str).map_err(|e| EvalError::UserError(format!("removeFile: {e}")))?;
+                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+            }
+            PrimOp::RemoveDirectory => {
+                let path = self.force(args[0].clone())?;
+                let path_str = match &path {
+                    Value::String(s) => s.to_string(),
+                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
+                };
+                std::fs::remove_dir(&path_str).map_err(|e| EvalError::UserError(format!("removeDirectory: {e}")))?;
+                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+            }
+            PrimOp::GetCurrentDirectory => {
+                let cwd = std::env::current_dir().map_err(|e| EvalError::UserError(format!("getCurrentDirectory: {e}")))?;
+                Ok(Value::String(Arc::from(cwd.to_string_lossy().as_ref())))
+            }
+            PrimOp::SetCurrentDirectory => {
+                let path = self.force(args[0].clone())?;
+                let path_str = match &path {
+                    Value::String(s) => s.to_string(),
+                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
+                };
+                std::env::set_current_dir(&path_str).map_err(|e| EvalError::UserError(format!("setCurrentDirectory: {e}")))?;
+                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+            }
+
+            // ---- Control.Monad ----
+            PrimOp::MonadWhen => {
+                // when :: Bool -> IO () -> IO ()
+                let cond = self.force(args[0].clone())?;
+                match cond.as_bool() {
+                    Some(true) => self.force(args[1].clone()),
+                    _ => Ok(Value::unit()),
+                }
+            }
+            PrimOp::MonadUnless => {
+                // unless :: Bool -> IO () -> IO ()
+                let cond = self.force(args[0].clone())?;
+                match cond.as_bool() {
+                    Some(false) => self.force(args[1].clone()),
+                    _ => Ok(Value::unit()),
+                }
+            }
+            PrimOp::MonadGuard => {
+                // guard :: Bool -> [()]  (list monad interpretation)
+                let cond = self.force(args[0].clone())?;
+                match cond.as_bool() {
+                    Some(true) => {
+                        Ok(Value::from_list(vec![Value::unit()]))
+                    }
+                    _ => Ok(Value::nil()),
+                }
+            }
+            PrimOp::MonadVoid => {
+                // void :: f a -> f ()
+                // Evaluate the action, discard result, return unit
+                let _ = self.force(args[0].clone())?;
+                Ok(Value::unit())
+            }
+            PrimOp::MonadJoin => {
+                // join :: m (m a) -> m a
+                // For lists: concat; for IO: just force
+                let v = self.force(args[0].clone())?;
+                if self.is_list_value(&v) {
+                    let outer = self.force_list(v)?;
+                    let mut result = Vec::new();
+                    for inner in outer {
+                        let inner_list = self.force_list(inner)?;
+                        result.extend(inner_list);
+                    }
+                    Ok(Value::from_list(result))
+                } else {
+                    Ok(v)
+                }
+            }
+            PrimOp::MonadAp => {
+                // ap :: m (a -> b) -> m a -> m b
+                let mf = self.force(args[0].clone())?;
+                let ma = self.force(args[1].clone())?;
+                if self.is_list_value(&mf) {
+                    let fs = self.force_list(mf)?;
+                    let xs = self.force_list(ma)?;
+                    let mut result = Vec::new();
+                    for f in &fs {
+                        for x in &xs {
+                            result.push(self.apply(f.clone(), x.clone())?);
+                        }
+                    }
+                    Ok(Value::from_list(result))
+                } else {
+                    // IO monad: mf is the function, ma is the value
+                    self.apply(mf, ma)
+                }
+            }
+            PrimOp::LiftM => {
+                // liftM :: (a -> b) -> m a -> m b (= fmap)
+                let f = args[0].clone();
+                let ma = self.force(args[1].clone())?;
+                if self.is_list_value(&ma) {
+                    let xs = self.force_list(ma)?;
+                    let mut result = Vec::new();
+                    for x in xs {
+                        result.push(self.apply(f.clone(), x)?);
+                    }
+                    Ok(Value::from_list(result))
+                } else {
+                    self.apply(f, ma)
+                }
+            }
+            PrimOp::LiftM2 => {
+                // liftM2 :: (a -> b -> c) -> m a -> m b -> m c
+                let f = args[0].clone();
+                let ma = self.force(args[1].clone())?;
+                let mb = self.force(args[2].clone())?;
+                if self.is_list_value(&ma) {
+                    let xs = self.force_list(ma)?;
+                    let ys = self.force_list(mb)?;
+                    let mut result = Vec::new();
+                    for x in &xs {
+                        for y in &ys {
+                            let tmp = self.apply(f.clone(), x.clone())?;
+                            result.push(self.apply(tmp, y.clone())?);
+                        }
+                    }
+                    Ok(Value::from_list(result))
+                } else {
+                    let tmp = self.apply(f, ma)?;
+                    self.apply(tmp, mb)
+                }
+            }
+            PrimOp::LiftM3 => {
+                // liftM3 :: (a -> b -> c -> d) -> m a -> m b -> m c -> m d
+                let f = args[0].clone();
+                let a = self.force(args[1].clone())?;
+                let b = self.force(args[2].clone())?;
+                let c = self.force(args[3].clone())?;
+                let t1 = self.apply(f, a)?;
+                let t2 = self.apply(t1, b)?;
+                self.apply(t2, c)
+            }
+            PrimOp::LiftM4 => {
+                // liftM4
+                let f = args[0].clone();
+                let a = self.force(args[1].clone())?;
+                let b = self.force(args[2].clone())?;
+                let c = self.force(args[3].clone())?;
+                let d = self.force(args[4].clone())?;
+                let t1 = self.apply(f, a)?;
+                let t2 = self.apply(t1, b)?;
+                let t3 = self.apply(t2, c)?;
+                self.apply(t3, d)
+            }
+            PrimOp::LiftM5 => {
+                // liftM5
+                let f = args[0].clone();
+                let a = self.force(args[1].clone())?;
+                let b = self.force(args[2].clone())?;
+                let c = self.force(args[3].clone())?;
+                let d = self.force(args[4].clone())?;
+                let e = self.force(args[5].clone())?;
+                let t1 = self.apply(f, a)?;
+                let t2 = self.apply(t1, b)?;
+                let t3 = self.apply(t2, c)?;
+                let t4 = self.apply(t3, d)?;
+                self.apply(t4, e)
+            }
+            PrimOp::FilterM => {
+                // filterM :: (a -> m Bool) -> [a] -> m [a]
+                let pred_fn = args[0].clone();
+                let list = self.force_list(args[1].clone())?;
+                let mut result = Vec::new();
+                for x in list {
+                    let b = self.apply(pred_fn.clone(), x.clone())?;
+                    let b = self.force(b)?;
+                    if b.as_bool().unwrap_or(false) {
+                        result.push(x);
+                    }
+                }
+                Ok(Value::from_list(result))
+            }
+            PrimOp::MapAndUnzipM => {
+                // mapAndUnzipM :: (a -> m (b, c)) -> [a] -> m ([b], [c])
+                let f = args[0].clone();
+                let list = self.force_list(args[1].clone())?;
+                let mut bs = Vec::new();
+                let mut cs = Vec::new();
+                for x in list {
+                    let pair = self.apply(f.clone(), x)?;
+                    let pair = self.force(pair)?;
+                    match &pair {
+                        Value::Data(dv) if dv.args.len() == 2 => {
+                            bs.push(dv.args[0].clone());
+                            cs.push(dv.args[1].clone());
+                        }
+                        _ => return Err(EvalError::TypeError { expected: "pair".into(), got: format!("{pair:?}") }),
+                    }
+                }
+                Ok(self.make_pair(Value::from_list(bs), Value::from_list(cs)))
+            }
+            PrimOp::ZipWithM => {
+                // zipWithM :: (a -> b -> m c) -> [a] -> [b] -> m [c]
+                let f = args[0].clone();
+                let xs = self.force_list(args[1].clone())?;
+                let ys = self.force_list(args[2].clone())?;
+                let mut result = Vec::new();
+                for (x, y) in xs.into_iter().zip(ys.into_iter()) {
+                    let tmp = self.apply(f.clone(), x)?;
+                    let val = self.apply(tmp, y)?;
+                    result.push(self.force(val)?);
+                }
+                Ok(Value::from_list(result))
+            }
+            PrimOp::ZipWithM_ => {
+                // zipWithM_ :: (a -> b -> m c) -> [a] -> [b] -> m ()
+                let f = args[0].clone();
+                let xs = self.force_list(args[1].clone())?;
+                let ys = self.force_list(args[2].clone())?;
+                for (x, y) in xs.into_iter().zip(ys.into_iter()) {
+                    let tmp = self.apply(f.clone(), x)?;
+                    let _ = self.apply(tmp, y)?;
+                }
+                Ok(Value::unit())
+            }
+            PrimOp::FoldM => {
+                // foldM :: (b -> a -> m b) -> b -> [a] -> m b
+                let f = args[0].clone();
+                let mut acc = self.force(args[1].clone())?;
+                let list = self.force_list(args[2].clone())?;
+                for x in list {
+                    let tmp = self.apply(f.clone(), acc)?;
+                    acc = self.apply(tmp, x)?;
+                    acc = self.force(acc)?;
+                }
+                Ok(acc)
+            }
+            PrimOp::FoldM_ => {
+                // foldM_ :: (b -> a -> m b) -> b -> [a] -> m ()
+                let f = args[0].clone();
+                let mut acc = self.force(args[1].clone())?;
+                let list = self.force_list(args[2].clone())?;
+                for x in list {
+                    let tmp = self.apply(f.clone(), acc)?;
+                    acc = self.apply(tmp, x)?;
+                    acc = self.force(acc)?;
+                }
+                Ok(Value::unit())
+            }
+            PrimOp::ReplicateM => {
+                // replicateM :: Int -> m a -> m [a]
+                let n = match self.force(args[0].clone())? {
+                    Value::Int(n) => n as usize,
+                    other => return Err(EvalError::TypeError { expected: "Int".into(), got: format!("{other:?}") }),
+                };
+                let action = args[1].clone();
+                let mut result = Vec::new();
+                for _ in 0..n {
+                    result.push(self.force(action.clone())?);
+                }
+                Ok(Value::from_list(result))
+            }
+            PrimOp::ReplicateM_ => {
+                // replicateM_ :: Int -> m a -> m ()
+                let n = match self.force(args[0].clone())? {
+                    Value::Int(n) => n as usize,
+                    other => return Err(EvalError::TypeError { expected: "Int".into(), got: format!("{other:?}") }),
+                };
+                let action = args[1].clone();
+                for _ in 0..n {
+                    let _ = self.force(action.clone())?;
+                }
+                Ok(Value::unit())
+            }
+            PrimOp::Forever => {
+                // forever :: m a -> m b
+                // In the interpreter, this would loop infinitely.
+                Err(EvalError::UserError("forever: infinite loop (not supported in interpreter)".into()))
+            }
+            PrimOp::Mzero => {
+                // mzero :: MonadPlus m => m a  (empty list for list monad)
+                Ok(Value::nil())
+            }
+            PrimOp::Mplus => {
+                // mplus :: MonadPlus m => m a -> m a -> m a (list concat for list monad)
+                let a = self.force(args[0].clone())?;
+                let b = self.force(args[1].clone())?;
+                if self.is_list_value(&a) {
+                    let mut xs = self.force_list(a)?;
+                    let ys = self.force_list(b)?;
+                    xs.extend(ys);
+                    Ok(Value::from_list(xs))
+                } else {
+                    // For IO/Maybe: return first non-error
+                    Ok(a)
+                }
+            }
+            PrimOp::Msum => {
+                // msum :: [m a] -> m a  (= mconcat for MonadPlus)
+                let actions = self.force_list(args[0].clone())?;
+                let mut result = Vec::new();
+                for action in actions {
+                    let v = self.force(action)?;
+                    if self.is_list_value(&v) {
+                        let xs = self.force_list(v)?;
+                        result.extend(xs);
+                    } else {
+                        return Ok(v);
+                    }
+                }
+                Ok(Value::from_list(result))
+            }
+            PrimOp::Mfilter => {
+                // mfilter :: MonadPlus m => (a -> Bool) -> m a -> m a
+                let pred_fn = args[0].clone();
+                let ma = self.force(args[1].clone())?;
+                if self.is_list_value(&ma) {
+                    let xs = self.force_list(ma)?;
+                    let mut result = Vec::new();
+                    for x in xs {
+                        let b = self.apply(pred_fn.clone(), x.clone())?;
+                        let b = self.force(b)?;
+                        if b.as_bool().unwrap_or(false) {
+                            result.push(x);
+                        }
+                    }
+                    Ok(Value::from_list(result))
+                } else {
+                    Ok(ma)
+                }
+            }
+            PrimOp::KleisliCompose => {
+                // (>=>) :: (a -> m b) -> (b -> m c) -> a -> m c
+                let f = args[0].clone();
+                let g = args[1].clone();
+                let a = args[2].clone();
+                let mb = self.apply(f, a)?;
+                let b = self.force(mb)?;
+                self.apply(g, b)
+            }
+            PrimOp::KleisliComposeFlip => {
+                // (<=<) :: (b -> m c) -> (a -> m b) -> a -> m c
+                let g = args[0].clone();
+                let f = args[1].clone();
+                let a = args[2].clone();
+                let mb = self.apply(f, a)?;
+                let b = self.force(mb)?;
+                self.apply(g, b)
+            }
+
+            // ---- Control.Applicative ----
+            PrimOp::LiftA => {
+                // liftA :: (a -> b) -> f a -> f b (= fmap)
+                let f = args[0].clone();
+                let fa = self.force(args[1].clone())?;
+                if self.is_list_value(&fa) {
+                    let xs = self.force_list(fa)?;
+                    let mut result = Vec::new();
+                    for x in xs {
+                        result.push(self.apply(f.clone(), x)?);
+                    }
+                    Ok(Value::from_list(result))
+                } else {
+                    self.apply(f, fa)
+                }
+            }
+            PrimOp::LiftA2 => {
+                // liftA2 :: (a -> b -> c) -> f a -> f b -> f c
+                let f = args[0].clone();
+                let fa = self.force(args[1].clone())?;
+                let fb = self.force(args[2].clone())?;
+                if self.is_list_value(&fa) {
+                    let xs = self.force_list(fa)?;
+                    let ys = self.force_list(fb)?;
+                    let mut result = Vec::new();
+                    for x in &xs {
+                        for y in &ys {
+                            let tmp = self.apply(f.clone(), x.clone())?;
+                            result.push(self.apply(tmp, y.clone())?);
+                        }
+                    }
+                    Ok(Value::from_list(result))
+                } else {
+                    let tmp = self.apply(f, fa)?;
+                    self.apply(tmp, fb)
+                }
+            }
+            PrimOp::LiftA3 => {
+                // liftA3 :: (a -> b -> c -> d) -> f a -> f b -> f c -> f d
+                let f = args[0].clone();
+                let a = self.force(args[1].clone())?;
+                let b = self.force(args[2].clone())?;
+                let c = self.force(args[3].clone())?;
+                let t1 = self.apply(f, a)?;
+                let t2 = self.apply(t1, b)?;
+                self.apply(t2, c)
+            }
+            PrimOp::Optional => {
+                // optional :: Alternative f => f a -> f (Maybe a)
+                // For lists: if empty return [Nothing], else map Just
+                let fa = self.force(args[0].clone())?;
+                if self.is_list_value(&fa) {
+                    let xs = self.force_list(fa)?;
+                    if xs.is_empty() {
+                        Ok(Value::from_list(vec![self.make_nothing()]))
+                    } else {
+                        let mut result = Vec::new();
+                        for x in xs {
+                            result.push(self.make_just(x));
+                        }
+                        Ok(Value::from_list(result))
+                    }
+                } else {
+                    Ok(self.make_just(fa))
+                }
+            }
+
+            // ---- Control.Exception ----
+            PrimOp::ExnCatch => {
+                // catch :: IO a -> (SomeException -> IO a) -> IO a
+                let action = args[0].clone();
+                let handler = args[1].clone();
+                match self.force(action) {
+                    Ok(v) => Ok(v),
+                    Err(e) => {
+                        let err_str = Value::String(Arc::from(format!("{e}")));
+                        self.apply(handler, err_str)
+                    }
+                }
+            }
+            PrimOp::ExnTry => {
+                // try :: IO a -> IO (Either SomeException a)
+                let action = args[0].clone();
+                match self.force(action) {
+                    Ok(v) => {
+                        // Right v
+                        Ok(Value::Data(DataValue {
+                            con: crate::DataCon { name: Symbol::intern("Right"), tag: 1, ty_con: bhc_types::TyCon::new(Symbol::intern("Either"), bhc_types::Kind::Star), arity: 1 },
+                            args: vec![v],
+                        }))
+                    }
+                    Err(e) => {
+                        // Left (show e)
+                        let err_str = Value::String(Arc::from(format!("{e}")));
+                        Ok(Value::Data(DataValue {
+                            con: crate::DataCon { name: Symbol::intern("Left"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("Either"), bhc_types::Kind::Star), arity: 1 },
+                            args: vec![err_str],
+                        }))
+                    }
+                }
+            }
+            PrimOp::ExnThrow => {
+                // throw :: SomeException -> a
+                let v = self.force(args[0].clone())?;
+                let msg = match &v {
+                    Value::String(s) => s.to_string(),
+                    _ => format!("{v:?}"),
+                };
+                Err(EvalError::UserError(msg))
+            }
+            PrimOp::ExnThrowIO => {
+                // throwIO :: SomeException -> IO a
+                let v = self.force(args[0].clone())?;
+                let msg = match &v {
+                    Value::String(s) => s.to_string(),
+                    _ => format!("{v:?}"),
+                };
+                Err(EvalError::UserError(msg))
+            }
+            PrimOp::ExnBracket => {
+                // bracket :: IO a -> (a -> IO b) -> (a -> IO c) -> IO c
+                let acquire = args[0].clone();
+                let release = args[1].clone();
+                let body = args[2].clone();
+                let resource = self.force(acquire)?;
+                let result = self.apply(body, resource.clone());
+                // Always run release
+                let _ = self.apply(release, resource);
+                result
+            }
+            PrimOp::ExnBracket_ => {
+                // bracket_ :: IO a -> IO b -> IO c -> IO c
+                let before = args[0].clone();
+                let after = args[1].clone();
+                let body = args[2].clone();
+                let _ = self.force(before)?;
+                let result = self.force(body);
+                let _ = self.force(after);
+                result
+            }
+            PrimOp::ExnBracketOnError => {
+                // bracketOnError :: IO a -> (a -> IO b) -> (a -> IO c) -> IO c
+                let acquire = args[0].clone();
+                let release = args[1].clone();
+                let body = args[2].clone();
+                let resource = self.force(acquire)?;
+                let result = self.apply(body, resource.clone());
+                if result.is_err() {
+                    let _ = self.apply(release, resource);
+                }
+                result
+            }
+            PrimOp::ExnFinally => {
+                // finally :: IO a -> IO b -> IO a
+                let action = args[0].clone();
+                let cleanup = args[1].clone();
+                let result = self.force(action);
+                let _ = self.force(cleanup);
+                result
+            }
+            PrimOp::ExnOnException => {
+                // onException :: IO a -> IO b -> IO a
+                let action = args[0].clone();
+                let cleanup = args[1].clone();
+                let result = self.force(action);
+                if result.is_err() {
+                    let _ = self.force(cleanup);
+                }
+                result
+            }
+            PrimOp::ExnHandle => {
+                // handle :: (SomeException -> IO a) -> IO a -> IO a (= flip catch)
+                let handler = args[0].clone();
+                let action = args[1].clone();
+                match self.force(action) {
+                    Ok(v) => Ok(v),
+                    Err(e) => {
+                        let err_str = Value::String(Arc::from(format!("{e}")));
+                        self.apply(handler, err_str)
+                    }
+                }
+            }
+            PrimOp::ExnHandleJust => {
+                // handleJust :: (SomeException -> Maybe b) -> (b -> IO a) -> IO a -> IO a
+                let pred_fn = args[0].clone();
+                let handler = args[1].clone();
+                let action = args[2].clone();
+                match self.force(action) {
+                    Ok(v) => Ok(v),
+                    Err(e) => {
+                        let err_str = Value::String(Arc::from(format!("{e}")));
+                        let maybe_b = self.apply(pred_fn, err_str)?;
+                        let maybe_b = self.force(maybe_b)?;
+                        match &maybe_b {
+                            Value::Data(dv) if dv.con.name.as_str() == "Just" && !dv.args.is_empty() => {
+                                self.apply(handler, dv.args[0].clone())
+                            }
+                            _ => Err(e),
+                        }
+                    }
+                }
+            }
+            PrimOp::ExnEvaluate => {
+                // evaluate :: a -> IO a (force to WHNF)
+                self.force(args[0].clone())
+            }
+            PrimOp::ExnMask => {
+                // mask :: ((IO a -> IO a) -> IO b) -> IO b
+                // In the interpreter: no masking needed, pass identity as the restore function
+                let f = args[0].clone();
+                let restore = args[1].clone();
+                let tmp = self.apply(f, restore)?;
+                self.force(tmp)
+            }
+            PrimOp::ExnMask_ => {
+                // mask_ :: IO a -> IO a (just run the action)
+                self.force(args[0].clone())
+            }
+            PrimOp::ExnUninterruptibleMask => {
+                // uninterruptibleMask :: ((IO a -> IO a) -> IO b) -> IO b
+                // Same as mask in the interpreter
+                let f = args[0].clone();
+                let restore = args[1].clone();
+                let tmp = self.apply(f, restore)?;
+                self.force(tmp)
+            }
+            PrimOp::ExnUninterruptibleMask_ => {
+                // uninterruptibleMask_ :: IO a -> IO a
+                self.force(args[0].clone())
+            }
+
+            // ---- Control.Concurrent ----
+            PrimOp::ForkIO => {
+                // forkIO :: IO () -> IO ThreadId
+                // In interpreter: just run the action synchronously and return a fake thread id
+                let _ = self.force(args[0].clone())?;
+                Ok(Value::Int(0)) // Fake ThreadId
+            }
+            PrimOp::ThreadDelay => {
+                // threadDelay :: Int -> IO ()
+                let micros = match self.force(args[0].clone())? {
+                    Value::Int(n) => n,
+                    other => return Err(EvalError::TypeError { expected: "Int".into(), got: format!("{other:?}") }),
+                };
+                std::thread::sleep(std::time::Duration::from_micros(micros as u64));
+                Ok(Value::unit())
+            }
+            PrimOp::MyThreadId => {
+                // myThreadId :: IO ThreadId
+                Ok(Value::Int(0)) // Fake ThreadId
+            }
+            PrimOp::NewMVar => {
+                // newMVar :: a -> IO (MVar a)
+                let v = self.force(args[0].clone())?;
+                Ok(Value::IORef(Arc::new(Mutex::new(v))))
+            }
+            PrimOp::NewEmptyMVar => {
+                // newEmptyMVar :: IO (MVar a)
+                Ok(Value::IORef(Arc::new(Mutex::new(Value::unit()))))
+            }
+            PrimOp::TakeMVar => {
+                // takeMVar :: MVar a -> IO a
+                let mvar = self.force(args[0].clone())?;
+                match &mvar {
+                    Value::IORef(r) => {
+                        let val = r.lock().unwrap().clone();
+                        Ok(val)
+                    }
+                    _ => Err(EvalError::TypeError { expected: "MVar".into(), got: format!("{mvar:?}") }),
+                }
+            }
+            PrimOp::PutMVar => {
+                // putMVar :: MVar a -> a -> IO ()
+                let mvar = self.force(args[0].clone())?;
+                let val = self.force(args[1].clone())?;
+                match &mvar {
+                    Value::IORef(r) => {
+                        *r.lock().unwrap() = val;
+                        Ok(Value::unit())
+                    }
+                    _ => Err(EvalError::TypeError { expected: "MVar".into(), got: format!("{mvar:?}") }),
+                }
+            }
+            PrimOp::ReadMVar => {
+                // readMVar :: MVar a -> IO a (non-destructive read)
+                let mvar = self.force(args[0].clone())?;
+                match &mvar {
+                    Value::IORef(r) => {
+                        let val = r.lock().unwrap().clone();
+                        Ok(val)
+                    }
+                    _ => Err(EvalError::TypeError { expected: "MVar".into(), got: format!("{mvar:?}") }),
+                }
+            }
+            PrimOp::ThrowTo => {
+                // throwTo :: ThreadId -> SomeException -> IO ()
+                let _tid = self.force(args[0].clone())?;
+                let exc = self.force(args[1].clone())?;
+                let msg = match &exc {
+                    Value::String(s) => s.to_string(),
+                    _ => format!("{exc:?}"),
+                };
+                Err(EvalError::UserError(format!("throwTo: {msg}")))
+            }
+            PrimOp::KillThread => {
+                // killThread :: ThreadId -> IO ()
+                let _ = self.force(args[0].clone())?;
+                Ok(Value::unit())
+            }
         }
     }
 
@@ -4609,6 +6039,8 @@ impl Evaluator {
                 let entries: Vec<String> = s.iter().map(|v| v.to_string()).collect();
                 Ok(format!("fromList [{}]", entries.join(", ")))
             }
+            Value::Handle(h) => Ok(format!("<handle {:?}>", h.kind)),
+            Value::IORef(_) => Ok("<IORef>".to_string()),
             Value::Thunk(_) => {
                 // Should have been forced above, but just in case
                 Ok("<thunk>".to_string())

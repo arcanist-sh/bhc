@@ -3636,6 +3636,29 @@ impl Builtins {
             ("Data.IntSet.foldr", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(self.int_ty.clone(), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))), Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())))))),
             ("Data.IntSet.toList", Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))),
             ("Data.IntSet.fromList", Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))),
+            // ---- Phase 3: IO PrimOps (genuinely new) ----
+            ("hGetChar", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("hPutChar", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("hSetBuffering", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("hGetBuffering", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("hSeek", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("hTell", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("hFileSize", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("setEnv", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            // ---- Phase 4: Control.* PrimOps (genuinely new) ----
+            ("liftM3", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("liftM4", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("liftM5", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("mzero", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("mplus", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("mfilter", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            (">=>", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("<=<", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("liftA", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("liftA2", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("liftA3", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("myThreadId", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("throwTo", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
         ];
 
         for (name, scheme) in ops {

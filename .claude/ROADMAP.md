@@ -285,6 +285,37 @@ crates/bhc-ast/src/
 
 ---
 
+## Known Issues
+
+### Phase 2: Closure Hardening
+
+**Found:** 2026-01-30 during blog post compiler testing
+
+Nested closure invocation segfaults (exit code 139) at runtime. Individual Phase 2 features (higher-order functions, lambdas, recursion, let bindings) all work correctly in isolation, but combining them causes a crash:
+
+```haskell
+-- CRASHES: nested closure application
+twice f x = f (f x)
+fib 0 = 0
+fib 1 = 1
+fib n = fib (n - 1) + fib (n - 2)
+main = print (twice (\x -> x * 2) (fib 5))
+```
+
+**Working cases:**
+- `apply f x = f x` with named functions (`apply double 21` → `42`)
+- Inline lambdas (`(\x -> x * 2) 21` → `42`)
+- Recursive functions (`fib 15` → `610`)
+- Let bindings with recursive calls (`let x = fib 10; y = fib 15 in x + y` → `665`)
+
+**Suspected area:** Closure invocation when a closure is passed as an argument to another higher-order function that calls it multiple times. Likely in `lower_lambda()` or `alloc_closure()` codegen paths (`bhc-codegen/lower.rs` lines 4147–5100).
+
+- [ ] Reproduce and isolate minimal crashing case
+- [ ] Check closure environment layout when closure is passed through two levels of application
+- [ ] Verify thunk forcing interacts correctly with closure re-entry
+
+---
+
 ## Risk Register
 
 | Risk | Impact | Mitigation |

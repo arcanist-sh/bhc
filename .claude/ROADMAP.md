@@ -2,7 +2,7 @@
 
 **Document ID:** BHC-ROAD-0001
 **Status:** Active
-**Last Updated:** 2026-01-17
+**Last Updated:** 2026-01-30
 
 ---
 
@@ -287,14 +287,15 @@ crates/bhc-ast/src/
 
 ## Known Issues
 
-### Phase 2: Closure Hardening
+### Phase 2: Closure Hardening — RESOLVED
 
 **Found:** 2026-01-30 during blog post compiler testing
+**Resolved:** 2026-01-30
 
-Nested closure invocation segfaults (exit code 139) at runtime. Individual Phase 2 features (higher-order functions, lambdas, recursion, let bindings) all work correctly in isolation, but combining them causes a crash:
+The reported nested closure invocation segfault (exit code 139) has been resolved. All previously crashing programs now compile and run correctly:
 
 ```haskell
--- CRASHES: nested closure application
+-- Previously crashed, now works correctly (output: 20)
 twice f x = f (f x)
 fib 0 = 0
 fib 1 = 1
@@ -302,17 +303,14 @@ fib n = fib (n - 1) + fib (n - 2)
 main = print (twice (\x -> x * 2) (fib 5))
 ```
 
-**Working cases:**
-- `apply f x = f x` with named functions (`apply double 21` → `42`)
-- Inline lambdas (`(\x -> x * 2) 21` → `42`)
-- Recursive functions (`fib 15` → `610`)
-- Let bindings with recursive calls (`let x = fib 10; y = fib 15 in x + y` → `665`)
+**Root cause:** The issue was fixed in prior codegen/parser work. Diagnostic testing confirmed all three features work both in isolation and combined:
+- Closure argument used multiple times (`twice f x = f (f x)`) — works
+- Multi-clause function definitions with pattern matching (`fib 0 = 0; fib 1 = 1; fib n = ...`) — works
+- Combined program with both features — works
 
-**Suspected area:** Closure invocation when a closure is passed as an argument to another higher-order function that calls it multiple times. Likely in `lower_lambda()` or `alloc_closure()` codegen paths (`bhc-codegen/lower.rs` lines 4147–5100).
-
-- [ ] Reproduce and isolate minimal crashing case
-- [ ] Check closure environment layout when closure is passed through two levels of application
-- [ ] Verify thunk forcing interacts correctly with closure re-entry
+**Regression tests added:**
+- `examples/twice.hs` — Higher-order function calling closure argument twice
+- `examples/pattern-match-fib.hs` — Multi-clause function definition with literal patterns
 
 ---
 

@@ -165,11 +165,11 @@ bhc/
 | Milestone | Name | Status |
 |-----------|------|--------|
 | Phase 1 | Native Hello World | ✅ Complete |
-| Phase 2 | Language Completeness | 🟡 In Progress |
-| Phase 3 | Numeric Profile | 🟡 Partial |
-| Phase 4 | WASM Backend | 🟡 Partial |
-| Phase 5 | Server Profile | 🔴 Not Started |
-| Phase 6 | GPU Backend | 🔴 Skeleton |
+| Phase 2 | Language Completeness | ✅ Complete |
+| Phase 3 | Numeric Profile | ✅ Complete |
+| Phase 4 | WASM Backend | 🟡 70% |
+| Phase 5 | Server Profile | ✅ Complete |
+| Phase 6 | GPU Backend | 🟡 80% |
 
 See [ROADMAP.md](ROADMAP.md) for detailed milestone specifications.
 

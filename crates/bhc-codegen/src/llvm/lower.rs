@@ -6573,14 +6573,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(())
     }
 
-    /// Lower `getLine` - read a line from stdin.
-    ///
-    /// For now, this is a placeholder that returns an empty string.
-    /// Full implementation requires RTS support.
+    /// Lower `getLine` - read a line from stdin via RTS `bhc_getLine`.
     fn lower_builtin_get_line(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        // Return empty string for now (placeholder)
-        let empty_str = self.module.add_global_string("empty_string", "");
-        Ok(Some(empty_str.into()))
+        let rts_fn = self.functions.get(&VarId::new(1071)).ok_or_else(|| {
+            CodegenError::Internal("bhc_getLine not declared".to_string())
+        })?;
+        let result = self
+            .builder()
+            .build_call(*rts_fn, &[], "getline_result")
+            .map_err(|e| {
+                CodegenError::Internal(format!("getLine call failed: {:?}", e))
+            })?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| {
+                CodegenError::Internal("getLine: returned void".to_string())
+            })?;
+        Ok(Some(result))
     }
 
     /// Lower `>>=` (bind) for monads.

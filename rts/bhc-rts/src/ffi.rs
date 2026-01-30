@@ -8,7 +8,7 @@
 //! All functions use the C calling convention and are `no_mangle` to
 //! ensure stable symbol names for linking.
 
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::AssertUnwindSafe;
 use std::ptr;
 
@@ -1307,6 +1307,150 @@ pub extern "C" fn bhc_getLine() -> *mut c_char {
         }
         Err(_) => ptr::null_mut(),
     }
+}
+
+// ----------------------------------------------------------------------------
+// File IO: readFile, writeFile, appendFile
+// ----------------------------------------------------------------------------
+
+/// Read entire file contents into a heap-allocated C string.
+/// Returns null on error.
+#[no_mangle]
+pub extern "C" fn bhc_readFile(path: *const c_char) -> *mut c_char {
+    if path.is_null() {
+        return ptr::null_mut();
+    }
+    let path_str = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
+    match std::fs::read_to_string(path_str) {
+        Ok(contents) => {
+            CString::new(contents).map_or(ptr::null_mut(), |cs| cs.into_raw())
+        }
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Write a C string to a file, replacing its contents.
+#[no_mangle]
+pub extern "C" fn bhc_writeFile(path: *const c_char, content: *const c_char) {
+    if path.is_null() || content.is_null() {
+        return;
+    }
+    let p = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
+    let c = unsafe { CStr::from_ptr(content) }.to_str().unwrap_or("");
+    let _ = std::fs::write(p, c);
+}
+
+/// Append a C string to a file, creating it if needed.
+#[no_mangle]
+pub extern "C" fn bhc_appendFile(path: *const c_char, content: *const c_char) {
+    if path.is_null() || content.is_null() {
+        return;
+    }
+    let p = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
+    let c = unsafe { CStr::from_ptr(content) }.to_str().unwrap_or("");
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(p)
+    {
+        let _ = f.write_all(c.as_bytes());
+    }
+}
+
+// ----------------------------------------------------------------------------
+// String split/join: lines, words, unlines, unwords
+// ----------------------------------------------------------------------------
+
+/// Allocate a cons cell: `[i64 tag=1, ptr head, ptr tail]` (24 bytes).
+unsafe fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
+        let cell = std::alloc::alloc(layout);
+        *(cell as *mut i64) = 1; // tag = cons
+        *(cell.add(8) as *mut *mut u8) = head;
+        *(cell.add(16) as *mut *mut u8) = tail;
+        cell
+    }
+}
+
+/// Allocate a nil cell: `[i64 tag=0, ...]` (24 bytes, matching cons layout).
+unsafe fn alloc_nil() -> *mut u8 {
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
+        let cell = std::alloc::alloc(layout);
+        *(cell as *mut i64) = 0;
+        cell
+    }
+}
+
+/// Split a C string by `'\n'`, returning a cons-cell list of C strings.
+#[no_mangle]
+pub extern "C" fn bhc_string_lines(s: *const c_char) -> *mut u8 {
+    if s.is_null() {
+        return unsafe { alloc_nil() };
+    }
+    let rust_str = unsafe { CStr::from_ptr(s) }.to_str().unwrap_or("");
+    let parts: Vec<&str> = rust_str.split('\n').collect();
+    let mut list = unsafe { alloc_nil() };
+    for part in parts.iter().rev() {
+        let cs = CString::new(*part).unwrap_or_default();
+        list = unsafe { alloc_cons(cs.into_raw() as *mut u8, list) };
+    }
+    list
+}
+
+/// Split a C string by whitespace, returning a cons-cell list of C strings.
+#[no_mangle]
+pub extern "C" fn bhc_string_words(s: *const c_char) -> *mut u8 {
+    if s.is_null() {
+        return unsafe { alloc_nil() };
+    }
+    let rust_str = unsafe { CStr::from_ptr(s) }.to_str().unwrap_or("");
+    let parts: Vec<&str> = rust_str.split_whitespace().collect();
+    let mut list = unsafe { alloc_nil() };
+    for part in parts.iter().rev() {
+        let cs = CString::new(*part).unwrap_or_default();
+        list = unsafe { alloc_cons(cs.into_raw() as *mut u8, list) };
+    }
+    list
+}
+
+/// Traverse a cons-cell list, collecting each head as a string.
+fn collect_list_strings(list: *const u8) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur = list;
+    while !cur.is_null() {
+        let tag = unsafe { *(cur as *const i64) };
+        if tag == 0 {
+            break;
+        }
+        let head = unsafe { *(cur.add(8) as *const *const c_char) };
+        if !head.is_null() {
+            let s = unsafe { CStr::from_ptr(head) }
+                .to_str()
+                .unwrap_or("");
+            parts.push(s.to_string());
+        }
+        cur = unsafe { *(cur.add(16) as *const *const u8) };
+    }
+    parts
+}
+
+/// Join a cons-cell list of C strings with `'\n'`.
+#[no_mangle]
+pub extern "C" fn bhc_string_unlines(list: *const u8) -> *mut c_char {
+    let parts = collect_list_strings(list);
+    let joined = parts.join("\n");
+    CString::new(joined).map_or(ptr::null_mut(), |cs| cs.into_raw())
+}
+
+/// Join a cons-cell list of C strings with `' '`.
+#[no_mangle]
+pub extern "C" fn bhc_string_unwords(list: *const u8) -> *mut c_char {
+    let parts = collect_list_strings(list);
+    let joined = parts.join(" ");
+    CString::new(joined).map_or(ptr::null_mut(), |cs| cs.into_raw())
 }
 
 /// Print a newline to stdout

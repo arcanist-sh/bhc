@@ -937,11 +937,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let word64_to_double = self.module.llvm_module().add_function("bhc_word64_to_double", i64_to_f64, None);
         self.functions.insert(VarId::new(1261), word64_to_double);
 
-        // ---- Exception RTS functions (VarId 1080-1084) ----
-        // bhc_throw(ptr) -> void (diverges)
-        let throw_fn = self.module.llvm_module().add_function("bhc_throw", void_type.fn_type(&[ptr_type.into()], false), None);
+        // ---- Exception RTS functions (VarId 1080-1091) ----
+        // bhc_throw(ptr) -> ptr (stores exception in TLS, returns sentinel null)
+        let throw_fn = self.module.llvm_module().add_function("bhc_throw", ptr_type.fn_type(&[ptr_type.into()], false), None);
         self.functions.insert(VarId::new(1080), throw_fn);
-        // bhc_catch(fn_ptr, env_ptr, handler_fn, handler_env) -> ptr
+        // bhc_catch(action_fn, action_env, handler_fn, handler_env) -> ptr
         let catch_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
         let catch_fn = self.module.llvm_module().add_function("bhc_catch", catch_type, None);
         self.functions.insert(VarId::new(1081), catch_fn);
@@ -955,6 +955,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // bhc_unmask(fn_ptr, env_ptr) -> ptr
         let unmask_fn = self.module.llvm_module().add_function("bhc_unmask", mask_type, None);
         self.functions.insert(VarId::new(1084), unmask_fn);
+        // bhc_finally(action_fn, action_env, cleanup_fn, cleanup_env) -> ptr
+        let finally_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let finally_fn = self.module.llvm_module().add_function("bhc_finally", finally_type, None);
+        self.functions.insert(VarId::new(1088), finally_fn);
+        // bhc_on_exception(action_fn, action_env, handler_fn, handler_env) -> ptr
+        let on_exception_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let on_exception_fn = self.module.llvm_module().add_function("bhc_on_exception", on_exception_type, None);
+        self.functions.insert(VarId::new(1089), on_exception_fn);
+        // bhc_bracket(acquire_fn, acquire_env, release_fn, release_env, use_fn, use_env) -> ptr
+        let bracket_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let bracket_fn = self.module.llvm_module().add_function("bhc_bracket", bracket_type, None);
+        self.functions.insert(VarId::new(1090), bracket_fn);
 
         // ---- Additional IO RTS functions (VarId 1085-1099) ----
         // bhc_hGetContents(*i8) -> *i8
@@ -5924,7 +5936,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(self.type_mapper().ptr_type().const_null().into()))
     }
 
-    /// Lower `throw` / `throwIO` - call bhc_throw and return null.
+    /// Lower `throw` / `throwIO` - call bhc_throw and return the sentinel.
     fn lower_builtin_throw(
         &mut self,
         msg_expr: &Expr,
@@ -5933,123 +5945,252 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(msg_expr)?
             .ok_or_else(|| CodegenError::Internal("throw: message has no value".to_string()))?;
 
-        let msg_ptr = match msg_val {
-            BasicValueEnum::PointerValue(p) => p,
-            _ => self
-                .module
-                .add_global_string("throw_default", "exception"),
-        };
+        let msg_ptr = self.value_to_ptr(msg_val)?;
 
         let throw_fn = self
             .functions
             .get(&VarId::new(1080))
             .ok_or_else(|| CodegenError::Internal("bhc_throw not declared".to_string()))?;
 
-        self.builder()
-            .build_call(*throw_fn, &[msg_ptr.into()], "")
-            .map_err(|e| CodegenError::Internal(format!("failed to call throw: {:?}", e)))?;
+        let result = self
+            .builder()
+            .build_call(*throw_fn, &[msg_ptr.into()], "throw_sentinel")
+            .map_err(|e| CodegenError::Internal(format!("failed to call throw: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("throw: returned void".to_string()))?;
 
-        Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+        Ok(Some(result))
     }
 
-    /// Lower `catch` - execute action, catch exceptions with handler.
-    /// Simplified: just execute the action (no actual exception catching yet).
+    /// Lower `catch` - call bhc_catch with action and handler closures.
+    ///
+    /// catch :: IO a -> (SomeException -> IO a) -> IO a
+    ///
+    /// Extracts fn_ptr and closure_ptr from both the action and handler,
+    /// then calls bhc_catch(action_fn, action_env, handler_fn, handler_env).
     fn lower_builtin_catch(
         &mut self,
         action_expr: &Expr,
         handler_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        // Evaluate both to ensure they're lowered, but only use the action result
-        let _ = self.lower_expr(handler_expr)?;
-        let result = self.lower_expr(action_expr)?;
-        Ok(result)
+        let action_val = self
+            .lower_expr(action_expr)?
+            .ok_or_else(|| CodegenError::Internal("catch: action has no value".to_string()))?;
+        let handler_val = self
+            .lower_expr(handler_expr)?
+            .ok_or_else(|| CodegenError::Internal("catch: handler has no value".to_string()))?;
+
+        let action_closure = self.value_to_ptr(action_val)?;
+        let handler_closure = self.value_to_ptr(handler_val)?;
+
+        let action_fn = self.extract_closure_fn_ptr(action_closure)?;
+        let handler_fn = self.extract_closure_fn_ptr(handler_closure)?;
+
+        let catch_rts = self
+            .functions
+            .get(&VarId::new(1081))
+            .ok_or_else(|| CodegenError::Internal("bhc_catch not declared".to_string()))?;
+
+        let result = self
+            .builder()
+            .build_call(
+                *catch_rts,
+                &[
+                    action_fn.into(),
+                    action_closure.into(),
+                    handler_fn.into(),
+                    handler_closure.into(),
+                ],
+                "catch_result",
+            )
+            .map_err(|e| CodegenError::Internal(format!("catch call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("catch: returned void".to_string()))?;
+
+        Ok(Some(result))
     }
 
-    /// Lower `try` - execute action, return Right(result) on success.
-    /// Simplified: just execute the action.
+    /// Lower `try` - execute action wrapped in catch.
+    ///
+    /// try :: IO a -> IO (Either SomeException a)
+    ///
+    /// Uses bhc_catch with a handler that returns the exception as a Left value.
+    /// Simplified: wraps in catch; on success returns the result directly.
+    /// Full Either construction would require ADT allocation at codegen level.
     fn lower_builtin_try(
         &mut self,
         action_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // For now, execute the action directly. A proper implementation would
+        // wrap in bhc_catch and construct Either values, but that requires
+        // ADT allocation infrastructure that's not yet available here.
         let result = self.lower_expr(action_expr)?;
         Ok(result)
     }
 
-    /// Lower `bracket` - acquire resource, use it, release it.
-    /// Simplified: acquire, use, release in sequence.
+    /// Lower `bracket` - acquire/use/release with exception safety.
+    ///
+    /// bracket :: IO a -> (a -> IO b) -> (a -> IO c) -> IO c
+    ///
+    /// Calls bhc_bracket(acquire_fn, acquire_env, release_fn, release_env, use_fn, use_env).
+    /// The RTS ensures release always runs even if use throws.
     fn lower_builtin_bracket(
         &mut self,
         acquire_expr: &Expr,
         release_expr: &Expr,
         use_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let resource = self
+        let acquire_val = self
             .lower_expr(acquire_expr)?
             .ok_or_else(|| CodegenError::Internal("bracket: acquire has no value".to_string()))?;
-
-        // Apply use_fn to resource
-        let use_fn = self
+        let release_val = self
+            .lower_expr(release_expr)?
+            .ok_or_else(|| CodegenError::Internal("bracket: release has no value".to_string()))?;
+        let use_val = self
             .lower_expr(use_expr)?
-            .ok_or_else(|| CodegenError::Internal("bracket: use fn has no value".to_string()))?;
-        let use_fn_ptr = use_fn.into_pointer_value();
-        let fn_ptr = self.extract_closure_fn_ptr(use_fn_ptr)?;
-        let ptr_type = self.type_mapper().ptr_type();
-        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            .ok_or_else(|| CodegenError::Internal("bracket: use has no value".to_string()))?;
+
+        let acquire_closure = self.value_to_ptr(acquire_val)?;
+        let release_closure = self.value_to_ptr(release_val)?;
+        let use_closure = self.value_to_ptr(use_val)?;
+
+        let acquire_fn = self.extract_closure_fn_ptr(acquire_closure)?;
+        let release_fn = self.extract_closure_fn_ptr(release_closure)?;
+        let use_fn = self.extract_closure_fn_ptr(use_closure)?;
+
+        let bracket_rts = self
+            .functions
+            .get(&VarId::new(1090))
+            .ok_or_else(|| CodegenError::Internal("bhc_bracket not declared".to_string()))?;
+
         let result = self
             .builder()
-            .build_indirect_call(
-                fn_type,
-                fn_ptr,
-                &[use_fn_ptr.into(), resource.into()],
-                "bracket_use_result",
+            .build_call(
+                *bracket_rts,
+                &[
+                    acquire_fn.into(),
+                    acquire_closure.into(),
+                    release_fn.into(),
+                    release_closure.into(),
+                    use_fn.into(),
+                    use_closure.into(),
+                ],
+                "bracket_result",
             )
-            .map_err(|e| CodegenError::Internal(format!("bracket use call failed: {:?}", e)))?
+            .map_err(|e| CodegenError::Internal(format!("bracket call failed: {:?}", e)))?
             .try_as_basic_value()
             .basic()
-            .ok_or_else(|| CodegenError::Internal("bracket: use returned void".to_string()))?;
-
-        // Apply release_fn to resource
-        let release_fn = self
-            .lower_expr(release_expr)?
-            .ok_or_else(|| CodegenError::Internal("bracket: release fn has no value".to_string()))?;
-        let release_fn_ptr = release_fn.into_pointer_value();
-        let rel_ptr = self.extract_closure_fn_ptr(release_fn_ptr)?;
-        self.builder()
-            .build_indirect_call(
-                fn_type,
-                rel_ptr,
-                &[release_fn_ptr.into(), resource.into()],
-                "bracket_release_result",
-            )
-            .map_err(|e| {
-                CodegenError::Internal(format!("bracket release call failed: {:?}", e))
-            })?;
+            .ok_or_else(|| CodegenError::Internal("bracket: returned void".to_string()))?;
 
         Ok(Some(result))
     }
 
-    /// Lower `finally` - execute action then cleanup.
-    /// Simplified: execute action, then cleanup, return action result.
+    /// Lower `finally` - execute action with guaranteed cleanup.
+    ///
+    /// finally :: IO a -> IO b -> IO a
+    ///
+    /// Calls bhc_finally(action_fn, action_env, cleanup_fn, cleanup_env).
+    /// The RTS ensures cleanup always runs, re-throwing any exception afterward.
     fn lower_builtin_finally(
         &mut self,
         action_expr: &Expr,
         cleanup_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let result = self.lower_expr(action_expr)?;
-        let _ = self.lower_expr(cleanup_expr)?;
-        Ok(result)
+        let action_val = self
+            .lower_expr(action_expr)?
+            .ok_or_else(|| CodegenError::Internal("finally: action has no value".to_string()))?;
+        let cleanup_val = self
+            .lower_expr(cleanup_expr)?
+            .ok_or_else(|| CodegenError::Internal("finally: cleanup has no value".to_string()))?;
+
+        let action_closure = self.value_to_ptr(action_val)?;
+        let cleanup_closure = self.value_to_ptr(cleanup_val)?;
+
+        let action_fn = self.extract_closure_fn_ptr(action_closure)?;
+        let cleanup_fn = self.extract_closure_fn_ptr(cleanup_closure)?;
+
+        let finally_rts = self
+            .functions
+            .get(&VarId::new(1088))
+            .ok_or_else(|| CodegenError::Internal("bhc_finally not declared".to_string()))?;
+
+        let result = self
+            .builder()
+            .build_call(
+                *finally_rts,
+                &[
+                    action_fn.into(),
+                    action_closure.into(),
+                    cleanup_fn.into(),
+                    cleanup_closure.into(),
+                ],
+                "finally_result",
+            )
+            .map_err(|e| CodegenError::Internal(format!("finally call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("finally: returned void".to_string()))?;
+
+        Ok(Some(result))
     }
 
-    /// Lower `onException` - execute action, run handler only if exception.
-    /// Simplified: just execute the action (no actual exception detection yet).
+    /// Lower `onException` - execute action, run handler only on exception.
+    ///
+    /// onException :: IO a -> IO b -> IO a
+    ///
+    /// Calls bhc_on_exception(action_fn, action_env, handler_fn, handler_env).
+    /// The RTS runs the handler only if the action throws, then re-throws.
     fn lower_builtin_on_exception(
         &mut self,
         action_expr: &Expr,
         handler_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let _ = self.lower_expr(handler_expr)?;
-        let result = self.lower_expr(action_expr)?;
-        Ok(result)
+        let action_val = self
+            .lower_expr(action_expr)?
+            .ok_or_else(|| {
+                CodegenError::Internal("onException: action has no value".to_string())
+            })?;
+        let handler_val = self
+            .lower_expr(handler_expr)?
+            .ok_or_else(|| {
+                CodegenError::Internal("onException: handler has no value".to_string())
+            })?;
+
+        let action_closure = self.value_to_ptr(action_val)?;
+        let handler_closure = self.value_to_ptr(handler_val)?;
+
+        let action_fn = self.extract_closure_fn_ptr(action_closure)?;
+        let handler_fn = self.extract_closure_fn_ptr(handler_closure)?;
+
+        let on_exc_rts = self
+            .functions
+            .get(&VarId::new(1089))
+            .ok_or_else(|| {
+                CodegenError::Internal("bhc_on_exception not declared".to_string())
+            })?;
+
+        let result = self
+            .builder()
+            .build_call(
+                *on_exc_rts,
+                &[
+                    action_fn.into(),
+                    action_closure.into(),
+                    handler_fn.into(),
+                    handler_closure.into(),
+                ],
+                "on_exception_result",
+            )
+            .map_err(|e| CodegenError::Internal(format!("onException call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| {
+                CodegenError::Internal("onException: returned void".to_string())
+            })?;
+
+        Ok(Some(result))
     }
 
     /// Lower `seq` - force evaluation of first argument, return second.

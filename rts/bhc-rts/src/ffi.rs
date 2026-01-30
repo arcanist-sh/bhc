@@ -1593,6 +1593,168 @@ pub extern "C" fn bhc_evaluate(val: *mut u8) -> *mut u8 {
     val
 }
 
+/// Execute an IO action with guaranteed cleanup.
+///
+/// Runs `action_fn(action_env)`. Regardless of whether the action succeeds
+/// or throws, `cleanup_fn(cleanup_env)` is always executed afterward.
+/// If the action threw an exception, the exception is re-thrown after cleanup.
+///
+/// Implements Haskell's `finally :: IO a -> IO b -> IO a`.
+///
+/// # Arguments
+///
+/// * `action_fn` - Function pointer for the IO action.
+/// * `action_env` - Environment/closure pointer for the action.
+/// * `cleanup_fn` - Function pointer for the cleanup action.
+/// * `cleanup_env` - Environment/closure pointer for the cleanup.
+///
+/// # Returns
+///
+/// The result of the action if no exception occurred.
+#[no_mangle]
+pub extern "C" fn bhc_finally(
+    action_fn: extern "C" fn(*mut u8) -> *mut u8,
+    action_env: *mut u8,
+    cleanup_fn: extern "C" fn(*mut u8) -> *mut u8,
+    cleanup_env: *mut u8,
+) -> *mut u8 {
+    // Save any pre-existing exception state
+    let saved = BHC_EXCEPTION.with(|cell| cell.replace(None));
+
+    // Run the action
+    let result = action_fn(action_env);
+
+    // Check if an exception was thrown
+    let thrown = BHC_EXCEPTION.with(|cell| cell.replace(None));
+
+    // Always run cleanup
+    let _ = cleanup_fn(cleanup_env);
+
+    match thrown {
+        Some(exc_ptr) => {
+            // Exception was thrown — re-throw after cleanup
+            BHC_EXCEPTION.with(|cell| cell.set(Some(exc_ptr)));
+            BHC_EXCEPTION_SENTINEL
+        }
+        None => {
+            // No exception — restore saved state and return result
+            if saved.is_some() {
+                BHC_EXCEPTION.with(|cell| cell.set(saved));
+            }
+            result
+        }
+    }
+}
+
+/// Execute an IO action, running a handler only if an exception occurs.
+///
+/// Runs `action_fn(action_env)`. If the action throws an exception,
+/// `handler_fn(handler_env)` is executed before re-throwing the exception.
+/// Unlike `catch`, the exception is always re-thrown.
+///
+/// Implements Haskell's `onException :: IO a -> IO b -> IO a`.
+///
+/// # Arguments
+///
+/// * `action_fn` - Function pointer for the IO action.
+/// * `action_env` - Environment/closure pointer for the action.
+/// * `handler_fn` - Function pointer for the exception handler.
+/// * `handler_env` - Environment/closure pointer for the handler.
+///
+/// # Returns
+///
+/// The result of the action if no exception occurred.
+#[no_mangle]
+pub extern "C" fn bhc_on_exception(
+    action_fn: extern "C" fn(*mut u8) -> *mut u8,
+    action_env: *mut u8,
+    handler_fn: extern "C" fn(*mut u8) -> *mut u8,
+    handler_env: *mut u8,
+) -> *mut u8 {
+    // Save any pre-existing exception state
+    let saved = BHC_EXCEPTION.with(|cell| cell.replace(None));
+
+    // Run the action
+    let result = action_fn(action_env);
+
+    // Check if an exception was thrown
+    let thrown = BHC_EXCEPTION.with(|cell| cell.replace(None));
+
+    match thrown {
+        Some(exc_ptr) => {
+            // Exception was thrown — run handler, then re-throw
+            let _ = handler_fn(handler_env);
+            BHC_EXCEPTION.with(|cell| cell.set(Some(exc_ptr)));
+            BHC_EXCEPTION_SENTINEL
+        }
+        None => {
+            // No exception — restore saved state and return result
+            if saved.is_some() {
+                BHC_EXCEPTION.with(|cell| cell.set(saved));
+            }
+            result
+        }
+    }
+}
+
+/// Acquire-use-release pattern with guaranteed cleanup.
+///
+/// Runs `acquire_fn(acquire_env)` to get a resource, then
+/// `use_fn(use_env, resource)` to use it, and always runs
+/// `release_fn(release_env, resource)` afterward (even on exception).
+///
+/// Implements Haskell's `bracket :: IO a -> (a -> IO b) -> (a -> IO c) -> IO c`.
+///
+/// # Arguments
+///
+/// * `acquire_fn` - Function pointer that acquires the resource.
+/// * `acquire_env` - Environment/closure pointer for acquire.
+/// * `release_fn` - Function pointer that releases the resource (takes env + resource).
+/// * `release_env` - Environment/closure pointer for release.
+/// * `use_fn` - Function pointer that uses the resource (takes env + resource).
+/// * `use_env` - Environment/closure pointer for use.
+///
+/// # Returns
+///
+/// The result of use_fn if no exception occurred.
+#[no_mangle]
+pub extern "C" fn bhc_bracket(
+    acquire_fn: extern "C" fn(*mut u8) -> *mut u8,
+    acquire_env: *mut u8,
+    release_fn: extern "C" fn(*mut u8, *mut u8) -> *mut u8,
+    release_env: *mut u8,
+    use_fn: extern "C" fn(*mut u8, *mut u8) -> *mut u8,
+    use_env: *mut u8,
+) -> *mut u8 {
+    // Acquire the resource
+    let resource = acquire_fn(acquire_env);
+
+    // Check if acquire threw
+    let acquire_thrown = BHC_EXCEPTION.with(|cell| cell.replace(None));
+    if let Some(exc_ptr) = acquire_thrown {
+        BHC_EXCEPTION.with(|cell| cell.set(Some(exc_ptr)));
+        return BHC_EXCEPTION_SENTINEL;
+    }
+
+    // Use the resource
+    let result = use_fn(use_env, resource);
+
+    // Check if use threw
+    let use_thrown = BHC_EXCEPTION.with(|cell| cell.replace(None));
+
+    // Always release (even on exception)
+    let _ = release_fn(release_env, resource);
+
+    match use_thrown {
+        Some(exc_ptr) => {
+            // Use threw — re-throw after release
+            BHC_EXCEPTION.with(|cell| cell.set(Some(exc_ptr)));
+            BHC_EXCEPTION_SENTINEL
+        }
+        None => result,
+    }
+}
+
 /// Mask asynchronous exceptions (stub).
 ///
 /// Currently just runs the action without masking, since BHC
@@ -1814,6 +1976,117 @@ mod tests {
         }
         let result = bhc_unmask(action, ptr::null_mut());
         assert_eq!(result as usize, 456);
+    }
+
+    #[test]
+    fn test_bhc_finally_no_exception() {
+        extern "C" fn action(_env: *mut u8) -> *mut u8 {
+            42usize as *mut u8
+        }
+        extern "C" fn cleanup(_env: *mut u8) -> *mut u8 {
+            // Cleanup runs but result is ignored
+            99usize as *mut u8
+        }
+        let result = bhc_finally(action, ptr::null_mut(), cleanup, ptr::null_mut());
+        assert_eq!(result as usize, 42);
+    }
+
+    #[test]
+    fn test_bhc_finally_with_exception() {
+        extern "C" fn action(_env: *mut u8) -> *mut u8 {
+            bhc_throw(77usize as *mut u8)
+        }
+        extern "C" fn cleanup(_env: *mut u8) -> *mut u8 {
+            ptr::null_mut()
+        }
+        // finally should re-throw; verify exception is pending
+        let result = bhc_finally(action, ptr::null_mut(), cleanup, ptr::null_mut());
+        assert_eq!(result, BHC_EXCEPTION_SENTINEL);
+        // Exception should be pending in TLS
+        let exc = BHC_EXCEPTION.with(|cell| cell.replace(None));
+        assert_eq!(exc.unwrap() as usize, 77);
+    }
+
+    #[test]
+    fn test_bhc_on_exception_no_exception() {
+        extern "C" fn action(_env: *mut u8) -> *mut u8 {
+            42usize as *mut u8
+        }
+        extern "C" fn handler(_env: *mut u8) -> *mut u8 {
+            panic!("handler should not be called");
+        }
+        let result = bhc_on_exception(action, ptr::null_mut(), handler, ptr::null_mut());
+        assert_eq!(result as usize, 42);
+    }
+
+    #[test]
+    fn test_bhc_on_exception_with_exception() {
+        extern "C" fn action(_env: *mut u8) -> *mut u8 {
+            bhc_throw(77usize as *mut u8)
+        }
+        static mut HANDLER_CALLED: bool = false;
+        extern "C" fn handler(_env: *mut u8) -> *mut u8 {
+            unsafe { HANDLER_CALLED = true; }
+            ptr::null_mut()
+        }
+        unsafe { HANDLER_CALLED = false; }
+        let result = bhc_on_exception(action, ptr::null_mut(), handler, ptr::null_mut());
+        assert_eq!(result, BHC_EXCEPTION_SENTINEL);
+        assert!(unsafe { HANDLER_CALLED });
+        // Exception should be pending in TLS (re-thrown)
+        let exc = BHC_EXCEPTION.with(|cell| cell.replace(None));
+        assert_eq!(exc.unwrap() as usize, 77);
+    }
+
+    #[test]
+    fn test_bhc_bracket_no_exception() {
+        static mut RELEASED: bool = false;
+        extern "C" fn acquire(_env: *mut u8) -> *mut u8 {
+            10usize as *mut u8
+        }
+        extern "C" fn release(_env: *mut u8, _resource: *mut u8) -> *mut u8 {
+            unsafe { RELEASED = true; }
+            ptr::null_mut()
+        }
+        extern "C" fn use_fn(_env: *mut u8, resource: *mut u8) -> *mut u8 {
+            // Return resource + 32
+            ((resource as usize) + 32) as *mut u8
+        }
+        unsafe { RELEASED = false; }
+        let result = bhc_bracket(
+            acquire, ptr::null_mut(),
+            release, ptr::null_mut(),
+            use_fn, ptr::null_mut(),
+        );
+        assert_eq!(result as usize, 42);
+        assert!(unsafe { RELEASED });
+    }
+
+    #[test]
+    fn test_bhc_bracket_use_throws() {
+        static mut RELEASED: bool = false;
+        extern "C" fn acquire(_env: *mut u8) -> *mut u8 {
+            10usize as *mut u8
+        }
+        extern "C" fn release(_env: *mut u8, _resource: *mut u8) -> *mut u8 {
+            unsafe { RELEASED = true; }
+            ptr::null_mut()
+        }
+        extern "C" fn use_fn(_env: *mut u8, _resource: *mut u8) -> *mut u8 {
+            bhc_throw(77usize as *mut u8)
+        }
+        unsafe { RELEASED = false; }
+        let result = bhc_bracket(
+            acquire, ptr::null_mut(),
+            release, ptr::null_mut(),
+            use_fn, ptr::null_mut(),
+        );
+        assert_eq!(result, BHC_EXCEPTION_SENTINEL);
+        // Release must have been called even though use threw
+        assert!(unsafe { RELEASED });
+        // Exception should be pending in TLS
+        let exc = BHC_EXCEPTION.with(|cell| cell.replace(None));
+        assert_eq!(exc.unwrap() as usize, 77);
     }
 
     #[test]

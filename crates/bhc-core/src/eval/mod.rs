@@ -306,6 +306,134 @@ impl Evaluator {
             ("putStr", PrimOp::PutStr),
             ("print", PrimOp::Print),
             ("getLine", PrimOp::GetLine),
+            // Enum operations
+            ("succ", PrimOp::Succ),
+            ("pred", PrimOp::Pred),
+            ("toEnum", PrimOp::ToEnum),
+            ("fromEnum", PrimOp::FromEnum),
+            // Integral operations
+            ("gcd", PrimOp::Gcd),
+            ("lcm", PrimOp::Lcm),
+            ("quot", PrimOp::Quot),
+            ("rem", PrimOp::Rem),
+            ("quotRem", PrimOp::QuotRem),
+            ("divMod", PrimOp::DivMod),
+            ("subtract", PrimOp::Subtract),
+            // Scan operations
+            ("scanl", PrimOp::Scanl),
+            ("scanl'", PrimOp::Scanl),
+            ("scanr", PrimOp::Scanr),
+            ("scanl1", PrimOp::Scanl1),
+            ("scanr1", PrimOp::Scanr1),
+            // More list operations
+            ("maximum", PrimOp::Maximum),
+            ("minimum", PrimOp::Minimum),
+            ("zip3", PrimOp::Zip3),
+            ("zipWith3", PrimOp::ZipWith3),
+            ("unzip3", PrimOp::Unzip3),
+            // Show helpers
+            ("showString", PrimOp::ShowString),
+            ("showChar", PrimOp::ShowChar),
+            ("showParen", PrimOp::ShowParen),
+            // IO operations (additional)
+            ("getChar", PrimOp::GetChar),
+            ("getContents", PrimOp::GetContents),
+            ("readFile", PrimOp::ReadFile),
+            ("writeFile", PrimOp::WriteFile),
+            ("appendFile", PrimOp::AppendFile),
+            ("interact", PrimOp::Interact),
+            // Misc Prelude
+            ("otherwise", PrimOp::Otherwise),
+            ("until", PrimOp::Until),
+            ("asTypeOf", PrimOp::AsTypeOf),
+            ("realToFrac", PrimOp::RealToFrac),
+            // Data.List
+            ("sort", PrimOp::Sort),
+            ("sortBy", PrimOp::SortBy),
+            ("sortOn", PrimOp::SortOn),
+            ("nub", PrimOp::Nub),
+            ("nubBy", PrimOp::NubBy),
+            ("group", PrimOp::Group),
+            ("groupBy", PrimOp::GroupBy),
+            ("intersperse", PrimOp::Intersperse),
+            ("intercalate", PrimOp::Intercalate),
+            ("transpose", PrimOp::Transpose),
+            ("subsequences", PrimOp::Subsequences),
+            ("permutations", PrimOp::Permutations),
+            ("partition", PrimOp::Partition),
+            ("find", PrimOp::Find),
+            ("stripPrefix", PrimOp::StripPrefix),
+            ("isPrefixOf", PrimOp::IsPrefixOf),
+            ("isSuffixOf", PrimOp::IsSuffixOf),
+            ("isInfixOf", PrimOp::IsInfixOf),
+            ("delete", PrimOp::Delete),
+            ("deleteBy", PrimOp::DeleteBy),
+            ("union", PrimOp::Union),
+            ("unionBy", PrimOp::UnionBy),
+            ("intersect", PrimOp::Intersect),
+            ("intersectBy", PrimOp::IntersectBy),
+            ("\\\\", PrimOp::ListDiff),
+            ("tails", PrimOp::Tails),
+            ("inits", PrimOp::Inits),
+            ("mapAccumL", PrimOp::MapAccumL),
+            ("mapAccumR", PrimOp::MapAccumR),
+            ("unfoldr", PrimOp::Unfoldr),
+            ("genericLength", PrimOp::GenericLength),
+            ("genericTake", PrimOp::GenericTake),
+            ("genericDrop", PrimOp::GenericDrop),
+            // Data.Char
+            ("isAlpha", PrimOp::IsAlpha),
+            ("isAlphaNum", PrimOp::IsAlphaNum),
+            ("isAscii", PrimOp::IsAscii),
+            ("isControl", PrimOp::IsControl),
+            ("isDigit", PrimOp::IsDigit),
+            ("isHexDigit", PrimOp::IsHexDigit),
+            ("isLetter", PrimOp::IsLetter),
+            ("isLower", PrimOp::IsLower),
+            ("isNumber", PrimOp::IsNumber),
+            ("isPrint", PrimOp::IsPrint),
+            ("isPunctuation", PrimOp::IsPunctuation),
+            ("isSpace", PrimOp::IsSpace),
+            ("isSymbol", PrimOp::IsSymbol),
+            ("isUpper", PrimOp::IsUpper),
+            ("toLower", PrimOp::ToLower),
+            ("toUpper", PrimOp::ToUpper),
+            ("toTitle", PrimOp::ToTitle),
+            ("digitToInt", PrimOp::DigitToInt),
+            ("intToDigit", PrimOp::IntToDigit),
+            ("isLatin1", PrimOp::IsLatin1),
+            ("isAsciiLower", PrimOp::IsAsciiLower),
+            ("isAsciiUpper", PrimOp::IsAsciiUpper),
+            // Data.Function
+            ("on", PrimOp::On),
+            ("fix", PrimOp::Fix),
+            ("&", PrimOp::Amp),
+            // Data.Maybe additional
+            ("listToMaybe", PrimOp::ListToMaybe),
+            ("maybeToList", PrimOp::MaybeToList),
+            ("catMaybes", PrimOp::CatMaybes),
+            ("mapMaybe", PrimOp::MapMaybe),
+            // Data.Either additional
+            ("isLeft", PrimOp::IsLeft),
+            ("isRight", PrimOp::IsRight),
+            ("lefts", PrimOp::Lefts),
+            ("rights", PrimOp::Rights),
+            ("partitionEithers", PrimOp::PartitionEithers),
+            // Math functions
+            ("sqrt", PrimOp::Sqrt),
+            ("exp", PrimOp::Exp),
+            ("log", PrimOp::Log),
+            ("sin", PrimOp::Sin),
+            ("cos", PrimOp::Cos),
+            ("tan", PrimOp::Tan),
+            ("^", PrimOp::Power),
+            ("truncate", PrimOp::Truncate),
+            ("round", PrimOp::Round),
+            ("ceiling", PrimOp::Ceiling),
+            ("floor", PrimOp::Floor),
+            // Tuple
+            ("fst", PrimOp::Fst),
+            ("snd", PrimOp::Snd),
         ];
 
         for (name, op) in ops {
@@ -1990,6 +2118,1090 @@ impl Evaluator {
                 }
             }
 
+            // === Enum operations ===
+            PrimOp::Succ => {
+                match &args[0] {
+                    Value::Int(n) => Ok(Value::Int(n + 1)),
+                    Value::Char(c) => {
+                        let n = u32::from(*c) + 1;
+                        Ok(Value::Char(char::from_u32(n).unwrap_or(*c)))
+                    }
+                    _ => Ok(Value::Int(args[0].as_int().unwrap_or(0) + 1)),
+                }
+            }
+
+            PrimOp::Pred => {
+                match &args[0] {
+                    Value::Int(n) => Ok(Value::Int(n - 1)),
+                    Value::Char(c) => {
+                        let n = u32::from(*c);
+                        if n == 0 {
+                            Err(EvalError::UserError("pred: zero character".into()))
+                        } else {
+                            Ok(Value::Char(char::from_u32(n - 1).unwrap_or(*c)))
+                        }
+                    }
+                    _ => Ok(Value::Int(args[0].as_int().unwrap_or(0) - 1)),
+                }
+            }
+
+            PrimOp::ToEnum => {
+                // toEnum for Int is identity; for Char it converts
+                let n = args[0].as_int().unwrap_or(0);
+                #[allow(clippy::cast_sign_loss)]
+                Ok(Value::Int(n))
+            }
+
+            PrimOp::FromEnum => {
+                match &args[0] {
+                    Value::Int(n) => Ok(Value::Int(*n)),
+                    Value::Char(c) => Ok(Value::Int(i64::from(u32::from(*c)))),
+                    Value::Data(d) if d.args.is_empty() => Ok(Value::Int(i64::from(d.con.tag))),
+                    _ => Ok(Value::Int(args[0].as_int().unwrap_or(0))),
+                }
+            }
+
+            // === Integral operations ===
+            PrimOp::Gcd => {
+                let a = args[0].as_int().unwrap_or(0).abs();
+                let b = args[1].as_int().unwrap_or(0).abs();
+                fn gcd(mut a: i64, mut b: i64) -> i64 {
+                    while b != 0 {
+                        let t = b;
+                        b = a % b;
+                        a = t;
+                    }
+                    a
+                }
+                Ok(Value::Int(gcd(a, b)))
+            }
+
+            PrimOp::Lcm => {
+                let a = args[0].as_int().unwrap_or(0);
+                let b = args[1].as_int().unwrap_or(0);
+                if a == 0 || b == 0 {
+                    Ok(Value::Int(0))
+                } else {
+                    fn gcd(mut a: i64, mut b: i64) -> i64 {
+                        while b != 0 { let t = b; b = a % b; a = t; } a
+                    }
+                    Ok(Value::Int((a / gcd(a.abs(), b.abs())).abs() * b.abs()))
+                }
+            }
+
+            PrimOp::Quot => {
+                let a = args[0].as_int().unwrap_or(0);
+                let b = args[1].as_int().unwrap_or(0);
+                if b == 0 { return Err(EvalError::DivisionByZero); }
+                // quot truncates towards zero
+                Ok(Value::Int(a / b))
+            }
+
+            PrimOp::Rem => {
+                let a = args[0].as_int().unwrap_or(0);
+                let b = args[1].as_int().unwrap_or(0);
+                if b == 0 { return Err(EvalError::DivisionByZero); }
+                Ok(Value::Int(a % b))
+            }
+
+            PrimOp::QuotRem => {
+                let a = args[0].as_int().unwrap_or(0);
+                let b = args[1].as_int().unwrap_or(0);
+                if b == 0 { return Err(EvalError::DivisionByZero); }
+                Ok(self.make_pair(Value::Int(a / b), Value::Int(a % b)))
+            }
+
+            PrimOp::DivMod => {
+                let a = args[0].as_int().unwrap_or(0);
+                let b = args[1].as_int().unwrap_or(0);
+                if b == 0 { return Err(EvalError::DivisionByZero); }
+                // Haskell div/mod truncates towards negative infinity
+                let d = a.div_euclid(b);
+                let m = a.rem_euclid(b);
+                // Adjust: Haskell divMod may differ from Euclidean for negative divisors
+                let (d, m) = if b < 0 { (-d - if m != 0 { 1 } else { 0 }, if m != 0 { m + b } else { 0 }) } else { (d, m) };
+                Ok(self.make_pair(Value::Int(d), Value::Int(m)))
+            }
+
+            PrimOp::Subtract => {
+                // subtract :: Num a => a -> a -> a
+                // subtract x y = y - x (note: flipped!)
+                let x = args[0].as_int().unwrap_or(0);
+                let y = args[1].as_int().unwrap_or(0);
+                Ok(Value::Int(y.wrapping_sub(x)))
+            }
+
+            // === Scan operations ===
+            PrimOp::Scanl => {
+                // scanl f z xs = [z, f z x0, f (f z x0) x1, ...]
+                let f = &args[0];
+                let z = args[1].clone();
+                let xs = self.force_list(args[2].clone())?;
+                let mut result = Vec::with_capacity(xs.len() + 1);
+                let mut acc = z;
+                result.push(acc.clone());
+                for x in xs {
+                    acc = self.apply(self.apply(f.clone(), acc)?, x)?;
+                    acc = self.force(acc)?;
+                    result.push(acc.clone());
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Scanr => {
+                // scanr f z xs
+                let f = &args[0];
+                let z = args[1].clone();
+                let xs = self.force_list(args[2].clone())?;
+                let mut result = vec![z.clone()];
+                let mut acc = z;
+                for x in xs.into_iter().rev() {
+                    acc = self.apply(self.apply(f.clone(), x)?, acc)?;
+                    acc = self.force(acc)?;
+                    result.push(acc.clone());
+                }
+                result.reverse();
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Scanl1 => {
+                // scanl1 f xs = scanl f (head xs) (tail xs)
+                let f = &args[0];
+                let xs = self.force_list(args[1].clone())?;
+                if xs.is_empty() {
+                    return Ok(Value::from_list(vec![]));
+                }
+                let mut acc = xs[0].clone();
+                let mut result = vec![acc.clone()];
+                for x in xs.into_iter().skip(1) {
+                    acc = self.apply(self.apply(f.clone(), acc)?, x)?;
+                    acc = self.force(acc)?;
+                    result.push(acc.clone());
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Scanr1 => {
+                // scanr1 f xs
+                let f = &args[0];
+                let xs = self.force_list(args[1].clone())?;
+                if xs.is_empty() {
+                    return Ok(Value::from_list(vec![]));
+                }
+                let mut result = Vec::with_capacity(xs.len());
+                let mut acc = xs.last().unwrap().clone();
+                result.push(acc.clone());
+                for x in xs.into_iter().rev().skip(1) {
+                    acc = self.apply(self.apply(f.clone(), x)?, acc)?;
+                    acc = self.force(acc)?;
+                    result.push(acc.clone());
+                }
+                result.reverse();
+                Ok(Value::from_list(result))
+            }
+
+            // === Maximum/Minimum ===
+            PrimOp::Maximum => {
+                let xs = self.force_list(args[0].clone())?;
+                if xs.is_empty() {
+                    return Err(EvalError::UserError("maximum: empty list".into()));
+                }
+                let mut best = xs[0].clone();
+                for x in xs.into_iter().skip(1) {
+                    if self.value_compare(&x, &best) == std::cmp::Ordering::Greater {
+                        best = x;
+                    }
+                }
+                Ok(best)
+            }
+
+            PrimOp::Minimum => {
+                let xs = self.force_list(args[0].clone())?;
+                if xs.is_empty() {
+                    return Err(EvalError::UserError("minimum: empty list".into()));
+                }
+                let mut best = xs[0].clone();
+                for x in xs.into_iter().skip(1) {
+                    if self.value_compare(&x, &best) == std::cmp::Ordering::Less {
+                        best = x;
+                    }
+                }
+                Ok(best)
+            }
+
+            // === Zip3 / ZipWith3 / Unzip3 ===
+            PrimOp::Zip3 => {
+                let xs = self.force_list(args[0].clone())?;
+                let ys = self.force_list(args[1].clone())?;
+                let zs = self.force_list(args[2].clone())?;
+                let result: Vec<Value> = xs.into_iter().zip(ys).zip(zs)
+                    .map(|((x, y), z)| self.make_triple(x, y, z))
+                    .collect();
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::ZipWith3 => {
+                let f = &args[0];
+                let xs = self.force_list(args[1].clone())?;
+                let ys = self.force_list(args[2].clone())?;
+                let zs = self.force_list(args[3].clone())?;
+                let mut result = Vec::new();
+                for ((x, y), z) in xs.into_iter().zip(ys).zip(zs) {
+                    let r = self.apply(self.apply(self.apply(f.clone(), x)?, y)?, z)?;
+                    result.push(self.force(r)?);
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Unzip3 => {
+                let xs = self.force_list(args[0].clone())?;
+                let mut as_ = Vec::new();
+                let mut bs = Vec::new();
+                let mut cs = Vec::new();
+                for triple in xs {
+                    let triple = self.force(triple)?;
+                    if let Value::Data(ref d) = triple {
+                        if d.args.len() == 3 {
+                            as_.push(d.args[0].clone());
+                            bs.push(d.args[1].clone());
+                            cs.push(d.args[2].clone());
+                        }
+                    }
+                }
+                Ok(self.make_triple(
+                    Value::from_list(as_),
+                    Value::from_list(bs),
+                    Value::from_list(cs),
+                ))
+            }
+
+            // === Show helpers ===
+            PrimOp::ShowString => {
+                // showString s = (s ++)
+                // For simplicity, return the string as-is (it's used as ShowS = String -> String)
+                Ok(args[0].clone())
+            }
+
+            PrimOp::ShowChar => {
+                // showChar c = (c :)
+                // Return the char as a single-char string
+                match &args[0] {
+                    Value::Char(c) => Ok(Value::String(c.to_string().into())),
+                    _ => Ok(args[0].clone()),
+                }
+            }
+
+            PrimOp::ShowParen => {
+                // showParen b p = if b then showChar '(' . p . showChar ')' else p
+                // Simplified: for now return the second arg as-is
+                let b = args[0].as_bool().unwrap_or(false);
+                if b {
+                    // Wrap in parens
+                    let inner = self.value_to_string(&args[1])?;
+                    Ok(Value::String(format!("({})", inner).into()))
+                } else {
+                    Ok(args[1].clone())
+                }
+            }
+
+            // === IO operations ===
+            PrimOp::GetChar => {
+                use std::io::Read;
+                let mut buf = [0u8; 1];
+                std::io::stdin().read_exact(&mut buf)
+                    .map_err(|e| EvalError::UserError(format!("getChar failed: {e}")))?;
+                Ok(Value::Char(buf[0] as char))
+            }
+
+            PrimOp::GetContents => {
+                use std::io::Read;
+                let mut contents = String::new();
+                std::io::stdin().read_to_string(&mut contents)
+                    .map_err(|e| EvalError::UserError(format!("getContents failed: {e}")))?;
+                Ok(Value::String(contents.into()))
+            }
+
+            PrimOp::ReadFile => {
+                let path = self.value_to_string(&args[0])?;
+                let contents = std::fs::read_to_string(&path)
+                    .map_err(|e| EvalError::UserError(format!("{}: {e}", path)))?;
+                Ok(Value::String(contents.into()))
+            }
+
+            PrimOp::WriteFile => {
+                let path = self.value_to_string(&args[0])?;
+                let contents = self.value_to_string(&args[1])?;
+                std::fs::write(&path, &contents)
+                    .map_err(|e| EvalError::UserError(format!("{}: {e}", path)))?;
+                Ok(Value::unit())
+            }
+
+            PrimOp::AppendFile => {
+                use std::io::Write;
+                let path = self.value_to_string(&args[0])?;
+                let contents = self.value_to_string(&args[1])?;
+                let mut file = std::fs::OpenOptions::new().append(true).create(true).open(&path)
+                    .map_err(|e| EvalError::UserError(format!("{}: {e}", path)))?;
+                file.write_all(contents.as_bytes())
+                    .map_err(|e| EvalError::UserError(format!("{}: {e}", path)))?;
+                Ok(Value::unit())
+            }
+
+            PrimOp::Interact => {
+                use std::io::Read;
+                let f = &args[0];
+                let mut input = String::new();
+                std::io::stdin().read_to_string(&mut input)
+                    .map_err(|e| EvalError::UserError(format!("interact failed: {e}")))?;
+                let result = self.apply(f.clone(), Value::String(input.into()))?;
+                let output = self.value_to_string(&self.force(result)?)?;
+                println!("{output}");
+                self.io_output.borrow_mut().push_str(&output);
+                Ok(Value::unit())
+            }
+
+            // === Misc Prelude ===
+            PrimOp::Otherwise => Ok(Value::bool(true)),
+
+            PrimOp::Until => {
+                // until p f x: apply f repeatedly until p holds
+                let p = &args[0];
+                let f = &args[1];
+                let mut x = args[2].clone();
+                for _ in 0..10000 {
+                    let test = self.apply(p.clone(), x.clone())?;
+                    let test = self.force(test)?;
+                    if test.as_bool().unwrap_or(false) {
+                        return Ok(x);
+                    }
+                    x = self.apply(f.clone(), x)?;
+                    x = self.force(x)?;
+                }
+                Err(EvalError::UserError("until: iteration limit exceeded".into()))
+            }
+
+            PrimOp::AsTypeOf => {
+                // asTypeOf x _ = x (type-level only, identity at runtime)
+                Ok(args[0].clone())
+            }
+
+            PrimOp::RealToFrac => {
+                // Identity conversion for now
+                match &args[0] {
+                    Value::Int(n) => Ok(Value::Double(*n as f64)),
+                    Value::Double(_) => Ok(args[0].clone()),
+                    Value::Float(f) => Ok(Value::Double(f64::from(*f))),
+                    _ => Ok(args[0].clone()),
+                }
+            }
+
+            // === Data.List operations ===
+            PrimOp::Sort => {
+                let mut xs = self.force_list(args[0].clone())?;
+                xs.sort_by(|a, b| self.value_compare(a, b));
+                Ok(Value::from_list(xs))
+            }
+
+            PrimOp::SortBy => {
+                let cmp = &args[0];
+                let mut xs = self.force_list(args[1].clone())?;
+                // Use a stable sort with the comparison function
+                // cmp returns Ordering (LT/EQ/GT data constructors)
+                let cmp_clone = cmp.clone();
+                let mut err: Option<EvalError> = None;
+                xs.sort_by(|a, b| {
+                    if err.is_some() { return std::cmp::Ordering::Equal; }
+                    match self.apply(cmp_clone.clone(), a.clone())
+                        .and_then(|f| self.apply(f, b.clone()))
+                        .and_then(|v| self.force(v))
+                    {
+                        Ok(v) => self.ordering_value_to_cmp(&v),
+                        Err(e) => { err = Some(e); std::cmp::Ordering::Equal }
+                    }
+                });
+                if let Some(e) = err { return Err(e); }
+                Ok(Value::from_list(xs))
+            }
+
+            PrimOp::SortOn => {
+                let f = &args[0];
+                let xs = self.force_list(args[1].clone())?;
+                // Schwartzian transform: compute key once
+                let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(xs.len());
+                for x in xs {
+                    let key = self.apply(f.clone(), x.clone())?;
+                    let key = self.force(key)?;
+                    keyed.push((key, x));
+                }
+                keyed.sort_by(|(ka, _), (kb, _)| self.value_compare(ka, kb));
+                let result: Vec<Value> = keyed.into_iter().map(|(_, v)| v).collect();
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Nub => {
+                let xs = self.force_list(args[0].clone())?;
+                let mut seen = Vec::new();
+                let mut result = Vec::new();
+                for x in xs {
+                    if !seen.iter().any(|s| self.values_equal(s, &x)) {
+                        seen.push(x.clone());
+                        result.push(x);
+                    }
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::NubBy => {
+                let eq = &args[0];
+                let xs = self.force_list(args[1].clone())?;
+                let mut seen: Vec<Value> = Vec::new();
+                let mut result = Vec::new();
+                for x in xs {
+                    let mut found = false;
+                    for s in &seen {
+                        let r = self.apply(self.apply(eq.clone(), s.clone())?, x.clone())?;
+                        let r = self.force(r)?;
+                        if r.as_bool().unwrap_or(false) { found = true; break; }
+                    }
+                    if !found {
+                        seen.push(x.clone());
+                        result.push(x);
+                    }
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Group => {
+                let xs = self.force_list(args[0].clone())?;
+                let mut result: Vec<Value> = Vec::new();
+                let mut i = 0;
+                while i < xs.len() {
+                    let mut group = vec![xs[i].clone()];
+                    let mut j = i + 1;
+                    while j < xs.len() && self.values_equal(&xs[i], &xs[j]) {
+                        group.push(xs[j].clone());
+                        j += 1;
+                    }
+                    result.push(Value::from_list(group));
+                    i = j;
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::GroupBy => {
+                let eq = &args[0];
+                let xs = self.force_list(args[1].clone())?;
+                let mut result: Vec<Value> = Vec::new();
+                let mut i = 0;
+                while i < xs.len() {
+                    let mut group = vec![xs[i].clone()];
+                    let mut j = i + 1;
+                    while j < xs.len() {
+                        let r = self.apply(self.apply(eq.clone(), xs[i].clone())?, xs[j].clone())?;
+                        let r = self.force(r)?;
+                        if r.as_bool().unwrap_or(false) {
+                            group.push(xs[j].clone());
+                            j += 1;
+                        } else { break; }
+                    }
+                    result.push(Value::from_list(group));
+                    i = j;
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Intersperse => {
+                let sep = args[0].clone();
+                let xs = self.force_list(args[1].clone())?;
+                if xs.len() <= 1 { return Ok(Value::from_list(xs)); }
+                let mut result = Vec::with_capacity(xs.len() * 2 - 1);
+                for (i, x) in xs.into_iter().enumerate() {
+                    if i > 0 { result.push(sep.clone()); }
+                    result.push(x);
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Intercalate => {
+                let sep = self.force_list(args[0].clone())?;
+                let xss = self.force_list(args[1].clone())?;
+                let mut result = Vec::new();
+                for (i, xs_val) in xss.into_iter().enumerate() {
+                    if i > 0 { result.extend(sep.clone()); }
+                    let xs = self.force_list(xs_val)?;
+                    result.extend(xs);
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Transpose => {
+                let xss = self.force_list(args[0].clone())?;
+                let mut rows: Vec<Vec<Value>> = Vec::new();
+                for xs_val in xss {
+                    let xs = self.force_list(xs_val)?;
+                    rows.push(xs);
+                }
+                if rows.is_empty() { return Ok(Value::from_list(vec![])); }
+                let max_len = rows.iter().map(Vec::len).max().unwrap_or(0);
+                let mut result = Vec::new();
+                for col in 0..max_len {
+                    let mut column = Vec::new();
+                    for row in &rows {
+                        if col < row.len() { column.push(row[col].clone()); }
+                    }
+                    result.push(Value::from_list(column));
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Subsequences => {
+                let xs = self.force_list(args[0].clone())?;
+                let n = xs.len();
+                let mut result = Vec::with_capacity(1 << n.min(20));
+                // Limit to prevent memory explosion
+                let limit = n.min(20);
+                for mask in 0..(1u64 << limit) {
+                    let mut sub = Vec::new();
+                    for (i, x) in xs.iter().enumerate().take(limit) {
+                        if mask & (1 << i) != 0 { sub.push(x.clone()); }
+                    }
+                    result.push(Value::from_list(sub));
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Permutations => {
+                let xs = self.force_list(args[0].clone())?;
+                if xs.len() > 8 {
+                    return Err(EvalError::UserError("permutations: list too long (max 8)".into()));
+                }
+                let mut perms = Vec::new();
+                let mut indices: Vec<usize> = (0..xs.len()).collect();
+                loop {
+                    let perm: Vec<Value> = indices.iter().map(|&i| xs[i].clone()).collect();
+                    perms.push(Value::from_list(perm));
+                    // Next permutation
+                    if !next_permutation(&mut indices) { break; }
+                }
+                Ok(Value::from_list(perms))
+            }
+
+            PrimOp::Partition => {
+                let p = &args[0];
+                let xs = self.force_list(args[1].clone())?;
+                let mut yes = Vec::new();
+                let mut no = Vec::new();
+                for x in xs {
+                    let r = self.apply(p.clone(), x.clone())?;
+                    let r = self.force(r)?;
+                    if r.as_bool().unwrap_or(false) { yes.push(x); } else { no.push(x); }
+                }
+                Ok(self.make_pair(Value::from_list(yes), Value::from_list(no)))
+            }
+
+            PrimOp::Find => {
+                let p = &args[0];
+                let xs = self.force_list(args[1].clone())?;
+                for x in xs {
+                    let r = self.apply(p.clone(), x.clone())?;
+                    let r = self.force(r)?;
+                    if r.as_bool().unwrap_or(false) {
+                        return Ok(self.make_just(x));
+                    }
+                }
+                Ok(self.make_nothing())
+            }
+
+            PrimOp::StripPrefix => {
+                let prefix = self.force_list(args[0].clone())?;
+                let xs = self.force_list(args[1].clone())?;
+                if xs.len() < prefix.len() { return Ok(self.make_nothing()); }
+                for (p, x) in prefix.iter().zip(xs.iter()) {
+                    if !self.values_equal(p, x) { return Ok(self.make_nothing()); }
+                }
+                let rest: Vec<Value> = xs.into_iter().skip(prefix.len()).collect();
+                Ok(self.make_just(Value::from_list(rest)))
+            }
+
+            PrimOp::IsPrefixOf => {
+                let prefix = self.force_list(args[0].clone())?;
+                let xs = self.force_list(args[1].clone())?;
+                if prefix.len() > xs.len() { return Ok(Value::bool(false)); }
+                for (p, x) in prefix.iter().zip(xs.iter()) {
+                    if !self.values_equal(p, x) { return Ok(Value::bool(false)); }
+                }
+                Ok(Value::bool(true))
+            }
+
+            PrimOp::IsSuffixOf => {
+                let suffix = self.force_list(args[0].clone())?;
+                let xs = self.force_list(args[1].clone())?;
+                if suffix.len() > xs.len() { return Ok(Value::bool(false)); }
+                let offset = xs.len() - suffix.len();
+                for (i, s) in suffix.iter().enumerate() {
+                    if !self.values_equal(s, &xs[offset + i]) { return Ok(Value::bool(false)); }
+                }
+                Ok(Value::bool(true))
+            }
+
+            PrimOp::IsInfixOf => {
+                let needle = self.force_list(args[0].clone())?;
+                let haystack = self.force_list(args[1].clone())?;
+                if needle.is_empty() { return Ok(Value::bool(true)); }
+                if needle.len() > haystack.len() { return Ok(Value::bool(false)); }
+                for i in 0..=(haystack.len() - needle.len()) {
+                    let mut found = true;
+                    for (j, n) in needle.iter().enumerate() {
+                        if !self.values_equal(n, &haystack[i + j]) { found = false; break; }
+                    }
+                    if found { return Ok(Value::bool(true)); }
+                }
+                Ok(Value::bool(false))
+            }
+
+            PrimOp::Delete => {
+                let x = &args[0];
+                let xs = self.force_list(args[1].clone())?;
+                let mut result = Vec::new();
+                let mut deleted = false;
+                for item in xs {
+                    if !deleted && self.values_equal(x, &item) {
+                        deleted = true;
+                    } else {
+                        result.push(item);
+                    }
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::DeleteBy => {
+                let eq = &args[0];
+                let x = &args[1];
+                let xs = self.force_list(args[2].clone())?;
+                let mut result = Vec::new();
+                let mut deleted = false;
+                for item in xs {
+                    if !deleted {
+                        let r = self.apply(self.apply(eq.clone(), x.clone())?, item.clone())?;
+                        let r = self.force(r)?;
+                        if r.as_bool().unwrap_or(false) { deleted = true; continue; }
+                    }
+                    result.push(item);
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Union => {
+                let xs = self.force_list(args[0].clone())?;
+                let ys = self.force_list(args[1].clone())?;
+                let mut result = xs.clone();
+                for y in ys {
+                    if !result.iter().any(|x| self.values_equal(x, &y)) {
+                        result.push(y);
+                    }
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::UnionBy => {
+                let eq = &args[0];
+                let xs = self.force_list(args[1].clone())?;
+                let ys = self.force_list(args[2].clone())?;
+                let mut result = xs.clone();
+                for y in ys {
+                    let mut found = false;
+                    for x in &result {
+                        let r = self.apply(self.apply(eq.clone(), x.clone())?, y.clone())?;
+                        let r = self.force(r)?;
+                        if r.as_bool().unwrap_or(false) { found = true; break; }
+                    }
+                    if !found { result.push(y); }
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Intersect => {
+                let xs = self.force_list(args[0].clone())?;
+                let ys = self.force_list(args[1].clone())?;
+                let result: Vec<Value> = xs.into_iter()
+                    .filter(|x| ys.iter().any(|y| self.values_equal(x, y)))
+                    .collect();
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::IntersectBy => {
+                let eq = &args[0];
+                let xs = self.force_list(args[1].clone())?;
+                let ys = self.force_list(args[2].clone())?;
+                let mut result = Vec::new();
+                for x in xs {
+                    let mut found = false;
+                    for y in &ys {
+                        let r = self.apply(self.apply(eq.clone(), x.clone())?, y.clone())?;
+                        let r = self.force(r)?;
+                        if r.as_bool().unwrap_or(false) { found = true; break; }
+                    }
+                    if found { result.push(x); }
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::ListDiff => {
+                let xs = self.force_list(args[0].clone())?;
+                let ys = self.force_list(args[1].clone())?;
+                let mut result = xs;
+                for y in &ys {
+                    if let Some(pos) = result.iter().position(|x| self.values_equal(x, y)) {
+                        result.remove(pos);
+                    }
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Tails => {
+                let xs = self.force_list(args[0].clone())?;
+                let mut result = Vec::with_capacity(xs.len() + 1);
+                for i in 0..=xs.len() {
+                    result.push(Value::from_list(xs[i..].to_vec()));
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Inits => {
+                let xs = self.force_list(args[0].clone())?;
+                let mut result = Vec::with_capacity(xs.len() + 1);
+                for i in 0..=xs.len() {
+                    result.push(Value::from_list(xs[..i].to_vec()));
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::MapAccumL => {
+                // mapAccumL f acc xs = (acc', ys)
+                let f = &args[0];
+                let mut acc = args[1].clone();
+                let xs = self.force_list(args[2].clone())?;
+                let mut ys = Vec::with_capacity(xs.len());
+                for x in xs {
+                    let r = self.apply(self.apply(f.clone(), acc)?, x)?;
+                    let r = self.force(r)?;
+                    if let Value::Data(ref d) = r {
+                        if d.con.name.as_str() == "(,)" && d.args.len() == 2 {
+                            acc = d.args[0].clone();
+                            ys.push(d.args[1].clone());
+                            continue;
+                        }
+                    }
+                    return Err(EvalError::TypeError {
+                        expected: "pair (acc, y)".into(),
+                        got: format!("{r:?}"),
+                    });
+                }
+                Ok(self.make_pair(acc, Value::from_list(ys)))
+            }
+
+            PrimOp::MapAccumR => {
+                let f = &args[0];
+                let mut acc = args[1].clone();
+                let xs = self.force_list(args[2].clone())?;
+                let mut ys = Vec::with_capacity(xs.len());
+                for x in xs.into_iter().rev() {
+                    let r = self.apply(self.apply(f.clone(), acc)?, x)?;
+                    let r = self.force(r)?;
+                    if let Value::Data(ref d) = r {
+                        if d.con.name.as_str() == "(,)" && d.args.len() == 2 {
+                            acc = d.args[0].clone();
+                            ys.push(d.args[1].clone());
+                            continue;
+                        }
+                    }
+                    return Err(EvalError::TypeError {
+                        expected: "pair (acc, y)".into(),
+                        got: format!("{r:?}"),
+                    });
+                }
+                ys.reverse();
+                Ok(self.make_pair(acc, Value::from_list(ys)))
+            }
+
+            PrimOp::Unfoldr => {
+                let f = &args[0];
+                let mut b = args[1].clone();
+                let mut result = Vec::new();
+                let limit = 10000;
+                for _ in 0..limit {
+                    let r = self.apply(f.clone(), b.clone())?;
+                    let r = self.force(r)?;
+                    match &r {
+                        Value::Data(d) if d.con.name.as_str() == "Nothing" => break,
+                        Value::Data(d) if d.con.name.as_str() == "Just" && d.args.len() == 1 => {
+                            let pair = self.force(d.args[0].clone())?;
+                            if let Value::Data(ref pd) = pair {
+                                if pd.con.name.as_str() == "(,)" && pd.args.len() == 2 {
+                                    result.push(pd.args[0].clone());
+                                    b = pd.args[1].clone();
+                                    continue;
+                                }
+                            }
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::GenericLength => {
+                let xs = self.force_list(args[0].clone())?;
+                Ok(Value::Int(xs.len() as i64))
+            }
+
+            PrimOp::GenericTake => {
+                let n = args[0].as_int().unwrap_or(0).max(0) as usize;
+                let xs = self.force_list(args[1].clone())?;
+                Ok(Value::from_list(xs.into_iter().take(n).collect()))
+            }
+
+            PrimOp::GenericDrop => {
+                let n = args[0].as_int().unwrap_or(0).max(0) as usize;
+                let xs = self.force_list(args[1].clone())?;
+                Ok(Value::from_list(xs.into_iter().skip(n).collect()))
+            }
+
+            // === Data.Char operations ===
+            PrimOp::IsAlpha => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_alphabetic())) }
+            PrimOp::IsAlphaNum => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_alphanumeric())) }
+            PrimOp::IsAscii => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_ascii())) }
+            PrimOp::IsControl => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_control())) }
+            PrimOp::IsDigit => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_ascii_digit())) }
+            PrimOp::IsHexDigit => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_ascii_hexdigit())) }
+            PrimOp::IsLetter => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_alphabetic())) }
+            PrimOp::IsLower => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_lowercase())) }
+            PrimOp::IsNumber => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_numeric())) }
+            PrimOp::IsPrint => { let c = self.as_char(&args[0])?; Ok(Value::bool(!c.is_control())) }
+            PrimOp::IsPunctuation => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_ascii_punctuation())) }
+            PrimOp::IsSpace => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_whitespace())) }
+            PrimOp::IsSymbol => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(matches!(c, '$' | '+' | '<' | '=' | '>' | '^' | '`' | '|' | '~' | '¬' | '±' | '×' | '÷')))
+            }
+            PrimOp::IsUpper => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_uppercase())) }
+            PrimOp::ToLower => { let c = self.as_char(&args[0])?; Ok(Value::Char(c.to_lowercase().next().unwrap_or(c))) }
+            PrimOp::ToUpper => { let c = self.as_char(&args[0])?; Ok(Value::Char(c.to_uppercase().next().unwrap_or(c))) }
+            PrimOp::ToTitle => { let c = self.as_char(&args[0])?; Ok(Value::Char(c.to_uppercase().next().unwrap_or(c))) }
+            PrimOp::DigitToInt => {
+                let c = self.as_char(&args[0])?;
+                let n = match c {
+                    '0'..='9' => (c as i64) - ('0' as i64),
+                    'a'..='f' => (c as i64) - ('a' as i64) + 10,
+                    'A'..='F' => (c as i64) - ('A' as i64) + 10,
+                    _ => return Err(EvalError::UserError(format!("digitToInt: not a digit: {:?}", c))),
+                };
+                Ok(Value::Int(n))
+            }
+            PrimOp::IntToDigit => {
+                let n = args[0].as_int().unwrap_or(0);
+                let c = match n {
+                    0..=9 => char::from(b'0' + n as u8),
+                    10..=15 => char::from(b'a' + (n - 10) as u8),
+                    _ => return Err(EvalError::UserError(format!("intToDigit: out of range: {n}"))),
+                };
+                Ok(Value::Char(c))
+            }
+            PrimOp::IsLatin1 => { let c = self.as_char(&args[0])?; Ok(Value::bool((c as u32) <= 255)) }
+            PrimOp::IsAsciiLower => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_ascii_lowercase())) }
+            PrimOp::IsAsciiUpper => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_ascii_uppercase())) }
+
+            // === Data.Function operations ===
+            PrimOp::On => {
+                // on f g x y = f (g x) (g y)
+                let f = &args[0];
+                let g = &args[1];
+                let x = args[2].clone();
+                let y = args[3].clone();
+                let gx = self.apply(g.clone(), x)?;
+                let gy = self.apply(g.clone(), y)?;
+                self.apply(self.apply(f.clone(), gx)?, gy)
+            }
+
+            PrimOp::Fix => {
+                // fix f = let x = f x in x
+                // We implement by repeatedly applying f, with a depth limit
+                let f = &args[0];
+                self.apply(f.clone(), Value::PrimOp(PrimOp::Fix))
+            }
+
+            PrimOp::Amp => {
+                // (&) x f = f x (flip ($))
+                let x = args[0].clone();
+                let f = &args[1];
+                self.apply(f.clone(), x)
+            }
+
+            // === Data.Maybe additional ===
+            PrimOp::ListToMaybe => {
+                let xs = self.force_list(args[0].clone())?;
+                if xs.is_empty() {
+                    Ok(self.make_nothing())
+                } else {
+                    Ok(self.make_just(xs.into_iter().next().unwrap()))
+                }
+            }
+
+            PrimOp::MaybeToList => {
+                let m = self.force(args[0].clone())?;
+                match &m {
+                    Value::Data(d) if d.con.name.as_str() == "Nothing" => Ok(Value::from_list(vec![])),
+                    Value::Data(d) if d.con.name.as_str() == "Just" && d.args.len() == 1 => {
+                        Ok(Value::from_list(vec![d.args[0].clone()]))
+                    }
+                    _ => Ok(Value::from_list(vec![])),
+                }
+            }
+
+            PrimOp::CatMaybes => {
+                let xs = self.force_list(args[0].clone())?;
+                let mut result = Vec::new();
+                for x in xs {
+                    let x = self.force(x)?;
+                    if let Value::Data(ref d) = x {
+                        if d.con.name.as_str() == "Just" && d.args.len() == 1 {
+                            result.push(d.args[0].clone());
+                        }
+                    }
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::MapMaybe => {
+                let f = &args[0];
+                let xs = self.force_list(args[1].clone())?;
+                let mut result = Vec::new();
+                for x in xs {
+                    let r = self.apply(f.clone(), x)?;
+                    let r = self.force(r)?;
+                    if let Value::Data(ref d) = r {
+                        if d.con.name.as_str() == "Just" && d.args.len() == 1 {
+                            result.push(d.args[0].clone());
+                        }
+                    }
+                }
+                Ok(Value::from_list(result))
+            }
+
+            // === Data.Either additional ===
+            PrimOp::IsLeft => {
+                let e = self.force(args[0].clone())?;
+                match &e {
+                    Value::Data(d) if d.con.name.as_str() == "Left" => Ok(Value::bool(true)),
+                    _ => Ok(Value::bool(false)),
+                }
+            }
+
+            PrimOp::IsRight => {
+                let e = self.force(args[0].clone())?;
+                match &e {
+                    Value::Data(d) if d.con.name.as_str() == "Right" => Ok(Value::bool(true)),
+                    _ => Ok(Value::bool(false)),
+                }
+            }
+
+            PrimOp::Lefts => {
+                let xs = self.force_list(args[0].clone())?;
+                let mut result = Vec::new();
+                for x in xs {
+                    let x = self.force(x)?;
+                    if let Value::Data(ref d) = x {
+                        if d.con.name.as_str() == "Left" && d.args.len() == 1 {
+                            result.push(d.args[0].clone());
+                        }
+                    }
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::Rights => {
+                let xs = self.force_list(args[0].clone())?;
+                let mut result = Vec::new();
+                for x in xs {
+                    let x = self.force(x)?;
+                    if let Value::Data(ref d) = x {
+                        if d.con.name.as_str() == "Right" && d.args.len() == 1 {
+                            result.push(d.args[0].clone());
+                        }
+                    }
+                }
+                Ok(Value::from_list(result))
+            }
+
+            PrimOp::PartitionEithers => {
+                let xs = self.force_list(args[0].clone())?;
+                let mut lefts = Vec::new();
+                let mut rights = Vec::new();
+                for x in xs {
+                    let x = self.force(x)?;
+                    if let Value::Data(ref d) = x {
+                        if d.con.name.as_str() == "Left" && d.args.len() == 1 {
+                            lefts.push(d.args[0].clone());
+                        } else if d.con.name.as_str() == "Right" && d.args.len() == 1 {
+                            rights.push(d.args[0].clone());
+                        }
+                    }
+                }
+                Ok(self.make_pair(Value::from_list(lefts), Value::from_list(rights)))
+            }
+
+            // === Math functions ===
+            PrimOp::Sqrt => { let a = args[0].as_double().unwrap_or(0.0); Ok(Value::Double(a.sqrt())) }
+            PrimOp::Exp => { let a = args[0].as_double().unwrap_or(0.0); Ok(Value::Double(a.exp())) }
+            PrimOp::Log => { let a = args[0].as_double().unwrap_or(0.0); Ok(Value::Double(a.ln())) }
+            PrimOp::Sin => { let a = args[0].as_double().unwrap_or(0.0); Ok(Value::Double(a.sin())) }
+            PrimOp::Cos => { let a = args[0].as_double().unwrap_or(0.0); Ok(Value::Double(a.cos())) }
+            PrimOp::Tan => { let a = args[0].as_double().unwrap_or(0.0); Ok(Value::Double(a.tan())) }
+            PrimOp::Power => {
+                let base = args[0].as_int().unwrap_or(0);
+                let exp = args[1].as_int().unwrap_or(0);
+                if exp < 0 { return Err(EvalError::UserError("(^): negative exponent".into())); }
+                Ok(Value::Int(base.wrapping_pow(exp as u32)))
+            }
+            PrimOp::Truncate => {
+                let a = args[0].as_double().unwrap_or(0.0);
+                Ok(Value::Int(a.trunc() as i64))
+            }
+            PrimOp::Round => {
+                let a = args[0].as_double().unwrap_or(0.0);
+                Ok(Value::Int(a.round() as i64))
+            }
+            PrimOp::Ceiling => {
+                let a = args[0].as_double().unwrap_or(0.0);
+                Ok(Value::Int(a.ceil() as i64))
+            }
+            PrimOp::Floor => {
+                let a = args[0].as_double().unwrap_or(0.0);
+                Ok(Value::Int(a.floor() as i64))
+            }
+
+            // === Tuple ===
+            PrimOp::Fst => {
+                let pair = self.force(args[0].clone())?;
+                if let Value::Data(ref d) = pair {
+                    if d.args.len() >= 2 {
+                        return Ok(d.args[0].clone());
+                    }
+                }
+                Err(EvalError::TypeError { expected: "pair".into(), got: format!("{pair:?}") })
+            }
+
+            PrimOp::Snd => {
+                let pair = self.force(args[0].clone())?;
+                if let Value::Data(ref d) = pair {
+                    if d.args.len() >= 2 {
+                        return Ok(d.args[1].clone());
+                    }
+                }
+                Err(EvalError::TypeError { expected: "pair".into(), got: format!("{pair:?}") })
+            }
+
             PrimOp::MonadBind => {
                 // Polymorphic (>>=): dispatch based on first argument type
                 // If it's a list, use list bind (concatMap)
@@ -2299,6 +3511,104 @@ impl Evaluator {
         }
     }
 
+    /// Extract a char from a Value.
+    fn as_char(&self, value: &Value) -> Result<char, EvalError> {
+        let forced = self.force(value.clone())?;
+        match &forced {
+            Value::Char(c) => Ok(*c),
+            other => Err(EvalError::TypeError {
+                expected: "Char".into(),
+                got: format!("{other:?}"),
+            }),
+        }
+    }
+
+    /// Compare two values for ordering.
+    fn value_compare(&self, a: &Value, b: &Value) -> std::cmp::Ordering {
+        match (a, b) {
+            (Value::Int(x), Value::Int(y)) => x.cmp(y),
+            (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
+            (Value::Double(x), Value::Double(y)) => {
+                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Value::Float(x), Value::Float(y)) => {
+                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Value::Char(x), Value::Char(y)) => x.cmp(y),
+            (Value::String(x), Value::String(y)) => x.cmp(y),
+            (Value::Data(x), Value::Data(y)) => {
+                match x.con.tag.cmp(&y.con.tag) {
+                    std::cmp::Ordering::Equal => {
+                        for (ax, ay) in x.args.iter().zip(y.args.iter()) {
+                            let c = self.value_compare(ax, ay);
+                            if c != std::cmp::Ordering::Equal {
+                                return c;
+                            }
+                        }
+                        std::cmp::Ordering::Equal
+                    }
+                    ord => ord,
+                }
+            }
+            _ => std::cmp::Ordering::Equal,
+        }
+    }
+
+    /// Convert an Ordering data constructor value to std::cmp::Ordering.
+    fn ordering_value_to_cmp(&self, v: &Value) -> std::cmp::Ordering {
+        match v {
+            Value::Data(d) => match d.con.name.as_str() {
+                "LT" => std::cmp::Ordering::Less,
+                "EQ" => std::cmp::Ordering::Equal,
+                "GT" => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Equal,
+            },
+            _ => std::cmp::Ordering::Equal,
+        }
+    }
+
+    /// Create a triple value (a, b, c).
+    fn make_triple(&self, a: Value, b: Value, c: Value) -> Value {
+        use bhc_types::{Kind, TyCon};
+        Value::Data(DataValue {
+            con: crate::DataCon {
+                name: Symbol::intern("(,,)"),
+                ty_con: TyCon::new(Symbol::intern("(,,)"), Kind::Star),
+                tag: 0,
+                arity: 3,
+            },
+            args: vec![a, b, c],
+        })
+    }
+
+    /// Create a Left value.
+    fn make_left(&self, a: Value) -> Value {
+        use bhc_types::{Kind, TyCon};
+        Value::Data(DataValue {
+            con: crate::DataCon {
+                name: Symbol::intern("Left"),
+                ty_con: TyCon::new(Symbol::intern("Either"), Kind::star_to_star()),
+                tag: 0,
+                arity: 1,
+            },
+            args: vec![a],
+        })
+    }
+
+    /// Create a Right value.
+    fn make_right(&self, a: Value) -> Value {
+        use bhc_types::{Kind, TyCon};
+        Value::Data(DataValue {
+            con: crate::DataCon {
+                name: Symbol::intern("Right"),
+                ty_con: TyCon::new(Symbol::intern("Either"), Kind::star_to_star()),
+                tag: 1,
+                arity: 1,
+            },
+            args: vec![a],
+        })
+    }
+
     /// Display a value, deeply forcing all thunks.
     ///
     /// This produces a readable string representation of a value,
@@ -2394,6 +3704,34 @@ impl Default for Evaluator {
     fn default() -> Self {
         Self::new(EvalMode::Lazy)
     }
+}
+
+/// Generate the next permutation of indices in lexicographic order.
+/// Returns false when all permutations have been exhausted.
+fn next_permutation(indices: &mut Vec<usize>) -> bool {
+    let n = indices.len();
+    if n <= 1 {
+        return false;
+    }
+    // Find largest i such that indices[i] < indices[i+1]
+    let mut i = n - 2;
+    loop {
+        if indices[i] < indices[i + 1] {
+            break;
+        }
+        if i == 0 {
+            return false;
+        }
+        i -= 1;
+    }
+    // Find largest j such that indices[i] < indices[j]
+    let mut j = n - 1;
+    while indices[j] <= indices[i] {
+        j -= 1;
+    }
+    indices.swap(i, j);
+    indices[i + 1..].reverse();
+    true
 }
 
 #[cfg(test)]

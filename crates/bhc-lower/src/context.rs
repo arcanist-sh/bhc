@@ -775,6 +775,36 @@ impl LowerContext {
             "fromException",
             "toException",
             "displayException",
+            // ---- Phase 1 new PrimOps ----
+            // Scans
+            "scanl1",
+            "scanr1",
+            // Integral
+            "subtract",
+            // Data.List "By" variants
+            "nubBy",
+            "groupBy",
+            "deleteBy",
+            "unionBy",
+            "intersectBy",
+            "stripPrefix",
+            // Accumulating maps
+            "mapAccumL",
+            "mapAccumR",
+            "unfoldr",
+            // Data.Char
+            "toTitle",
+            "isLatin1",
+            "isAsciiLower",
+            "isAsciiUpper",
+            // Show helpers
+            "showString",
+            "showChar",
+            "showParen",
+            // IO
+            "getChar",
+            // Data.Function
+            "&",
             // Note: X11/System.Posix stubs are now in define_stubs()
         ];
 

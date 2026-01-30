@@ -560,6 +560,260 @@ pub enum PrimOp {
     /// Polymorphic then (>>): dispatches to IoThen or ListThen based on first arg.
     MonadThen,
 
+    // Prelude: Enum operations
+    /// succ :: Enum a => a -> a
+    Succ,
+    /// pred :: Enum a => a -> a
+    Pred,
+    /// toEnum :: Enum a => Int -> a
+    ToEnum,
+    /// fromEnum :: Enum a => a -> Int
+    FromEnum,
+
+    // Prelude: Integral operations
+    /// gcd :: Integral a => a -> a -> a
+    Gcd,
+    /// lcm :: Integral a => a -> a -> a
+    Lcm,
+    /// quot :: Integral a => a -> a -> a
+    Quot,
+    /// rem :: Integral a => a -> a -> a
+    Rem,
+    /// quotRem :: Integral a => a -> a -> (a, a)
+    QuotRem,
+    /// divMod :: Integral a => a -> a -> (a, a)
+    DivMod,
+    /// subtract :: Num a => a -> a -> a
+    Subtract,
+
+    // Prelude: Scan operations
+    /// scanl :: (b -> a -> b) -> b -> [a] -> [b]
+    Scanl,
+    /// scanr :: (a -> b -> b) -> b -> [a] -> [b]
+    Scanr,
+    /// scanl1 :: (a -> a -> a) -> [a] -> [a]
+    Scanl1,
+    /// scanr1 :: (a -> a -> a) -> [a] -> [a]
+    Scanr1,
+
+    // Prelude: More list operations
+    /// maximum :: Ord a => [a] -> a
+    Maximum,
+    /// minimum :: Ord a => [a] -> a
+    Minimum,
+    /// zip3 :: [a] -> [b] -> [c] -> [(a,b,c)]
+    Zip3,
+    /// zipWith3 :: (a -> b -> c -> d) -> [a] -> [b] -> [c] -> [d]
+    ZipWith3,
+    /// unzip3 :: [(a,b,c)] -> ([a],[b],[c])
+    Unzip3,
+
+    // Prelude: Show helpers
+    /// showString :: String -> ShowS
+    ShowString,
+    /// showChar :: Char -> ShowS
+    ShowChar,
+    /// showParen :: Bool -> ShowS -> ShowS
+    ShowParen,
+
+    // Prelude: IO operations
+    /// getChar :: IO Char
+    GetChar,
+    /// getContents :: IO String
+    GetContents,
+    /// readFile :: FilePath -> IO String
+    ReadFile,
+    /// writeFile :: FilePath -> String -> IO ()
+    WriteFile,
+    /// appendFile :: FilePath -> String -> IO ()
+    AppendFile,
+    /// interact :: (String -> String) -> IO ()
+    Interact,
+
+    // Prelude: otherwise and misc
+    /// otherwise :: Bool (always True)
+    Otherwise,
+    /// until :: (a -> Bool) -> (a -> a) -> a -> a
+    Until,
+    /// asTypeOf :: a -> a -> a
+    AsTypeOf,
+    /// realToFrac :: (Real a, Fractional b) => a -> b
+    RealToFrac,
+
+    // Data.List operations
+    /// sort :: Ord a => [a] -> [a]
+    Sort,
+    /// sortBy :: (a -> a -> Ordering) -> [a] -> [a]
+    SortBy,
+    /// sortOn :: Ord b => (a -> b) -> [a] -> [a]
+    SortOn,
+    /// nub :: Eq a => [a] -> [a]
+    Nub,
+    /// nubBy :: (a -> a -> Bool) -> [a] -> [a]
+    NubBy,
+    /// group :: Eq a => [a] -> [[a]]
+    Group,
+    /// groupBy :: (a -> a -> Bool) -> [a] -> [[a]]
+    GroupBy,
+    /// intersperse :: a -> [a] -> [a]
+    Intersperse,
+    /// intercalate :: [a] -> [[a]] -> [a]
+    Intercalate,
+    /// transpose :: [[a]] -> [[a]]
+    Transpose,
+    /// subsequences :: [a] -> [[a]]
+    Subsequences,
+    /// permutations :: [a] -> [[a]]
+    Permutations,
+    /// partition :: (a -> Bool) -> [a] -> ([a], [a])
+    Partition,
+    /// find :: (a -> Bool) -> [a] -> Maybe a
+    Find,
+    /// stripPrefix :: Eq a => [a] -> [a] -> Maybe [a]
+    StripPrefix,
+    /// isPrefixOf :: Eq a => [a] -> [a] -> Bool
+    IsPrefixOf,
+    /// isSuffixOf :: Eq a => [a] -> [a] -> Bool
+    IsSuffixOf,
+    /// isInfixOf :: Eq a => [a] -> [a] -> Bool
+    IsInfixOf,
+    /// delete :: Eq a => a -> [a] -> [a]
+    Delete,
+    /// deleteBy :: (a -> a -> Bool) -> a -> [a] -> [a]
+    DeleteBy,
+    /// union :: Eq a => [a] -> [a] -> [a]
+    Union,
+    /// unionBy :: (a -> a -> Bool) -> [a] -> [a] -> [a]
+    UnionBy,
+    /// intersect :: Eq a => [a] -> [a] -> [a]
+    Intersect,
+    /// intersectBy :: (a -> a -> Bool) -> [a] -> [a] -> [a]
+    IntersectBy,
+    /// (\\) :: Eq a => [a] -> [a] -> [a]
+    ListDiff,
+    /// tails :: [a] -> [[a]]
+    Tails,
+    /// inits :: [a] -> [[a]]
+    Inits,
+    /// mapAccumL :: (acc -> x -> (acc, y)) -> acc -> [x] -> (acc, [y])
+    MapAccumL,
+    /// mapAccumR :: (acc -> x -> (acc, y)) -> acc -> [x] -> (acc, [y])
+    MapAccumR,
+    /// unfoldr :: (b -> Maybe (a, b)) -> b -> [a]
+    Unfoldr,
+    /// genericLength :: Num i => [a] -> i
+    GenericLength,
+    /// genericTake :: Integral i => i -> [a] -> [a]
+    GenericTake,
+    /// genericDrop :: Integral i => i -> [a] -> [a]
+    GenericDrop,
+
+    // Data.Char operations
+    /// isAlpha :: Char -> Bool
+    IsAlpha,
+    /// isAlphaNum :: Char -> Bool
+    IsAlphaNum,
+    /// isAscii :: Char -> Bool
+    IsAscii,
+    /// isControl :: Char -> Bool
+    IsControl,
+    /// isDigit :: Char -> Bool
+    IsDigit,
+    /// isHexDigit :: Char -> Bool
+    IsHexDigit,
+    /// isLetter :: Char -> Bool
+    IsLetter,
+    /// isLower :: Char -> Bool
+    IsLower,
+    /// isNumber :: Char -> Bool
+    IsNumber,
+    /// isPrint :: Char -> Bool
+    IsPrint,
+    /// isPunctuation :: Char -> Bool
+    IsPunctuation,
+    /// isSpace :: Char -> Bool
+    IsSpace,
+    /// isSymbol :: Char -> Bool
+    IsSymbol,
+    /// isUpper :: Char -> Bool
+    IsUpper,
+    /// toLower :: Char -> Char
+    ToLower,
+    /// toUpper :: Char -> Char
+    ToUpper,
+    /// toTitle :: Char -> Char
+    ToTitle,
+    /// digitToInt :: Char -> Int
+    DigitToInt,
+    /// intToDigit :: Int -> Char
+    IntToDigit,
+    /// isLatin1 :: Char -> Bool
+    IsLatin1,
+    /// isAsciiLower :: Char -> Bool
+    IsAsciiLower,
+    /// isAsciiUpper :: Char -> Bool
+    IsAsciiUpper,
+
+    // Data.Function operations
+    /// on :: (b -> b -> c) -> (a -> b) -> a -> a -> c
+    On,
+    /// fix :: (a -> a) -> a
+    Fix,
+    /// (&) :: a -> (a -> b) -> b
+    Amp,
+
+    // Data.Maybe additional operations
+    /// listToMaybe :: [a] -> Maybe a
+    ListToMaybe,
+    /// maybeToList :: Maybe a -> [a]
+    MaybeToList,
+    /// catMaybes :: [Maybe a] -> [a]
+    CatMaybes,
+    /// mapMaybe :: (a -> Maybe b) -> [a] -> [b]
+    MapMaybe,
+
+    // Data.Either additional operations
+    /// isLeft :: Either a b -> Bool
+    IsLeft,
+    /// isRight :: Either a b -> Bool
+    IsRight,
+    /// lefts :: [Either a b] -> [a]
+    Lefts,
+    /// rights :: [Either a b] -> [b]
+    Rights,
+    /// partitionEithers :: [Either a b] -> ([a], [b])
+    PartitionEithers,
+
+    // Numeric: math functions
+    /// sqrt :: Floating a => a -> a
+    Sqrt,
+    /// exp :: Floating a => a -> a
+    Exp,
+    /// log :: Floating a => a -> a
+    Log,
+    /// sin :: Floating a => a -> a
+    Sin,
+    /// cos :: Floating a => a -> a
+    Cos,
+    /// tan :: Floating a => a -> a
+    Tan,
+    /// (^) :: (Num a, Integral b) => a -> b -> a
+    Power,
+    /// truncate :: (RealFrac a, Integral b) => a -> b
+    Truncate,
+    /// round :: (RealFrac a, Integral b) => a -> b
+    Round,
+    /// ceiling :: (RealFrac a, Integral b) => a -> b
+    Ceiling,
+    /// floor :: (RealFrac a, Integral b) => a -> b
+    Floor,
+
+    // Prelude: fst/snd
+    /// fst :: (a, b) -> a
+    Fst,
+    /// snd :: (a, b) -> b
+    Snd,
+
     // Dictionary operations (generated by type class desugaring)
     /// Select field N from a dictionary (tuple). Generated as `$sel_N` by
     /// HIR-to-Core lowering for type class method extraction.
@@ -571,6 +825,8 @@ impl PrimOp {
     #[must_use]
     pub fn arity(self) -> usize {
         match self {
+            // Arity 0
+            Self::GetLine | Self::GetChar | Self::GetContents | Self::Otherwise => 0,
             // Arity 1
             Self::NegInt
             | Self::NegDouble
@@ -615,9 +871,71 @@ impl PrimOp {
             | Self::PutStr
             | Self::Print
             | Self::IoReturn
-            | Self::DictSelect(_) => 1,
-            // Arity 0
-            Self::GetLine => 0,
+            | Self::DictSelect(_)
+            | Self::Succ
+            | Self::Pred
+            | Self::ToEnum
+            | Self::FromEnum
+            | Self::Maximum
+            | Self::Minimum
+            | Self::Unzip3
+            | Self::ReadFile
+            | Self::RealToFrac
+            | Self::Nub
+            | Self::Group
+            | Self::Transpose
+            | Self::Subsequences
+            | Self::Permutations
+            | Self::Tails
+            | Self::Inits
+            | Self::GenericLength
+            | Self::IsAlpha
+            | Self::IsAlphaNum
+            | Self::IsAscii
+            | Self::IsControl
+            | Self::IsDigit
+            | Self::IsHexDigit
+            | Self::IsLetter
+            | Self::IsLower
+            | Self::IsNumber
+            | Self::IsPrint
+            | Self::IsPunctuation
+            | Self::IsSpace
+            | Self::IsSymbol
+            | Self::IsUpper
+            | Self::ToLower
+            | Self::ToUpper
+            | Self::ToTitle
+            | Self::DigitToInt
+            | Self::IntToDigit
+            | Self::IsLatin1
+            | Self::IsAsciiLower
+            | Self::IsAsciiUpper
+            | Self::Fix
+            | Self::ListToMaybe
+            | Self::MaybeToList
+            | Self::CatMaybes
+            | Self::IsLeft
+            | Self::IsRight
+            | Self::Lefts
+            | Self::Rights
+            | Self::PartitionEithers
+            | Self::Sqrt
+            | Self::Exp
+            | Self::Log
+            | Self::Sin
+            | Self::Cos
+            | Self::Tan
+            | Self::Truncate
+            | Self::Round
+            | Self::Ceiling
+            | Self::Floor
+            | Self::Fst
+            | Self::Snd
+            | Self::Scanl1
+            | Self::Scanr1
+            | Self::ShowString
+            | Self::ShowChar => 1,
             // Arity 2
             Self::UArrayMap
             | Self::UArrayRange
@@ -652,7 +970,43 @@ impl PrimOp {
             | Self::IoBind
             | Self::IoThen
             | Self::MonadBind
-            | Self::MonadThen => 2,
+            | Self::MonadThen
+            | Self::Gcd
+            | Self::Lcm
+            | Self::Quot
+            | Self::Rem
+            | Self::QuotRem
+            | Self::DivMod
+            | Self::Subtract
+            | Self::WriteFile
+            | Self::AppendFile
+            | Self::AsTypeOf
+            | Self::SortBy
+            | Self::SortOn
+            | Self::NubBy
+            | Self::GroupBy
+            | Self::Intersperse
+            | Self::Intercalate
+            | Self::Partition
+            | Self::Find
+            | Self::StripPrefix
+            | Self::IsPrefixOf
+            | Self::IsSuffixOf
+            | Self::IsInfixOf
+            | Self::Delete
+            | Self::Union
+            | Self::Intersect
+            | Self::ListDiff
+            | Self::GenericTake
+            | Self::GenericDrop
+            | Self::MapMaybe
+            | Self::Power
+            | Self::On
+            | Self::Amp
+            | Self::Unfoldr
+            | Self::Sort
+            | Self::Interact
+            | Self::ShowParen => 2,
             // Arity 3
             Self::UArrayZipWith
             | Self::UArrayFold
@@ -663,7 +1017,18 @@ impl PrimOp {
             | Self::Flip
             | Self::MaybeElim
             | Self::EitherElim
-            | Self::Curry => 3,
+            | Self::Curry
+            | Self::Scanl
+            | Self::Scanr
+            | Self::Zip3
+            | Self::Until
+            | Self::DeleteBy
+            | Self::UnionBy
+            | Self::IntersectBy
+            | Self::MapAccumL
+            | Self::MapAccumR => 3,
+            // Arity 4
+            Self::ZipWith3 => 4,
             // Default arity 2 for arithmetic/comparison ops
             _ => 2,
         }
@@ -782,6 +1147,134 @@ impl PrimOp {
             "putStr" => Some(Self::PutStr),
             "print" => Some(Self::Print),
             "getLine" => Some(Self::GetLine),
+            // Enum operations
+            "succ" => Some(Self::Succ),
+            "pred" => Some(Self::Pred),
+            "toEnum" => Some(Self::ToEnum),
+            "fromEnum" => Some(Self::FromEnum),
+            // Integral operations
+            "gcd" => Some(Self::Gcd),
+            "lcm" => Some(Self::Lcm),
+            "quot" => Some(Self::Quot),
+            "rem" => Some(Self::Rem),
+            "quotRem" => Some(Self::QuotRem),
+            "divMod" => Some(Self::DivMod),
+            "subtract" => Some(Self::Subtract),
+            // Scan operations
+            "scanl" => Some(Self::Scanl),
+            "scanl'" => Some(Self::Scanl),
+            "scanr" => Some(Self::Scanr),
+            "scanl1" => Some(Self::Scanl1),
+            "scanr1" => Some(Self::Scanr1),
+            // More list operations
+            "maximum" => Some(Self::Maximum),
+            "minimum" => Some(Self::Minimum),
+            "zip3" => Some(Self::Zip3),
+            "zipWith3" => Some(Self::ZipWith3),
+            "unzip3" => Some(Self::Unzip3),
+            // Show helpers
+            "showString" => Some(Self::ShowString),
+            "showChar" => Some(Self::ShowChar),
+            "showParen" => Some(Self::ShowParen),
+            // IO operations (additional)
+            "getChar" => Some(Self::GetChar),
+            "getContents" => Some(Self::GetContents),
+            "readFile" => Some(Self::ReadFile),
+            "writeFile" => Some(Self::WriteFile),
+            "appendFile" => Some(Self::AppendFile),
+            "interact" => Some(Self::Interact),
+            // Misc Prelude
+            "otherwise" => Some(Self::Otherwise),
+            "until" => Some(Self::Until),
+            "asTypeOf" => Some(Self::AsTypeOf),
+            "realToFrac" => Some(Self::RealToFrac),
+            // Data.List
+            "sort" => Some(Self::Sort),
+            "sortBy" => Some(Self::SortBy),
+            "sortOn" => Some(Self::SortOn),
+            "nub" => Some(Self::Nub),
+            "nubBy" => Some(Self::NubBy),
+            "group" => Some(Self::Group),
+            "groupBy" => Some(Self::GroupBy),
+            "intersperse" => Some(Self::Intersperse),
+            "intercalate" => Some(Self::Intercalate),
+            "transpose" => Some(Self::Transpose),
+            "subsequences" => Some(Self::Subsequences),
+            "permutations" => Some(Self::Permutations),
+            "partition" => Some(Self::Partition),
+            "find" => Some(Self::Find),
+            "stripPrefix" => Some(Self::StripPrefix),
+            "isPrefixOf" => Some(Self::IsPrefixOf),
+            "isSuffixOf" => Some(Self::IsSuffixOf),
+            "isInfixOf" => Some(Self::IsInfixOf),
+            "delete" => Some(Self::Delete),
+            "deleteBy" => Some(Self::DeleteBy),
+            "union" => Some(Self::Union),
+            "unionBy" => Some(Self::UnionBy),
+            "intersect" => Some(Self::Intersect),
+            "intersectBy" => Some(Self::IntersectBy),
+            "\\\\" => Some(Self::ListDiff),
+            "tails" => Some(Self::Tails),
+            "inits" => Some(Self::Inits),
+            "mapAccumL" => Some(Self::MapAccumL),
+            "mapAccumR" => Some(Self::MapAccumR),
+            "unfoldr" => Some(Self::Unfoldr),
+            "genericLength" => Some(Self::GenericLength),
+            "genericTake" => Some(Self::GenericTake),
+            "genericDrop" => Some(Self::GenericDrop),
+            // Data.Char
+            "isAlpha" => Some(Self::IsAlpha),
+            "isAlphaNum" => Some(Self::IsAlphaNum),
+            "isAscii" => Some(Self::IsAscii),
+            "isControl" => Some(Self::IsControl),
+            "isDigit" => Some(Self::IsDigit),
+            "isHexDigit" => Some(Self::IsHexDigit),
+            "isLetter" => Some(Self::IsLetter),
+            "isLower" => Some(Self::IsLower),
+            "isNumber" => Some(Self::IsNumber),
+            "isPrint" => Some(Self::IsPrint),
+            "isPunctuation" => Some(Self::IsPunctuation),
+            "isSpace" => Some(Self::IsSpace),
+            "isSymbol" => Some(Self::IsSymbol),
+            "isUpper" => Some(Self::IsUpper),
+            "toLower" => Some(Self::ToLower),
+            "toUpper" => Some(Self::ToUpper),
+            "toTitle" => Some(Self::ToTitle),
+            "digitToInt" => Some(Self::DigitToInt),
+            "intToDigit" => Some(Self::IntToDigit),
+            "isLatin1" => Some(Self::IsLatin1),
+            "isAsciiLower" => Some(Self::IsAsciiLower),
+            "isAsciiUpper" => Some(Self::IsAsciiUpper),
+            // Data.Function
+            "on" => Some(Self::On),
+            "fix" => Some(Self::Fix),
+            "&" => Some(Self::Amp),
+            // Data.Maybe additional
+            "listToMaybe" => Some(Self::ListToMaybe),
+            "maybeToList" => Some(Self::MaybeToList),
+            "catMaybes" => Some(Self::CatMaybes),
+            "mapMaybe" => Some(Self::MapMaybe),
+            // Data.Either additional
+            "isLeft" => Some(Self::IsLeft),
+            "isRight" => Some(Self::IsRight),
+            "lefts" => Some(Self::Lefts),
+            "rights" => Some(Self::Rights),
+            "partitionEithers" => Some(Self::PartitionEithers),
+            // Math functions
+            "sqrt" => Some(Self::Sqrt),
+            "exp" => Some(Self::Exp),
+            "log" => Some(Self::Log),
+            "sin" => Some(Self::Sin),
+            "cos" => Some(Self::Cos),
+            "tan" => Some(Self::Tan),
+            "^" => Some(Self::Power),
+            "truncate" => Some(Self::Truncate),
+            "round" => Some(Self::Round),
+            "ceiling" => Some(Self::Ceiling),
+            "floor" => Some(Self::Floor),
+            // Tuple
+            "fst" => Some(Self::Fst),
+            "snd" => Some(Self::Snd),
             _ => None,
         }
     }

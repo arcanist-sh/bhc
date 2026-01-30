@@ -23,10 +23,11 @@ mod env;
 mod value;
 
 pub use env::Env;
-pub use value::{Closure, DataValue, PrimOp, Thunk, Value};
+pub use value::{Closure, DataValue, OrdValue, PrimOp, Thunk, Value};
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use bhc_index::Idx;
 use bhc_intern::Symbol;
@@ -438,6 +439,142 @@ impl Evaluator {
 
         for (name, op) in ops {
             prims.insert(Symbol::intern(name), Value::PrimOp(op));
+        }
+
+        // Register container PrimOps with qualified names
+        let container_ops: &[(&str, PrimOp)] = &[
+            // Data.Map
+            ("Data.Map.empty", PrimOp::MapEmpty),
+            ("Data.Map.singleton", PrimOp::MapSingleton),
+            ("Data.Map.null", PrimOp::MapNull),
+            ("Data.Map.size", PrimOp::MapSize),
+            ("Data.Map.member", PrimOp::MapMember),
+            ("Data.Map.notMember", PrimOp::MapNotMember),
+            ("Data.Map.lookup", PrimOp::MapLookup),
+            ("Data.Map.findWithDefault", PrimOp::MapFindWithDefault),
+            ("Data.Map.!", PrimOp::MapIndex),
+            ("Data.Map.insert", PrimOp::MapInsert),
+            ("Data.Map.insertWith", PrimOp::MapInsertWith),
+            ("Data.Map.delete", PrimOp::MapDelete),
+            ("Data.Map.adjust", PrimOp::MapAdjust),
+            ("Data.Map.update", PrimOp::MapUpdate),
+            ("Data.Map.alter", PrimOp::MapAlter),
+            ("Data.Map.union", PrimOp::MapUnion),
+            ("Data.Map.unionWith", PrimOp::MapUnionWith),
+            ("Data.Map.unionWithKey", PrimOp::MapUnionWithKey),
+            ("Data.Map.unions", PrimOp::MapUnions),
+            ("Data.Map.intersection", PrimOp::MapIntersection),
+            ("Data.Map.intersectionWith", PrimOp::MapIntersectionWith),
+            ("Data.Map.difference", PrimOp::MapDifference),
+            ("Data.Map.differenceWith", PrimOp::MapDifferenceWith),
+            ("Data.Map.map", PrimOp::MapMap),
+            ("Data.Map.mapWithKey", PrimOp::MapMapWithKey),
+            ("Data.Map.mapKeys", PrimOp::MapMapKeys),
+            ("Data.Map.filter", PrimOp::MapFilter),
+            ("Data.Map.filterWithKey", PrimOp::MapFilterWithKey),
+            ("Data.Map.foldr", PrimOp::MapFoldr),
+            ("Data.Map.foldl", PrimOp::MapFoldl),
+            ("Data.Map.foldrWithKey", PrimOp::MapFoldrWithKey),
+            ("Data.Map.foldlWithKey", PrimOp::MapFoldlWithKey),
+            ("Data.Map.keys", PrimOp::MapKeys),
+            ("Data.Map.elems", PrimOp::MapElems),
+            ("Data.Map.assocs", PrimOp::MapAssocs),
+            ("Data.Map.toList", PrimOp::MapToList),
+            ("Data.Map.fromList", PrimOp::MapFromList),
+            ("Data.Map.fromListWith", PrimOp::MapFromListWith),
+            ("Data.Map.toAscList", PrimOp::MapToAscList),
+            ("Data.Map.toDescList", PrimOp::MapToDescList),
+            ("Data.Map.isSubmapOf", PrimOp::MapIsSubmapOf),
+            // Data.Map.Strict aliases
+            ("Data.Map.Strict.empty", PrimOp::MapEmpty),
+            ("Data.Map.Strict.singleton", PrimOp::MapSingleton),
+            ("Data.Map.Strict.null", PrimOp::MapNull),
+            ("Data.Map.Strict.size", PrimOp::MapSize),
+            ("Data.Map.Strict.member", PrimOp::MapMember),
+            ("Data.Map.Strict.insert", PrimOp::MapInsert),
+            ("Data.Map.Strict.delete", PrimOp::MapDelete),
+            ("Data.Map.Strict.lookup", PrimOp::MapLookup),
+            ("Data.Map.Strict.union", PrimOp::MapUnion),
+            ("Data.Map.Strict.map", PrimOp::MapMap),
+            ("Data.Map.Strict.filter", PrimOp::MapFilter),
+            ("Data.Map.Strict.fromList", PrimOp::MapFromList),
+            // Data.Set
+            ("Data.Set.empty", PrimOp::SetEmpty),
+            ("Data.Set.singleton", PrimOp::SetSingleton),
+            ("Data.Set.null", PrimOp::SetNull),
+            ("Data.Set.size", PrimOp::SetSize),
+            ("Data.Set.member", PrimOp::SetMember),
+            ("Data.Set.notMember", PrimOp::SetNotMember),
+            ("Data.Set.insert", PrimOp::SetInsert),
+            ("Data.Set.delete", PrimOp::SetDelete),
+            ("Data.Set.union", PrimOp::SetUnion),
+            ("Data.Set.unions", PrimOp::SetUnions),
+            ("Data.Set.intersection", PrimOp::SetIntersection),
+            ("Data.Set.difference", PrimOp::SetDifference),
+            ("Data.Set.isSubsetOf", PrimOp::SetIsSubsetOf),
+            ("Data.Set.isProperSubsetOf", PrimOp::SetIsProperSubsetOf),
+            ("Data.Set.map", PrimOp::SetMap),
+            ("Data.Set.filter", PrimOp::SetFilter),
+            ("Data.Set.partition", PrimOp::SetPartition),
+            ("Data.Set.foldr", PrimOp::SetFoldr),
+            ("Data.Set.foldl", PrimOp::SetFoldl),
+            ("Data.Set.toList", PrimOp::SetToList),
+            ("Data.Set.fromList", PrimOp::SetFromList),
+            ("Data.Set.toAscList", PrimOp::SetToAscList),
+            ("Data.Set.toDescList", PrimOp::SetToDescList),
+            ("Data.Set.findMin", PrimOp::SetFindMin),
+            ("Data.Set.findMax", PrimOp::SetFindMax),
+            ("Data.Set.deleteMin", PrimOp::SetDeleteMin),
+            ("Data.Set.deleteMax", PrimOp::SetDeleteMax),
+            ("Data.Set.elems", PrimOp::SetElems),
+            ("Data.Set.lookupMin", PrimOp::SetLookupMin),
+            ("Data.Set.lookupMax", PrimOp::SetLookupMax),
+            // Data.IntMap
+            ("Data.IntMap.empty", PrimOp::IntMapEmpty),
+            ("Data.IntMap.singleton", PrimOp::IntMapSingleton),
+            ("Data.IntMap.null", PrimOp::IntMapNull),
+            ("Data.IntMap.size", PrimOp::IntMapSize),
+            ("Data.IntMap.member", PrimOp::IntMapMember),
+            ("Data.IntMap.lookup", PrimOp::IntMapLookup),
+            ("Data.IntMap.findWithDefault", PrimOp::IntMapFindWithDefault),
+            ("Data.IntMap.insert", PrimOp::IntMapInsert),
+            ("Data.IntMap.insertWith", PrimOp::IntMapInsertWith),
+            ("Data.IntMap.delete", PrimOp::IntMapDelete),
+            ("Data.IntMap.adjust", PrimOp::IntMapAdjust),
+            ("Data.IntMap.union", PrimOp::IntMapUnion),
+            ("Data.IntMap.unionWith", PrimOp::IntMapUnionWith),
+            ("Data.IntMap.intersection", PrimOp::IntMapIntersection),
+            ("Data.IntMap.difference", PrimOp::IntMapDifference),
+            ("Data.IntMap.map", PrimOp::IntMapMap),
+            ("Data.IntMap.mapWithKey", PrimOp::IntMapMapWithKey),
+            ("Data.IntMap.filter", PrimOp::IntMapFilter),
+            ("Data.IntMap.foldr", PrimOp::IntMapFoldr),
+            ("Data.IntMap.foldlWithKey", PrimOp::IntMapFoldlWithKey),
+            ("Data.IntMap.keys", PrimOp::IntMapKeys),
+            ("Data.IntMap.elems", PrimOp::IntMapElems),
+            ("Data.IntMap.toList", PrimOp::IntMapToList),
+            ("Data.IntMap.fromList", PrimOp::IntMapFromList),
+            ("Data.IntMap.toAscList", PrimOp::IntMapToAscList),
+            // Data.IntSet
+            ("Data.IntSet.empty", PrimOp::IntSetEmpty),
+            ("Data.IntSet.singleton", PrimOp::IntSetSingleton),
+            ("Data.IntSet.null", PrimOp::IntSetNull),
+            ("Data.IntSet.size", PrimOp::IntSetSize),
+            ("Data.IntSet.member", PrimOp::IntSetMember),
+            ("Data.IntSet.insert", PrimOp::IntSetInsert),
+            ("Data.IntSet.delete", PrimOp::IntSetDelete),
+            ("Data.IntSet.union", PrimOp::IntSetUnion),
+            ("Data.IntSet.intersection", PrimOp::IntSetIntersection),
+            ("Data.IntSet.difference", PrimOp::IntSetDifference),
+            ("Data.IntSet.isSubsetOf", PrimOp::IntSetIsSubsetOf),
+            ("Data.IntSet.filter", PrimOp::IntSetFilter),
+            ("Data.IntSet.foldr", PrimOp::IntSetFoldr),
+            ("Data.IntSet.toList", PrimOp::IntSetToList),
+            ("Data.IntSet.fromList", PrimOp::IntSetFromList),
+        ];
+
+        for (name, op) in container_ops {
+            prims.insert(Symbol::intern(name), Value::PrimOp(*op));
         }
 
         // Register list constructors
@@ -3229,6 +3366,761 @@ impl Evaluator {
                     self.apply_primop(PrimOp::IoThen, args)
                 }
             }
+
+            // ========================================================
+            // Data.Map PrimOps
+            // ========================================================
+            PrimOp::MapEmpty => {
+                Ok(Value::Map(Arc::new(BTreeMap::new())))
+            }
+            PrimOp::MapSingleton => {
+                let k = self.force(args[0].clone())?;
+                let v = self.force(args[1].clone())?;
+                let mut m = BTreeMap::new();
+                m.insert(OrdValue(k), v);
+                Ok(Value::Map(Arc::new(m)))
+            }
+            PrimOp::MapNull => {
+                let m = self.force(args[0].clone())?;
+                match &m {
+                    Value::Map(map) => Ok(Value::bool(map.is_empty())),
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapSize => {
+                let m = self.force(args[0].clone())?;
+                match &m {
+                    Value::Map(map) => Ok(Value::Int(map.len() as i64)),
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapMember => {
+                let k = self.force(args[0].clone())?;
+                let m = self.force(args[1].clone())?;
+                match &m {
+                    Value::Map(map) => Ok(Value::bool(map.contains_key(&OrdValue(k)))),
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapNotMember => {
+                let k = self.force(args[0].clone())?;
+                let m = self.force(args[1].clone())?;
+                match &m {
+                    Value::Map(map) => Ok(Value::bool(!map.contains_key(&OrdValue(k)))),
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapLookup => {
+                let k = self.force(args[0].clone())?;
+                let m = self.force(args[1].clone())?;
+                match &m {
+                    Value::Map(map) => match map.get(&OrdValue(k)) {
+                        Some(v) => Ok(self.make_just(v.clone())),
+                        None => Ok(self.make_nothing()),
+                    },
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapFindWithDefault => {
+                let def = self.force(args[0].clone())?;
+                let k = self.force(args[1].clone())?;
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::Map(map) => Ok(map.get(&OrdValue(k)).cloned().unwrap_or(def)),
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapIndex => {
+                let m = self.force(args[0].clone())?;
+                let k = self.force(args[1].clone())?;
+                match &m {
+                    Value::Map(map) => match map.get(&OrdValue(k)) {
+                        Some(v) => Ok(v.clone()),
+                        None => Err(EvalError::UserError("Map.!: key not found".into())),
+                    },
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapInsert => {
+                let k = self.force(args[0].clone())?;
+                let v = self.force(args[1].clone())?;
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut new_map = (**map).clone();
+                        new_map.insert(OrdValue(k), v);
+                        Ok(Value::Map(Arc::new(new_map)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapInsertWith => {
+                let f = self.force(args[0].clone())?;
+                let k = self.force(args[1].clone())?;
+                let v = self.force(args[2].clone())?;
+                let m = self.force(args[3].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut new_map = (**map).clone();
+                        let ok = OrdValue(k);
+                        if let Some(old_v) = new_map.get(&ok) {
+                            let tmp = self.apply(f.clone(), v)?;
+                            let new_v = self.apply(tmp, old_v.clone())?;
+                            new_map.insert(ok, new_v);
+                        } else {
+                            new_map.insert(ok, v);
+                        }
+                        Ok(Value::Map(Arc::new(new_map)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapDelete => {
+                let k = self.force(args[0].clone())?;
+                let m = self.force(args[1].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut new_map = (**map).clone();
+                        new_map.remove(&OrdValue(k));
+                        Ok(Value::Map(Arc::new(new_map)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapAdjust => {
+                let f = self.force(args[0].clone())?;
+                let k = self.force(args[1].clone())?;
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut new_map = (**map).clone();
+                        let ok = OrdValue(k);
+                        if let Some(v) = new_map.get(&ok).cloned() {
+                            let new_v = self.apply(f, v)?;
+                            new_map.insert(ok, new_v);
+                        }
+                        Ok(Value::Map(Arc::new(new_map)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapUpdate => {
+                let f = self.force(args[0].clone())?;
+                let k = self.force(args[1].clone())?;
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut new_map = (**map).clone();
+                        let ok = OrdValue(k);
+                        if let Some(v) = new_map.get(&ok).cloned() {
+                            let result = self.apply(f, v)?;
+                            let result = self.force(result)?;
+                            if let Value::Data(ref d) = result {
+                                if d.con.name.as_str() == "Just" && !d.args.is_empty() {
+                                    new_map.insert(ok, d.args[0].clone());
+                                } else if d.con.name.as_str() == "Nothing" {
+                                    new_map.remove(&ok);
+                                }
+                            }
+                        }
+                        Ok(Value::Map(Arc::new(new_map)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapAlter => {
+                let f = self.force(args[0].clone())?;
+                let k = self.force(args[1].clone())?;
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut new_map = (**map).clone();
+                        let ok = OrdValue(k);
+                        let input = match map.get(&ok) {
+                            Some(v) => self.make_just(v.clone()),
+                            None => self.make_nothing(),
+                        };
+                        let result = self.apply(f, input)?;
+                        let result = self.force(result)?;
+                        if let Value::Data(ref d) = result {
+                            if d.con.name.as_str() == "Just" && !d.args.is_empty() {
+                                new_map.insert(ok, d.args[0].clone());
+                            } else if d.con.name.as_str() == "Nothing" {
+                                new_map.remove(&ok);
+                            }
+                        }
+                        Ok(Value::Map(Arc::new(new_map)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapUnion => {
+                let m1 = self.force(args[0].clone())?;
+                let m2 = self.force(args[1].clone())?;
+                match (&m1, &m2) {
+                    (Value::Map(a), Value::Map(b)) => {
+                        let mut result = (**a).clone();
+                        for (k, v) in b.iter() {
+                            result.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                        Ok(Value::Map(Arc::new(result)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                }
+            }
+            PrimOp::MapUnionWith => {
+                let f = self.force(args[0].clone())?;
+                let m1 = self.force(args[1].clone())?;
+                let m2 = self.force(args[2].clone())?;
+                match (&m1, &m2) {
+                    (Value::Map(a), Value::Map(b)) => {
+                        let mut result = (**a).clone();
+                        for (k, v) in b.iter() {
+                            if let Some(old) = result.get(k).cloned() {
+                                let tmp = self.apply(f.clone(), old)?;
+                                let new_v = self.apply(tmp, v.clone())?;
+                                result.insert(k.clone(), new_v);
+                            } else {
+                                result.insert(k.clone(), v.clone());
+                            }
+                        }
+                        Ok(Value::Map(Arc::new(result)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                }
+            }
+            PrimOp::MapUnionWithKey => {
+                let f = self.force(args[0].clone())?;
+                let m1 = self.force(args[1].clone())?;
+                let m2 = self.force(args[2].clone())?;
+                match (&m1, &m2) {
+                    (Value::Map(a), Value::Map(b)) => {
+                        let mut result = (**a).clone();
+                        for (k, v) in b.iter() {
+                            if let Some(old) = result.get(k).cloned() {
+                                let tmp1 = self.apply(f.clone(), k.inner().clone())?;
+                                let tmp2 = self.apply(tmp1, old)?;
+                                let new_v = self.apply(tmp2, v.clone())?;
+                                result.insert(k.clone(), new_v);
+                            } else {
+                                result.insert(k.clone(), v.clone());
+                            }
+                        }
+                        Ok(Value::Map(Arc::new(result)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                }
+            }
+            PrimOp::MapUnions => {
+                let list = self.force(args[0].clone())?;
+                let maps = self.force_list(list)?;
+                let mut result = BTreeMap::new();
+                for m in maps {
+                    let m = self.force(m)?;
+                    if let Value::Map(map) = m {
+                        for (k, v) in map.iter() {
+                            result.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                }
+                Ok(Value::Map(Arc::new(result)))
+            }
+            PrimOp::MapIntersection => {
+                let m1 = self.force(args[0].clone())?;
+                let m2 = self.force(args[1].clone())?;
+                match (&m1, &m2) {
+                    (Value::Map(a), Value::Map(b)) => {
+                        let result: BTreeMap<OrdValue, Value> = a.iter()
+                            .filter(|(k, _)| b.contains_key(k))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        Ok(Value::Map(Arc::new(result)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                }
+            }
+            PrimOp::MapIntersectionWith => {
+                let f = self.force(args[0].clone())?;
+                let m1 = self.force(args[1].clone())?;
+                let m2 = self.force(args[2].clone())?;
+                match (&m1, &m2) {
+                    (Value::Map(a), Value::Map(b)) => {
+                        let mut result = BTreeMap::new();
+                        for (k, va) in a.iter() {
+                            if let Some(vb) = b.get(k) {
+                                let tmp = self.apply(f.clone(), va.clone())?;
+                                let v = self.apply(tmp, vb.clone())?;
+                                result.insert(k.clone(), v);
+                            }
+                        }
+                        Ok(Value::Map(Arc::new(result)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                }
+            }
+            PrimOp::MapDifference => {
+                let m1 = self.force(args[0].clone())?;
+                let m2 = self.force(args[1].clone())?;
+                match (&m1, &m2) {
+                    (Value::Map(a), Value::Map(b)) => {
+                        let result: BTreeMap<OrdValue, Value> = a.iter()
+                            .filter(|(k, _)| !b.contains_key(k))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        Ok(Value::Map(Arc::new(result)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                }
+            }
+            PrimOp::MapDifferenceWith => {
+                let f = self.force(args[0].clone())?;
+                let m1 = self.force(args[1].clone())?;
+                let m2 = self.force(args[2].clone())?;
+                match (&m1, &m2) {
+                    (Value::Map(a), Value::Map(b)) => {
+                        let mut result = BTreeMap::new();
+                        for (k, va) in a.iter() {
+                            if let Some(vb) = b.get(k) {
+                                let tmp = self.apply(f.clone(), va.clone())?;
+                                let r = self.apply(tmp, vb.clone())?;
+                                let r = self.force(r)?;
+                                if let Value::Data(ref d) = r {
+                                    if d.con.name.as_str() == "Just" && !d.args.is_empty() {
+                                        result.insert(k.clone(), d.args[0].clone());
+                                    }
+                                }
+                            } else {
+                                result.insert(k.clone(), va.clone());
+                            }
+                        }
+                        Ok(Value::Map(Arc::new(result)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                }
+            }
+            PrimOp::MapMap => {
+                let f = self.force(args[0].clone())?;
+                let m = self.force(args[1].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut result = BTreeMap::new();
+                        for (k, v) in map.iter() {
+                            let new_v = self.apply(f.clone(), v.clone())?;
+                            result.insert(k.clone(), new_v);
+                        }
+                        Ok(Value::Map(Arc::new(result)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapMapWithKey => {
+                let f = self.force(args[0].clone())?;
+                let _k = args[1].clone();
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut result = BTreeMap::new();
+                        for (k, v) in map.iter() {
+                            let tmp = self.apply(f.clone(), k.inner().clone())?;
+                            let new_v = self.apply(tmp, v.clone())?;
+                            result.insert(k.clone(), new_v);
+                        }
+                        Ok(Value::Map(Arc::new(result)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapMapKeys => {
+                let f = self.force(args[0].clone())?;
+                let m = self.force(args[1].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut result = BTreeMap::new();
+                        for (k, v) in map.iter() {
+                            let new_k = self.apply(f.clone(), k.inner().clone())?;
+                            result.insert(OrdValue(new_k), v.clone());
+                        }
+                        Ok(Value::Map(Arc::new(result)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapFilter => {
+                let f = self.force(args[0].clone())?;
+                let m = self.force(args[1].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut result = BTreeMap::new();
+                        for (k, v) in map.iter() {
+                            let keep = self.apply(f.clone(), v.clone())?;
+                            let keep = self.force(keep)?;
+                            if keep.as_bool() == Some(true) {
+                                result.insert(k.clone(), v.clone());
+                            }
+                        }
+                        Ok(Value::Map(Arc::new(result)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapFilterWithKey => {
+                let f = self.force(args[0].clone())?;
+                let _k = args[1].clone();
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut result = BTreeMap::new();
+                        for (k, v) in map.iter() {
+                            let tmp = self.apply(f.clone(), k.inner().clone())?;
+                            let keep = self.apply(tmp, v.clone())?;
+                            let keep = self.force(keep)?;
+                            if keep.as_bool() == Some(true) {
+                                result.insert(k.clone(), v.clone());
+                            }
+                        }
+                        Ok(Value::Map(Arc::new(result)))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapFoldr => {
+                let f = self.force(args[0].clone())?;
+                let z = self.force(args[1].clone())?;
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut acc = z;
+                        for (_, v) in map.iter().rev() {
+                            let tmp = self.apply(f.clone(), v.clone())?;
+                            acc = self.apply(tmp, acc)?;
+                        }
+                        Ok(acc)
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapFoldl => {
+                let f = self.force(args[0].clone())?;
+                let z = self.force(args[1].clone())?;
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut acc = z;
+                        for (_, v) in map.iter() {
+                            let tmp = self.apply(f.clone(), acc)?;
+                            acc = self.apply(tmp, v.clone())?;
+                        }
+                        Ok(acc)
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapFoldrWithKey => {
+                let f = self.force(args[0].clone())?;
+                let z = self.force(args[1].clone())?;
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut acc = z;
+                        for (k, v) in map.iter().rev() {
+                            let tmp1 = self.apply(f.clone(), k.inner().clone())?;
+                            let tmp2 = self.apply(tmp1, v.clone())?;
+                            acc = self.apply(tmp2, acc)?;
+                        }
+                        Ok(acc)
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapFoldlWithKey => {
+                let f = self.force(args[0].clone())?;
+                let z = self.force(args[1].clone())?;
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let mut acc = z;
+                        for (k, v) in map.iter() {
+                            let tmp1 = self.apply(f.clone(), acc)?;
+                            let tmp2 = self.apply(tmp1, k.inner().clone())?;
+                            acc = self.apply(tmp2, v.clone())?;
+                        }
+                        Ok(acc)
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapKeys => {
+                let m = self.force(args[0].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let keys: Vec<Value> = map.keys().map(|k| k.inner().clone()).collect();
+                        Ok(Value::from_list(keys))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapElems => {
+                let m = self.force(args[0].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let vals: Vec<Value> = map.values().cloned().collect();
+                        Ok(Value::from_list(vals))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapAssocs | PrimOp::MapToList | PrimOp::MapToAscList => {
+                let m = self.force(args[0].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let pairs: Vec<Value> = map.iter()
+                            .map(|(k, v)| self.make_pair(k.inner().clone(), v.clone()))
+                            .collect();
+                        Ok(Value::from_list(pairs))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapToDescList => {
+                let m = self.force(args[0].clone())?;
+                match &m {
+                    Value::Map(map) => {
+                        let pairs: Vec<Value> = map.iter().rev()
+                            .map(|(k, v)| self.make_pair(k.inner().clone(), v.clone()))
+                            .collect();
+                        Ok(Value::from_list(pairs))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                }
+            }
+            PrimOp::MapFromList => {
+                let list = self.force(args[0].clone())?;
+                let pairs = self.force_list(list)?;
+                let mut m = BTreeMap::new();
+                for pair in pairs {
+                    let pair = self.force(pair)?;
+                    if let Value::Data(ref d) = pair {
+                        if d.args.len() >= 2 {
+                            let k = self.force(d.args[0].clone())?;
+                            let v = self.force(d.args[1].clone())?;
+                            m.insert(OrdValue(k), v);
+                        }
+                    }
+                }
+                Ok(Value::Map(Arc::new(m)))
+            }
+            PrimOp::MapFromListWith => {
+                let f = self.force(args[0].clone())?;
+                let list = self.force(args[1].clone())?;
+                let pairs = self.force_list(list)?;
+                let mut m = BTreeMap::new();
+                for pair in pairs {
+                    let pair = self.force(pair)?;
+                    if let Value::Data(ref d) = pair {
+                        if d.args.len() >= 2 {
+                            let k = self.force(d.args[0].clone())?;
+                            let v = self.force(d.args[1].clone())?;
+                            let ok = OrdValue(k);
+                            if let Some(old) = m.get(&ok).cloned() {
+                                let tmp = self.apply(f.clone(), v)?;
+                                let new_v = self.apply(tmp, old)?;
+                                m.insert(ok, new_v);
+                            } else {
+                                m.insert(ok, v);
+                            }
+                        }
+                    }
+                }
+                Ok(Value::Map(Arc::new(m)))
+            }
+            PrimOp::MapIsSubmapOf => {
+                let m1 = self.force(args[0].clone())?;
+                let m2 = self.force(args[1].clone())?;
+                match (&m1, &m2) {
+                    (Value::Map(a), Value::Map(b)) => {
+                        let is_sub = a.iter().all(|(k, v)| b.get(k).map_or(false, |bv| self.values_equal(v, bv)));
+                        Ok(Value::bool(is_sub))
+                    }
+                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                }
+            }
+
+            // ========================================================
+            // Data.Set PrimOps
+            // ========================================================
+            PrimOp::SetEmpty => Ok(Value::Set(Arc::new(BTreeSet::new()))),
+            PrimOp::SetSingleton => {
+                let v = self.force(args[0].clone())?;
+                let mut s = BTreeSet::new();
+                s.insert(OrdValue(v));
+                Ok(Value::Set(Arc::new(s)))
+            }
+            PrimOp::SetNull => {
+                let s = self.force(args[0].clone())?;
+                match &s { Value::Set(set) => Ok(Value::bool(set.is_empty())), _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetSize => {
+                let s = self.force(args[0].clone())?;
+                match &s { Value::Set(set) => Ok(Value::Int(set.len() as i64)), _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetMember => {
+                let v = self.force(args[0].clone())?;
+                let s = self.force(args[1].clone())?;
+                match &s { Value::Set(set) => Ok(Value::bool(set.contains(&OrdValue(v)))), _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetNotMember => {
+                let v = self.force(args[0].clone())?;
+                let s = self.force(args[1].clone())?;
+                match &s { Value::Set(set) => Ok(Value::bool(!set.contains(&OrdValue(v)))), _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetInsert => {
+                let v = self.force(args[0].clone())?;
+                let s = self.force(args[1].clone())?;
+                match &s { Value::Set(set) => { let mut ns = (**set).clone(); ns.insert(OrdValue(v)); Ok(Value::Set(Arc::new(ns))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetDelete => {
+                let v = self.force(args[0].clone())?;
+                let s = self.force(args[1].clone())?;
+                match &s { Value::Set(set) => { let mut ns = (**set).clone(); ns.remove(&OrdValue(v)); Ok(Value::Set(Arc::new(ns))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetUnion => {
+                let s1 = self.force(args[0].clone())?;
+                let s2 = self.force(args[1].clone())?;
+                match (&s1, &s2) { (Value::Set(a), Value::Set(b)) => { let r: BTreeSet<OrdValue> = a.union(b).cloned().collect(); Ok(Value::Set(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s1:?}") }) }
+            }
+            PrimOp::SetUnions => {
+                let list = self.force(args[0].clone())?;
+                let sets = self.force_list(list)?;
+                let mut result = BTreeSet::new();
+                for s in sets { let s = self.force(s)?; if let Value::Set(set) = s { for v in set.iter() { result.insert(v.clone()); } } }
+                Ok(Value::Set(Arc::new(result)))
+            }
+            PrimOp::SetIntersection => {
+                let s1 = self.force(args[0].clone())?;
+                let s2 = self.force(args[1].clone())?;
+                match (&s1, &s2) { (Value::Set(a), Value::Set(b)) => { let r: BTreeSet<OrdValue> = a.intersection(b).cloned().collect(); Ok(Value::Set(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s1:?}") }) }
+            }
+            PrimOp::SetDifference => {
+                let s1 = self.force(args[0].clone())?;
+                let s2 = self.force(args[1].clone())?;
+                match (&s1, &s2) { (Value::Set(a), Value::Set(b)) => { let r: BTreeSet<OrdValue> = a.difference(b).cloned().collect(); Ok(Value::Set(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s1:?}") }) }
+            }
+            PrimOp::SetIsSubsetOf => {
+                let s1 = self.force(args[0].clone())?; let s2 = self.force(args[1].clone())?;
+                match (&s1, &s2) { (Value::Set(a), Value::Set(b)) => Ok(Value::bool(a.is_subset(b))), _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s1:?}") }) }
+            }
+            PrimOp::SetIsProperSubsetOf => {
+                let s1 = self.force(args[0].clone())?; let s2 = self.force(args[1].clone())?;
+                match (&s1, &s2) { (Value::Set(a), Value::Set(b)) => Ok(Value::bool(a.is_subset(b) && a.len() < b.len())), _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s1:?}") }) }
+            }
+            PrimOp::SetMap => {
+                let f = self.force(args[0].clone())?;
+                let s = self.force(args[1].clone())?;
+                match &s { Value::Set(set) => { let mut r = BTreeSet::new(); for v in set.iter() { let nv = self.apply(f.clone(), v.inner().clone())?; r.insert(OrdValue(nv)); } Ok(Value::Set(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetFilter => {
+                let f = self.force(args[0].clone())?;
+                let s = self.force(args[1].clone())?;
+                match &s { Value::Set(set) => { let mut r = BTreeSet::new(); for v in set.iter() { let keep = self.apply(f.clone(), v.inner().clone())?; let keep = self.force(keep)?; if keep.as_bool() == Some(true) { r.insert(v.clone()); } } Ok(Value::Set(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetPartition => {
+                let f = self.force(args[0].clone())?;
+                let s = self.force(args[1].clone())?;
+                match &s { Value::Set(set) => { let mut yes = BTreeSet::new(); let mut no = BTreeSet::new(); for v in set.iter() { let keep = self.apply(f.clone(), v.inner().clone())?; let keep = self.force(keep)?; if keep.as_bool() == Some(true) { yes.insert(v.clone()); } else { no.insert(v.clone()); } } Ok(self.make_pair(Value::Set(Arc::new(yes)), Value::Set(Arc::new(no)))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetFoldr => {
+                let f = self.force(args[0].clone())?; let z = self.force(args[1].clone())?; let s = self.force(args[2].clone())?;
+                match &s { Value::Set(set) => { let mut acc = z; for v in set.iter().rev() { let tmp = self.apply(f.clone(), v.inner().clone())?; acc = self.apply(tmp, acc)?; } Ok(acc) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetFoldl => {
+                let f = self.force(args[0].clone())?; let z = self.force(args[1].clone())?; let s = self.force(args[2].clone())?;
+                match &s { Value::Set(set) => { let mut acc = z; for v in set.iter() { let tmp = self.apply(f.clone(), acc)?; acc = self.apply(tmp, v.inner().clone())?; } Ok(acc) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetToList | PrimOp::SetToAscList | PrimOp::SetElems => {
+                let s = self.force(args[0].clone())?;
+                match &s { Value::Set(set) => { let vals: Vec<Value> = set.iter().map(|v| v.inner().clone()).collect(); Ok(Value::from_list(vals)) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetToDescList => {
+                let s = self.force(args[0].clone())?;
+                match &s { Value::Set(set) => { let vals: Vec<Value> = set.iter().rev().map(|v| v.inner().clone()).collect(); Ok(Value::from_list(vals)) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetFromList => {
+                let list = self.force(args[0].clone())?;
+                let items = self.force_list(list)?;
+                let set: BTreeSet<OrdValue> = items.into_iter().map(OrdValue).collect();
+                Ok(Value::Set(Arc::new(set)))
+            }
+            PrimOp::SetFindMin => {
+                let s = self.force(args[0].clone())?;
+                match &s { Value::Set(set) => match set.iter().next() { Some(v) => Ok(v.inner().clone()), None => Err(EvalError::UserError("Set.findMin: empty set".into())) }, _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetFindMax => {
+                let s = self.force(args[0].clone())?;
+                match &s { Value::Set(set) => match set.iter().next_back() { Some(v) => Ok(v.inner().clone()), None => Err(EvalError::UserError("Set.findMax: empty set".into())) }, _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetDeleteMin => {
+                let s = self.force(args[0].clone())?;
+                match &s { Value::Set(set) => { let mut ns = (**set).clone(); if let Some(min) = set.iter().next().cloned() { ns.remove(&min); } Ok(Value::Set(Arc::new(ns))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetDeleteMax => {
+                let s = self.force(args[0].clone())?;
+                match &s { Value::Set(set) => { let mut ns = (**set).clone(); if let Some(max) = set.iter().next_back().cloned() { ns.remove(&max); } Ok(Value::Set(Arc::new(ns))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetLookupMin => {
+                let s = self.force(args[0].clone())?;
+                match &s { Value::Set(set) => match set.iter().next() { Some(v) => Ok(self.make_just(v.inner().clone())), None => Ok(self.make_nothing()) }, _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+            PrimOp::SetLookupMax => {
+                let s = self.force(args[0].clone())?;
+                match &s { Value::Set(set) => match set.iter().next_back() { Some(v) => Ok(self.make_just(v.inner().clone())), None => Ok(self.make_nothing()) }, _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+            }
+
+            // ========================================================
+            // Data.IntMap PrimOps
+            // ========================================================
+            PrimOp::IntMapEmpty => Ok(Value::IntMap(Arc::new(BTreeMap::new()))),
+            PrimOp::IntMapSingleton => { let k = self.force(args[0].clone())?.as_int().unwrap_or(0); let v = self.force(args[1].clone())?; let mut m = BTreeMap::new(); m.insert(k, v); Ok(Value::IntMap(Arc::new(m))) }
+            PrimOp::IntMapNull => { let m = self.force(args[0].clone())?; match &m { Value::IntMap(map) => Ok(Value::bool(map.is_empty())), _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapSize => { let m = self.force(args[0].clone())?; match &m { Value::IntMap(map) => Ok(Value::Int(map.len() as i64)), _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapMember => { let k = self.force(args[0].clone())?.as_int().unwrap_or(0); let m = self.force(args[1].clone())?; match &m { Value::IntMap(map) => Ok(Value::bool(map.contains_key(&k))), _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapLookup => { let k = self.force(args[0].clone())?.as_int().unwrap_or(0); let m = self.force(args[1].clone())?; match &m { Value::IntMap(map) => match map.get(&k) { Some(v) => Ok(self.make_just(v.clone())), None => Ok(self.make_nothing()) }, _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapFindWithDefault => { let def = self.force(args[0].clone())?; let k = self.force(args[1].clone())?.as_int().unwrap_or(0); let m = self.force(args[2].clone())?; match &m { Value::IntMap(map) => Ok(map.get(&k).cloned().unwrap_or(def)), _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapInsert => { let k = self.force(args[0].clone())?.as_int().unwrap_or(0); let v = self.force(args[1].clone())?; let m = self.force(args[2].clone())?; match &m { Value::IntMap(map) => { let mut nm = (**map).clone(); nm.insert(k, v); Ok(Value::IntMap(Arc::new(nm))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapInsertWith => { let f = self.force(args[0].clone())?; let k = self.force(args[1].clone())?.as_int().unwrap_or(0); let v = self.force(args[2].clone())?; let m = self.force(args[3].clone())?; match &m { Value::IntMap(map) => { let mut nm = (**map).clone(); if let Some(old) = nm.get(&k).cloned() { let tmp = self.apply(f.clone(), v)?; let nv = self.apply(tmp, old)?; nm.insert(k, nv); } else { nm.insert(k, v); } Ok(Value::IntMap(Arc::new(nm))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapDelete => { let k = self.force(args[0].clone())?.as_int().unwrap_or(0); let m = self.force(args[1].clone())?; match &m { Value::IntMap(map) => { let mut nm = (**map).clone(); nm.remove(&k); Ok(Value::IntMap(Arc::new(nm))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapAdjust => { let f = self.force(args[0].clone())?; let k = self.force(args[1].clone())?.as_int().unwrap_or(0); let m = self.force(args[2].clone())?; match &m { Value::IntMap(map) => { let mut nm = (**map).clone(); if let Some(v) = nm.get(&k).cloned() { let nv = self.apply(f, v)?; nm.insert(k, nv); } Ok(Value::IntMap(Arc::new(nm))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapUnion => { let m1 = self.force(args[0].clone())?; let m2 = self.force(args[1].clone())?; match (&m1, &m2) { (Value::IntMap(a), Value::IntMap(b)) => { let mut r = (**a).clone(); for (k, v) in b.iter() { r.entry(*k).or_insert_with(|| v.clone()); } Ok(Value::IntMap(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m1:?}") }) } }
+            PrimOp::IntMapUnionWith => { let f = self.force(args[0].clone())?; let m1 = self.force(args[1].clone())?; let m2 = self.force(args[2].clone())?; match (&m1, &m2) { (Value::IntMap(a), Value::IntMap(b)) => { let mut r = (**a).clone(); for (k, v) in b.iter() { if let Some(old) = r.get(k).cloned() { let tmp = self.apply(f.clone(), old)?; let nv = self.apply(tmp, v.clone())?; r.insert(*k, nv); } else { r.insert(*k, v.clone()); } } Ok(Value::IntMap(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m1:?}") }) } }
+            PrimOp::IntMapIntersection => { let m1 = self.force(args[0].clone())?; let m2 = self.force(args[1].clone())?; match (&m1, &m2) { (Value::IntMap(a), Value::IntMap(b)) => { let r: BTreeMap<i64, Value> = a.iter().filter(|(k, _)| b.contains_key(k)).map(|(k, v)| (*k, v.clone())).collect(); Ok(Value::IntMap(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m1:?}") }) } }
+            PrimOp::IntMapDifference => { let m1 = self.force(args[0].clone())?; let m2 = self.force(args[1].clone())?; match (&m1, &m2) { (Value::IntMap(a), Value::IntMap(b)) => { let r: BTreeMap<i64, Value> = a.iter().filter(|(k, _)| !b.contains_key(k)).map(|(k, v)| (*k, v.clone())).collect(); Ok(Value::IntMap(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m1:?}") }) } }
+            PrimOp::IntMapMap => { let f = self.force(args[0].clone())?; let m = self.force(args[1].clone())?; match &m { Value::IntMap(map) => { let mut r = BTreeMap::new(); for (k, v) in map.iter() { let nv = self.apply(f.clone(), v.clone())?; r.insert(*k, nv); } Ok(Value::IntMap(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapMapWithKey => { let f = self.force(args[0].clone())?; let m = self.force(args[1].clone())?; match &m { Value::IntMap(map) => { let mut r = BTreeMap::new(); for (k, v) in map.iter() { let tmp = self.apply(f.clone(), Value::Int(*k))?; let nv = self.apply(tmp, v.clone())?; r.insert(*k, nv); } Ok(Value::IntMap(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapFilter => { let f = self.force(args[0].clone())?; let m = self.force(args[1].clone())?; match &m { Value::IntMap(map) => { let mut r = BTreeMap::new(); for (k, v) in map.iter() { let keep = self.apply(f.clone(), v.clone())?; let keep = self.force(keep)?; if keep.as_bool() == Some(true) { r.insert(*k, v.clone()); } } Ok(Value::IntMap(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapFoldr => { let f = self.force(args[0].clone())?; let z = self.force(args[1].clone())?; let m = self.force(args[2].clone())?; match &m { Value::IntMap(map) => { let mut acc = z; for (_, v) in map.iter().rev() { let tmp = self.apply(f.clone(), v.clone())?; acc = self.apply(tmp, acc)?; } Ok(acc) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapFoldlWithKey => { let f = self.force(args[0].clone())?; let z = self.force(args[1].clone())?; let m = self.force(args[2].clone())?; match &m { Value::IntMap(map) => { let mut acc = z; for (k, v) in map.iter() { let tmp1 = self.apply(f.clone(), acc)?; let tmp2 = self.apply(tmp1, Value::Int(*k))?; acc = self.apply(tmp2, v.clone())?; } Ok(acc) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapKeys => { let m = self.force(args[0].clone())?; match &m { Value::IntMap(map) => { let keys: Vec<Value> = map.keys().map(|k| Value::Int(*k)).collect(); Ok(Value::from_list(keys)) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapElems => { let m = self.force(args[0].clone())?; match &m { Value::IntMap(map) => { let vals: Vec<Value> = map.values().cloned().collect(); Ok(Value::from_list(vals)) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapToList | PrimOp::IntMapToAscList => { let m = self.force(args[0].clone())?; match &m { Value::IntMap(map) => { let pairs: Vec<Value> = map.iter().map(|(k, v)| self.make_pair(Value::Int(*k), v.clone())).collect(); Ok(Value::from_list(pairs)) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
+            PrimOp::IntMapFromList => { let list = self.force(args[0].clone())?; let pairs = self.force_list(list)?; let mut m = BTreeMap::new(); for pair in pairs { let pair = self.force(pair)?; if let Value::Data(ref d) = pair { if d.args.len() >= 2 { let k = self.force(d.args[0].clone())?.as_int().unwrap_or(0); let v = self.force(d.args[1].clone())?; m.insert(k, v); } } } Ok(Value::IntMap(Arc::new(m))) }
+
+            // ========================================================
+            // Data.IntSet PrimOps
+            // ========================================================
+            PrimOp::IntSetEmpty => Ok(Value::IntSet(Arc::new(BTreeSet::new()))),
+            PrimOp::IntSetSingleton => { let v = self.force(args[0].clone())?.as_int().unwrap_or(0); let mut s = BTreeSet::new(); s.insert(v); Ok(Value::IntSet(Arc::new(s))) }
+            PrimOp::IntSetNull => { let s = self.force(args[0].clone())?; match &s { Value::IntSet(set) => Ok(Value::bool(set.is_empty())), _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
+            PrimOp::IntSetSize => { let s = self.force(args[0].clone())?; match &s { Value::IntSet(set) => Ok(Value::Int(set.len() as i64)), _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
+            PrimOp::IntSetMember => { let v = self.force(args[0].clone())?.as_int().unwrap_or(0); let s = self.force(args[1].clone())?; match &s { Value::IntSet(set) => Ok(Value::bool(set.contains(&v))), _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
+            PrimOp::IntSetInsert => { let v = self.force(args[0].clone())?.as_int().unwrap_or(0); let s = self.force(args[1].clone())?; match &s { Value::IntSet(set) => { let mut ns = (**set).clone(); ns.insert(v); Ok(Value::IntSet(Arc::new(ns))) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
+            PrimOp::IntSetDelete => { let v = self.force(args[0].clone())?.as_int().unwrap_or(0); let s = self.force(args[1].clone())?; match &s { Value::IntSet(set) => { let mut ns = (**set).clone(); ns.remove(&v); Ok(Value::IntSet(Arc::new(ns))) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
+            PrimOp::IntSetUnion => { let s1 = self.force(args[0].clone())?; let s2 = self.force(args[1].clone())?; match (&s1, &s2) { (Value::IntSet(a), Value::IntSet(b)) => { let r: BTreeSet<i64> = a.union(b).copied().collect(); Ok(Value::IntSet(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s1:?}") }) } }
+            PrimOp::IntSetIntersection => { let s1 = self.force(args[0].clone())?; let s2 = self.force(args[1].clone())?; match (&s1, &s2) { (Value::IntSet(a), Value::IntSet(b)) => { let r: BTreeSet<i64> = a.intersection(b).copied().collect(); Ok(Value::IntSet(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s1:?}") }) } }
+            PrimOp::IntSetDifference => { let s1 = self.force(args[0].clone())?; let s2 = self.force(args[1].clone())?; match (&s1, &s2) { (Value::IntSet(a), Value::IntSet(b)) => { let r: BTreeSet<i64> = a.difference(b).copied().collect(); Ok(Value::IntSet(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s1:?}") }) } }
+            PrimOp::IntSetIsSubsetOf => { let s1 = self.force(args[0].clone())?; let s2 = self.force(args[1].clone())?; match (&s1, &s2) { (Value::IntSet(a), Value::IntSet(b)) => Ok(Value::bool(a.is_subset(b))), _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s1:?}") }) } }
+            PrimOp::IntSetFilter => { let f = self.force(args[0].clone())?; let s = self.force(args[1].clone())?; match &s { Value::IntSet(set) => { let mut r = BTreeSet::new(); for v in set.iter() { let keep = self.apply(f.clone(), Value::Int(*v))?; let keep = self.force(keep)?; if keep.as_bool() == Some(true) { r.insert(*v); } } Ok(Value::IntSet(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
+            PrimOp::IntSetFoldr => { let f = self.force(args[0].clone())?; let z = self.force(args[1].clone())?; let s = self.force(args[2].clone())?; match &s { Value::IntSet(set) => { let mut acc = z; for v in set.iter().rev() { let tmp = self.apply(f.clone(), Value::Int(*v))?; acc = self.apply(tmp, acc)?; } Ok(acc) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
+            PrimOp::IntSetToList => { let s = self.force(args[0].clone())?; match &s { Value::IntSet(set) => { let vals: Vec<Value> = set.iter().map(|v| Value::Int(*v)).collect(); Ok(Value::from_list(vals)) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
+            PrimOp::IntSetFromList => { let list = self.force(args[0].clone())?; let items = self.force_list(list)?; let set: BTreeSet<i64> = items.into_iter().filter_map(|v| v.as_int()).collect(); Ok(Value::IntSet(Arc::new(set))) }
         }
     }
 
@@ -3684,6 +4576,38 @@ impl Evaluator {
                         .collect();
                     Ok(format!("{} {}", name, args?.join(" ")))
                 }
+            }
+            Value::Map(m) => {
+                let entries: Result<Vec<String>, _> = m
+                    .iter()
+                    .map(|(k, v)| {
+                        let ks = self.display_value_impl(&k.0, depth + 1)?;
+                        let vs = self.display_value_impl(v, depth + 1)?;
+                        Ok(format!("({}, {})", ks, vs))
+                    })
+                    .collect();
+                Ok(format!("fromList [{}]", entries?.join(", ")))
+            }
+            Value::Set(s) => {
+                let entries: Result<Vec<String>, _> = s
+                    .iter()
+                    .map(|v| self.display_value_impl(&v.0, depth + 1))
+                    .collect();
+                Ok(format!("fromList [{}]", entries?.join(", ")))
+            }
+            Value::IntMap(m) => {
+                let entries: Vec<String> = m
+                    .iter()
+                    .map(|(k, v)| {
+                        let vs = self.display_value_impl(v, depth + 1).unwrap_or_else(|_| "<error>".to_string());
+                        format!("({}, {})", k, vs)
+                    })
+                    .collect();
+                Ok(format!("fromList [{}]", entries.join(", ")))
+            }
+            Value::IntSet(s) => {
+                let entries: Vec<String> = s.iter().map(|v| v.to_string()).collect();
+                Ok(format!("fromList [{}]", entries.join(", ")))
             }
             Value::Thunk(_) => {
                 // Should have been forced above, but just in case

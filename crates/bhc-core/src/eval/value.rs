@@ -3,6 +3,7 @@
 //! This module defines the `Value` type that represents values during
 //! interpretation of Core IR expressions.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -53,6 +54,18 @@ pub enum Value {
 
     /// An unboxed double array.
     UArrayDouble(UArray<f64>),
+
+    /// An ordered map (Data.Map) backed by BTreeMap.
+    Map(Arc<BTreeMap<OrdValue, Value>>),
+
+    /// An ordered set (Data.Set) backed by BTreeSet.
+    Set(Arc<BTreeSet<OrdValue>>),
+
+    /// An integer-keyed map (Data.IntMap) backed by BTreeMap<i64, Value>.
+    IntMap(Arc<BTreeMap<i64, Value>>),
+
+    /// An integer set (Data.IntSet) backed by BTreeSet<i64>.
+    IntSet(Arc<BTreeSet<i64>>),
 }
 
 impl fmt::Debug for Value {
@@ -79,6 +92,10 @@ impl fmt::Debug for Value {
             }
             Self::UArrayInt(arr) => write!(f, "UArray[Int; {}]", arr.len()),
             Self::UArrayDouble(arr) => write!(f, "UArray[Double; {}]", arr.len()),
+            Self::Map(m) => write!(f, "Map[size={}]", m.len()),
+            Self::Set(s) => write!(f, "Set[size={}]", s.len()),
+            Self::IntMap(m) => write!(f, "IntMap[size={}]", m.len()),
+            Self::IntSet(s) => write!(f, "IntSet[size={}]", s.len()),
         }
     }
 }
@@ -269,6 +286,87 @@ impl Value {
         match self {
             Self::UArrayDouble(arr) => Some(arr),
             _ => None,
+        }
+    }
+}
+
+/// A newtype around `Value` that implements `Ord` for use as map/set keys.
+///
+/// Only Int, Integer, Char, String, Bool, and Data (by tag then args) support
+/// ordering. Attempting to compare closures, thunks, or other non-orderable
+/// values will treat them as equal (fallback).
+#[derive(Clone, Debug)]
+pub struct OrdValue(pub Value);
+
+impl OrdValue {
+    /// Extract the inner Value.
+    pub fn into_inner(self) -> Value {
+        self.0
+    }
+
+    /// Borrow the inner Value.
+    pub fn inner(&self) -> &Value {
+        &self.0
+    }
+}
+
+impl PartialEq for OrdValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for OrdValue {}
+
+impl PartialOrd for OrdValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrdValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        // Discriminant ordering: Int=0, Integer=1, Float=2, Double=3, Char=4, String=5, Data=6, other=7
+        fn disc(v: &Value) -> u8 {
+            match v {
+                Value::Int(_) => 0,
+                Value::Integer(_) => 1,
+                Value::Float(_) => 2,
+                Value::Double(_) => 3,
+                Value::Char(_) => 4,
+                Value::String(_) => 5,
+                Value::Data(_) => 6,
+                _ => 7,
+            }
+        }
+        let d1 = disc(&self.0);
+        let d2 = disc(&other.0);
+        if d1 != d2 {
+            return d1.cmp(&d2);
+        }
+        match (&self.0, &other.0) {
+            (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
+            (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+            (Value::Double(a), Value::Double(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+            (Value::Char(a), Value::Char(b)) => a.cmp(b),
+            (Value::String(a), Value::String(b)) => a.cmp(b),
+            (Value::Data(a), Value::Data(b)) => {
+                match a.con.tag.cmp(&b.con.tag) {
+                    Ordering::Equal => {
+                        for (ax, bx) in a.args.iter().zip(b.args.iter()) {
+                            let c = OrdValue(ax.clone()).cmp(&OrdValue(bx.clone()));
+                            if c != Ordering::Equal {
+                                return c;
+                            }
+                        }
+                        a.args.len().cmp(&b.args.len())
+                    }
+                    ord => ord,
+                }
+            }
+            _ => Ordering::Equal,
         }
     }
 }
@@ -814,6 +912,244 @@ pub enum PrimOp {
     /// snd :: (a, b) -> b
     Snd,
 
+    // ========================================================
+    // Data.Map PrimOps
+    // ========================================================
+    /// Data.Map.empty :: Map k v
+    MapEmpty,
+    /// Data.Map.singleton :: k -> v -> Map k v
+    MapSingleton,
+    /// Data.Map.null :: Map k v -> Bool
+    MapNull,
+    /// Data.Map.size :: Map k v -> Int
+    MapSize,
+    /// Data.Map.member :: Ord k => k -> Map k v -> Bool
+    MapMember,
+    /// Data.Map.notMember :: Ord k => k -> Map k v -> Bool
+    MapNotMember,
+    /// Data.Map.lookup :: Ord k => k -> Map k v -> Maybe v
+    MapLookup,
+    /// Data.Map.findWithDefault :: Ord k => v -> k -> Map k v -> v
+    MapFindWithDefault,
+    /// Data.Map.(!) :: Ord k => Map k v -> k -> v
+    MapIndex,
+    /// Data.Map.insert :: Ord k => k -> v -> Map k v -> Map k v
+    MapInsert,
+    /// Data.Map.insertWith :: Ord k => (v -> v -> v) -> k -> v -> Map k v -> Map k v
+    MapInsertWith,
+    /// Data.Map.delete :: Ord k => k -> Map k v -> Map k v
+    MapDelete,
+    /// Data.Map.adjust :: Ord k => (v -> v) -> k -> Map k v -> Map k v
+    MapAdjust,
+    /// Data.Map.update :: Ord k => (v -> Maybe v) -> k -> Map k v -> Map k v
+    MapUpdate,
+    /// Data.Map.alter :: Ord k => (Maybe v -> Maybe v) -> k -> Map k v -> Map k v
+    MapAlter,
+    /// Data.Map.union :: Ord k => Map k v -> Map k v -> Map k v
+    MapUnion,
+    /// Data.Map.unionWith :: Ord k => (v -> v -> v) -> Map k v -> Map k v -> Map k v
+    MapUnionWith,
+    /// Data.Map.unionWithKey :: Ord k => (k -> v -> v -> v) -> Map k v -> Map k v -> Map k v
+    MapUnionWithKey,
+    /// Data.Map.unions :: Ord k => [Map k v] -> Map k v
+    MapUnions,
+    /// Data.Map.intersection :: Ord k => Map k v -> Map k w -> Map k v
+    MapIntersection,
+    /// Data.Map.intersectionWith :: Ord k => (a -> b -> c) -> Map k a -> Map k b -> Map k c
+    MapIntersectionWith,
+    /// Data.Map.difference :: Ord k => Map k v -> Map k w -> Map k v
+    MapDifference,
+    /// Data.Map.differenceWith :: Ord k => (a -> b -> Maybe a) -> Map k a -> Map k b -> Map k a
+    MapDifferenceWith,
+    /// Data.Map.map :: (a -> b) -> Map k a -> Map k b
+    MapMap,
+    /// Data.Map.mapWithKey :: (k -> a -> b) -> Map k a -> Map k b
+    MapMapWithKey,
+    /// Data.Map.mapKeys :: Ord k2 => (k1 -> k2) -> Map k1 a -> Map k2 a
+    MapMapKeys,
+    /// Data.Map.filter :: (a -> Bool) -> Map k a -> Map k a
+    MapFilter,
+    /// Data.Map.filterWithKey :: (k -> a -> Bool) -> Map k a -> Map k a
+    MapFilterWithKey,
+    /// Data.Map.foldr :: (a -> b -> b) -> b -> Map k a -> b
+    MapFoldr,
+    /// Data.Map.foldl :: (a -> b -> a) -> a -> Map k b -> a
+    MapFoldl,
+    /// Data.Map.foldrWithKey :: (k -> a -> b -> b) -> b -> Map k a -> b
+    MapFoldrWithKey,
+    /// Data.Map.foldlWithKey :: (a -> k -> b -> a) -> a -> Map k b -> a
+    MapFoldlWithKey,
+    /// Data.Map.keys :: Map k v -> [k]
+    MapKeys,
+    /// Data.Map.elems :: Map k v -> [v]
+    MapElems,
+    /// Data.Map.assocs :: Map k v -> [(k, v)]
+    MapAssocs,
+    /// Data.Map.toList :: Map k v -> [(k, v)]
+    MapToList,
+    /// Data.Map.fromList :: Ord k => [(k, v)] -> Map k v
+    MapFromList,
+    /// Data.Map.fromListWith :: Ord k => (a -> a -> a) -> [(k, a)] -> Map k a
+    MapFromListWith,
+    /// Data.Map.toAscList :: Map k v -> [(k, v)]
+    MapToAscList,
+    /// Data.Map.toDescList :: Map k v -> [(k, v)]
+    MapToDescList,
+    /// Data.Map.isSubmapOf :: (Ord k, Eq v) => Map k v -> Map k v -> Bool
+    MapIsSubmapOf,
+
+    // ========================================================
+    // Data.Set PrimOps
+    // ========================================================
+    /// Data.Set.empty :: Set a
+    SetEmpty,
+    /// Data.Set.singleton :: a -> Set a
+    SetSingleton,
+    /// Data.Set.null :: Set a -> Bool
+    SetNull,
+    /// Data.Set.size :: Set a -> Int
+    SetSize,
+    /// Data.Set.member :: Ord a => a -> Set a -> Bool
+    SetMember,
+    /// Data.Set.notMember :: Ord a => a -> Set a -> Bool
+    SetNotMember,
+    /// Data.Set.insert :: Ord a => a -> Set a -> Set a
+    SetInsert,
+    /// Data.Set.delete :: Ord a => a -> Set a -> Set a
+    SetDelete,
+    /// Data.Set.union :: Ord a => Set a -> Set a -> Set a
+    SetUnion,
+    /// Data.Set.unions :: Ord a => [Set a] -> Set a
+    SetUnions,
+    /// Data.Set.intersection :: Ord a => Set a -> Set a -> Set a
+    SetIntersection,
+    /// Data.Set.difference :: Ord a => Set a -> Set a -> Set a
+    SetDifference,
+    /// Data.Set.isSubsetOf :: Ord a => Set a -> Set a -> Bool
+    SetIsSubsetOf,
+    /// Data.Set.isProperSubsetOf :: Ord a => Set a -> Set a -> Bool
+    SetIsProperSubsetOf,
+    /// Data.Set.map :: Ord b => (a -> b) -> Set a -> Set b
+    SetMap,
+    /// Data.Set.filter :: (a -> Bool) -> Set a -> Set a
+    SetFilter,
+    /// Data.Set.partition :: (a -> Bool) -> Set a -> (Set a, Set a)
+    SetPartition,
+    /// Data.Set.foldr :: (a -> b -> b) -> b -> Set a -> b
+    SetFoldr,
+    /// Data.Set.foldl :: (a -> b -> a) -> a -> Set b -> a
+    SetFoldl,
+    /// Data.Set.toList :: Set a -> [a]
+    SetToList,
+    /// Data.Set.fromList :: Ord a => [a] -> Set a
+    SetFromList,
+    /// Data.Set.toAscList :: Set a -> [a]
+    SetToAscList,
+    /// Data.Set.toDescList :: Set a -> [a]
+    SetToDescList,
+    /// Data.Set.findMin :: Set a -> a
+    SetFindMin,
+    /// Data.Set.findMax :: Set a -> a
+    SetFindMax,
+    /// Data.Set.deleteMin :: Set a -> Set a
+    SetDeleteMin,
+    /// Data.Set.deleteMax :: Set a -> Set a
+    SetDeleteMax,
+    /// Data.Set.elems :: Set a -> [a]
+    SetElems,
+    /// Data.Set.lookupMin :: Set a -> Maybe a
+    SetLookupMin,
+    /// Data.Set.lookupMax :: Set a -> Maybe a
+    SetLookupMax,
+
+    // ========================================================
+    // Data.IntMap PrimOps
+    // ========================================================
+    /// Data.IntMap.empty :: IntMap v
+    IntMapEmpty,
+    /// Data.IntMap.singleton :: Int -> v -> IntMap v
+    IntMapSingleton,
+    /// Data.IntMap.null :: IntMap v -> Bool
+    IntMapNull,
+    /// Data.IntMap.size :: IntMap v -> Int
+    IntMapSize,
+    /// Data.IntMap.member :: Int -> IntMap v -> Bool
+    IntMapMember,
+    /// Data.IntMap.lookup :: Int -> IntMap v -> Maybe v
+    IntMapLookup,
+    /// Data.IntMap.findWithDefault :: v -> Int -> IntMap v -> v
+    IntMapFindWithDefault,
+    /// Data.IntMap.insert :: Int -> v -> IntMap v -> IntMap v
+    IntMapInsert,
+    /// Data.IntMap.insertWith :: (v -> v -> v) -> Int -> v -> IntMap v -> IntMap v
+    IntMapInsertWith,
+    /// Data.IntMap.delete :: Int -> IntMap v -> IntMap v
+    IntMapDelete,
+    /// Data.IntMap.adjust :: (v -> v) -> Int -> IntMap v -> IntMap v
+    IntMapAdjust,
+    /// Data.IntMap.union :: IntMap v -> IntMap v -> IntMap v
+    IntMapUnion,
+    /// Data.IntMap.unionWith :: (v -> v -> v) -> IntMap v -> IntMap v -> IntMap v
+    IntMapUnionWith,
+    /// Data.IntMap.intersection :: IntMap v -> IntMap w -> IntMap v
+    IntMapIntersection,
+    /// Data.IntMap.difference :: IntMap v -> IntMap w -> IntMap v
+    IntMapDifference,
+    /// Data.IntMap.map :: (a -> b) -> IntMap a -> IntMap b
+    IntMapMap,
+    /// Data.IntMap.mapWithKey :: (Int -> a -> b) -> IntMap a -> IntMap b
+    IntMapMapWithKey,
+    /// Data.IntMap.filter :: (a -> Bool) -> IntMap a -> IntMap a
+    IntMapFilter,
+    /// Data.IntMap.foldr :: (a -> b -> b) -> b -> IntMap a -> b
+    IntMapFoldr,
+    /// Data.IntMap.foldlWithKey :: (a -> Int -> b -> a) -> a -> IntMap b -> a
+    IntMapFoldlWithKey,
+    /// Data.IntMap.keys :: IntMap v -> [Int]
+    IntMapKeys,
+    /// Data.IntMap.elems :: IntMap v -> [v]
+    IntMapElems,
+    /// Data.IntMap.toList :: IntMap v -> [(Int, v)]
+    IntMapToList,
+    /// Data.IntMap.fromList :: [(Int, v)] -> IntMap v
+    IntMapFromList,
+    /// Data.IntMap.toAscList :: IntMap v -> [(Int, v)]
+    IntMapToAscList,
+
+    // ========================================================
+    // Data.IntSet PrimOps
+    // ========================================================
+    /// Data.IntSet.empty :: IntSet
+    IntSetEmpty,
+    /// Data.IntSet.singleton :: Int -> IntSet
+    IntSetSingleton,
+    /// Data.IntSet.null :: IntSet -> Bool
+    IntSetNull,
+    /// Data.IntSet.size :: IntSet -> Int
+    IntSetSize,
+    /// Data.IntSet.member :: Int -> IntSet -> Bool
+    IntSetMember,
+    /// Data.IntSet.insert :: Int -> IntSet -> IntSet
+    IntSetInsert,
+    /// Data.IntSet.delete :: Int -> IntSet -> IntSet
+    IntSetDelete,
+    /// Data.IntSet.union :: IntSet -> IntSet -> IntSet
+    IntSetUnion,
+    /// Data.IntSet.intersection :: IntSet -> IntSet -> IntSet
+    IntSetIntersection,
+    /// Data.IntSet.difference :: IntSet -> IntSet -> IntSet
+    IntSetDifference,
+    /// Data.IntSet.isSubsetOf :: IntSet -> IntSet -> Bool
+    IntSetIsSubsetOf,
+    /// Data.IntSet.filter :: (Int -> Bool) -> IntSet -> IntSet
+    IntSetFilter,
+    /// Data.IntSet.foldr :: (Int -> b -> b) -> b -> IntSet -> b
+    IntSetFoldr,
+    /// Data.IntSet.toList :: IntSet -> [Int]
+    IntSetToList,
+    /// Data.IntSet.fromList :: [Int] -> IntSet
+    IntSetFromList,
+
     // Dictionary operations (generated by type class desugaring)
     /// Select field N from a dictionary (tuple). Generated as `$sel_N` by
     /// HIR-to-Core lowering for type class method extraction.
@@ -826,7 +1162,14 @@ impl PrimOp {
     pub fn arity(self) -> usize {
         match self {
             // Arity 0
-            Self::GetLine | Self::GetChar | Self::GetContents | Self::Otherwise => 0,
+            Self::GetLine
+            | Self::GetChar
+            | Self::GetContents
+            | Self::Otherwise
+            | Self::MapEmpty
+            | Self::SetEmpty
+            | Self::IntMapEmpty
+            | Self::IntSetEmpty => 0,
             // Arity 1
             Self::NegInt
             | Self::NegDouble
@@ -935,7 +1278,44 @@ impl PrimOp {
             | Self::Scanl1
             | Self::Scanr1
             | Self::ShowString
-            | Self::ShowChar => 1,
+            | Self::ShowChar
+            // Container arity 1
+            | Self::MapNull
+            | Self::MapSize
+            | Self::MapKeys
+            | Self::MapElems
+            | Self::MapAssocs
+            | Self::MapToList
+            | Self::MapFromList
+            | Self::MapToAscList
+            | Self::MapToDescList
+            | Self::MapUnions
+            | Self::SetNull
+            | Self::SetSize
+            | Self::SetSingleton
+            | Self::SetToList
+            | Self::SetFromList
+            | Self::SetToAscList
+            | Self::SetToDescList
+            | Self::SetFindMin
+            | Self::SetFindMax
+            | Self::SetDeleteMin
+            | Self::SetDeleteMax
+            | Self::SetElems
+            | Self::SetLookupMin
+            | Self::SetLookupMax
+            | Self::IntMapNull
+            | Self::IntMapSize
+            | Self::IntMapKeys
+            | Self::IntMapElems
+            | Self::IntMapToList
+            | Self::IntMapFromList
+            | Self::IntMapToAscList
+            | Self::IntSetNull
+            | Self::IntSetSize
+            | Self::IntSetSingleton
+            | Self::IntSetToList
+            | Self::IntSetFromList => 1,
             // Arity 2
             Self::UArrayMap
             | Self::UArrayRange
@@ -1006,7 +1386,53 @@ impl PrimOp {
             | Self::Unfoldr
             | Self::Sort
             | Self::Interact
-            | Self::ShowParen => 2,
+            | Self::ShowParen
+            // Container arity 2
+            | Self::MapSingleton
+            | Self::MapMember
+            | Self::MapNotMember
+            | Self::MapLookup
+            | Self::MapIndex
+            | Self::MapDelete
+            | Self::MapUnion
+            | Self::MapIntersection
+            | Self::MapDifference
+            | Self::MapMap
+            | Self::MapMapKeys
+            | Self::MapFilter
+            | Self::MapIsSubmapOf
+            | Self::MapFromListWith
+            | Self::SetMember
+            | Self::SetNotMember
+            | Self::SetInsert
+            | Self::SetDelete
+            | Self::SetUnion
+            | Self::SetUnions
+            | Self::SetIntersection
+            | Self::SetDifference
+            | Self::SetIsSubsetOf
+            | Self::SetIsProperSubsetOf
+            | Self::SetMap
+            | Self::SetFilter
+            | Self::SetPartition
+            | Self::IntMapSingleton
+            | Self::IntMapMember
+            | Self::IntMapLookup
+            | Self::IntMapDelete
+            | Self::IntMapUnion
+            | Self::IntMapIntersection
+            | Self::IntMapDifference
+            | Self::IntMapMap
+            | Self::IntMapFilter
+            | Self::IntMapMapWithKey
+            | Self::IntSetMember
+            | Self::IntSetInsert
+            | Self::IntSetDelete
+            | Self::IntSetUnion
+            | Self::IntSetIntersection
+            | Self::IntSetDifference
+            | Self::IntSetIsSubsetOf
+            | Self::IntSetFilter => 2,
             // Arity 3
             Self::UArrayZipWith
             | Self::UArrayFold
@@ -1026,9 +1452,36 @@ impl PrimOp {
             | Self::UnionBy
             | Self::IntersectBy
             | Self::MapAccumL
-            | Self::MapAccumR => 3,
+            | Self::MapAccumR
+            // Container arity 3
+            | Self::MapInsert
+            | Self::MapAdjust
+            | Self::MapUpdate
+            | Self::MapAlter
+            | Self::MapUnionWith
+            | Self::MapIntersectionWith
+            | Self::MapDifferenceWith
+            | Self::MapMapWithKey
+            | Self::MapFilterWithKey
+            | Self::MapFoldr
+            | Self::MapFoldl
+            | Self::MapFindWithDefault
+            | Self::SetFoldr
+            | Self::SetFoldl
+            | Self::IntMapInsert
+            | Self::IntMapAdjust
+            | Self::IntMapUnionWith
+            | Self::IntMapFoldr
+            | Self::IntMapFindWithDefault
+            | Self::IntSetFoldr
+            | Self::MapUnionWithKey
+            | Self::MapFoldrWithKey
+            | Self::MapFoldlWithKey
+            | Self::IntMapFoldlWithKey => 3,
             // Arity 4
-            Self::ZipWith3 => 4,
+            Self::ZipWith3
+            | Self::MapInsertWith
+            | Self::IntMapInsertWith => 4,
             // Default arity 2 for arithmetic/comparison ops
             _ => 2,
         }
@@ -1275,6 +1728,121 @@ impl PrimOp {
             // Tuple
             "fst" => Some(Self::Fst),
             "snd" => Some(Self::Snd),
+            // Data.Map (qualified)
+            "Data.Map.empty" | "Data.Map.Strict.empty" | "Map.empty" => Some(Self::MapEmpty),
+            "Data.Map.singleton" | "Data.Map.Strict.singleton" | "Map.singleton" => Some(Self::MapSingleton),
+            "Data.Map.null" | "Data.Map.Strict.null" | "Map.null" => Some(Self::MapNull),
+            "Data.Map.size" | "Data.Map.Strict.size" | "Map.size" => Some(Self::MapSize),
+            "Data.Map.member" | "Data.Map.Strict.member" | "Map.member" => Some(Self::MapMember),
+            "Data.Map.notMember" | "Data.Map.Strict.notMember" | "Map.notMember" => Some(Self::MapNotMember),
+            "Data.Map.lookup" | "Data.Map.Strict.lookup" | "Map.lookup" => Some(Self::MapLookup),
+            "Data.Map.findWithDefault" | "Map.findWithDefault" => Some(Self::MapFindWithDefault),
+            "Data.Map.!" | "Map.!" => Some(Self::MapIndex),
+            "Data.Map.insert" | "Data.Map.Strict.insert" | "Map.insert" => Some(Self::MapInsert),
+            "Data.Map.insertWith" | "Map.insertWith" => Some(Self::MapInsertWith),
+            "Data.Map.delete" | "Data.Map.Strict.delete" | "Map.delete" => Some(Self::MapDelete),
+            "Data.Map.adjust" | "Map.adjust" => Some(Self::MapAdjust),
+            "Data.Map.update" | "Map.update" => Some(Self::MapUpdate),
+            "Data.Map.alter" | "Map.alter" => Some(Self::MapAlter),
+            "Data.Map.union" | "Data.Map.Strict.union" | "Map.union" => Some(Self::MapUnion),
+            "Data.Map.unionWith" | "Map.unionWith" => Some(Self::MapUnionWith),
+            "Data.Map.unionWithKey" | "Map.unionWithKey" => Some(Self::MapUnionWithKey),
+            "Data.Map.unions" | "Map.unions" => Some(Self::MapUnions),
+            "Data.Map.intersection" | "Map.intersection" => Some(Self::MapIntersection),
+            "Data.Map.intersectionWith" | "Map.intersectionWith" => Some(Self::MapIntersectionWith),
+            "Data.Map.difference" | "Map.difference" => Some(Self::MapDifference),
+            "Data.Map.differenceWith" | "Map.differenceWith" => Some(Self::MapDifferenceWith),
+            "Data.Map.map" | "Data.Map.Strict.map" | "Map.map" => Some(Self::MapMap),
+            "Data.Map.mapWithKey" | "Map.mapWithKey" => Some(Self::MapMapWithKey),
+            "Data.Map.mapKeys" | "Map.mapKeys" => Some(Self::MapMapKeys),
+            "Data.Map.filter" | "Map.filter" => Some(Self::MapFilter),
+            "Data.Map.filterWithKey" | "Map.filterWithKey" => Some(Self::MapFilterWithKey),
+            "Data.Map.foldr" | "Map.foldr" => Some(Self::MapFoldr),
+            "Data.Map.foldl" | "Map.foldl" => Some(Self::MapFoldl),
+            "Data.Map.foldrWithKey" | "Map.foldrWithKey" => Some(Self::MapFoldrWithKey),
+            "Data.Map.foldlWithKey" | "Map.foldlWithKey" => Some(Self::MapFoldlWithKey),
+            "Data.Map.keys" | "Map.keys" => Some(Self::MapKeys),
+            "Data.Map.elems" | "Map.elems" => Some(Self::MapElems),
+            "Data.Map.assocs" | "Map.assocs" => Some(Self::MapAssocs),
+            "Data.Map.toList" | "Map.toList" => Some(Self::MapToList),
+            "Data.Map.fromList" | "Data.Map.Strict.fromList" | "Map.fromList" => Some(Self::MapFromList),
+            "Data.Map.fromListWith" | "Map.fromListWith" => Some(Self::MapFromListWith),
+            "Data.Map.toAscList" | "Map.toAscList" => Some(Self::MapToAscList),
+            "Data.Map.toDescList" | "Map.toDescList" => Some(Self::MapToDescList),
+            "Data.Map.isSubmapOf" | "Map.isSubmapOf" => Some(Self::MapIsSubmapOf),
+            // Data.Set (qualified)
+            "Data.Set.empty" | "Set.empty" => Some(Self::SetEmpty),
+            "Data.Set.singleton" | "Set.singleton" => Some(Self::SetSingleton),
+            "Data.Set.null" | "Set.null" => Some(Self::SetNull),
+            "Data.Set.size" | "Set.size" => Some(Self::SetSize),
+            "Data.Set.member" | "Set.member" => Some(Self::SetMember),
+            "Data.Set.notMember" | "Set.notMember" => Some(Self::SetNotMember),
+            "Data.Set.insert" | "Set.insert" => Some(Self::SetInsert),
+            "Data.Set.delete" | "Set.delete" => Some(Self::SetDelete),
+            "Data.Set.union" | "Set.union" => Some(Self::SetUnion),
+            "Data.Set.unions" | "Set.unions" => Some(Self::SetUnions),
+            "Data.Set.intersection" | "Set.intersection" => Some(Self::SetIntersection),
+            "Data.Set.difference" | "Set.difference" => Some(Self::SetDifference),
+            "Data.Set.isSubsetOf" | "Set.isSubsetOf" => Some(Self::SetIsSubsetOf),
+            "Data.Set.isProperSubsetOf" | "Set.isProperSubsetOf" => Some(Self::SetIsProperSubsetOf),
+            "Data.Set.map" | "Set.map" => Some(Self::SetMap),
+            "Data.Set.filter" | "Set.filter" => Some(Self::SetFilter),
+            "Data.Set.partition" | "Set.partition" => Some(Self::SetPartition),
+            "Data.Set.foldr" | "Set.foldr" => Some(Self::SetFoldr),
+            "Data.Set.foldl" | "Set.foldl" => Some(Self::SetFoldl),
+            "Data.Set.toList" | "Set.toList" => Some(Self::SetToList),
+            "Data.Set.fromList" | "Set.fromList" => Some(Self::SetFromList),
+            "Data.Set.toAscList" | "Set.toAscList" => Some(Self::SetToAscList),
+            "Data.Set.toDescList" | "Set.toDescList" => Some(Self::SetToDescList),
+            "Data.Set.findMin" | "Set.findMin" => Some(Self::SetFindMin),
+            "Data.Set.findMax" | "Set.findMax" => Some(Self::SetFindMax),
+            "Data.Set.deleteMin" | "Set.deleteMin" => Some(Self::SetDeleteMin),
+            "Data.Set.deleteMax" | "Set.deleteMax" => Some(Self::SetDeleteMax),
+            "Data.Set.elems" | "Set.elems" => Some(Self::SetElems),
+            "Data.Set.lookupMin" | "Set.lookupMin" => Some(Self::SetLookupMin),
+            "Data.Set.lookupMax" | "Set.lookupMax" => Some(Self::SetLookupMax),
+            // Data.IntMap (qualified)
+            "Data.IntMap.empty" | "Data.IntMap.Strict.empty" | "IntMap.empty" => Some(Self::IntMapEmpty),
+            "Data.IntMap.singleton" | "IntMap.singleton" => Some(Self::IntMapSingleton),
+            "Data.IntMap.null" | "IntMap.null" => Some(Self::IntMapNull),
+            "Data.IntMap.size" | "IntMap.size" => Some(Self::IntMapSize),
+            "Data.IntMap.member" | "IntMap.member" => Some(Self::IntMapMember),
+            "Data.IntMap.lookup" | "IntMap.lookup" => Some(Self::IntMapLookup),
+            "Data.IntMap.findWithDefault" | "IntMap.findWithDefault" => Some(Self::IntMapFindWithDefault),
+            "Data.IntMap.insert" | "IntMap.insert" => Some(Self::IntMapInsert),
+            "Data.IntMap.insertWith" | "IntMap.insertWith" => Some(Self::IntMapInsertWith),
+            "Data.IntMap.delete" | "IntMap.delete" => Some(Self::IntMapDelete),
+            "Data.IntMap.adjust" | "IntMap.adjust" => Some(Self::IntMapAdjust),
+            "Data.IntMap.union" | "IntMap.union" => Some(Self::IntMapUnion),
+            "Data.IntMap.unionWith" | "IntMap.unionWith" => Some(Self::IntMapUnionWith),
+            "Data.IntMap.intersection" | "IntMap.intersection" => Some(Self::IntMapIntersection),
+            "Data.IntMap.difference" | "IntMap.difference" => Some(Self::IntMapDifference),
+            "Data.IntMap.map" | "IntMap.map" => Some(Self::IntMapMap),
+            "Data.IntMap.mapWithKey" | "IntMap.mapWithKey" => Some(Self::IntMapMapWithKey),
+            "Data.IntMap.filter" | "IntMap.filter" => Some(Self::IntMapFilter),
+            "Data.IntMap.foldr" | "IntMap.foldr" => Some(Self::IntMapFoldr),
+            "Data.IntMap.foldlWithKey" | "IntMap.foldlWithKey" => Some(Self::IntMapFoldlWithKey),
+            "Data.IntMap.keys" | "IntMap.keys" => Some(Self::IntMapKeys),
+            "Data.IntMap.elems" | "IntMap.elems" => Some(Self::IntMapElems),
+            "Data.IntMap.toList" | "IntMap.toList" => Some(Self::IntMapToList),
+            "Data.IntMap.fromList" | "IntMap.fromList" => Some(Self::IntMapFromList),
+            "Data.IntMap.toAscList" | "IntMap.toAscList" => Some(Self::IntMapToAscList),
+            // Data.IntSet (qualified)
+            "Data.IntSet.empty" | "IntSet.empty" => Some(Self::IntSetEmpty),
+            "Data.IntSet.singleton" | "IntSet.singleton" => Some(Self::IntSetSingleton),
+            "Data.IntSet.null" | "IntSet.null" => Some(Self::IntSetNull),
+            "Data.IntSet.size" | "IntSet.size" => Some(Self::IntSetSize),
+            "Data.IntSet.member" | "IntSet.member" => Some(Self::IntSetMember),
+            "Data.IntSet.insert" | "IntSet.insert" => Some(Self::IntSetInsert),
+            "Data.IntSet.delete" | "IntSet.delete" => Some(Self::IntSetDelete),
+            "Data.IntSet.union" | "IntSet.union" => Some(Self::IntSetUnion),
+            "Data.IntSet.intersection" | "IntSet.intersection" => Some(Self::IntSetIntersection),
+            "Data.IntSet.difference" | "IntSet.difference" => Some(Self::IntSetDifference),
+            "Data.IntSet.isSubsetOf" | "IntSet.isSubsetOf" => Some(Self::IntSetIsSubsetOf),
+            "Data.IntSet.filter" | "IntSet.filter" => Some(Self::IntSetFilter),
+            "Data.IntSet.foldr" | "IntSet.foldr" => Some(Self::IntSetFoldr),
+            "Data.IntSet.toList" | "IntSet.toList" => Some(Self::IntSetToList),
+            "Data.IntSet.fromList" | "IntSet.fromList" => Some(Self::IntSetFromList),
             _ => None,
         }
     }

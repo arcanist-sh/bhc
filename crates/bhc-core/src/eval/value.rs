@@ -1011,6 +1011,104 @@ pub enum PrimOp {
     /// killThread :: ThreadId -> IO ()
     KillThread,
 
+    // ---- Data.Ord ----
+    /// comparing :: Ord b => (a -> b) -> a -> a -> Ordering
+    Comparing,
+    /// clamp :: Ord a => (a, a) -> a -> a
+    Clamp,
+
+    // ---- Data.Foldable ----
+    /// fold :: Monoid m => [m] -> m (= mconcat for lists)
+    Fold,
+    /// foldMap :: Monoid m => (a -> m) -> [a] -> m
+    FoldMap,
+    /// foldr' :: (a -> b -> b) -> b -> [a] -> b (strict foldr)
+    FoldrStrict,
+    /// foldl1 :: (a -> a -> a) -> [a] -> a
+    Foldl1,
+    /// foldr1 :: (a -> a -> a) -> [a] -> a
+    Foldr1,
+    /// maximumBy :: (a -> a -> Ordering) -> [a] -> a
+    MaximumBy,
+    /// minimumBy :: (a -> a -> Ordering) -> [a] -> a
+    MinimumBy,
+    /// asum :: [Maybe a] -> Maybe a (or Alternative)
+    Asum,
+    /// traverse_ :: (a -> f b) -> [a] -> f ()
+    Traverse_,
+    /// for_ :: [a] -> (a -> f b) -> f ()
+    For_,
+    /// sequenceA_ :: [f a] -> f ()
+    SequenceA_,
+
+    // ---- Data.Traversable ----
+    /// traverse :: (a -> f b) -> [a] -> f [b]
+    Traverse,
+    /// sequenceA :: [f a] -> f [a]
+    SequenceA,
+
+    // ---- Data.Monoid ----
+    /// mempty :: Monoid a => a
+    Mempty,
+    /// mappend :: Monoid a => a -> a -> a
+    Mappend,
+    /// mconcat :: Monoid a => [a] -> a
+    Mconcat,
+
+    // ---- Data.String ----
+    /// fromString :: String -> a (IsString class)
+    FromString,
+
+    // ---- Data.Bits ----
+    /// (.&.) :: Bits a => a -> a -> a
+    BitAnd,
+    /// (.|.) :: Bits a => a -> a -> a
+    BitOr,
+    /// xor :: Bits a => a -> a -> a
+    BitXor,
+    /// complement :: Bits a => a -> a
+    BitComplement,
+    /// shift :: Bits a => a -> Int -> a
+    BitShift,
+    /// shiftL :: Bits a => a -> Int -> a
+    BitShiftL,
+    /// shiftR :: Bits a => a -> Int -> a
+    BitShiftR,
+    /// rotate :: Bits a => a -> Int -> a
+    BitRotate,
+    /// rotateL :: Bits a => a -> Int -> a
+    BitRotateL,
+    /// rotateR :: Bits a => a -> Int -> a
+    BitRotateR,
+    /// bit :: Bits a => Int -> a
+    BitBit,
+    /// setBit :: Bits a => a -> Int -> a
+    BitSetBit,
+    /// clearBit :: Bits a => a -> Int -> a
+    BitClearBit,
+    /// complementBit :: Bits a => a -> Int -> a
+    BitComplementBit,
+    /// testBit :: Bits a => a -> Int -> Bool
+    BitTestBit,
+    /// popCount :: Bits a => a -> Int
+    BitPopCount,
+    /// zeroBits :: Bits a => a
+    BitZeroBits,
+    /// countLeadingZeros :: FiniteBits a => a -> Int
+    BitCountLeadingZeros,
+    /// countTrailingZeros :: FiniteBits a => a -> Int
+    BitCountTrailingZeros,
+
+    // ---- Data.Proxy ----
+    /// asProxyTypeOf :: a -> proxy a -> a
+    AsProxyTypeOf,
+
+    // ---- Data.Void ----
+    /// absurd :: Void -> a
+    Absurd,
+    /// vacuous :: Functor f => f Void -> f a
+    Vacuous,
+
     // Prelude: otherwise and misc
     /// otherwise :: Bool (always True)
     Otherwise,
@@ -1464,7 +1562,9 @@ impl PrimOp {
             | Self::GetCurrentDirectory
             | Self::Mzero
             | Self::MyThreadId
-            | Self::NewEmptyMVar => 0,
+            | Self::NewEmptyMVar
+            | Self::Mempty
+            | Self::BitZeroBits => 0,
             // Arity 1
             Self::NegInt
             | Self::NegDouble
@@ -1646,7 +1746,20 @@ impl PrimOp {
             | Self::NewMVar
             | Self::TakeMVar
             | Self::ReadMVar
-            | Self::KillThread => 1,
+            | Self::KillThread
+            | Self::Fold
+            | Self::Mconcat
+            | Self::FromString
+            | Self::BitComplement
+            | Self::BitBit
+            | Self::BitPopCount
+            | Self::BitCountLeadingZeros
+            | Self::BitCountTrailingZeros
+            | Self::SequenceA
+            | Self::SequenceA_
+            | Self::Asum
+            | Self::Absurd
+            | Self::Vacuous => 1,
             // Arity 2
             Self::UArrayMap
             | Self::UArrayRange
@@ -1798,7 +1911,31 @@ impl PrimOp {
             | Self::ExnMask
             | Self::ExnUninterruptibleMask
             | Self::PutMVar
-            | Self::ThrowTo => 2,
+            | Self::ThrowTo
+            | Self::FoldMap
+            | Self::Foldl1
+            | Self::Foldr1
+            | Self::MaximumBy
+            | Self::MinimumBy
+            | Self::Traverse
+            | Self::Traverse_
+            | Self::For_
+            | Self::Mappend
+            | Self::BitAnd
+            | Self::BitOr
+            | Self::BitXor
+            | Self::BitShift
+            | Self::BitShiftL
+            | Self::BitShiftR
+            | Self::BitRotate
+            | Self::BitRotateL
+            | Self::BitRotateR
+            | Self::BitSetBit
+            | Self::BitClearBit
+            | Self::BitComplementBit
+            | Self::BitTestBit
+            | Self::Clamp
+            | Self::AsProxyTypeOf => 2,
             // Arity 3
             Self::UArrayZipWith
             | Self::UArrayFold
@@ -1819,6 +1956,8 @@ impl PrimOp {
             | Self::IntersectBy
             | Self::MapAccumL
             | Self::MapAccumR
+            | Self::FoldrStrict
+            | Self::Comparing
             // Container arity 3
             | Self::MapInsert
             | Self::MapAdjust
@@ -2339,6 +2478,57 @@ impl PrimOp {
             "readMVar" | "Control.Concurrent.MVar.readMVar" => Some(Self::ReadMVar),
             "throwTo" | "Control.Concurrent.throwTo" | "Control.Exception.throwTo" => Some(Self::ThrowTo),
             "killThread" | "Control.Concurrent.killThread" => Some(Self::KillThread),
+            // Data.Ord
+            "comparing" | "Data.Ord.comparing" => Some(Self::Comparing),
+            "clamp" | "Data.Ord.clamp" => Some(Self::Clamp),
+            // Data.Foldable
+            "fold" | "Data.Foldable.fold" => Some(Self::Fold),
+            "foldMap" | "Data.Foldable.foldMap" => Some(Self::FoldMap),
+            "foldr'" | "Data.Foldable.foldr'" => Some(Self::FoldrStrict),
+            "foldl1" | "Data.Foldable.foldl1" => Some(Self::Foldl1),
+            "foldr1" | "Data.Foldable.foldr1" => Some(Self::Foldr1),
+            "maximumBy" | "Data.Foldable.maximumBy" | "Data.List.maximumBy" => Some(Self::MaximumBy),
+            "minimumBy" | "Data.Foldable.minimumBy" | "Data.List.minimumBy" => Some(Self::MinimumBy),
+            "asum" | "Data.Foldable.asum" => Some(Self::Asum),
+            "traverse_" | "Data.Foldable.traverse_" => Some(Self::Traverse_),
+            "for_" | "Data.Foldable.for_" => Some(Self::For_),
+            "sequenceA_" | "Data.Foldable.sequenceA_" => Some(Self::SequenceA_),
+            // Data.Traversable
+            "traverse" | "Data.Traversable.traverse" => Some(Self::Traverse),
+            "sequenceA" | "Data.Traversable.sequenceA" => Some(Self::SequenceA),
+            "Data.Traversable.mapAccumL" | "Data.List.mapAccumL" => Some(Self::MapAccumL),
+            "Data.Traversable.mapAccumR" | "Data.List.mapAccumR" => Some(Self::MapAccumR),
+            // Data.Monoid
+            "mempty" | "Data.Monoid.mempty" => Some(Self::Mempty),
+            "mappend" | "Data.Monoid.mappend" => Some(Self::Mappend),
+            "mconcat" | "Data.Monoid.mconcat" => Some(Self::Mconcat),
+            // Data.String
+            "fromString" | "Data.String.fromString" => Some(Self::FromString),
+            // Data.Bits
+            ".&." | "Data.Bits..&." => Some(Self::BitAnd),
+            ".|." | "Data.Bits..|." => Some(Self::BitOr),
+            "xor" | "Data.Bits.xor" => Some(Self::BitXor),
+            "complement" | "Data.Bits.complement" => Some(Self::BitComplement),
+            "shift" | "Data.Bits.shift" => Some(Self::BitShift),
+            "shiftL" | "Data.Bits.shiftL" => Some(Self::BitShiftL),
+            "shiftR" | "Data.Bits.shiftR" => Some(Self::BitShiftR),
+            "rotate" | "Data.Bits.rotate" => Some(Self::BitRotate),
+            "rotateL" | "Data.Bits.rotateL" => Some(Self::BitRotateL),
+            "rotateR" | "Data.Bits.rotateR" => Some(Self::BitRotateR),
+            "bit" | "Data.Bits.bit" => Some(Self::BitBit),
+            "setBit" | "Data.Bits.setBit" => Some(Self::BitSetBit),
+            "clearBit" | "Data.Bits.clearBit" => Some(Self::BitClearBit),
+            "complementBit" | "Data.Bits.complementBit" => Some(Self::BitComplementBit),
+            "testBit" | "Data.Bits.testBit" => Some(Self::BitTestBit),
+            "popCount" | "Data.Bits.popCount" => Some(Self::BitPopCount),
+            "zeroBits" | "Data.Bits.zeroBits" => Some(Self::BitZeroBits),
+            "countLeadingZeros" | "Data.Bits.countLeadingZeros" => Some(Self::BitCountLeadingZeros),
+            "countTrailingZeros" | "Data.Bits.countTrailingZeros" => Some(Self::BitCountTrailingZeros),
+            // Data.Proxy
+            "asProxyTypeOf" | "Data.Proxy.asProxyTypeOf" => Some(Self::AsProxyTypeOf),
+            // Data.Void
+            "absurd" | "Data.Void.absurd" => Some(Self::Absurd),
+            "vacuous" | "Data.Void.vacuous" => Some(Self::Vacuous),
             _ => None,
         }
     }

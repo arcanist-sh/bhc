@@ -3659,6 +3659,22 @@ impl Builtins {
             ("liftA3", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
             ("myThreadId", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
             ("throwTo", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            // ---- Phase 5: Data.* PrimOps (genuinely new) ----
+            ("comparing", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("clamp", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("foldr'", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("foldl1", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("foldr1", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("maximumBy", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("minimumBy", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("fromString", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("shift", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("rotate", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("countLeadingZeros", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("countTrailingZeros", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("asProxyTypeOf", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("absurd", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
+            ("vacuous", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
         ];
 
         for (name, scheme) in ops {

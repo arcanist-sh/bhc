@@ -945,6 +945,22 @@ impl LowerContext {
             "liftA3",
             "myThreadId",
             "throwTo",
+            // ---- Phase 5: Data.* PrimOps (genuinely new) ----
+            "comparing",
+            "clamp",
+            "foldr'",
+            "foldl1",
+            "foldr1",
+            "maximumBy",
+            "minimumBy",
+            "fromString",
+            "shift",
+            "rotate",
+            "countLeadingZeros",
+            "countTrailingZeros",
+            "asProxyTypeOf",
+            "absurd",
+            "vacuous",
         ];
 
         for name in builtin_funcs {

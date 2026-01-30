@@ -797,6 +797,110 @@ impl Evaluator {
             prims.insert(Symbol::intern(name), Value::PrimOp(*op));
         }
 
+        // Data.* operations
+        let data_ops: &[(&str, PrimOp)] = &[
+            // Data.Ord
+            ("comparing", PrimOp::Comparing),
+            ("Data.Ord.comparing", PrimOp::Comparing),
+            ("clamp", PrimOp::Clamp),
+            ("Data.Ord.clamp", PrimOp::Clamp),
+            // Data.Foldable
+            ("fold", PrimOp::Fold),
+            ("Data.Foldable.fold", PrimOp::Fold),
+            ("foldMap", PrimOp::FoldMap),
+            ("Data.Foldable.foldMap", PrimOp::FoldMap),
+            ("foldr'", PrimOp::FoldrStrict),
+            ("Data.Foldable.foldr'", PrimOp::FoldrStrict),
+            ("foldl1", PrimOp::Foldl1),
+            ("Data.Foldable.foldl1", PrimOp::Foldl1),
+            ("foldr1", PrimOp::Foldr1),
+            ("Data.Foldable.foldr1", PrimOp::Foldr1),
+            ("maximumBy", PrimOp::MaximumBy),
+            ("Data.Foldable.maximumBy", PrimOp::MaximumBy),
+            ("Data.List.maximumBy", PrimOp::MaximumBy),
+            ("minimumBy", PrimOp::MinimumBy),
+            ("Data.Foldable.minimumBy", PrimOp::MinimumBy),
+            ("Data.List.minimumBy", PrimOp::MinimumBy),
+            ("Data.Foldable.notElem", PrimOp::NotElem),
+            ("asum", PrimOp::Asum),
+            ("Data.Foldable.asum", PrimOp::Asum),
+            ("traverse_", PrimOp::Traverse_),
+            ("Data.Foldable.traverse_", PrimOp::Traverse_),
+            ("for_", PrimOp::For_),
+            ("Data.Foldable.for_", PrimOp::For_),
+            ("sequenceA_", PrimOp::SequenceA_),
+            ("Data.Foldable.sequenceA_", PrimOp::SequenceA_),
+            // Data.Traversable
+            ("traverse", PrimOp::Traverse),
+            ("Data.Traversable.traverse", PrimOp::Traverse),
+            ("sequenceA", PrimOp::SequenceA),
+            ("Data.Traversable.sequenceA", PrimOp::SequenceA),
+            ("Data.Traversable.mapAccumL", PrimOp::MapAccumL),
+            ("Data.List.mapAccumL", PrimOp::MapAccumL),
+            ("Data.Traversable.mapAccumR", PrimOp::MapAccumR),
+            ("Data.List.mapAccumR", PrimOp::MapAccumR),
+            // Data.Monoid
+            ("mempty", PrimOp::Mempty),
+            ("Data.Monoid.mempty", PrimOp::Mempty),
+            ("mappend", PrimOp::Mappend),
+            ("Data.Monoid.mappend", PrimOp::Mappend),
+            ("mconcat", PrimOp::Mconcat),
+            ("Data.Monoid.mconcat", PrimOp::Mconcat),
+            // Data.String
+            ("fromString", PrimOp::FromString),
+            ("Data.String.fromString", PrimOp::FromString),
+            // Data.Bits
+            (".&.", PrimOp::BitAnd),
+            ("Data.Bits..&.", PrimOp::BitAnd),
+            (".|.", PrimOp::BitOr),
+            ("Data.Bits..|.", PrimOp::BitOr),
+            ("xor", PrimOp::BitXor),
+            ("Data.Bits.xor", PrimOp::BitXor),
+            ("complement", PrimOp::BitComplement),
+            ("Data.Bits.complement", PrimOp::BitComplement),
+            ("shift", PrimOp::BitShift),
+            ("Data.Bits.shift", PrimOp::BitShift),
+            ("shiftL", PrimOp::BitShiftL),
+            ("Data.Bits.shiftL", PrimOp::BitShiftL),
+            ("shiftR", PrimOp::BitShiftR),
+            ("Data.Bits.shiftR", PrimOp::BitShiftR),
+            ("rotate", PrimOp::BitRotate),
+            ("Data.Bits.rotate", PrimOp::BitRotate),
+            ("rotateL", PrimOp::BitRotateL),
+            ("Data.Bits.rotateL", PrimOp::BitRotateL),
+            ("rotateR", PrimOp::BitRotateR),
+            ("Data.Bits.rotateR", PrimOp::BitRotateR),
+            ("bit", PrimOp::BitBit),
+            ("Data.Bits.bit", PrimOp::BitBit),
+            ("setBit", PrimOp::BitSetBit),
+            ("Data.Bits.setBit", PrimOp::BitSetBit),
+            ("clearBit", PrimOp::BitClearBit),
+            ("Data.Bits.clearBit", PrimOp::BitClearBit),
+            ("complementBit", PrimOp::BitComplementBit),
+            ("Data.Bits.complementBit", PrimOp::BitComplementBit),
+            ("testBit", PrimOp::BitTestBit),
+            ("Data.Bits.testBit", PrimOp::BitTestBit),
+            ("popCount", PrimOp::BitPopCount),
+            ("Data.Bits.popCount", PrimOp::BitPopCount),
+            ("zeroBits", PrimOp::BitZeroBits),
+            ("Data.Bits.zeroBits", PrimOp::BitZeroBits),
+            ("countLeadingZeros", PrimOp::BitCountLeadingZeros),
+            ("Data.Bits.countLeadingZeros", PrimOp::BitCountLeadingZeros),
+            ("countTrailingZeros", PrimOp::BitCountTrailingZeros),
+            ("Data.Bits.countTrailingZeros", PrimOp::BitCountTrailingZeros),
+            // Data.Proxy
+            ("asProxyTypeOf", PrimOp::AsProxyTypeOf),
+            ("Data.Proxy.asProxyTypeOf", PrimOp::AsProxyTypeOf),
+            // Data.Void
+            ("absurd", PrimOp::Absurd),
+            ("Data.Void.absurd", PrimOp::Absurd),
+            ("vacuous", PrimOp::Vacuous),
+            ("Data.Void.vacuous", PrimOp::Vacuous),
+        ];
+        for (name, op) in data_ops {
+            prims.insert(Symbol::intern(name), Value::PrimOp(*op));
+        }
+
         // Register list constructors
         prims.insert(Symbol::intern("[]"), Value::nil());
         prims.insert(
@@ -5551,6 +5655,532 @@ impl Evaluator {
                 let _ = self.force(args[0].clone())?;
                 Ok(Value::unit())
             }
+
+            // ---- Data.Ord ----
+            PrimOp::Comparing => {
+                // comparing :: (a -> b) -> a -> a -> Ordering
+                let f = args[0].clone();
+                let x = args[1].clone();
+                let y = args[2].clone();
+                let fx = self.apply(f.clone(), x)?;
+                let fy = self.apply(f, y)?;
+                let fx = self.force(fx)?;
+                let fy = self.force(fy)?;
+                // Use OrdValue comparison to produce Ordering
+                let ord = OrdValue(fx).cmp(&OrdValue(fy));
+                Ok(self.make_ordering(ord))
+            }
+            PrimOp::Clamp => {
+                // clamp :: (a, a) -> a -> a
+                let bounds = self.force(args[0].clone())?;
+                let val = self.force(args[1].clone())?;
+                match &bounds {
+                    Value::Data(dv) if dv.con.name.as_str() == "(,)" && dv.args.len() == 2 => {
+                        let lo = self.force(dv.args[0].clone())?;
+                        let hi = self.force(dv.args[1].clone())?;
+                        let cmp_lo = OrdValue(val.clone()).cmp(&OrdValue(lo.clone()));
+                        if cmp_lo == std::cmp::Ordering::Less {
+                            return Ok(lo);
+                        }
+                        let cmp_hi = OrdValue(val.clone()).cmp(&OrdValue(hi.clone()));
+                        if cmp_hi == std::cmp::Ordering::Greater {
+                            return Ok(hi);
+                        }
+                        Ok(val)
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "pair".into(),
+                        got: format!("{bounds:?}"),
+                    }),
+                }
+            }
+
+            // ---- Data.Foldable ----
+            PrimOp::Fold => {
+                // fold :: Monoid m => [m] -> m
+                let list = self.force_list(args[0].clone())?;
+                if list.is_empty() {
+                    return Ok(Value::String("".into()));
+                }
+                let first = self.force(list[0].clone())?;
+                match &first {
+                    Value::String(_) => {
+                        let mut s = String::new();
+                        for item in list {
+                            let item = self.force(item)?;
+                            if let Value::String(ref rs) = item {
+                                s.push_str(rs);
+                            }
+                        }
+                        Ok(Value::String(s.into()))
+                    }
+                    _ if self.is_list_value(&first) => {
+                        let mut all = Vec::new();
+                        for item in list {
+                            let item = self.force(item)?;
+                            if self.is_list_value(&item) {
+                                all.extend(self.force_list(item)?);
+                            } else {
+                                all.push(item);
+                            }
+                        }
+                        Ok(Value::from_list(all))
+                    }
+                    _ => Ok(first),
+                }
+            }
+            PrimOp::FoldMap => {
+                // foldMap :: (a -> m) -> [a] -> m
+                let f = args[0].clone();
+                let list = self.force_list(args[1].clone())?;
+                let mut results = Vec::new();
+                for item in list {
+                    let mapped = self.apply(f.clone(), item)?;
+                    results.push(self.force(mapped)?);
+                }
+                if results.is_empty() {
+                    return Ok(Value::String("".into()));
+                }
+                match &results[0] {
+                    Value::String(_) => {
+                        let mut s = String::new();
+                        for r in results {
+                            if let Value::String(ref rs) = r {
+                                s.push_str(rs);
+                            }
+                        }
+                        Ok(Value::String(s.into()))
+                    }
+                    _ => {
+                        let mut all = Vec::new();
+                        for r in results {
+                            if self.is_list_value(&r) {
+                                all.extend(self.force_list(r)?);
+                            } else {
+                                all.push(r);
+                            }
+                        }
+                        Ok(Value::from_list(all))
+                    }
+                }
+            }
+            PrimOp::FoldrStrict => {
+                // foldr' :: (a -> b -> b) -> b -> [a] -> b
+                let f = args[0].clone();
+                let z = self.force(args[1].clone())?;
+                let list = self.force_list(args[2].clone())?;
+                let mut acc = z;
+                for item in list.into_iter().rev() {
+                    let tmp = self.apply(f.clone(), item)?;
+                    acc = self.apply(tmp, acc)?;
+                    acc = self.force(acc)?;
+                }
+                Ok(acc)
+            }
+            PrimOp::Foldl1 => {
+                // foldl1 :: (a -> a -> a) -> [a] -> a
+                let f = args[0].clone();
+                let list = self.force_list(args[1].clone())?;
+                if list.is_empty() {
+                    return Err(EvalError::UserError("foldl1: empty list".into()));
+                }
+                let mut acc = self.force(list[0].clone())?;
+                for item in list.into_iter().skip(1) {
+                    let tmp = self.apply(f.clone(), acc)?;
+                    acc = self.apply(tmp, item)?;
+                    acc = self.force(acc)?;
+                }
+                Ok(acc)
+            }
+            PrimOp::Foldr1 => {
+                // foldr1 :: (a -> a -> a) -> [a] -> a
+                let f = args[0].clone();
+                let list = self.force_list(args[1].clone())?;
+                if list.is_empty() {
+                    return Err(EvalError::UserError("foldr1: empty list".into()));
+                }
+                let mut acc = self.force(list.last().unwrap().clone())?;
+                for item in list.into_iter().rev().skip(1) {
+                    let item = self.force(item)?;
+                    let tmp = self.apply(f.clone(), item)?;
+                    acc = self.apply(tmp, acc)?;
+                    acc = self.force(acc)?;
+                }
+                Ok(acc)
+            }
+            PrimOp::MaximumBy => {
+                // maximumBy :: (a -> a -> Ordering) -> [a] -> a
+                let cmp = args[0].clone();
+                let list = self.force_list(args[1].clone())?;
+                if list.is_empty() {
+                    return Err(EvalError::UserError("maximumBy: empty list".into()));
+                }
+                let mut best = self.force(list[0].clone())?;
+                for item in list.into_iter().skip(1) {
+                    let item = self.force(item)?;
+                    let tmp = self.apply(cmp.clone(), item.clone())?;
+                    let ord = self.apply(tmp, best.clone())?;
+                    let ord = self.force(ord)?;
+                    if let Value::Data(ref dv) = ord {
+                        if dv.con.name.as_str() == "GT" {
+                            best = item;
+                        }
+                    }
+                }
+                Ok(best)
+            }
+            PrimOp::MinimumBy => {
+                // minimumBy :: (a -> a -> Ordering) -> [a] -> a
+                let cmp = args[0].clone();
+                let list = self.force_list(args[1].clone())?;
+                if list.is_empty() {
+                    return Err(EvalError::UserError("minimumBy: empty list".into()));
+                }
+                let mut best = self.force(list[0].clone())?;
+                for item in list.into_iter().skip(1) {
+                    let item = self.force(item)?;
+                    let tmp = self.apply(cmp.clone(), item.clone())?;
+                    let ord = self.apply(tmp, best.clone())?;
+                    let ord = self.force(ord)?;
+                    if let Value::Data(ref dv) = ord {
+                        if dv.con.name.as_str() == "LT" {
+                            best = item;
+                        }
+                    }
+                }
+                Ok(best)
+            }
+            PrimOp::Asum => {
+                // asum :: [Maybe a] -> Maybe a (first Just)
+                let list = self.force_list(args[0].clone())?;
+                for item in list {
+                    let item = self.force(item)?;
+                    if let Value::Data(ref dv) = item {
+                        if dv.con.name.as_str() == "Just" {
+                            return Ok(item);
+                        }
+                    }
+                }
+                Ok(self.make_nothing())
+            }
+            PrimOp::Traverse_ => {
+                // traverse_ :: (a -> f b) -> [a] -> f ()
+                let f = args[0].clone();
+                let list = self.force_list(args[1].clone())?;
+                for item in list {
+                    let _ = self.apply(f.clone(), item)?;
+                }
+                Ok(Value::unit())
+            }
+            PrimOp::For_ => {
+                // for_ :: [a] -> (a -> f b) -> f ()
+                let list = self.force_list(args[0].clone())?;
+                let f = args[1].clone();
+                for item in list {
+                    let _ = self.apply(f.clone(), item)?;
+                }
+                Ok(Value::unit())
+            }
+            PrimOp::SequenceA_ => {
+                // sequenceA_ :: [f a] -> f ()
+                let list = self.force_list(args[0].clone())?;
+                for item in list {
+                    let _ = self.force(item)?;
+                }
+                Ok(Value::unit())
+            }
+
+            // ---- Data.Traversable ----
+            PrimOp::Traverse => {
+                // traverse :: (a -> f b) -> [a] -> f [b]
+                let f = args[0].clone();
+                let list = self.force_list(args[1].clone())?;
+                let mut results = Vec::new();
+                for item in list {
+                    let r = self.apply(f.clone(), item)?;
+                    results.push(self.force(r)?);
+                }
+                Ok(Value::from_list(results))
+            }
+            PrimOp::SequenceA => {
+                // sequenceA :: [f a] -> f [a]
+                let list = self.force_list(args[0].clone())?;
+                let mut results = Vec::new();
+                for item in list {
+                    results.push(self.force(item)?);
+                }
+                Ok(Value::from_list(results))
+            }
+
+            // ---- Data.Monoid ----
+            PrimOp::Mempty => {
+                // mempty :: Monoid a => a (default: empty list)
+                Ok(Value::nil())
+            }
+            PrimOp::Mappend => {
+                // mappend :: a -> a -> a
+                let a = self.force(args[0].clone())?;
+                let b = self.force(args[1].clone())?;
+                match (&a, &b) {
+                    (Value::String(s1), Value::String(s2)) => {
+                        let mut s = s1.to_string();
+                        s.push_str(s2);
+                        Ok(Value::String(s.into()))
+                    }
+                    _ if self.is_list_value(&a) => {
+                        let mut xs = self.force_list(a)?;
+                        let ys = self.force_list(b)?;
+                        xs.extend(ys);
+                        Ok(Value::from_list(xs))
+                    }
+                    _ => Ok(a),
+                }
+            }
+            PrimOp::Mconcat => {
+                // mconcat :: [a] -> a
+                let list = self.force_list(args[0].clone())?;
+                if list.is_empty() {
+                    return Ok(Value::nil());
+                }
+                let first = self.force(list[0].clone())?;
+                match &first {
+                    Value::String(_) => {
+                        let mut s = String::new();
+                        for item in list {
+                            let item = self.force(item)?;
+                            if let Value::String(ref rs) = item {
+                                s.push_str(rs);
+                            }
+                        }
+                        Ok(Value::String(s.into()))
+                    }
+                    _ => {
+                        let mut all = Vec::new();
+                        for item in list {
+                            let item = self.force(item)?;
+                            if self.is_list_value(&item) {
+                                all.extend(self.force_list(item)?);
+                            } else {
+                                all.push(item);
+                            }
+                        }
+                        Ok(Value::from_list(all))
+                    }
+                }
+            }
+
+            // ---- Data.String ----
+            PrimOp::FromString => {
+                // fromString :: String -> a (identity for String)
+                self.force(args[0].clone())
+            }
+
+            // ---- Data.Bits ----
+            PrimOp::BitAnd => {
+                let a = self.force(args[0].clone())?;
+                let b = self.force(args[1].clone())?;
+                match (&a, &b) {
+                    (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x & y)),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitOr => {
+                let a = self.force(args[0].clone())?;
+                let b = self.force(args[1].clone())?;
+                match (&a, &b) {
+                    (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x | y)),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitXor => {
+                let a = self.force(args[0].clone())?;
+                let b = self.force(args[1].clone())?;
+                match (&a, &b) {
+                    (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x ^ y)),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitComplement => {
+                let a = self.force(args[0].clone())?;
+                match &a {
+                    Value::Int(x) => Ok(Value::Int(!x)),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitShift | PrimOp::BitShiftL => {
+                let a = self.force(args[0].clone())?;
+                let b = self.force(args[1].clone())?;
+                match (&a, &b) {
+                    (Value::Int(x), Value::Int(n)) => {
+                        if *n >= 0 {
+                            Ok(Value::Int(x.wrapping_shl(*n as u32)))
+                        } else {
+                            Ok(Value::Int(x.wrapping_shr((-*n) as u32)))
+                        }
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitShiftR => {
+                let a = self.force(args[0].clone())?;
+                let b = self.force(args[1].clone())?;
+                match (&a, &b) {
+                    (Value::Int(x), Value::Int(n)) => Ok(Value::Int(x.wrapping_shr(*n as u32))),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitRotate | PrimOp::BitRotateL => {
+                let a = self.force(args[0].clone())?;
+                let b = self.force(args[1].clone())?;
+                match (&a, &b) {
+                    (Value::Int(x), Value::Int(n)) => {
+                        Ok(Value::Int(x.rotate_left(*n as u32)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitRotateR => {
+                let a = self.force(args[0].clone())?;
+                let b = self.force(args[1].clone())?;
+                match (&a, &b) {
+                    (Value::Int(x), Value::Int(n)) => {
+                        Ok(Value::Int(x.rotate_right(*n as u32)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitBit => {
+                let a = self.force(args[0].clone())?;
+                match &a {
+                    Value::Int(n) => Ok(Value::Int(1i64.wrapping_shl(*n as u32))),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitSetBit => {
+                let a = self.force(args[0].clone())?;
+                let b = self.force(args[1].clone())?;
+                match (&a, &b) {
+                    (Value::Int(x), Value::Int(n)) => {
+                        Ok(Value::Int(x | (1i64.wrapping_shl(*n as u32))))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitClearBit => {
+                let a = self.force(args[0].clone())?;
+                let b = self.force(args[1].clone())?;
+                match (&a, &b) {
+                    (Value::Int(x), Value::Int(n)) => {
+                        Ok(Value::Int(x & !(1i64.wrapping_shl(*n as u32))))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitComplementBit => {
+                let a = self.force(args[0].clone())?;
+                let b = self.force(args[1].clone())?;
+                match (&a, &b) {
+                    (Value::Int(x), Value::Int(n)) => {
+                        Ok(Value::Int(x ^ (1i64.wrapping_shl(*n as u32))))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitTestBit => {
+                let a = self.force(args[0].clone())?;
+                let b = self.force(args[1].clone())?;
+                match (&a, &b) {
+                    (Value::Int(x), Value::Int(n)) => {
+                        Ok(Value::bool((x.wrapping_shr(*n as u32)) & 1 == 1))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitPopCount => {
+                let a = self.force(args[0].clone())?;
+                match &a {
+                    Value::Int(x) => Ok(Value::Int(x.count_ones() as i64)),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitZeroBits => Ok(Value::Int(0)),
+            PrimOp::BitCountLeadingZeros => {
+                let a = self.force(args[0].clone())?;
+                match &a {
+                    Value::Int(x) => Ok(Value::Int(x.leading_zeros() as i64)),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+            PrimOp::BitCountTrailingZeros => {
+                let a = self.force(args[0].clone())?;
+                match &a {
+                    Value::Int(x) => Ok(Value::Int(x.trailing_zeros() as i64)),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Int".into(),
+                        got: format!("{a:?}"),
+                    }),
+                }
+            }
+
+            // ---- Data.Proxy ----
+            PrimOp::AsProxyTypeOf => {
+                // asProxyTypeOf :: a -> proxy a -> a (returns first arg)
+                self.force(args[0].clone())
+            }
+
+            // ---- Data.Void ----
+            PrimOp::Absurd => {
+                Err(EvalError::UserError("absurd: Void value".into()))
+            }
+            PrimOp::Vacuous => {
+                // vacuous :: f Void -> f a (just return the structure)
+                self.force(args[0].clone())
+            }
         }
     }
 
@@ -5928,6 +6558,25 @@ impl Evaluator {
                 arity: 1,
             },
             args: vec![a],
+        })
+    }
+
+    /// Create an Ordering value (LT, EQ, or GT) from std::cmp::Ordering.
+    fn make_ordering(&self, ord: std::cmp::Ordering) -> Value {
+        use bhc_types::{Kind, TyCon};
+        let (name, tag) = match ord {
+            std::cmp::Ordering::Less => ("LT", 0),
+            std::cmp::Ordering::Equal => ("EQ", 1),
+            std::cmp::Ordering::Greater => ("GT", 2),
+        };
+        Value::Data(DataValue {
+            con: crate::DataCon {
+                name: Symbol::intern(name),
+                ty_con: TyCon::new(Symbol::intern("Ordering"), Kind::Star),
+                tag,
+                arity: 0,
+            },
+            args: Vec::new(),
         })
     }
 

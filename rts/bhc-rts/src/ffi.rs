@@ -695,6 +695,15 @@ pub extern "C" fn bhc_show_int(n: i64) -> *mut c_char {
     c_string.into_raw()
 }
 
+/// Show Bool - returns "True" or "False" as a heap-allocated string.
+/// Takes the ADT tag: 0 = False, 1 = True.
+#[no_mangle]
+pub extern "C" fn bhc_show_bool(tag: i64) -> *mut c_char {
+    let s = if tag != 0 { "True" } else { "False" };
+    let c_string = std::ffi::CString::new(s).unwrap();
+    c_string.into_raw()
+}
+
 // ----------------------------------------------------------------------------
 // Float Primitives
 // ----------------------------------------------------------------------------
@@ -1335,7 +1344,12 @@ pub extern "C" fn bhc_readFile(path: *const c_char) -> *mut c_char {
         Ok(contents) => {
             CString::new(contents).map_or(ptr::null_mut(), |cs| cs.into_raw())
         }
-        Err(_) => ptr::null_mut(),
+        Err(e) => {
+            // Throw an exception with the error message as a C string
+            let msg = format!("{}: {}", path_str, e);
+            let exc = CString::new(msg).map_or(ptr::null_mut(), |cs| cs.into_raw());
+            bhc_throw(exc as *mut u8) as *mut c_char
+        }
     }
 }
 

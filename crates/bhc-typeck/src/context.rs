@@ -1479,6 +1479,177 @@ impl TyCtxt {
                         ),
                     ))
                 }
+                // catch :: IO a -> (SomeException -> IO a) -> IO a
+                // (simplified: exception type is String)
+                "catch" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    let handler = Ty::fun(
+                        self.builtins.string_ty.clone(),
+                        io_a.clone(),
+                    );
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(io_a.clone(), Ty::fun(handler, io_a)),
+                    )
+                }
+                // bracket :: IO a -> (a -> IO b) -> (a -> IO c) -> IO c
+                "bracket" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    let io_b = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(b.clone())),
+                    );
+                    let io_c = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(c.clone())),
+                    );
+                    let cleanup = Ty::fun(Ty::Var(a.clone()), io_b);
+                    let body = Ty::fun(Ty::Var(a.clone()), io_c.clone());
+                    Scheme::poly(
+                        vec![a.clone(), b.clone(), c.clone()],
+                        Ty::fun(io_a, Ty::fun(cleanup, Ty::fun(body, io_c))),
+                    )
+                }
+                // bracket_ :: IO a -> IO b -> IO c -> IO c
+                "bracket_" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    let io_b = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(b.clone())),
+                    );
+                    let io_c = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(c.clone())),
+                    );
+                    Scheme::poly(
+                        vec![a.clone(), b.clone(), c.clone()],
+                        Ty::fun(io_a, Ty::fun(io_b, Ty::fun(io_c.clone(), io_c))),
+                    )
+                }
+                // finally :: IO a -> IO b -> IO a
+                "finally" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    let io_b = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(b.clone())),
+                    );
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(io_a.clone(), Ty::fun(io_b, io_a)),
+                    )
+                }
+                // handle :: (SomeException -> IO a) -> IO a -> IO a
+                "handle" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    let handler = Ty::fun(
+                        self.builtins.string_ty.clone(),
+                        io_a.clone(),
+                    );
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(handler, Ty::fun(io_a.clone(), io_a)),
+                    )
+                }
+                // onException :: IO a -> IO b -> IO a
+                "onException" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    let io_b = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(b.clone())),
+                    );
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(io_a.clone(), Ty::fun(io_b, io_a)),
+                    )
+                }
+                // openFile :: FilePath -> IOMode -> IO Handle
+                // Simplified: String -> a -> IO b (IOMode and Handle are opaque)
+                "openFile" => {
+                    let io_b = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(b.clone())),
+                    );
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(self.builtins.string_ty.clone(), Ty::fun(Ty::Var(a.clone()), io_b)),
+                    )
+                }
+                // hGetLine :: Handle -> IO String
+                // Simplified: a -> IO String (Handle is opaque)
+                "hGetLine" | "hGetContents" => {
+                    let io_string = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(self.builtins.string_ty.clone()),
+                    );
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(Ty::Var(a.clone()), io_string),
+                    )
+                }
+                // hClose :: Handle -> IO ()
+                // Simplified: a -> IO ()
+                "hClose" => {
+                    let io_unit = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::unit()),
+                    );
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(Ty::Var(a.clone()), io_unit),
+                    )
+                }
+                // hPutStr :: Handle -> String -> IO ()
+                "hPutStr" | "hPutStrLn" => {
+                    let io_unit = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::unit()),
+                    );
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(self.builtins.string_ty.clone(), io_unit)),
+                    )
+                }
+                // withFile :: FilePath -> IOMode -> (Handle -> IO a) -> IO a
+                "withFile" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    let callback = Ty::fun(Ty::Var(b.clone()), io_a.clone());
+                    Scheme::poly(
+                        vec![a.clone(), b.clone(), c.clone()],
+                        Ty::fun(
+                            self.builtins.string_ty.clone(),
+                            Ty::fun(Ty::Var(c.clone()), Ty::fun(callback, io_a)),
+                        ),
+                    )
+                }
+                // doesFileExist :: FilePath -> IO Bool
+                "doesFileExist" | "doesDirectoryExist" => {
+                    let io_bool = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(self.builtins.bool_ty.clone()),
+                    );
+                    Scheme::mono(Ty::fun(self.builtins.string_ty.clone(), io_bool))
+                }
                 // Unknown builtins - skip here, will be handled in second pass
                 _ => continue,
             };

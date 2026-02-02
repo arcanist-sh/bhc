@@ -587,6 +587,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let show_double = self.module.llvm_module().add_function("bhc_show_double", f64_to_ptr, None);
         self.functions.insert(VarId::new(1073), show_double);
 
+        // bhc_show_bool(i64) -> *i8
+        let show_bool = self.module.llvm_module().add_function("bhc_show_bool", i64_to_ptr, None);
+        self.functions.insert(VarId::new(1075), show_bool);
+
         // bhc_show_char(i32) -> *i8
         let i32_to_ptr = i8_ptr_type.fn_type(&[i32_type.into()], false);
         let show_char = self.module.llvm_module().add_function("bhc_show_char", i32_to_ptr, None);
@@ -6059,19 +6063,101 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ///
     /// Extracts fn_ptr and closure_ptr from both the action and handler,
     /// then calls bhc_catch(action_fn, action_env, handler_fn, handler_env).
+    /// Wrap an IO action expression as a thunk (closure) for deferred execution.
+    ///
+    /// This creates a new function that evaluates the expression when called,
+    /// and wraps it in a closure. Used for `catch`, `bracket`, and similar
+    /// functions that need to defer IO actions.
+    fn wrap_io_as_thunk(
+        &mut self,
+        expr: &Expr,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        // If the expression is already a lambda/closure, just lower it normally
+        if matches!(expr, Expr::Lam(_, _, _)) {
+            let val = self.lower_expr(expr)?
+                .ok_or_else(|| CodegenError::Internal("wrap_io_as_thunk: no value".to_string()))?;
+            return self.value_to_ptr(val);
+        }
+
+        // Compute free variables
+        let free = self.free_vars(expr);
+
+        // Collect captured variable values
+        let mut captured: Vec<(VarId, BasicValueEnum<'ctx>)> = Vec::new();
+        for var_id in &free {
+            if let Some(val) = self.env.get(var_id) {
+                captured.push((*var_id, *val));
+            }
+        }
+
+        // Save current state
+        let current_block = self.builder().get_insert_block();
+        let fn_name = self.next_closure_name();
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+
+        // Create function: fn(env_ptr) -> result_ptr
+        let fn_type = ptr_type.fn_type(&[ptr_type.into()], false);
+        let lifted_fn = self.module.add_function(&fn_name, fn_type);
+
+        let entry = self.llvm_context().append_basic_block(lifted_fn, "entry");
+        self.builder().position_at_end(entry);
+
+        // Save and replace environment
+        let old_env = std::mem::take(&mut self.env);
+
+        // Restore captured variables from closure env
+        if !captured.is_empty() {
+            let closure_ptr = lifted_fn
+                .get_first_param()
+                .ok_or_else(|| CodegenError::Internal("missing closure param".to_string()))?
+                .into_pointer_value();
+
+            for (i, (var_id, _)) in captured.iter().enumerate() {
+                let elem_ptr =
+                    self.extract_closure_env_elem(closure_ptr, captured.len() as u32, i as u32)?;
+                self.env.insert(*var_id, elem_ptr.into());
+            }
+        }
+
+        // Lower the expression inside the thunk
+        let result = self.lower_expr(expr)?;
+
+        // Return result
+        if let Some(val) = result {
+            let ret_ptr = self.value_to_ptr(val)?;
+            self.builder()
+                .build_return(Some(&ret_ptr))
+                .map_err(|e| CodegenError::Internal(format!("thunk return failed: {:?}", e)))?;
+        } else {
+            let null = ptr_type.const_null();
+            self.builder()
+                .build_return(Some(&null))
+                .map_err(|e| CodegenError::Internal(format!("thunk null return failed: {:?}", e)))?;
+        }
+
+        // Restore environment and insertion point
+        self.env = old_env;
+        if let Some(block) = current_block {
+            self.builder().position_at_end(block);
+        }
+
+        // Create closure
+        let fn_ptr = lifted_fn.as_global_value().as_pointer_value();
+        self.alloc_closure(fn_ptr, &captured)
+    }
+
     fn lower_builtin_catch(
         &mut self,
         action_expr: &Expr,
         handler_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let action_val = self
-            .lower_expr(action_expr)?
-            .ok_or_else(|| CodegenError::Internal("catch: action has no value".to_string()))?;
+        // Wrap the action as a thunk so it's deferred (not eagerly evaluated)
+        let action_closure = self.wrap_io_as_thunk(action_expr)?;
         let handler_val = self
             .lower_expr(handler_expr)?
             .ok_or_else(|| CodegenError::Internal("catch: handler has no value".to_string()))?;
-
-        let action_closure = self.value_to_ptr(action_val)?;
         let handler_closure = self.value_to_ptr(handler_val)?;
 
         let action_fn = self.extract_closure_fn_ptr(action_closure)?;
@@ -6132,9 +6218,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         release_expr: &Expr,
         use_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let acquire_val = self
-            .lower_expr(acquire_expr)?
-            .ok_or_else(|| CodegenError::Internal("bracket: acquire has no value".to_string()))?;
+        // Wrap acquire as a thunk (deferred IO action)
+        let acquire_closure = self.wrap_io_as_thunk(acquire_expr)?;
+        // release and use are functions (lambdas), lower normally
         let release_val = self
             .lower_expr(release_expr)?
             .ok_or_else(|| CodegenError::Internal("bracket: release has no value".to_string()))?;
@@ -6142,7 +6228,6 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(use_expr)?
             .ok_or_else(|| CodegenError::Internal("bracket: use has no value".to_string()))?;
 
-        let acquire_closure = self.value_to_ptr(acquire_val)?;
         let release_closure = self.value_to_ptr(release_val)?;
         let use_closure = self.value_to_ptr(use_val)?;
 
@@ -7339,7 +7424,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let path_val = self.lower_expr(path_expr)?.ok_or_else(|| CodegenError::Internal("openFile: no path".to_string()))?;
         let mode_val = self.lower_expr(mode_expr)?.ok_or_else(|| CodegenError::Internal("openFile: no mode".to_string()))?;
         let path_ptr = match path_val { BasicValueEnum::PointerValue(p) => p, _ => return Err(CodegenError::TypeError("openFile expects string".to_string())) };
-        let mode_int = self.coerce_to_int(mode_val)?;
+        // mode_val is an IOMode ADT pointer — load the tag (first i64) to get the mode integer
+        let mode_int = match mode_val {
+            BasicValueEnum::PointerValue(p) => {
+                self.builder().build_load(self.type_mapper().i64_type(), p, "mode_tag")
+                    .map_err(|e| CodegenError::Internal(format!("openFile: load mode tag failed: {:?}", e)))?
+                    .into_int_value()
+            }
+            BasicValueEnum::IntValue(i) => i,
+            _ => return Err(CodegenError::TypeError("openFile: unexpected mode type".to_string())),
+        };
         let mode_i32 = self.builder().build_int_truncate(mode_int, self.type_mapper().i32_type(), "mode")
             .map_err(|e| CodegenError::Internal(format!("openFile: truncate failed: {:?}", e)))?;
         let rts_fn = self.functions.get(&VarId::new(1053)).ok_or_else(|| CodegenError::Internal("bhc_open_file not declared".to_string()))?;
@@ -7460,10 +7554,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", name, e)))?
             .try_as_basic_value().basic()
             .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", name)))?;
-        let bool_val = result.into_int_value();
-        let extended = self.builder().build_int_z_extend(bool_val, self.type_mapper().i64_type(), "pred_ext")
+        let bool_i32 = result.into_int_value();
+        // Convert i32 result (0/1) to a proper Bool ADT constructor
+        // True = tag 1, False = tag 0
+        let i64_type = self.type_mapper().i64_type();
+        let extended = self.builder().build_int_z_extend(bool_i32, i64_type, "pred_ext")
             .map_err(|e| CodegenError::Internal(format!("{}: extend failed: {:?}", name, e)))?;
-        Ok(Some(self.int_to_ptr(extended)?.into()))
+
+        // Allocate a Bool ADT: 8-byte tag followed by no fields
+        let ptr_type = self.type_mapper().ptr_type();
+        let alloc_fn = self.functions.get(&VarId::new(1005)).ok_or_else(|| {
+            CodegenError::Internal("bhc_alloc not declared".to_string())
+        })?;
+        let size = i64_type.const_int(8, false); // Just the tag
+        let adt_ptr = self.builder()
+            .build_call(*alloc_fn, &[size.into()], "bool_adt")
+            .map_err(|e| CodegenError::Internal(format!("{}: alloc failed: {:?}", name, e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: alloc returned void", name)))?
+            .into_pointer_value();
+        // Store the tag
+        self.builder().build_store(adt_ptr, extended)
+            .map_err(|e| CodegenError::Internal(format!("{}: store tag failed: {:?}", name, e)))?;
+        Ok(Some(adt_ptr.into()))
     }
 
     /// Lower `removeFile`.
@@ -13991,6 +14104,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "EQ" => return Some((1, 0)), // tag=1, arity=0
             "GT" => return Some((2, 0)), // tag=2, arity=0
 
+            // IOMode constructors
+            "ReadMode" => return Some((0, 0)),      // tag=0, arity=0
+            "WriteMode" => return Some((1, 0)),     // tag=1, arity=0
+            "AppendMode" => return Some((2, 0)),    // tag=2, arity=0
+            "ReadWriteMode" => return Some((3, 0)), // tag=3, arity=0
+
             // Tuple constructors - used for type class dictionaries
             "(,)" => return Some((0, 2)),       // 2-tuple
             "(,,)" => return Some((0, 3)),      // 3-tuple
@@ -15372,6 +15491,27 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // return :: a -> m a
                 // For our simple IO model, just return the value
                 Ok(Some(args[0]))
+            }
+            "putStrLn" => {
+                // putStrLn :: String -> IO ()
+                let str_ptr = args[0].into_pointer_value();
+                let rts_fn = self.functions.get(&VarId::new(1002)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_print_string_ln not declared".to_string())
+                })?;
+                self.builder()
+                    .build_call(*rts_fn, &[str_ptr.into()], "")
+                    .map_err(|e| CodegenError::Internal(format!("putStrLn call failed: {:?}", e)))?;
+                Ok(Some(ptr_type.const_null().into()))
+            }
+            "putStr" => {
+                let str_ptr = args[0].into_pointer_value();
+                let rts_fn = self.functions.get(&VarId::new(1004)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_print_string not declared".to_string())
+                })?;
+                self.builder()
+                    .build_call(*rts_fn, &[str_ptr.into()], "")
+                    .map_err(|e| CodegenError::Internal(format!("putStr call failed: {:?}", e)))?;
+                Ok(Some(ptr_type.const_null().into()))
             }
             _ => Err(CodegenError::Internal(format!(
                 "lower_builtin_direct: unhandled builtin '{}'",

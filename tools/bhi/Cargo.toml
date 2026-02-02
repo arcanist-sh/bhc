@@ -19,6 +19,9 @@ bhc-hir = { workspace = true }
 bhc-core = { workspace = true }
 bhc-tensor-ir = { workspace = true }
 bhc-loop-ir = { workspace = true }
+bhc-parser = { workspace = true }
+bhc-lower = { workspace = true }
+bhc-hir-to-core = { workspace = true }
 
 clap = { workspace = true }
 anyhow = { workspace = true }

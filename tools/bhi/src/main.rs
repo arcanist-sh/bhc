@@ -212,7 +212,7 @@ enum Commands {
     },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum IrStage {
     Ast,
     Hir,
@@ -483,6 +483,13 @@ fn inspect_ir(
     show_locations: bool,
     verbose: bool,
 ) -> Result<()> {
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+    // If it's a Haskell source file, compile it and display the requested IR stage
+    if ext == "hs" {
+        return inspect_ir_from_source(file, stage, function, verbose);
+    }
+
     let content =
         fs::read_to_string(file).with_context(|| format!("Failed to read {}", file.display()))?;
 
@@ -504,6 +511,110 @@ fn inspect_ir(
     }
 
     Ok(())
+}
+
+/// Compile a Haskell source file and display the IR at the requested stage.
+fn inspect_ir_from_source(
+    file: &PathBuf,
+    stage: Option<IrStage>,
+    function: Option<&str>,
+    verbose: bool,
+) -> Result<()> {
+    let source =
+        fs::read_to_string(file).with_context(|| format!("Failed to read {}", file.display()))?;
+
+    let stage = stage.unwrap_or(IrStage::Core);
+
+    println!("{}", "IR Inspection (from source)".bold().cyan());
+    println!("{}: {}", "File".dimmed(), file.display());
+    println!("{}: {:?}", "Stage".dimmed(), stage);
+    println!();
+
+    // 1. Parse
+    let mut source_map = bhc_diagnostics::SourceMap::new();
+    let file_id = source_map.add_file(file.display().to_string(), source.clone());
+    let (module, diagnostics) = bhc_parser::parse_module(&source, file_id);
+
+    if !diagnostics.is_empty() {
+        let renderer = bhc_diagnostics::DiagnosticRenderer::new(&source_map);
+        renderer.render_all(&diagnostics);
+    }
+
+    let module = module.context("Failed to parse module")?;
+
+    if stage == IrStage::Ast {
+        println!("{}", "AST".bold().green());
+        println!("{}", "─".repeat(60).dimmed());
+        let ast_str = format!("{:#?}", module);
+        print_filtered(&ast_str, function);
+        return Ok(());
+    }
+
+    // 2. Lower AST → HIR
+    let mut lower_ctx = bhc_lower::LowerContext::with_builtins();
+    let config = bhc_lower::LowerConfig {
+        include_builtins: true,
+        warn_unused: false,
+        search_paths: vec![],
+    };
+    let hir = bhc_lower::lower_module(&mut lower_ctx, &module, &config)
+        .map_err(|e| anyhow::anyhow!("Lowering error: {e}"))?;
+
+    if stage == IrStage::Hir {
+        println!("{}", "HIR (High-level IR)".bold().green());
+        println!("{}", "─".repeat(60).dimmed());
+        let hir_str = format!("{:#?}", hir);
+        print_filtered(&hir_str, function);
+        return Ok(());
+    }
+
+    // 3. Lower HIR → Core
+    let def_map: bhc_hir_to_core::DefMap = lower_ctx
+        .defs
+        .iter()
+        .map(|(def_id, def_info)| {
+            (
+                *def_id,
+                bhc_hir_to_core::DefInfo {
+                    id: *def_id,
+                    name: def_info.name,
+                },
+            )
+        })
+        .collect();
+    let core = bhc_hir_to_core::lower_module_with_defs(&hir, Some(&def_map), None)
+        .map_err(|e| anyhow::anyhow!("Core lowering error: {e}"))?;
+
+    if stage == IrStage::Core {
+        println!("{}", "Core IR".bold().green());
+        println!("{}", "─".repeat(60).dimmed());
+        let core_str = format!("{:#?}", core);
+        print_filtered(&core_str, function);
+        return Ok(());
+    }
+
+    // Tensor and Loop IR stages require further lowering not yet wired
+    println!(
+        "{}",
+        format!("Stage {:?} not yet supported for .hs compilation", stage).yellow()
+    );
+    if verbose {
+        println!("Core IR is the furthest stage available from source compilation.");
+    }
+
+    Ok(())
+}
+
+/// Print debug output, optionally filtered by a function name.
+fn print_filtered(content: &str, filter: Option<&str>) {
+    for line in content.lines() {
+        if let Some(f) = filter {
+            if !line.contains(f) {
+                continue;
+            }
+        }
+        println!("{}", line);
+    }
 }
 
 fn detect_stage(file: &PathBuf) -> IrStage {
@@ -1430,6 +1541,13 @@ fn normalize_whitespace(s: &str) -> String {
 // ============================================================================
 
 fn show_stats(file: &PathBuf, timing: bool, memory: bool, compare: Option<&PathBuf>) -> Result<()> {
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+    // If it's a Haskell source file, compile and produce real stats
+    if ext == "hs" {
+        return show_stats_from_source(file, timing, memory);
+    }
+
     let content =
         fs::read_to_string(file).with_context(|| format!("Failed to read {}", file.display()))?;
 
@@ -1564,6 +1682,153 @@ fn show_stats(file: &PathBuf, timing: bool, memory: bool, compare: Option<&PathB
 
         println!("  {}", "─".repeat(50));
         println!("  {:<20} {:>8.1} MB", "Peak".bold(), summary.peak_memory_mb);
+    }
+
+    Ok(())
+}
+
+/// Compile a Haskell source file and show real compilation statistics.
+fn show_stats_from_source(file: &PathBuf, timing: bool, _memory: bool) -> Result<()> {
+    use std::time::Instant;
+
+    let source =
+        fs::read_to_string(file).with_context(|| format!("Failed to read {}", file.display()))?;
+
+    let lines_of_code = source.lines().count();
+
+    println!("{}", "Compilation Statistics (from source)".bold().cyan());
+    println!("{}", "═".repeat(70));
+    println!("File: {}", file.display().to_string().bold());
+    println!();
+
+    let mut phases = Vec::new();
+
+    // Phase 1: Parse
+    let t0 = Instant::now();
+    let mut source_map = bhc_diagnostics::SourceMap::new();
+    let file_id = source_map.add_file(file.display().to_string(), source.clone());
+    let (module, diagnostics) = bhc_parser::parse_module(&source, file_id);
+    let parse_time = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let decl_count = module.as_ref().map_or(0, |m| m.decls.len());
+    phases.push(PhaseStats {
+        name: "Parsing".to_string(),
+        time_ms: parse_time,
+        memory_mb: 0.0,
+        items_processed: decl_count,
+    });
+
+    if !diagnostics.is_empty() {
+        let renderer = bhc_diagnostics::DiagnosticRenderer::new(&source_map);
+        renderer.render_all(&diagnostics);
+    }
+
+    let module = match module {
+        Some(m) => m,
+        None => {
+            println!("  {} Parse failed", "✗".red());
+            return Ok(());
+        }
+    };
+
+    // Phase 2: Lower AST → HIR
+    let t1 = Instant::now();
+    let mut lower_ctx = bhc_lower::LowerContext::with_builtins();
+    let config = bhc_lower::LowerConfig {
+        include_builtins: true,
+        warn_unused: false,
+        search_paths: vec![],
+    };
+    let hir = bhc_lower::lower_module(&mut lower_ctx, &module, &config);
+    let lower_time = t1.elapsed().as_secs_f64() * 1000.0;
+
+    let hir = match hir {
+        Ok(h) => {
+            phases.push(PhaseStats {
+                name: "AST → HIR".to_string(),
+                time_ms: lower_time,
+                memory_mb: 0.0,
+                items_processed: decl_count,
+            });
+            h
+        }
+        Err(e) => {
+            println!("  {} AST → HIR failed: {}", "✗".red(), e);
+            return Ok(());
+        }
+    };
+
+    // Phase 3: Lower HIR → Core
+    let t2 = Instant::now();
+    let def_map: bhc_hir_to_core::DefMap = lower_ctx
+        .defs
+        .iter()
+        .map(|(def_id, def_info)| {
+            (
+                *def_id,
+                bhc_hir_to_core::DefInfo {
+                    id: *def_id,
+                    name: def_info.name,
+                },
+            )
+        })
+        .collect();
+    let core = bhc_hir_to_core::lower_module_with_defs(&hir, Some(&def_map), None);
+    let core_time = t2.elapsed().as_secs_f64() * 1000.0;
+
+    let core = match core {
+        Ok(c) => {
+            let binding_count = c.bindings.len();
+            phases.push(PhaseStats {
+                name: "HIR → Core".to_string(),
+                time_ms: core_time,
+                memory_mb: 0.0,
+                items_processed: binding_count,
+            });
+            c
+        }
+        Err(e) => {
+            println!("  {} HIR → Core failed: {}", "✗".red(), e);
+            return Ok(());
+        }
+    };
+
+    let total_time: f64 = phases.iter().map(|p| p.time_ms).sum();
+
+    // Summary
+    println!("{}", "Summary".bold());
+    println!("{}", "─".repeat(70));
+    println!("  Lines:        {}", lines_of_code);
+    println!("  Declarations: {}", decl_count);
+    println!("  Core bindings: {}", core.bindings.len());
+    println!(
+        "  Total time:   {:.2}ms",
+        total_time
+    );
+    println!();
+
+    // Timing breakdown
+    if timing {
+        println!("{}", "Timing Breakdown".bold());
+        println!("{}", "─".repeat(70));
+
+        let max_time = phases.iter().map(|p| p.time_ms).fold(0.0, f64::max);
+        for phase in &phases {
+            let bar_width = if max_time > 0.0 {
+                ((phase.time_ms / max_time) * 30.0) as usize
+            } else {
+                0
+            };
+            let bar = "█".repeat(bar_width);
+            println!(
+                "  {:20} {:>8.2}ms  {} ({})",
+                phase.name,
+                phase.time_ms,
+                bar.blue(),
+                phase.items_processed,
+            );
+        }
+        println!();
     }
 
     Ok(())

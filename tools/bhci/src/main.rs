@@ -558,6 +558,19 @@ fn eval_input(state: &mut ReplState, input: &str) {
 
     let start = Instant::now();
 
+    // Handle let declarations: `let name = expr`
+    let trimmed = input.trim();
+    if let Some(rest) = trimmed.strip_prefix("let ") {
+        if let Some(eq_pos) = rest.find('=') {
+            let name = rest[..eq_pos].trim().to_string();
+            let expr_str = rest[eq_pos + 1..].trim();
+            if !name.is_empty() && !expr_str.is_empty() {
+                eval_let_binding(state, &name, expr_str);
+                return;
+            }
+        }
+    }
+
     // Add to source map
     let file_id = state
         .source_map
@@ -579,52 +592,120 @@ fn eval_input(state: &mut ReplState, input: &str) {
         return;
     };
 
-    // Type check
-    match infer_type(state, &ast_expr) {
-        Ok(ty) => {
-            // Evaluate
-            match evaluate_expr(state, &ast_expr) {
-                Ok(value) => {
-                    // Store as binding
-                    let name = state.next_binding_name();
-                    state
-                        .bindings
-                        .push((name.clone(), ty.clone(), value.clone()));
+    // Type check (placeholder)
+    let ty = infer_type(state, &ast_expr).unwrap_or_else(|_| state.type_ctx.fresh_ty());
 
-                    // Print IO output if any, otherwise print the value
-                    let io_output = state.evaluator.take_io_output();
-                    if !io_output.is_empty() {
-                        print!("{io_output}");
-                    } else {
-                        print_value(&value);
-                    }
+    // Evaluate
+    match evaluate_expr(state, &ast_expr) {
+        Ok(value) => {
+            // Store as binding
+            let name = state.next_binding_name();
+            state
+                .bindings
+                .push((name.clone(), ty.clone(), value.clone()));
 
-                    // Print type if enabled
-                    if state.options.show_types {
-                        println!("  :: {}", format_type(&ty));
-                    }
+            // Print IO output if any, otherwise print the value
+            let io_output = state.evaluator.take_io_output();
+            if !io_output.is_empty() {
+                print!("{io_output}");
+            } else {
+                print_value(&value);
+            }
 
-                    // Print timing if enabled
-                    if state.options.show_timing {
-                        let elapsed = start.elapsed();
-                        println!("  ({:.3}ms)", elapsed.as_secs_f64() * 1000.0);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Evaluation error: {}", e);
-                }
+            // Print type if enabled
+            if state.options.show_types {
+                println!("  :: {}", type_from_value(&value));
+            }
+
+            // Print timing if enabled
+            if state.options.show_timing {
+                let elapsed = start.elapsed();
+                println!("  ({:.3}ms)", elapsed.as_secs_f64() * 1000.0);
             }
         }
         Err(e) => {
-            eprintln!("Type error: {}", e);
+            eprintln!("Evaluation error: {}", e);
+        }
+    }
+}
+
+/// Evaluate a `let name = expr` declaration and store the binding.
+fn eval_let_binding(state: &mut ReplState, name: &str, expr_str: &str) {
+    let file_id = state
+        .source_map
+        .add_file("<repl>".to_string(), expr_str.to_string());
+
+    let (expr, diagnostics) = parse_expr(expr_str, file_id);
+
+    if !diagnostics.is_empty() {
+        let renderer = DiagnosticRenderer::new(&state.source_map);
+        renderer.render_all(&diagnostics);
+
+        if diagnostics.iter().any(|d| d.is_error()) {
+            return;
+        }
+    }
+
+    let Some(ast_expr) = expr else {
+        return;
+    };
+
+    let ty = infer_type(state, &ast_expr).unwrap_or_else(|_| state.type_ctx.fresh_ty());
+
+    match evaluate_expr(state, &ast_expr) {
+        Ok(value) => {
+            // Consume any IO output
+            let io_output = state.evaluator.take_io_output();
+            if !io_output.is_empty() {
+                print!("{io_output}");
+            }
+
+            let type_str = type_from_value(&value);
+            println!("{} :: {} = {:?}", name, type_str, value);
+            state
+                .bindings
+                .push((name.to_string(), ty, value));
+        }
+        Err(e) => {
+            eprintln!("Evaluation error: {}", e);
         }
     }
 }
 
 fn infer_type(state: &mut ReplState, _expr: &AstExpr) -> Result<Ty, String> {
     // Use type context to infer type
-    // For now, return a placeholder
+    // For now, return a placeholder — actual types are inferred from values post-evaluation
     Ok(state.type_ctx.fresh_ty())
+}
+
+/// Infer a display type string from a runtime Value.
+fn type_from_value(value: &Value) -> String {
+    match value {
+        Value::Int(_) => "Int".to_string(),
+        Value::Integer(_) => "Integer".to_string(),
+        Value::Float(_) => "Float".to_string(),
+        Value::Double(_) => "Double".to_string(),
+        Value::Char(_) => "Char".to_string(),
+        Value::String(_) => "String".to_string(),
+        Value::Data(d) => {
+            let name = d.con.name.as_str();
+            match name {
+                "True" | "False" => "Bool".to_string(),
+                "()" => "()".to_string(),
+                _ => name.to_string(),
+            }
+        }
+        Value::Closure(_) => "_ -> _".to_string(),
+        Value::Handle(_) => "Handle".to_string(),
+        Value::IORef(_) => "IORef _".to_string(),
+        Value::Map(_) => "Map _ _".to_string(),
+        Value::Set(_) => "Set _".to_string(),
+        Value::IntMap(_) => "IntMap _".to_string(),
+        Value::IntSet(_) => "IntSet".to_string(),
+        Value::UArrayInt(_) => "UArray Int".to_string(),
+        Value::UArrayDouble(_) => "UArray Double".to_string(),
+        _ => "_".to_string(),
+    }
 }
 
 fn evaluate_expr(state: &mut ReplState, expr: &AstExpr) -> Result<Value, String> {

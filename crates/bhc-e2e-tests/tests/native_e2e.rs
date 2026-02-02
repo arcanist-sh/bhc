@@ -41,6 +41,11 @@ fn test_tier1_arithmetic_native() {
 }
 
 #[test]
+fn test_tier1_let_binding_native() {
+    run_native_test("tier1_simple/let_binding", Profile::Default);
+}
+
+#[test]
 fn test_tier1_list_range_native() {
     run_native_test("tier1_simple/list_range", Profile::Default);
 }
@@ -52,6 +57,11 @@ fn test_tier1_list_range_native() {
 #[test]
 fn test_tier2_fibonacci_native() {
     run_native_test("tier2_functions/fibonacci", Profile::Default);
+}
+
+#[test]
+fn test_tier2_factorial_native() {
+    run_native_test("tier2_functions/factorial", Profile::Default);
 }
 
 #[test]

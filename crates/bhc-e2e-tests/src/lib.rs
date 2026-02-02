@@ -94,6 +94,9 @@ pub struct E2ETestCase {
     /// Path to source file.
     pub source_path: PathBuf,
 
+    /// Path to the fixture directory (contains data files like input.txt).
+    pub fixture_dir: PathBuf,
+
     /// Backends this test should run on.
     #[serde(default = "default_backends")]
     pub backends: Vec<Backend>,
@@ -178,9 +181,12 @@ impl E2ETestCase {
             (default_backends(), Profile::Default, 0, default_timeout())
         };
 
+        let fixture_dir = fixture_path.to_path_buf();
+
         Ok(Self {
             name,
             source_path,
+            fixture_dir,
             backends,
             profile,
             expected_stdout,

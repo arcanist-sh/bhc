@@ -1313,6 +1313,16 @@ pub extern "C" fn bhc_getLine() -> *mut c_char {
 // File IO: readFile, writeFile, appendFile
 // ----------------------------------------------------------------------------
 
+/// Compute the length of a C string (wrapper around strlen).
+/// Used by `length` when applied to raw C strings (e.g. from readFile).
+#[no_mangle]
+pub extern "C" fn bhc_string_length(s: *const c_char) -> i64 {
+    if s.is_null() {
+        return 0;
+    }
+    unsafe { CStr::from_ptr(s) }.to_bytes().len() as i64
+}
+
 /// Read entire file contents into a heap-allocated C string.
 /// Returns null on error.
 #[no_mangle]
@@ -1391,7 +1401,12 @@ pub extern "C" fn bhc_string_lines(s: *const c_char) -> *mut u8 {
         return unsafe { alloc_nil() };
     }
     let rust_str = unsafe { CStr::from_ptr(s) }.to_str().unwrap_or("");
-    let parts: Vec<&str> = rust_str.split('\n').collect();
+    // Match Haskell semantics: lines "a\nb\n" == ["a", "b"]
+    // split('\n') would produce ["a", "b", ""], so filter trailing empty.
+    let mut parts: Vec<&str> = rust_str.split('\n').collect();
+    if parts.last() == Some(&"") {
+        parts.pop();
+    }
     let mut list = unsafe { alloc_nil() };
     for part in parts.iter().rev() {
         let cs = CString::new(*part).unwrap_or_default();
@@ -1437,11 +1452,16 @@ fn collect_list_strings(list: *const u8) -> Vec<String> {
     parts
 }
 
-/// Join a cons-cell list of C strings with `'\n'`.
+/// Join a cons-cell list of C strings, appending `'\n'` after each element.
+/// Matches Haskell semantics: unlines ["a","b","c"] == "a\nb\nc\n"
 #[no_mangle]
 pub extern "C" fn bhc_string_unlines(list: *const u8) -> *mut c_char {
     let parts = collect_list_strings(list);
-    let joined = parts.join("\n");
+    let mut joined = String::new();
+    for part in &parts {
+        joined.push_str(part);
+        joined.push('\n');
+    }
     CString::new(joined).map_or(ptr::null_mut(), |cs| cs.into_raw())
 }
 

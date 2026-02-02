@@ -809,6 +809,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // bhc_string_unwords(list_ptr) -> ptr
         let string_unwords = self.module.llvm_module().add_function("bhc_string_unwords", ptr_type.fn_type(&[ptr_type.into()], false), None);
         self.functions.insert(VarId::new(1179), string_unwords);
+        // bhc_string_length(str_ptr) -> i64  (strlen wrapper for C strings)
+        let string_length = self.module.llvm_module().add_function("bhc_string_length", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1180), string_length);
 
         // ---- Text RTS functions (VarId 1200-1227) ----
         // bhc_text_empty() -> ptr
@@ -2346,7 +2349,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower `length` - compute list length.
-    /// This generates a loop to count elements.
+    /// Handles both cons-cell lists (tag 0=nil, 1=cons) and raw C strings
+    /// (from readFile etc.) by checking the tag value at runtime.
     fn lower_builtin_length(
         &mut self,
         list_expr: &Expr,
@@ -2367,63 +2371,122 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .and_then(|b| b.get_parent())
             .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
 
-        // Create loop blocks
+        // Read the first i64 from the pointer to determine representation.
+        // Cons-cell lists have tag 0 (nil) or 1 (cons).
+        // C strings have arbitrary byte content (interpreted as i64, usually > 1).
+        let tag = self.extract_adt_tag(list_ptr)?;
+
+        // Create blocks for dispatch
+        let is_cons_block = self
+            .llvm_context()
+            .append_basic_block(current_fn, "length_cons");
+        let is_cstring_block = self
+            .llvm_context()
+            .append_basic_block(current_fn, "length_cstring");
         let loop_header = self
             .llvm_context()
             .append_basic_block(current_fn, "length_header");
         let loop_body = self
             .llvm_context()
             .append_basic_block(current_fn, "length_body");
-        let loop_exit = self
+        let merge_block = self
             .llvm_context()
-            .append_basic_block(current_fn, "length_exit");
+            .append_basic_block(current_fn, "length_merge");
 
-        // Capture the current block BEFORE branching (this is the entry point to our loop)
         let entry_block = self
             .builder()
             .get_insert_block()
             .ok_or_else(|| CodegenError::Internal("no current block".to_string()))?;
 
-        // Initialize count to 0 and branch to header
-        let init_count = tm.i64_type().const_zero();
-        self.builder()
-            .build_unconditional_branch(loop_header)
-            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
-
-        // Loop header: phi nodes for count and current list pointer
-        self.builder().position_at_end(loop_header);
-
-        let count_phi = self
-            .builder()
-            .build_phi(tm.i64_type(), "count")
-            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
-
-        let list_phi = self
-            .builder()
-            .build_phi(tm.ptr_type(), "list")
-            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
-
-        // Check if current list is empty
-        let current_list = list_phi.as_basic_value().into_pointer_value();
-        let tag = self.extract_adt_tag(current_list)?;
-
-        let is_empty = self
+        // Check if tag == 0 (nil list — length 0)
+        let is_nil = self
             .builder()
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 tag,
                 tm.i64_type().const_zero(),
-                "is_empty",
+                "is_nil",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
 
+        // For tag==0, jump directly to merge with result 0.
+        // For tag!=0, check if tag==1 (cons) or >1 (C string).
+        let not_nil_block = self
+            .llvm_context()
+            .append_basic_block(current_fn, "length_not_nil");
         self.builder()
-            .build_conditional_branch(is_empty, loop_exit, loop_body)
+            .build_conditional_branch(is_nil, merge_block, not_nil_block)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
-        // Loop body: increment count, get tail
-        self.builder().position_at_end(loop_body);
+        // not_nil: check tag == 1 (cons) vs > 1 (C string)
+        self.builder().position_at_end(not_nil_block);
+        let is_cons = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                tm.i64_type().const_int(1, false),
+                "is_cons",
+            )
+            .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(is_cons, is_cons_block, is_cstring_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
+        // ---- C string path: call bhc_string_length ----
+        self.builder().position_at_end(is_cstring_block);
+        let strlen_fn = self.functions.get(&VarId::new(1180)).ok_or_else(|| {
+            CodegenError::Internal("bhc_string_length not declared".to_string())
+        })?;
+        let strlen_result = self
+            .builder()
+            .build_call(*strlen_fn, &[list_ptr.into()], "strlen_result")
+            .map_err(|e| CodegenError::Internal(format!("strlen call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("strlen returned void".to_string()))?;
+        self.builder()
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+        let cstring_exit_block = self.builder().get_insert_block().unwrap();
+
+        // ---- Cons-cell path: iterative loop ----
+        self.builder().position_at_end(is_cons_block);
+        let init_count = tm.i64_type().const_int(1, false); // already know first cell is cons
+        let first_tail = self.extract_adt_field(list_ptr, 2, 1)?;
+        self.builder()
+            .build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Loop header
+        self.builder().position_at_end(loop_header);
+        let count_phi = self
+            .builder()
+            .build_phi(tm.i64_type(), "count")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        let list_phi = self
+            .builder()
+            .build_phi(tm.ptr_type(), "list")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+
+        let current_list = list_phi.as_basic_value().into_pointer_value();
+        let cur_tag = self.extract_adt_tag(current_list)?;
+        let is_empty = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                cur_tag,
+                tm.i64_type().const_zero(),
+                "is_empty",
+            )
+            .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(is_empty, merge_block, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+        let loop_header_exit = self.builder().get_insert_block().unwrap();
+
+        // Loop body
+        self.builder().position_at_end(loop_body);
         let new_count = self
             .builder()
             .build_int_add(
@@ -2432,22 +2495,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "new_count",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to add: {:?}", e)))?;
-
         let tail_ptr = self.extract_adt_field(current_list, 2, 1)?;
-
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
-        // Add phi incoming edges
-        // Note: We need to find the block that had the initial branch to loop_header
-        // This is tricky because we already positioned at loop_body
-        count_phi.add_incoming(&[(&init_count, entry_block), (&new_count, loop_body)]);
-        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, loop_body)]);
+        // Wire up phi nodes
+        count_phi.add_incoming(&[(&init_count, is_cons_block), (&new_count, loop_body)]);
+        list_phi.add_incoming(&[(&first_tail, is_cons_block), (&tail_ptr, loop_body)]);
 
-        // Loop exit: return final count
-        self.builder().position_at_end(loop_exit);
-        Ok(Some(count_phi.as_basic_value()))
+        // ---- Merge block: phi to combine all paths ----
+        self.builder().position_at_end(merge_block);
+        let result_phi = self
+            .builder()
+            .build_phi(tm.i64_type(), "length_result")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        let zero = tm.i64_type().const_zero();
+        result_phi.add_incoming(&[
+            (&zero, entry_block),                                     // nil path
+            (&strlen_result.into_int_value(), cstring_exit_block),    // C string path
+            (&count_phi.as_basic_value().into_int_value(), loop_header_exit), // cons loop done
+        ]);
+
+        Ok(Some(result_phi.as_basic_value()))
     }
 
     /// Lower `take` - take first n elements of a list.

@@ -113,6 +113,16 @@ fn test_tier3_system_ops_native() {
     run_native_test("tier3_io/system_ops", Profile::Default);
 }
 
+#[test]
+fn test_tier3_milestone_b_wordcount_native() {
+    run_native_test("tier3_io/milestone_b_wordcount", Profile::Default);
+}
+
+#[test]
+fn test_tier3_milestone_b_transform_native() {
+    run_native_test("tier3_io/milestone_b_transform", Profile::Default);
+}
+
 // =============================================================================
 // Discovery Tests
 // =============================================================================

@@ -163,6 +163,27 @@ impl E2ERunner {
             .join(self.config.backend.to_string());
         std::fs::create_dir_all(&test_work_dir)?;
 
+        // Copy fixture data files (input.txt, etc.) to work directory
+        if test_case.fixture_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&test_case.fixture_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let name = path.file_name().unwrap_or_default();
+                        let name_str = name.to_string_lossy();
+                        // Skip source, expected output, and config files
+                        if name_str != "main.hs"
+                            && name_str != "expected.txt"
+                            && name_str != "test.toml"
+                        {
+                            let dest = test_work_dir.join(name);
+                            let _ = std::fs::copy(&path, &dest);
+                        }
+                    }
+                }
+            }
+        }
+
         // Compile
         let compile_start = Instant::now();
         let artifact_path = match self.compile(test_case, &test_work_dir) {
@@ -173,7 +194,7 @@ impl E2ERunner {
 
         // Execute
         let exec_start = Instant::now();
-        let output = match self.execute(&artifact_path, test_case.timeout()) {
+        let output = match self.execute(&artifact_path, test_case.timeout(), &test_work_dir) {
             Ok(output) => output,
             Err(E2EError::Timeout(d)) => return Ok(E2EResult::Timeout(d)),
             Err(e) => return Ok(E2EResult::ExecutionError(e.to_string())),
@@ -230,9 +251,10 @@ impl E2ERunner {
         &self,
         artifact_path: &Path,
         timeout: Duration,
+        work_dir: &Path,
     ) -> Result<ExecutionOutput, E2EError> {
         match self.config.backend {
-            Backend::Native => crate::native::run_native(artifact_path, timeout),
+            Backend::Native => crate::native::run_native(artifact_path, timeout, Some(work_dir)),
             Backend::Wasm => crate::wasm::run_wasm(artifact_path, timeout),
             Backend::Gpu => crate::gpu::run_gpu(artifact_path, timeout, self.config.gpu_mock),
         }

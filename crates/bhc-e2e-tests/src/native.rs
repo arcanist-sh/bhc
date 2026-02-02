@@ -65,7 +65,7 @@ pub fn compile_native(
 }
 
 /// Run a native executable and capture its output.
-pub fn run_native(exe_path: &Path, timeout: Duration) -> Result<ExecutionOutput, E2EError> {
+pub fn run_native(exe_path: &Path, timeout: Duration, work_dir: Option<&Path>) -> Result<ExecutionOutput, E2EError> {
     let start = Instant::now();
 
     // Make executable (Unix)
@@ -77,9 +77,12 @@ pub fn run_native(exe_path: &Path, timeout: Duration) -> Result<ExecutionOutput,
         std::fs::set_permissions(exe_path, perms)?;
     }
 
-    let mut child = Command::new(exe_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let mut cmd = Command::new(exe_path);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(dir) = work_dir {
+        cmd.current_dir(dir);
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| E2EError::ExecutionError(format!("Failed to spawn process: {}", e)))?;
 
@@ -165,7 +168,7 @@ mod tests {
     fn test_timeout_detection() {
         // This test verifies the timeout mechanism works
         // by attempting to run a non-existent binary
-        let result = run_native(Path::new("/nonexistent/binary"), Duration::from_secs(1));
+        let result = run_native(Path::new("/nonexistent/binary"), Duration::from_secs(1), None);
         assert!(result.is_err());
     }
 }

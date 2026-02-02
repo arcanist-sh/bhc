@@ -1797,6 +1797,637 @@ pub extern "C" fn bhc_unmask(
     action_fn(action_env)
 }
 
+// ============================================================================
+// Handle-based IO
+// ============================================================================
+//
+// Handles use sentinel pointers for standard streams:
+//   1 = stdin, 2 = stdout, 3 = stderr
+// Real file handles are heap-allocated BhcHandle structs leaked as *mut u8.
+// ============================================================================
+
+use std::io::{BufRead, Read, Seek, Write};
+
+/// Internal handle representation tracking open state and capabilities.
+struct BhcHandle {
+    file: Option<std::fs::File>,
+    readable: bool,
+    writable: bool,
+    closed: bool,
+}
+
+const HANDLE_STDIN: usize = 1;
+const HANDLE_STDOUT: usize = 2;
+const HANDLE_STDERR: usize = 3;
+
+fn is_sentinel(handle: *mut u8) -> bool {
+    let h = handle as usize;
+    h == HANDLE_STDIN || h == HANDLE_STDOUT || h == HANDLE_STDERR
+}
+
+fn get_bhc_handle(handle: *mut u8) -> Option<&'static mut BhcHandle> {
+    if handle.is_null() || is_sentinel(handle) {
+        None
+    } else {
+        Some(unsafe { &mut *(handle as *mut BhcHandle) })
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Standard handle accessors
+// ----------------------------------------------------------------------------
+
+/// Return sentinel pointer for stdin.
+#[no_mangle]
+pub extern "C" fn bhc_stdin() -> *mut u8 {
+    HANDLE_STDIN as *mut u8
+}
+
+/// Return sentinel pointer for stdout.
+#[no_mangle]
+pub extern "C" fn bhc_stdout() -> *mut u8 {
+    HANDLE_STDOUT as *mut u8
+}
+
+/// Return sentinel pointer for stderr.
+#[no_mangle]
+pub extern "C" fn bhc_stderr() -> *mut u8 {
+    HANDLE_STDERR as *mut u8
+}
+
+// ----------------------------------------------------------------------------
+// File open / close
+// ----------------------------------------------------------------------------
+
+/// Open a file and return a handle pointer.
+///
+/// Mode: 0=ReadMode, 1=WriteMode, 2=AppendMode, 3=ReadWriteMode.
+/// Returns null on error.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_open_file(path: *const c_char, mode: c_int) -> *mut u8 {
+    if path.is_null() {
+        return ptr::null_mut();
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    let (file_result, readable, writable) = match mode {
+        0 => (std::fs::File::open(path_str), true, false),
+        1 => (std::fs::File::create(path_str), false, true),
+        2 => (
+            std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(path_str),
+            false,
+            true,
+        ),
+        3 => (
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path_str),
+            true,
+            true,
+        ),
+        _ => return ptr::null_mut(),
+    };
+
+    match file_result {
+        Ok(file) => {
+            let handle = Box::new(BhcHandle {
+                file: Some(file),
+                readable,
+                writable,
+                closed: false,
+            });
+            Box::into_raw(handle) as *mut u8
+        }
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Close a handle. No-op for standard stream sentinels.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_close_handle(handle: *mut u8) {
+    if handle.is_null() || is_sentinel(handle) {
+        return;
+    }
+    let bh = unsafe { &mut *(handle as *mut BhcHandle) };
+    bh.file = None;
+    bh.closed = true;
+    // Note: We intentionally don't free the BhcHandle here to avoid
+    // use-after-free if code still holds a reference. The memory will
+    // be reclaimed on process exit.
+}
+
+// ----------------------------------------------------------------------------
+// Reading
+// ----------------------------------------------------------------------------
+
+/// Read a single character from a handle.
+/// Returns the character code, or -1 on EOF/error.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_hGetChar(handle: *mut u8) -> c_int {
+    let h = handle as usize;
+    if h == HANDLE_STDIN {
+        let mut buf = [0u8; 1];
+        match std::io::stdin().read(&mut buf) {
+            Ok(1) => buf[0] as c_int,
+            _ => -1,
+        }
+    } else if let Some(bh) = get_bhc_handle(handle) {
+        if let Some(ref mut f) = bh.file {
+            let mut buf = [0u8; 1];
+            match f.read(&mut buf) {
+                Ok(1) => buf[0] as c_int,
+                _ => -1,
+            }
+        } else {
+            -1
+        }
+    } else {
+        -1
+    }
+}
+
+/// Read a line from a handle. Returns a heap-allocated C string, or null on EOF/error.
+/// Reads byte-by-byte to avoid BufReader consuming ahead of the file position.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_hGetLine(handle: *mut u8) -> *mut c_char {
+    let h = handle as usize;
+
+    if h == HANDLE_STDIN {
+        let mut line = String::new();
+        match std::io::stdin().read_line(&mut line) {
+            Ok(0) => return ptr::null_mut(),
+            Ok(_) => {
+                if line.ends_with('\n') {
+                    line.pop();
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                }
+                return CString::new(line).map_or(ptr::null_mut(), |cs| cs.into_raw());
+            }
+            Err(_) => return ptr::null_mut(),
+        }
+    }
+
+    if let Some(bh) = get_bhc_handle(handle) {
+        if let Some(ref mut f) = bh.file {
+            let mut line = Vec::new();
+            let mut buf = [0u8; 1];
+            let mut bytes_read = 0usize;
+            loop {
+                match f.read(&mut buf) {
+                    Ok(0) => break,       // EOF
+                    Ok(_) => {
+                        bytes_read += 1;
+                        if buf[0] == b'\n' {
+                            break;
+                        }
+                        line.push(buf[0]);
+                    }
+                    Err(_) => break,
+                }
+            }
+            // If nothing was read at all, we're at EOF
+            if bytes_read == 0 {
+                return ptr::null_mut();
+            }
+            // Remove trailing \r if present
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            match CString::new(line) {
+                Ok(cs) => cs.into_raw(),
+                Err(_) => ptr::null_mut(),
+            }
+        } else {
+            ptr::null_mut()
+        }
+    } else {
+        ptr::null_mut()
+    }
+}
+
+/// Read all remaining contents from a handle. Returns heap-allocated C string.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_hGetContents(handle: *mut u8) -> *mut c_char {
+    let h = handle as usize;
+    let mut contents = String::new();
+
+    let result = if h == HANDLE_STDIN {
+        std::io::stdin().read_to_string(&mut contents)
+    } else if let Some(bh) = get_bhc_handle(handle) {
+        if let Some(ref mut f) = bh.file {
+            f.read_to_string(&mut contents)
+        } else {
+            return ptr::null_mut();
+        }
+    } else {
+        return ptr::null_mut();
+    };
+
+    match result {
+        Ok(_) => CString::new(contents).map_or(ptr::null_mut(), |cs| cs.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Check if a handle is at EOF. Returns 1 if EOF, 0 otherwise.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_hIsEOF(handle: *mut u8) -> c_int {
+    if let Some(bh) = get_bhc_handle(handle) {
+        if let Some(ref mut f) = bh.file {
+            let mut buf = [0u8; 1];
+            match f.read(&mut buf) {
+                Ok(0) => 1,
+                Ok(_) => {
+                    // We read a byte, seek back
+                    let _ = f.seek(std::io::SeekFrom::Current(-1));
+                    0
+                }
+                Err(_) => 1,
+            }
+        } else {
+            1
+        }
+    } else {
+        0 // stdin: can't easily check EOF
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Writing
+// ----------------------------------------------------------------------------
+
+/// Write a string to a handle.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_hPutStr(handle: *mut u8, s: *const c_char) {
+    if s.is_null() {
+        return;
+    }
+    let str_val = match unsafe { CStr::from_ptr(s) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let h = handle as usize;
+    if h == HANDLE_STDOUT {
+        let _ = std::io::stdout().write_all(str_val.as_bytes());
+    } else if h == HANDLE_STDERR {
+        let _ = std::io::stderr().write_all(str_val.as_bytes());
+    } else if let Some(bh) = get_bhc_handle(handle) {
+        if let Some(ref mut f) = bh.file {
+            let _ = f.write_all(str_val.as_bytes());
+        }
+    }
+}
+
+/// Write a single character to a handle.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_hPutChar(handle: *mut u8, c: c_int) {
+    let ch = match char::from_u32(c as u32) {
+        Some(ch) => ch,
+        None => return,
+    };
+    let mut buf = [0u8; 4];
+    let s = ch.encode_utf8(&mut buf);
+
+    let h = handle as usize;
+    if h == HANDLE_STDOUT {
+        let _ = std::io::stdout().write_all(s.as_bytes());
+    } else if h == HANDLE_STDERR {
+        let _ = std::io::stderr().write_all(s.as_bytes());
+    } else if let Some(bh) = get_bhc_handle(handle) {
+        if let Some(ref mut f) = bh.file {
+            let _ = f.write_all(s.as_bytes());
+        }
+    }
+}
+
+/// Flush a handle's output buffer.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_hFlush(handle: *mut u8) {
+    let h = handle as usize;
+    if h == HANDLE_STDOUT {
+        let _ = std::io::stdout().flush();
+    } else if h == HANDLE_STDERR {
+        let _ = std::io::stderr().flush();
+    } else if let Some(bh) = get_bhc_handle(handle) {
+        if let Some(ref mut f) = bh.file {
+            let _ = f.flush();
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Handle properties
+// ----------------------------------------------------------------------------
+
+/// Check if a handle is open. Returns 1 if open, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn bhc_hIsOpen(handle: *mut u8) -> c_int {
+    if is_sentinel(handle) {
+        return 1; // std handles are always open
+    }
+    if let Some(bh) = get_bhc_handle(handle) {
+        if bh.closed { 0 } else { 1 }
+    } else {
+        0
+    }
+}
+
+/// Check if a handle is closed. Returns 1 if closed, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn bhc_hIsClosed(handle: *mut u8) -> c_int {
+    if is_sentinel(handle) {
+        return 0;
+    }
+    if let Some(bh) = get_bhc_handle(handle) {
+        if bh.closed { 1 } else { 0 }
+    } else {
+        1
+    }
+}
+
+/// Check if a handle is readable. Returns 1 if readable, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn bhc_hIsReadable(handle: *mut u8) -> c_int {
+    let h = handle as usize;
+    if h == HANDLE_STDIN {
+        return 1;
+    }
+    if h == HANDLE_STDOUT || h == HANDLE_STDERR {
+        return 0;
+    }
+    if let Some(bh) = get_bhc_handle(handle) {
+        if bh.readable { 1 } else { 0 }
+    } else {
+        0
+    }
+}
+
+/// Check if a handle is writable. Returns 1 if writable, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn bhc_hIsWritable(handle: *mut u8) -> c_int {
+    let h = handle as usize;
+    if h == HANDLE_STDIN {
+        return 0;
+    }
+    if h == HANDLE_STDOUT || h == HANDLE_STDERR {
+        return 1;
+    }
+    if let Some(bh) = get_bhc_handle(handle) {
+        if bh.writable { 1 } else { 0 }
+    } else {
+        0
+    }
+}
+
+/// Check if a handle is seekable. Returns 1 if seekable, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn bhc_hIsSeekable(handle: *mut u8) -> c_int {
+    if is_sentinel(handle) {
+        return 0; // std streams are not seekable
+    }
+    if let Some(bh) = get_bhc_handle(handle) {
+        if bh.closed {
+            return 0;
+        }
+        if let Some(ref mut f) = bh.file {
+            // Try seeking to current position to test seekability
+            match f.stream_position() {
+                Ok(_) => 1,
+                Err(_) => 0,
+            }
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+/// Set buffering mode for a handle. mode: 0=NoBuffering, 1=LineBuffering, 2=BlockBuffering.
+/// Currently a no-op stub since Rust handles buffering internally.
+#[no_mangle]
+pub extern "C" fn bhc_hSetBuffering(_handle: *mut u8, _mode: c_int) {
+    // Stub: Rust's BufWriter/BufReader handle buffering.
+}
+
+/// Get buffering mode for a handle. Returns 0=NoBuffering, 1=LineBuffering, 2=BlockBuffering.
+/// Currently returns 2 (BlockBuffering) as default.
+#[no_mangle]
+pub extern "C" fn bhc_hGetBuffering(_handle: *mut u8) -> c_int {
+    2 // BlockBuffering
+}
+
+/// Seek within a handle.
+/// mode: 0=AbsoluteSeek, 1=RelativeSeek, 2=SeekFromEnd.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_hSeek(handle: *mut u8, mode: c_int, offset: i64) {
+    if is_sentinel(handle) {
+        return;
+    }
+    if let Some(bh) = get_bhc_handle(handle) {
+        if let Some(ref mut f) = bh.file {
+            let seek_from = match mode {
+                0 => std::io::SeekFrom::Start(offset as u64),
+                1 => std::io::SeekFrom::Current(offset),
+                2 => std::io::SeekFrom::End(offset),
+                _ => return,
+            };
+            let _ = f.seek(seek_from);
+        }
+    }
+}
+
+/// Get the current position in a handle. Returns -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_hTell(handle: *mut u8) -> i64 {
+    if is_sentinel(handle) {
+        return -1;
+    }
+    if let Some(bh) = get_bhc_handle(handle) {
+        if let Some(ref mut f) = bh.file {
+            match f.stream_position() {
+                Ok(pos) => pos as i64,
+                Err(_) => -1,
+            }
+        } else {
+            -1
+        }
+    } else {
+        -1
+    }
+}
+
+// ----------------------------------------------------------------------------
+// System / filesystem operations
+// ----------------------------------------------------------------------------
+
+/// Check if a file exists. Returns 1 if it exists, 0 otherwise.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_exists(path: *const c_char) -> c_int {
+    if path.is_null() {
+        return 0;
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    if std::path::Path::new(path_str).exists() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Check if a path is a directory. Returns 1 if directory, 0 otherwise.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_is_directory(path: *const c_char) -> c_int {
+    if path.is_null() {
+        return 0;
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    if std::path::Path::new(path_str).is_dir() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Get an environment variable. Returns heap-allocated C string, or null if not set.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_get_env(name: *const c_char) -> *mut c_char {
+    if name.is_null() {
+        return ptr::null_mut();
+    }
+    let name_str = match unsafe { CStr::from_ptr(name) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+    match std::env::var(name_str) {
+        Ok(val) => CString::new(val).map_or(ptr::null_mut(), |cs| cs.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Lookup an environment variable. Returns heap-allocated C string, or null for Nothing.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_lookupEnv(name: *const c_char) -> *mut c_char {
+    // Same as bhc_get_env; null encodes Nothing
+    unsafe { bhc_get_env(name) }
+}
+
+/// Get command line arguments as a cons-cell list of C strings.
+#[no_mangle]
+pub extern "C" fn bhc_get_args() -> *mut u8 {
+    let args: Vec<String> = std::env::args().collect();
+    let mut list = unsafe { alloc_nil() };
+    for arg in args.iter().rev() {
+        let cs = CString::new(arg.as_str()).unwrap_or_default();
+        list = unsafe { alloc_cons(cs.into_raw() as *mut u8, list) };
+    }
+    list
+}
+
+/// Get the program name. Returns heap-allocated C string.
+#[no_mangle]
+pub extern "C" fn bhc_get_prog_name() -> *mut c_char {
+    match std::env::args().next() {
+        Some(name) => CString::new(name).map_or(ptr::null_mut(), |cs| cs.into_raw()),
+        None => CString::new("bhc").map_or(ptr::null_mut(), |cs| cs.into_raw()),
+    }
+}
+
+/// Get the current working directory. Returns heap-allocated C string.
+#[no_mangle]
+pub extern "C" fn bhc_get_current_directory() -> *mut c_char {
+    match std::env::current_dir() {
+        Ok(path) => {
+            let s = path.to_string_lossy().into_owned();
+            CString::new(s).map_or(ptr::null_mut(), |cs| cs.into_raw())
+        }
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Create a directory (and parents). No-op on error.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_create_directory(path: *const c_char) {
+    if path.is_null() {
+        return;
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let _ = std::fs::create_dir_all(path_str);
+}
+
+/// Remove a file. No-op on error.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_remove_file(path: *const c_char) {
+    if path.is_null() {
+        return;
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let _ = std::fs::remove_file(path_str);
+}
+
+/// List directory entries as a cons-cell list of C strings.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_directory(path: *const c_char) -> *mut u8 {
+    if path.is_null() {
+        return unsafe { alloc_nil() };
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return unsafe { alloc_nil() },
+    };
+    match std::fs::read_dir(path_str) {
+        Ok(entries) => {
+            let names: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            let mut list = unsafe { alloc_nil() };
+            for name in names.iter().rev() {
+                let cs = CString::new(name.as_str()).unwrap_or_default();
+                list = unsafe { alloc_cons(cs.into_raw() as *mut u8, list) };
+            }
+            list
+        }
+        Err(_) => unsafe { alloc_nil() },
+    }
+}
+
+/// Exit with success (code 0).
+#[no_mangle]
+pub extern "C" fn bhc_exit_success() -> ! {
+    bhc_shutdown();
+    std::process::exit(0)
+}
+
+/// Exit with failure (code 1).
+#[no_mangle]
+pub extern "C" fn bhc_exit_failure() -> ! {
+    bhc_shutdown();
+    std::process::exit(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2095,5 +2726,149 @@ mod tests {
         let cstr = unsafe { std::ffi::CStr::from_ptr(s) };
         assert_eq!(cstr.to_str().unwrap(), "'a'");
         unsafe { bhc_free_string(s) };
+    }
+
+    // Tests for handle-based IO
+    #[test]
+    fn test_std_handle_sentinels() {
+        let stdin = bhc_stdin();
+        let stdout = bhc_stdout();
+        let stderr = bhc_stderr();
+        assert_eq!(stdin as usize, HANDLE_STDIN);
+        assert_eq!(stdout as usize, HANDLE_STDOUT);
+        assert_eq!(stderr as usize, HANDLE_STDERR);
+        assert!(is_sentinel(stdin));
+        assert!(is_sentinel(stdout));
+        assert!(is_sentinel(stderr));
+    }
+
+    #[test]
+    fn test_handle_properties_std() {
+        let stdin = bhc_stdin();
+        let stdout = bhc_stdout();
+        assert_eq!(bhc_hIsOpen(stdin), 1);
+        assert_eq!(bhc_hIsClosed(stdin), 0);
+        assert_eq!(bhc_hIsReadable(stdin), 1);
+        assert_eq!(bhc_hIsWritable(stdin), 0);
+        assert_eq!(bhc_hIsSeekable(stdin), 0);
+        assert_eq!(bhc_hIsOpen(stdout), 1);
+        assert_eq!(bhc_hIsReadable(stdout), 0);
+        assert_eq!(bhc_hIsWritable(stdout), 1);
+    }
+
+    #[test]
+    fn test_open_close_file() {
+        use std::io::Write;
+        // Create a temp file
+        let tmp = std::env::temp_dir().join("bhc_test_open_close.txt");
+        std::fs::write(&tmp, "hello").unwrap();
+        let path = CString::new(tmp.to_str().unwrap()).unwrap();
+
+        let handle = unsafe { bhc_open_file(path.as_ptr(), 0) }; // ReadMode
+        assert!(!handle.is_null());
+        assert!(!is_sentinel(handle));
+        assert_eq!(bhc_hIsOpen(handle), 1);
+        assert_eq!(bhc_hIsReadable(handle), 1);
+        assert_eq!(bhc_hIsWritable(handle), 0);
+
+        unsafe { bhc_close_handle(handle) };
+        assert_eq!(bhc_hIsClosed(handle), 1);
+        assert_eq!(bhc_hIsOpen(handle), 0);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_file_read_write() {
+        let tmp = std::env::temp_dir().join("bhc_test_rw.txt");
+        let path = CString::new(tmp.to_str().unwrap()).unwrap();
+
+        // Write
+        let wh = unsafe { bhc_open_file(path.as_ptr(), 1) }; // WriteMode
+        assert!(!wh.is_null());
+        let content = CString::new("line1\nline2\n").unwrap();
+        unsafe { bhc_hPutStr(wh, content.as_ptr()) };
+        unsafe { bhc_hFlush(wh) };
+        unsafe { bhc_close_handle(wh) };
+
+        // Read line by line
+        let rh = unsafe { bhc_open_file(path.as_ptr(), 0) }; // ReadMode
+        assert!(!rh.is_null());
+        let line1 = unsafe { bhc_hGetLine(rh) };
+        assert!(!line1.is_null());
+        let l1 = unsafe { CStr::from_ptr(line1) }.to_str().unwrap();
+        assert_eq!(l1, "line1");
+        unsafe { bhc_free_string(line1) };
+
+        let line2 = unsafe { bhc_hGetLine(rh) };
+        assert!(!line2.is_null());
+        let l2 = unsafe { CStr::from_ptr(line2) }.to_str().unwrap();
+        assert_eq!(l2, "line2");
+        unsafe { bhc_free_string(line2) };
+
+        unsafe { bhc_close_handle(rh) };
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_exists_and_is_directory() {
+        let tmp = std::env::temp_dir().join("bhc_test_exists.txt");
+        std::fs::write(&tmp, "x").unwrap();
+        let path = CString::new(tmp.to_str().unwrap()).unwrap();
+
+        assert_eq!(unsafe { bhc_exists(path.as_ptr()) }, 1);
+        assert_eq!(unsafe { bhc_is_directory(path.as_ptr()) }, 0);
+
+        let dir_path = CString::new(std::env::temp_dir().to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { bhc_is_directory(dir_path.as_ptr()) }, 1);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_get_prog_name() {
+        let name = bhc_get_prog_name();
+        assert!(!name.is_null());
+        unsafe { bhc_free_string(name) };
+    }
+
+    #[test]
+    fn test_get_current_directory() {
+        let dir = bhc_get_current_directory();
+        assert!(!dir.is_null());
+        unsafe { bhc_free_string(dir) };
+    }
+
+    #[test]
+    fn test_get_args() {
+        let args = bhc_get_args();
+        assert!(!args.is_null());
+        // At minimum there should be the program name
+        let tag = unsafe { *(args as *const i64) };
+        assert!(tag == 0 || tag == 1); // nil or cons
+    }
+
+    #[test]
+    fn test_seek_tell() {
+        let tmp = std::env::temp_dir().join("bhc_test_seek.txt");
+        std::fs::write(&tmp, "abcdef").unwrap();
+        let path = CString::new(tmp.to_str().unwrap()).unwrap();
+
+        let h = unsafe { bhc_open_file(path.as_ptr(), 0) }; // ReadMode
+        assert!(!h.is_null());
+
+        // Tell should start at 0
+        assert_eq!(unsafe { bhc_hTell(h) }, 0);
+
+        // Seek to position 3
+        unsafe { bhc_hSeek(h, 0, 3) }; // AbsoluteSeek
+        assert_eq!(unsafe { bhc_hTell(h) }, 3);
+
+        // Read char at position 3 should be 'd'
+        let ch = unsafe { bhc_hGetChar(h) };
+        assert_eq!(ch, b'd' as c_int);
+
+        unsafe { bhc_close_handle(h) };
+        let _ = std::fs::remove_file(&tmp);
     }
 }

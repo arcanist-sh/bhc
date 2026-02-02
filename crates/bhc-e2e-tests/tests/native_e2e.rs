@@ -83,6 +83,36 @@ fn test_tier3_print_sequence_native() {
     run_native_test("tier3_io/print_sequence", Profile::Default);
 }
 
+#[test]
+fn test_tier3_file_stats_native() {
+    run_native_test("tier3_io/file_stats", Profile::Default);
+}
+
+#[test]
+fn test_tier3_file_reverse_native() {
+    run_native_test("tier3_io/file_reverse", Profile::Default);
+}
+
+#[test]
+fn test_tier3_bracket_io_native() {
+    run_native_test("tier3_io/bracket_io", Profile::Default);
+}
+
+#[test]
+fn test_tier3_catch_file_error_native() {
+    run_native_test("tier3_io/catch_file_error", Profile::Default);
+}
+
+#[test]
+fn test_tier3_handle_io_native() {
+    run_native_test("tier3_io/handle_io", Profile::Default);
+}
+
+#[test]
+fn test_tier3_system_ops_native() {
+    run_native_test("tier3_io/system_ops", Profile::Default);
+}
+
 // =============================================================================
 // Discovery Tests
 // =============================================================================

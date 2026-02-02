@@ -968,55 +968,58 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let bracket_fn = self.module.llvm_module().add_function("bhc_bracket", bracket_type, None);
         self.functions.insert(VarId::new(1090), bracket_fn);
 
-        // ---- Additional IO RTS functions (VarId 1085-1099) ----
+        // ---- Additional IO RTS functions (VarId 1300-1314) ----
+        // NOTE: Previously used VarId 1085-1099 which collided with exception
+        // functions (finally=1088, on_exception=1089, bracket=1090). Moved to
+        // 1300+ range to avoid overwriting those entries.
         // bhc_hGetContents(*i8) -> *i8
         let h_get_contents = self.module.llvm_module().add_function("bhc_hGetContents", ptr_to_ptr, None);
-        self.functions.insert(VarId::new(1085), h_get_contents);
+        self.functions.insert(VarId::new(1300), h_get_contents);
         // bhc_hSeek(*i8, i32, i64) -> void
         let h_seek_type = void_type.fn_type(&[ptr_type.into(), i32_type.into(), i64_type.into()], false);
         let h_seek = self.module.llvm_module().add_function("bhc_hSeek", h_seek_type, None);
-        self.functions.insert(VarId::new(1086), h_seek);
+        self.functions.insert(VarId::new(1301), h_seek);
         // bhc_hTell(*i8) -> i64
         let h_tell = self.module.llvm_module().add_function("bhc_hTell", i64_type.fn_type(&[ptr_type.into()], false), None);
-        self.functions.insert(VarId::new(1087), h_tell);
+        self.functions.insert(VarId::new(1302), h_tell);
         // bhc_hIsOpen(*i8) -> i32
         let h_is_open = self.module.llvm_module().add_function("bhc_hIsOpen", ptr_to_i32, None);
-        self.functions.insert(VarId::new(1088), h_is_open);
+        self.functions.insert(VarId::new(1303), h_is_open);
         // bhc_hIsClosed(*i8) -> i32
         let h_is_closed = self.module.llvm_module().add_function("bhc_hIsClosed", ptr_to_i32, None);
-        self.functions.insert(VarId::new(1089), h_is_closed);
+        self.functions.insert(VarId::new(1304), h_is_closed);
         // bhc_hIsReadable(*i8) -> i32
         let h_is_readable = self.module.llvm_module().add_function("bhc_hIsReadable", ptr_to_i32, None);
-        self.functions.insert(VarId::new(1090), h_is_readable);
+        self.functions.insert(VarId::new(1305), h_is_readable);
         // bhc_hIsWritable(*i8) -> i32
         let h_is_writable = self.module.llvm_module().add_function("bhc_hIsWritable", ptr_to_i32, None);
-        self.functions.insert(VarId::new(1091), h_is_writable);
+        self.functions.insert(VarId::new(1306), h_is_writable);
         // bhc_hIsSeekable(*i8) -> i32
         let h_is_seekable = self.module.llvm_module().add_function("bhc_hIsSeekable", ptr_to_i32, None);
-        self.functions.insert(VarId::new(1092), h_is_seekable);
+        self.functions.insert(VarId::new(1307), h_is_seekable);
         // bhc_hSetBuffering(*i8, i32) -> void
         let h_set_buf_type = void_type.fn_type(&[ptr_type.into(), i32_type.into()], false);
         let h_set_buffering = self.module.llvm_module().add_function("bhc_hSetBuffering", h_set_buf_type, None);
-        self.functions.insert(VarId::new(1093), h_set_buffering);
+        self.functions.insert(VarId::new(1308), h_set_buffering);
         // bhc_hGetBuffering(*i8) -> i32
         let h_get_buffering = self.module.llvm_module().add_function("bhc_hGetBuffering", ptr_to_i32, None);
-        self.functions.insert(VarId::new(1094), h_get_buffering);
+        self.functions.insert(VarId::new(1309), h_get_buffering);
         // bhc_hPutChar(*i8, i32) -> void
         let h_put_char_type = void_type.fn_type(&[ptr_type.into(), i32_type.into()], false);
         let h_put_char = self.module.llvm_module().add_function("bhc_hPutChar", h_put_char_type, None);
-        self.functions.insert(VarId::new(1095), h_put_char);
+        self.functions.insert(VarId::new(1310), h_put_char);
         // bhc_create_directory(*i8) -> void
         let create_dir = self.module.llvm_module().add_function("bhc_create_directory", ptr_to_void, None);
-        self.functions.insert(VarId::new(1096), create_dir);
+        self.functions.insert(VarId::new(1311), create_dir);
         // bhc_remove_file(*i8) -> void
         let remove_file = self.module.llvm_module().add_function("bhc_remove_file", ptr_to_void, None);
-        self.functions.insert(VarId::new(1097), remove_file);
+        self.functions.insert(VarId::new(1312), remove_file);
         // bhc_list_directory(*i8) -> *i8
         let list_dir = self.module.llvm_module().add_function("bhc_list_directory", ptr_to_ptr, None);
-        self.functions.insert(VarId::new(1098), list_dir);
+        self.functions.insert(VarId::new(1313), list_dir);
         // bhc_lookupEnv(*i8) -> *i8
         let lookup_env = self.module.llvm_module().add_function("bhc_lookupEnv", ptr_to_ptr, None);
-        self.functions.insert(VarId::new(1099), lookup_env);
+        self.functions.insert(VarId::new(1314), lookup_env);
     }
 
     // ========================================================================

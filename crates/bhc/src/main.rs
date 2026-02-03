@@ -300,9 +300,39 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
 
 /// Check source files without generating code
 fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
+    use bhc_driver::CompilerBuilder;
+    use camino::Utf8PathBuf;
+
     tracing::info!("Checking {} file(s)", files.len());
-    // For now, just parse
-    compile_files(files, cli)
+
+    let profile = match cli.profile {
+        Profile::Default => bhc_session::Profile::Default,
+        Profile::Server => bhc_session::Profile::Server,
+        Profile::Numeric => bhc_session::Profile::Numeric,
+        Profile::Edge => bhc_session::Profile::Edge,
+    };
+
+    let compiler = CompilerBuilder::new().profile(profile).build()?;
+
+    let mut has_errors = false;
+    for file in files {
+        let path = Utf8PathBuf::from_path_buf(file.clone())
+            .map_err(|p| anyhow::anyhow!("Invalid UTF-8 path: {}", p.display()))?;
+
+        match compiler.check_file(&path) {
+            Ok(()) => println!("  {} OK", path),
+            Err(e) => {
+                eprintln!("  {} FAILED: {}", path, e);
+                has_errors = true;
+            }
+        }
+    }
+
+    if has_errors {
+        anyhow::bail!("Type checking failed");
+    }
+
+    Ok(())
 }
 
 /// Run a Haskell program
@@ -344,13 +374,35 @@ fn run_file(file: &PathBuf, _args: &[String], cli: &Cli) -> Result<()> {
 }
 
 /// Start the interactive REPL
-fn start_repl(_cli: &Cli) -> Result<()> {
-    println!("Basel Haskell Compiler Interactive (bhci)");
-    println!("Type :help for help, :quit to exit");
-    println!();
-    // TODO: Implement REPL
-    println!("(REPL not yet implemented)");
-    Ok(())
+fn start_repl(cli: &Cli) -> Result<()> {
+    use std::process::Command;
+
+    let bhc_exe = std::env::current_exe()?;
+    let bhci_exe = bhc_exe.with_file_name("bhci");
+
+    let mut args = vec![];
+    match cli.profile {
+        Profile::Numeric => args.extend(["--profile", "numeric"]),
+        Profile::Server => args.extend(["--profile", "server"]),
+        Profile::Edge => args.extend(["--profile", "edge"]),
+        Profile::Default => {}
+    }
+
+    let status = Command::new(&bhci_exe)
+        .args(&args)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to start bhci at {}: {}",
+                bhci_exe.display(),
+                e
+            )
+        })?;
+
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 /// Print version information

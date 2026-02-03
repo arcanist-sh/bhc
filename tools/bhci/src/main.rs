@@ -651,7 +651,7 @@ fn eval_input(state: &mut ReplState, input: &str) {
             if !io_output.is_empty() {
                 print!("{io_output}");
             } else {
-                print_value(&value);
+                print_value(&state.evaluator, &value);
             }
 
             // Print type if enabled
@@ -709,7 +709,11 @@ fn eval_let_binding(state: &mut ReplState, name: &str, expr_str: &str) {
             }
 
             let type_str = type_from_value(&value);
-            println!("{} :: {} = {}", name, type_str, value);
+            let display_val = value
+                .clone()
+                .deep_force(&state.evaluator)
+                .unwrap_or_else(|_| value.clone());
+            println!("{} :: {} = {}", name, type_str, display_val);
 
             // Store in the evaluator's named bindings for persistence
             let sym = bhc_intern::Symbol::intern(name);
@@ -1394,19 +1398,37 @@ fn set_option(state: &mut ReplState, opt: &str) {
         }
         opt if opt.starts_with("profile ") => {
             let profile_name = opt.strip_prefix("profile ").unwrap().trim();
-            match profile_name {
-                "default" => state.profile = Profile::Default,
-                "server" => state.profile = Profile::Server,
-                "numeric" => state.profile = Profile::Numeric,
-                "edge" => state.profile = Profile::Edge,
-                "realtime" => state.profile = Profile::Realtime,
-                "embedded" => state.profile = Profile::Embedded,
+            let new_profile = match profile_name {
+                "default" => Profile::Default,
+                "server" => Profile::Server,
+                "numeric" => Profile::Numeric,
+                "edge" => Profile::Edge,
+                "realtime" => Profile::Realtime,
+                "embedded" => Profile::Embedded,
                 _ => {
                     println!("Unknown profile: {}", profile_name);
+                    println!("Valid profiles: default, server, numeric, edge, realtime, embedded");
                     return;
                 }
+            };
+
+            state.profile = new_profile;
+
+            // Recreate evaluator with new profile mode
+            state.evaluator = Evaluator::with_profile(new_profile);
+
+            // Re-register all named bindings in the new evaluator
+            for (name, _ty, value, _var_id) in &state.bindings {
+                let sym = bhc_intern::Symbol::intern(name);
+                state.evaluator.set_named_binding(sym, value.clone());
             }
-            println!("Profile set to: {:?}", state.profile);
+
+            let mode = if matches!(new_profile, Profile::Numeric | Profile::Embedded) {
+                "strict"
+            } else {
+                "lazy"
+            };
+            println!("Profile set to: {:?} (evaluation: {})", new_profile, mode);
         }
         _ => {
             println!("Unknown option: {}", opt);
@@ -1518,8 +1540,11 @@ fn format_type(ty: &Ty) -> String {
     format!("{ty}")
 }
 
-fn print_value(value: &Value) {
-    println!("{value}");
+fn print_value(evaluator: &Evaluator, value: &Value) {
+    match value.clone().deep_force(evaluator) {
+        Ok(forced) => println!("{forced}"),
+        Err(_) => println!("{value}"),
+    }
 }
 
 #[cfg(test)]

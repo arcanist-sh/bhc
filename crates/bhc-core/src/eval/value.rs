@@ -330,6 +330,31 @@ impl fmt::Display for Value {
 }
 
 impl Value {
+    /// Recursively force all thunks in a value tree.
+    ///
+    /// Used by the REPL to fully evaluate values before display,
+    /// so that `Just 5` shows as `Just 5` rather than `Just <<thunk>>`.
+    pub fn deep_force(self, evaluator: &super::Evaluator) -> Result<Self, super::EvalError> {
+        match self {
+            Self::Thunk(_) => {
+                let forced = evaluator.force(self)?;
+                forced.deep_force(evaluator)
+            }
+            Self::Data(d) => {
+                let forced_args = d
+                    .args
+                    .into_iter()
+                    .map(|arg| arg.deep_force(evaluator))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Self::Data(DataValue {
+                    con: d.con,
+                    args: forced_args,
+                }))
+            }
+            other => Ok(other),
+        }
+    }
+
     /// Returns true if this value needs to be forced (is a thunk).
     #[must_use]
     pub fn is_thunk(&self) -> bool {

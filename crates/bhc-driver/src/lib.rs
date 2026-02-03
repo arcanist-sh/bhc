@@ -348,6 +348,30 @@ impl Compiler {
         self.compile_unit(unit)
     }
 
+    /// Type-check a file without generating code.
+    ///
+    /// Runs parse, lower, and type-check phases only. Significantly faster
+    /// than full compilation since codegen and linking are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if parsing, lowering, or type checking fails.
+    pub fn check_file(&self, path: impl AsRef<Utf8Path>) -> CompileResult<()> {
+        let unit = CompilationUnit::from_path(path.as_ref().to_path_buf())?;
+        let file_id = FileId::new(0);
+
+        // Phase 1: Parse
+        let ast = self.parse(&unit, file_id)?;
+
+        // Phase 2: Lower AST to HIR
+        let (hir, lower_ctx) = self.lower(&ast)?;
+
+        // Phase 3: Type check
+        let _typed = self.type_check(&hir, file_id, &lower_ctx)?;
+
+        Ok(())
+    }
+
     /// Compile a compilation unit through all phases.
     #[instrument(skip(self, unit), fields(module = %unit.module_name))]
     fn compile_unit(&self, unit: CompilationUnit) -> CompileResult<CompileOutput> {

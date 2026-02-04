@@ -4176,8 +4176,8 @@ const BUILTIN_TYVAR_B: u32 = 0xFFFF_0001;
 const BUILTIN_TYVAR_SHAPE: u32 = 0xFFFF_0002;
 const BUILTIN_TYVAR_R: u32 = 0xFFFF_0003;
 const BUILTIN_TYVAR_SHAPE2: u32 = 0xFFFF_0004;
-const BUILTIN_TYVAR_M: u32 = 0xFFFF_0005; // For monad type constructor variable
-const BUILTIN_TYVAR_F: u32 = 0xFFFF_0006; // For functor type constructor variable
+pub(crate) const BUILTIN_TYVAR_M: u32 = 0xFFFF_0005; // For monad type constructor variable
+pub(crate) const BUILTIN_TYVAR_F: u32 = 0xFFFF_0006; // For functor type constructor variable
 const BUILTIN_TYVAR_S: u32 = 0xFFFF_0007; // For state type variable
 const BUILTIN_TYVAR_T: u32 = 0xFFFF_0008; // For transformer type constructor variable
 

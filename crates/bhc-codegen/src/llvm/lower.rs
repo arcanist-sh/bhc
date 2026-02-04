@@ -85,6 +85,14 @@ pub struct CompiledSymbol {
     pub param_count: usize,
 }
 
+/// Which monad's bind/return semantics to use during lowering.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MonadContext {
+    IO,
+    ReaderT,
+    StateT,
+}
+
 /// State for lowering Core IR to LLVM IR.
 ///
 /// The struct has two lifetimes:
@@ -111,6 +119,9 @@ pub struct Lowering<'ctx, 'm> {
     module_name: Option<String>,
     /// External functions imported from other compiled modules.
     external_functions: FxHashMap<Symbol, FunctionValue<'ctx>>,
+    /// Stack tracking which monad's bind/return to use.
+    /// Pushed when entering transformer runners (runReaderT, evalStateT, etc.).
+    monad_context_stack: Vec<MonadContext>,
 }
 
 impl<'ctx, 'm> Lowering<'ctx, 'm> {
@@ -126,6 +137,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             in_tail_position: false,
             module_name: None,
             external_functions: FxHashMap::default(),
+            monad_context_stack: vec![MonadContext::IO],
         };
         lowering.declare_rts_functions();
         lowering
@@ -151,10 +163,50 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             in_tail_position: false,
             module_name: Some(module_name.to_string()),
             external_functions: FxHashMap::default(),
+            monad_context_stack: vec![MonadContext::IO],
         };
         lowering.declare_rts_functions();
         lowering.declare_external_symbols(imported_symbols)?;
         Ok(lowering)
+    }
+
+    /// Push a monad context onto the stack (e.g. when entering a transformer runner).
+    fn push_monad_context(&mut self, ctx: MonadContext) {
+        self.monad_context_stack.push(ctx);
+    }
+
+    /// Pop the monad context stack (e.g. when leaving a transformer runner).
+    fn pop_monad_context(&mut self) {
+        self.monad_context_stack.pop();
+    }
+
+    /// Return the current monad context (top of stack, defaults to IO).
+    fn current_monad_context(&self) -> MonadContext {
+        self.monad_context_stack.last().copied().unwrap_or(MonadContext::IO)
+    }
+
+    /// Detect the monad context from an expression by inspecting its head symbol.
+    /// This handles the case where `>>=` is used with transformer operations
+    /// (e.g. `ask >>= \n -> return n`) outside of an explicit runner call.
+    fn detect_monad_from_expr(&self, expr: &Expr) -> MonadContext {
+        match expr {
+            Expr::Var(v, _) => {
+                let name = v.name.as_str();
+                match name {
+                    "ask" | "asks" | "local"
+                    | "ReaderT.>>=" | "ReaderT.>>" | "ReaderT.pure"
+                    | "ReaderT.fmap" | "ReaderT.<*>"
+                    | "ReaderT.lift" | "ReaderT.liftIO" => MonadContext::ReaderT,
+                    "get" | "put" | "modify" | "gets"
+                    | "StateT.>>=" | "StateT.>>" | "StateT.pure"
+                    | "StateT.fmap" | "StateT.<*>"
+                    | "StateT.lift" | "StateT.liftIO" => MonadContext::StateT,
+                    _ => self.current_monad_context(),
+                }
+            }
+            Expr::App(func, _, _) => self.detect_monad_from_expr(func),
+            _ => self.current_monad_context(),
+        }
     }
 
     /// Mangle a function name with the module name for multi-module compilation.
@@ -1867,10 +1919,38 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "print" => self.lower_builtin_print(args[0]),
             "getLine" => self.lower_builtin_get_line(),
 
-            // Monadic operations
-            ">>=" => self.lower_builtin_bind(args[0], args[1]),
-            ">>" => self.lower_builtin_then(args[0], args[1]),
-            "return" | "pure" => self.lower_builtin_return(args[0]),
+            // Monadic operations — dispatch based on monad context.
+            // Push the detected context so that nested operations (e.g. return
+            // inside a bind continuation) also dispatch to the correct monad.
+            ">>=" => {
+                let monad = self.detect_monad_from_expr(args[0]);
+                self.push_monad_context(monad);
+                let result = match monad {
+                    MonadContext::ReaderT => self.lower_builtin_reader_t_bind(args[0], args[1]),
+                    MonadContext::StateT => self.lower_builtin_state_t_bind(args[0], args[1]),
+                    MonadContext::IO => self.lower_builtin_bind(args[0], args[1]),
+                };
+                self.pop_monad_context();
+                result
+            }
+            ">>" => {
+                let monad = self.detect_monad_from_expr(args[0]);
+                self.push_monad_context(monad);
+                let result = match monad {
+                    MonadContext::ReaderT => self.lower_builtin_reader_t_then(args[0], args[1]),
+                    MonadContext::StateT => self.lower_builtin_state_t_then(args[0], args[1]),
+                    MonadContext::IO => self.lower_builtin_then(args[0], args[1]),
+                };
+                self.pop_monad_context();
+                result
+            }
+            "return" | "pure" => {
+                match self.current_monad_context() {
+                    MonadContext::ReaderT => self.lower_builtin_reader_t_pure(args[0]),
+                    MonadContext::StateT => self.lower_builtin_state_t_pure(args[0]),
+                    MonadContext::IO => self.lower_builtin_return(args[0]),
+                }
+            }
 
             // Numeric / Math operations
             "negate" => self.lower_builtin_negate(args[0]),
@@ -7715,8 +7795,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         m_expr: &Expr,
         r_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        self.push_monad_context(MonadContext::ReaderT);
         let m_val = self.lower_expr(m_expr)?
             .ok_or_else(|| CodegenError::Internal("runReaderT: m has no value".to_string()))?;
+        self.pop_monad_context();
         let r_val = self.lower_expr(r_expr)?
             .ok_or_else(|| CodegenError::Internal("runReaderT: r has no value".to_string()))?;
 
@@ -8174,8 +8256,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         m_expr: &Expr,
         s_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        self.push_monad_context(MonadContext::StateT);
         let m_val = self.lower_expr(m_expr)?
             .ok_or_else(|| CodegenError::Internal("runStateT: m has no value".to_string()))?;
+        self.pop_monad_context();
         let s_val = self.lower_expr(s_expr)?
             .ok_or_else(|| CodegenError::Internal("runStateT: s has no value".to_string()))?;
 

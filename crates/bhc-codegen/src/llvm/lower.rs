@@ -1718,6 +1718,46 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.IntSet.toList" => Some(1),
                 "Data.IntSet.fromList" => Some(1),
 
+            // Identity operations
+            "Identity" => Some(1),
+            "runIdentity" => Some(1),
+            "Identity.fmap" => Some(2),
+            "Identity.pure" => Some(1),
+            "Identity.<*>" => Some(2),
+            "Identity.>>=" => Some(2),
+            "Identity.>>" => Some(2),
+
+            // ReaderT operations
+            "ReaderT" => Some(1),
+            "runReaderT" => Some(2),
+            "ReaderT.fmap" => Some(2),
+            "ReaderT.pure" => Some(1),
+            "ReaderT.<*>" => Some(2),
+            "ReaderT.>>=" => Some(2),
+            "ReaderT.>>" => Some(2),
+            "ReaderT.lift" => Some(1),
+            "ReaderT.liftIO" => Some(1),
+            "ask" => Some(0),
+            "asks" => Some(1),
+            "local" => Some(2),
+
+            // StateT operations
+            "StateT" => Some(1),
+            "runStateT" => Some(2),
+            "StateT.fmap" => Some(2),
+            "StateT.pure" => Some(1),
+            "StateT.<*>" => Some(2),
+            "StateT.>>=" => Some(2),
+            "StateT.>>" => Some(2),
+            "StateT.lift" => Some(1),
+            "StateT.liftIO" => Some(1),
+            "get" => Some(0),
+            "put" => Some(1),
+            "modify" => Some(1),
+            "gets" => Some(1),
+            "evalStateT" => Some(2),
+            "execStateT" => Some(2),
+
             _ => {
                 // Check for field selector pattern: $sel_N where N is a digit
                 if name.starts_with("$sel_") {
@@ -2159,6 +2199,46 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.ByteString.bhc_poke_byte" => self.lower_builtin_ba_poke(args[0], args[1], args[2]),
                 "Data.ByteString.bhc_cstring_length" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1256, "ba_strlen"),
                 "Data.ByteString.bhc_peek_array" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1257, "ba_peek_array"),
+
+            // Identity operations (newtype = pass through)
+            "Identity" | "runIdentity" => self.lower_expr(args[0]),
+            "Identity.fmap" => {
+                // fmap f (Identity x) = Identity (f x) => just apply f to x
+                self.lower_builtin_fmap(args[0], args[1])
+            }
+            "Identity.pure" => self.lower_expr(args[0]),
+            "Identity.<*>" => self.lower_builtin_ap(args[0], args[1]),
+            "Identity.>>=" => self.lower_builtin_bind(args[0], args[1]),
+            "Identity.>>" => self.lower_builtin_then(args[0], args[1]),
+
+            // ReaderT operations
+            "ReaderT" => self.lower_expr(args[0]), // newtype wrap = identity
+            "runReaderT" => self.lower_builtin_run_reader_t(args[0], args[1]),
+            "ReaderT.pure" => self.lower_builtin_reader_t_pure(args[0]),
+            "ReaderT.>>=" => self.lower_builtin_reader_t_bind(args[0], args[1]),
+            "ReaderT.>>" => self.lower_builtin_reader_t_then(args[0], args[1]),
+            "ReaderT.fmap" => self.lower_builtin_reader_t_fmap(args[0], args[1]),
+            "ReaderT.<*>" => self.lower_builtin_reader_t_ap(args[0], args[1]),
+            "ReaderT.lift" | "ReaderT.liftIO" => self.lower_builtin_reader_t_lift(args[0]),
+            "ask" => self.lower_builtin_ask(),
+            "asks" => self.lower_builtin_asks(args[0]),
+            "local" => self.lower_builtin_local(args[0], args[1]),
+
+            // StateT operations
+            "StateT" => self.lower_expr(args[0]), // newtype wrap = identity
+            "runStateT" => self.lower_builtin_run_state_t(args[0], args[1]),
+            "StateT.pure" => self.lower_builtin_state_t_pure(args[0]),
+            "StateT.>>=" => self.lower_builtin_state_t_bind(args[0], args[1]),
+            "StateT.>>" => self.lower_builtin_state_t_then(args[0], args[1]),
+            "StateT.fmap" => self.lower_builtin_state_t_fmap(args[0], args[1]),
+            "StateT.<*>" => self.lower_builtin_state_t_ap(args[0], args[1]),
+            "StateT.lift" | "StateT.liftIO" => self.lower_builtin_state_t_lift(args[0]),
+            "get" => self.lower_builtin_get(),
+            "put" => self.lower_builtin_put(args[0]),
+            "modify" => self.lower_builtin_modify(args[0]),
+            "gets" => self.lower_builtin_gets(args[0]),
+            "evalStateT" => self.lower_builtin_eval_state_t(args[0], args[1]),
+            "execStateT" => self.lower_builtin_exec_state_t(args[0], args[1]),
 
             _ => {
                 // Check for field selector pattern: $sel_N
@@ -7572,6 +7652,1088 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // For our simple IO model, return is identity
         self.lower_expr(value_expr)
+    }
+
+    // ========================================================================
+    // Monad Transformer Helpers
+    // ========================================================================
+
+    /// Helper to build a closure that captures values from the current scope.
+    /// `body_name` is a unique name for the closure function.
+    /// `num_captures` is how many captured values there are.
+    /// `build_body` receives (builder, env_ptr, arg) and should build the body + return.
+    fn build_transformer_closure(
+        &mut self,
+        body_name: &str,
+        captures: &[BasicValueEnum<'ctx>],
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let num_captures = captures.len() as u32;
+
+        // Create the closure function: (ptr env, ptr arg) -> ptr
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        let func = self
+            .module
+            .llvm_module()
+            .add_function(body_name, fn_type, None);
+
+        // Allocate closure with captures
+        let capture_pairs: Vec<(VarId, BasicValueEnum<'ctx>)> = captures
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (VarId::new(900000 + i), *v))
+            .collect();
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let closure_ptr = self.alloc_closure(fn_ptr, &capture_pairs)?;
+        Ok(closure_ptr)
+    }
+
+    /// Helper: emit a transformer closure body function that has already been added to the module.
+    /// Returns the function value so the caller can build its body.
+    fn get_or_create_transformer_fn(
+        &mut self,
+        name: &str,
+    ) -> FunctionValue<'ctx> {
+        let ptr_type = self.type_mapper().ptr_type();
+        if let Some(existing) = self.module.llvm_module().get_function(name) {
+            existing
+        } else {
+            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            self.module.llvm_module().add_function(name, fn_type, None)
+        }
+    }
+
+    // ========================================================================
+    // ReaderT Operations
+    // ========================================================================
+
+    /// runReaderT m r = m(r)
+    fn lower_builtin_run_reader_t(
+        &mut self,
+        m_expr: &Expr,
+        r_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let m_val = self.lower_expr(m_expr)?
+            .ok_or_else(|| CodegenError::Internal("runReaderT: m has no value".to_string()))?;
+        let r_val = self.lower_expr(r_expr)?
+            .ok_or_else(|| CodegenError::Internal("runReaderT: r has no value".to_string()))?;
+
+        let m_ptr = m_val.into_pointer_value();
+        let r_ptr = self.value_to_ptr(r_val)?;
+        let fn_ptr = self.extract_closure_fn_ptr(m_ptr)?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        let result = self.builder()
+            .build_indirect_call(fn_type, fn_ptr, &[m_ptr.into(), r_ptr.into()], "run_reader_t")
+            .map_err(|e| CodegenError::Internal(format!("runReaderT call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("runReaderT: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// ask = closure \r -> r (returns env)
+    fn lower_builtin_ask(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_reader_t_ask";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            // \(env, r) -> r
+            let r = func.get_nth_param(1).unwrap();
+            self.builder().build_return(Some(&r))
+                .map_err(|e| CodegenError::Internal(format!("ask return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let closure_ptr = self.alloc_closure(fn_ptr, &[])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// asks f = closure \r -> f(r)
+    fn lower_builtin_asks(
+        &mut self,
+        f_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let f_val = self.lower_expr(f_expr)?
+            .ok_or_else(|| CodegenError::Internal("asks: f has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_reader_t_asks";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            // \(env, r) -> f(r) where f = env[0]
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let r = func.get_nth_param(1).unwrap();
+            let f = self.extract_closure_env_elem(env, 1, 0)?;
+            let f_fn = self.extract_closure_fn_ptr(f)?;
+            let r_ptr = self.value_to_ptr(r)?;
+            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            let result = self.builder()
+                .build_indirect_call(fn_type, f_fn, &[f.into(), r_ptr.into()], "asks_result")
+                .map_err(|e| CodegenError::Internal(format!("asks call: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("asks: void".to_string()))?;
+            self.builder().build_return(Some(&result))
+                .map_err(|e| CodegenError::Internal(format!("asks return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let f_ptr = self.value_to_ptr(f_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), f_ptr.into())])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// local f m = closure \r -> m(f(r))
+    fn lower_builtin_local(
+        &mut self,
+        f_expr: &Expr,
+        m_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let f_val = self.lower_expr(f_expr)?
+            .ok_or_else(|| CodegenError::Internal("local: f has no value".to_string()))?;
+        let m_val = self.lower_expr(m_expr)?
+            .ok_or_else(|| CodegenError::Internal("local: m has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_reader_t_local";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            // \(env, r) -> m(f(r)) where f = env[0], m = env[1]
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let r = func.get_nth_param(1).unwrap();
+            let f = self.extract_closure_env_elem(env, 2, 0)?;
+            let m = self.extract_closure_env_elem(env, 2, 1)?;
+
+            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            // r' = f(r)
+            let f_fn = self.extract_closure_fn_ptr(f)?;
+            let r_ptr = self.value_to_ptr(r)?;
+            let r_prime = self.builder()
+                .build_indirect_call(fn_type, f_fn, &[f.into(), r_ptr.into()], "local_r")
+                .map_err(|e| CodegenError::Internal(format!("local f call: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("local f: void".to_string()))?;
+
+            // result = m(r')
+            let m_fn = self.extract_closure_fn_ptr(m)?;
+            let result = self.builder()
+                .build_indirect_call(fn_type, m_fn, &[m.into(), r_prime.into()], "local_result")
+                .map_err(|e| CodegenError::Internal(format!("local m call: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("local m: void".to_string()))?;
+
+            self.builder().build_return(Some(&result))
+                .map_err(|e| CodegenError::Internal(format!("local return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let f_ptr = self.value_to_ptr(f_val)?;
+        let m_ptr = self.value_to_ptr(m_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[
+            (VarId::new(900000), f_ptr.into()),
+            (VarId::new(900001), m_ptr.into()),
+        ])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// ReaderT.pure x = closure \r -> x
+    fn lower_builtin_reader_t_pure(
+        &mut self,
+        x_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let x_val = self.lower_expr(x_expr)?
+            .ok_or_else(|| CodegenError::Internal("ReaderT.pure: x has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_reader_t_pure";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            // \(env, _r) -> x where x = env[0]
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let x = self.extract_closure_env_elem(env, 1, 0)?;
+            self.builder().build_return(Some(&x))
+                .map_err(|e| CodegenError::Internal(format!("reader_t_pure return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let x_ptr = self.value_to_ptr(x_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), x_ptr.into())])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// ReaderT.>>= m k = closure \r -> let a = m(r) in k(a)(r)
+    fn lower_builtin_reader_t_bind(
+        &mut self,
+        m_expr: &Expr,
+        k_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let m_val = self.lower_expr(m_expr)?
+            .ok_or_else(|| CodegenError::Internal("ReaderT.>>=: m has no value".to_string()))?;
+        let k_val = self.lower_expr(k_expr)?
+            .ok_or_else(|| CodegenError::Internal("ReaderT.>>=: k has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_reader_t_bind";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            // \(env, r) -> let a = m(r); kr = k(a); kr(r)
+            // where m = env[0], k = env[1]
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let r = func.get_nth_param(1).unwrap();
+            let m = self.extract_closure_env_elem(env, 2, 0)?;
+            let k = self.extract_closure_env_elem(env, 2, 1)?;
+
+            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            // a = m(r)
+            let m_fn = self.extract_closure_fn_ptr(m)?;
+            let a = self.builder()
+                .build_indirect_call(fn_type, m_fn, &[m.into(), r.into()], "bind_a")
+                .map_err(|e| CodegenError::Internal(format!("ReaderT bind m: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("ReaderT bind m: void".to_string()))?;
+
+            // kr = k(a)
+            let k_fn = self.extract_closure_fn_ptr(k)?;
+            let kr = self.builder()
+                .build_indirect_call(fn_type, k_fn, &[k.into(), a.into()], "bind_kr")
+                .map_err(|e| CodegenError::Internal(format!("ReaderT bind k: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("ReaderT bind k: void".to_string()))?;
+
+            // result = kr(r)
+            let kr_ptr = kr.into_pointer_value();
+            let kr_fn = self.extract_closure_fn_ptr(kr_ptr)?;
+            let result = self.builder()
+                .build_indirect_call(fn_type, kr_fn, &[kr_ptr.into(), r.into()], "bind_result")
+                .map_err(|e| CodegenError::Internal(format!("ReaderT bind kr: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("ReaderT bind kr: void".to_string()))?;
+
+            self.builder().build_return(Some(&result))
+                .map_err(|e| CodegenError::Internal(format!("reader_t_bind return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let m_ptr = self.value_to_ptr(m_val)?;
+        let k_ptr = self.value_to_ptr(k_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[
+            (VarId::new(900000), m_ptr.into()),
+            (VarId::new(900001), k_ptr.into()),
+        ])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// ReaderT.>> m1 m2 = closure \r -> m1(r); m2(r)
+    fn lower_builtin_reader_t_then(
+        &mut self,
+        m1_expr: &Expr,
+        m2_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let m1_val = self.lower_expr(m1_expr)?
+            .ok_or_else(|| CodegenError::Internal("ReaderT.>>: m1 has no value".to_string()))?;
+        let m2_val = self.lower_expr(m2_expr)?
+            .ok_or_else(|| CodegenError::Internal("ReaderT.>>: m2 has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_reader_t_then";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            // \(env, r) -> m1(r); m2(r) where m1 = env[0], m2 = env[1]
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let r = func.get_nth_param(1).unwrap();
+            let m1 = self.extract_closure_env_elem(env, 2, 0)?;
+            let m2 = self.extract_closure_env_elem(env, 2, 1)?;
+
+            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            // m1(r) - discard result
+            let m1_fn = self.extract_closure_fn_ptr(m1)?;
+            self.builder()
+                .build_indirect_call(fn_type, m1_fn, &[m1.into(), r.into()], "then_m1")
+                .map_err(|e| CodegenError::Internal(format!("ReaderT then m1: {:?}", e)))?;
+
+            // result = m2(r)
+            let m2_fn = self.extract_closure_fn_ptr(m2)?;
+            let result = self.builder()
+                .build_indirect_call(fn_type, m2_fn, &[m2.into(), r.into()], "then_result")
+                .map_err(|e| CodegenError::Internal(format!("ReaderT then m2: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("ReaderT then m2: void".to_string()))?;
+
+            self.builder().build_return(Some(&result))
+                .map_err(|e| CodegenError::Internal(format!("reader_t_then return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let m1_ptr = self.value_to_ptr(m1_val)?;
+        let m2_ptr = self.value_to_ptr(m2_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[
+            (VarId::new(900000), m1_ptr.into()),
+            (VarId::new(900001), m2_ptr.into()),
+        ])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// ReaderT.fmap f m = closure \r -> f(m(r))
+    fn lower_builtin_reader_t_fmap(
+        &mut self,
+        f_expr: &Expr,
+        m_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let f_val = self.lower_expr(f_expr)?
+            .ok_or_else(|| CodegenError::Internal("ReaderT.fmap: f has no value".to_string()))?;
+        let m_val = self.lower_expr(m_expr)?
+            .ok_or_else(|| CodegenError::Internal("ReaderT.fmap: m has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_reader_t_fmap";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let r = func.get_nth_param(1).unwrap();
+            let f = self.extract_closure_env_elem(env, 2, 0)?;
+            let m = self.extract_closure_env_elem(env, 2, 1)?;
+
+            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            // a = m(r)
+            let m_fn = self.extract_closure_fn_ptr(m)?;
+            let a = self.builder()
+                .build_indirect_call(fn_type, m_fn, &[m.into(), r.into()], "fmap_a")
+                .map_err(|e| CodegenError::Internal(format!("ReaderT fmap m: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("ReaderT fmap m: void".to_string()))?;
+
+            // result = f(a)
+            let f_fn = self.extract_closure_fn_ptr(f)?;
+            let result = self.builder()
+                .build_indirect_call(fn_type, f_fn, &[f.into(), a.into()], "fmap_result")
+                .map_err(|e| CodegenError::Internal(format!("ReaderT fmap f: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("ReaderT fmap f: void".to_string()))?;
+
+            self.builder().build_return(Some(&result))
+                .map_err(|e| CodegenError::Internal(format!("reader_t_fmap return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let f_ptr = self.value_to_ptr(f_val)?;
+        let m_ptr = self.value_to_ptr(m_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[
+            (VarId::new(900000), f_ptr.into()),
+            (VarId::new(900001), m_ptr.into()),
+        ])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// ReaderT.<*> mf mx = closure \r -> mf(r)(mx(r))
+    fn lower_builtin_reader_t_ap(
+        &mut self,
+        mf_expr: &Expr,
+        mx_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Same structure as fmap but applied differently
+        // For simplicity, implement as: mf >>= \f -> fmap f mx
+        // Which compiles to same closure pattern
+        let mf_val = self.lower_expr(mf_expr)?
+            .ok_or_else(|| CodegenError::Internal("ReaderT.<*>: mf has no value".to_string()))?;
+        let mx_val = self.lower_expr(mx_expr)?
+            .ok_or_else(|| CodegenError::Internal("ReaderT.<*>: mx has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_reader_t_ap";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let r = func.get_nth_param(1).unwrap();
+            let mf = self.extract_closure_env_elem(env, 2, 0)?;
+            let mx = self.extract_closure_env_elem(env, 2, 1)?;
+
+            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            // f = mf(r)
+            let mf_fn = self.extract_closure_fn_ptr(mf)?;
+            let f = self.builder()
+                .build_indirect_call(fn_type, mf_fn, &[mf.into(), r.into()], "ap_f")
+                .map_err(|e| CodegenError::Internal(format!("ReaderT ap mf: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("ReaderT ap mf: void".to_string()))?;
+
+            // x = mx(r)
+            let mx_fn = self.extract_closure_fn_ptr(mx)?;
+            let x = self.builder()
+                .build_indirect_call(fn_type, mx_fn, &[mx.into(), r.into()], "ap_x")
+                .map_err(|e| CodegenError::Internal(format!("ReaderT ap mx: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("ReaderT ap mx: void".to_string()))?;
+
+            // result = f(x)
+            let f_ptr = f.into_pointer_value();
+            let f_fn = self.extract_closure_fn_ptr(f_ptr)?;
+            let result = self.builder()
+                .build_indirect_call(fn_type, f_fn, &[f_ptr.into(), x.into()], "ap_result")
+                .map_err(|e| CodegenError::Internal(format!("ReaderT ap f: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("ReaderT ap f: void".to_string()))?;
+
+            self.builder().build_return(Some(&result))
+                .map_err(|e| CodegenError::Internal(format!("reader_t_ap return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let mf_ptr = self.value_to_ptr(mf_val)?;
+        let mx_ptr = self.value_to_ptr(mx_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[
+            (VarId::new(900000), mf_ptr.into()),
+            (VarId::new(900001), mx_ptr.into()),
+        ])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// ReaderT.lift action = closure \r -> action (ignore r, return action)
+    fn lower_builtin_reader_t_lift(
+        &mut self,
+        action_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let action_val = self.lower_expr(action_expr)?
+            .ok_or_else(|| CodegenError::Internal("ReaderT.lift: action has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_reader_t_lift";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            // \(env, _r) -> action where action = env[0]
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let action = self.extract_closure_env_elem(env, 1, 0)?;
+            self.builder().build_return(Some(&action))
+                .map_err(|e| CodegenError::Internal(format!("reader_t_lift return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let action_ptr = self.value_to_ptr(action_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), action_ptr.into())])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    // ========================================================================
+    // StateT Operations
+    // ========================================================================
+
+    /// runStateT m s = m(s)
+    fn lower_builtin_run_state_t(
+        &mut self,
+        m_expr: &Expr,
+        s_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let m_val = self.lower_expr(m_expr)?
+            .ok_or_else(|| CodegenError::Internal("runStateT: m has no value".to_string()))?;
+        let s_val = self.lower_expr(s_expr)?
+            .ok_or_else(|| CodegenError::Internal("runStateT: s has no value".to_string()))?;
+
+        let m_ptr = m_val.into_pointer_value();
+        let s_ptr = self.value_to_ptr(s_val)?;
+        let fn_ptr = self.extract_closure_fn_ptr(m_ptr)?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        let result = self.builder()
+            .build_indirect_call(fn_type, fn_ptr, &[m_ptr.into(), s_ptr.into()], "run_state_t")
+            .map_err(|e| CodegenError::Internal(format!("runStateT call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("runStateT: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Helper: allocate a pair (a, s) as a 2-element ADT (tag=0, field0=a, field1=s)
+    fn alloc_pair(
+        &mut self,
+        fst_val: BasicValueEnum<'ctx>,
+        snd_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let adt_ty = self.adt_type(2);
+        let i64_type = self.type_mapper().i64_type();
+
+        // Allocate: tag(i64) + 2 fields (ptr each) = 24 bytes
+        let alloc_fn = *self.functions.get(&VarId::new(1000005))
+            .ok_or_else(|| CodegenError::Internal("bhc_alloc not declared".to_string()))?;
+        let size = i64_type.const_int(24, false);
+        let raw = self.builder()
+            .build_call(alloc_fn, &[size.into()], "pair_alloc")
+            .map_err(|e| CodegenError::Internal(format!("pair alloc: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("pair alloc: void".to_string()))?
+            .into_pointer_value();
+
+        // Tag = 0 (tuple constructor)
+        let tag_ptr = self.builder()
+            .build_struct_gep(adt_ty, raw, 0, "pair_tag")
+            .map_err(|e| CodegenError::Internal(format!("pair tag gep: {:?}", e)))?;
+        self.builder().build_store(tag_ptr, i64_type.const_zero())
+            .map_err(|e| CodegenError::Internal(format!("pair tag store: {:?}", e)))?;
+
+        // Field 0 - use store_adt_field pattern
+        self.store_adt_field(raw, 2, 0, fst_val)?;
+
+        // Field 1
+        self.store_adt_field(raw, 2, 1, snd_val)?;
+
+        Ok(raw)
+    }
+
+    /// Helper: extract fst from pair (tag + 2 fields)
+    fn extract_pair_fst(&self, pair: PointerValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
+        self.extract_adt_field(pair, 2, 0)
+    }
+
+    /// Helper: extract snd from pair (tag + 2 fields)
+    fn extract_pair_snd(&self, pair: PointerValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
+        self.extract_adt_field(pair, 2, 1)
+    }
+
+    /// get = closure \s -> (s, s)
+    fn lower_builtin_get(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_state_t_get";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            // \(_env, s) -> (s, s)
+            let s = func.get_nth_param(1).unwrap();
+            let pair = self.alloc_pair(s, s)?;
+            self.builder().build_return(Some(&pair))
+                .map_err(|e| CodegenError::Internal(format!("state_t_get return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let closure_ptr = self.alloc_closure(fn_ptr, &[])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// put s' = closure \_ -> ((), s')
+    fn lower_builtin_put(
+        &mut self,
+        s_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let s_val = self.lower_expr(s_expr)?
+            .ok_or_else(|| CodegenError::Internal("put: s has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_state_t_put";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            // \(env, _s) -> ((), s') where s' = env[0]
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s_new = self.extract_closure_env_elem(env, 1, 0)?;
+            let unit = ptr_type.const_null();
+            let pair = self.alloc_pair(unit.into(), s_new.into())?;
+            self.builder().build_return(Some(&pair))
+                .map_err(|e| CodegenError::Internal(format!("state_t_put return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let s_ptr = self.value_to_ptr(s_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), s_ptr.into())])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// modify f = closure \s -> ((), f(s))
+    fn lower_builtin_modify(
+        &mut self,
+        f_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let f_val = self.lower_expr(f_expr)?
+            .ok_or_else(|| CodegenError::Internal("modify: f has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_state_t_modify";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            // \(env, s) -> ((), f(s)) where f = env[0]
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap();
+            let f = self.extract_closure_env_elem(env, 1, 0)?;
+
+            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            let f_fn = self.extract_closure_fn_ptr(f)?;
+            let s_ptr = self.value_to_ptr(s)?;
+            let s_new = self.builder()
+                .build_indirect_call(fn_type, f_fn, &[f.into(), s_ptr.into()], "modify_s")
+                .map_err(|e| CodegenError::Internal(format!("modify f: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("modify f: void".to_string()))?;
+
+            let unit = ptr_type.const_null();
+            let pair = self.alloc_pair(unit.into(), s_new)?;
+            self.builder().build_return(Some(&pair))
+                .map_err(|e| CodegenError::Internal(format!("state_t_modify return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let f_ptr = self.value_to_ptr(f_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), f_ptr.into())])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// gets f = closure \s -> (f(s), s)
+    fn lower_builtin_gets(
+        &mut self,
+        f_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let f_val = self.lower_expr(f_expr)?
+            .ok_or_else(|| CodegenError::Internal("gets: f has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_state_t_gets";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap();
+            let f = self.extract_closure_env_elem(env, 1, 0)?;
+
+            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            let f_fn = self.extract_closure_fn_ptr(f)?;
+            let s_ptr = self.value_to_ptr(s)?;
+            let result = self.builder()
+                .build_indirect_call(fn_type, f_fn, &[f.into(), s_ptr.into()], "gets_result")
+                .map_err(|e| CodegenError::Internal(format!("gets f: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("gets f: void".to_string()))?;
+
+            let pair = self.alloc_pair(result, s)?;
+            self.builder().build_return(Some(&pair))
+                .map_err(|e| CodegenError::Internal(format!("state_t_gets return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let f_ptr = self.value_to_ptr(f_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), f_ptr.into())])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// StateT.pure x = closure \s -> (x, s)
+    fn lower_builtin_state_t_pure(
+        &mut self,
+        x_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let x_val = self.lower_expr(x_expr)?
+            .ok_or_else(|| CodegenError::Internal("StateT.pure: x has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_state_t_pure";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            // \(env, s) -> (x, s) where x = env[0]
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap();
+            let x = self.extract_closure_env_elem(env, 1, 0)?;
+            let pair = self.alloc_pair(x.into(), s)?;
+            self.builder().build_return(Some(&pair))
+                .map_err(|e| CodegenError::Internal(format!("state_t_pure return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let x_ptr = self.value_to_ptr(x_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), x_ptr.into())])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// StateT.>>= m k = closure \s -> let (a, s') = m(s) in k(a)(s')
+    fn lower_builtin_state_t_bind(
+        &mut self,
+        m_expr: &Expr,
+        k_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let m_val = self.lower_expr(m_expr)?
+            .ok_or_else(|| CodegenError::Internal("StateT.>>=: m has no value".to_string()))?;
+        let k_val = self.lower_expr(k_expr)?
+            .ok_or_else(|| CodegenError::Internal("StateT.>>=: k has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_state_t_bind";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap();
+            let m = self.extract_closure_env_elem(env, 2, 0)?;
+            let k = self.extract_closure_env_elem(env, 2, 1)?;
+
+            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            // pair = m(s)
+            let m_fn = self.extract_closure_fn_ptr(m)?;
+            let pair = self.builder()
+                .build_indirect_call(fn_type, m_fn, &[m.into(), s.into()], "st_bind_pair")
+                .map_err(|e| CodegenError::Internal(format!("StateT bind m: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("StateT bind m: void".to_string()))?
+                .into_pointer_value();
+
+            // a = fst(pair), s' = snd(pair)
+            let a = self.extract_pair_fst(pair)?;
+            let s_prime = self.extract_pair_snd(pair)?;
+
+            // kr = k(a)
+            let k_fn = self.extract_closure_fn_ptr(k)?;
+            let kr = self.builder()
+                .build_indirect_call(fn_type, k_fn, &[k.into(), a.into()], "st_bind_kr")
+                .map_err(|e| CodegenError::Internal(format!("StateT bind k: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("StateT bind k: void".to_string()))?;
+
+            // result = kr(s')
+            let kr_ptr = kr.into_pointer_value();
+            let kr_fn = self.extract_closure_fn_ptr(kr_ptr)?;
+            let result = self.builder()
+                .build_indirect_call(fn_type, kr_fn, &[kr_ptr.into(), s_prime.into()], "st_bind_result")
+                .map_err(|e| CodegenError::Internal(format!("StateT bind kr: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("StateT bind kr: void".to_string()))?;
+
+            self.builder().build_return(Some(&result))
+                .map_err(|e| CodegenError::Internal(format!("state_t_bind return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let m_ptr = self.value_to_ptr(m_val)?;
+        let k_ptr = self.value_to_ptr(k_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[
+            (VarId::new(900000), m_ptr.into()),
+            (VarId::new(900001), k_ptr.into()),
+        ])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// StateT.>> m1 m2 = closure \s -> let (_, s') = m1(s) in m2(s')
+    fn lower_builtin_state_t_then(
+        &mut self,
+        m1_expr: &Expr,
+        m2_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let m1_val = self.lower_expr(m1_expr)?
+            .ok_or_else(|| CodegenError::Internal("StateT.>>: m1 has no value".to_string()))?;
+        let m2_val = self.lower_expr(m2_expr)?
+            .ok_or_else(|| CodegenError::Internal("StateT.>>: m2 has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_state_t_then";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap();
+            let m1 = self.extract_closure_env_elem(env, 2, 0)?;
+            let m2 = self.extract_closure_env_elem(env, 2, 1)?;
+
+            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            // pair = m1(s)
+            let m1_fn = self.extract_closure_fn_ptr(m1)?;
+            let pair = self.builder()
+                .build_indirect_call(fn_type, m1_fn, &[m1.into(), s.into()], "st_then_pair")
+                .map_err(|e| CodegenError::Internal(format!("StateT then m1: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("StateT then m1: void".to_string()))?
+                .into_pointer_value();
+
+            // s' = snd(pair)
+            let s_prime = self.extract_pair_snd(pair)?;
+
+            // result = m2(s')
+            let m2_fn = self.extract_closure_fn_ptr(m2)?;
+            let result = self.builder()
+                .build_indirect_call(fn_type, m2_fn, &[m2.into(), s_prime.into()], "st_then_result")
+                .map_err(|e| CodegenError::Internal(format!("StateT then m2: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("StateT then m2: void".to_string()))?;
+
+            self.builder().build_return(Some(&result))
+                .map_err(|e| CodegenError::Internal(format!("state_t_then return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let m1_ptr = self.value_to_ptr(m1_val)?;
+        let m2_ptr = self.value_to_ptr(m2_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[
+            (VarId::new(900000), m1_ptr.into()),
+            (VarId::new(900001), m2_ptr.into()),
+        ])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// StateT.fmap f m = closure \s -> let (a, s') = m(s) in (f(a), s')
+    fn lower_builtin_state_t_fmap(
+        &mut self,
+        f_expr: &Expr,
+        m_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let f_val = self.lower_expr(f_expr)?
+            .ok_or_else(|| CodegenError::Internal("StateT.fmap: f has no value".to_string()))?;
+        let m_val = self.lower_expr(m_expr)?
+            .ok_or_else(|| CodegenError::Internal("StateT.fmap: m has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_state_t_fmap";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap();
+            let f = self.extract_closure_env_elem(env, 2, 0)?;
+            let m = self.extract_closure_env_elem(env, 2, 1)?;
+
+            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            let m_fn = self.extract_closure_fn_ptr(m)?;
+            let pair = self.builder()
+                .build_indirect_call(fn_type, m_fn, &[m.into(), s.into()], "st_fmap_pair")
+                .map_err(|e| CodegenError::Internal(format!("StateT fmap m: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("StateT fmap m: void".to_string()))?
+                .into_pointer_value();
+
+            let a = self.extract_pair_fst(pair)?;
+            let s_prime = self.extract_pair_snd(pair)?;
+
+            let f_fn = self.extract_closure_fn_ptr(f)?;
+            let b = self.builder()
+                .build_indirect_call(fn_type, f_fn, &[f.into(), a.into()], "st_fmap_b")
+                .map_err(|e| CodegenError::Internal(format!("StateT fmap f: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("StateT fmap f: void".to_string()))?;
+
+            let result_pair = self.alloc_pair(b, s_prime.into())?;
+            self.builder().build_return(Some(&result_pair))
+                .map_err(|e| CodegenError::Internal(format!("state_t_fmap return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let f_ptr = self.value_to_ptr(f_val)?;
+        let m_ptr = self.value_to_ptr(m_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[
+            (VarId::new(900000), f_ptr.into()),
+            (VarId::new(900001), m_ptr.into()),
+        ])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// StateT.<*> = use bind and fmap composition
+    fn lower_builtin_state_t_ap(
+        &mut self,
+        mf_expr: &Expr,
+        mx_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // ap mf mx = mf >>= \f -> fmap f mx
+        // For simplicity, implement directly like reader_t_ap but with state threading
+        let mf_val = self.lower_expr(mf_expr)?
+            .ok_or_else(|| CodegenError::Internal("StateT.<*>: mf has no value".to_string()))?;
+        let mx_val = self.lower_expr(mx_expr)?
+            .ok_or_else(|| CodegenError::Internal("StateT.<*>: mx has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_state_t_ap";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap();
+            let mf = self.extract_closure_env_elem(env, 2, 0)?;
+            let mx = self.extract_closure_env_elem(env, 2, 1)?;
+
+            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            // (f, s') = mf(s)
+            let mf_fn = self.extract_closure_fn_ptr(mf)?;
+            let pair1 = self.builder()
+                .build_indirect_call(fn_type, mf_fn, &[mf.into(), s.into()], "st_ap_pair1")
+                .map_err(|e| CodegenError::Internal(format!("StateT ap mf: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("StateT ap mf: void".to_string()))?
+                .into_pointer_value();
+            let f = self.extract_pair_fst(pair1)?;
+            let s_prime = self.extract_pair_snd(pair1)?;
+
+            // (x, s'') = mx(s')
+            let mx_fn = self.extract_closure_fn_ptr(mx)?;
+            let pair2 = self.builder()
+                .build_indirect_call(fn_type, mx_fn, &[mx.into(), s_prime.into()], "st_ap_pair2")
+                .map_err(|e| CodegenError::Internal(format!("StateT ap mx: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("StateT ap mx: void".to_string()))?
+                .into_pointer_value();
+            let x = self.extract_pair_fst(pair2)?;
+            let s_double_prime = self.extract_pair_snd(pair2)?;
+
+            // result = f(x)
+            let f_fn = self.extract_closure_fn_ptr(f)?;
+            let b = self.builder()
+                .build_indirect_call(fn_type, f_fn, &[f.into(), x.into()], "st_ap_result")
+                .map_err(|e| CodegenError::Internal(format!("StateT ap f: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("StateT ap f: void".to_string()))?;
+
+            let result_pair = self.alloc_pair(b, s_double_prime.into())?;
+            self.builder().build_return(Some(&result_pair))
+                .map_err(|e| CodegenError::Internal(format!("state_t_ap return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let mf_ptr = self.value_to_ptr(mf_val)?;
+        let mx_ptr = self.value_to_ptr(mx_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[
+            (VarId::new(900000), mf_ptr.into()),
+            (VarId::new(900001), mx_ptr.into()),
+        ])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// StateT.lift action = closure \s -> (action, s)
+    fn lower_builtin_state_t_lift(
+        &mut self,
+        action_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let action_val = self.lower_expr(action_expr)?
+            .ok_or_else(|| CodegenError::Internal("StateT.lift: action has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_state_t_lift";
+
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            // \(env, s) -> (action, s) where action = env[0]
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap();
+            let action = self.extract_closure_env_elem(env, 1, 0)?;
+            let pair = self.alloc_pair(action.into(), s)?;
+            self.builder().build_return(Some(&pair))
+                .map_err(|e| CodegenError::Internal(format!("state_t_lift return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let action_ptr = self.value_to_ptr(action_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), action_ptr.into())])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// evalStateT m s = fst(m(s))
+    fn lower_builtin_eval_state_t(
+        &mut self,
+        m_expr: &Expr,
+        s_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let result = self.lower_builtin_run_state_t(m_expr, s_expr)?;
+        let pair = result
+            .ok_or_else(|| CodegenError::Internal("evalStateT: no result".to_string()))?
+            .into_pointer_value();
+        let fst = self.extract_pair_fst(pair)?;
+        Ok(Some(fst.into()))
+    }
+
+    /// execStateT m s = snd(m(s))
+    fn lower_builtin_exec_state_t(
+        &mut self,
+        m_expr: &Expr,
+        s_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let result = self.lower_builtin_run_state_t(m_expr, s_expr)?;
+        let pair = result
+            .ok_or_else(|| CodegenError::Internal("execStateT: no result".to_string()))?
+            .into_pointer_value();
+        let snd = self.extract_pair_snd(pair)?;
+        Ok(Some(snd.into()))
     }
 
     // ========================================================================
@@ -15869,6 +17031,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         name: &str,
         arity: u32,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // For arity-0 builtins, directly evaluate without wrapping in another closure.
+        // This is important for builtins like `ask` and `get` that return closures:
+        // wrapping them would create a double-closure that breaks runReaderT/runStateT.
+        if arity == 0 {
+            return self.lower_builtin_direct(name, &[]);
+        }
+
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
 
@@ -16085,6 +17254,720 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .map_err(|e| CodegenError::Internal(format!("putStr call failed: {:?}", e)))?;
                 Ok(Some(ptr_type.const_null().into()))
             }
+            // Identity operations (newtype = pass through)
+            "Identity" | "runIdentity" | "Identity.pure" => Ok(Some(args[0])),
+            "Identity.fmap" | "Identity.>>=" | "Identity.<*>" => {
+                // Apply function to value
+                let func = args[0].into_pointer_value();
+                let val = args[1];
+                let fn_ptr = self.extract_closure_fn_ptr(func)?;
+                let val_ptr = self.value_to_ptr(val)?;
+                let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                let result = self.builder()
+                    .build_indirect_call(fn_type, fn_ptr, &[func.into(), val_ptr.into()], "identity_call")
+                    .map_err(|e| CodegenError::Internal(format!("Identity call failed: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("Identity: returned void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Identity.>>" => Ok(Some(args[1])),
+
+            // ReaderT/StateT constructors (newtype = pass through)
+            "ReaderT" | "StateT" => Ok(Some(args[0])),
+            "runReaderT" | "runStateT" => {
+                // Call the closure (arg0) with the environment/state (arg1)
+                let closure = args[0].into_pointer_value();
+                let env_val = args[1];
+                let fn_ptr = self.extract_closure_fn_ptr(closure)?;
+                let env_ptr = self.value_to_ptr(env_val)?;
+                let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                let result = self.builder()
+                    .build_indirect_call(fn_type, fn_ptr, &[closure.into(), env_ptr.into()], "run_t_result")
+                    .map_err(|e| CodegenError::Internal(format!("runT call failed: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("runT: returned void".to_string()))?;
+                Ok(Some(result))
+            }
+
+            // ReaderT operations (zero-arity: ask returns closure \r -> r)
+            "ask" => self.lower_builtin_ask(),
+
+            // ReaderT operations with pre-lowered args
+            "asks" => {
+                // asks f = closure \r -> f(r)
+                let f_val = args[0];
+                let fn_name = "bhc_reader_t_asks";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let r = func.get_nth_param(1).unwrap();
+                    let f = self.extract_closure_env_elem(env, 1, 0)?;
+                    let f_fn = self.extract_closure_fn_ptr(f)?;
+                    let r_ptr = self.value_to_ptr(r)?;
+                    let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                    let result = self.builder()
+                        .build_indirect_call(fn_type, f_fn, &[f.into(), r_ptr.into()], "asks_result")
+                        .map_err(|e| CodegenError::Internal(format!("asks call: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("asks: void".to_string()))?;
+                    self.builder().build_return(Some(&result))
+                        .map_err(|e| CodegenError::Internal(format!("asks return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let f_ptr = self.value_to_ptr(f_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), f_ptr.into())])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "local" => {
+                // local f m = closure \r -> m(f(r))
+                let f_val = args[0];
+                let m_val = args[1];
+                let fn_name = "bhc_reader_t_local";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let r = func.get_nth_param(1).unwrap();
+                    let f = self.extract_closure_env_elem(env, 2, 0)?;
+                    let m = self.extract_closure_env_elem(env, 2, 1)?;
+                    let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                    let f_fn = self.extract_closure_fn_ptr(f)?;
+                    let r_ptr = self.value_to_ptr(r)?;
+                    let r_prime = self.builder()
+                        .build_indirect_call(fn_type, f_fn, &[f.into(), r_ptr.into()], "local_r")
+                        .map_err(|e| CodegenError::Internal(format!("local f call: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("local f: void".to_string()))?;
+                    let m_fn = self.extract_closure_fn_ptr(m)?;
+                    let result = self.builder()
+                        .build_indirect_call(fn_type, m_fn, &[m.into(), r_prime.into()], "local_result")
+                        .map_err(|e| CodegenError::Internal(format!("local m call: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("local m: void".to_string()))?;
+                    self.builder().build_return(Some(&result))
+                        .map_err(|e| CodegenError::Internal(format!("local return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let f_ptr = self.value_to_ptr(f_val)?;
+                let m_ptr = self.value_to_ptr(m_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[
+                    (VarId::new(900000), f_ptr.into()),
+                    (VarId::new(900001), m_ptr.into()),
+                ])?;
+                Ok(Some(closure_ptr.into()))
+            }
+
+            // ReaderT instance methods with pre-lowered args
+            "ReaderT.pure" => {
+                // \r -> x where x = args[0]
+                let x_val = args[0];
+                let fn_name = "bhc_reader_t_pure";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let x = self.extract_closure_env_elem(env, 1, 0)?;
+                    self.builder().build_return(Some(&x))
+                        .map_err(|e| CodegenError::Internal(format!("reader_t_pure return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let x_ptr = self.value_to_ptr(x_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), x_ptr.into())])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "ReaderT.>>=" => {
+                // \r -> let a = m(r) in k(a)(r) where m = args[0], k = args[1]
+                let m_val = args[0];
+                let k_val = args[1];
+                let fn_name = "bhc_reader_t_bind";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let r = func.get_nth_param(1).unwrap();
+                    let m = self.extract_closure_env_elem(env, 2, 0)?;
+                    let k = self.extract_closure_env_elem(env, 2, 1)?;
+                    let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                    let m_fn = self.extract_closure_fn_ptr(m)?;
+                    let r_ptr = self.value_to_ptr(r)?;
+                    let a = self.builder()
+                        .build_indirect_call(fn_type, m_fn, &[m.into(), r_ptr.into()], "bind_a")
+                        .map_err(|e| CodegenError::Internal(format!("reader bind m: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("reader bind m: void".to_string()))?;
+                    let k_fn = self.extract_closure_fn_ptr(k)?;
+                    let kr = self.builder()
+                        .build_indirect_call(fn_type, k_fn, &[k.into(), a.into()], "bind_kr")
+                        .map_err(|e| CodegenError::Internal(format!("reader bind k: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("reader bind k: void".to_string()))?;
+                    let kr_ptr = kr.into_pointer_value();
+                    let kr_fn = self.extract_closure_fn_ptr(kr_ptr)?;
+                    let result = self.builder()
+                        .build_indirect_call(fn_type, kr_fn, &[kr_ptr.into(), r_ptr.into()], "bind_result")
+                        .map_err(|e| CodegenError::Internal(format!("reader bind kr: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("reader bind kr: void".to_string()))?;
+                    self.builder().build_return(Some(&result))
+                        .map_err(|e| CodegenError::Internal(format!("reader bind return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let m_ptr = self.value_to_ptr(m_val)?;
+                let k_ptr = self.value_to_ptr(k_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[
+                    (VarId::new(900000), m_ptr.into()),
+                    (VarId::new(900001), k_ptr.into()),
+                ])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "ReaderT.>>" => {
+                // \r -> m1(r); m2(r) where m1 = args[0], m2 = args[1]
+                let m1_val = args[0];
+                let m2_val = args[1];
+                let fn_name = "bhc_reader_t_then";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let r = func.get_nth_param(1).unwrap();
+                    let m1 = self.extract_closure_env_elem(env, 2, 0)?;
+                    let m2 = self.extract_closure_env_elem(env, 2, 1)?;
+                    let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                    let m1_fn = self.extract_closure_fn_ptr(m1)?;
+                    let r_ptr = self.value_to_ptr(r)?;
+                    self.builder()
+                        .build_indirect_call(fn_type, m1_fn, &[m1.into(), r_ptr.into()], "then_discard")
+                        .map_err(|e| CodegenError::Internal(format!("reader then m1: {:?}", e)))?;
+                    let m2_fn = self.extract_closure_fn_ptr(m2)?;
+                    let result = self.builder()
+                        .build_indirect_call(fn_type, m2_fn, &[m2.into(), r_ptr.into()], "then_result")
+                        .map_err(|e| CodegenError::Internal(format!("reader then m2: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("reader then m2: void".to_string()))?;
+                    self.builder().build_return(Some(&result))
+                        .map_err(|e| CodegenError::Internal(format!("reader then return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let m1_ptr = self.value_to_ptr(m1_val)?;
+                let m2_ptr = self.value_to_ptr(m2_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[
+                    (VarId::new(900000), m1_ptr.into()),
+                    (VarId::new(900001), m2_ptr.into()),
+                ])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "ReaderT.fmap" => {
+                // \r -> f(m(r)) where f = args[0], m = args[1]
+                let f_val = args[0];
+                let m_val = args[1];
+                let fn_name = "bhc_reader_t_fmap";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let r = func.get_nth_param(1).unwrap();
+                    let f = self.extract_closure_env_elem(env, 2, 0)?;
+                    let m = self.extract_closure_env_elem(env, 2, 1)?;
+                    let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                    let m_fn = self.extract_closure_fn_ptr(m)?;
+                    let r_ptr = self.value_to_ptr(r)?;
+                    let a = self.builder()
+                        .build_indirect_call(fn_type, m_fn, &[m.into(), r_ptr.into()], "fmap_a")
+                        .map_err(|e| CodegenError::Internal(format!("reader fmap m: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("reader fmap m: void".to_string()))?;
+                    let f_fn = self.extract_closure_fn_ptr(f)?;
+                    let result = self.builder()
+                        .build_indirect_call(fn_type, f_fn, &[f.into(), a.into()], "fmap_result")
+                        .map_err(|e| CodegenError::Internal(format!("reader fmap f: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("reader fmap f: void".to_string()))?;
+                    self.builder().build_return(Some(&result))
+                        .map_err(|e| CodegenError::Internal(format!("reader fmap return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let f_ptr = self.value_to_ptr(f_val)?;
+                let m_ptr = self.value_to_ptr(m_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[
+                    (VarId::new(900000), f_ptr.into()),
+                    (VarId::new(900001), m_ptr.into()),
+                ])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "ReaderT.<*>" => {
+                // \r -> (mf(r))(mx(r)) where mf = args[0], mx = args[1]
+                let mf_val = args[0];
+                let mx_val = args[1];
+                let fn_name = "bhc_reader_t_ap";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let r = func.get_nth_param(1).unwrap();
+                    let mf = self.extract_closure_env_elem(env, 2, 0)?;
+                    let mx = self.extract_closure_env_elem(env, 2, 1)?;
+                    let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                    let mf_fn = self.extract_closure_fn_ptr(mf)?;
+                    let r_ptr = self.value_to_ptr(r)?;
+                    let f = self.builder()
+                        .build_indirect_call(fn_type, mf_fn, &[mf.into(), r_ptr.into()], "ap_f")
+                        .map_err(|e| CodegenError::Internal(format!("reader ap mf: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("reader ap mf: void".to_string()))?;
+                    let mx_fn = self.extract_closure_fn_ptr(mx)?;
+                    let x = self.builder()
+                        .build_indirect_call(fn_type, mx_fn, &[mx.into(), r_ptr.into()], "ap_x")
+                        .map_err(|e| CodegenError::Internal(format!("reader ap mx: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("reader ap mx: void".to_string()))?;
+                    let f_ptr_val = f.into_pointer_value();
+                    let f_fn = self.extract_closure_fn_ptr(f_ptr_val)?;
+                    let result = self.builder()
+                        .build_indirect_call(fn_type, f_fn, &[f_ptr_val.into(), x.into()], "ap_result")
+                        .map_err(|e| CodegenError::Internal(format!("reader ap f(x): {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("reader ap f(x): void".to_string()))?;
+                    self.builder().build_return(Some(&result))
+                        .map_err(|e| CodegenError::Internal(format!("reader ap return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let mf_ptr = self.value_to_ptr(mf_val)?;
+                let mx_ptr = self.value_to_ptr(mx_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[
+                    (VarId::new(900000), mf_ptr.into()),
+                    (VarId::new(900001), mx_ptr.into()),
+                ])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "ReaderT.lift" | "ReaderT.liftIO" => {
+                // \r -> action (const function) where action = args[0]
+                let action_val = args[0];
+                let fn_name = "bhc_reader_t_lift";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let _r = func.get_nth_param(1).unwrap();
+                    let action = self.extract_closure_env_elem(env, 1, 0)?;
+                    self.builder().build_return(Some(&action))
+                        .map_err(|e| CodegenError::Internal(format!("reader lift return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let a_ptr = self.value_to_ptr(action_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), a_ptr.into())])?;
+                Ok(Some(closure_ptr.into()))
+            }
+
+            // StateT operations (zero-arity: get returns closure \s -> (s, s))
+            "get" => self.lower_builtin_get(),
+
+            // StateT operations with pre-lowered args
+            "put" => {
+                // put s' = closure \_ -> ((), s')
+                let s_val = args[0];
+                let fn_name = "bhc_state_t_put";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let _s = func.get_nth_param(1).unwrap();
+                    let new_s = self.extract_closure_env_elem(env, 1, 0)?;
+                    let unit_val = ptr_type.const_null();
+                    let pair = self.alloc_pair(unit_val.into(), new_s.into())?;
+                    self.builder().build_return(Some(&pair))
+                        .map_err(|e| CodegenError::Internal(format!("put return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let s_ptr = self.value_to_ptr(s_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), s_ptr.into())])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "modify" => {
+                // modify f = closure \s -> ((), f(s))
+                let f_val = args[0];
+                let fn_name = "bhc_state_t_modify";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let s = func.get_nth_param(1).unwrap();
+                    let f = self.extract_closure_env_elem(env, 1, 0)?;
+                    let f_fn = self.extract_closure_fn_ptr(f)?;
+                    let s_ptr_val = self.value_to_ptr(s)?;
+                    let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                    let new_s = self.builder()
+                        .build_indirect_call(fn_type, f_fn, &[f.into(), s_ptr_val.into()], "modify_s")
+                        .map_err(|e| CodegenError::Internal(format!("modify f call: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("modify f: void".to_string()))?;
+                    let unit_val = ptr_type.const_null();
+                    let pair = self.alloc_pair(unit_val.into(), new_s)?;
+                    self.builder().build_return(Some(&pair))
+                        .map_err(|e| CodegenError::Internal(format!("modify return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let f_ptr = self.value_to_ptr(f_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), f_ptr.into())])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "gets" => {
+                // gets f = closure \s -> (f(s), s)
+                let f_val = args[0];
+                let fn_name = "bhc_state_t_gets";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let s = func.get_nth_param(1).unwrap();
+                    let f = self.extract_closure_env_elem(env, 1, 0)?;
+                    let f_fn = self.extract_closure_fn_ptr(f)?;
+                    let s_ptr_val = self.value_to_ptr(s)?;
+                    let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                    let result = self.builder()
+                        .build_indirect_call(fn_type, f_fn, &[f.into(), s_ptr_val.into()], "gets_result")
+                        .map_err(|e| CodegenError::Internal(format!("gets f call: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("gets f: void".to_string()))?;
+                    let pair = self.alloc_pair(result, s)?;
+                    self.builder().build_return(Some(&pair))
+                        .map_err(|e| CodegenError::Internal(format!("gets return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let f_ptr = self.value_to_ptr(f_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), f_ptr.into())])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "evalStateT" => {
+                // evalStateT m s = fst (runStateT m s)
+                let m_val = args[0];
+                let s_val = args[1];
+                let closure = m_val.into_pointer_value();
+                let fn_ptr_val = self.extract_closure_fn_ptr(closure)?;
+                let s_ptr = self.value_to_ptr(s_val)?;
+                let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                let pair_result = self.builder()
+                    .build_indirect_call(fn_type, fn_ptr_val, &[closure.into(), s_ptr.into()], "eval_state")
+                    .map_err(|e| CodegenError::Internal(format!("evalStateT call: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("evalStateT: void".to_string()))?;
+                let result = self.extract_pair_fst(pair_result.into_pointer_value())?;
+                Ok(Some(result.into()))
+            }
+            "execStateT" => {
+                // execStateT m s = snd (runStateT m s)
+                let m_val = args[0];
+                let s_val = args[1];
+                let closure = m_val.into_pointer_value();
+                let fn_ptr_val = self.extract_closure_fn_ptr(closure)?;
+                let s_ptr = self.value_to_ptr(s_val)?;
+                let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                let pair_result = self.builder()
+                    .build_indirect_call(fn_type, fn_ptr_val, &[closure.into(), s_ptr.into()], "exec_state")
+                    .map_err(|e| CodegenError::Internal(format!("execStateT call: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("execStateT: void".to_string()))?;
+                let result = self.extract_pair_snd(pair_result.into_pointer_value())?;
+                Ok(Some(result.into()))
+            }
+
+            // StateT instance methods with pre-lowered args
+            "StateT.pure" => {
+                // \s -> (x, s) where x = args[0]
+                let x_val = args[0];
+                let fn_name = "bhc_state_t_pure";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let s = func.get_nth_param(1).unwrap();
+                    let x = self.extract_closure_env_elem(env, 1, 0)?;
+                    let pair = self.alloc_pair(x.into(), s)?;
+                    self.builder().build_return(Some(&pair))
+                        .map_err(|e| CodegenError::Internal(format!("state_t_pure return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let x_ptr = self.value_to_ptr(x_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), x_ptr.into())])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "StateT.>>=" => {
+                // \s -> let (a, s') = m(s); k(a)(s') where m = args[0], k = args[1]
+                let m_val = args[0];
+                let k_val = args[1];
+                let fn_name = "bhc_state_t_bind";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let s = func.get_nth_param(1).unwrap();
+                    let m = self.extract_closure_env_elem(env, 2, 0)?;
+                    let k = self.extract_closure_env_elem(env, 2, 1)?;
+                    let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                    let m_fn = self.extract_closure_fn_ptr(m)?;
+                    let s_ptr_val = self.value_to_ptr(s)?;
+                    let pair = self.builder()
+                        .build_indirect_call(fn_type, m_fn, &[m.into(), s_ptr_val.into()], "sbind_pair")
+                        .map_err(|e| CodegenError::Internal(format!("state bind m: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("state bind m: void".to_string()))?;
+                    let pair_ptr = pair.into_pointer_value();
+                    let a = self.extract_pair_fst(pair_ptr)?;
+                    let s_prime = self.extract_pair_snd(pair_ptr)?;
+                    let k_fn = self.extract_closure_fn_ptr(k)?;
+                    let kr = self.builder()
+                        .build_indirect_call(fn_type, k_fn, &[k.into(), a.into()], "sbind_kr")
+                        .map_err(|e| CodegenError::Internal(format!("state bind k: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("state bind k: void".to_string()))?;
+                    let kr_ptr = kr.into_pointer_value();
+                    let kr_fn = self.extract_closure_fn_ptr(kr_ptr)?;
+                    let result = self.builder()
+                        .build_indirect_call(fn_type, kr_fn, &[kr_ptr.into(), s_prime.into()], "sbind_result")
+                        .map_err(|e| CodegenError::Internal(format!("state bind kr: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("state bind kr: void".to_string()))?;
+                    self.builder().build_return(Some(&result))
+                        .map_err(|e| CodegenError::Internal(format!("state bind return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let m_ptr = self.value_to_ptr(m_val)?;
+                let k_ptr = self.value_to_ptr(k_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[
+                    (VarId::new(900000), m_ptr.into()),
+                    (VarId::new(900001), k_ptr.into()),
+                ])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "StateT.>>" => {
+                // \s -> let (_, s') = m1(s); m2(s') where m1 = args[0], m2 = args[1]
+                let m1_val = args[0];
+                let m2_val = args[1];
+                let fn_name = "bhc_state_t_then";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let s = func.get_nth_param(1).unwrap();
+                    let m1 = self.extract_closure_env_elem(env, 2, 0)?;
+                    let m2 = self.extract_closure_env_elem(env, 2, 1)?;
+                    let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                    let m1_fn = self.extract_closure_fn_ptr(m1)?;
+                    let s_ptr_val = self.value_to_ptr(s)?;
+                    let pair = self.builder()
+                        .build_indirect_call(fn_type, m1_fn, &[m1.into(), s_ptr_val.into()], "sthen_pair")
+                        .map_err(|e| CodegenError::Internal(format!("state then m1: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("state then m1: void".to_string()))?;
+                    let s_prime = self.extract_pair_snd(pair.into_pointer_value())?;
+                    let m2_fn = self.extract_closure_fn_ptr(m2)?;
+                    let result = self.builder()
+                        .build_indirect_call(fn_type, m2_fn, &[m2.into(), s_prime.into()], "sthen_result")
+                        .map_err(|e| CodegenError::Internal(format!("state then m2: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("state then m2: void".to_string()))?;
+                    self.builder().build_return(Some(&result))
+                        .map_err(|e| CodegenError::Internal(format!("state then return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let m1_ptr = self.value_to_ptr(m1_val)?;
+                let m2_ptr = self.value_to_ptr(m2_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[
+                    (VarId::new(900000), m1_ptr.into()),
+                    (VarId::new(900001), m2_ptr.into()),
+                ])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "StateT.fmap" => {
+                // \s -> let (a, s') = m(s) in (f(a), s') where f = args[0], m = args[1]
+                let f_val = args[0];
+                let m_val = args[1];
+                let fn_name = "bhc_state_t_fmap";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let s = func.get_nth_param(1).unwrap();
+                    let f = self.extract_closure_env_elem(env, 2, 0)?;
+                    let m = self.extract_closure_env_elem(env, 2, 1)?;
+                    let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                    let m_fn = self.extract_closure_fn_ptr(m)?;
+                    let s_ptr_val = self.value_to_ptr(s)?;
+                    let pair = self.builder()
+                        .build_indirect_call(fn_type, m_fn, &[m.into(), s_ptr_val.into()], "sfmap_pair")
+                        .map_err(|e| CodegenError::Internal(format!("state fmap m: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("state fmap m: void".to_string()))?;
+                    let pair_ptr = pair.into_pointer_value();
+                    let a = self.extract_pair_fst(pair_ptr)?;
+                    let s_prime = self.extract_pair_snd(pair_ptr)?;
+                    let f_fn = self.extract_closure_fn_ptr(f)?;
+                    let fa = self.builder()
+                        .build_indirect_call(fn_type, f_fn, &[f.into(), a.into()], "sfmap_fa")
+                        .map_err(|e| CodegenError::Internal(format!("state fmap f: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("state fmap f: void".to_string()))?;
+                    let result_pair = self.alloc_pair(fa, s_prime.into())?;
+                    self.builder().build_return(Some(&result_pair))
+                        .map_err(|e| CodegenError::Internal(format!("state fmap return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let f_ptr = self.value_to_ptr(f_val)?;
+                let m_ptr = self.value_to_ptr(m_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[
+                    (VarId::new(900000), f_ptr.into()),
+                    (VarId::new(900001), m_ptr.into()),
+                ])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "StateT.<*>" => {
+                // \s -> let (f, s') = mf(s); (x, s'') = mx(s') in (f(x), s'')
+                let mf_val = args[0];
+                let mx_val = args[1];
+                let fn_name = "bhc_state_t_ap";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let s = func.get_nth_param(1).unwrap();
+                    let mf = self.extract_closure_env_elem(env, 2, 0)?;
+                    let mx = self.extract_closure_env_elem(env, 2, 1)?;
+                    let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                    let mf_fn = self.extract_closure_fn_ptr(mf)?;
+                    let s_ptr_val = self.value_to_ptr(s)?;
+                    let pair1 = self.builder()
+                        .build_indirect_call(fn_type, mf_fn, &[mf.into(), s_ptr_val.into()], "sap_p1")
+                        .map_err(|e| CodegenError::Internal(format!("state ap mf: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("state ap mf: void".to_string()))?;
+                    let pair1_ptr = pair1.into_pointer_value();
+                    let f = self.extract_pair_fst(pair1_ptr)?;
+                    let s_prime = self.extract_pair_snd(pair1_ptr)?;
+                    let mx_fn = self.extract_closure_fn_ptr(mx)?;
+                    let pair2 = self.builder()
+                        .build_indirect_call(fn_type, mx_fn, &[mx.into(), s_prime.into()], "sap_p2")
+                        .map_err(|e| CodegenError::Internal(format!("state ap mx: {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("state ap mx: void".to_string()))?;
+                    let pair2_ptr = pair2.into_pointer_value();
+                    let x = self.extract_pair_fst(pair2_ptr)?;
+                    let s_double_prime = self.extract_pair_snd(pair2_ptr)?;
+                    let f_fn_ptr = self.extract_closure_fn_ptr(f)?;
+                    let fx = self.builder()
+                        .build_indirect_call(fn_type, f_fn_ptr, &[f.into(), x.into()], "sap_fx")
+                        .map_err(|e| CodegenError::Internal(format!("state ap f(x): {:?}", e)))?
+                        .try_as_basic_value().basic()
+                        .ok_or_else(|| CodegenError::Internal("state ap f(x): void".to_string()))?;
+                    let result_pair = self.alloc_pair(fx, s_double_prime.into())?;
+                    self.builder().build_return(Some(&result_pair))
+                        .map_err(|e| CodegenError::Internal(format!("state ap return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let mf_ptr = self.value_to_ptr(mf_val)?;
+                let mx_ptr = self.value_to_ptr(mx_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[
+                    (VarId::new(900000), mf_ptr.into()),
+                    (VarId::new(900001), mx_ptr.into()),
+                ])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "StateT.lift" | "StateT.liftIO" => {
+                // \s -> (action, s) where action = args[0]
+                let action_val = args[0];
+                let fn_name = "bhc_state_t_lift";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let s = func.get_nth_param(1).unwrap();
+                    let action = self.extract_closure_env_elem(env, 1, 0)?;
+                    let pair = self.alloc_pair(action.into(), s)?;
+                    self.builder().build_return(Some(&pair))
+                        .map_err(|e| CodegenError::Internal(format!("state lift return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let a_ptr = self.value_to_ptr(action_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), a_ptr.into())])?;
+                Ok(Some(closure_ptr.into()))
+            }
+
+            // Generic lift/liftIO (delegate to ReaderT versions as default)
+            "lift" => {
+                let action_val = args[0];
+                let fn_name = "bhc_reader_t_lift";
+                let func = self.get_or_create_transformer_fn(fn_name);
+                if func.count_basic_blocks() == 0 {
+                    let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                    let saved_bb = self.builder().get_insert_block();
+                    self.builder().position_at_end(entry);
+                    let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                    let _r = func.get_nth_param(1).unwrap();
+                    let action = self.extract_closure_env_elem(env, 1, 0)?;
+                    self.builder().build_return(Some(&action))
+                        .map_err(|e| CodegenError::Internal(format!("lift return: {:?}", e)))?;
+                    if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+                }
+                let fn_ptr = func.as_global_value().as_pointer_value();
+                let a_ptr = self.value_to_ptr(action_val)?;
+                let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), a_ptr.into())])?;
+                Ok(Some(closure_ptr.into()))
+            }
+            "liftIO" => {
+                // For IO, liftIO = id
+                Ok(Some(args[0]))
+            }
+
             _ => Err(CodegenError::Internal(format!(
                 "lower_builtin_direct: unhandled builtin '{}'",
                 name

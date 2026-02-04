@@ -973,6 +973,46 @@ impl LowerContext {
             self.define(def_id, sym, DefKind::Value, Span::default());
             self.bind_value(sym, def_id);
         }
+
+        // Register monad transformer builtins at fixed DefIds (10000+).
+        // These use explicit DefIds to avoid interfering with the sequential
+        // allocation above. Must match bhc-typeck register_transformer_ops
+        // and bhc-hir-to-core context.rs.
+        let transformer_builtins: &[(usize, &str)] = &[
+            // Identity (10000-10006)
+            (10000, "Identity"),
+            (10001, "runIdentity"),
+            // MonadTrans / MonadIO (10010-10012)
+            (10010, "lift"),
+            (10011, "liftIO"),
+            // ReaderT (10020-10031)
+            (10020, "ReaderT"),
+            (10021, "runReaderT"),
+            (10029, "ask"),
+            (10030, "asks"),
+            (10031, "local"),
+            // StateT (10040-10055)
+            (10040, "StateT"),
+            (10041, "runStateT"),
+            (10049, "get"),
+            (10050, "put"),
+            (10051, "modify"),
+            (10053, "gets"),
+            (10054, "evalStateT"),
+            (10055, "execStateT"),
+        ];
+
+        for &(id, name) in transformer_builtins {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
+        // Ensure next_def_id is past the transformer range
+        if self.next_def_id <= 10056 {
+            self.next_def_id = 10056;
+        }
     }
 
     /// Define stub types, constructors, and functions for external packages.

@@ -3688,6 +3688,329 @@ impl Builtins {
             env.register_value(def_id, Symbol::intern(name), scheme);
             next_id += 1;
         }
+
+        // Register transformer types and operations at fixed DefIds (10000+)
+        self.register_transformer_ops(env);
+    }
+
+    /// Register monad transformer types and operations.
+    ///
+    /// These use fixed DefIds in the 10000+ range to avoid conflicts
+    /// with the sequential allocation used by `register_primitive_ops`.
+    fn register_transformer_ops(&self, env: &mut TypeEnv) {
+        let a = TyVar::new_star(BUILTIN_TYVAR_A);
+        let b = TyVar::new_star(BUILTIN_TYVAR_B);
+        let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+        let m = TyVar::new(BUILTIN_TYVAR_M, m_kind.clone());
+        let r_var = TyVar::new_star(BUILTIN_TYVAR_R);
+        let s_var = TyVar::new_star(BUILTIN_TYVAR_S);
+
+        // IO type for IO-specific signatures
+        let io_ty = Ty::Con(self.io_con.clone());
+
+        // Helper: m a
+        let ma = |m: &TyVar, a: &TyVar| {
+            Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())))
+        };
+
+        // === Identity (DefIds 10000-10006) ===
+        // Identity :: a -> Identity a (newtype constructor)
+        let identity_con = TyCon::new(Symbol::intern("Identity"), m_kind.clone());
+        let identity_a = Ty::App(
+            Box::new(Ty::Con(identity_con.clone())),
+            Box::new(Ty::Var(a.clone())),
+        );
+
+        env.register_value(
+            DefId::new(10000),
+            Symbol::intern("Identity"),
+            Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), identity_a.clone())),
+        );
+        env.register_value(
+            DefId::new(10001),
+            Symbol::intern("runIdentity"),
+            Scheme::poly(vec![a.clone()], Ty::fun(identity_a, Ty::Var(a.clone()))),
+        );
+
+        // === MonadTrans / MonadIO (DefIds 10010-10012) ===
+        // lift :: (MonadTrans t, Monad m) => m a -> t m a
+        let t_kind = Kind::Arrow(
+            Box::new(m_kind.clone()),
+            Box::new(m_kind.clone()),
+        );
+        let t_var = TyVar::new(BUILTIN_TYVAR_T, t_kind);
+        let t_m_a = Ty::App(
+            Box::new(Ty::App(
+                Box::new(Ty::Var(t_var.clone())),
+                Box::new(Ty::Var(m.clone())),
+            )),
+            Box::new(Ty::Var(a.clone())),
+        );
+        env.register_value(
+            DefId::new(10010),
+            Symbol::intern("lift"),
+            Scheme::poly(
+                vec![t_var.clone(), m.clone(), a.clone()],
+                Ty::fun(ma(&m, &a), t_m_a),
+            ),
+        );
+
+        // liftIO :: MonadIO m => IO a -> m a
+        let io_a = Ty::App(Box::new(io_ty.clone()), Box::new(Ty::Var(a.clone())));
+        env.register_value(
+            DefId::new(10011),
+            Symbol::intern("liftIO"),
+            Scheme::poly(
+                vec![m.clone(), a.clone()],
+                Ty::fun(io_a.clone(), ma(&m, &a)),
+            ),
+        );
+
+        // IO.liftIO is identity: IO a -> IO a
+        env.register_value(
+            DefId::new(10012),
+            Symbol::intern("liftIO"),
+            Scheme::poly(
+                vec![a.clone()],
+                Ty::fun(io_a.clone(), io_a.clone()),
+            ),
+        );
+
+        // === ReaderT (DefIds 10020-10031) ===
+        let reader_t_con = TyCon::new(
+            Symbol::intern("ReaderT"),
+            Kind::Arrow(
+                Box::new(Kind::Star),
+                Box::new(Kind::Arrow(
+                    Box::new(m_kind.clone()),
+                    Box::new(m_kind.clone()),
+                )),
+            ),
+        );
+
+        // ReaderT r m a ~ r -> m a (newtype)
+        let reader_t_r_m_a = Ty::App(
+            Box::new(Ty::App(
+                Box::new(Ty::App(
+                    Box::new(Ty::Con(reader_t_con.clone())),
+                    Box::new(Ty::Var(r_var.clone())),
+                )),
+                Box::new(Ty::Var(m.clone())),
+            )),
+            Box::new(Ty::Var(a.clone())),
+        );
+
+        // ReaderT :: (r -> m a) -> ReaderT r m a
+        env.register_value(
+            DefId::new(10020),
+            Symbol::intern("ReaderT"),
+            Scheme::poly(
+                vec![r_var.clone(), m.clone(), a.clone()],
+                Ty::fun(
+                    Ty::fun(Ty::Var(r_var.clone()), ma(&m, &a)),
+                    reader_t_r_m_a.clone(),
+                ),
+            ),
+        );
+
+        // runReaderT :: ReaderT r m a -> r -> m a
+        env.register_value(
+            DefId::new(10021),
+            Symbol::intern("runReaderT"),
+            Scheme::poly(
+                vec![r_var.clone(), m.clone(), a.clone()],
+                Ty::fun(
+                    reader_t_r_m_a.clone(),
+                    Ty::fun(Ty::Var(r_var.clone()), ma(&m, &a)),
+                ),
+            ),
+        );
+
+        // ask :: Monad m => ReaderT r m r
+        let reader_t_r_m_r = Ty::App(
+            Box::new(Ty::App(
+                Box::new(Ty::App(
+                    Box::new(Ty::Con(reader_t_con.clone())),
+                    Box::new(Ty::Var(r_var.clone())),
+                )),
+                Box::new(Ty::Var(m.clone())),
+            )),
+            Box::new(Ty::Var(r_var.clone())),
+        );
+        env.register_value(
+            DefId::new(10029),
+            Symbol::intern("ask"),
+            Scheme::poly(vec![r_var.clone(), m.clone()], reader_t_r_m_r),
+        );
+
+        // asks :: Monad m => (r -> a) -> ReaderT r m a
+        env.register_value(
+            DefId::new(10030),
+            Symbol::intern("asks"),
+            Scheme::poly(
+                vec![r_var.clone(), m.clone(), a.clone()],
+                Ty::fun(
+                    Ty::fun(Ty::Var(r_var.clone()), Ty::Var(a.clone())),
+                    reader_t_r_m_a.clone(),
+                ),
+            ),
+        );
+
+        // local :: (r -> r) -> ReaderT r m a -> ReaderT r m a
+        env.register_value(
+            DefId::new(10031),
+            Symbol::intern("local"),
+            Scheme::poly(
+                vec![r_var.clone(), m.clone(), a.clone()],
+                Ty::fun(
+                    Ty::fun(Ty::Var(r_var.clone()), Ty::Var(r_var.clone())),
+                    Ty::fun(reader_t_r_m_a.clone(), reader_t_r_m_a.clone()),
+                ),
+            ),
+        );
+
+        // === StateT (DefIds 10040-10055) ===
+        let state_t_con = TyCon::new(
+            Symbol::intern("StateT"),
+            Kind::Arrow(
+                Box::new(Kind::Star),
+                Box::new(Kind::Arrow(
+                    Box::new(m_kind.clone()),
+                    Box::new(m_kind.clone()),
+                )),
+            ),
+        );
+
+        // StateT s m a ~ s -> m (a, s) (newtype)
+        let state_t_s_m_a = Ty::App(
+            Box::new(Ty::App(
+                Box::new(Ty::App(
+                    Box::new(Ty::Con(state_t_con.clone())),
+                    Box::new(Ty::Var(s_var.clone())),
+                )),
+                Box::new(Ty::Var(m.clone())),
+            )),
+            Box::new(Ty::Var(a.clone())),
+        );
+
+        let pair_a_s = Ty::Tuple(vec![Ty::Var(a.clone()), Ty::Var(s_var.clone())]);
+        let m_pair_a_s = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(pair_a_s.clone()));
+
+        // StateT :: (s -> m (a, s)) -> StateT s m a
+        env.register_value(
+            DefId::new(10040),
+            Symbol::intern("StateT"),
+            Scheme::poly(
+                vec![s_var.clone(), m.clone(), a.clone()],
+                Ty::fun(
+                    Ty::fun(Ty::Var(s_var.clone()), m_pair_a_s.clone()),
+                    state_t_s_m_a.clone(),
+                ),
+            ),
+        );
+
+        // runStateT :: StateT s m a -> s -> m (a, s)
+        env.register_value(
+            DefId::new(10041),
+            Symbol::intern("runStateT"),
+            Scheme::poly(
+                vec![s_var.clone(), m.clone(), a.clone()],
+                Ty::fun(
+                    state_t_s_m_a.clone(),
+                    Ty::fun(Ty::Var(s_var.clone()), m_pair_a_s),
+                ),
+            ),
+        );
+
+        // get :: Monad m => StateT s m s
+        let state_t_s_m_s = Ty::App(
+            Box::new(Ty::App(
+                Box::new(Ty::App(
+                    Box::new(Ty::Con(state_t_con.clone())),
+                    Box::new(Ty::Var(s_var.clone())),
+                )),
+                Box::new(Ty::Var(m.clone())),
+            )),
+            Box::new(Ty::Var(s_var.clone())),
+        );
+        env.register_value(
+            DefId::new(10049),
+            Symbol::intern("get"),
+            Scheme::poly(vec![s_var.clone(), m.clone()], state_t_s_m_s),
+        );
+
+        // put :: Monad m => s -> StateT s m ()
+        let state_t_s_m_unit = Ty::App(
+            Box::new(Ty::App(
+                Box::new(Ty::App(
+                    Box::new(Ty::Con(state_t_con.clone())),
+                    Box::new(Ty::Var(s_var.clone())),
+                )),
+                Box::new(Ty::Var(m.clone())),
+            )),
+            Box::new(Ty::unit()),
+        );
+        env.register_value(
+            DefId::new(10050),
+            Symbol::intern("put"),
+            Scheme::poly(
+                vec![s_var.clone(), m.clone()],
+                Ty::fun(Ty::Var(s_var.clone()), state_t_s_m_unit.clone()),
+            ),
+        );
+
+        // modify :: Monad m => (s -> s) -> StateT s m ()
+        env.register_value(
+            DefId::new(10051),
+            Symbol::intern("modify"),
+            Scheme::poly(
+                vec![s_var.clone(), m.clone()],
+                Ty::fun(
+                    Ty::fun(Ty::Var(s_var.clone()), Ty::Var(s_var.clone())),
+                    state_t_s_m_unit,
+                ),
+            ),
+        );
+
+        // gets :: Monad m => (s -> a) -> StateT s m a
+        env.register_value(
+            DefId::new(10053),
+            Symbol::intern("gets"),
+            Scheme::poly(
+                vec![s_var.clone(), m.clone(), a.clone()],
+                Ty::fun(
+                    Ty::fun(Ty::Var(s_var.clone()), Ty::Var(a.clone())),
+                    state_t_s_m_a.clone(),
+                ),
+            ),
+        );
+
+        // evalStateT :: Monad m => StateT s m a -> s -> m a
+        env.register_value(
+            DefId::new(10054),
+            Symbol::intern("evalStateT"),
+            Scheme::poly(
+                vec![s_var.clone(), m.clone(), a.clone()],
+                Ty::fun(
+                    state_t_s_m_a.clone(),
+                    Ty::fun(Ty::Var(s_var.clone()), ma(&m, &a)),
+                ),
+            ),
+        );
+
+        // execStateT :: Monad m => StateT s m a -> s -> m s
+        let m_s = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(s_var.clone())));
+        env.register_value(
+            DefId::new(10055),
+            Symbol::intern("execStateT"),
+            Scheme::poly(
+                vec![s_var.clone(), m.clone(), a.clone()],
+                Ty::fun(
+                    state_t_s_m_a,
+                    Ty::fun(Ty::Var(s_var.clone()), m_s),
+                ),
+            ),
+        );
     }
 
     /// Register dynamic tensor operations in the environment.
@@ -3855,6 +4178,8 @@ const BUILTIN_TYVAR_R: u32 = 0xFFFF_0003;
 const BUILTIN_TYVAR_SHAPE2: u32 = 0xFFFF_0004;
 const BUILTIN_TYVAR_M: u32 = 0xFFFF_0005; // For monad type constructor variable
 const BUILTIN_TYVAR_F: u32 = 0xFFFF_0006; // For functor type constructor variable
+const BUILTIN_TYVAR_S: u32 = 0xFFFF_0007; // For state type variable
+const BUILTIN_TYVAR_T: u32 = 0xFFFF_0008; // For transformer type constructor variable
 
 #[cfg(test)]
 mod tests {

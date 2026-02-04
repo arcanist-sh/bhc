@@ -460,9 +460,11 @@ impl<'a> DictContext<'a> {
 
     /// Create a reference to a method implementation.
     fn method_reference(&self, def_id: DefId, span: Span) -> core::Expr {
-        // Look up the actual method name from the registry so codegen can resolve it
+        // For transformer instance methods (DefIds 10000-10055), use qualified names
+        // so codegen can distinguish ReaderT.>>= from IO's >>= etc.
         let name = self
-            .find_method_name(def_id)
+            .transformer_method_name(def_id)
+            .or_else(|| self.find_method_name(def_id))
             .unwrap_or_else(|| Symbol::intern(&format!("$method_{}", def_id.index())));
         let var = Var {
             name,
@@ -470,6 +472,51 @@ impl<'a> DictContext<'a> {
             ty: Ty::Error,
         };
         core::Expr::Var(var, span)
+    }
+
+    /// Map transformer instance method DefIds to qualified names for codegen.
+    fn transformer_method_name(&self, def_id: DefId) -> Option<Symbol> {
+        let name = match def_id.index() {
+            // Identity instances
+            10000 => "Identity",
+            10001 => "runIdentity",
+            10002 => "Identity.fmap",
+            10003 => "Identity.pure",
+            10004 => "Identity.<*>",
+            10005 => "Identity.>>=",
+            10006 => "Identity.>>",
+            // ReaderT instances
+            10020 => "ReaderT",
+            10021 => "runReaderT",
+            10022 => "ReaderT.fmap",
+            10023 => "ReaderT.pure",
+            10024 => "ReaderT.<*>",
+            10025 => "ReaderT.>>=",
+            10026 => "ReaderT.>>",
+            10027 => "ReaderT.lift",
+            10028 => "ReaderT.liftIO",
+            10029 => "ask",
+            10030 => "asks",
+            10031 => "local",
+            // StateT instances
+            10040 => "StateT",
+            10041 => "runStateT",
+            10042 => "StateT.fmap",
+            10043 => "StateT.pure",
+            10044 => "StateT.<*>",
+            10045 => "StateT.>>=",
+            10046 => "StateT.>>",
+            10047 => "StateT.lift",
+            10048 => "StateT.liftIO",
+            10049 => "get",
+            10050 => "put",
+            10051 => "modify",
+            10053 => "gets",
+            10054 => "evalStateT",
+            10055 => "execStateT",
+            _ => return None,
+        };
+        Some(Symbol::intern(name))
     }
 
     /// Find the method name for a given DefId by searching all registered instances.

@@ -407,6 +407,95 @@ impl LowerContext {
             };
             self.var_map.insert(def_id, var);
         }
+
+        // Identity type + methods (DefIds 10000-10006)
+        let identity_methods: [(usize, &str); 7] = [
+            (10000, "Identity"),
+            (10001, "runIdentity"),
+            (10002, "Identity.fmap"),
+            (10003, "Identity.pure"),
+            (10004, "Identity.<*>"),
+            (10005, "Identity.>>="),
+            (10006, "Identity.>>"),
+        ];
+        for (method_id, name) in identity_methods {
+            let def_id = DefId::new(method_id);
+            let var = Var {
+                name: Symbol::intern(name),
+                id: VarId::new(method_id),
+                ty: Ty::Error,
+            };
+            self.var_map.insert(def_id, var);
+        }
+
+        // MonadTrans/MonadIO class methods + IO MonadIO instance (DefIds 10010-10012)
+        let class_methods: [(usize, &str); 3] = [
+            (10010, "lift"),
+            (10011, "liftIO"),
+            (10012, "IO.liftIO"),
+        ];
+        for (method_id, name) in class_methods {
+            let def_id = DefId::new(method_id);
+            let var = Var {
+                name: Symbol::intern(name),
+                id: VarId::new(method_id),
+                ty: Ty::Error,
+            };
+            self.var_map.insert(def_id, var);
+        }
+
+        // ReaderT type + instances + operations (DefIds 10020-10031)
+        let reader_t_methods: [(usize, &str); 12] = [
+            (10020, "ReaderT"),
+            (10021, "runReaderT"),
+            (10022, "ReaderT.fmap"),
+            (10023, "ReaderT.pure"),
+            (10024, "ReaderT.<*>"),
+            (10025, "ReaderT.>>="),
+            (10026, "ReaderT.>>"),
+            (10027, "ReaderT.lift"),
+            (10028, "ReaderT.liftIO"),
+            (10029, "ask"),
+            (10030, "asks"),
+            (10031, "local"),
+        ];
+        for (method_id, name) in reader_t_methods {
+            let def_id = DefId::new(method_id);
+            let var = Var {
+                name: Symbol::intern(name),
+                id: VarId::new(method_id),
+                ty: Ty::Error,
+            };
+            self.var_map.insert(def_id, var);
+        }
+
+        // StateT type + instances + operations (DefIds 10040-10055)
+        let state_t_methods: [(usize, &str); 15] = [
+            (10040, "StateT"),
+            (10041, "runStateT"),
+            (10042, "StateT.fmap"),
+            (10043, "StateT.pure"),
+            (10044, "StateT.<*>"),
+            (10045, "StateT.>>="),
+            (10046, "StateT.>>"),
+            (10047, "StateT.lift"),
+            (10048, "StateT.liftIO"),
+            (10049, "get"),
+            (10050, "put"),
+            (10051, "modify"),
+            (10053, "gets"),
+            (10054, "evalStateT"),
+            (10055, "execStateT"),
+        ];
+        for (method_id, name) in state_t_methods {
+            let def_id = DefId::new(method_id);
+            let var = Var {
+                name: Symbol::intern(name),
+                id: VarId::new(method_id),
+                ty: Ty::Error,
+            };
+            self.var_map.insert(def_id, var);
+        }
     }
 
     /// Register built-in type classes and their instances.
@@ -657,6 +746,88 @@ impl LowerContext {
         // Monad IO: >>= = DefId(153), >> = DefId(154)
         // Superclass: Applicative IO
         self.register_builtin_instance("Monad", &io_ty, &[(153, ">>="), (154, ">>")]);
+
+        // === Register MonadTrans class ===
+        // Methods: lift
+        let monad_trans_class = ClassInfo {
+            name: Symbol::intern("MonadTrans"),
+            methods: vec![Symbol::intern("lift")],
+            method_types: FxHashMap::default(),
+            superclasses: vec![],
+            defaults: FxHashMap::default(),
+            assoc_types: vec![],
+        };
+        self.class_registry.register_class(monad_trans_class);
+
+        // === Register MonadIO class ===
+        // Methods: liftIO
+        // Superclass: Monad
+        let monad_io_class = ClassInfo {
+            name: Symbol::intern("MonadIO"),
+            methods: vec![Symbol::intern("liftIO")],
+            method_types: FxHashMap::default(),
+            superclasses: vec![Symbol::intern("Monad")],
+            defaults: FxHashMap::default(),
+            assoc_types: vec![],
+        };
+        self.class_registry.register_class(monad_io_class);
+
+        // MonadIO IO: liftIO = id (DefId 10012)
+        self.register_builtin_instance("MonadIO", &io_ty, &[(10012, "liftIO")]);
+
+        // === Register Identity type and instances ===
+        let identity_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+        let identity_ty = Ty::Con(TyCon::new(Symbol::intern("Identity"), identity_kind));
+
+        self.register_builtin_instance("Functor", &identity_ty, &[(10002, "fmap")]);
+        self.register_builtin_instance(
+            "Applicative",
+            &identity_ty,
+            &[(10003, "pure"), (10004, "<*>")],
+        );
+        self.register_builtin_instance("Monad", &identity_ty, &[(10005, ">>="), (10006, ">>")]);
+
+        // === Register ReaderT instances ===
+        // ReaderT r m is represented as a partially applied type constructor
+        // For codegen, we match on the name "ReaderT" rather than the full type
+        let reader_t_kind = Kind::Arrow(
+            Box::new(Kind::Star),
+            Box::new(Kind::Arrow(
+                Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+                Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+            )),
+        );
+        let reader_t_ty = Ty::Con(TyCon::new(Symbol::intern("ReaderT"), reader_t_kind));
+
+        self.register_builtin_instance("Functor", &reader_t_ty, &[(10022, "fmap")]);
+        self.register_builtin_instance(
+            "Applicative",
+            &reader_t_ty,
+            &[(10023, "pure"), (10024, "<*>")],
+        );
+        self.register_builtin_instance("Monad", &reader_t_ty, &[(10025, ">>="), (10026, ">>")]);
+        self.register_builtin_instance("MonadTrans", &reader_t_ty, &[(10027, "lift")]);
+        self.register_builtin_instance("MonadIO", &reader_t_ty, &[(10028, "liftIO")]);
+
+        // === Register StateT instances ===
+        let state_t_kind = Kind::Arrow(
+            Box::new(Kind::Star),
+            Box::new(Kind::Arrow(
+                Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+                Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+            )),
+        );
+        let state_t_ty = Ty::Con(TyCon::new(Symbol::intern("StateT"), state_t_kind));
+
+        self.register_builtin_instance("Functor", &state_t_ty, &[(10042, "fmap")]);
+        self.register_builtin_instance(
+            "Applicative",
+            &state_t_ty,
+            &[(10043, "pure"), (10044, "<*>")],
+        );
+        self.register_builtin_instance("Monad", &state_t_ty, &[(10045, ">>="), (10046, ">>")]);
+        self.register_builtin_instance("MonadTrans", &state_t_ty, &[(10047, "lift")]);
+        self.register_builtin_instance("MonadIO", &state_t_ty, &[(10048, "liftIO")]);
     }
 
     /// Helper to register a builtin instance with method DefIds.

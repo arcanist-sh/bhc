@@ -172,6 +172,16 @@ fn test_tier3_milestone_c_markdown_native() {
     run_native_test("tier3_io/milestone_c_markdown", Profile::Default);
 }
 
+#[test]
+fn test_tier3_reader_t_native() {
+    run_native_test("tier3_io/reader_t", Profile::Default);
+}
+
+#[test]
+fn test_tier3_state_t_native() {
+    run_native_test("tier3_io/state_t", Profile::Default);
+}
+
 // =============================================================================
 // Discovery Tests
 // =============================================================================

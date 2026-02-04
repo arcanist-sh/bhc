@@ -182,6 +182,21 @@ fn test_tier3_state_t_native() {
     run_native_test("tier3_io/state_t", Profile::Default);
 }
 
+#[test]
+fn test_tier3_state_t_string_native() {
+    run_native_test("tier3_io/state_t_string", Profile::Default);
+}
+
+#[test]
+fn test_tier3_state_t_case_native() {
+    run_native_test("tier3_io/state_t_case", Profile::Default);
+}
+
+#[test]
+fn test_tier3_milestone_d_csv_parser_native() {
+    run_native_test("tier3_io/milestone_d_csv_parser", Profile::Default);
+}
+
 // =============================================================================
 // Discovery Tests
 // =============================================================================

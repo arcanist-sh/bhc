@@ -1,0 +1,4 @@
+name | age | city
+-----+-----+-----
+Alice | 30 | Zurich
+Bob | 25 | Basel

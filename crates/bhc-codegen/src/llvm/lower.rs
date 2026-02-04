@@ -122,6 +122,11 @@ pub struct Lowering<'ctx, 'm> {
     /// Stack tracking which monad's bind/return to use.
     /// Pushed when entering transformer runners (runReaderT, evalStateT, etc.).
     monad_context_stack: Vec<MonadContext>,
+    /// Set of function names whose bodies use StateT operations.
+    /// Used to detect monad context when these functions appear in bind chains.
+    state_t_functions: FxHashSet<String>,
+    /// Set of function names whose bodies use ReaderT operations.
+    reader_t_functions: FxHashSet<String>,
 }
 
 impl<'ctx, 'm> Lowering<'ctx, 'm> {
@@ -138,6 +143,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             module_name: None,
             external_functions: FxHashMap::default(),
             monad_context_stack: vec![MonadContext::IO],
+            state_t_functions: FxHashSet::default(),
+            reader_t_functions: FxHashSet::default(),
         };
         lowering.declare_rts_functions();
         lowering
@@ -164,6 +171,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             module_name: Some(module_name.to_string()),
             external_functions: FxHashMap::default(),
             monad_context_stack: vec![MonadContext::IO],
+            state_t_functions: FxHashSet::default(),
+            reader_t_functions: FxHashSet::default(),
         };
         lowering.declare_rts_functions();
         lowering.declare_external_symbols(imported_symbols)?;
@@ -201,11 +210,61 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     | "StateT.>>=" | "StateT.>>" | "StateT.pure"
                     | "StateT.fmap" | "StateT.<*>"
                     | "StateT.lift" | "StateT.liftIO" => MonadContext::StateT,
-                    _ => self.current_monad_context(),
+                    _ => {
+                        // Check if this is a user-defined function that was detected
+                        // as using StateT/ReaderT operations in its body.
+                        if self.state_t_functions.contains(name) {
+                            MonadContext::StateT
+                        } else if self.reader_t_functions.contains(name) {
+                            MonadContext::ReaderT
+                        } else {
+                            self.current_monad_context()
+                        }
+                    }
                 }
             }
             Expr::App(func, _, _) => self.detect_monad_from_expr(func),
             _ => self.current_monad_context(),
+        }
+    }
+
+    /// Check whether an expression tree contains StateT or ReaderT operations.
+    /// Used to determine the monad context for top-level function definitions
+    /// that are used as StateT/ReaderT computations.
+    fn detect_monad_context_for_body(&self, expr: &Expr) -> Option<MonadContext> {
+        match expr {
+            Expr::Var(v, _) => {
+                let name = v.name.as_str();
+                match name {
+                    "get" | "put" | "modify" | "gets"
+                    | "StateT.>>=" | "StateT.>>" | "StateT.pure" => Some(MonadContext::StateT),
+                    "ask" | "asks" | "local"
+                    | "ReaderT.>>=" | "ReaderT.>>" | "ReaderT.pure" => Some(MonadContext::ReaderT),
+                    _ => None,
+                }
+            }
+            Expr::App(func, arg, _) => {
+                self.detect_monad_context_for_body(func)
+                    .or_else(|| self.detect_monad_context_for_body(arg))
+            }
+            Expr::Lam(_, body, _) => self.detect_monad_context_for_body(body),
+            Expr::Let(bind, body, _) => {
+                let in_bind = match bind.as_ref() {
+                    Bind::NonRec(_, e) => self.detect_monad_context_for_body(e),
+                    Bind::Rec(bindings) => bindings
+                        .iter()
+                        .find_map(|(_, e)| self.detect_monad_context_for_body(e)),
+                };
+                in_bind.or_else(|| self.detect_monad_context_for_body(body))
+            }
+            Expr::Case(scrut, alts, _, _) => {
+                self.detect_monad_context_for_body(scrut).or_else(|| {
+                    alts.iter()
+                        .find_map(|alt| self.detect_monad_context_for_body(&alt.rhs))
+                })
+            }
+            Expr::TyApp(e, _, _) => self.detect_monad_context_for_body(e),
+            _ => None,
         }
     }
 
@@ -16400,6 +16459,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.collect_constructors_from_binding(bind);
         }
 
+        // Pre-pass: detect which functions use StateT/ReaderT operations.
+        // This must happen before lowering so that callers of these functions
+        // can detect the correct monad context.
+        self.detect_monad_functions(&core_module.bindings);
+
         // First pass: declare all top-level functions
         for bind in &core_module.bindings {
             self.declare_binding(bind)?;
@@ -16411,6 +16475,129 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         Ok(())
+    }
+
+    /// Pre-pass: scan all bindings to detect which functions use StateT/ReaderT.
+    /// This populates `state_t_functions` and `reader_t_functions` so that
+    /// `detect_monad_from_expr` can recognize calls to user-defined monadic functions.
+    fn detect_monad_functions(&mut self, bindings: &[Bind]) {
+        // First pass: detect direct users of get/put/ask/etc.
+        for bind in bindings {
+            match bind {
+                Bind::NonRec(var, expr) => {
+                    if let Some(ctx) = self.detect_monad_context_for_body(expr) {
+                        let name = var.name.as_str().to_string();
+                        match ctx {
+                            MonadContext::StateT => { self.state_t_functions.insert(name); }
+                            MonadContext::ReaderT => { self.reader_t_functions.insert(name); }
+                            _ => {}
+                        }
+                    }
+                }
+                Bind::Rec(pairs) => {
+                    for (var, expr) in pairs {
+                        if let Some(ctx) = self.detect_monad_context_for_body(expr) {
+                            let name = var.name.as_str().to_string();
+                            match ctx {
+                                MonadContext::StateT => { self.state_t_functions.insert(name); }
+                                MonadContext::ReaderT => { self.reader_t_functions.insert(name); }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Second pass: propagate — functions that call StateT/ReaderT functions
+        // are themselves StateT/ReaderT functions.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for bind in bindings {
+                match bind {
+                    Bind::NonRec(var, expr) => {
+                        let name = var.name.as_str().to_string();
+                        if !self.state_t_functions.contains(&name)
+                            && !self.reader_t_functions.contains(&name)
+                        {
+                            if let Some(ctx) = self.detect_monad_context_for_calls(expr) {
+                                match ctx {
+                                    MonadContext::StateT => {
+                                        self.state_t_functions.insert(name);
+                                        changed = true;
+                                    }
+                                    MonadContext::ReaderT => {
+                                        self.reader_t_functions.insert(name);
+                                        changed = true;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    Bind::Rec(pairs) => {
+                        for (var, expr) in pairs {
+                            let name = var.name.as_str().to_string();
+                            if !self.state_t_functions.contains(&name)
+                                && !self.reader_t_functions.contains(&name)
+                            {
+                                if let Some(ctx) = self.detect_monad_context_for_calls(expr) {
+                                    match ctx {
+                                        MonadContext::StateT => {
+                                            self.state_t_functions.insert(name);
+                                            changed = true;
+                                        }
+                                        MonadContext::ReaderT => {
+                                            self.reader_t_functions.insert(name);
+                                            changed = true;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Detect if an expression calls any known StateT/ReaderT function.
+    fn detect_monad_context_for_calls(&self, expr: &Expr) -> Option<MonadContext> {
+        match expr {
+            Expr::Var(v, _) => {
+                let name = v.name.as_str();
+                if self.state_t_functions.contains(name) {
+                    Some(MonadContext::StateT)
+                } else if self.reader_t_functions.contains(name) {
+                    Some(MonadContext::ReaderT)
+                } else {
+                    None
+                }
+            }
+            Expr::App(func, arg, _) => {
+                self.detect_monad_context_for_calls(func)
+                    .or_else(|| self.detect_monad_context_for_calls(arg))
+            }
+            Expr::Lam(_, body, _) => self.detect_monad_context_for_calls(body),
+            Expr::Let(bind, body, _) => {
+                let in_bind = match bind.as_ref() {
+                    Bind::NonRec(_, e) => self.detect_monad_context_for_calls(e),
+                    Bind::Rec(bindings) => bindings
+                        .iter()
+                        .find_map(|(_, e)| self.detect_monad_context_for_calls(e)),
+                };
+                in_bind.or_else(|| self.detect_monad_context_for_calls(body))
+            }
+            Expr::Case(scrut, alts, _, _) => {
+                self.detect_monad_context_for_calls(scrut).or_else(|| {
+                    alts.iter()
+                        .find_map(|alt| self.detect_monad_context_for_calls(&alt.rhs))
+                })
+            }
+            Expr::TyApp(e, _, _) => self.detect_monad_context_for_calls(e),
+            _ => None,
+        }
     }
 
     /// Collect constructor metadata from a binding's expression.
@@ -16569,8 +16756,27 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let entry = self.llvm_context().append_basic_block(fn_val, "entry");
         self.builder().position_at_end(entry);
 
+        // Detect if this function body uses StateT/ReaderT operations.
+        // If so, push the appropriate monad context so that >>= and >>
+        // dispatch correctly for user-defined helper functions, and record
+        // this function as a StateT/ReaderT function so callers can detect it.
+        let monad_ctx = self.detect_monad_context_for_body(expr);
+        if let Some(ctx) = monad_ctx {
+            let fn_name = var.name.as_str().to_string();
+            match ctx {
+                MonadContext::StateT => { self.state_t_functions.insert(fn_name); }
+                MonadContext::ReaderT => { self.reader_t_functions.insert(fn_name); }
+                _ => {}
+            }
+            self.push_monad_context(ctx);
+        }
+
         // Lower the function body, handling lambda parameters
         let result = self.lower_function_body(fn_val, expr)?;
+
+        if monad_ctx.is_some() {
+            self.pop_monad_context();
+        }
 
         // Check if the current block already has a terminator (e.g., from `error` or `unreachable`)
         // If so, don't add another terminator

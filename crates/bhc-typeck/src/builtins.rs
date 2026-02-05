@@ -3691,6 +3691,9 @@ impl Builtins {
 
         // Register transformer types and operations at fixed DefIds (10000+)
         self.register_transformer_ops(env);
+
+        // Register MTL typeclasses and instances for cross-transformer operations
+        self.register_mtl_classes(env);
     }
 
     /// Register monad transformer types and operations.
@@ -4537,6 +4540,577 @@ impl Builtins {
             Symbol::intern("MkDynTensor"),
             mk_dyn_tensor_scheme,
         );
+    }
+
+    /// Register MTL-style typeclasses and instances for cross-transformer operations.
+    ///
+    /// This enables code like:
+    /// ```haskell
+    /// comp :: StateT Int (ReaderT String IO) Int
+    /// comp = do
+    ///     s <- get      -- MonadState operation (direct)
+    ///     r <- ask      -- MonadReader operation (needs lifted instance)
+    ///     return (s + length r)
+    /// ```
+    ///
+    /// Registered typeclasses:
+    /// - `MonadReader r m | m -> r` with methods: ask, asks, local
+    /// - `MonadState s m | m -> s` with methods: get, put, modify, gets
+    /// - `MonadError e m | m -> e` with methods: throwError, catchError
+    /// - `MonadWriter w m | m -> w` with method: tell
+    ///
+    /// Also registers direct instances (e.g., `MonadReader r (ReaderT r m)`) and
+    /// lifted instances (e.g., `MonadReader r m => MonadReader r (StateT s m)`).
+    pub fn register_mtl_classes(&self, env: &mut TypeEnv) {
+        use crate::env::{ClassInfo, FunDep, InstanceInfo};
+
+        // Type variables
+        let a = TyVar::new_star(BUILTIN_TYVAR_A);
+        let r = TyVar::new_star(BUILTIN_TYVAR_R);
+        let s = TyVar::new_star(BUILTIN_TYVAR_S);
+        let e = TyVar::new_star(BUILTIN_TYVAR_E);
+        let w = TyVar::new_star(BUILTIN_TYVAR_W);
+        let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+        let m = TyVar::new(BUILTIN_TYVAR_M, m_kind.clone());
+
+        // Type constructor symbols
+        let reader_t_sym = Symbol::intern("ReaderT");
+        let state_t_sym = Symbol::intern("StateT");
+        let except_t_sym = Symbol::intern("ExceptT");
+        let writer_t_sym = Symbol::intern("WriterT");
+
+        // Class symbols
+        let monad_reader_sym = Symbol::intern("MonadReader");
+        let monad_state_sym = Symbol::intern("MonadState");
+        let monad_error_sym = Symbol::intern("MonadError");
+        let monad_writer_sym = Symbol::intern("MonadWriter");
+        let monad_sym = Symbol::intern("Monad");
+        let monoid_sym = Symbol::intern("Monoid");
+
+        // Helper to build m a
+        let ma = |m_var: &TyVar, a_var: &TyVar| -> Ty {
+            Ty::App(
+                Box::new(Ty::Var(m_var.clone())),
+                Box::new(Ty::Var(a_var.clone())),
+            )
+        };
+
+        // Helper to build transformer types: T x m a
+        let transformer_type =
+            |con_name: Symbol, x: &TyVar, m_var: &TyVar, a_var: &TyVar| -> Ty {
+                let con = TyCon::new(
+                    con_name,
+                    Kind::Arrow(
+                        Box::new(Kind::Star),
+                        Box::new(Kind::Arrow(Box::new(m_kind.clone()), Box::new(m_kind.clone()))),
+                    ),
+                );
+                Ty::App(
+                    Box::new(Ty::App(
+                        Box::new(Ty::App(
+                            Box::new(Ty::Con(con)),
+                            Box::new(Ty::Var(x.clone())),
+                        )),
+                        Box::new(Ty::Var(m_var.clone())),
+                    )),
+                    Box::new(Ty::Var(a_var.clone())),
+                )
+            };
+
+        // Helper to build just the transformer monad: T x m (without the final type parameter)
+        let transformer_monad = |con_name: Symbol, x: &TyVar, m_var: &TyVar| -> Ty {
+            let con = TyCon::new(
+                con_name,
+                Kind::Arrow(
+                    Box::new(Kind::Star),
+                    Box::new(Kind::Arrow(Box::new(m_kind.clone()), Box::new(m_kind.clone()))),
+                ),
+            );
+            Ty::App(
+                Box::new(Ty::App(
+                    Box::new(Ty::Con(con)),
+                    Box::new(Ty::Var(x.clone())),
+                )),
+                Box::new(Ty::Var(m_var.clone())),
+            )
+        };
+
+        // =================================================================
+        // MonadReader r m | m -> r
+        // Methods: ask :: m r, asks :: (r -> a) -> m a, local :: (r -> r) -> m a -> m a
+        // =================================================================
+        let monad_reader_class = ClassInfo {
+            name: monad_reader_sym,
+            params: vec![r.clone(), m.clone()],
+            fundeps: vec![FunDep {
+                from: vec![1], // m
+                to: vec![0],   // r
+            }],
+            supers: vec![monad_sym],
+            methods: {
+                let mut methods = rustc_hash::FxHashMap::default();
+                // ask :: MonadReader r m => m r
+                methods.insert(
+                    Symbol::intern("ask"),
+                    Scheme::qualified(
+                        vec![r.clone(), m.clone()],
+                        vec![Constraint::new_multi(
+                            monad_reader_sym,
+                            vec![Ty::Var(r.clone()), Ty::Var(m.clone())],
+                            Span::default(),
+                        )],
+                        ma(&m, &r),
+                    ),
+                );
+                // asks :: MonadReader r m => (r -> a) -> m a
+                methods.insert(
+                    Symbol::intern("asks"),
+                    Scheme::qualified(
+                        vec![r.clone(), m.clone(), a.clone()],
+                        vec![Constraint::new_multi(
+                            monad_reader_sym,
+                            vec![Ty::Var(r.clone()), Ty::Var(m.clone())],
+                            Span::default(),
+                        )],
+                        Ty::fun(
+                            Ty::fun(Ty::Var(r.clone()), Ty::Var(a.clone())),
+                            ma(&m, &a),
+                        ),
+                    ),
+                );
+                // local :: MonadReader r m => (r -> r) -> m a -> m a
+                methods.insert(
+                    Symbol::intern("local"),
+                    Scheme::qualified(
+                        vec![r.clone(), m.clone(), a.clone()],
+                        vec![Constraint::new_multi(
+                            monad_reader_sym,
+                            vec![Ty::Var(r.clone()), Ty::Var(m.clone())],
+                            Span::default(),
+                        )],
+                        Ty::fun(
+                            Ty::fun(Ty::Var(r.clone()), Ty::Var(r.clone())),
+                            Ty::fun(ma(&m, &a), ma(&m, &a)),
+                        ),
+                    ),
+                );
+                methods
+            },
+            assoc_types: vec![],
+        };
+        // Register methods by name AND by DefId to override the transformer-specific types.
+        // This ensures that when code like `ask` is resolved to DefId 10029, the MTL-constrained
+        // type is used instead of the naked transformer type.
+        // DefIds: ask=10029, asks=10030, local=10031
+        for (name, scheme) in &monad_reader_class.methods {
+            let def_id = match name.as_str() {
+                "ask" => DefId::new(10029),
+                "asks" => DefId::new(10030),
+                "local" => DefId::new(10031),
+                _ => continue,
+            };
+            env.register_value(def_id, *name, scheme.clone());
+        }
+        env.register_class(monad_reader_class);
+
+        // =================================================================
+        // MonadState s m | m -> s
+        // Methods: get :: m s, put :: s -> m (), modify :: (s -> s) -> m (), gets :: (s -> a) -> m a
+        // =================================================================
+        let monad_state_class = ClassInfo {
+            name: monad_state_sym,
+            params: vec![s.clone(), m.clone()],
+            fundeps: vec![FunDep {
+                from: vec![1], // m
+                to: vec![0],   // s
+            }],
+            supers: vec![monad_sym],
+            methods: {
+                let mut methods = rustc_hash::FxHashMap::default();
+                // get :: MonadState s m => m s
+                methods.insert(
+                    Symbol::intern("get"),
+                    Scheme::qualified(
+                        vec![s.clone(), m.clone()],
+                        vec![Constraint::new_multi(
+                            monad_state_sym,
+                            vec![Ty::Var(s.clone()), Ty::Var(m.clone())],
+                            Span::default(),
+                        )],
+                        ma(&m, &s),
+                    ),
+                );
+                // put :: MonadState s m => s -> m ()
+                methods.insert(
+                    Symbol::intern("put"),
+                    Scheme::qualified(
+                        vec![s.clone(), m.clone()],
+                        vec![Constraint::new_multi(
+                            monad_state_sym,
+                            vec![Ty::Var(s.clone()), Ty::Var(m.clone())],
+                            Span::default(),
+                        )],
+                        Ty::fun(Ty::Var(s.clone()), Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::unit()))),
+                    ),
+                );
+                // modify :: MonadState s m => (s -> s) -> m ()
+                methods.insert(
+                    Symbol::intern("modify"),
+                    Scheme::qualified(
+                        vec![s.clone(), m.clone()],
+                        vec![Constraint::new_multi(
+                            monad_state_sym,
+                            vec![Ty::Var(s.clone()), Ty::Var(m.clone())],
+                            Span::default(),
+                        )],
+                        Ty::fun(
+                            Ty::fun(Ty::Var(s.clone()), Ty::Var(s.clone())),
+                            Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::unit())),
+                        ),
+                    ),
+                );
+                // gets :: MonadState s m => (s -> a) -> m a
+                methods.insert(
+                    Symbol::intern("gets"),
+                    Scheme::qualified(
+                        vec![s.clone(), m.clone(), a.clone()],
+                        vec![Constraint::new_multi(
+                            monad_state_sym,
+                            vec![Ty::Var(s.clone()), Ty::Var(m.clone())],
+                            Span::default(),
+                        )],
+                        Ty::fun(
+                            Ty::fun(Ty::Var(s.clone()), Ty::Var(a.clone())),
+                            ma(&m, &a),
+                        ),
+                    ),
+                );
+                methods
+            },
+            assoc_types: vec![],
+        };
+        // Register methods by name AND by DefId to override the transformer-specific types.
+        // DefIds: get=10049, put=10050, modify=10051, gets=10053
+        for (name, scheme) in &monad_state_class.methods {
+            let def_id = match name.as_str() {
+                "get" => DefId::new(10049),
+                "put" => DefId::new(10050),
+                "modify" => DefId::new(10051),
+                "gets" => DefId::new(10053),
+                _ => continue,
+            };
+            env.register_value(def_id, *name, scheme.clone());
+        }
+        env.register_class(monad_state_class);
+
+        // =================================================================
+        // MonadError e m | m -> e
+        // Methods: throwError :: e -> m a, catchError :: m a -> (e -> m a) -> m a
+        // =================================================================
+        let monad_error_class = ClassInfo {
+            name: monad_error_sym,
+            params: vec![e.clone(), m.clone()],
+            fundeps: vec![FunDep {
+                from: vec![1], // m
+                to: vec![0],   // e
+            }],
+            supers: vec![monad_sym],
+            methods: {
+                let mut methods = rustc_hash::FxHashMap::default();
+                // throwError :: MonadError e m => e -> m a
+                methods.insert(
+                    Symbol::intern("throwError"),
+                    Scheme::qualified(
+                        vec![e.clone(), m.clone(), a.clone()],
+                        vec![Constraint::new_multi(
+                            monad_error_sym,
+                            vec![Ty::Var(e.clone()), Ty::Var(m.clone())],
+                            Span::default(),
+                        )],
+                        Ty::fun(Ty::Var(e.clone()), ma(&m, &a)),
+                    ),
+                );
+                // catchError :: MonadError e m => m a -> (e -> m a) -> m a
+                methods.insert(
+                    Symbol::intern("catchError"),
+                    Scheme::qualified(
+                        vec![e.clone(), m.clone(), a.clone()],
+                        vec![Constraint::new_multi(
+                            monad_error_sym,
+                            vec![Ty::Var(e.clone()), Ty::Var(m.clone())],
+                            Span::default(),
+                        )],
+                        Ty::fun(
+                            ma(&m, &a),
+                            Ty::fun(Ty::fun(Ty::Var(e.clone()), ma(&m, &a)), ma(&m, &a)),
+                        ),
+                    ),
+                );
+                methods
+            },
+            assoc_types: vec![],
+        };
+        // Register methods by name AND by DefId to override the transformer-specific types.
+        // DefIds: throwError=10071, catchError=10072
+        for (name, scheme) in &monad_error_class.methods {
+            let def_id = match name.as_str() {
+                "throwError" => DefId::new(10071),
+                "catchError" => DefId::new(10072),
+                _ => continue,
+            };
+            env.register_value(def_id, *name, scheme.clone());
+        }
+        env.register_class(monad_error_class);
+
+        // =================================================================
+        // MonadWriter w m | m -> w
+        // Methods: tell :: w -> m ()
+        // =================================================================
+        let monad_writer_class = ClassInfo {
+            name: monad_writer_sym,
+            params: vec![w.clone(), m.clone()],
+            fundeps: vec![FunDep {
+                from: vec![1], // m
+                to: vec![0],   // w
+            }],
+            supers: vec![monad_sym, monoid_sym],
+            methods: {
+                let mut methods = rustc_hash::FxHashMap::default();
+                // tell :: MonadWriter w m => w -> m ()
+                methods.insert(
+                    Symbol::intern("tell"),
+                    Scheme::qualified(
+                        vec![w.clone(), m.clone()],
+                        vec![Constraint::new_multi(
+                            monad_writer_sym,
+                            vec![Ty::Var(w.clone()), Ty::Var(m.clone())],
+                            Span::default(),
+                        )],
+                        Ty::fun(Ty::Var(w.clone()), Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::unit()))),
+                    ),
+                );
+                methods
+            },
+            assoc_types: vec![],
+        };
+        // Register methods by name AND by DefId to override the transformer-specific types.
+        // DefIds: tell=10082
+        for (name, scheme) in &monad_writer_class.methods {
+            let def_id = match name.as_str() {
+                "tell" => DefId::new(10082),
+                _ => continue,
+            };
+            env.register_value(def_id, *name, scheme.clone());
+        }
+        env.register_class(monad_writer_class);
+
+        // =================================================================
+        // Direct Instances
+        // =================================================================
+
+        // instance Monad m => MonadReader r (ReaderT r m)
+        let reader_t_r_m = transformer_monad(reader_t_sym, &r, &m);
+        env.register_instance(InstanceInfo {
+            class: monad_reader_sym,
+            types: vec![Ty::Var(r.clone()), reader_t_r_m.clone()],
+            context: vec![Constraint::new(monad_sym, Ty::Var(m.clone()), Span::default())],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // instance Monad m => MonadState s (StateT s m)
+        let state_t_s_m = transformer_monad(state_t_sym, &s, &m);
+        env.register_instance(InstanceInfo {
+            class: monad_state_sym,
+            types: vec![Ty::Var(s.clone()), state_t_s_m.clone()],
+            context: vec![Constraint::new(monad_sym, Ty::Var(m.clone()), Span::default())],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // instance Monad m => MonadError e (ExceptT e m)
+        let except_t_e_m = transformer_monad(except_t_sym, &e, &m);
+        env.register_instance(InstanceInfo {
+            class: monad_error_sym,
+            types: vec![Ty::Var(e.clone()), except_t_e_m.clone()],
+            context: vec![Constraint::new(monad_sym, Ty::Var(m.clone()), Span::default())],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // instance (Monoid w, Monad m) => MonadWriter w (WriterT w m)
+        let writer_t_w_m = transformer_monad(writer_t_sym, &w, &m);
+        env.register_instance(InstanceInfo {
+            class: monad_writer_sym,
+            types: vec![Ty::Var(w.clone()), writer_t_w_m.clone()],
+            context: vec![
+                Constraint::new(monoid_sym, Ty::Var(w.clone()), Span::default()),
+                Constraint::new(monad_sym, Ty::Var(m.clone()), Span::default()),
+            ],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // =================================================================
+        // Lifted Instances (cross-transformer operations)
+        // =================================================================
+
+        // instance MonadReader r m => MonadReader r (StateT s m)
+        env.register_instance(InstanceInfo {
+            class: monad_reader_sym,
+            types: vec![Ty::Var(r.clone()), state_t_s_m.clone()],
+            context: vec![Constraint::new_multi(
+                monad_reader_sym,
+                vec![Ty::Var(r.clone()), Ty::Var(m.clone())],
+                Span::default(),
+            )],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // instance MonadState s m => MonadState s (ReaderT r m)
+        env.register_instance(InstanceInfo {
+            class: monad_state_sym,
+            types: vec![Ty::Var(s.clone()), reader_t_r_m.clone()],
+            context: vec![Constraint::new_multi(
+                monad_state_sym,
+                vec![Ty::Var(s.clone()), Ty::Var(m.clone())],
+                Span::default(),
+            )],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // instance MonadReader r m => MonadReader r (ExceptT e m)
+        env.register_instance(InstanceInfo {
+            class: monad_reader_sym,
+            types: vec![Ty::Var(r.clone()), except_t_e_m.clone()],
+            context: vec![Constraint::new_multi(
+                monad_reader_sym,
+                vec![Ty::Var(r.clone()), Ty::Var(m.clone())],
+                Span::default(),
+            )],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // instance MonadState s m => MonadState s (ExceptT e m)
+        env.register_instance(InstanceInfo {
+            class: monad_state_sym,
+            types: vec![Ty::Var(s.clone()), except_t_e_m.clone()],
+            context: vec![Constraint::new_multi(
+                monad_state_sym,
+                vec![Ty::Var(s.clone()), Ty::Var(m.clone())],
+                Span::default(),
+            )],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // instance MonadError e m => MonadError e (StateT s m)
+        env.register_instance(InstanceInfo {
+            class: monad_error_sym,
+            types: vec![Ty::Var(e.clone()), state_t_s_m.clone()],
+            context: vec![Constraint::new_multi(
+                monad_error_sym,
+                vec![Ty::Var(e.clone()), Ty::Var(m.clone())],
+                Span::default(),
+            )],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // instance MonadError e m => MonadError e (ReaderT r m)
+        env.register_instance(InstanceInfo {
+            class: monad_error_sym,
+            types: vec![Ty::Var(e.clone()), reader_t_r_m.clone()],
+            context: vec![Constraint::new_multi(
+                monad_error_sym,
+                vec![Ty::Var(e.clone()), Ty::Var(m.clone())],
+                Span::default(),
+            )],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // instance MonadReader r m => MonadReader r (WriterT w m)
+        env.register_instance(InstanceInfo {
+            class: monad_reader_sym,
+            types: vec![Ty::Var(r.clone()), writer_t_w_m.clone()],
+            context: vec![Constraint::new_multi(
+                monad_reader_sym,
+                vec![Ty::Var(r.clone()), Ty::Var(m.clone())],
+                Span::default(),
+            )],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // instance MonadState s m => MonadState s (WriterT w m)
+        env.register_instance(InstanceInfo {
+            class: monad_state_sym,
+            types: vec![Ty::Var(s.clone()), writer_t_w_m.clone()],
+            context: vec![Constraint::new_multi(
+                monad_state_sym,
+                vec![Ty::Var(s.clone()), Ty::Var(m.clone())],
+                Span::default(),
+            )],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // instance MonadError e m => MonadError e (WriterT w m)
+        env.register_instance(InstanceInfo {
+            class: monad_error_sym,
+            types: vec![Ty::Var(e.clone()), writer_t_w_m.clone()],
+            context: vec![Constraint::new_multi(
+                monad_error_sym,
+                vec![Ty::Var(e.clone()), Ty::Var(m.clone())],
+                Span::default(),
+            )],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // instance MonadWriter w m => MonadWriter w (StateT s m)
+        env.register_instance(InstanceInfo {
+            class: monad_writer_sym,
+            types: vec![Ty::Var(w.clone()), state_t_s_m],
+            context: vec![Constraint::new_multi(
+                monad_writer_sym,
+                vec![Ty::Var(w.clone()), Ty::Var(m.clone())],
+                Span::default(),
+            )],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // instance MonadWriter w m => MonadWriter w (ReaderT r m)
+        env.register_instance(InstanceInfo {
+            class: monad_writer_sym,
+            types: vec![Ty::Var(w.clone()), reader_t_r_m],
+            context: vec![Constraint::new_multi(
+                monad_writer_sym,
+                vec![Ty::Var(w.clone()), Ty::Var(m.clone())],
+                Span::default(),
+            )],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
+        // instance MonadWriter w m => MonadWriter w (ExceptT e m)
+        env.register_instance(InstanceInfo {
+            class: monad_writer_sym,
+            types: vec![Ty::Var(w.clone()), except_t_e_m],
+            context: vec![Constraint::new_multi(
+                monad_writer_sym,
+                vec![Ty::Var(w.clone()), Ty::Var(m.clone())],
+                Span::default(),
+            )],
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_type_impls: vec![],
+        });
+
     }
 }
 

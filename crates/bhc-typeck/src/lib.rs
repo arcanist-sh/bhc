@@ -176,6 +176,7 @@ pub fn type_check_module_with_defs(
                     let info = env::InstanceInfo {
                         class: *class_name,
                         types: vec![instance_type],
+                        context: vec![],
                         methods: rustc_hash::FxHashMap::default(),
                         assoc_type_impls: vec![],
                     };
@@ -189,6 +190,7 @@ pub fn type_check_module_with_defs(
                     let info = env::InstanceInfo {
                         class: *class_name,
                         types: vec![instance_type],
+                        context: vec![],
                         methods: rustc_hash::FxHashMap::default(),
                         assoc_type_impls: vec![],
                     };

@@ -302,6 +302,62 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Extract the transformer stack from a type signature.
+    ///
+    /// For a type like `StateT Int (ReaderT String IO) Int`, this returns
+    /// `[StateT, ReaderT, IO]` from outermost to innermost.
+    ///
+    /// For nested transformers, we examine the monad parameter (the second-to-last
+    /// type argument) recursively.
+    ///
+    /// NOTE: Currently unused because the codegen doesn't yet support nested
+    /// transformer stacks. When nested transformer support is added, this will be
+    /// needed to properly set up the transformer stack for cross-transformer operations.
+    #[allow(dead_code)]
+    fn extract_transformer_stack_from_type(&self, ty: &Ty) -> Vec<TransformerLayer> {
+        let mut stack = Vec::new();
+        self.extract_transformer_stack_recursive(ty, &mut stack);
+        stack
+    }
+
+    /// Helper for recursively building the transformer stack from a type.
+    #[allow(dead_code)]
+    fn extract_transformer_stack_recursive(&self, ty: &Ty, stack: &mut Vec<TransformerLayer>) {
+        match ty {
+            // Check for IO at the base
+            Ty::Con(tycon) if tycon.name.as_str() == "IO" => {
+                stack.push(TransformerLayer::IO);
+            }
+
+            // Check for transformer application: T x m a where T is StateT/ReaderT/etc.
+            // The structure is: App(App(App(Con(T), x), m), a)
+            Ty::App(inner, _result_type) => {
+                // Go inside one application to get: App(App(Con(T), x), m)
+                if let Ty::App(inner2, monad_arg) = inner.as_ref() {
+                    // Now inner2 is: App(Con(T), x)
+                    if let Ty::App(con_or_app, _param) = inner2.as_ref() {
+                        // con_or_app should be Con(T)
+                        if let Ty::Con(tycon) = con_or_app.as_ref() {
+                            let layer = match tycon.name.as_str() {
+                                "StateT" => Some(TransformerLayer::StateT),
+                                "ReaderT" => Some(TransformerLayer::ReaderT),
+                                "ExceptT" => Some(TransformerLayer::ExceptT),
+                                "WriterT" => Some(TransformerLayer::WriterT),
+                                _ => None,
+                            };
+                            if let Some(l) = layer {
+                                stack.push(l);
+                                // Recursively extract from the monad argument
+                                self.extract_transformer_stack_recursive(monad_arg, stack);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Check whether an expression tree contains StateT/ReaderT/ExceptT/WriterT operations.
     /// Used to determine the transformer layer for top-level function definitions
     /// that are used as transformer computations.
@@ -18716,6 +18772,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // If so, push the appropriate transformer layer so that >>= and >>
         // dispatch correctly for user-defined helper functions, and record
         // this function as a StateT/ReaderT function so callers can detect it.
+        //
+        // Note: We only push the OUTERMOST transformer layer, not the full stack.
+        // Cross-transformer operations (e.g., ask inside StateT over ReaderT) are
+        // handled by the MTL typeclass system at the type level, but the codegen
+        // for nested transformers is not yet fully supported.
         let transformer_layer = self.detect_transformer_for_body(expr);
         if let Some(layer) = transformer_layer {
             let fn_name = var.name.as_str().to_string();

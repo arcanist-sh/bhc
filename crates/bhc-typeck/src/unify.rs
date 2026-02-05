@@ -1042,6 +1042,7 @@ mod tests {
         let instance_info = InstanceInfo {
             class: collection,
             types: vec![list_a.clone()],
+            context: vec![],
             methods: FxHashMap::default(),
             assoc_type_impls: vec![AssocTypeImpl {
                 name: elem,

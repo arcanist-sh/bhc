@@ -11,7 +11,7 @@
 
 use bhc_hir::DefId;
 use bhc_intern::Symbol;
-use bhc_types::{Scheme, Ty, TyCon, TyVar};
+use bhc_types::{Constraint, Scheme, Ty, TyCon, TyVar};
 use rustc_hash::FxHashMap;
 
 /// Information about a data constructor.
@@ -85,6 +85,9 @@ pub struct InstanceInfo {
     pub class: Symbol,
     /// The instance types (e.g., `Int` for `instance Show Int`).
     pub types: Vec<Ty>,
+    /// Instance context constraints (e.g., `Monad m` in `instance Monad m => MonadReader r (ReaderT r m)`).
+    /// These constraints must be satisfied for the instance to apply.
+    pub context: Vec<Constraint>,
     /// Method implementations (name -> DefId of the implementation).
     pub methods: FxHashMap<Symbol, DefId>,
     /// Associated type implementations.
@@ -693,6 +696,7 @@ mod tests {
         let instance_info = InstanceInfo {
             class: collection,
             types: vec![list_a.clone()],
+            context: vec![],
             methods: FxHashMap::default(),
             assoc_type_impls: vec![AssocTypeImpl {
                 name: elem,
@@ -834,6 +838,7 @@ mod tests {
         let instance_info = InstanceInfo {
             class: wrapper,
             types: vec![int_ty.clone()],
+            context: vec![],
             methods: FxHashMap::default(),
             // No associated type implementation - should use default
             assoc_type_impls: vec![],
@@ -889,6 +894,7 @@ mod tests {
         let instance_info = InstanceInfo {
             class: wrapper,
             types: vec![maybe_a.clone()],
+            context: vec![],
             methods: FxHashMap::default(),
             // Explicit implementation overrides default
             assoc_type_impls: vec![AssocTypeImpl {
@@ -952,6 +958,7 @@ mod tests {
         let instance_info = InstanceInfo {
             class: container,
             types: vec![list_a.clone()],
+            context: vec![],
             methods: FxHashMap::default(),
             // No implementation - uses default
             assoc_type_impls: vec![],

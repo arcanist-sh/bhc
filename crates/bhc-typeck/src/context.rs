@@ -238,23 +238,25 @@ impl TyCtxt {
                 continue;
             }
 
-            let ty = self.subst.apply(&constraint.args[0]);
+            // Apply substitution to all constraint arguments
+            let args: Vec<Ty> = constraint.args.iter().map(|t| self.subst.apply(t)).collect();
 
-            // Check if we have an instance
-            if self.env.resolve_instance(constraint.class, &ty).is_some() {
-                // Constraint satisfied by instance
+            // Try to solve the constraint
+            if self.try_solve_constraint_recursive(&constraint.class, &args, 0) {
                 continue;
             }
 
-            // Check for built-in numeric types that satisfy common classes
-            if self.is_builtin_instance(constraint.class, &ty) {
+            // Check for built-in numeric types that satisfy common classes (single-arg only)
+            if args.len() == 1 && self.is_builtin_instance(constraint.class, &args[0]) {
                 continue;
             }
 
-            // If it's a type variable, try defaulting
-            if let Ty::Var(ref v) = ty {
-                if self.try_default_constraint(constraint.class, v) {
-                    continue;
+            // If all args are type variables, try defaulting (single-arg only)
+            if args.len() == 1 {
+                if let Ty::Var(ref v) = args[0] {
+                    if self.try_default_constraint(constraint.class, v) {
+                        continue;
+                    }
                 }
             }
 
@@ -266,6 +268,110 @@ impl TyCtxt {
         for (constraint, _needs_error) in results {
             let ty = self.subst.apply(&constraint.args[0]);
             diagnostics::emit_no_instance(self, constraint.class, &ty, constraint.span);
+        }
+    }
+
+    /// Try to solve a constraint recursively, checking instance contexts.
+    ///
+    /// For multi-parameter typeclasses like `MonadReader r m`, this resolves
+    /// instances and recursively checks their context constraints.
+    ///
+    /// For example, to solve `MonadReader String (StateT Int (ReaderT String IO))`:
+    /// 1. Find instance `MonadReader r m => MonadReader r (StateT s m)`
+    /// 2. Match: r = String, s = Int, m = ReaderT String IO
+    /// 3. Recursively solve context: `MonadReader String (ReaderT String IO)`
+    /// 4. Find direct instance `Monad m => MonadReader r (ReaderT r m)`
+    /// 5. Match: r = String, m = IO
+    /// 6. Recursively solve context: `Monad IO` (builtin - satisfied)
+    fn try_solve_constraint_recursive(
+        &self,
+        class: &Symbol,
+        args: &[Ty],
+        depth: usize,
+    ) -> bool {
+        // Prevent infinite recursion
+        if depth > 50 {
+            return false;
+        }
+
+        // Handle single-argument constraints with existing resolve_instance
+        if args.len() == 1 {
+            if self.env.resolve_instance(*class, &args[0]).is_some() {
+                return true;
+            }
+            // Also check built-in instances
+            if self.is_builtin_instance(*class, &args[0]) {
+                return true;
+            }
+        }
+
+        // Check for built-in multi-argument instances (IO is always a Monad)
+        if self.is_builtin_instance_multi(*class, args) {
+            return true;
+        }
+
+        // Try to resolve with multi-arg instance matching
+        if let Some((inst, subst)) = self.env.resolve_instance_multi(*class, args) {
+            // Found a matching instance. Now check the instance context.
+            // Each context constraint must also be satisfiable.
+            for ctx in &inst.context {
+                let specialized_args: Vec<Ty> = ctx.args.iter().map(|t| subst.apply(t)).collect();
+                if !self.try_solve_constraint_recursive(&ctx.class, &specialized_args, depth + 1) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        false
+    }
+
+    /// Check if a multi-argument constraint has a built-in instance.
+    fn is_builtin_instance_multi(&self, class: Symbol, args: &[Ty]) -> bool {
+        let class_name = class.as_str();
+
+        match class_name {
+            // Monad IO is always satisfied
+            "Monad" if args.len() == 1 => {
+                if let Ty::Con(tycon) = &args[0] {
+                    if tycon.name.as_str() == "IO" {
+                        return true;
+                    }
+                }
+                // Also check nested transformer applications that bottom out in IO
+                self.monad_bottoms_out_in_io(&args[0])
+            }
+            // Monoid instances
+            "Monoid" if args.len() == 1 => {
+                // [a] is a Monoid
+                if let Ty::List(_) = &args[0] {
+                    return true;
+                }
+                // String is a Monoid
+                if let Ty::Con(tycon) = &args[0] {
+                    if tycon.name.as_str() == "String" {
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if a monad type bottoms out in IO (e.g., StateT s IO, ReaderT r (StateT s IO), etc.)
+    fn monad_bottoms_out_in_io(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Con(tycon) if tycon.name.as_str() == "IO" => true,
+            Ty::App(f, _) => {
+                // Check if this is a transformer application T x m
+                // We need to recursively check m
+                match f.as_ref() {
+                    Ty::App(_, inner_m) => self.monad_bottoms_out_in_io(inner_m),
+                    _ => false,
+                }
+            }
+            _ => false,
         }
     }
 
@@ -1827,6 +1933,7 @@ impl TyCtxt {
         let info = InstanceInfo {
             class: instance.class,
             types: instance.types.clone(),
+            context: vec![], // TODO: Parse instance context from HIR
             methods,
             assoc_type_impls,
         };

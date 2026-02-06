@@ -1,0 +1,10 @@
+caught file error
+resource acquired
+using resource
+resource released
+caught throwIO
+action succeeded
+finally cleanup
+onException handler
+outer catch
+all tests passed

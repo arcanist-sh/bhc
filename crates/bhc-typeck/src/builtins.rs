@@ -418,10 +418,14 @@ impl Builtins {
     /// - Alternative: <|>
     /// - And many more...
     pub fn register_primitive_ops(&self, env: &mut TypeEnv) {
-        // Start after types (9) and constructors (11: 6 basic + 3 list/unit + 2 tuples) = 20
+        // Start after types (24) and constructors (37) = 61
         // Order MUST match bhc_lower::context::define_builtins
-        let mut next_id =
-            BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT + BUILTIN_LIST_UNIT_COUNT + BUILTIN_TUPLE_COUNT;
+        let mut next_id = BUILTIN_TYPE_COUNT
+            + BUILTIN_CON_COUNT
+            + BUILTIN_ORDERING_COUNT
+            + BUILTIN_LIST_UNIT_COUNT
+            + BUILTIN_TUPLE_COUNT
+            + BUILTIN_EXTRA_CON_COUNT;
 
         // Type variables for polymorphic types
         let a = TyVar::new_star(BUILTIN_TYVAR_A);
@@ -5157,35 +5161,53 @@ impl Builtins {
 // These MUST match the order in bhc_lower::context::define_builtins!
 //
 // Lowering phase allocates:
-// - Types: Int, Float, Double, Char, Bool, String, IO, Maybe, Either (DefIds 0-8)
-// - Constructors: True, False, Nothing, Just, Left, Right (DefIds 9-14)
-// - Functions: +, -, *, /, ... (DefIds 15+)
+// DefId layout (MUST match bhc-lower/src/context.rs):
+// - Types: Int, Float, Double, Char, Bool, String, IO, Maybe, Either, Ordering,
+//          NonEmpty, ExitCode, IOMode, BufferMode, Endo, Backwards, All, Any,
+//          XdgDirectory, StdStream, TypeRep, SomeException, Permissions, Text (DefIds 0-23)
+// - Constructors: True, False, Nothing, Just, Left, Right, LT, EQ, GT, [], :, (),
+//                 (,), (,,), :|, Backwards, Endo, ExitSuccess, ExitFailure,
+//                 SomeException, ReadMode, WriteMode, AppendMode, ReadWriteMode,
+//                 NoBuffering, LineBuffering, BlockBuffering, XdgData, XdgConfig,
+//                 XdgCache, CreatePipe, Inherit, UseHandle, NoStream, TypeRep,
+//                 All, Any (DefIds 24-60)
+// - Functions: +, -, *, /, ... (DefIds 61+)
 //
-// We skip the type DefIds (0-8) and start constructors at 9.
-const BUILTIN_TYPE_COUNT: usize = 9; // Int, Float, Double, Char, Bool, String, IO, Maybe, Either
+// We skip the type DefIds (0-23) and start constructors at 24.
+const BUILTIN_TYPE_COUNT: usize = 24; // All types registered in context.rs
 
-const BUILTIN_TRUE_ID: usize = BUILTIN_TYPE_COUNT; // 9
-const BUILTIN_FALSE_ID: usize = BUILTIN_TYPE_COUNT + 1; // 10
-const BUILTIN_NOTHING_ID: usize = BUILTIN_TYPE_COUNT + 2; // 11
-const BUILTIN_JUST_ID: usize = BUILTIN_TYPE_COUNT + 3; // 12
-const BUILTIN_LEFT_ID: usize = BUILTIN_TYPE_COUNT + 4; // 13
-const BUILTIN_RIGHT_ID: usize = BUILTIN_TYPE_COUNT + 5; // 14
+const BUILTIN_TRUE_ID: usize = BUILTIN_TYPE_COUNT; // 24
+const BUILTIN_FALSE_ID: usize = BUILTIN_TYPE_COUNT + 1; // 25
+const BUILTIN_NOTHING_ID: usize = BUILTIN_TYPE_COUNT + 2; // 26
+const BUILTIN_JUST_ID: usize = BUILTIN_TYPE_COUNT + 3; // 27
+const BUILTIN_LEFT_ID: usize = BUILTIN_TYPE_COUNT + 4; // 28
+const BUILTIN_RIGHT_ID: usize = BUILTIN_TYPE_COUNT + 5; // 29
 
 const BUILTIN_CON_COUNT: usize = 6; // True, False, Nothing, Just, Left, Right
 
-// List and unit constructors - registered by both lowering and type checker
-const BUILTIN_NIL_ID: usize = BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT; // 15
-const BUILTIN_CONS_ID: usize = BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT + 1; // 16
-const BUILTIN_UNIT_ID: usize = BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT + 2; // 17
+// Ordering constructors
+const BUILTIN_LT_ID: usize = BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT; // 30
+const BUILTIN_EQ_ID: usize = BUILTIN_LT_ID + 1; // 31
+const BUILTIN_GT_ID: usize = BUILTIN_LT_ID + 2; // 32
+const BUILTIN_ORDERING_COUNT: usize = 3; // LT, EQ, GT
 
-// Count of list/unit constructors for calculating operator DefId start
+// List and unit constructors
+const BUILTIN_NIL_ID: usize = BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT + BUILTIN_ORDERING_COUNT; // 33
+const BUILTIN_CONS_ID: usize = BUILTIN_NIL_ID + 1; // 34
+const BUILTIN_UNIT_ID: usize = BUILTIN_NIL_ID + 2; // 35
+
+// Count of list/unit constructors
 const BUILTIN_LIST_UNIT_COUNT: usize = 3; // [], :, ()
 
 // Tuple constructors - after list/unit constructors
-const BUILTIN_PAIR_ID: usize = BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT + BUILTIN_LIST_UNIT_COUNT; // 18
-const BUILTIN_TRIPLE_ID: usize = BUILTIN_PAIR_ID + 1; // 19
+const BUILTIN_PAIR_ID: usize = BUILTIN_NIL_ID + BUILTIN_LIST_UNIT_COUNT; // 36
+const BUILTIN_TRIPLE_ID: usize = BUILTIN_PAIR_ID + 1; // 37
 
 const BUILTIN_TUPLE_COUNT: usize = 2; // (,), (,,)
+
+// Extra constructors after tuples (:|, Backwards, Endo, ExitSuccess, ExitFailure,
+// SomeException, IOMode×4, BufferMode×3, XdgDirectory×3, StdStream×4, TypeRep, All, Any)
+const BUILTIN_EXTRA_CON_COUNT: usize = 23; // All remaining constructors
 
 // M9 Phase 5: Dynamic tensor operations - use reserved range to avoid conflicts
 const BUILTIN_RESERVED_BASE: usize = 0xFFFF_0000;

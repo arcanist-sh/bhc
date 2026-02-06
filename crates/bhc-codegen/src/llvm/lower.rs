@@ -7765,15 +7765,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         action_expr: &Expr,
         cleanup_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let action_val = self
-            .lower_expr(action_expr)?
-            .ok_or_else(|| CodegenError::Internal("finally: action has no value".to_string()))?;
-        let cleanup_val = self
-            .lower_expr(cleanup_expr)?
-            .ok_or_else(|| CodegenError::Internal("finally: cleanup has no value".to_string()))?;
-
-        let action_closure = self.value_to_ptr(action_val)?;
-        let cleanup_closure = self.value_to_ptr(cleanup_val)?;
+        // Wrap action and cleanup as thunks so they're deferred (not eagerly evaluated)
+        let action_closure = self.wrap_io_as_thunk(action_expr)?;
+        let cleanup_closure = self.wrap_io_as_thunk(cleanup_expr)?;
 
         let action_fn = self.extract_closure_fn_ptr(action_closure)?;
         let cleanup_fn = self.extract_closure_fn_ptr(cleanup_closure)?;
@@ -7814,19 +7808,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         action_expr: &Expr,
         handler_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let action_val = self
-            .lower_expr(action_expr)?
-            .ok_or_else(|| {
-                CodegenError::Internal("onException: action has no value".to_string())
-            })?;
-        let handler_val = self
-            .lower_expr(handler_expr)?
-            .ok_or_else(|| {
-                CodegenError::Internal("onException: handler has no value".to_string())
-            })?;
-
-        let action_closure = self.value_to_ptr(action_val)?;
-        let handler_closure = self.value_to_ptr(handler_val)?;
+        // Wrap action and handler as thunks so they're deferred (not eagerly evaluated)
+        let action_closure = self.wrap_io_as_thunk(action_expr)?;
+        let handler_closure = self.wrap_io_as_thunk(handler_expr)?;
 
         let action_fn = self.extract_closure_fn_ptr(action_closure)?;
         let handler_fn = self.extract_closure_fn_ptr(handler_closure)?;

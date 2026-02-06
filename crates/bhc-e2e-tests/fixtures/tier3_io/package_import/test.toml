@@ -1,0 +1,3 @@
+[test]
+# Only run on native backend for now
+backends = ["native"]

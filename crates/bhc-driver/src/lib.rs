@@ -58,7 +58,7 @@ use bhc_codegen::{
 };
 use bhc_core::eval::{Env, EvalError, Evaluator, Value};
 use bhc_core::{Bind, CoreModule, Expr, VarId};
-use bhc_gpu::{codegen::ptx, device::DeviceInfo, GpuResult};
+use bhc_gpu::{codegen::ptx, device::DeviceInfo};
 use bhc_hir::Module as HirModule;
 use bhc_intern::Symbol;
 use bhc_linker::{LinkLibrary, LinkOutputType, LinkerConfig};
@@ -69,6 +69,7 @@ use bhc_loop_ir::{
     LoopId, TargetArch,
 };
 use bhc_lower::{LowerContext, ModuleCache, ModuleExports};
+use bhc_package::hackage::{Hackage, HackageError};
 use bhc_session::{Options, OutputType, Profile, Session, SessionRef};
 use bhc_span::FileId;
 use bhc_target::TargetSpec;
@@ -145,6 +146,10 @@ pub enum CompileError {
     /// Escape analysis failed (Embedded profile).
     #[error("embedded profile: {} allocations escape their defining scope", .0.len())]
     EscapeAnalysisFailed(Vec<bhc_core::escape::EscapingAllocation>),
+
+    /// Package resolution error.
+    #[error("package error: {0}")]
+    PackageError(#[from] HackageError),
 
     /// Other compilation error.
     #[error("{0}")]
@@ -771,6 +776,10 @@ impl Compiler {
             }
         }
 
+        // Resolve Hackage package dependencies and add their source directories
+        let package_paths = self.resolve_hackage_packages()?;
+        search_paths.extend(package_paths);
+
         let config = bhc_lower::LowerConfig {
             include_builtins: true,
             warn_unused: self.session.options.warn_all,
@@ -786,6 +795,52 @@ impl Compiler {
         }
 
         Ok((hir, ctx))
+    }
+
+    /// Resolve Hackage package dependencies and return their source directories.
+    ///
+    /// For each package in `hackage_packages`, this function:
+    /// 1. Downloads the package from Hackage (if not cached)
+    /// 2. Parses the .cabal file to find hs-source-dirs
+    /// 3. Returns the source directories as search paths
+    fn resolve_hackage_packages(&self) -> CompileResult<Vec<Utf8PathBuf>> {
+        if self.session.options.hackage_packages.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let hackage = Hackage::new()?;
+        let mut source_dirs = Vec::new();
+
+        for pkg_spec in &self.session.options.hackage_packages {
+            // Parse "name:version" format
+            let (name, version) = match pkg_spec.split_once(':') {
+                Some((n, v)) => (n, v),
+                None => {
+                    return Err(CompileError::Other(format!(
+                        "Invalid package specification '{}': expected 'name:version' format",
+                        pkg_spec
+                    )));
+                }
+            };
+
+            debug!(package = %name, version = %version, "fetching Hackage package");
+
+            // Fetch the package (downloads if not cached)
+            let pkg = hackage.fetch_package(name, version)?;
+
+            // Get source directories from the package
+            let pkg_source_dirs = pkg.source_dirs();
+            info!(
+                package = %name,
+                version = %version,
+                source_dirs = ?pkg_source_dirs,
+                "resolved Hackage package"
+            );
+
+            source_dirs.extend(pkg_source_dirs);
+        }
+
+        Ok(source_dirs)
     }
 
     /// Type check a HIR module.
@@ -2319,6 +2374,13 @@ impl CompilerBuilder {
     #[must_use]
     pub fn import_path(mut self, path: impl Into<Utf8PathBuf>) -> Self {
         self.options.import_paths.push(path.into());
+        self
+    }
+
+    /// Add a Hackage package dependency (format: "name:version").
+    #[must_use]
+    pub fn hackage_package(mut self, pkg_spec: impl Into<String>) -> Self {
+        self.options.hackage_packages.push(pkg_spec.into());
         self
     }
 

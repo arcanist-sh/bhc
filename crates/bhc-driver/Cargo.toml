@@ -33,6 +33,9 @@ bhc-linker = { workspace = true }
 bhc-wasm = { workspace = true }
 bhc-gpu = { workspace = true }
 
+# Internal crates - package management
+bhc-package = { workspace = true }
+
 # External dependencies
 thiserror = { workspace = true }
 anyhow = { workspace = true }

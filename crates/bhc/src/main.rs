@@ -66,6 +66,14 @@ struct Cli {
     /// Emit format for output (e.g., ptx for GPU, llvm-ir for debugging)
     #[arg(long)]
     emit: Option<String>,
+
+    /// Additional import paths for module search
+    #[arg(short = 'I', long = "import-path", value_name = "DIR")]
+    import_paths: Vec<PathBuf>,
+
+    /// Hackage packages to include (format: "name:version")
+    #[arg(long = "package", value_name = "PKG:VER")]
+    packages: Vec<String>,
 }
 
 /// Compilation profile
@@ -256,6 +264,19 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
             Utf8PathBuf::from_path_buf(output.clone())
                 .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in output path"))?,
         );
+    }
+
+    // Add import paths
+    for path in &cli.import_paths {
+        builder = builder.import_path(
+            Utf8PathBuf::from_path_buf(path.clone())
+                .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in import path"))?,
+        );
+    }
+
+    // Add Hackage packages
+    for pkg in &cli.packages {
+        builder = builder.hackage_package(pkg.clone());
     }
 
     let compiler = builder

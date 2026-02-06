@@ -1,0 +1,4 @@
+7
+42
+30
+package import test passed

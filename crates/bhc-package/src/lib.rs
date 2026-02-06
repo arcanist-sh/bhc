@@ -34,7 +34,9 @@
 
 #![warn(missing_docs)]
 
+pub mod cabal;
 pub mod commands;
+pub mod hackage;
 pub mod lockfile;
 pub mod registry;
 pub mod resolve;

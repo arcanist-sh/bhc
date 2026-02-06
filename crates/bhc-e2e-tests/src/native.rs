@@ -35,6 +35,12 @@ pub fn compile_native(
         }
     }
 
+    // Add import paths
+    for import_path in &test_case.import_paths {
+        cmd.arg("-I");
+        cmd.arg(import_path.to_str().unwrap());
+    }
+
     // Run compiler
     let result = cmd
         .stdout(Stdio::piped())

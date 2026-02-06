@@ -165,6 +165,9 @@ pub struct Options {
     /// Path to the BHC standard library.
     /// Used for implicit Prelude loading and module resolution.
     pub stdlib_path: Option<Utf8PathBuf>,
+    /// Hackage package dependencies as "name:version" pairs.
+    /// Example: `["filepath:1.4.100.0", "directory:1.3.8.0"]`
+    pub hackage_packages: Vec<String>,
 }
 
 impl Default for Options {
@@ -184,6 +187,7 @@ impl Default for Options {
             emit_kernel_report: false,
             dump_ir: IrDumpOptions::default(),
             stdlib_path: None,
+            hackage_packages: Vec::new(),
         }
     }
 }

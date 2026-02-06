@@ -115,6 +115,10 @@ pub struct E2ETestCase {
     /// Timeout in seconds.
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+
+    /// Additional import paths for module search.
+    #[serde(default)]
+    pub import_paths: Vec<PathBuf>,
 }
 
 fn default_backends() -> Vec<Backend> {
@@ -189,22 +193,44 @@ impl E2ETestCase {
 
         // Load optional test.toml
         let config_path = fixture_path.join("test.toml");
-        let (backends, profile, expected_exit_code, timeout_secs) = if config_path.exists() {
-            let config_str = std::fs::read_to_string(&config_path).map_err(|e| {
-                E2EError::InvalidFixture(format!("Failed to read test.toml: {}", e))
-            })?;
-            let config: TestConfig = toml::from_str(&config_str).map_err(|e| {
-                E2EError::InvalidFixture(format!("Failed to parse test.toml: {}", e))
-            })?;
-            (
-                config.test.backends.unwrap_or_else(default_backends),
-                config.test.profile.unwrap_or_default(),
-                config.test.expected_exit.unwrap_or(0),
-                config.test.timeout_secs.unwrap_or(default_timeout()),
-            )
-        } else {
-            (default_backends(), Profile::Default, 0, default_timeout())
-        };
+        let (backends, profile, expected_exit_code, timeout_secs, import_paths) =
+            if config_path.exists() {
+                let config_str = std::fs::read_to_string(&config_path).map_err(|e| {
+                    E2EError::InvalidFixture(format!("Failed to read test.toml: {}", e))
+                })?;
+                let config: TestConfig = toml::from_str(&config_str).map_err(|e| {
+                    E2EError::InvalidFixture(format!("Failed to parse test.toml: {}", e))
+                })?;
+                // Make import paths relative to fixture directory
+                let resolved_paths = config
+                    .test
+                    .import_paths
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|p| {
+                        if p.is_relative() {
+                            fixture_path.join(p)
+                        } else {
+                            p
+                        }
+                    })
+                    .collect();
+                (
+                    config.test.backends.unwrap_or_else(default_backends),
+                    config.test.profile.unwrap_or_default(),
+                    config.test.expected_exit.unwrap_or(0),
+                    config.test.timeout_secs.unwrap_or(default_timeout()),
+                    resolved_paths,
+                )
+            } else {
+                (
+                    default_backends(),
+                    Profile::Default,
+                    0,
+                    default_timeout(),
+                    Vec::new(),
+                )
+            };
 
         let fixture_dir = fixture_path.to_path_buf();
 
@@ -217,6 +243,7 @@ impl E2ETestCase {
             expected_stdout,
             expected_exit_code,
             timeout_secs,
+            import_paths,
         })
     }
 
@@ -242,6 +269,8 @@ struct TestConfigInner {
     expected_exit: Option<i32>,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    #[serde(default)]
+    import_paths: Option<Vec<PathBuf>>,
 }
 
 /// Errors that can occur during E2E testing.

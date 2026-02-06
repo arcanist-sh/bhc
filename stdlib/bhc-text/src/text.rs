@@ -23,7 +23,7 @@ use std::str;
 use crate::simd::{bhc_ascii_to_lower, bhc_ascii_to_upper, bhc_is_ascii, bhc_text_find_substring};
 
 /// Header: data_ptr (8) + offset (8) + byte_len (8) = 24 bytes.
-const HEADER_SIZE: usize = 24;
+pub(crate) const HEADER_SIZE: usize = 24;
 
 // ============================================================
 // Internal helpers
@@ -45,7 +45,7 @@ unsafe fn text_byte_len(text: *const u8) -> usize {
 }
 
 /// Get a slice view of the text's active bytes.
-unsafe fn text_bytes(text: *const u8) -> &'static [u8] {
+pub(crate) unsafe fn text_bytes(text: *const u8) -> &'static [u8] {
     let data = text_data_ptr(text);
     let off = text_offset(text);
     let len = text_byte_len(text);
@@ -60,7 +60,7 @@ unsafe fn text_as_str(text: *const u8) -> &'static str {
 /// Allocate a new self-contained BhcText from a byte slice.
 ///
 /// The returned pointer owns both header and data.
-fn alloc_text_from_bytes(bytes: &[u8]) -> *mut u8 {
+pub(crate) fn alloc_text_from_bytes(bytes: &[u8]) -> *mut u8 {
     let total = HEADER_SIZE + bytes.len();
     let layout = Layout::from_size_align(total, 8).expect("invalid layout");
     unsafe {

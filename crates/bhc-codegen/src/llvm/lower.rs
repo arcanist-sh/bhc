@@ -98,6 +98,21 @@ enum TransformerLayer {
     WriterT,
 }
 
+/// Coercion mode for type-specialized show functions.
+#[derive(Clone, Copy, Debug)]
+enum ShowCoerce {
+    /// Coerce to i64 for show_int
+    Int,
+    /// Coerce to f64 (bitcast from i64) for show_double
+    Double,
+    /// Coerce to f32 for show_float
+    Float,
+    /// Coerce to i32 (truncate from i64) for show_char
+    Char,
+    /// Extract ADT tag (i64) for show_bool
+    Bool,
+}
+
 /// A stack of transformer layers, tracking the full transformer stack.
 ///
 /// The stack is ordered [outermost, ..., IO], so the current (outermost) layer
@@ -1479,12 +1494,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // bhc_show_bool(i64) -> *i8
         let show_bool = self.module.llvm_module().add_function("bhc_show_bool", i64_to_ptr, None);
-        self.functions.insert(VarId::new(1000075), show_bool);
+        self.functions.insert(VarId::new(1000091), show_bool);
 
         // bhc_show_char(i32) -> *i8
         let i32_to_ptr = i8_ptr_type.fn_type(&[i32_type.into()], false);
         let show_char = self.module.llvm_module().add_function("bhc_show_char", i32_to_ptr, None);
         self.functions.insert(VarId::new(1000074), show_char);
+
+        // bhc_show_float(f32) -> *i8
+        let f32_to_ptr = i8_ptr_type.fn_type(&[f32_type.into()], false);
+        let show_float = self.module.llvm_module().add_function("bhc_show_float", f32_to_ptr, None);
+        self.functions.insert(VarId::new(1000090), show_float);
 
         // bhc_char_to_int(u32) -> i64 (ord)
         let u32_to_i64 = i64_type.fn_type(&[u32_type.into()], false);
@@ -1824,6 +1844,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // bhc_text_decode_utf8(bs_ptr) -> ptr (ByteString -> Text)
         let text_decode_utf8 = self.module.llvm_module().add_function("bhc_text_decode_utf8", ptr_type.fn_type(&[ptr_type.into()], false), None);
         self.functions.insert(VarId::new(1000237), text_decode_utf8);
+
+        // ---- Data.Text.IO RTS functions (VarId 1000240-1000246) ----
+        // bhc_text_read_file(path_cstr) -> ptr (Text)
+        let text_read_file = self.module.llvm_module().add_function("bhc_text_read_file", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000240), text_read_file);
+        // bhc_text_write_file(path_cstr, text_ptr) -> void
+        let text_write_file = self.module.llvm_module().add_function("bhc_text_write_file", void_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000241), text_write_file);
+        // bhc_text_append_file(path_cstr, text_ptr) -> void
+        let text_append_file = self.module.llvm_module().add_function("bhc_text_append_file", void_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000242), text_append_file);
+        // bhc_text_h_get_contents(handle_ptr) -> ptr (Text)
+        let text_h_get_contents = self.module.llvm_module().add_function("bhc_text_h_get_contents", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000243), text_h_get_contents);
+        // bhc_text_h_get_line(handle_ptr) -> ptr (Text)
+        let text_h_get_line = self.module.llvm_module().add_function("bhc_text_h_get_line", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000244), text_h_get_line);
+        // bhc_text_h_put_str(handle_ptr, text_ptr) -> void
+        let text_h_put_str = self.module.llvm_module().add_function("bhc_text_h_put_str", void_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000245), text_h_put_str);
+        // bhc_text_h_put_str_ln(handle_ptr, text_ptr) -> void
+        let text_h_put_str_ln = self.module.llvm_module().add_function("bhc_text_h_put_str_ln", void_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000246), text_h_put_str_ln);
 
         // ---- ByteString RTS functions (VarId 1000400-1000425) ----
         // bhc_bs_empty() -> ptr
@@ -2599,6 +2642,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // Show
             "show" => Some(1),
+            "showInt" => Some(1),
+            "showDouble" => Some(1),
+            "showFloat" => Some(1),
+            "showBool" => Some(1),
+            "showChar" => Some(1),
 
                 // Data.Map operations
                 "Data.Map.empty" => Some(0),
@@ -2756,6 +2804,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // Data.Text.Encoding operations
                 "Data.Text.Encoding.encodeUtf8" => Some(1),
                 "Data.Text.Encoding.decodeUtf8" => Some(1),
+                // Data.Text.IO operations
+                "Data.Text.IO.readFile" => Some(1),
+                "Data.Text.IO.writeFile" => Some(2),
+                "Data.Text.IO.appendFile" => Some(2),
+                "Data.Text.IO.hGetContents" => Some(1),
+                "Data.Text.IO.hGetLine" => Some(1),
+                "Data.Text.IO.hPutStr" => Some(2),
+                "Data.Text.IO.hPutStrLn" => Some(2),
+                "Data.Text.IO.putStr" => Some(1),
+                "Data.Text.IO.putStrLn" => Some(1),
+                "Data.Text.IO.getLine" => Some(0),
+                "Data.Text.IO.getContents" => Some(0),
                 // Data.ByteString operations
                 "Data.ByteString.empty" => Some(0),
                 "Data.ByteString.singleton" => Some(1),
@@ -3046,22 +3106,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Character operations
             "ord" => self.lower_builtin_ord(args[0]),
             "chr" => self.lower_builtin_chr(args[0]),
-            "isAlpha" => self.lower_builtin_char_pred(args[0], 1030, "is_alpha"),
-            "isDigit" => self.lower_builtin_char_pred(args[0], 1031, "is_digit"),
-            "isAlphaNum" => self.lower_builtin_char_pred(args[0], 1032, "is_alnum"),
-            "isSpace" => self.lower_builtin_char_pred(args[0], 1033, "is_space"),
-            "isUpper" => self.lower_builtin_char_pred(args[0], 1034, "is_upper"),
-            "isLower" => self.lower_builtin_char_pred(args[0], 1035, "is_lower"),
-            "isPrint" => self.lower_builtin_char_pred(args[0], 1038, "is_print"),
-            "isAscii" => self.lower_builtin_char_pred(args[0], 1039, "is_ascii"),
-            "isControl" => self.lower_builtin_char_pred(args[0], 1040, "is_control"),
-            "isHexDigit" => self.lower_builtin_char_pred(args[0], 1041, "is_hex"),
-            "isLetter" => self.lower_builtin_char_pred(args[0], 1042, "is_letter"),
-            "isNumber" => self.lower_builtin_char_pred(args[0], 1043, "is_number"),
-            "isPunctuation" => self.lower_builtin_char_pred(args[0], 1044, "is_punct"),
-            "isSymbol" => self.lower_builtin_char_pred(args[0], 1045, "is_symbol"),
-            "toLower" => self.lower_builtin_char_conv(args[0], 1037, "to_lower"),
-            "toUpper" => self.lower_builtin_char_conv(args[0], 1036, "to_upper"),
+            "isAlpha" => self.lower_builtin_char_pred(args[0], 1000030, "is_alpha"),
+            "isDigit" => self.lower_builtin_char_pred(args[0], 1000031, "is_digit"),
+            "isAlphaNum" => self.lower_builtin_char_pred(args[0], 1000032, "is_alnum"),
+            "isSpace" => self.lower_builtin_char_pred(args[0], 1000033, "is_space"),
+            "isUpper" => self.lower_builtin_char_pred(args[0], 1000034, "is_upper"),
+            "isLower" => self.lower_builtin_char_pred(args[0], 1000035, "is_lower"),
+            "isPrint" => self.lower_builtin_char_pred(args[0], 1000038, "is_print"),
+            "isAscii" => self.lower_builtin_char_pred(args[0], 1000039, "is_ascii"),
+            "isControl" => self.lower_builtin_char_pred(args[0], 1000040, "is_control"),
+            "isHexDigit" => self.lower_builtin_char_pred(args[0], 1000041, "is_hex"),
+            "isLetter" => self.lower_builtin_char_pred(args[0], 1000042, "is_letter"),
+            "isNumber" => self.lower_builtin_char_pred(args[0], 1000043, "is_number"),
+            "isPunctuation" => self.lower_builtin_char_pred(args[0], 1000044, "is_punct"),
+            "isSymbol" => self.lower_builtin_char_pred(args[0], 1000045, "is_symbol"),
+            "toLower" => self.lower_builtin_char_conv(args[0], 1000037, "to_lower"),
+            "toUpper" => self.lower_builtin_char_conv(args[0], 1000036, "to_upper"),
             "digitToInt" => self.lower_builtin_digit_to_int(args[0]),
             "intToDigit" => self.lower_builtin_int_to_digit(args[0]),
 
@@ -3121,6 +3181,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // Show
             "show" => self.lower_builtin_show(args[0]),
+            "showInt" => self.lower_builtin_show_typed(args[0], 1000072, "show_int", ShowCoerce::Int),
+            "showDouble" => self.lower_builtin_show_typed(args[0], 1000073, "show_double", ShowCoerce::Double),
+            "showFloat" => self.lower_builtin_show_typed(args[0], 1000090, "show_float", ShowCoerce::Float),
+            "showBool" => self.lower_builtin_show_typed(args[0], 1000091, "show_bool", ShowCoerce::Bool),
+            "showChar" => self.lower_builtin_show_typed(args[0], 1000074, "show_char", ShowCoerce::Char),
 
             // Advanced list operations (delegate to existing patterns)
             "any" => self.lower_builtin_any(args[0], args[1]),
@@ -3354,6 +3419,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // Data.Text.Encoding (VarIds 1000236-1000237)
                 "Data.Text.Encoding.encodeUtf8" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000236, "text_encode_utf8"),
                 "Data.Text.Encoding.decodeUtf8" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000237, "text_decode_utf8"),
+                // Data.Text.IO operations (VarIds 1000240-1000246)
+                "Data.Text.IO.readFile" => self.lower_builtin_text_io_read_file(args[0]),
+                "Data.Text.IO.writeFile" => self.lower_builtin_text_io_write_file(args[0], args[1]),
+                "Data.Text.IO.appendFile" => self.lower_builtin_text_io_append_file(args[0], args[1]),
+                "Data.Text.IO.hGetContents" => self.lower_builtin_text_io_handle_to_text(args[0], 1000243, "text_h_get_contents"),
+                "Data.Text.IO.hGetLine" => self.lower_builtin_text_io_handle_to_text(args[0], 1000244, "text_h_get_line"),
+                "Data.Text.IO.hPutStr" => self.lower_builtin_text_io_handle_text_void(args[0], args[1], 1000245, "text_h_put_str"),
+                "Data.Text.IO.hPutStrLn" => self.lower_builtin_text_io_handle_text_void(args[0], args[1], 1000246, "text_h_put_str_ln"),
+                "Data.Text.IO.putStr" => self.lower_builtin_text_io_stdout_text(args[0], 1000245, "text_io_put_str"),
+                "Data.Text.IO.putStrLn" => self.lower_builtin_text_io_stdout_text(args[0], 1000246, "text_io_put_str_ln"),
+                "Data.Text.IO.getLine" => self.lower_builtin_text_io_stdin_to_text(1000244, "text_io_get_line"),
+                "Data.Text.IO.getContents" => self.lower_builtin_text_io_stdin_to_text(1000243, "text_io_get_contents"),
                 // Data.ByteString operations (VarIds 1000400-1000423)
                 "Data.ByteString.empty" => self.lower_builtin_text_nullary(1000400, "bs_empty"),
                 "Data.ByteString.singleton" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000401, "bs_singleton"),
@@ -11868,6 +11945,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower a character predicate (isAlpha, isDigit, isSpace, etc.)
+    /// Returns a proper Bool ADT (tag 0=False, 1=True) for consistency with True/False constructors.
     fn lower_builtin_char_pred(
         &mut self,
         expr: &Expr,
@@ -11890,10 +11968,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", name)))?;
         let bool_val = result.into_int_value();
-        let extended = self.builder()
-            .build_int_z_extend(bool_val, self.type_mapper().i64_type(), "bool_ext")
+        let tag = self.builder()
+            .build_int_z_extend(bool_val, self.type_mapper().i64_type(), "bool_tag")
             .map_err(|e| CodegenError::Internal(format!("{}: extend failed: {:?}", name, e)))?;
-        Ok(Some(self.int_to_ptr(extended)?.into()))
+
+        // Allocate a Bool ADT with dynamic tag (0=False, 1=True)
+        let tm = self.type_mapper();
+        let adt_ty = self.adt_type(0);
+        let size_val = tm.i64_type().const_int(8, false); // Just tag, no fields
+        let alloc_fn = self.functions.get(&VarId::new(1000005)).ok_or_else(|| {
+            CodegenError::Internal("bhc_alloc not declared".to_string())
+        })?;
+        let raw_ptr = self.builder()
+            .build_call(*alloc_fn, &[size_val.into()], "bool_alloc")
+            .map_err(|e| CodegenError::Internal(format!("{}: alloc failed: {:?}", name, e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: alloc returned void", name)))?;
+        let ptr = raw_ptr.into_pointer_value();
+        let tag_ptr = self.builder()
+            .build_struct_gep(adt_ty, ptr, 0, "tag_ptr")
+            .map_err(|e| CodegenError::Internal(format!("{}: gep failed: {:?}", name, e)))?;
+        self.builder()
+            .build_store(tag_ptr, tag)
+            .map_err(|e| CodegenError::Internal(format!("{}: store failed: {:?}", name, e)))?;
+        Ok(Some(ptr.into()))
     }
 
     /// Lower a character conversion (toLower, toUpper).
@@ -12333,6 +12432,64 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .try_as_basic_value().basic()
             .ok_or_else(|| CodegenError::Internal("show: returned void".to_string()))?;
         // Convert C-string result to [Char] linked list
+        let char_list = self.cstring_to_char_list(cstr_result.into_pointer_value())?;
+        Ok(Some(char_list.into()))
+    }
+
+    /// Lower type-specialized show: `showInt`, `showDouble`, `showFloat`, `showBool`, `showChar`.
+    fn lower_builtin_show_typed(&mut self, expr: &Expr, var_id: usize, label: &str, coerce: ShowCoerce) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let val = self.lower_expr(expr)?.ok_or_else(|| CodegenError::Internal(format!("{}: no value", label)))?;
+        let rts_fn = *self.functions.get(&VarId::new(var_id)).ok_or_else(|| CodegenError::Internal(format!("bhc_{} not declared", label)))?;
+        let call_arg: inkwell::values::BasicMetadataValueEnum = match coerce {
+            ShowCoerce::Int => {
+                let int_val = self.coerce_to_int(val)?;
+                int_val.into()
+            }
+            ShowCoerce::Double => {
+                let int_val = self.coerce_to_int(val)?;
+                let f64_val = self.builder().build_bit_cast(int_val, self.type_mapper().f64_type(), "to_f64")
+                    .map_err(|e| CodegenError::Internal(format!("{}: bitcast failed: {:?}", label, e)))?;
+                f64_val.into()
+            }
+            ShowCoerce::Float => {
+                let int_val = self.coerce_to_int(val)?;
+                let truncated = self.builder().build_int_truncate(int_val, self.llvm_context().i32_type(), "trunc32")
+                    .map_err(|e| CodegenError::Internal(format!("{}: truncate failed: {:?}", label, e)))?;
+                let f32_val = self.builder().build_bit_cast(truncated, self.type_mapper().f32_type(), "to_f32")
+                    .map_err(|e| CodegenError::Internal(format!("{}: bitcast failed: {:?}", label, e)))?;
+                f32_val.into()
+            }
+            ShowCoerce::Char => {
+                let int_val = self.coerce_to_int(val)?;
+                let i32_val = self.builder().build_int_truncate(int_val, self.llvm_context().i32_type(), "to_i32")
+                    .map_err(|e| CodegenError::Internal(format!("{}: truncate failed: {:?}", label, e)))?;
+                i32_val.into()
+            }
+            ShowCoerce::Bool => {
+                // Bool is an ADT with tag 0=False, 1=True - extract the tag
+                let ptr = match val {
+                    BasicValueEnum::PointerValue(p) => p,
+                    BasicValueEnum::IntValue(i) => {
+                        // Already an int (e.g. from case branch), use directly
+                        return {
+                            let cstr_result = self.builder().build_call(rts_fn, &[i.into()], label)
+                                .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+                                .try_as_basic_value().basic()
+                                .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+                            let char_list = self.cstring_to_char_list(cstr_result.into_pointer_value())?;
+                            Ok(Some(char_list.into()))
+                        };
+                    }
+                    _ => return Err(CodegenError::Internal(format!("{}: expected pointer or int for Bool", label))),
+                };
+                let tag = self.extract_adt_tag(ptr)?;
+                tag.into()
+            }
+        };
+        let cstr_result = self.builder().build_call(rts_fn, &[call_arg], label)
+            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
         let char_list = self.cstring_to_char_list(cstr_result.into_pointer_value())?;
         Ok(Some(char_list.into()))
     }
@@ -18767,6 +18924,183 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         })?;
         let result = self.builder()
             .build_call(*rts_fn, &[a_ptr.into(), b_ptr.into(), c_ptr.into()], label)
+            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+        Ok(Some(result))
+    }
+
+    // ================================================================
+    // Data.Text.IO codegen helpers
+    // ================================================================
+
+    /// Data.Text.IO.readFile: convert [Char] path to C-string, call RTS, return Text ptr.
+    fn lower_builtin_text_io_read_file(
+        &mut self,
+        path_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let path_val = self.lower_expr(path_expr)?
+            .ok_or_else(|| CodegenError::Internal("text_io_read_file: no path".to_string()))?;
+        let path_ptr = self.value_to_ptr(path_val)?;
+        let path_cstr = self.char_list_to_cstring(path_ptr)?;
+        let rts_fn = self.functions.get(&VarId::new(1000240)).ok_or_else(|| {
+            CodegenError::Internal("bhc_text_read_file not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[path_cstr.into()], "text_read_file")
+            .map_err(|e| CodegenError::Internal(format!("text_read_file call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("text_read_file: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Data.Text.IO.writeFile: convert [Char] path to C-string, lower Text arg, call RTS void.
+    fn lower_builtin_text_io_write_file(
+        &mut self,
+        path_expr: &Expr,
+        text_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let path_val = self.lower_expr(path_expr)?
+            .ok_or_else(|| CodegenError::Internal("text_io_write_file: no path".to_string()))?;
+        let text_val = self.lower_expr(text_expr)?
+            .ok_or_else(|| CodegenError::Internal("text_io_write_file: no text".to_string()))?;
+        let path_ptr = self.value_to_ptr(path_val)?;
+        let path_cstr = self.char_list_to_cstring(path_ptr)?;
+        let text_ptr = self.value_to_ptr(text_val)?;
+        let rts_fn = self.functions.get(&VarId::new(1000241)).ok_or_else(|| {
+            CodegenError::Internal("bhc_text_write_file not declared".to_string())
+        })?;
+        self.builder()
+            .build_call(*rts_fn, &[path_cstr.into(), text_ptr.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("text_write_file call failed: {:?}", e)))?;
+        Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+    }
+
+    /// Data.Text.IO.appendFile: convert [Char] path to C-string, lower Text arg, call RTS void.
+    fn lower_builtin_text_io_append_file(
+        &mut self,
+        path_expr: &Expr,
+        text_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let path_val = self.lower_expr(path_expr)?
+            .ok_or_else(|| CodegenError::Internal("text_io_append_file: no path".to_string()))?;
+        let text_val = self.lower_expr(text_expr)?
+            .ok_or_else(|| CodegenError::Internal("text_io_append_file: no text".to_string()))?;
+        let path_ptr = self.value_to_ptr(path_val)?;
+        let path_cstr = self.char_list_to_cstring(path_ptr)?;
+        let text_ptr = self.value_to_ptr(text_val)?;
+        let rts_fn = self.functions.get(&VarId::new(1000242)).ok_or_else(|| {
+            CodegenError::Internal("bhc_text_append_file not declared".to_string())
+        })?;
+        self.builder()
+            .build_call(*rts_fn, &[path_cstr.into(), text_ptr.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("text_append_file call failed: {:?}", e)))?;
+        Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+    }
+
+    /// Data.Text.IO handle -> Text: hGetContents, hGetLine.
+    fn lower_builtin_text_io_handle_to_text(
+        &mut self,
+        handle_expr: &Expr,
+        rts_id: usize,
+        label: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let handle_val = self.lower_expr(handle_expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no handle", label)))?;
+        let handle_ptr = match handle_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError(format!("{} expects handle", label))),
+        };
+        let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
+            CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[handle_ptr.into()], label)
+            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+        Ok(Some(result))
+    }
+
+    /// Data.Text.IO (handle, Text) -> void: hPutStr, hPutStrLn.
+    fn lower_builtin_text_io_handle_text_void(
+        &mut self,
+        handle_expr: &Expr,
+        text_expr: &Expr,
+        rts_id: usize,
+        label: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let handle_val = self.lower_expr(handle_expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no handle", label)))?;
+        let text_val = self.lower_expr(text_expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no text", label)))?;
+        let handle_ptr = match handle_val {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => return Err(CodegenError::TypeError(format!("{} expects handle", label))),
+        };
+        let text_ptr = self.value_to_ptr(text_val)?;
+        let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
+            CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
+        })?;
+        self.builder()
+            .build_call(*rts_fn, &[handle_ptr.into(), text_ptr.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?;
+        Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+    }
+
+    /// Data.Text.IO putStr/putStrLn: get stdout, call hPutStr/hPutStrLn.
+    fn lower_builtin_text_io_stdout_text(
+        &mut self,
+        text_expr: &Expr,
+        rts_id: usize,
+        label: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Get stdout handle
+        let stdout_fn = self.functions.get(&VarId::new(1000061)).ok_or_else(|| {
+            CodegenError::Internal("bhc_stdout not declared".to_string())
+        })?;
+        let stdout = self.builder()
+            .build_call(*stdout_fn, &[], "stdout")
+            .map_err(|e| CodegenError::Internal(format!("{}: stdout call failed: {:?}", label, e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: stdout returned void", label)))?;
+        let stdout_ptr = stdout.into_pointer_value();
+        // Lower text argument
+        let text_val = self.lower_expr(text_expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no text", label)))?;
+        let text_ptr = self.value_to_ptr(text_val)?;
+        // Call RTS function
+        let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
+            CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
+        })?;
+        self.builder()
+            .build_call(*rts_fn, &[stdout_ptr.into(), text_ptr.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?;
+        Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+    }
+
+    /// Data.Text.IO getLine/getContents: get stdin, call hGetLine/hGetContents.
+    fn lower_builtin_text_io_stdin_to_text(
+        &mut self,
+        rts_id: usize,
+        label: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Get stdin handle
+        let stdin_fn = self.functions.get(&VarId::new(1000060)).ok_or_else(|| {
+            CodegenError::Internal("bhc_stdin not declared".to_string())
+        })?;
+        let stdin = self.builder()
+            .build_call(*stdin_fn, &[], "stdin")
+            .map_err(|e| CodegenError::Internal(format!("{}: stdin call failed: {:?}", label, e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: stdin returned void", label)))?;
+        let stdin_ptr = stdin.into_pointer_value();
+        // Call RTS function
+        let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
+            CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[stdin_ptr.into()], label)
             .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
             .try_as_basic_value().basic()
             .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;

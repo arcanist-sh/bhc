@@ -1,0 +1,9 @@
+True
+False
+True
+False
+True
+True
+True
+'A'
+'z'

@@ -2446,87 +2446,7 @@ impl Builtins {
                 let pair_ba = Ty::Tuple(vec![Ty::Var(b.clone()), Ty::Var(a.clone())]);
                 Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(pair_ab, pair_ba))
             }),
-            // Character functions
-            (
-                "ord",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.int_ty.clone())),
-            ),
-            (
-                "chr",
-                Scheme::mono(Ty::fun(self.int_ty.clone(), self.char_ty.clone())),
-            ),
-            (
-                "isAlpha",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
-            ),
-            (
-                "isAlphaNum",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
-            ),
-            (
-                "isAscii",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
-            ),
-            (
-                "isControl",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
-            ),
-            (
-                "isDigit",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
-            ),
-            (
-                "isHexDigit",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
-            ),
-            (
-                "isLetter",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
-            ),
-            (
-                "isLower",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
-            ),
-            (
-                "isNumber",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
-            ),
-            (
-                "isPrint",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
-            ),
-            (
-                "isPunctuation",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
-            ),
-            (
-                "isSpace",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
-            ),
-            (
-                "isSymbol",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
-            ),
-            (
-                "isUpper",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
-            ),
-            (
-                "toLower",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.char_ty.clone())),
-            ),
-            (
-                "toUpper",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.char_ty.clone())),
-            ),
-            (
-                "digitToInt",
-                Scheme::mono(Ty::fun(self.char_ty.clone(), self.int_ty.clone())),
-            ),
-            (
-                "intToDigit",
-                Scheme::mono(Ty::fun(self.int_ty.clone(), self.char_ty.clone())),
-            ),
+            // Character functions registered at fixed DefIds below (10200+)
             // Enum functions (Int-specialized)
             ("succ", {
                 // succ :: Int -> Int (simplified for Int)
@@ -3777,6 +3697,180 @@ impl Builtins {
             let def_id = DefId::new(next_id);
             env.register_value(def_id, Symbol::intern(name), scheme);
             next_id += 1;
+        }
+
+        // Register type-specialized show functions at fixed DefIds (10100+)
+        env.register_value(
+            DefId::new(10100),
+            Symbol::intern("showInt"),
+            Scheme::mono(Ty::fun(self.int_ty.clone(), self.string_ty.clone())),
+        );
+        env.register_value(
+            DefId::new(10101),
+            Symbol::intern("showDouble"),
+            Scheme::mono(Ty::fun(self.float_ty.clone(), self.string_ty.clone())),
+        );
+        env.register_value(
+            DefId::new(10102),
+            Symbol::intern("showFloat"),
+            Scheme::mono(Ty::fun(self.float_ty.clone(), self.string_ty.clone())),
+        );
+        env.register_value(
+            DefId::new(10103),
+            Symbol::intern("showBool"),
+            Scheme::mono(Ty::fun(self.bool_ty.clone(), self.string_ty.clone())),
+        );
+        env.register_value(
+            DefId::new(10104),
+            Symbol::intern("showChar"),
+            Scheme::mono(Ty::fun(self.char_ty.clone(), self.string_ty.clone())),
+        );
+
+        // Register character functions at fixed DefIds (10200+)
+        env.register_value(
+            DefId::new(10200),
+            Symbol::intern("ord"),
+            Scheme::mono(Ty::fun(self.char_ty.clone(), self.int_ty.clone())),
+        );
+        env.register_value(
+            DefId::new(10201),
+            Symbol::intern("chr"),
+            Scheme::mono(Ty::fun(self.int_ty.clone(), self.char_ty.clone())),
+        );
+        let char_predicates: &[(usize, &str)] = &[
+            (10202, "isAlpha"),
+            (10203, "isAlphaNum"),
+            (10204, "isAscii"),
+            (10205, "isControl"),
+            (10206, "isDigit"),
+            (10207, "isHexDigit"),
+            (10208, "isLetter"),
+            (10209, "isLower"),
+            (10210, "isNumber"),
+            (10211, "isPrint"),
+            (10212, "isPunctuation"),
+            (10213, "isSpace"),
+            (10214, "isSymbol"),
+            (10215, "isUpper"),
+        ];
+        for &(id, name) in char_predicates {
+            env.register_value(
+                DefId::new(id),
+                Symbol::intern(name),
+                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone())),
+            );
+        }
+        env.register_value(
+            DefId::new(10216),
+            Symbol::intern("toLower"),
+            Scheme::mono(Ty::fun(self.char_ty.clone(), self.char_ty.clone())),
+        );
+        env.register_value(
+            DefId::new(10217),
+            Symbol::intern("toUpper"),
+            Scheme::mono(Ty::fun(self.char_ty.clone(), self.char_ty.clone())),
+        );
+        env.register_value(
+            DefId::new(10218),
+            Symbol::intern("digitToInt"),
+            Scheme::mono(Ty::fun(self.char_ty.clone(), self.int_ty.clone())),
+        );
+        env.register_value(
+            DefId::new(10219),
+            Symbol::intern("intToDigit"),
+            Scheme::mono(Ty::fun(self.int_ty.clone(), self.char_ty.clone())),
+        );
+
+        // Register Data.Text.IO functions at fixed DefIds (10300+).
+        // Handle is Int, FilePath is String, Text is text_ty.
+        {
+            let io_text = Ty::App(
+                Box::new(Ty::Con(self.io_con.clone())),
+                Box::new(self.text_ty.clone()),
+            );
+            let io_unit = Ty::App(
+                Box::new(Ty::Con(self.io_con.clone())),
+                Box::new(Ty::unit()),
+            );
+
+            // readFile :: FilePath -> IO Text
+            env.register_value(
+                DefId::new(10300),
+                Symbol::intern("Data.Text.IO.readFile"),
+                Scheme::mono(Ty::fun(self.string_ty.clone(), io_text.clone())),
+            );
+            // writeFile :: FilePath -> Text -> IO ()
+            env.register_value(
+                DefId::new(10301),
+                Symbol::intern("Data.Text.IO.writeFile"),
+                Scheme::mono(Ty::fun(
+                    self.string_ty.clone(),
+                    Ty::fun(self.text_ty.clone(), io_unit.clone()),
+                )),
+            );
+            // appendFile :: FilePath -> Text -> IO ()
+            env.register_value(
+                DefId::new(10302),
+                Symbol::intern("Data.Text.IO.appendFile"),
+                Scheme::mono(Ty::fun(
+                    self.string_ty.clone(),
+                    Ty::fun(self.text_ty.clone(), io_unit.clone()),
+                )),
+            );
+            // hGetContents :: Handle -> IO Text
+            env.register_value(
+                DefId::new(10303),
+                Symbol::intern("Data.Text.IO.hGetContents"),
+                Scheme::mono(Ty::fun(self.int_ty.clone(), io_text.clone())),
+            );
+            // hGetLine :: Handle -> IO Text
+            env.register_value(
+                DefId::new(10304),
+                Symbol::intern("Data.Text.IO.hGetLine"),
+                Scheme::mono(Ty::fun(self.int_ty.clone(), io_text.clone())),
+            );
+            // hPutStr :: Handle -> Text -> IO ()
+            env.register_value(
+                DefId::new(10305),
+                Symbol::intern("Data.Text.IO.hPutStr"),
+                Scheme::mono(Ty::fun(
+                    self.int_ty.clone(),
+                    Ty::fun(self.text_ty.clone(), io_unit.clone()),
+                )),
+            );
+            // hPutStrLn :: Handle -> Text -> IO ()
+            env.register_value(
+                DefId::new(10306),
+                Symbol::intern("Data.Text.IO.hPutStrLn"),
+                Scheme::mono(Ty::fun(
+                    self.int_ty.clone(),
+                    Ty::fun(self.text_ty.clone(), io_unit.clone()),
+                )),
+            );
+            // putStr :: Text -> IO ()
+            env.register_value(
+                DefId::new(10307),
+                Symbol::intern("Data.Text.IO.putStr"),
+                Scheme::mono(Ty::fun(self.text_ty.clone(), io_unit.clone())),
+            );
+            // putStrLn :: Text -> IO ()
+            env.register_value(
+                DefId::new(10308),
+                Symbol::intern("Data.Text.IO.putStrLn"),
+                Scheme::mono(Ty::fun(self.text_ty.clone(), io_unit.clone())),
+            );
+            // getLine :: IO Text
+            env.register_value(
+                DefId::new(10309),
+                Symbol::intern("Data.Text.IO.getLine"),
+                Scheme::mono(io_text.clone()),
+            );
+            // getContents :: IO Text
+            env.register_value(
+                DefId::new(10310),
+                Symbol::intern("Data.Text.IO.getContents"),
+                Scheme::mono(io_text),
+            );
         }
 
         // Register transformer types and operations at fixed DefIds (10000+)

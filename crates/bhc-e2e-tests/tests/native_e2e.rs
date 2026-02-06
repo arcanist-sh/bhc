@@ -256,6 +256,24 @@ fn test_tier3_package_import_native() {
     run_native_test("tier3_io/package_import", Profile::Default);
 }
 
+// Data.Char predicates - isAlpha, isDigit, isSpace, toUpper, toLower, etc.
+#[test]
+fn test_tier3_char_predicates_native() {
+    run_native_test("tier3_io/char_predicates", Profile::Default);
+}
+
+// Type-specialized show functions - showInt, showBool, showChar
+#[test]
+fn test_tier3_show_types_native() {
+    run_native_test("tier3_io/show_types", Profile::Default);
+}
+
+// Data.Text.IO - native Text file I/O
+#[test]
+fn test_tier3_text_io_native() {
+    run_native_test("tier3_io/text_io", Profile::Default);
+}
+
 // =============================================================================
 // Discovery Tests
 // =============================================================================

@@ -550,27 +550,7 @@ impl LowerContext {
             "curry",
             "uncurry",
             "swap",
-            // Character functions
-            "ord",
-            "chr",
-            "isAlpha",
-            "isAlphaNum",
-            "isAscii",
-            "isControl",
-            "isDigit",
-            "isHexDigit",
-            "isLetter",
-            "isLower",
-            "isNumber",
-            "isPrint",
-            "isPunctuation",
-            "isSpace",
-            "isSymbol",
-            "isUpper",
-            "toLower",
-            "toUpper",
-            "digitToInt",
-            "intToDigit",
+            // Character functions registered at fixed DefIds below (10200+)
             // Enum functions
             "succ",
             "pred",
@@ -1089,9 +1069,81 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
-        // Ensure next_def_id is past the transformer range
-        if self.next_def_id <= 10096 {
-            self.next_def_id = 10096;
+        // Register type-specialized show functions at fixed DefIds (10100+).
+        // Must match bhc-typeck builtins.rs register_primitive_ops.
+        let show_builtins: &[(usize, &str)] = &[
+            (10100, "showInt"),
+            (10101, "showDouble"),
+            (10102, "showFloat"),
+            (10103, "showBool"),
+            (10104, "showChar"),
+        ];
+
+        for &(id, name) in show_builtins {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
+        // Register character functions at fixed DefIds (10200+).
+        // Must match bhc-typeck builtins.rs register_primitive_ops.
+        let char_builtins: &[(usize, &str)] = &[
+            (10200, "ord"),
+            (10201, "chr"),
+            (10202, "isAlpha"),
+            (10203, "isAlphaNum"),
+            (10204, "isAscii"),
+            (10205, "isControl"),
+            (10206, "isDigit"),
+            (10207, "isHexDigit"),
+            (10208, "isLetter"),
+            (10209, "isLower"),
+            (10210, "isNumber"),
+            (10211, "isPrint"),
+            (10212, "isPunctuation"),
+            (10213, "isSpace"),
+            (10214, "isSymbol"),
+            (10215, "isUpper"),
+            (10216, "toLower"),
+            (10217, "toUpper"),
+            (10218, "digitToInt"),
+            (10219, "intToDigit"),
+        ];
+
+        for &(id, name) in char_builtins {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
+        // Register Data.Text.IO functions at fixed DefIds (10300+).
+        // Must match bhc-typeck builtins.rs register_primitive_ops.
+        let text_io_builtins: &[(usize, &str)] = &[
+            (10300, "Data.Text.IO.readFile"),
+            (10301, "Data.Text.IO.writeFile"),
+            (10302, "Data.Text.IO.appendFile"),
+            (10303, "Data.Text.IO.hGetContents"),
+            (10304, "Data.Text.IO.hGetLine"),
+            (10305, "Data.Text.IO.hPutStr"),
+            (10306, "Data.Text.IO.hPutStrLn"),
+            (10307, "Data.Text.IO.putStr"),
+            (10308, "Data.Text.IO.putStrLn"),
+            (10309, "Data.Text.IO.getLine"),
+            (10310, "Data.Text.IO.getContents"),
+        ];
+
+        for &(id, name) in text_io_builtins {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
+        // Ensure next_def_id is past the fixed DefId ranges
+        if self.next_def_id <= 10311 {
+            self.next_def_id = 10311;
         }
     }
 

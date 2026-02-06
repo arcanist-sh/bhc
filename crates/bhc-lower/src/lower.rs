@@ -871,6 +871,19 @@ fn register_standard_module_exports(ctx: &mut LowerContext, module_name: &str) {
             "absurd",
             "vacuous",
         ],
+        "Data.Text.IO" => &[
+            "readFile",
+            "writeFile",
+            "appendFile",
+            "hGetContents",
+            "hGetLine",
+            "hPutStr",
+            "hPutStrLn",
+            "putStr",
+            "putStrLn",
+            "getLine",
+            "getContents",
+        ],
         _ => &[],
     };
 
@@ -879,8 +892,12 @@ fn register_standard_module_exports(ctx: &mut LowerContext, module_name: &str) {
         let qualified_name = Symbol::intern(&format!("{}.{}", module_name, export));
         let unqualified = Symbol::intern(export);
 
-        // Register the mapping from qualified to unqualified
-        ctx.register_qualified_name(qualified_name, unqualified);
+        // If the qualified name is already directly bound (e.g. as a builtin
+        // with its own DefId), don't register a qualified-to-unqualified mapping
+        // that would redirect to a different Prelude function.
+        if ctx.lookup_value(qualified_name).is_none() {
+            ctx.register_qualified_name(qualified_name, unqualified);
+        }
 
         // Also ensure the unqualified name is defined (if not already)
         if ctx.lookup_value(unqualified).is_none() {

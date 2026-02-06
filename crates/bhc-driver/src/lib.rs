@@ -1595,6 +1595,10 @@ impl Compiler {
         // Provides: bhc_text_pack, bhc_text_unpack, bhc_text_append, etc.
         config = config.with_library(LinkLibrary::named("bhc_text"));
 
+        // Add the BHC Base library
+        // Provides: bhc_char_is_alpha, bhc_char_is_digit, bhc_char_to_upper, etc.
+        config = config.with_library(LinkLibrary::named("bhc_base"));
+
         // Add system libraries needed by the RTS
         #[cfg(target_os = "linux")]
         {

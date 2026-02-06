@@ -34,3 +34,4 @@ pub mod bytearray;
 pub mod bytestring;
 pub mod simd;
 pub mod text;
+pub mod text_io;

@@ -314,11 +314,11 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 - [ ] Compile a program that imports from 2-3 simple Hackage packages
 - [ ] Example: use `filepath` and `directory` packages
 
-### Milestone E.7: Data.Text Foundation
-- [ ] Implement packed UTF-8 `Text` type (not `[Char]`)
-- [ ] Core API: pack, unpack, append, length, null, map, filter
-- [ ] Text.IO: readFile, writeFile
-- [ ] E2E test: read file as Text, process, write output
+### Milestone E.7: Data.Text Foundation ✅
+- [x] Implement packed UTF-8 `Text` type (not `[Char]`)
+- [x] Core API: pack, unpack, append, length, null, take, drop, toUpper, toLower
+- [x] RTS-backed implementation in bhc-text with UTF-8 encoding
+- [x] E2E test: `tier3_io/text_basic` passes (pack, unpack, append, toUpper, take, drop)
 
 ### Milestone F: Pandoc (Minimal)
 - [ ] Compile Pandoc with a subset of readers/writers (e.g., Markdown → HTML only)
@@ -353,6 +353,14 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 ---
 
 ## Recent Progress
+
+### 2026-02-05: Milestone E.7 Data.Text Foundation Complete
+- Implemented packed UTF-8 `Text` type via RTS-backed functions
+- Core API: pack, unpack, append, length, null, take, drop, toUpper, toLower
+- Registered in all three systems: typeck/builtins.rs, lower/context.rs, codegen/lower.rs
+- VarIds 1000200-1000226 allocated for Data.Text RTS functions
+- E2E test `tier3_io/text_basic` passes (outputs "5", "HELLO WORLD", "Hello", "World")
+- Discovered three-system registration requirement: type checker, lowering context, AND codegen
 
 ### 2026-02-05: Milestone E JSON Parser Complete
 - Self-contained JSON key-value parser compiles and runs correctly

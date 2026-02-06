@@ -1790,6 +1790,115 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let text_map = self.module.llvm_module().add_function("bhc_text_map", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false), None);
         self.functions.insert(VarId::new(1000226), text_map);
 
+        // ---- Additional Text RTS functions (VarId 1000227-1000236) ----
+        // bhc_text_filter(fn_ptr, env_ptr, text_ptr) -> ptr
+        let text_filter = self.module.llvm_module().add_function("bhc_text_filter", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000227), text_filter);
+        // bhc_text_foldl(fn_ptr, env_ptr, i64, text_ptr) -> i64
+        let text_foldl = self.module.llvm_module().add_function("bhc_text_foldl", i64_type.fn_type(&[ptr_type.into(), ptr_type.into(), i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000228), text_foldl);
+        // bhc_text_concat(list_ptr) -> ptr
+        let text_concat = self.module.llvm_module().add_function("bhc_text_concat", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000229), text_concat);
+        // bhc_text_intercalate(sep_ptr, list_ptr) -> ptr
+        let text_intercalate = self.module.llvm_module().add_function("bhc_text_intercalate", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000230), text_intercalate);
+        // bhc_text_strip(text_ptr) -> ptr
+        let text_strip = self.module.llvm_module().add_function("bhc_text_strip", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000231), text_strip);
+        // bhc_text_words(text_ptr) -> ptr (returns cons-list of Text)
+        let text_words = self.module.llvm_module().add_function("bhc_text_words", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000232), text_words);
+        // bhc_text_lines(text_ptr) -> ptr (returns cons-list of Text)
+        let text_lines = self.module.llvm_module().add_function("bhc_text_lines", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000233), text_lines);
+        // bhc_text_split_on(needle_ptr, haystack_ptr) -> ptr (returns cons-list of Text)
+        let text_split_on = self.module.llvm_module().add_function("bhc_text_split_on", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000234), text_split_on);
+        // bhc_text_replace(needle_ptr, replacement_ptr, haystack_ptr) -> ptr
+        let text_replace = self.module.llvm_module().add_function("bhc_text_replace", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000235), text_replace);
+        // bhc_text_encode_utf8(text_ptr) -> ptr (Text -> ByteString)
+        let text_encode_utf8 = self.module.llvm_module().add_function("bhc_text_encode_utf8", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000236), text_encode_utf8);
+        // bhc_text_decode_utf8(bs_ptr) -> ptr (ByteString -> Text)
+        let text_decode_utf8 = self.module.llvm_module().add_function("bhc_text_decode_utf8", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000237), text_decode_utf8);
+
+        // ---- ByteString RTS functions (VarId 1000400-1000425) ----
+        // bhc_bs_empty() -> ptr
+        let bs_empty = self.module.llvm_module().add_function("bhc_bs_empty", ptr_type.fn_type(&[], false), None);
+        self.functions.insert(VarId::new(1000400), bs_empty);
+        // bhc_bs_singleton(i64) -> ptr
+        let bs_singleton = self.module.llvm_module().add_function("bhc_bs_singleton", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000401), bs_singleton);
+        // bhc_bs_pack(ptr) -> ptr  (list -> ByteString)
+        let bs_pack = self.module.llvm_module().add_function("bhc_bs_pack", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000402), bs_pack);
+        // bhc_bs_length(ptr) -> i64
+        let bs_length = self.module.llvm_module().add_function("bhc_bs_length", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000403), bs_length);
+        // bhc_bs_null(ptr) -> i64
+        let bs_null = self.module.llvm_module().add_function("bhc_bs_null", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000404), bs_null);
+        // bhc_bs_head(ptr) -> i64
+        let bs_head = self.module.llvm_module().add_function("bhc_bs_head", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000405), bs_head);
+        // bhc_bs_last(ptr) -> i64
+        let bs_last = self.module.llvm_module().add_function("bhc_bs_last", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000406), bs_last);
+        // bhc_bs_tail(ptr) -> ptr
+        let bs_tail = self.module.llvm_module().add_function("bhc_bs_tail", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000407), bs_tail);
+        // bhc_bs_init(ptr) -> ptr
+        let bs_init = self.module.llvm_module().add_function("bhc_bs_init", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000408), bs_init);
+        // bhc_bs_append(ptr, ptr) -> ptr
+        let bs_append = self.module.llvm_module().add_function("bhc_bs_append", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000409), bs_append);
+        // bhc_bs_cons(i64, ptr) -> ptr
+        let bs_cons = self.module.llvm_module().add_function("bhc_bs_cons", ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000410), bs_cons);
+        // bhc_bs_snoc(ptr, i64) -> ptr
+        let bs_snoc = self.module.llvm_module().add_function("bhc_bs_snoc", ptr_type.fn_type(&[ptr_type.into(), i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000411), bs_snoc);
+        // bhc_bs_take(i64, ptr) -> ptr
+        let bs_take = self.module.llvm_module().add_function("bhc_bs_take", ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000412), bs_take);
+        // bhc_bs_drop(i64, ptr) -> ptr
+        let bs_drop = self.module.llvm_module().add_function("bhc_bs_drop", ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000413), bs_drop);
+        // bhc_bs_reverse(ptr) -> ptr
+        let bs_reverse = self.module.llvm_module().add_function("bhc_bs_reverse", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000414), bs_reverse);
+        // bhc_bs_elem(i64, ptr) -> i64
+        let bs_elem = self.module.llvm_module().add_function("bhc_bs_elem", i64_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000415), bs_elem);
+        // bhc_bs_index(ptr, i64) -> i64
+        let bs_index = self.module.llvm_module().add_function("bhc_bs_index", i64_type.fn_type(&[ptr_type.into(), i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000416), bs_index);
+        // bhc_bs_eq(ptr, ptr) -> i64
+        let bs_eq = self.module.llvm_module().add_function("bhc_bs_eq", i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000417), bs_eq);
+        // bhc_bs_compare(ptr, ptr) -> i64
+        let bs_compare = self.module.llvm_module().add_function("bhc_bs_compare", i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000418), bs_compare);
+        // bhc_bs_is_prefix_of(ptr, ptr) -> i64
+        let bs_is_prefix = self.module.llvm_module().add_function("bhc_bs_is_prefix_of", i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000419), bs_is_prefix);
+        // bhc_bs_is_suffix_of(ptr, ptr) -> i64
+        let bs_is_suffix = self.module.llvm_module().add_function("bhc_bs_is_suffix_of", i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000420), bs_is_suffix);
+        // bhc_bs_unpack(ptr, i64) -> i64  (for unpack iteration)
+        let bs_unpack = self.module.llvm_module().add_function("bhc_bs_unpack", i64_type.fn_type(&[ptr_type.into(), i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000421), bs_unpack);
+        // bhc_bs_read_file(path_ptr) -> ptr
+        let bs_read_file = self.module.llvm_module().add_function("bhc_bs_read_file", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000422), bs_read_file);
+        // bhc_bs_write_file(path_ptr, bs_ptr) -> void
+        let bs_write_file = self.module.llvm_module().add_function("bhc_bs_write_file", void_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000423), bs_write_file);
+
         // ---- ByteArray RTS functions (VarId 1250-1258) ----
         // bhc_bytearray_malloc(i64) -> ptr
         let ba_malloc = self.module.llvm_module().add_function("bhc_bytearray_malloc", ptr_type.fn_type(&[i64_type.into()], false), None);
@@ -2634,6 +2743,44 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.Text.map" => Some(2),
                 "Data.Text.eq" | "Data.Text.==" => Some(2),
                 "Data.Text.compare" => Some(2),
+                // Additional Data.Text operations
+                "Data.Text.filter" => Some(2),
+                "Data.Text.foldl'" => Some(3),
+                "Data.Text.concat" => Some(1),
+                "Data.Text.intercalate" => Some(2),
+                "Data.Text.strip" => Some(1),
+                "Data.Text.words" => Some(1),
+                "Data.Text.lines" => Some(1),
+                "Data.Text.splitOn" => Some(2),
+                "Data.Text.replace" => Some(3),
+                // Data.Text.Encoding operations
+                "Data.Text.Encoding.encodeUtf8" => Some(1),
+                "Data.Text.Encoding.decodeUtf8" => Some(1),
+                // Data.ByteString operations
+                "Data.ByteString.empty" => Some(0),
+                "Data.ByteString.singleton" => Some(1),
+                "Data.ByteString.pack" => Some(1),
+                "Data.ByteString.unpack" => Some(1),
+                "Data.ByteString.null" => Some(1),
+                "Data.ByteString.length" => Some(1),
+                "Data.ByteString.head" => Some(1),
+                "Data.ByteString.last" => Some(1),
+                "Data.ByteString.tail" => Some(1),
+                "Data.ByteString.init" => Some(1),
+                "Data.ByteString.append" => Some(2),
+                "Data.ByteString.cons" => Some(2),
+                "Data.ByteString.snoc" => Some(2),
+                "Data.ByteString.take" => Some(2),
+                "Data.ByteString.drop" => Some(2),
+                "Data.ByteString.reverse" => Some(1),
+                "Data.ByteString.elem" => Some(2),
+                "Data.ByteString.index" => Some(2),
+                "Data.ByteString.eq" => Some(2),
+                "Data.ByteString.compare" => Some(2),
+                "Data.ByteString.isPrefixOf" => Some(2),
+                "Data.ByteString.isSuffixOf" => Some(2),
+                "Data.ByteString.readFile" => Some(1),
+                "Data.ByteString.writeFile" => Some(2),
 
             // Identity operations
             "Identity" => Some(1),
@@ -3194,6 +3341,44 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.Text.pack" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000223, "text_pack"),
                 "Data.Text.unpack" => self.lower_builtin_text_unpack(args[0]),
                 "Data.Text.map" => self.lower_builtin_text_map(args[0], args[1]),
+                // Additional Data.Text operations (VarIds 1000227-1000235)
+                "Data.Text.filter" => self.lower_builtin_text_filter(args[0], args[1]),
+                "Data.Text.foldl'" => self.lower_builtin_text_foldl(args[0], args[1], args[2]),
+                "Data.Text.concat" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000229, "text_concat"),
+                "Data.Text.intercalate" => self.lower_builtin_text_binary_ptr_to_ptr(args[0], args[1], 1000230, "text_intercalate"),
+                "Data.Text.strip" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000231, "text_strip"),
+                "Data.Text.words" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000232, "text_words"),
+                "Data.Text.lines" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000233, "text_lines"),
+                "Data.Text.splitOn" => self.lower_builtin_text_binary_ptr_to_ptr(args[0], args[1], 1000234, "text_split_on"),
+                "Data.Text.replace" => self.lower_builtin_text_ternary_ptr(args[0], args[1], args[2], 1000235, "text_replace"),
+                // Data.Text.Encoding (VarIds 1000236-1000237)
+                "Data.Text.Encoding.encodeUtf8" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000236, "text_encode_utf8"),
+                "Data.Text.Encoding.decodeUtf8" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000237, "text_decode_utf8"),
+                // Data.ByteString operations (VarIds 1000400-1000423)
+                "Data.ByteString.empty" => self.lower_builtin_text_nullary(1000400, "bs_empty"),
+                "Data.ByteString.singleton" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000401, "bs_singleton"),
+                "Data.ByteString.pack" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000402, "bs_pack"),
+                "Data.ByteString.null" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1000404, "bs_null"),
+                "Data.ByteString.length" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1000403, "bs_length"),
+                "Data.ByteString.head" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1000405, "bs_head"),
+                "Data.ByteString.last" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1000406, "bs_last"),
+                "Data.ByteString.tail" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000407, "bs_tail"),
+                "Data.ByteString.init" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000408, "bs_init"),
+                "Data.ByteString.append" => self.lower_builtin_text_binary_ptr_to_ptr(args[0], args[1], 1000409, "bs_append"),
+                "Data.ByteString.cons" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000410, "bs_cons"),
+                "Data.ByteString.snoc" => self.lower_builtin_text_snoc(args[0], args[1], 1000411, "bs_snoc"),
+                "Data.ByteString.take" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000412, "bs_take"),
+                "Data.ByteString.drop" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000413, "bs_drop"),
+                "Data.ByteString.reverse" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000414, "bs_reverse"),
+                "Data.ByteString.elem" => self.lower_builtin_text_int_ptr_to_int(args[0], args[1], 1000415, "bs_elem"),
+                "Data.ByteString.index" => self.lower_builtin_text_ptr_int_to_int(args[0], args[1], 1000416, "bs_index"),
+                "Data.ByteString.eq" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1000417, "bs_eq"),
+                "Data.ByteString.compare" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1000418, "bs_compare"),
+                "Data.ByteString.isPrefixOf" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1000419, "bs_is_prefix_of"),
+                "Data.ByteString.isSuffixOf" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1000420, "bs_is_suffix_of"),
+                "Data.ByteString.unpack" => self.lower_builtin_bs_unpack(args[0]),
+                "Data.ByteString.readFile" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000422, "bs_read_file"),
+                "Data.ByteString.writeFile" => self.lower_builtin_bs_write_file(args[0], args[1]),
 
                 // ByteArray operations (used by Data.ByteString internals)
                 "Data.ByteString.bhc_bytearray_malloc" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1250, "ba_malloc"),
@@ -18503,6 +18688,262 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .try_as_basic_value().basic()
             .ok_or_else(|| CodegenError::Internal("text_map: returned void".to_string()))?;
         Ok(Some(result))
+    }
+
+    /// Text filter: (Char -> Bool) -> Text -> Text
+    ///
+    /// Dispatches via `bhc_text_filter(fn_ptr, env_ptr, text_ptr)`.
+    fn lower_builtin_text_filter(
+        &mut self,
+        func_expr: &Expr,
+        text_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self.lower_expr(func_expr)?
+            .ok_or_else(|| CodegenError::Internal("text_filter: no func".to_string()))?;
+        let text = self.lower_expr(text_expr)?
+            .ok_or_else(|| CodegenError::Internal("text_filter: no text".to_string()))?;
+        let func_ptr = self.value_to_ptr(func)?;
+        let text_ptr = self.value_to_ptr(text)?;
+        let rts_fn = self.functions.get(&VarId::new(1000227)).ok_or_else(|| {
+            CodegenError::Internal("bhc_text_filter not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[func_ptr.into(), func_ptr.into(), text_ptr.into()], "text_filter")
+            .map_err(|e| CodegenError::Internal(format!("text_filter call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("text_filter: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Text foldl': (a -> Char -> a) -> a -> Text -> a
+    ///
+    /// Dispatches via `bhc_text_foldl(fn_ptr, env_ptr, init_val, text_ptr)`.
+    fn lower_builtin_text_foldl(
+        &mut self,
+        func_expr: &Expr,
+        init_expr: &Expr,
+        text_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self.lower_expr(func_expr)?
+            .ok_or_else(|| CodegenError::Internal("text_foldl: no func".to_string()))?;
+        let init = self.lower_expr(init_expr)?
+            .ok_or_else(|| CodegenError::Internal("text_foldl: no init".to_string()))?;
+        let text = self.lower_expr(text_expr)?
+            .ok_or_else(|| CodegenError::Internal("text_foldl: no text".to_string()))?;
+        let func_ptr = self.value_to_ptr(func)?;
+        let init_int = self.coerce_to_int(init)?;
+        let text_ptr = self.value_to_ptr(text)?;
+        let rts_fn = self.functions.get(&VarId::new(1000228)).ok_or_else(|| {
+            CodegenError::Internal("bhc_text_foldl not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[func_ptr.into(), func_ptr.into(), init_int.into(), text_ptr.into()], "text_foldl")
+            .map_err(|e| CodegenError::Internal(format!("text_foldl call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("text_foldl: returned void".to_string()))?;
+        Ok(Some(self.int_to_ptr(result.into_int_value())?.into()))
+    }
+
+    /// Text ternary: (ptr, ptr, ptr) -> ptr (e.g. text_replace)
+    fn lower_builtin_text_ternary_ptr(
+        &mut self,
+        expr_a: &Expr,
+        expr_b: &Expr,
+        expr_c: &Expr,
+        rts_id: usize,
+        label: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let a = self.lower_expr(expr_a)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no a", label)))?;
+        let b = self.lower_expr(expr_b)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no b", label)))?;
+        let c = self.lower_expr(expr_c)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no c", label)))?;
+        let a_ptr = self.value_to_ptr(a)?;
+        let b_ptr = self.value_to_ptr(b)?;
+        let c_ptr = self.value_to_ptr(c)?;
+        let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
+            CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[a_ptr.into(), b_ptr.into(), c_ptr.into()], label)
+            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+        Ok(Some(result))
+    }
+
+    /// ByteString snoc: (ptr, i64) -> ptr (e.g. bs_snoc)
+    fn lower_builtin_text_snoc(
+        &mut self,
+        ptr_expr: &Expr,
+        int_expr: &Expr,
+        rts_id: usize,
+        label: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let p = self.lower_expr(ptr_expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no ptr", label)))?;
+        let n = self.lower_expr(int_expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no int", label)))?;
+        let p_ptr = self.value_to_ptr(p)?;
+        let n_int = self.coerce_to_int(n)?;
+        let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
+            CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[p_ptr.into(), n_int.into()], label)
+            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+        Ok(Some(result))
+    }
+
+    /// ByteString: (i64, ptr) -> i64 (e.g. bs_elem)
+    fn lower_builtin_text_int_ptr_to_int(
+        &mut self,
+        int_expr: &Expr,
+        ptr_expr: &Expr,
+        rts_id: usize,
+        label: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let n = self.lower_expr(int_expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no int", label)))?;
+        let p = self.lower_expr(ptr_expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no ptr", label)))?;
+        let n_int = self.coerce_to_int(n)?;
+        let p_ptr = self.value_to_ptr(p)?;
+        let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
+            CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[n_int.into(), p_ptr.into()], label)
+            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+        Ok(Some(self.int_to_ptr(result.into_int_value())?.into()))
+    }
+
+    /// ByteString unpack: ByteString -> [Int]
+    ///
+    /// Similar to text_unpack but returns list of Word8 (as Int).
+    fn lower_builtin_bs_unpack(
+        &mut self,
+        bs_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let bs_val = self.lower_expr(bs_expr)?
+            .ok_or_else(|| CodegenError::Internal("bs_unpack: no bs".to_string()))?;
+        let bs_ptr = self.value_to_ptr(bs_val)?;
+
+        // Get byte count
+        let length_fn = self.functions.get(&VarId::new(1000403)).ok_or_else(|| {
+            CodegenError::Internal("bhc_bs_length not declared".to_string())
+        })?;
+        let count_val = self.builder()
+            .build_call(*length_fn, &[bs_ptr.into()], "bs_len")
+            .map_err(|e| CodegenError::Internal(format!("bs_length call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("bs_length: returned void".to_string()))?
+            .into_int_value();
+
+        let unpack_fn = self.functions.get(&VarId::new(1000421)).ok_or_else(|| {
+            CodegenError::Internal("bhc_bs_unpack not declared".to_string())
+        })?;
+
+        let tm = self.type_mapper();
+        let i64_type = tm.i64_type();
+        let ptr_type = tm.ptr_type();
+
+        // Build Nil as starting accumulator
+        let nil = self.alloc_adt(0, 0)?;
+
+        // Create loop blocks
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("bs_unpack: no current function".to_string()))?;
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "bs_unpack_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "bs_unpack_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "bs_unpack_exit");
+
+        // Initial: i = count - 1, acc = nil
+        let one = i64_type.const_int(1, false);
+        let init_i = self.builder()
+            .build_int_sub(count_val, one, "init_i")
+            .map_err(|e| CodegenError::Internal(format!("bs_unpack sub: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("bs_unpack br: {:?}", e)))?;
+
+        // Loop header
+        self.builder().position_at_end(loop_header);
+        let phi_i = self.builder()
+            .build_phi(i64_type, "i")
+            .map_err(|e| CodegenError::Internal(format!("bs_unpack phi_i: {:?}", e)))?;
+        let phi_acc = self.builder()
+            .build_phi(ptr_type, "acc")
+            .map_err(|e| CodegenError::Internal(format!("bs_unpack phi_acc: {:?}", e)))?;
+
+        let zero = i64_type.const_int(0, false);
+        let cond = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SGE, phi_i.as_basic_value().into_int_value(), zero, "cond")
+            .map_err(|e| CodegenError::Internal(format!("bs_unpack cmp: {:?}", e)))?;
+        self.builder().build_conditional_branch(cond, loop_body, loop_exit)
+            .map_err(|e| CodegenError::Internal(format!("bs_unpack cbr: {:?}", e)))?;
+
+        // Loop body: byte = unpack(bs, i); cons = Cons(byte, acc); i = i - 1
+        self.builder().position_at_end(loop_body);
+        let i_val = phi_i.as_basic_value().into_int_value();
+        let byte_val = self.builder()
+            .build_call(*unpack_fn, &[bs_ptr.into(), i_val.into()], "bs_byte_at")
+            .map_err(|e| CodegenError::Internal(format!("bs_unpack call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("bs_unpack: returned void".to_string()))?;
+
+        // Alloc Cons node: tag=1, arity=2
+        let cons = self.alloc_adt(1, 2)?;
+        let byte_ptr = self.int_to_ptr(byte_val.into_int_value())?;
+        self.store_adt_field(cons, 2, 0, byte_ptr.into())?;
+        let acc_val = phi_acc.as_basic_value().into_pointer_value();
+        self.store_adt_field(cons, 2, 1, acc_val.into())?;
+
+        let next_i = self.builder()
+            .build_int_sub(i_val, one, "next_i")
+            .map_err(|e| CodegenError::Internal(format!("bs_unpack dec: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("bs_unpack loop_br: {:?}", e)))?;
+
+        // Wire phi nodes
+        let pre_header = loop_header.get_previous_basic_block()
+            .ok_or_else(|| CodegenError::Internal("bs_unpack: no pre-header block".to_string()))?;
+        phi_i.add_incoming(&[(&init_i, pre_header), (&next_i, loop_body)]);
+        phi_acc.add_incoming(&[(&nil, pre_header), (&cons, loop_body)]);
+
+        // Exit
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(phi_acc.as_basic_value()))
+    }
+
+    /// ByteString writeFile: String -> ByteString -> IO ()
+    fn lower_builtin_bs_write_file(
+        &mut self,
+        path_expr: &Expr,
+        bs_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let path = self.lower_expr(path_expr)?
+            .ok_or_else(|| CodegenError::Internal("bs_write_file: no path".to_string()))?;
+        let bs = self.lower_expr(bs_expr)?
+            .ok_or_else(|| CodegenError::Internal("bs_write_file: no bs".to_string()))?;
+        let path_ptr = self.value_to_ptr(path)?;
+        let bs_ptr = self.value_to_ptr(bs)?;
+        let rts_fn = self.functions.get(&VarId::new(1000423)).ok_or_else(|| {
+            CodegenError::Internal("bhc_bs_write_file not declared".to_string())
+        })?;
+        self.builder()
+            .build_call(*rts_fn, &[path_ptr.into(), bs_ptr.into()], "bs_write_file")
+            .map_err(|e| CodegenError::Internal(format!("bs_write_file call failed: {:?}", e)))?;
+        // void return — return unit (null ptr)
+        let unit = self.type_mapper().ptr_type().const_null();
+        Ok(Some(unit.into()))
     }
 
     /// Check if an expression is structurally a list (Cons applications or Nil).

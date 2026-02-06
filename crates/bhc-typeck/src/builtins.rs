@@ -53,6 +53,8 @@ pub struct Builtins {
     pub string_con: TyCon,
     /// The `Text` type constructor (packed UTF-8).
     pub text_con: TyCon,
+    /// The `ByteString` type constructor (packed bytes).
+    pub bytestring_con: TyCon,
     /// The `[]` (list) type constructor.
     pub list_con: TyCon,
     /// The `Maybe` type constructor.
@@ -88,6 +90,8 @@ pub struct Builtins {
     pub string_ty: Ty,
     /// The `Text` type (packed UTF-8).
     pub text_ty: Ty,
+    /// The `ByteString` type (packed bytes).
+    pub bytestring_ty: Ty,
 }
 
 impl Default for Builtins {
@@ -107,6 +111,7 @@ impl Builtins {
         let bool_con = TyCon::new(Symbol::intern("Bool"), Kind::Star);
         let string_con = TyCon::new(Symbol::intern("String"), Kind::Star);
         let text_con = TyCon::new(Symbol::intern("Text"), Kind::Star);
+        let bytestring_con = TyCon::new(Symbol::intern("ByteString"), Kind::Star);
 
         // Type constructors with kind * -> *
         let list_con = TyCon::new(Symbol::intern("[]"), Kind::star_to_star());
@@ -147,6 +152,8 @@ impl Builtins {
         let string_ty = Ty::List(Box::new(Ty::Con(char_con.clone())));
         // Text is a packed UTF-8 type (not [Char])
         let text_ty = Ty::Con(text_con.clone());
+        // ByteString is a packed byte array type
+        let bytestring_ty = Ty::Con(bytestring_con.clone());
 
         Self {
             int_con,
@@ -155,6 +162,7 @@ impl Builtins {
             bool_con,
             string_con,
             text_con,
+            bytestring_con,
             list_con,
             maybe_con,
             either_con,
@@ -168,6 +176,7 @@ impl Builtins {
             bool_ty,
             string_ty,
             text_ty,
+            bytestring_ty,
         }
     }
 
@@ -3685,6 +3694,44 @@ impl Builtins {
             ("Data.Text.==", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::fun(self.text_ty.clone(), self.bool_ty.clone())))),
             // compare returns Ordering tags (0=LT, 1=EQ, 2=GT) as Int
             ("Data.Text.compare", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::fun(self.text_ty.clone(), self.int_ty.clone())))),
+            // Additional Data.Text operations
+            ("Data.Text.filter", Scheme::mono(Ty::fun(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()), Ty::fun(self.text_ty.clone(), self.text_ty.clone())))),
+            ("Data.Text.foldl'", Scheme::poly(vec![a.clone()], Ty::fun(Ty::fun(Ty::Var(a.clone()), Ty::fun(self.char_ty.clone(), Ty::Var(a.clone()))), Ty::fun(Ty::Var(a.clone()), Ty::fun(self.text_ty.clone(), Ty::Var(a.clone())))))),
+            ("Data.Text.concat", Scheme::mono(Ty::fun(Ty::List(Box::new(self.text_ty.clone())), self.text_ty.clone()))),
+            ("Data.Text.intercalate", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::fun(Ty::List(Box::new(self.text_ty.clone())), self.text_ty.clone())))),
+            ("Data.Text.strip", Scheme::mono(Ty::fun(self.text_ty.clone(), self.text_ty.clone()))),
+            ("Data.Text.words", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::List(Box::new(self.text_ty.clone()))))),
+            ("Data.Text.lines", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::List(Box::new(self.text_ty.clone()))))),
+            ("Data.Text.splitOn", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::fun(self.text_ty.clone(), Ty::List(Box::new(self.text_ty.clone())))))),
+            ("Data.Text.replace", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::fun(self.text_ty.clone(), Ty::fun(self.text_ty.clone(), self.text_ty.clone()))))),
+            // Data.Text.Encoding
+            ("Data.Text.Encoding.encodeUtf8", Scheme::mono(Ty::fun(self.text_ty.clone(), self.bytestring_ty.clone()))),
+            ("Data.Text.Encoding.decodeUtf8", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), self.text_ty.clone()))),
+            // Data.ByteString PrimOps: packed byte arrays
+            ("Data.ByteString.empty", Scheme::mono(self.bytestring_ty.clone())),
+            ("Data.ByteString.singleton", Scheme::mono(Ty::fun(self.int_ty.clone(), self.bytestring_ty.clone()))),
+            ("Data.ByteString.pack", Scheme::mono(Ty::fun(Ty::List(Box::new(self.int_ty.clone())), self.bytestring_ty.clone()))),
+            ("Data.ByteString.unpack", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), Ty::List(Box::new(self.int_ty.clone()))))),
+            ("Data.ByteString.null", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), self.bool_ty.clone()))),
+            ("Data.ByteString.length", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), self.int_ty.clone()))),
+            ("Data.ByteString.head", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), self.int_ty.clone()))),
+            ("Data.ByteString.last", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), self.int_ty.clone()))),
+            ("Data.ByteString.tail", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), self.bytestring_ty.clone()))),
+            ("Data.ByteString.init", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), self.bytestring_ty.clone()))),
+            ("Data.ByteString.append", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), Ty::fun(self.bytestring_ty.clone(), self.bytestring_ty.clone())))),
+            ("Data.ByteString.cons", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.bytestring_ty.clone(), self.bytestring_ty.clone())))),
+            ("Data.ByteString.snoc", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), Ty::fun(self.int_ty.clone(), self.bytestring_ty.clone())))),
+            ("Data.ByteString.take", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.bytestring_ty.clone(), self.bytestring_ty.clone())))),
+            ("Data.ByteString.drop", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.bytestring_ty.clone(), self.bytestring_ty.clone())))),
+            ("Data.ByteString.reverse", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), self.bytestring_ty.clone()))),
+            ("Data.ByteString.elem", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.bytestring_ty.clone(), self.bool_ty.clone())))),
+            ("Data.ByteString.index", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), Ty::fun(self.int_ty.clone(), self.int_ty.clone())))),
+            ("Data.ByteString.eq", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), Ty::fun(self.bytestring_ty.clone(), self.bool_ty.clone())))),
+            ("Data.ByteString.compare", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), Ty::fun(self.bytestring_ty.clone(), self.int_ty.clone())))),
+            ("Data.ByteString.isPrefixOf", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), Ty::fun(self.bytestring_ty.clone(), self.bool_ty.clone())))),
+            ("Data.ByteString.isSuffixOf", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), Ty::fun(self.bytestring_ty.clone(), self.bool_ty.clone())))),
+            ("Data.ByteString.readFile", Scheme::mono(Ty::fun(self.string_ty.clone(), Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(self.bytestring_ty.clone()))))),
+            ("Data.ByteString.writeFile", Scheme::mono(Ty::fun(self.string_ty.clone(), Ty::fun(self.bytestring_ty.clone(), Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(Ty::Tuple(vec![]))))))),
             // ---- Phase 3: IO PrimOps (genuinely new) ----
             ("hGetChar", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
             ("hPutChar", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),

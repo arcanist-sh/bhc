@@ -213,6 +213,16 @@ fn test_tier3_text_basic_native() {
 }
 
 #[test]
+fn test_tier3_bytestring_basic_native() {
+    run_native_test("tier3_io/bytestring_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_text_encoding_native() {
+    run_native_test("tier3_io/text_encoding", Profile::Default);
+}
+
+#[test]
 fn test_tier3_except_t_native() {
     run_native_test("tier3_io/except_t", Profile::Default);
 }

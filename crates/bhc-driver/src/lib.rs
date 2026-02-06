@@ -1572,17 +1572,19 @@ impl Compiler {
             .and_then(|p| p.parent())
             .unwrap_or(std::path::Path::new("."));
 
-        // Try release first, then debug
-        let release_path = workspace_dir.join("target/release");
+        // Add debug path first (preferred during development), then release as fallback.
+        // This ensures that when running via `cargo test` (debug profile), the freshly
+        // compiled debug libraries are found before potentially stale release libraries.
         let debug_path = workspace_dir.join("target/debug");
+        let release_path = workspace_dir.join("target/release");
 
-        if release_path.exists() {
-            config = config
-                .with_library_path(Utf8PathBuf::from_path_buf(release_path).unwrap_or_default());
-        }
         if debug_path.exists() {
             config = config
                 .with_library_path(Utf8PathBuf::from_path_buf(debug_path).unwrap_or_default());
+        }
+        if release_path.exists() {
+            config = config
+                .with_library_path(Utf8PathBuf::from_path_buf(release_path).unwrap_or_default());
         }
 
         // Add the BHC RTS library

@@ -31,5 +31,6 @@
 #![allow(unsafe_code)] // SIMD requires unsafe
 
 pub mod bytearray;
+pub mod bytestring;
 pub mod simd;
 pub mod text;

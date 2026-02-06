@@ -1534,6 +1534,10 @@ impl Compiler {
         // The RTS provides: bhc_init, bhc_rts_init, bhc_shutdown, bhc_alloc, etc.
         config = config.with_library(LinkLibrary::named("bhc_rts"));
 
+        // Add the BHC Text library
+        // Provides: bhc_text_pack, bhc_text_unpack, bhc_text_append, etc.
+        config = config.with_library(LinkLibrary::named("bhc_text"));
+
         // Add system libraries needed by the RTS
         #[cfg(target_os = "linux")]
         {

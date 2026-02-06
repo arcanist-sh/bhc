@@ -51,6 +51,8 @@ pub struct Builtins {
     pub bool_con: TyCon,
     /// The `String` type constructor.
     pub string_con: TyCon,
+    /// The `Text` type constructor (packed UTF-8).
+    pub text_con: TyCon,
     /// The `[]` (list) type constructor.
     pub list_con: TyCon,
     /// The `Maybe` type constructor.
@@ -84,6 +86,8 @@ pub struct Builtins {
     pub bool_ty: Ty,
     /// The `String` type.
     pub string_ty: Ty,
+    /// The `Text` type (packed UTF-8).
+    pub text_ty: Ty,
 }
 
 impl Default for Builtins {
@@ -102,6 +106,7 @@ impl Builtins {
         let char_con = TyCon::new(Symbol::intern("Char"), Kind::Star);
         let bool_con = TyCon::new(Symbol::intern("Bool"), Kind::Star);
         let string_con = TyCon::new(Symbol::intern("String"), Kind::Star);
+        let text_con = TyCon::new(Symbol::intern("Text"), Kind::Star);
 
         // Type constructors with kind * -> *
         let list_con = TyCon::new(Symbol::intern("[]"), Kind::star_to_star());
@@ -140,6 +145,8 @@ impl Builtins {
         let bool_ty = Ty::Con(bool_con.clone());
         // String is a type alias for [Char] in Haskell
         let string_ty = Ty::List(Box::new(Ty::Con(char_con.clone())));
+        // Text is a packed UTF-8 type (not [Char])
+        let text_ty = Ty::Con(text_con.clone());
 
         Self {
             int_con,
@@ -147,6 +154,7 @@ impl Builtins {
             char_con,
             bool_con,
             string_con,
+            text_con,
             list_con,
             maybe_con,
             either_con,
@@ -159,6 +167,7 @@ impl Builtins {
             char_ty,
             bool_ty,
             string_ty,
+            text_ty,
         }
     }
 
@@ -3642,6 +3651,36 @@ impl Builtins {
             ("Data.IntSet.foldr", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(self.int_ty.clone(), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))), Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())))))),
             ("Data.IntSet.toList", Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))),
             ("Data.IntSet.fromList", Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))),
+            // Data.Text PrimOps: packed UTF-8 text
+            ("Data.Text.empty", Scheme::mono(self.text_ty.clone())),
+            ("Data.Text.singleton", Scheme::mono(Ty::fun(self.char_ty.clone(), self.text_ty.clone()))),
+            ("Data.Text.pack", Scheme::mono(Ty::fun(self.string_ty.clone(), self.text_ty.clone()))),
+            ("Data.Text.unpack", Scheme::mono(Ty::fun(self.text_ty.clone(), self.string_ty.clone()))),
+            ("Data.Text.null", Scheme::mono(Ty::fun(self.text_ty.clone(), self.bool_ty.clone()))),
+            ("Data.Text.length", Scheme::mono(Ty::fun(self.text_ty.clone(), self.int_ty.clone()))),
+            ("Data.Text.head", Scheme::mono(Ty::fun(self.text_ty.clone(), self.char_ty.clone()))),
+            ("Data.Text.last", Scheme::mono(Ty::fun(self.text_ty.clone(), self.char_ty.clone()))),
+            ("Data.Text.tail", Scheme::mono(Ty::fun(self.text_ty.clone(), self.text_ty.clone()))),
+            ("Data.Text.init", Scheme::mono(Ty::fun(self.text_ty.clone(), self.text_ty.clone()))),
+            ("Data.Text.append", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::fun(self.text_ty.clone(), self.text_ty.clone())))),
+            ("Data.Text.<>", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::fun(self.text_ty.clone(), self.text_ty.clone())))),
+            ("Data.Text.reverse", Scheme::mono(Ty::fun(self.text_ty.clone(), self.text_ty.clone()))),
+            ("Data.Text.take", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.text_ty.clone(), self.text_ty.clone())))),
+            ("Data.Text.takeEnd", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.text_ty.clone(), self.text_ty.clone())))),
+            ("Data.Text.drop", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.text_ty.clone(), self.text_ty.clone())))),
+            ("Data.Text.dropEnd", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.text_ty.clone(), self.text_ty.clone())))),
+            ("Data.Text.isPrefixOf", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::fun(self.text_ty.clone(), self.bool_ty.clone())))),
+            ("Data.Text.isSuffixOf", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::fun(self.text_ty.clone(), self.bool_ty.clone())))),
+            ("Data.Text.isInfixOf", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::fun(self.text_ty.clone(), self.bool_ty.clone())))),
+            ("Data.Text.toLower", Scheme::mono(Ty::fun(self.text_ty.clone(), self.text_ty.clone()))),
+            ("Data.Text.toUpper", Scheme::mono(Ty::fun(self.text_ty.clone(), self.text_ty.clone()))),
+            ("Data.Text.toCaseFold", Scheme::mono(Ty::fun(self.text_ty.clone(), self.text_ty.clone()))),
+            ("Data.Text.toTitle", Scheme::mono(Ty::fun(self.text_ty.clone(), self.text_ty.clone()))),
+            ("Data.Text.map", Scheme::mono(Ty::fun(Ty::fun(self.char_ty.clone(), self.char_ty.clone()), Ty::fun(self.text_ty.clone(), self.text_ty.clone())))),
+            ("Data.Text.eq", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::fun(self.text_ty.clone(), self.bool_ty.clone())))),
+            ("Data.Text.==", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::fun(self.text_ty.clone(), self.bool_ty.clone())))),
+            // compare returns Ordering tags (0=LT, 1=EQ, 2=GT) as Int
+            ("Data.Text.compare", Scheme::mono(Ty::fun(self.text_ty.clone(), Ty::fun(self.text_ty.clone(), self.int_ty.clone())))),
             // ---- Phase 3: IO PrimOps (genuinely new) ----
             ("hGetChar", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
             ("hPutChar", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),

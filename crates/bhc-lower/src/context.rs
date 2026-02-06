@@ -233,6 +233,7 @@ impl LowerContext {
             "TypeRep",
             "SomeException",
             "Permissions",
+            "Text", // Data.Text (packed UTF-8)
         ];
 
         for name in builtin_types {
@@ -925,6 +926,35 @@ impl LowerContext {
             "Data.IntSet.foldr",
             "Data.IntSet.toList",
             "Data.IntSet.fromList",
+            // Container PrimOps: Data.Text (packed UTF-8)
+            "Data.Text.empty",
+            "Data.Text.singleton",
+            "Data.Text.pack",
+            "Data.Text.unpack",
+            "Data.Text.null",
+            "Data.Text.length",
+            "Data.Text.head",
+            "Data.Text.last",
+            "Data.Text.tail",
+            "Data.Text.init",
+            "Data.Text.append",
+            "Data.Text.<>",
+            "Data.Text.reverse",
+            "Data.Text.take",
+            "Data.Text.takeEnd",
+            "Data.Text.drop",
+            "Data.Text.dropEnd",
+            "Data.Text.isPrefixOf",
+            "Data.Text.isSuffixOf",
+            "Data.Text.isInfixOf",
+            "Data.Text.toLower",
+            "Data.Text.toUpper",
+            "Data.Text.toCaseFold",
+            "Data.Text.toTitle",
+            "Data.Text.map",
+            "Data.Text.eq",
+            "Data.Text.==",
+            "Data.Text.compare",
             // Note: X11/System.Posix stubs are now in define_stubs()
             // ---- Phase 3: IO PrimOps (genuinely new) ----
             "hGetChar",

@@ -203,6 +203,11 @@ fn test_tier3_milestone_e_json_native() {
 }
 
 #[test]
+fn test_tier3_text_basic_native() {
+    run_native_test("tier3_io/text_basic", Profile::Default);
+}
+
+#[test]
 fn test_tier3_except_t_native() {
     run_native_test("tier3_io/except_t", Profile::Default);
 }

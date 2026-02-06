@@ -2607,6 +2607,33 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.IntSet.foldr" => Some(3),
                 "Data.IntSet.toList" => Some(1),
                 "Data.IntSet.fromList" => Some(1),
+                // Data.Text operations
+                "Data.Text.empty" => Some(0),
+                "Data.Text.singleton" => Some(1),
+                "Data.Text.pack" => Some(1),
+                "Data.Text.unpack" => Some(1),
+                "Data.Text.null" => Some(1),
+                "Data.Text.length" => Some(1),
+                "Data.Text.head" => Some(1),
+                "Data.Text.last" => Some(1),
+                "Data.Text.tail" => Some(1),
+                "Data.Text.init" => Some(1),
+                "Data.Text.append" | "Data.Text.<>" => Some(2),
+                "Data.Text.reverse" => Some(1),
+                "Data.Text.take" => Some(2),
+                "Data.Text.takeEnd" => Some(2),
+                "Data.Text.drop" => Some(2),
+                "Data.Text.dropEnd" => Some(2),
+                "Data.Text.isPrefixOf" => Some(2),
+                "Data.Text.isSuffixOf" => Some(2),
+                "Data.Text.isInfixOf" => Some(2),
+                "Data.Text.toLower" => Some(1),
+                "Data.Text.toUpper" => Some(1),
+                "Data.Text.toCaseFold" => Some(1),
+                "Data.Text.toTitle" => Some(1),
+                "Data.Text.map" => Some(2),
+                "Data.Text.eq" | "Data.Text.==" => Some(2),
+                "Data.Text.compare" => Some(2),
 
             // Identity operations
             "Identity" => Some(1),
@@ -3140,31 +3167,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.IntSet.toList" => self.lower_builtin_set_to_list(args[0]),
                 "Data.IntSet.fromList" => self.lower_builtin_set_from_list(args[0]),
 
-                // Data.Text operations
-                "Data.Text.empty" => self.lower_builtin_text_nullary(1200, "text_empty"),
-                "Data.Text.singleton" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1201, "text_singleton"),
-                "Data.Text.null" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1202, "text_null"),
-                "Data.Text.length" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1203, "text_length"),
-                "Data.Text.eq" | "Data.Text.==" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1204, "text_eq"),
-                "Data.Text.compare" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1205, "text_compare"),
-                "Data.Text.head" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1206, "text_head"),
-                "Data.Text.last" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1207, "text_last"),
-                "Data.Text.tail" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1208, "text_tail"),
-                "Data.Text.init" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1209, "text_init"),
-                "Data.Text.append" | "Data.Text.<>" => self.lower_builtin_text_binary_ptr_to_ptr(args[0], args[1], 1210, "text_append"),
-                "Data.Text.reverse" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1211, "text_reverse"),
-                "Data.Text.take" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1212, "text_take"),
-                "Data.Text.takeEnd" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1213, "text_take_end"),
-                "Data.Text.drop" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1214, "text_drop"),
-                "Data.Text.dropEnd" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1215, "text_drop_end"),
-                "Data.Text.isPrefixOf" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1216, "text_is_prefix_of"),
-                "Data.Text.isSuffixOf" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1217, "text_is_suffix_of"),
-                "Data.Text.isInfixOf" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1218, "text_is_infix_of"),
-                "Data.Text.toLower" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1219, "text_to_lower"),
-                "Data.Text.toUpper" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1220, "text_to_upper"),
-                "Data.Text.toCaseFold" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1221, "text_to_case_fold"),
-                "Data.Text.toTitle" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1222, "text_to_title"),
-                "Data.Text.pack" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1223, "text_pack"),
+                // Data.Text operations (VarIds 1000200-1000226)
+                "Data.Text.empty" => self.lower_builtin_text_nullary(1000200, "text_empty"),
+                "Data.Text.singleton" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000201, "text_singleton"),
+                "Data.Text.null" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1000202, "text_null"),
+                "Data.Text.length" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1000203, "text_length"),
+                "Data.Text.eq" | "Data.Text.==" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1000204, "text_eq"),
+                "Data.Text.compare" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1000205, "text_compare"),
+                "Data.Text.head" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1000206, "text_head"),
+                "Data.Text.last" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1000207, "text_last"),
+                "Data.Text.tail" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000208, "text_tail"),
+                "Data.Text.init" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000209, "text_init"),
+                "Data.Text.append" | "Data.Text.<>" => self.lower_builtin_text_binary_ptr_to_ptr(args[0], args[1], 1000210, "text_append"),
+                "Data.Text.reverse" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000211, "text_reverse"),
+                "Data.Text.take" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000212, "text_take"),
+                "Data.Text.takeEnd" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000213, "text_take_end"),
+                "Data.Text.drop" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000214, "text_drop"),
+                "Data.Text.dropEnd" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000215, "text_drop_end"),
+                "Data.Text.isPrefixOf" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1000216, "text_is_prefix_of"),
+                "Data.Text.isSuffixOf" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1000217, "text_is_suffix_of"),
+                "Data.Text.isInfixOf" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1000218, "text_is_infix_of"),
+                "Data.Text.toLower" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000219, "text_to_lower"),
+                "Data.Text.toUpper" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000220, "text_to_upper"),
+                "Data.Text.toCaseFold" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000221, "text_to_case_fold"),
+                "Data.Text.toTitle" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000222, "text_to_title"),
+                "Data.Text.pack" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000223, "text_pack"),
                 "Data.Text.unpack" => self.lower_builtin_text_unpack(args[0]),
                 "Data.Text.map" => self.lower_builtin_text_map(args[0], args[1]),
 
@@ -20952,6 +20979,129 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "liftIO" => {
                 // For IO, liftIO = id
                 Ok(Some(args[0]))
+            }
+
+            // Data.Text operations - call RTS functions with already-lowered values
+            "Data.Text.empty" => {
+                let rts_fn = self.functions.get(&VarId::new(1000200)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_empty not declared".to_string())
+                })?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[], "text_empty")
+                    .map_err(|e| CodegenError::Internal(format!("text_empty: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("text_empty: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.singleton" => {
+                let rts_fn = self.functions.get(&VarId::new(1000201)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_singleton not declared".to_string())
+                })?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[args[0].into()], "text_singleton")
+                    .map_err(|e| CodegenError::Internal(format!("text_singleton: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("text_singleton: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.pack" => {
+                let rts_fn = self.functions.get(&VarId::new(1000223)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_pack not declared".to_string())
+                })?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[args[0].into()], "text_pack")
+                    .map_err(|e| CodegenError::Internal(format!("text_pack: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("text_pack: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.unpack" => {
+                let rts_fn = self.functions.get(&VarId::new(1000224)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_unpack not declared".to_string())
+                })?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[args[0].into()], "text_unpack")
+                    .map_err(|e| CodegenError::Internal(format!("text_unpack: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("text_unpack: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.null" => {
+                let rts_fn = self.functions.get(&VarId::new(1000202)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_null not declared".to_string())
+                })?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[args[0].into()], "text_null")
+                    .map_err(|e| CodegenError::Internal(format!("text_null: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("text_null: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.length" => {
+                let rts_fn = self.functions.get(&VarId::new(1000203)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_length not declared".to_string())
+                })?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[args[0].into()], "text_length")
+                    .map_err(|e| CodegenError::Internal(format!("text_length: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("text_length: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.append" | "Data.Text.<>" => {
+                let rts_fn = self.functions.get(&VarId::new(1000210)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_append not declared".to_string())
+                })?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[args[0].into(), args[1].into()], "text_append")
+                    .map_err(|e| CodegenError::Internal(format!("text_append: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("text_append: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.toUpper" => {
+                let rts_fn = self.functions.get(&VarId::new(1000220)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_to_upper not declared".to_string())
+                })?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[args[0].into()], "text_to_upper")
+                    .map_err(|e| CodegenError::Internal(format!("text_to_upper: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("text_to_upper: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.toLower" => {
+                let rts_fn = self.functions.get(&VarId::new(1000219)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_to_lower not declared".to_string())
+                })?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[args[0].into()], "text_to_lower")
+                    .map_err(|e| CodegenError::Internal(format!("text_to_lower: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("text_to_lower: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.take" => {
+                let rts_fn = self.functions.get(&VarId::new(1000212)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_take not declared".to_string())
+                })?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[args[0].into(), args[1].into()], "text_take")
+                    .map_err(|e| CodegenError::Internal(format!("text_take: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("text_take: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.drop" => {
+                let rts_fn = self.functions.get(&VarId::new(1000214)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_drop not declared".to_string())
+                })?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[args[0].into(), args[1].into()], "text_drop")
+                    .map_err(|e| CodegenError::Internal(format!("text_drop: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("text_drop: void".to_string()))?;
+                Ok(Some(result))
             }
 
             _ => Err(CodegenError::Internal(format!(

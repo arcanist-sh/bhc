@@ -3725,6 +3725,64 @@ impl Builtins {
             Symbol::intern("showChar"),
             Scheme::mono(Ty::fun(self.char_ty.clone(), self.string_ty.clone())),
         );
+        env.register_value(
+            DefId::new(10105),
+            Symbol::intern("showString"),
+            Scheme::mono(Ty::fun(self.string_ty.clone(), self.string_ty.clone())),
+        );
+        {
+            let a = TyVar::new_star(BUILTIN_TYVAR_A);
+            let b = TyVar::new_star(BUILTIN_TYVAR_B);
+            env.register_value(
+                DefId::new(10106),
+                Symbol::intern("showList"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::list(Ty::Var(a.clone())), self.string_ty.clone()),
+                ),
+            );
+            env.register_value(
+                DefId::new(10107),
+                Symbol::intern("showMaybe"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        Ty::App(Box::new(Ty::Con(self.maybe_con.clone())), Box::new(Ty::Var(a.clone()))),
+                        self.string_ty.clone(),
+                    ),
+                ),
+            );
+            env.register_value(
+                DefId::new(10108),
+                Symbol::intern("showEither"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::App(
+                            Box::new(Ty::App(Box::new(Ty::Con(self.either_con.clone())), Box::new(Ty::Var(a.clone())))),
+                            Box::new(Ty::Var(b.clone())),
+                        ),
+                        self.string_ty.clone(),
+                    ),
+                ),
+            );
+            env.register_value(
+                DefId::new(10109),
+                Symbol::intern("showTuple2"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::Tuple(vec![Ty::Var(a), Ty::Var(b)]),
+                        self.string_ty.clone(),
+                    ),
+                ),
+            );
+        }
+        env.register_value(
+            DefId::new(10110),
+            Symbol::intern("showUnit"),
+            Scheme::mono(Ty::fun(Ty::unit(), self.string_ty.clone())),
+        );
 
         // Register character functions at fixed DefIds (10200+)
         env.register_value(

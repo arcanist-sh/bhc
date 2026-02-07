@@ -1,0 +1,3 @@
+Just 42
+Nothing
+Just True

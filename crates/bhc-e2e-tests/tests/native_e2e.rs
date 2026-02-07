@@ -274,6 +274,37 @@ fn test_tier3_text_io_native() {
     run_native_test("tier3_io/text_io", Profile::Default);
 }
 
+// Show compound types
+#[test]
+fn test_tier3_show_string_native() {
+    run_native_test("tier3_io/show_string", Profile::Default);
+}
+
+#[test]
+fn test_tier3_show_list_native() {
+    run_native_test("tier3_io/show_list", Profile::Default);
+}
+
+#[test]
+fn test_tier3_show_maybe_native() {
+    run_native_test("tier3_io/show_maybe", Profile::Default);
+}
+
+#[test]
+fn test_tier3_show_either_native() {
+    run_native_test("tier3_io/show_either", Profile::Default);
+}
+
+#[test]
+fn test_tier3_show_tuple_native() {
+    run_native_test("tier3_io/show_tuple", Profile::Default);
+}
+
+#[test]
+fn test_tier3_show_unit_native() {
+    run_native_test("tier3_io/show_unit", Profile::Default);
+}
+
 // =============================================================================
 // Discovery Tests
 // =============================================================================

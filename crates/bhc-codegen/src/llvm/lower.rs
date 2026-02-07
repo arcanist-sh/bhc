@@ -111,6 +111,18 @@ enum ShowCoerce {
     Char,
     /// Extract ADT tag (i64) for show_bool
     Bool,
+    /// Pass pointer directly for show_string ([Char])
+    StringList,
+    /// Pass pointer + elem type tag for show_list
+    List,
+    /// Pass pointer + elem type tag for show_maybe
+    MaybeOf,
+    /// Pass pointer + left/right type tags for show_either
+    EitherOf,
+    /// Pass pointer + fst/snd type tags for show_tuple2
+    Tuple2Of,
+    /// Pass pointer directly for show_unit
+    Unit,
 }
 
 /// A stack of transformer layers, tracking the full transformer stack.
@@ -1506,6 +1518,33 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let show_float = self.module.llvm_module().add_function("bhc_show_float", f32_to_ptr, None);
         self.functions.insert(VarId::new(1000090), show_float);
 
+        // bhc_show_string(ptr) -> *i8
+        let ptr_to_ptr = i8_ptr_type.fn_type(&[i8_ptr_type.into()], false);
+        let show_string = self.module.llvm_module().add_function("bhc_show_string", ptr_to_ptr, None);
+        self.functions.insert(VarId::new(1000092), show_string);
+
+        // bhc_show_list(ptr, i64) -> *i8
+        let ptr_i64_to_ptr = i8_ptr_type.fn_type(&[i8_ptr_type.into(), i64_type.into()], false);
+        let show_list = self.module.llvm_module().add_function("bhc_show_list", ptr_i64_to_ptr, None);
+        self.functions.insert(VarId::new(1000093), show_list);
+
+        // bhc_show_maybe(ptr, i64) -> *i8
+        let show_maybe = self.module.llvm_module().add_function("bhc_show_maybe", ptr_i64_to_ptr, None);
+        self.functions.insert(VarId::new(1000094), show_maybe);
+
+        // bhc_show_either(ptr, i64, i64) -> *i8
+        let ptr_i64_i64_to_ptr = i8_ptr_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i64_type.into()], false);
+        let show_either = self.module.llvm_module().add_function("bhc_show_either", ptr_i64_i64_to_ptr, None);
+        self.functions.insert(VarId::new(1000095), show_either);
+
+        // bhc_show_tuple2(ptr, i64, i64) -> *i8
+        let show_tuple2 = self.module.llvm_module().add_function("bhc_show_tuple2", ptr_i64_i64_to_ptr, None);
+        self.functions.insert(VarId::new(1000096), show_tuple2);
+
+        // bhc_show_unit(ptr) -> *i8
+        let show_unit = self.module.llvm_module().add_function("bhc_show_unit", ptr_to_ptr, None);
+        self.functions.insert(VarId::new(1000097), show_unit);
+
         // bhc_char_to_int(u32) -> i64 (ord)
         let u32_to_i64 = i64_type.fn_type(&[u32_type.into()], false);
         let char_to_int = self.module.llvm_module().add_function("bhc_char_to_int", u32_to_i64, None);
@@ -2647,6 +2686,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "showFloat" => Some(1),
             "showBool" => Some(1),
             "showChar" => Some(1),
+            "showString" => Some(1),
+            "showList" => Some(1),
+            "showMaybe" => Some(1),
+            "showEither" => Some(1),
+            "showTuple2" => Some(1),
+            "showUnit" => Some(1),
 
                 // Data.Map operations
                 "Data.Map.empty" => Some(0),
@@ -3186,6 +3231,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "showFloat" => self.lower_builtin_show_typed(args[0], 1000090, "show_float", ShowCoerce::Float),
             "showBool" => self.lower_builtin_show_typed(args[0], 1000091, "show_bool", ShowCoerce::Bool),
             "showChar" => self.lower_builtin_show_typed(args[0], 1000074, "show_char", ShowCoerce::Char),
+            "showString" => self.lower_builtin_show_typed(args[0], 1000092, "show_string", ShowCoerce::StringList),
+            "showList" => self.lower_builtin_show_typed(args[0], 1000093, "show_list", ShowCoerce::List),
+            "showMaybe" => self.lower_builtin_show_typed(args[0], 1000094, "show_maybe", ShowCoerce::MaybeOf),
+            "showEither" => self.lower_builtin_show_typed(args[0], 1000095, "show_either", ShowCoerce::EitherOf),
+            "showTuple2" => self.lower_builtin_show_typed(args[0], 1000096, "show_tuple2", ShowCoerce::Tuple2Of),
+            "showUnit" => self.lower_builtin_show_typed(args[0], 1000097, "show_unit", ShowCoerce::Unit),
 
             // Advanced list operations (delegate to existing patterns)
             "any" => self.lower_builtin_any(args[0], args[1]),
@@ -8593,6 +8644,140 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Check if a type is a Char type.
+    fn is_char_type(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Con(con) => con.name.as_str() == "Char",
+            Ty::App(f, _) => self.is_char_type(f),
+            Ty::Forall(_, body) => self.is_char_type(body),
+            _ => false,
+        }
+    }
+
+    /// Check if a type is specifically Double (not Float).
+    fn is_double_type(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Con(con) => matches!(con.name.as_str(), "Double" | "Double#"),
+            Ty::Prim(prim) => matches!(prim, bhc_types::PrimTy::F64),
+            Ty::App(f, _) => self.is_double_type(f),
+            Ty::Forall(_, body) => self.is_double_type(body),
+            _ => false,
+        }
+    }
+
+    /// Check if a type is [Char] (String).
+    fn is_string_type(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::List(elem) => self.is_char_type(elem),
+            Ty::App(f, a) => {
+                if let Ty::Con(con) = f.as_ref() {
+                    (con.name.as_str() == "[]" || con.name.as_str() == "List") && self.is_char_type(a)
+                } else {
+                    false
+                }
+            }
+            Ty::Con(con) => con.name.as_str() == "String",
+            Ty::Forall(_, body) => self.is_string_type(body),
+            _ => false,
+        }
+    }
+
+    /// Check if a type is Maybe a, returning the inner type.
+    fn is_maybe_type<'t>(&self, ty: &'t Ty) -> Option<&'t Ty> {
+        match ty {
+            Ty::App(f, a) => {
+                if let Ty::Con(con) = f.as_ref() {
+                    if con.name.as_str() == "Maybe" {
+                        return Some(a);
+                    }
+                }
+                None
+            }
+            Ty::Forall(_, body) => self.is_maybe_type(body),
+            _ => None,
+        }
+    }
+
+    /// Check if a type is Either a b, returning (left, right) types.
+    fn is_either_type<'t>(&self, ty: &'t Ty) -> Option<(&'t Ty, &'t Ty)> {
+        match ty {
+            Ty::App(f, b) => {
+                if let Ty::App(ff, a) = f.as_ref() {
+                    if let Ty::Con(con) = ff.as_ref() {
+                        if con.name.as_str() == "Either" {
+                            return Some((a, b));
+                        }
+                    }
+                }
+                None
+            }
+            Ty::Forall(_, body) => self.is_either_type(body),
+            _ => None,
+        }
+    }
+
+    /// Check if a type is a 2-tuple (a, b), returning (fst, snd) types.
+    fn is_tuple_type<'t>(&self, ty: &'t Ty) -> Option<(&'t Ty, &'t Ty)> {
+        match ty {
+            Ty::Tuple(elems) if elems.len() == 2 => Some((&elems[0], &elems[1])),
+            Ty::App(f, b) => {
+                if let Ty::App(ff, a) = f.as_ref() {
+                    if let Ty::Con(con) = ff.as_ref() {
+                        if con.name.as_str() == "(,)" || con.name.as_str() == "Tuple2" {
+                            return Some((a, b));
+                        }
+                    }
+                }
+                None
+            }
+            Ty::Forall(_, body) => self.is_tuple_type(body),
+            _ => None,
+        }
+    }
+
+    /// Check if a type is unit ().
+    fn is_unit_type(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Tuple(elems) => elems.is_empty(),
+            Ty::Con(con) => con.name.as_str() == "()" || con.name.as_str() == "Unit",
+            Ty::Forall(_, body) => self.is_unit_type(body),
+            _ => false,
+        }
+    }
+
+    /// Get the element type from a list type.
+    fn list_elem_type<'t>(&self, ty: &'t Ty) -> Option<&'t Ty> {
+        match ty {
+            Ty::List(elem) => Some(elem),
+            Ty::App(f, a) => {
+                if let Ty::Con(con) = f.as_ref() {
+                    if con.name.as_str() == "[]" || con.name.as_str() == "List" {
+                        return Some(a);
+                    }
+                }
+                None
+            }
+            Ty::Forall(_, body) => self.list_elem_type(body),
+            _ => None,
+        }
+    }
+
+    /// Convert a type to a show type tag for RTS functions.
+    /// 0=Int, 1=Double, 2=Float, 3=Bool, 4=Char, 5=String
+    fn type_to_show_tag(&self, ty: &Ty) -> i64 {
+        if self.is_char_type(ty) { return 4; }
+        if self.is_bool_type(ty) { return 3; }
+        if self.is_double_type(ty) { return 1; }
+        if self.is_float_type(ty) {
+            // is_float_type matches both Float and Double; if we got here, it's Float only
+            // since Double was already checked above
+            return 2;
+        }
+        if self.is_string_type(ty) { return 5; }
+        if self.is_int_type(ty) { return 0; }
+        0 // default to Int
+    }
+
     /// Check if an expression looks like a list based on its structure.
     /// This is used when type information is unavailable (Error type).
     fn expr_looks_like_list(&self, expr: &Expr) -> bool {
@@ -12422,24 +12607,317 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(result))
     }
 
-    /// Lower `show` (default: treat as integer).
+    /// Lower `show` — type-aware dispatch to the correct show function.
+    /// First tries expr.ty(), falls back to expression structure analysis.
     fn lower_builtin_show(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let val = self.lower_expr(expr)?.ok_or_else(|| CodegenError::Internal("show: no value".to_string()))?;
-        let int_val = self.coerce_to_int(val)?;
-        let rts_fn = self.functions.get(&VarId::new(1000072)).ok_or_else(|| CodegenError::Internal("bhc_show_int not declared".to_string()))?;
-        let cstr_result = self.builder().build_call(*rts_fn, &[int_val.into()], "show")
-            .map_err(|e| CodegenError::Internal(format!("show call failed: {:?}", e)))?
-            .try_as_basic_value().basic()
-            .ok_or_else(|| CodegenError::Internal("show: returned void".to_string()))?;
-        // Convert C-string result to [Char] linked list
-        let char_list = self.cstring_to_char_list(cstr_result.into_pointer_value())?;
-        Ok(Some(char_list.into()))
+        let ty = expr.ty();
+
+        // First try type-based dispatch (works when type info is available)
+        if !matches!(ty, Ty::Error) && !matches!(ty, Ty::Var(_)) {
+            if self.is_bool_type(&ty) {
+                return self.lower_builtin_show_typed(expr, 1000091, "show_bool", ShowCoerce::Bool);
+            }
+            if self.is_char_type(&ty) {
+                return self.lower_builtin_show_typed(expr, 1000074, "show_char", ShowCoerce::Char);
+            }
+            if self.is_double_type(&ty) {
+                return self.lower_builtin_show_typed(expr, 1000073, "show_double", ShowCoerce::Double);
+            }
+            if self.is_float_type(&ty) {
+                return self.lower_builtin_show_typed(expr, 1000090, "show_float", ShowCoerce::Float);
+            }
+            if self.is_string_type(&ty) {
+                return self.lower_builtin_show_typed(expr, 1000092, "show_string", ShowCoerce::StringList);
+            }
+            if self.is_list_type(&ty) {
+                return self.lower_builtin_show_typed(expr, 1000093, "show_list", ShowCoerce::List);
+            }
+            if self.is_maybe_type(&ty).is_some() {
+                return self.lower_builtin_show_typed(expr, 1000094, "show_maybe", ShowCoerce::MaybeOf);
+            }
+            if self.is_either_type(&ty).is_some() {
+                return self.lower_builtin_show_typed(expr, 1000095, "show_either", ShowCoerce::EitherOf);
+            }
+            if self.is_tuple_type(&ty).is_some() {
+                return self.lower_builtin_show_typed(expr, 1000096, "show_tuple2", ShowCoerce::Tuple2Of);
+            }
+            if self.is_unit_type(&ty) {
+                return self.lower_builtin_show_typed(expr, 1000097, "show_unit", ShowCoerce::Unit);
+            }
+            if self.is_int_type(&ty) {
+                return self.lower_builtin_show_typed(expr, 1000072, "show_int", ShowCoerce::Int);
+            }
+        }
+
+        // Fall back to expression structure analysis when type is Error/Var
+        if let Some((coerce, var_id, label)) = self.infer_show_from_expr(expr) {
+            return self.lower_builtin_show_typed(expr, var_id, label, coerce);
+        }
+
+        // Default: Int
+        self.lower_builtin_show_typed(expr, 1000072, "show_int", ShowCoerce::Int)
     }
 
-    /// Lower type-specialized show: `showInt`, `showDouble`, `showFloat`, `showBool`, `showChar`.
+    /// Infer the show coercion from the expression structure when type info is unavailable.
+    fn infer_show_from_expr(&self, expr: &Expr) -> Option<(ShowCoerce, usize, &'static str)> {
+        match expr {
+            // String literal
+            Expr::Lit(Literal::String(_), _, _) => {
+                Some((ShowCoerce::StringList, 1000092, "show_string"))
+            }
+            // Int literal
+            Expr::Lit(Literal::Int(_), _, _) => {
+                Some((ShowCoerce::Int, 1000072, "show_int"))
+            }
+            // Float/Double literal
+            Expr::Lit(Literal::Float(_), _, _) | Expr::Lit(Literal::Double(_), _, _) => {
+                Some((ShowCoerce::Double, 1000073, "show_double"))
+            }
+            // Char literal
+            Expr::Lit(Literal::Char(_), _, _) => {
+                Some((ShowCoerce::Char, 1000074, "show_char"))
+            }
+            // Unit "()" or constructor named "()"
+            Expr::Var(var, _) if var.name.as_str() == "()" => {
+                Some((ShowCoerce::Unit, 1000097, "show_unit"))
+            }
+            // Bool constructors
+            Expr::Var(var, _) if var.name.as_str() == "True" || var.name.as_str() == "False" => {
+                Some((ShowCoerce::Bool, 1000091, "show_bool"))
+            }
+            // Nothing
+            Expr::Var(var, _) if var.name.as_str() == "Nothing" => {
+                Some((ShowCoerce::MaybeOf, 1000094, "show_maybe"))
+            }
+            // Empty list []
+            Expr::Var(var, _) if var.name.as_str() == "[]" => {
+                // Could be [a] for any a - use List with Int default
+                Some((ShowCoerce::List, 1000093, "show_list"))
+            }
+            // Constructor applications
+            Expr::App(f, arg, _) => {
+                match f.as_ref() {
+                    // Just x
+                    Expr::Var(var, _) if var.name.as_str() == "Just" => {
+                        Some((ShowCoerce::MaybeOf, 1000094, "show_maybe"))
+                    }
+                    // Left x or Right x
+                    Expr::Var(var, _) if var.name.as_str() == "Left" || var.name.as_str() == "Right" => {
+                        Some((ShowCoerce::EitherOf, 1000095, "show_either"))
+                    }
+                    // Cons application: (:) x xs  — it's a two-arg app, so this is partially applied
+                    // The full Cons is App(App((:), head), tail)
+                    Expr::App(ff, _head, _) => {
+                        match ff.as_ref() {
+                            Expr::Var(var, _) if var.name.as_str() == ":" => {
+                                // This is a list. Check head to determine element type.
+                                Some((ShowCoerce::List, 1000093, "show_list"))
+                            }
+                            // Tuple constructor: App(App((,), fst), snd)
+                            Expr::Var(var, _) if var.name.as_str() == "(,)" || var.name.as_str() == "Tuple2" => {
+                                Some((ShowCoerce::Tuple2Of, 1000096, "show_tuple2"))
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            // Let binding: check body
+            Expr::Let(_, body, _) => self.infer_show_from_expr(body),
+            // Type application: check inner
+            Expr::TyApp(inner, _, _) => self.infer_show_from_expr(inner),
+            _ => None,
+        }
+    }
+
+    /// Infer the show type tag for an element from expression structure.
+    /// Returns: 0=Int, 1=Double, 2=Float, 3=Bool, 4=Char, 5=String
+    fn infer_elem_tag_from_expr(&self, expr: &Expr) -> i64 {
+        // First try type info
+        let ty = expr.ty();
+        if !matches!(ty, Ty::Error) && !matches!(ty, Ty::Var(_)) {
+            return self.type_to_show_tag(&ty);
+        }
+        // Fall back to expression structure
+        match expr {
+            Expr::Lit(Literal::Int(_), _, _) => 0,
+            Expr::Lit(Literal::Double(_), _, _) => 1,
+            Expr::Lit(Literal::Float(_), _, _) => 2,
+            Expr::Lit(Literal::Char(_), _, _) => 4,
+            Expr::Lit(Literal::String(_), _, _) => 5,
+            Expr::Var(var, _) => {
+                match var.name.as_str() {
+                    "True" | "False" => 3,
+                    _ => 0,
+                }
+            }
+            _ => 0, // default Int
+        }
+    }
+
+    /// Get the first element of a Cons-list expression for type inference.
+    fn get_list_head_expr<'e>(&self, expr: &'e Expr) -> Option<&'e Expr> {
+        match expr {
+            // App(App((:), head), tail)
+            Expr::App(f, _tail, _) => {
+                if let Expr::App(ff, head, _) = f.as_ref() {
+                    if let Expr::Var(var, _) = ff.as_ref() {
+                        if var.name.as_str() == ":" {
+                            return Some(head);
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Let(_, body, _) => self.get_list_head_expr(body),
+            Expr::TyApp(inner, _, _) => self.get_list_head_expr(inner),
+            _ => None,
+        }
+    }
+
+    /// Infer element type tag for a list expression.
+    fn infer_list_elem_tag(&self, list_expr: &Expr) -> i64 {
+        // Try to get the head element and infer its type
+        if let Some(head) = self.get_list_head_expr(list_expr) {
+            return self.infer_elem_tag_from_expr(head);
+        }
+        0 // default to Int for empty lists
+    }
+
+    /// Infer the value type tag for a Maybe/Just expression.
+    fn infer_maybe_elem_tag(&self, maybe_expr: &Expr) -> i64 {
+        // Just x → infer from x
+        if let Expr::App(f, arg, _) = maybe_expr {
+            if let Expr::Var(var, _) = f.as_ref() {
+                if var.name.as_str() == "Just" {
+                    return self.infer_elem_tag_from_expr(arg);
+                }
+            }
+        }
+        0 // Nothing defaults to Int
+    }
+
+    /// Infer the left/right type tags for an Either expression.
+    fn infer_either_tags(&self, either_expr: &Expr) -> (i64, i64) {
+        if let Expr::App(f, arg, _) = either_expr {
+            if let Expr::Var(var, _) = f.as_ref() {
+                match var.name.as_str() {
+                    "Left" => return (self.infer_elem_tag_from_expr(arg), 0),
+                    "Right" => return (0, self.infer_elem_tag_from_expr(arg)),
+                    _ => {}
+                }
+            }
+        }
+        (0, 0)
+    }
+
+    /// Infer the fst/snd type tags for a tuple expression.
+    fn infer_tuple_tags(&self, tuple_expr: &Expr) -> (i64, i64) {
+        // App(App((,), fst), snd)
+        if let Expr::App(f, snd, _) = tuple_expr {
+            if let Expr::App(ff, fst, _) = f.as_ref() {
+                if let Expr::Var(var, _) = ff.as_ref() {
+                    if var.name.as_str() == "(,)" || var.name.as_str() == "Tuple2" {
+                        return (self.infer_elem_tag_from_expr(fst), self.infer_elem_tag_from_expr(snd));
+                    }
+                }
+            }
+        }
+        (0, 0)
+    }
+
+    /// Lower type-specialized show functions.
     fn lower_builtin_show_typed(&mut self, expr: &Expr, var_id: usize, label: &str, coerce: ShowCoerce) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let val = self.lower_expr(expr)?.ok_or_else(|| CodegenError::Internal(format!("{}: no value", label)))?;
         let rts_fn = *self.functions.get(&VarId::new(var_id)).ok_or_else(|| CodegenError::Internal(format!("bhc_{} not declared", label)))?;
+
+        // For compound types, we pass pointer + type tags directly
+        match coerce {
+            ShowCoerce::StringList | ShowCoerce::Unit => {
+                // Pass pointer directly: fn(ptr) -> ptr
+                let ptr = self.value_to_ptr(val)?;
+                let cstr_result = self.builder().build_call(rts_fn, &[ptr.into()], label)
+                    .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+                let char_list = self.cstring_to_char_list(cstr_result.into_pointer_value())?;
+                return Ok(Some(char_list.into()));
+            }
+            ShowCoerce::List => {
+                // fn(ptr, elem_tag) -> ptr
+                let ptr = self.value_to_ptr(val)?;
+                let elem_ty = expr.ty();
+                let elem_tag = if let Some(inner) = self.list_elem_type(&elem_ty) {
+                    self.type_to_show_tag(inner)
+                } else {
+                    self.infer_list_elem_tag(expr)
+                };
+                let tag_val = self.type_mapper().i64_type().const_int(elem_tag as u64, false);
+                let cstr_result = self.builder().build_call(rts_fn, &[ptr.into(), tag_val.into()], label)
+                    .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+                let char_list = self.cstring_to_char_list(cstr_result.into_pointer_value())?;
+                return Ok(Some(char_list.into()));
+            }
+            ShowCoerce::MaybeOf => {
+                // fn(ptr, elem_tag) -> ptr
+                let ptr = self.value_to_ptr(val)?;
+                let ty = expr.ty();
+                let elem_tag = if let Some(inner) = self.is_maybe_type(&ty) {
+                    self.type_to_show_tag(inner)
+                } else {
+                    self.infer_maybe_elem_tag(expr)
+                };
+                let tag_val = self.type_mapper().i64_type().const_int(elem_tag as u64, false);
+                let cstr_result = self.builder().build_call(rts_fn, &[ptr.into(), tag_val.into()], label)
+                    .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+                let char_list = self.cstring_to_char_list(cstr_result.into_pointer_value())?;
+                return Ok(Some(char_list.into()));
+            }
+            ShowCoerce::EitherOf => {
+                // fn(ptr, left_tag, right_tag) -> ptr
+                let ptr = self.value_to_ptr(val)?;
+                let ty = expr.ty();
+                let (left_tag, right_tag) = if let Some((l, r)) = self.is_either_type(&ty) {
+                    (self.type_to_show_tag(l), self.type_to_show_tag(r))
+                } else {
+                    self.infer_either_tags(expr)
+                };
+                let left_val = self.type_mapper().i64_type().const_int(left_tag as u64, false);
+                let right_val = self.type_mapper().i64_type().const_int(right_tag as u64, false);
+                let cstr_result = self.builder().build_call(rts_fn, &[ptr.into(), left_val.into(), right_val.into()], label)
+                    .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+                let char_list = self.cstring_to_char_list(cstr_result.into_pointer_value())?;
+                return Ok(Some(char_list.into()));
+            }
+            ShowCoerce::Tuple2Of => {
+                // fn(ptr, fst_tag, snd_tag) -> ptr
+                let ptr = self.value_to_ptr(val)?;
+                let ty = expr.ty();
+                let (fst_tag, snd_tag) = if let Some((f, s)) = self.is_tuple_type(&ty) {
+                    (self.type_to_show_tag(f), self.type_to_show_tag(s))
+                } else {
+                    self.infer_tuple_tags(expr)
+                };
+                let fst_val = self.type_mapper().i64_type().const_int(fst_tag as u64, false);
+                let snd_val = self.type_mapper().i64_type().const_int(snd_tag as u64, false);
+                let cstr_result = self.builder().build_call(rts_fn, &[ptr.into(), fst_val.into(), snd_val.into()], label)
+                    .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+                let char_list = self.cstring_to_char_list(cstr_result.into_pointer_value())?;
+                return Ok(Some(char_list.into()));
+            }
+            _ => {} // Fall through to primitive coercion handling below
+        }
+
+        // Primitive coercions (Int, Double, Float, Char, Bool)
         let call_arg: inkwell::values::BasicMetadataValueEnum = match coerce {
             ShowCoerce::Int => {
                 let int_val = self.coerce_to_int(val)?;
@@ -12485,6 +12963,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let tag = self.extract_adt_tag(ptr)?;
                 tag.into()
             }
+            _ => unreachable!("compound coercions handled above"),
         };
         let cstr_result = self.builder().build_call(rts_fn, &[call_arg], label)
             .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?

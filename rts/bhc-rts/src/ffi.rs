@@ -1235,6 +1235,164 @@ pub extern "C" fn bhc_show_char(c: u32) -> *mut c_char {
 }
 
 // ----------------------------------------------------------------------------
+// Show: Compound Types (String, List, Maybe, Either, Tuple, Unit)
+// ----------------------------------------------------------------------------
+
+/// Format a single element for compound show functions.
+/// type_tag: 0=Int, 1=Double, 2=Float, 3=Bool, 4=Char, 5=String
+unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
+    unsafe {
+        match type_tag {
+            0 => {
+                // Int: pointer-as-integer
+                let val = ptr as i64;
+                format!("{}", val)
+            }
+            1 => {
+                // Double: interpret as f64 bits
+                let bits = ptr as i64;
+                let val = f64::from_bits(bits as u64);
+                format!("{}", val)
+            }
+            2 => {
+                // Float: interpret as f32 bits (lower 32 bits)
+                let bits = ptr as i32;
+                let val = f32::from_bits(bits as u32);
+                format!("{}", val)
+            }
+            3 => {
+                // Bool: ADT with tag 0=False, 1=True
+                let tag = *(ptr as *const i64);
+                if tag != 0 { "True".to_string() } else { "False".to_string() }
+            }
+            4 => {
+                // Char: stored as u32 via int-to-ptr
+                let c = ptr as u32;
+                if let Some(ch) = char::from_u32(c) {
+                    format!("'{}'", ch.escape_default())
+                } else {
+                    format!("'\\x{:x}'", c)
+                }
+            }
+            5 => {
+                // String: [Char] linked list, show with quotes
+                let s = read_char_list(ptr);
+                format!("\"{}\"", s.escape_default())
+            }
+            _ => {
+                // Default: treat as Int
+                let val = ptr as i64;
+                format!("{}", val)
+            }
+        }
+    }
+}
+
+/// Read a [Char] linked list into a Rust String.
+/// List layout: Nil=[tag=0], Cons=[tag=1][head@+8][tail@+16]
+unsafe fn read_char_list(mut list_ptr: *const u8) -> String {
+    unsafe {
+        let mut result = String::new();
+        while !list_ptr.is_null() {
+            let tag = *(list_ptr as *const i64);
+            if tag == 0 {
+                break; // Nil
+            }
+            // Cons: head at +8, tail at +16
+            let head = *(list_ptr.add(8) as *const *const u8);
+            let char_val = head as u32;
+            if let Some(ch) = char::from_u32(char_val) {
+                result.push(ch);
+            }
+            list_ptr = *(list_ptr.add(16) as *const *const u8);
+        }
+        result
+    }
+}
+
+/// Show String - wraps a [Char] list in quotes: "\"hello\""
+#[no_mangle]
+pub extern "C" fn bhc_show_string(list_ptr: *const u8) -> *mut c_char {
+    let s = unsafe { read_char_list(list_ptr) };
+    let shown = format!("\"{}\"", s.escape_default());
+    let c_string = CString::new(shown).unwrap();
+    c_string.into_raw()
+}
+
+/// Show List - formats a [a] list as "[el1,el2,el3]"
+/// Special case: elem_type_tag==4 (Char) formats as String: "\"abc\""
+#[no_mangle]
+pub extern "C" fn bhc_show_list(list_ptr: *const u8, elem_type_tag: i64) -> *mut c_char {
+    // Special case: [Char] is shown as a String
+    if elem_type_tag == 4 {
+        return bhc_show_string(list_ptr);
+    }
+
+    let mut elems = Vec::new();
+    let mut cur = list_ptr;
+    unsafe {
+        while !cur.is_null() {
+            let tag = *(cur as *const i64);
+            if tag == 0 {
+                break; // Nil
+            }
+            let head = *(cur.add(8) as *const *const u8);
+            elems.push(show_elem(head, elem_type_tag));
+            cur = *(cur.add(16) as *const *const u8);
+        }
+    }
+    let shown = format!("[{}]", elems.join(","));
+    let c_string = CString::new(shown).unwrap();
+    c_string.into_raw()
+}
+
+/// Show Maybe - "Nothing" or "Just <val>"
+#[no_mangle]
+pub extern "C" fn bhc_show_maybe(maybe_ptr: *const u8, elem_type_tag: i64) -> *mut c_char {
+    let tag = unsafe { *(maybe_ptr as *const i64) };
+    let shown = if tag == 0 {
+        "Nothing".to_string()
+    } else {
+        let val = unsafe { *(maybe_ptr.add(8) as *const *const u8) };
+        format!("Just {}", unsafe { show_elem(val, elem_type_tag) })
+    };
+    let c_string = CString::new(shown).unwrap();
+    c_string.into_raw()
+}
+
+/// Show Either - "Left <val>" or "Right <val>"
+#[no_mangle]
+pub extern "C" fn bhc_show_either(either_ptr: *const u8, left_type_tag: i64, right_type_tag: i64) -> *mut c_char {
+    let tag = unsafe { *(either_ptr as *const i64) };
+    let shown = if tag == 0 {
+        let val = unsafe { *(either_ptr.add(8) as *const *const u8) };
+        format!("Left {}", unsafe { show_elem(val, left_type_tag) })
+    } else {
+        let val = unsafe { *(either_ptr.add(8) as *const *const u8) };
+        format!("Right {}", unsafe { show_elem(val, right_type_tag) })
+    };
+    let c_string = CString::new(shown).unwrap();
+    c_string.into_raw()
+}
+
+/// Show Tuple2 - "(fst,snd)"
+#[no_mangle]
+pub extern "C" fn bhc_show_tuple2(tuple_ptr: *const u8, fst_type_tag: i64, snd_type_tag: i64) -> *mut c_char {
+    let fst = unsafe { *(tuple_ptr.add(8) as *const *const u8) };
+    let snd = unsafe { *(tuple_ptr.add(16) as *const *const u8) };
+    let shown = format!("({},{})", unsafe { show_elem(fst, fst_type_tag) }, unsafe { show_elem(snd, snd_type_tag) });
+    let c_string = CString::new(shown).unwrap();
+    c_string.into_raw()
+}
+
+/// Show Unit - "()"
+#[no_mangle]
+pub extern "C" fn bhc_show_unit(_unit_ptr: *const u8) -> *mut c_char {
+    let c_string = CString::new("()").unwrap();
+    c_string.into_raw()
+}
+
+// ----------------------------------------------------------------------------
 // Math: atan2 for Float and Double
 // ----------------------------------------------------------------------------
 

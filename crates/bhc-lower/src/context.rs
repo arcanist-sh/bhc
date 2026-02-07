@@ -1077,6 +1077,12 @@ impl LowerContext {
             (10102, "showFloat"),
             (10103, "showBool"),
             (10104, "showChar"),
+            (10105, "showString"),
+            (10106, "showList"),
+            (10107, "showMaybe"),
+            (10108, "showEither"),
+            (10109, "showTuple2"),
+            (10110, "showUnit"),
         ];
 
         for &(id, name) in show_builtins {

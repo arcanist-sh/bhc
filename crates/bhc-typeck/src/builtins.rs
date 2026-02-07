@@ -4000,6 +4000,211 @@ impl Builtins {
             );
         }
 
+        // Data.Either extra operations at fixed DefIds 10600-10601
+        {
+            let a = TyVar::new_star(BUILTIN_TYVAR_A);
+            let b = TyVar::new_star(BUILTIN_TYVAR_B);
+            let either_ab = Ty::App(
+                Box::new(Ty::App(
+                    Box::new(Ty::Con(self.either_con.clone())),
+                    Box::new(Ty::Var(a.clone())),
+                )),
+                Box::new(Ty::Var(b.clone())),
+            );
+
+            // fromLeft :: a -> Either a b -> a
+            env.register_value(
+                DefId::new(10600),
+                Symbol::intern("fromLeft"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::fun(either_ab.clone(), Ty::Var(a.clone()))),
+                ),
+            );
+            // fromRight :: b -> Either a b -> b
+            env.register_value(
+                DefId::new(10601),
+                Symbol::intern("fromRight"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(Ty::Var(b.clone()), Ty::fun(either_ab, Ty::Var(b.clone()))),
+                ),
+            );
+        }
+
+        // Data.Maybe / Data.Either / guard at fixed DefIds 10610-10622
+        // These override the sequential array registrations to fix DefId alignment.
+        {
+            let a = TyVar::new_star(BUILTIN_TYVAR_A);
+            let b = TyVar::new_star(BUILTIN_TYVAR_B);
+            let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
+            let maybe_a = Ty::App(
+                Box::new(Ty::Con(self.maybe_con.clone())),
+                Box::new(Ty::Var(a.clone())),
+            );
+            let either_ab = Ty::App(
+                Box::new(Ty::App(
+                    Box::new(Ty::Con(self.either_con.clone())),
+                    Box::new(Ty::Var(a.clone())),
+                )),
+                Box::new(Ty::Var(b.clone())),
+            );
+
+            // fromMaybe :: a -> Maybe a -> a
+            env.register_value(
+                DefId::new(10610),
+                Symbol::intern("fromMaybe"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::fun(maybe_a.clone(), Ty::Var(a.clone()))),
+                ),
+            );
+            // maybe :: b -> (a -> b) -> Maybe a -> b
+            env.register_value(
+                DefId::new(10611),
+                Symbol::intern("maybe"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::Var(b.clone()),
+                        Ty::fun(
+                            Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                            Ty::fun(maybe_a.clone(), Ty::Var(b.clone())),
+                        ),
+                    ),
+                ),
+            );
+            // listToMaybe :: [a] -> Maybe a
+            env.register_value(
+                DefId::new(10612),
+                Symbol::intern("listToMaybe"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::List(Box::new(Ty::Var(a.clone()))), maybe_a.clone()),
+                ),
+            );
+            // maybeToList :: Maybe a -> [a]
+            env.register_value(
+                DefId::new(10613),
+                Symbol::intern("maybeToList"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(maybe_a.clone(), Ty::List(Box::new(Ty::Var(a.clone())))),
+                ),
+            );
+            // catMaybes :: [Maybe a] -> [a]
+            env.register_value(
+                DefId::new(10614),
+                Symbol::intern("catMaybes"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        Ty::List(Box::new(maybe_a.clone())),
+                        Ty::List(Box::new(Ty::Var(a.clone()))),
+                    ),
+                ),
+            );
+            // mapMaybe :: (a -> Maybe b) -> [a] -> [b]
+            env.register_value(
+                DefId::new(10615),
+                Symbol::intern("mapMaybe"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::fun(Ty::Var(a.clone()), Ty::App(
+                            Box::new(Ty::Con(self.maybe_con.clone())),
+                            Box::new(Ty::Var(b.clone())),
+                        )),
+                        Ty::fun(
+                            Ty::List(Box::new(Ty::Var(a.clone()))),
+                            Ty::List(Box::new(Ty::Var(b.clone()))),
+                        ),
+                    ),
+                ),
+            );
+            // either :: (a -> c) -> (b -> c) -> Either a b -> c
+            env.register_value(
+                DefId::new(10616),
+                Symbol::intern("either"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone(), c.clone()],
+                    Ty::fun(
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(c.clone())),
+                        Ty::fun(
+                            Ty::fun(Ty::Var(b.clone()), Ty::Var(c.clone())),
+                            Ty::fun(either_ab.clone(), Ty::Var(c.clone())),
+                        ),
+                    ),
+                ),
+            );
+            // isLeft :: Either a b -> Bool
+            env.register_value(
+                DefId::new(10617),
+                Symbol::intern("isLeft"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(either_ab.clone(), self.bool_ty.clone()),
+                ),
+            );
+            // isRight :: Either a b -> Bool
+            env.register_value(
+                DefId::new(10618),
+                Symbol::intern("isRight"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(either_ab.clone(), self.bool_ty.clone()),
+                ),
+            );
+            // lefts :: [Either a b] -> [a]
+            env.register_value(
+                DefId::new(10619),
+                Symbol::intern("lefts"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::List(Box::new(either_ab.clone())),
+                        Ty::List(Box::new(Ty::Var(a.clone()))),
+                    ),
+                ),
+            );
+            // rights :: [Either a b] -> [b]
+            env.register_value(
+                DefId::new(10620),
+                Symbol::intern("rights"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::List(Box::new(either_ab.clone())),
+                        Ty::List(Box::new(Ty::Var(b.clone()))),
+                    ),
+                ),
+            );
+            // partitionEithers :: [Either a b] -> ([a], [b])
+            env.register_value(
+                DefId::new(10621),
+                Symbol::intern("partitionEithers"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::List(Box::new(either_ab)),
+                        Ty::Tuple(vec![
+                            Ty::List(Box::new(Ty::Var(a.clone()))),
+                            Ty::List(Box::new(Ty::Var(b.clone()))),
+                        ]),
+                    ),
+                ),
+            );
+            // guard :: Bool -> [()]
+            env.register_value(
+                DefId::new(10622),
+                Symbol::intern("guard"),
+                Scheme::mono(Ty::fun(
+                    self.bool_ty.clone(),
+                    Ty::List(Box::new(Ty::unit())),
+                )),
+            );
+        }
+
         // Register transformer types and operations at fixed DefIds (10000+)
         self.register_transformer_ops(env);
 

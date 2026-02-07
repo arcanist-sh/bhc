@@ -320,6 +320,21 @@ fn test_tier3_ioref_basic_native() {
     run_native_test("tier3_io/ioref_basic", Profile::Default);
 }
 
+#[test]
+fn test_tier3_data_maybe_native() {
+    run_native_test("tier3_io/data_maybe", Profile::Default);
+}
+
+#[test]
+fn test_tier3_data_either_native() {
+    run_native_test("tier3_io/data_either", Profile::Default);
+}
+
+#[test]
+fn test_tier3_guard_basic_native() {
+    run_native_test("tier3_io/guard_basic", Profile::Default);
+}
+
 // =============================================================================
 // Discovery Tests
 // =============================================================================

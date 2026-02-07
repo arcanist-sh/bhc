@@ -1,0 +1,11 @@
+main :: IO ()
+main = do
+    putStrLn (show (fromMaybe 0 (Just 42)))
+    putStrLn (show (fromMaybe 0 Nothing))
+    putStrLn (show (maybe 0 (\x -> x + 1) (Just 5)))
+    putStrLn (show (maybe 0 (\x -> x + 1) Nothing))
+    putStrLn (show (fromMaybe 0 (listToMaybe [10, 20, 30])))
+    putStrLn (show (fromMaybe 0 (listToMaybe ([] :: [Int]))))
+    putStrLn (show (length (maybeToList (Just 7))))
+    putStrLn (show (length (maybeToList (Nothing :: Maybe Int))))
+    putStrLn (show (length (catMaybes [Just 1, Nothing, Just 3])))

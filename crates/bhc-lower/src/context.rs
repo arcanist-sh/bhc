@@ -1182,9 +1182,36 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
+        // Data.Maybe / Data.Either / guard at fixed DefIds 10600-10622
+        // These override the sequential array registrations to fix DefId alignment.
+        let maybe_either_builtins: &[(usize, &str)] = &[
+            (10600, "fromLeft"),
+            (10601, "fromRight"),
+            (10610, "fromMaybe"),
+            (10611, "maybe"),
+            (10612, "listToMaybe"),
+            (10613, "maybeToList"),
+            (10614, "catMaybes"),
+            (10615, "mapMaybe"),
+            (10616, "either"),
+            (10617, "isLeft"),
+            (10618, "isRight"),
+            (10619, "lefts"),
+            (10620, "rights"),
+            (10621, "partitionEithers"),
+            (10622, "guard"),
+        ];
+
+        for &(id, name) in maybe_either_builtins {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
         // Ensure next_def_id is past the fixed DefId ranges
-        if self.next_def_id <= 10508 {
-            self.next_def_id = 10508;
+        if self.next_def_id <= 10623 {
+            self.next_def_id = 10623;
         }
     }
 

@@ -1,0 +1,10 @@
+main :: IO ()
+main = do
+    putStrLn (show (either (\x -> x + 1) (\x -> x * 2) (Left 5)))
+    putStrLn (show (either (\x -> x + 1) (\x -> x * 2) (Right 5)))
+    putStrLn (show (fromLeft 0 (Left 42)))
+    putStrLn (show (fromLeft 0 (Right 99)))
+    putStrLn (show (fromRight 0 (Right 42)))
+    putStrLn (show (fromRight 0 (Left 99)))
+    putStrLn (show (length (lefts [Left 1, Right 2, Left 3])))
+    putStrLn (show (length (rights [Left 1, Right 2, Left 3])))

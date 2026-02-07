@@ -18,7 +18,7 @@ north-star integration target for BHC's real-world Haskell compatibility.
 ## Current State
 
 BHC compiles real Haskell programs to native executables via LLVM:
-- 55 native E2E tests passing (including monad transformers, file IO, markdown parser, JSON parser)
+- 69 native E2E tests passing (including monad transformers, file IO, markdown parser, JSON parser)
 - Monad transformers: StateT, ReaderT, ExceptT, WriterT all working
 - Nested transformer stacks: `StateT s (ReaderT r IO)` with cross-transformer `ask` working
 - MTL typeclasses registered: MonadReader, MonadState, MonadError, MonadWriter
@@ -30,15 +30,24 @@ BHC compiles real Haskell programs to native executables via LLVM:
 - Data.Text.IO: native Text file/handle I/O (E.10)
 - Show for compound types: String, [a], Maybe, Either, (a,b), () (E.11)
 - Numeric ops: even/odd, gcd/lcm, divMod/quotRem, fromIntegral + IORef (E.12)
-- All intermediate milestones A–E.12 done
+- Data.Maybe: fromMaybe, maybe, listToMaybe, maybeToList, catMaybes, mapMaybe (E.13)
+- Data.Either: either, fromLeft, fromRight, lefts, rights, partitionEithers (E.13)
+- Control.Monad: when, unless, guard, mapM_, any, all (E.13, E.14)
+- Data.List: scanr, scanl1, scanr1, unfoldr, intersect, zip3, zipWith3 (E.15)
+- Data.List: take-fused iterate, repeat, cycle (E.15)
+- Data.List: elemIndex, findIndex, isPrefixOf, isSuffixOf, isInfixOf, tails, inits (E.16)
+- Fixed stubs: maximum, minimum, and, or, Data.Map.notMember (E.16)
+- maximumBy, minimumBy, foldMap (E.16)
+- All intermediate milestones A–E.16 done
 
 ### Gap to Pandoc
 
-**Completed:** Self-contained programs with transformers, parsing, file IO, Text, ByteString, Text.IO, Data.Char, show for compound types, numeric conversions, IORef, exceptions, multi-package imports
+**Completed:** Self-contained programs with transformers, parsing, file IO, Text, ByteString, Text.IO, Data.Char, show for compound types, numeric conversions, IORef, exceptions, multi-package imports, Data.Maybe/Either utilities, extensive Data.List operations, when/unless/guard/any/all
 **Missing for Pandoc:**
 1. **Full package system** — Basic import paths work (E.6), but no Hackage .cabal parsing yet
 2. **Lazy Text/ByteString** — Only strict variants implemented
 3. **GHC.Generics or TH** — Required for aeson JSON deriving
+4. **show for Bool from builtins** — `show (and [...])` doesn't dispatch correctly; `compare` returns Int not Ordering ADT
 
 ---
 
@@ -256,16 +265,25 @@ compiled from Hackage source.
 
 ### 3.1 Remaining Codegen Builtins
 
-**Status:** ~300 of 587 builtins lowered
+**Status:** ~400+ of 587 builtins lowered (E.13–E.16 added ~40 functions)
 **Scope:** Small-Medium (ongoing)
 
 - [ ] Monadic codegen: general `>>=`, `>>`, `return` via dictionary dispatch
-- [ ] `mapM`, `mapM_`, `forM`, `forM_`, `sequence`, `sequence_`
-- [ ] `when`, `unless`, `void`, `guard`
-- [ ] Foldable/Traversable: `traverse`, `sequenceA`, `foldMap`, `toList`
+- [x] `mapM_` (E.14), `when`, `unless` (E.14), `guard` (E.13)
+- [ ] `mapM`, `forM`, `forM_`, `sequence`, `sequence_`, `void`
+- [x] `foldMap` (delegates to concatMap, E.16)
+- [ ] Foldable/Traversable: `traverse`, `sequenceA`, `toList`
+- [x] Data.Maybe: fromMaybe, maybe, listToMaybe, maybeToList, catMaybes, mapMaybe (E.13)
+- [x] Data.Either: either, fromLeft, fromRight, lefts, rights, partitionEithers (E.13)
+- [x] Data.List: any, all (E.14), scanr, scanl1, scanr1, unfoldr, intersect, zip3, zipWith3 (E.15)
+- [x] Data.List: iterate, repeat, cycle (take-fused, E.15)
+- [x] Data.List: elemIndex, findIndex, isPrefixOf, isSuffixOf, isInfixOf, tails, inits (E.16)
+- [x] maximumBy, minimumBy (E.16) — note: `compare` returns Int not Ordering ADT, so these await Ordering fix
+- [x] Fixed stubs: maximum, minimum, and, or, Data.Map.notMember (E.16)
 - [ ] Data.Map.update, Data.Map.alter, Data.Map.unions
 - [ ] Data.Set.unions, Data.Set.partition
-- [ ] Remaining string/list stubs
+- [ ] `show` dispatch for Bool-returning builtins (and/or/isPrefixOf etc. — works via if-then-else workaround)
+- [ ] `compare` should return Ordering ADT instead of Int
 
 ### 3.2 Numeric and Conversion Operations
 
@@ -387,6 +405,38 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 - [x] E2E tests: numeric_ops, divmod, ioref_basic
 - [x] 55 total E2E tests pass
 
+### Milestone E.13: Data.Maybe + Data.Either + guard ✅
+- [x] Data.Maybe: fromMaybe, maybe, listToMaybe, maybeToList, catMaybes, mapMaybe
+- [x] Data.Either: either, fromLeft, fromRight, lefts, rights, partitionEithers
+- [x] Control.Monad: guard
+- [x] 13 pure LLVM codegen functions, no RTS needed
+- [x] Fixed DefIds 10600-10622
+- [x] Shared helper: `build_inline_reverse()` for catMaybes, lefts, rights, mapMaybe, partitionEithers
+- [x] E2E tests: data_maybe, data_either, guard_basic
+- [x] 58 total E2E tests pass
+
+### Milestone E.14: when/unless + any/all + Closure Wrapping ✅
+- [x] Fix when/unless Bool bug: use `extract_adt_tag()` not `ptr_to_int()` for Bool ADT
+- [x] Implement `any`/`all` with loop + predicate closure + short-circuit
+- [x] Add `even`/`odd` to `lower_builtin_direct` for first-class closure wrapping
+- [x] E2E tests: when_unless, mapm_basic, any_all
+- [x] 61 total E2E tests pass
+
+### Milestone E.15: Data.List Completions ✅
+- [x] Finite ops: scanr, scanl1, scanr1, unfoldr, intersect, zip3, zipWith3
+- [x] Infinite generators (take-fused): iterate, repeat, cycle
+- [x] Fixed DefIds 10700-10706
+- [x] E2E tests: scanr_basic, unfoldr_basic, zip3_basic, take_iterate, intersect_basic
+- [x] 66 total E2E tests pass
+
+### Milestone E.16: Fix Broken Stubs + List Operations ✅
+- [x] Fixed 5 broken stubs: maximum (accumulator loop), minimum, and (Bool tag short-circuit), or, Data.Map.notMember (XOR inversion)
+- [x] 10 new functions: elemIndex, findIndex, isPrefixOf, isSuffixOf, isInfixOf, tails, inits, maximumBy, minimumBy, foldMap
+- [x] Fixed DefIds 10800-10809
+- [x] E2E tests: max_min_and_or, elem_index_prefix, tails_inits
+- [x] 69 total E2E tests pass
+- [x] Known limitation: `show` doesn't dispatch correctly for Bool-returning builtins (and/or/isPrefixOf); `compare` returns Int not Ordering ADT
+
 ### Milestone F: Pandoc (Minimal)
 - [ ] Compile Pandoc with a subset of readers/writers (e.g., Markdown → HTML only)
 - [ ] Skip optional dependencies (skylighting, texmath, etc.)
@@ -423,6 +473,42 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 ---
 
 ## Recent Progress
+
+### 2026-02-07: Milestone E.16 Fix Broken Stubs + List Operations
+- Fixed 5 broken stubs: `maximum` (proper accumulator loop with `icmp sgt`), `minimum` (`icmp slt`), `and` (Bool ADT tag check, short-circuit on False), `or` (short-circuit on True), `Data.Map.notMember` (call member, XOR tag with 1)
+- 10 new functions at Fixed DefIds 10800-10809: `elemIndex`, `findIndex`, `isPrefixOf`, `isSuffixOf`, `isInfixOf`, `tails`, `inits`, `maximumBy`, `minimumBy`, `foldMap`
+- `isSuffixOf` reverses both lists then runs isPrefixOf logic; `isInfixOf` runs outer loop with inner isPrefixOf at each position
+- `tails`/`inits` build list-of-lists: tails walks consing suffixes; inits accumulates reversed elements, reverses prefix at each step
+- `maximumBy`/`minimumBy` call 2-arg comparison closure (partial application pattern), check Ordering ADT tag
+- `foldMap` delegates to `concatMap` (list Foldable specialization)
+- Known limitations: `show` for Bool-returning builtins prints raw pointers (type inference doesn't propagate Bool through `and`/`or` return); `compare` returns Int not Ordering ADT so `maximumBy compare` doesn't type-check
+- E2E tests: max_min_and_or, elem_index_prefix, tails_inits
+- 69 E2E tests pass (66 existing + 3 new)
+
+### 2026-02-07: Milestone E.15 Data.List Completions
+- 7 finite list ops: `scanr`, `scanl1`, `scanr1`, `unfoldr`, `intersect`, `zip3`, `zipWith3`
+- 3 infinite generators (take-fused): `iterate`, `repeat`, `cycle` — fused with `take` to avoid infinite loops
+- Fixed DefIds 10700-10706
+- E2E tests: scanr_basic, unfoldr_basic, zip3_basic, take_iterate, intersect_basic
+- 66 E2E tests pass
+
+### 2026-02-07: Milestone E.14 when/unless + any/all
+- Fixed `when`/`unless` Bool bug: was using `ptr_to_int` (gives non-zero for ADT pointers), now uses `extract_adt_tag()`
+- Implemented `any`/`all` with loop + predicate closure call + short-circuit on Bool tag
+- Added `even`/`odd` entries in `lower_builtin_direct` so they can be passed as first-class function values (e.g., `any even xs`)
+- E2E tests: when_unless, mapm_basic, any_all
+- 61 E2E tests pass
+
+### 2026-02-07: Milestone E.13 Data.Maybe + Data.Either + guard
+- 13 pure LLVM codegen functions, no RTS needed
+- Data.Maybe: `fromMaybe`, `maybe`, `listToMaybe`, `maybeToList`, `catMaybes`, `mapMaybe`
+- Data.Either: `either`, `fromLeft`, `fromRight`, `lefts`, `rights`, `partitionEithers`
+- Control.Monad: `guard` (returns `[()]` for True, `[]` for False)
+- Implementation patterns: Group A (tag check + phi), Group B (closure call), Group C (filter loop + reverse), Group D (dual accumulator)
+- Shared helper `build_inline_reverse()` used by catMaybes, lefts, rights, mapMaybe, partitionEithers
+- Fixed DefIds 10600-10622
+- E2E tests: data_maybe, data_either, guard_basic
+- 58 E2E tests pass
 
 ### 2026-02-07: Milestone E.12 Numeric Conversions + IORef
 - Numeric conversions: `fromIntegral`/`toInteger`/`fromInteger` as identity pass-through (BHC only has Int/Double/Float)

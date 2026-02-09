@@ -18,7 +18,7 @@ north-star integration target for BHC's real-world Haskell compatibility.
 ## Current State
 
 BHC compiles real Haskell programs to native executables via LLVM:
-- 70 native E2E tests passing (including monad transformers, file IO, markdown parser, JSON parser)
+- 72 native E2E tests passing (including monad transformers, file IO, markdown parser, JSON parser)
 - Monad transformers: StateT, ReaderT, ExceptT, WriterT all working
 - Nested transformer stacks: `StateT s (ReaderT r IO)` with cross-transformer `ask` working
 - MTL typeclasses registered: MonadReader, MonadState, MonadError, MonadWriter
@@ -39,11 +39,13 @@ BHC compiles real Haskell programs to native executables via LLVM:
 - Fixed stubs: maximum, minimum, and, or, Data.Map.notMember (E.16)
 - maximumBy, minimumBy, foldMap (E.16)
 - Ordering ADT (LT/EQ/GT), compare returning Ordering (E.17)
-- All intermediate milestones A–E.18 done
+- System.FilePath: takeFileName, takeDirectory, takeExtension, dropExtension, takeBaseName, replaceExtension, isAbsolute, isRelative, hasExtension, splitExtension, </> (E.19)
+- System.Directory: setCurrentDirectory, removeDirectory, renameFile, copyFile (E.19)
+- All intermediate milestones A–E.19 done
 
 ### Gap to Pandoc
 
-**Completed:** Self-contained programs with transformers, parsing, file IO, Text, ByteString, Text.IO, Data.Char, show for compound types, numeric conversions, IORef, exceptions, multi-package imports, Data.Maybe/Either utilities, extensive Data.List operations, when/unless/guard/any/all, monadic combinators (filterM/foldM/replicateM/zipWithM), Ordering ADT with compare
+**Completed:** Self-contained programs with transformers, parsing, file IO, Text, ByteString, Text.IO, Data.Char, show for compound types, numeric conversions, IORef, exceptions, multi-package imports, Data.Maybe/Either utilities, extensive Data.List operations, when/unless/guard/any/all, monadic combinators (filterM/foldM/replicateM/zipWithM), Ordering ADT with compare, System.FilePath + System.Directory
 **Missing for Pandoc:**
 1. **Full package system** — Basic import paths work (E.6), but no Hackage .cabal parsing yet
 2. **Lazy Text/ByteString** — Only strict variants implemented
@@ -112,12 +114,12 @@ encodeUtf8/decodeUtf8 bridge.
 
 ### 1.3 Full IO and Exception Handling
 
-**Status:** Core exception handling complete (E.5), file IO working, remaining: directory ops
+**Status:** ✅ Core exception handling complete (E.5), file IO working, directory ops complete (E.19)
 **Scope:** Medium
 
 Exception handling (catch, bracket, finally, onException) is working (E.5).
 File IO (readFile, writeFile, openFile, hClose) is working. System ops
-(getArgs, getEnv, exitWith) are working. Remaining: directory operations.
+(getArgs, getEnv, exitWith) are working. Directory operations (E.19) complete.
 
 - [x] Handle abstraction: `Handle`, `IOMode`
 - [x] File operations: `openFile`, `hClose`, `hFlush`
@@ -132,8 +134,9 @@ File IO (readFile, writeFile, openFile, hClose) is working. System ops
 - [ ] Asynchronous exceptions: `mask`, `uninterruptibleMask` (at least stubs)
 - [x] System operations: `getArgs`, `getProgName`, `getEnv`, `lookupEnv`
 - [x] Exit: `exitSuccess`, `exitFailure`, `exitWith`
-- [ ] Directory: `doesFileExist`, `doesDirectoryExist`, `createDirectory`,
-      `removeFile`, `getDirectoryContents`, `getCurrentDirectory`
+- [x] Directory: `doesFileExist`, `doesDirectoryExist`, `createDirectory`,
+      `removeFile`, `removeDirectory`, `getCurrentDirectory`, `setCurrentDirectory`,
+      `renameFile`, `copyFile`, `listDirectory` (E.19)
 - [ ] Temporary files: `withTempFile`, `withTempDirectory`
 
 **Key files:**
@@ -233,8 +236,8 @@ compiled from Hackage source.
 - [ ] Pandoc uses YAML for document metadata
 
 #### Other dependencies
-- [ ] `filepath` — file path manipulation (`</>`, `takeExtension`, etc.)
-- [ ] `directory` — filesystem operations
+- [x] `filepath` — file path manipulation (`</>`, `takeExtension`, etc.) (E.19)
+- [x] `directory` — filesystem operations (E.19)
 - [ ] `process` — spawn subprocesses
 - [ ] `time` — date/time types
 - [ ] `network-uri` — URI parsing
@@ -439,6 +442,31 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 - [x] 69 total E2E tests pass
 - [x] Known limitation: `show` doesn't dispatch correctly for Bool-returning builtins (and/or/isPrefixOf); `compare` returns Int not Ordering ADT
 
+### Milestone E.17: Ordering ADT + compare ✅
+- [x] Ordering ADT (LT/EQ/GT) as zero-field ADT (tag 0=LT, 1=EQ, 2=GT)
+- [x] `compare` returns Ordering instead of Int (fixed DefId 10900)
+- [x] ShowCoerce::Ordering + RTS `bhc_show_ordering`
+- [x] Fixed flat calling convention in maximumBy/minimumBy
+- [x] E2E test: ordering_basic
+- [x] 70 total E2E tests pass
+
+### Milestone E.18: Monadic Combinators ✅
+- [x] 7 pure LLVM codegen functions: filterM, foldM, foldM_, replicateM, replicateM_, zipWithM, zipWithM_
+- [x] Fixed DefIds 11000-11006
+- [x] Key pitfall: replicateM/replicateM_ re-lower action_expr each iteration, creating new blocks
+- [x] E2E tests: monadic_combinators, zipwithm_basic
+- [x] 70 total E2E tests pass (68+2 new, 4 pre-existing text/exception failures)
+
+### Milestone E.19: System.FilePath + System.Directory ✅
+- [x] System.FilePath: takeFileName, takeDirectory, takeExtension, dropExtension, takeBaseName, replaceExtension, isAbsolute, isRelative, hasExtension, splitExtension, </>
+- [x] System.Directory: setCurrentDirectory, removeDirectory, renameFile, copyFile
+- [x] 14 RTS FFI functions + 1 codegen-composed (splitExtension)
+- [x] Fixed DefIds 11100-11115, VarIds 1000520-1000534
+- [x] Key pitfall: `typeck/context.rs` type match must include ALL builtin types — `builtins.rs` `register_value()` alone is insufficient
+- [x] Also fixed missing types for createDirectory, removeFile in typeck match
+- [x] E2E tests: filepath_basic, directory_ops
+- [x] 72 total E2E tests pass (70+2 new, 4 pre-existing text/exception failures)
+
 ### Milestone F: Pandoc (Minimal)
 - [ ] Compile Pandoc with a subset of readers/writers (e.g., Markdown → HTML only)
 - [ ] Skip optional dependencies (skylighting, texmath, etc.)
@@ -467,6 +495,7 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 | `stdlib/bhc-text/src/bytestring.rs` | ByteString RTS (24 FFI functions, E.8) |
 | `stdlib/bhc-base/` | Base library: Data.Char predicates, show functions (E.9) |
 | `stdlib/bhc-system/` | System/IO operations |
+| `rts/bhc-rts/src/ffi.rs` | FFI functions for FilePath/Directory (E.19) |
 | `stdlib/bhc-containers/` | Container data structures |
 | `stdlib/bhc-transformers/` | Monad transformers |
 | `rts/bhc-rts/` | Core runtime system |
@@ -475,6 +504,20 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 ---
 
 ## Recent Progress
+
+### 2026-02-09: Milestone E.19 System.FilePath + System.Directory
+- 14 RTS FFI functions in `rts/bhc-rts/src/ffi.rs`: takeFileName, takeDirectory, takeExtension, dropExtension, takeBaseName, replaceExtension, isAbsolute, isRelative, hasExtension, combine, setCurrentDirectory, removeDirectory, renameFile, copyFile
+- 1 codegen-composed function: splitExtension (calls dropExtension + takeExtension, packs into tuple)
+- Fixed DefIds 11100-11115, VarIds 1000520-1000534
+- Key bug found: `typeck/context.rs` has a separate type lookup match (`register_builtins_from_lowering_defs`) that must handle ALL builtins. Functions not in this match get fresh type variables in the second pass, causing type mismatch errors. This also affected previously-untested functions: createDirectory, removeFile, removeDirectory
+- Added type entries for 15 E.19 functions + 4 previously-missing functions in typeck/context.rs
+- E2E tests: filepath_basic (13 assertions), directory_ops (create/write/copy/rename/remove)
+- 72 E2E tests pass (70 existing + 2 new)
+
+### 2026-02-09: Milestones E.17–E.18
+- E.17: Ordering ADT (LT/EQ/GT) with proper `compare` returning Ordering. ShowCoerce::Ordering. Fixed flat calling convention in maximumBy/minimumBy.
+- E.18: 7 monadic combinators (filterM, foldM, foldM_, replicateM, replicateM_, zipWithM, zipWithM_). Fixed DefIds 11000-11006. Key pitfall: replicateM/replicateM_ re-lower action_expr each iteration which creates new blocks.
+- 70 E2E tests pass after E.17-E.18
 
 ### 2026-02-07: Milestone E.16 Fix Broken Stubs + List Operations
 - Fixed 5 broken stubs: `maximum` (proper accumulator loop with `icmp sgt`), `minimum` (`icmp slt`), `and` (Bool ADT tag check, short-circuit on False), `or` (short-circuit on True), `Data.Map.notMember` (call member, XOR tag with 1)

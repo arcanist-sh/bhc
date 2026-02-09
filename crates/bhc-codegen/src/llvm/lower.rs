@@ -123,6 +123,8 @@ enum ShowCoerce {
     Tuple2Of,
     /// Pass pointer directly for show_unit
     Unit,
+    /// Extract ADT tag (i64) for show_ordering
+    Ordering,
 }
 
 /// A stack of transformer layers, tracking the full transformer stack.
@@ -1508,6 +1510,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let show_bool = self.module.llvm_module().add_function("bhc_show_bool", i64_to_ptr, None);
         self.functions.insert(VarId::new(1000091), show_bool);
 
+        // bhc_show_ordering(i64) -> *i8
+        let show_ordering = self.module.llvm_module().add_function("bhc_show_ordering", i64_to_ptr, None);
+        self.functions.insert(VarId::new(1000098), show_ordering);
+
         // bhc_show_char(i32) -> *i8
         let i32_to_ptr = i8_ptr_type.fn_type(&[i32_type.into()], false);
         let show_char = self.module.llvm_module().add_function("bhc_show_char", i32_to_ptr, None);
@@ -2596,6 +2602,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "fromIntegral" => Some(1),
             "toInteger" => Some(1),
             "fromInteger" => Some(1),
+            "compare" => Some(2),
             "even" => Some(1),
             "odd" => Some(1),
             "gcd" => Some(2),
@@ -3225,6 +3232,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // Numeric conversions (identity for BHC's single Int type)
             "fromIntegral" | "toInteger" | "fromInteger" => self.lower_expr(args[0]),
+
+            // Ordering
+            "compare" => self.lower_builtin_compare(args[0], args[1]),
 
             // Integer predicates
             "even" => self.lower_builtin_even(args[0]),
@@ -10304,6 +10314,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Check if a function expression returns Ordering (e.g., `compare`).
+    fn expr_returns_ordering(&self, func_expr: &Expr) -> bool {
+        match func_expr {
+            // Fully applied binary: App(compare, x) — the outer App provides the second arg
+            Expr::App(ff, _, _) => {
+                match ff.as_ref() {
+                    Expr::Var(var, _) => var.name.as_str() == "compare",
+                    _ => false,
+                }
+            }
+            Expr::TyApp(inner, _, _) => self.expr_returns_ordering(inner),
+            _ => false,
+        }
+    }
+
     /// Check if an expression looks like a list based on its structure.
     /// This is used when type information is unavailable (Error type).
     fn expr_looks_like_list(&self, expr: &Expr) -> bool {
@@ -13730,6 +13755,65 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(ptr.into()))
     }
 
+    /// Allocate an Ordering ADT with dynamic tag (0=LT, 1=EQ, 2=GT).
+    fn allocate_ordering_adt(
+        &mut self,
+        tag: inkwell::values::IntValue<'ctx>,
+        name: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Identical layout to Bool ADT — 8-byte tag-only struct
+        let adt_ty = self.adt_type(0);
+        let size_val = self.type_mapper().i64_type().const_int(8, false);
+        let alloc_fn = self.functions.get(&VarId::new(1000005)).ok_or_else(|| {
+            CodegenError::Internal("bhc_alloc not declared".to_string())
+        })?;
+        let raw_ptr = self.builder()
+            .build_call(*alloc_fn, &[size_val.into()], &format!("{}_alloc", name))
+            .map_err(|e| CodegenError::Internal(format!("{}: alloc failed: {:?}", name, e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: alloc returned void", name)))?;
+        let ptr = raw_ptr.into_pointer_value();
+        let tag_ptr = self.builder()
+            .build_struct_gep(adt_ty, ptr, 0, &format!("{}_tag_ptr", name))
+            .map_err(|e| CodegenError::Internal(format!("{}: gep failed: {:?}", name, e)))?;
+        self.builder()
+            .build_store(tag_ptr, tag)
+            .map_err(|e| CodegenError::Internal(format!("{}: store failed: {:?}", name, e)))?;
+        Ok(Some(ptr.into()))
+    }
+
+    /// Lower `compare a b` — returns Ordering ADT (tag 0=LT, 1=EQ, 2=GT).
+    fn lower_builtin_compare(
+        &mut self,
+        a_expr: &Expr,
+        b_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let a_val = self.lower_expr(a_expr)?.ok_or_else(|| CodegenError::Internal("compare: no lhs".to_string()))?;
+        let b_val = self.lower_expr(b_expr)?.ok_or_else(|| CodegenError::Internal("compare: no rhs".to_string()))?;
+        let a_int = self.coerce_to_int(a_val)?;
+        let b_int = self.coerce_to_int(b_val)?;
+        let i64_type = self.type_mapper().i64_type();
+
+        let is_lt = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SLT, a_int, b_int, "cmp_lt")
+            .map_err(|e| CodegenError::Internal(format!("compare: slt: {:?}", e)))?;
+        let is_gt = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SGT, a_int, b_int, "cmp_gt")
+            .map_err(|e| CodegenError::Internal(format!("compare: sgt: {:?}", e)))?;
+
+        // tag = is_lt ? 0 : (is_gt ? 2 : 1)
+        let tag_gt_or_eq = self.builder()
+            .build_select(is_gt, i64_type.const_int(2, false), i64_type.const_int(1, false), "gt_or_eq")
+            .map_err(|e| CodegenError::Internal(format!("compare: select1: {:?}", e)))?
+            .into_int_value();
+        let tag = self.builder()
+            .build_select(is_lt, i64_type.const_int(0, false), tag_gt_or_eq, "cmp_tag")
+            .map_err(|e| CodegenError::Internal(format!("compare: select2: {:?}", e)))?;
+
+        self.allocate_ordering_adt(tag.into_int_value(), "compare")
+    }
+
     /// Lower a binary integer RTS operation (gcd, lcm).
     fn lower_builtin_int_binop_rts(
         &mut self,
@@ -14534,6 +14618,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Expr::Var(var, _) if var.name.as_str() == "True" || var.name.as_str() == "False" => {
                 Some((ShowCoerce::Bool, 1000091, "show_bool"))
             }
+            // Ordering constructors
+            Expr::Var(var, _) if matches!(var.name.as_str(), "LT" | "EQ" | "GT") => {
+                Some((ShowCoerce::Ordering, 1000098, "show_ordering"))
+            }
             // Nothing
             Expr::Var(var, _) if var.name.as_str() == "Nothing" => {
                 Some((ShowCoerce::MaybeOf, 1000094, "show_maybe"))
@@ -14548,6 +14636,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // Check if it's a function that returns Bool
                 if self.expr_returns_bool(f) {
                     return Some((ShowCoerce::Bool, 1000091, "show_bool"));
+                }
+                // Check if it's a function that returns Ordering (e.g., compare x y)
+                if self.expr_returns_ordering(f) {
+                    return Some((ShowCoerce::Ordering, 1000098, "show_ordering"));
                 }
                 // Check if it's a function that returns Int (fully applied binary int op)
                 if self.expr_returns_int(expr) {
@@ -14816,6 +14908,25 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         };
                     }
                     _ => return Err(CodegenError::Internal(format!("{}: expected pointer or int for Bool", label))),
+                };
+                let tag = self.extract_adt_tag(ptr)?;
+                tag.into()
+            }
+            ShowCoerce::Ordering => {
+                // Ordering is an ADT with tag 0=LT, 1=EQ, 2=GT - extract the tag
+                let ptr = match val {
+                    BasicValueEnum::PointerValue(p) => p,
+                    BasicValueEnum::IntValue(i) => {
+                        return {
+                            let cstr_result = self.builder().build_call(rts_fn, &[i.into()], label)
+                                .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+                                .try_as_basic_value().basic()
+                                .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+                            let char_list = self.cstring_to_char_list(cstr_result.into_pointer_value())?;
+                            Ok(Some(char_list.into()))
+                        };
+                    }
+                    _ => return Err(CodegenError::Internal(format!("{}: expected pointer or int for Ordering", label))),
                 };
                 let tag = self.extract_adt_tag(ptr)?;
                 tag.into()
@@ -16312,22 +16423,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let cur_head = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
         let cur_tail = self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
 
-        // Call cmp(cur_head, best) - cmp is a 2-arg function closure
-        // First call: cmp closure_ptr cur_head -> partial closure
+        // Call cmp(cur_head, best) - cmp is a flat 2-arg closure: (env, arg1, arg2) -> Ordering
         let cmp_fn_ptr = self.extract_closure_fn_ptr(cmp_ptr)?;
-        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
-        let partial = self.builder()
-            .build_indirect_call(fn_type, cmp_fn_ptr, &[cmp_ptr.into(), cur_head.into()], &format!("{}_partial", label))
-            .map_err(|e| CodegenError::Internal(format!("{}: call: {:?}", label, e)))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal(format!("{}: cmp partial returned void", label)))?;
-
-        // Second call: partial best -> Ordering
-        let partial_ptr = partial.into_pointer_value();
-        let partial_fn_ptr = self.extract_closure_fn_ptr(partial_ptr)?;
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
         let ordering_result = self.builder()
-            .build_indirect_call(fn_type, partial_fn_ptr, &[partial_ptr.into(), best_phi.as_basic_value().into_pointer_value().into()], &format!("{}_ord", label))
+            .build_indirect_call(fn_type, cmp_fn_ptr, &[cmp_ptr.into(), cur_head.into(), best_phi.as_basic_value().into_pointer_value().into()], &format!("{}_ord", label))
             .map_err(|e| CodegenError::Internal(format!("{}: call: {:?}", label, e)))?
             .try_as_basic_value()
             .basic()
@@ -26191,6 +26291,25 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .build_int_z_extend(is_odd, i64_type, "odd_tag")
                     .map_err(|e| CodegenError::Internal(format!("odd: ext: {:?}", e)))?;
                 self.allocate_bool_adt(tag, "odd")
+            }
+            "compare" => {
+                let a_int = self.coerce_to_int(args[0])?;
+                let b_int = self.coerce_to_int(args[1])?;
+                let i64_type = self.type_mapper().i64_type();
+                let is_lt = self.builder()
+                    .build_int_compare(inkwell::IntPredicate::SLT, a_int, b_int, "cmp_lt")
+                    .map_err(|e| CodegenError::Internal(format!("compare: slt: {:?}", e)))?;
+                let is_gt = self.builder()
+                    .build_int_compare(inkwell::IntPredicate::SGT, a_int, b_int, "cmp_gt")
+                    .map_err(|e| CodegenError::Internal(format!("compare: sgt: {:?}", e)))?;
+                let tag_gt_or_eq = self.builder()
+                    .build_select(is_gt, i64_type.const_int(2, false), i64_type.const_int(1, false), "gt_or_eq")
+                    .map_err(|e| CodegenError::Internal(format!("compare: select1: {:?}", e)))?
+                    .into_int_value();
+                let tag = self.builder()
+                    .build_select(is_lt, i64_type.const_int(0, false), tag_gt_or_eq, "cmp_tag")
+                    .map_err(|e| CodegenError::Internal(format!("compare: select2: {:?}", e)))?;
+                self.allocate_ordering_adt(tag.into_int_value(), "compare")
             }
 
             _ => Err(CodegenError::Internal(format!(

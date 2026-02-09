@@ -55,6 +55,8 @@ pub struct Builtins {
     pub text_con: TyCon,
     /// The `ByteString` type constructor (packed bytes).
     pub bytestring_con: TyCon,
+    /// The `Ordering` type constructor.
+    pub ordering_con: TyCon,
     /// The `[]` (list) type constructor.
     pub list_con: TyCon,
     /// The `Maybe` type constructor.
@@ -92,6 +94,8 @@ pub struct Builtins {
     pub text_ty: Ty,
     /// The `ByteString` type (packed bytes).
     pub bytestring_ty: Ty,
+    /// The `Ordering` type.
+    pub ordering_ty: Ty,
 }
 
 impl Default for Builtins {
@@ -112,6 +116,7 @@ impl Builtins {
         let string_con = TyCon::new(Symbol::intern("String"), Kind::Star);
         let text_con = TyCon::new(Symbol::intern("Text"), Kind::Star);
         let bytestring_con = TyCon::new(Symbol::intern("ByteString"), Kind::Star);
+        let ordering_con = TyCon::new(Symbol::intern("Ordering"), Kind::Star);
 
         // Type constructors with kind * -> *
         let list_con = TyCon::new(Symbol::intern("[]"), Kind::star_to_star());
@@ -154,6 +159,8 @@ impl Builtins {
         let text_ty = Ty::Con(text_con.clone());
         // ByteString is a packed byte array type
         let bytestring_ty = Ty::Con(bytestring_con.clone());
+        // Ordering is an ADT: LT | EQ | GT
+        let ordering_ty = Ty::Con(ordering_con.clone());
 
         Self {
             int_con,
@@ -163,6 +170,7 @@ impl Builtins {
             string_con,
             text_con,
             bytestring_con,
+            ordering_con,
             list_con,
             maybe_con,
             either_con,
@@ -177,6 +185,7 @@ impl Builtins {
             string_ty,
             text_ty,
             bytestring_ty,
+            ordering_ty,
         }
     }
 
@@ -267,6 +276,26 @@ impl Builtins {
             right_id,
             Symbol::intern("Right"),
             Scheme::poly(vec![a, b.clone()], Ty::fun(Ty::Var(b), either_ab)),
+        );
+
+        // Ordering constructors
+        // LT :: Ordering (tag=0)
+        // EQ :: Ordering (tag=1)
+        // GT :: Ordering (tag=2)
+        env.register_data_con(
+            DefId::new(BUILTIN_LT_ID),
+            Symbol::intern("LT"),
+            Scheme::mono(self.ordering_ty.clone()),
+        );
+        env.register_data_con(
+            DefId::new(BUILTIN_EQ_ID),
+            Symbol::intern("EQ"),
+            Scheme::mono(self.ordering_ty.clone()),
+        );
+        env.register_data_con(
+            DefId::new(BUILTIN_GT_ID),
+            Symbol::intern("GT"),
+            Scheme::mono(self.ordering_ty.clone()),
         );
 
         // Unit constructor
@@ -2257,15 +2286,11 @@ impl Builtins {
             ),
             // Comparison
             ("compare", {
-                // compare :: Ord a => a -> a -> Ordering (using Int as Ordering: -1, 0, 1)
-                Scheme::qualified(
-                    vec![a.clone()],
-                    vec![ord_constraint(Ty::Var(a.clone()))],
-                    Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(a.clone()), self.int_ty.clone()),
-                    ),
-                )
+                // compare :: Int -> Int -> Ordering (monomorphic, matching cmp_binop pattern)
+                Scheme::mono(Ty::fun(
+                    self.int_ty.clone(),
+                    Ty::fun(self.int_ty.clone(), self.ordering_ty.clone()),
+                ))
             }),
             ("min", num_binop()),
             ("max", num_binop()),
@@ -4341,7 +4366,7 @@ impl Builtins {
             let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
             let int_ty = self.int_ty.clone();
             let bool_ty = self.bool_ty.clone();
-            let ordering_ty = Ty::Con(TyCon::new(Symbol::intern("Ordering"), Kind::Star));
+            let ordering_ty = self.ordering_ty.clone();
             let maybe_int = Ty::App(
                 Box::new(Ty::Con(self.maybe_con.clone())),
                 Box::new(int_ty.clone()),
@@ -4452,6 +4477,19 @@ impl Builtins {
                         Ty::fun(list_a.clone(), list_b.clone()),
                     ),
                 ),
+            );
+        }
+
+        // E.17: Ordering ADT - compare at fixed DefId
+        {
+            // compare :: Int -> Int -> Ordering (monomorphic, matching cmp_binop pattern)
+            env.register_value(
+                DefId::new(10900),
+                Symbol::intern("compare"),
+                Scheme::mono(Ty::fun(
+                    self.int_ty.clone(),
+                    Ty::fun(self.int_ty.clone(), self.ordering_ty.clone()),
+                )),
             );
         }
 

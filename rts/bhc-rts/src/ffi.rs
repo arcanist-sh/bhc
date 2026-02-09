@@ -746,6 +746,20 @@ pub extern "C" fn bhc_show_bool(tag: i64) -> *mut c_char {
     c_string.into_raw()
 }
 
+/// Show Ordering - returns "LT", "EQ", or "GT" as a heap-allocated string.
+/// Takes the ADT tag: 0 = LT, 1 = EQ, 2 = GT.
+#[no_mangle]
+pub extern "C" fn bhc_show_ordering(tag: i64) -> *mut c_char {
+    let s = match tag {
+        0 => "LT",
+        1 => "EQ",
+        2 => "GT",
+        _ => "<invalid Ordering>",
+    };
+    let c_string = std::ffi::CString::new(s).unwrap();
+    c_string.into_raw()
+}
+
 // ----------------------------------------------------------------------------
 // Float Primitives
 // ----------------------------------------------------------------------------

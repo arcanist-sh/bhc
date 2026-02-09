@@ -1248,9 +1248,21 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
+        // E.17: Ordering ADT - compare at fixed DefId
+        let e17_builtins: &[(usize, &str)] = &[
+            (10900, "compare"),
+        ];
+
+        for &(id, name) in e17_builtins {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
         // Ensure next_def_id is past the fixed DefId ranges
-        if self.next_def_id <= 10810 {
-            self.next_def_id = 10810;
+        if self.next_def_id <= 10901 {
+            self.next_def_id = 10901;
         }
     }
 

@@ -390,6 +390,11 @@ fn test_tier3_tails_inits_native() {
     run_native_test("tier3_io/tails_inits", Profile::Default);
 }
 
+#[test]
+fn test_tier3_ordering_basic_native() {
+    run_native_test("tier3_io/ordering_basic", Profile::Default);
+}
+
 // =============================================================================
 // Discovery Tests
 // =============================================================================

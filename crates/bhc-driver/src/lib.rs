@@ -1599,6 +1599,10 @@ impl Compiler {
         // Provides: bhc_char_is_alpha, bhc_char_is_digit, bhc_char_to_upper, etc.
         config = config.with_library(LinkLibrary::named("bhc_base"));
 
+        // Add the BHC Containers library
+        // Provides: bhc_map_empty, bhc_map_insert, bhc_map_lookup, bhc_set_* etc.
+        config = config.with_library(LinkLibrary::named("bhc_containers"));
+
         // Add system libraries needed by the RTS
         #[cfg(target_os = "linux")]
         {

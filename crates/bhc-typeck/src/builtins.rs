@@ -3578,8 +3578,8 @@ impl Builtins {
             ("Data.Map.insertWith", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())), Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))))))),
             ("Data.Map.delete", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))))),
             ("Data.Map.adjust", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())), Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())))))),
-            ("Data.Map.update", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())), Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())))))),
-            ("Data.Map.alter", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())), Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())))))),
+            ("Data.Map.update", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(b.clone()), self.maybe_of(Ty::Var(b.clone()))), Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())))))),
+            ("Data.Map.alter", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(self.maybe_of(Ty::Var(b.clone())), self.maybe_of(Ty::Var(b.clone()))), Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())))))),
             ("Data.Map.union", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))))),
             ("Data.Map.unionWith", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())), Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))))),
             ("Data.Map.unionWithKey", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())), Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))))),
@@ -4784,6 +4784,397 @@ impl Builtins {
                     self.string_ty.clone(),
                     Ty::fun(self.string_ty.clone(), self.string_ty.clone()),
                 )),
+            );
+        }
+
+        // E.20: Data.Text at fixed DefIds (fixes sequential array misalignment)
+        {
+            let text_ty = self.text_ty.clone();
+            let char_ty = self.char_ty.clone();
+            let int_ty = self.int_ty.clone();
+            let bool_ty = self.bool_ty.clone();
+            let string_ty = self.string_ty.clone();
+            let bs_ty = self.bytestring_ty.clone();
+
+            // Text (no args)
+            env.register_value(
+                DefId::new(11200),
+                Symbol::intern("Data.Text.empty"),
+                Scheme::mono(text_ty.clone()),
+            );
+
+            // Char -> Text
+            env.register_value(
+                DefId::new(11201),
+                Symbol::intern("Data.Text.singleton"),
+                Scheme::mono(Ty::fun(char_ty.clone(), text_ty.clone())),
+            );
+
+            // String -> Text
+            env.register_value(
+                DefId::new(11202),
+                Symbol::intern("Data.Text.pack"),
+                Scheme::mono(Ty::fun(string_ty.clone(), text_ty.clone())),
+            );
+
+            // Text -> String
+            env.register_value(
+                DefId::new(11203),
+                Symbol::intern("Data.Text.unpack"),
+                Scheme::mono(Ty::fun(text_ty.clone(), string_ty.clone())),
+            );
+
+            // Text -> Bool
+            env.register_value(
+                DefId::new(11204),
+                Symbol::intern("Data.Text.null"),
+                Scheme::mono(Ty::fun(text_ty.clone(), bool_ty.clone())),
+            );
+
+            // Text -> Int
+            env.register_value(
+                DefId::new(11205),
+                Symbol::intern("Data.Text.length"),
+                Scheme::mono(Ty::fun(text_ty.clone(), int_ty.clone())),
+            );
+
+            // Text -> Char (head, last)
+            for (id, name) in [
+                (11206, "Data.Text.head"),
+                (11207, "Data.Text.last"),
+            ] {
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::mono(Ty::fun(text_ty.clone(), char_ty.clone())),
+                );
+            }
+
+            // Text -> Text (tail, init, reverse, strip, toLower, toUpper, toCaseFold, toTitle)
+            for (id, name) in [
+                (11208, "Data.Text.tail"),
+                (11209, "Data.Text.init"),
+                (11212, "Data.Text.reverse"),
+                (11220, "Data.Text.toLower"),
+                (11221, "Data.Text.toUpper"),
+                (11222, "Data.Text.toCaseFold"),
+                (11223, "Data.Text.toTitle"),
+                (11232, "Data.Text.strip"),
+            ] {
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::mono(Ty::fun(text_ty.clone(), text_ty.clone())),
+                );
+            }
+
+            // Text -> Text -> Text (append, <>)
+            for (id, name) in [
+                (11210, "Data.Text.append"),
+                (11211, "Data.Text.<>"),
+            ] {
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::mono(Ty::fun(text_ty.clone(), Ty::fun(text_ty.clone(), text_ty.clone()))),
+                );
+            }
+
+            // Int -> Text -> Text (take, takeEnd, drop, dropEnd)
+            for (id, name) in [
+                (11213, "Data.Text.take"),
+                (11214, "Data.Text.takeEnd"),
+                (11215, "Data.Text.drop"),
+                (11216, "Data.Text.dropEnd"),
+            ] {
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::mono(Ty::fun(int_ty.clone(), Ty::fun(text_ty.clone(), text_ty.clone()))),
+                );
+            }
+
+            // Text -> Text -> Bool (isPrefixOf, isSuffixOf, isInfixOf)
+            for (id, name) in [
+                (11217, "Data.Text.isPrefixOf"),
+                (11218, "Data.Text.isSuffixOf"),
+                (11219, "Data.Text.isInfixOf"),
+            ] {
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::mono(Ty::fun(text_ty.clone(), Ty::fun(text_ty.clone(), bool_ty.clone()))),
+                );
+            }
+
+            // (Char -> Char) -> Text -> Text (map)
+            env.register_value(
+                DefId::new(11224),
+                Symbol::intern("Data.Text.map"),
+                Scheme::mono(Ty::fun(
+                    Ty::fun(char_ty.clone(), char_ty.clone()),
+                    Ty::fun(text_ty.clone(), text_ty.clone()),
+                )),
+            );
+
+            // Text -> Text -> Bool (eq, ==)
+            for (id, name) in [
+                (11225, "Data.Text.eq"),
+                (11226, "Data.Text.=="),
+            ] {
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::mono(Ty::fun(text_ty.clone(), Ty::fun(text_ty.clone(), bool_ty.clone()))),
+                );
+            }
+
+            // Text -> Text -> Int (compare)
+            env.register_value(
+                DefId::new(11227),
+                Symbol::intern("Data.Text.compare"),
+                Scheme::mono(Ty::fun(text_ty.clone(), Ty::fun(text_ty.clone(), int_ty.clone()))),
+            );
+
+            // (Char -> Bool) -> Text -> Text (filter)
+            env.register_value(
+                DefId::new(11228),
+                Symbol::intern("Data.Text.filter"),
+                Scheme::mono(Ty::fun(
+                    Ty::fun(char_ty.clone(), bool_ty.clone()),
+                    Ty::fun(text_ty.clone(), text_ty.clone()),
+                )),
+            );
+
+            // foldl' :: (a -> Char -> a) -> a -> Text -> a
+            {
+                let foldl_a = TyVar::new_star(BUILTIN_TYVAR_A);
+                env.register_value(
+                    DefId::new(11229),
+                    Symbol::intern("Data.Text.foldl'"),
+                    Scheme::poly(
+                        vec![foldl_a.clone()],
+                        Ty::fun(
+                            Ty::fun(Ty::Var(foldl_a.clone()), Ty::fun(char_ty.clone(), Ty::Var(foldl_a.clone()))),
+                            Ty::fun(Ty::Var(foldl_a.clone()), Ty::fun(text_ty.clone(), Ty::Var(foldl_a.clone()))),
+                        ),
+                    ),
+                );
+            }
+
+            // [Text] -> Text (concat)
+            env.register_value(
+                DefId::new(11230),
+                Symbol::intern("Data.Text.concat"),
+                Scheme::mono(Ty::fun(Ty::List(Box::new(text_ty.clone())), text_ty.clone())),
+            );
+
+            // Text -> [Text] -> Text (intercalate)
+            env.register_value(
+                DefId::new(11231),
+                Symbol::intern("Data.Text.intercalate"),
+                Scheme::mono(Ty::fun(
+                    text_ty.clone(),
+                    Ty::fun(Ty::List(Box::new(text_ty.clone())), text_ty.clone()),
+                )),
+            );
+
+            // Text -> [Text] (words, lines)
+            for (id, name) in [
+                (11233, "Data.Text.words"),
+                (11234, "Data.Text.lines"),
+            ] {
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::mono(Ty::fun(text_ty.clone(), Ty::List(Box::new(text_ty.clone())))),
+                );
+            }
+
+            // Text -> Text -> [Text] (splitOn)
+            env.register_value(
+                DefId::new(11235),
+                Symbol::intern("Data.Text.splitOn"),
+                Scheme::mono(Ty::fun(
+                    text_ty.clone(),
+                    Ty::fun(text_ty.clone(), Ty::List(Box::new(text_ty.clone()))),
+                )),
+            );
+
+            // Text -> Text -> Text -> Text (replace)
+            env.register_value(
+                DefId::new(11236),
+                Symbol::intern("Data.Text.replace"),
+                Scheme::mono(Ty::fun(
+                    text_ty.clone(),
+                    Ty::fun(text_ty.clone(), Ty::fun(text_ty.clone(), text_ty.clone())),
+                )),
+            );
+
+            // Data.Text.Encoding: Text -> ByteString
+            env.register_value(
+                DefId::new(11238),
+                Symbol::intern("Data.Text.Encoding.encodeUtf8"),
+                Scheme::mono(Ty::fun(text_ty.clone(), bs_ty.clone())),
+            );
+
+            // Data.Text.Encoding: ByteString -> Text
+            env.register_value(
+                DefId::new(11239),
+                Symbol::intern("Data.Text.Encoding.decodeUtf8"),
+                Scheme::mono(Ty::fun(bs_ty.clone(), text_ty.clone())),
+            );
+
+            // E.20: Data.ByteString at fixed DefIds
+            let io_bs = Ty::App(
+                Box::new(Ty::Con(self.io_con.clone())),
+                Box::new(bs_ty.clone()),
+            );
+            let io_unit = Ty::App(
+                Box::new(Ty::Con(self.io_con.clone())),
+                Box::new(Ty::Tuple(vec![])),
+            );
+
+            // ByteString (no args)
+            env.register_value(
+                DefId::new(11250),
+                Symbol::intern("Data.ByteString.empty"),
+                Scheme::mono(bs_ty.clone()),
+            );
+
+            // Int -> ByteString (singleton)
+            env.register_value(
+                DefId::new(11251),
+                Symbol::intern("Data.ByteString.singleton"),
+                Scheme::mono(Ty::fun(int_ty.clone(), bs_ty.clone())),
+            );
+
+            // [Int] -> ByteString (pack)
+            env.register_value(
+                DefId::new(11252),
+                Symbol::intern("Data.ByteString.pack"),
+                Scheme::mono(Ty::fun(Ty::List(Box::new(int_ty.clone())), bs_ty.clone())),
+            );
+
+            // ByteString -> [Int] (unpack)
+            env.register_value(
+                DefId::new(11253),
+                Symbol::intern("Data.ByteString.unpack"),
+                Scheme::mono(Ty::fun(bs_ty.clone(), Ty::List(Box::new(int_ty.clone())))),
+            );
+
+            // ByteString -> Bool (null)
+            env.register_value(
+                DefId::new(11254),
+                Symbol::intern("Data.ByteString.null"),
+                Scheme::mono(Ty::fun(bs_ty.clone(), bool_ty.clone())),
+            );
+
+            // ByteString -> Int (length, head, last)
+            for (id, name) in [
+                (11255, "Data.ByteString.length"),
+                (11256, "Data.ByteString.head"),
+                (11257, "Data.ByteString.last"),
+            ] {
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::mono(Ty::fun(bs_ty.clone(), int_ty.clone())),
+                );
+            }
+
+            // ByteString -> ByteString (tail, init, reverse)
+            for (id, name) in [
+                (11258, "Data.ByteString.tail"),
+                (11259, "Data.ByteString.init"),
+                (11265, "Data.ByteString.reverse"),
+            ] {
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::mono(Ty::fun(bs_ty.clone(), bs_ty.clone())),
+                );
+            }
+
+            // ByteString -> ByteString -> ByteString (append)
+            env.register_value(
+                DefId::new(11260),
+                Symbol::intern("Data.ByteString.append"),
+                Scheme::mono(Ty::fun(bs_ty.clone(), Ty::fun(bs_ty.clone(), bs_ty.clone()))),
+            );
+
+            // Int -> ByteString -> ByteString (cons)
+            env.register_value(
+                DefId::new(11261),
+                Symbol::intern("Data.ByteString.cons"),
+                Scheme::mono(Ty::fun(int_ty.clone(), Ty::fun(bs_ty.clone(), bs_ty.clone()))),
+            );
+
+            // ByteString -> Int -> ByteString (snoc)
+            env.register_value(
+                DefId::new(11262),
+                Symbol::intern("Data.ByteString.snoc"),
+                Scheme::mono(Ty::fun(bs_ty.clone(), Ty::fun(int_ty.clone(), bs_ty.clone()))),
+            );
+
+            // Int -> ByteString -> ByteString (take, drop)
+            for (id, name) in [
+                (11263, "Data.ByteString.take"),
+                (11264, "Data.ByteString.drop"),
+            ] {
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::mono(Ty::fun(int_ty.clone(), Ty::fun(bs_ty.clone(), bs_ty.clone()))),
+                );
+            }
+
+            // Int -> ByteString -> Bool (elem)
+            env.register_value(
+                DefId::new(11266),
+                Symbol::intern("Data.ByteString.elem"),
+                Scheme::mono(Ty::fun(int_ty.clone(), Ty::fun(bs_ty.clone(), bool_ty.clone()))),
+            );
+
+            // ByteString -> Int -> Int (index)
+            env.register_value(
+                DefId::new(11267),
+                Symbol::intern("Data.ByteString.index"),
+                Scheme::mono(Ty::fun(bs_ty.clone(), Ty::fun(int_ty.clone(), int_ty.clone()))),
+            );
+
+            // ByteString -> ByteString -> Bool (eq, isPrefixOf, isSuffixOf)
+            for (id, name) in [
+                (11268, "Data.ByteString.eq"),
+                (11270, "Data.ByteString.isPrefixOf"),
+                (11271, "Data.ByteString.isSuffixOf"),
+            ] {
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::mono(Ty::fun(bs_ty.clone(), Ty::fun(bs_ty.clone(), bool_ty.clone()))),
+                );
+            }
+
+            // ByteString -> ByteString -> Int (compare)
+            env.register_value(
+                DefId::new(11269),
+                Symbol::intern("Data.ByteString.compare"),
+                Scheme::mono(Ty::fun(bs_ty.clone(), Ty::fun(bs_ty.clone(), int_ty.clone()))),
+            );
+
+            // String -> IO ByteString (readFile)
+            env.register_value(
+                DefId::new(11272),
+                Symbol::intern("Data.ByteString.readFile"),
+                Scheme::mono(Ty::fun(string_ty.clone(), io_bs)),
+            );
+
+            // String -> ByteString -> IO () (writeFile)
+            env.register_value(
+                DefId::new(11273),
+                Symbol::intern("Data.ByteString.writeFile"),
+                Scheme::mono(Ty::fun(string_ty.clone(), Ty::fun(bs_ty.clone(), io_unit))),
             );
         }
 

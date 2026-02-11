@@ -1305,9 +1305,95 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
+        // E.20: Data.Text at fixed DefIds (fixes sequential array misalignment)
+        let e20_text_builtins: &[(usize, &str)] = &[
+            (11200, "Data.Text.empty"),
+            (11201, "Data.Text.singleton"),
+            (11202, "Data.Text.pack"),
+            (11203, "Data.Text.unpack"),
+            (11204, "Data.Text.null"),
+            (11205, "Data.Text.length"),
+            (11206, "Data.Text.head"),
+            (11207, "Data.Text.last"),
+            (11208, "Data.Text.tail"),
+            (11209, "Data.Text.init"),
+            (11210, "Data.Text.append"),
+            (11211, "Data.Text.<>"),
+            (11212, "Data.Text.reverse"),
+            (11213, "Data.Text.take"),
+            (11214, "Data.Text.takeEnd"),
+            (11215, "Data.Text.drop"),
+            (11216, "Data.Text.dropEnd"),
+            (11217, "Data.Text.isPrefixOf"),
+            (11218, "Data.Text.isSuffixOf"),
+            (11219, "Data.Text.isInfixOf"),
+            (11220, "Data.Text.toLower"),
+            (11221, "Data.Text.toUpper"),
+            (11222, "Data.Text.toCaseFold"),
+            (11223, "Data.Text.toTitle"),
+            (11224, "Data.Text.map"),
+            (11225, "Data.Text.eq"),
+            (11226, "Data.Text.=="),
+            (11227, "Data.Text.compare"),
+            (11228, "Data.Text.filter"),
+            (11229, "Data.Text.foldl'"),
+            (11230, "Data.Text.concat"),
+            (11231, "Data.Text.intercalate"),
+            (11232, "Data.Text.strip"),
+            (11233, "Data.Text.words"),
+            (11234, "Data.Text.lines"),
+            (11235, "Data.Text.splitOn"),
+            (11236, "Data.Text.replace"),
+            // Data.Text.Encoding
+            (11238, "Data.Text.Encoding.encodeUtf8"),
+            (11239, "Data.Text.Encoding.decodeUtf8"),
+        ];
+
+        for &(id, name) in e20_text_builtins {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
+        // E.20: Data.ByteString at fixed DefIds (fixes sequential array misalignment)
+        let e20_bs_builtins: &[(usize, &str)] = &[
+            (11250, "Data.ByteString.empty"),
+            (11251, "Data.ByteString.singleton"),
+            (11252, "Data.ByteString.pack"),
+            (11253, "Data.ByteString.unpack"),
+            (11254, "Data.ByteString.null"),
+            (11255, "Data.ByteString.length"),
+            (11256, "Data.ByteString.head"),
+            (11257, "Data.ByteString.last"),
+            (11258, "Data.ByteString.tail"),
+            (11259, "Data.ByteString.init"),
+            (11260, "Data.ByteString.append"),
+            (11261, "Data.ByteString.cons"),
+            (11262, "Data.ByteString.snoc"),
+            (11263, "Data.ByteString.take"),
+            (11264, "Data.ByteString.drop"),
+            (11265, "Data.ByteString.reverse"),
+            (11266, "Data.ByteString.elem"),
+            (11267, "Data.ByteString.index"),
+            (11268, "Data.ByteString.eq"),
+            (11269, "Data.ByteString.compare"),
+            (11270, "Data.ByteString.isPrefixOf"),
+            (11271, "Data.ByteString.isSuffixOf"),
+            (11272, "Data.ByteString.readFile"),
+            (11273, "Data.ByteString.writeFile"),
+        ];
+
+        for &(id, name) in e20_bs_builtins {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
         // Ensure next_def_id is past the fixed DefId ranges
-        if self.next_def_id <= 11116 {
-            self.next_def_id = 11116;
+        if self.next_def_id <= 11274 {
+            self.next_def_id = 11274;
         }
     }
 

@@ -417,6 +417,17 @@ fn test_tier3_directory_ops_native() {
     run_native_test("tier3_io/directory_ops", Profile::Default);
 }
 
+// Data.Map operations
+#[test]
+fn test_tier3_map_basic_native() {
+    run_native_test("tier3_io/map_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_map_complete_native() {
+    run_native_test("tier3_io/map_complete", Profile::Default);
+}
+
 // =============================================================================
 // Discovery Tests
 // =============================================================================

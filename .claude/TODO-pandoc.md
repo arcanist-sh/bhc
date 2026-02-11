@@ -18,7 +18,7 @@ north-star integration target for BHC's real-world Haskell compatibility.
 ## Current State
 
 BHC compiles real Haskell programs to native executables via LLVM:
-- 81 native E2E tests passing (including monad transformers, file IO, markdown parser, JSON parser)
+- 83 native E2E tests passing (including monad transformers, file IO, markdown parser, JSON parser)
 - Monad transformers: StateT, ReaderT, ExceptT, WriterT all working
 - Nested transformer stacks: `StateT s (ReaderT r IO)` with cross-transformer `ask` working
 - MTL typeclasses registered: MonadReader, MonadState, MonadError, MonadWriter
@@ -48,11 +48,13 @@ BHC compiles real Haskell programs to native executables via LLVM:
 - Fixed VarId suffix bug in Set/IntSet binary/predicate dispatches (E.22)
 - Stock deriving: Eq, Show, Ord for user-defined ADTs (E.23, E.24)
 - Polymorphic compare and comparison operators for derived Ord (E.24)
-- All intermediate milestones A–E.24 done
+- String methods: fromString, read, readMaybe (E.25)
+- Data.List: sortOn, nubBy, groupBy, deleteBy, unionBy, intersectBy, stripPrefix, insert, mapAccumL, mapAccumR (E.26)
+- All intermediate milestones A–E.26 done
 
 ### Gap to Pandoc
 
-**Completed:** Self-contained programs with transformers, parsing, file IO, Text, ByteString, Text.IO, Data.Char, show for compound types, numeric conversions, IORef, exceptions, multi-package imports, Data.Maybe/Either utilities, extensive Data.List operations, when/unless/guard/any/all, monadic combinators (filterM/foldM/replicateM/zipWithM), Ordering ADT with compare, System.FilePath + System.Directory, Data.Map complete (update/alter/unions/keysSet), fixed DefId misalignment for Text/ByteString/exceptions (E.20), Bool ADT for container predicates (E.21), Data.Set/IntMap/IntSet full type support + codegen completions (E.22), stock deriving Eq/Show/Ord for user ADTs (E.23, E.24)
+**Completed:** Self-contained programs with transformers, parsing, file IO, Text, ByteString, Text.IO, Data.Char, show for compound types, numeric conversions, IORef, exceptions, multi-package imports, Data.Maybe/Either utilities, extensive Data.List operations, when/unless/guard/any/all, monadic combinators (filterM/foldM/replicateM/zipWithM), Ordering ADT with compare, System.FilePath + System.Directory, Data.Map complete (update/alter/unions/keysSet), fixed DefId misalignment for Text/ByteString/exceptions (E.20), Bool ADT for container predicates (E.21), Data.Set/IntMap/IntSet full type support + codegen completions (E.22), stock deriving Eq/Show/Ord for user ADTs (E.23, E.24), String read/readMaybe/fromString (E.25), sortOn/nubBy/groupBy/deleteBy/unionBy/intersectBy/stripPrefix/insert/mapAccumL/mapAccumR (E.26)
 **Missing for Pandoc:**
 1. **Full package system** — Basic import paths work (E.6), but no Hackage .cabal parsing yet
 2. **Lazy Text/ByteString** — Only strict variants implemented
@@ -278,7 +280,7 @@ compiled from Hackage source.
 
 ### 3.1 Remaining Codegen Builtins
 
-**Status:** ~470+ of 587 builtins lowered (E.13–E.24 added ~60+ functions + derived dispatches)
+**Status:** ~480+ of 587 builtins lowered (E.13–E.26 added ~70+ functions + derived dispatches)
 **Scope:** Small-Medium (ongoing)
 
 - [ ] Monadic codegen: general `>>=`, `>>`, `return` via dictionary dispatch
@@ -307,7 +309,10 @@ compiled from Hackage source.
 - [x] `show` for standard types: showInt, showBool, showChar, showFloat (type-specialized, E.9)
 - [x] `show` for compound types: String, [a], Maybe, Either, (a,b), () (E.11)
 - [ ] `show` for remaining types: Double, nested compound types
-- [ ] `read` / `reads` for parsing
+- [x] `read` for Int (RTS bhc_read_int, E.25)
+- [x] `readMaybe` for Int (RTS bhc_try_read_int, E.25)
+- [x] `fromString` (identity, E.25)
+- [ ] `reads` for parsing (general)
 - [x] `fromIntegral`, `toInteger`, `fromInteger` (identity pass-through, E.12)
 - [x] `even`, `odd` (inline LLVM srem, E.12)
 - [x] `gcd`, `lcm` (RTS functions, E.12)
@@ -527,6 +532,23 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 - [x] E2E test: derive_ord (compare on enums + comparison operators + multiple types)
 - [x] 81 total E2E tests pass (80 existing + 1 new, 0 failures)
 
+### Milestone E.25: String Type Class Methods ✅
+- [x] `fromString` as identity pass-through
+- [x] `read` (String→Int) via RTS `bhc_read_int`
+- [x] `readMaybe` (String→Maybe Int) via RTS `bhc_try_read_int`
+- [x] Fixed DefIds 11300-11302, VarIds 1000540-1000541
+- [x] Show inference: readMaybe recognized as Maybe-returning
+- [x] E2E test: string_read
+- [x] 82 total E2E tests pass
+
+### Milestone E.26: More List Operations ✅
+- [x] 10 RTS functions: sortOn, nubBy, groupBy, deleteBy, unionBy, intersectBy, stripPrefix, insert, mapAccumL, mapAccumR
+- [x] Internal helpers: extract_bool (dual Bool representation), call_eq_closure, alloc_nothing/just/tuple
+- [x] Fixed DefIds 11400-11409, VarIds 1000550-1000559
+- [x] Show inference: `expr_looks_like_list` integrated into `infer_show_from_expr` App case
+- [x] E2E test: list_by_ops (13 assertions covering all 10 functions)
+- [x] 83 total E2E tests pass
+
 ### Milestone F: Pandoc (Minimal)
 - [ ] Compile Pandoc with a subset of readers/writers (e.g., Markdown → HTML only)
 - [ ] Skip optional dependencies (skylighting, texmath, etc.)
@@ -564,6 +586,22 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 ---
 
 ## Recent Progress
+
+### 2026-02-11: Milestone E.26 More List Operations
+- 10 new RTS functions in `stdlib/bhc-base/src/list.rs`: sortOn, nubBy, groupBy, deleteBy, unionBy, intersectBy, stripPrefix, insert, mapAccumL, mapAccumR
+- Internal helpers: `extract_bool()` (handles both tagged-int-as-pointer and Bool ADT), `call_eq_closure()`, `alloc_nothing/just/tuple()`
+- Fixed DefIds 11400-11409, VarIds 1000550-1000559
+- Integrated `expr_looks_like_list()` into `infer_show_from_expr` App case for automatic list show dispatch
+- Key pitfall: polymorphic extractors (fromMaybe, snd, head) must NOT be in `expr_looks_like_list` — causes segfaults in tests where they return non-list types. Use recognized list wrappers instead: `concat (maybeToList (...))`, `take 100 (snd (...))`
+- E2E test: list_by_ops (13 assertions covering all 10 functions)
+- 83 E2E tests pass (82 existing + 1 new, 0 failures)
+
+### 2026-02-11: Milestone E.25 String Type Class Methods
+- `fromString` as identity pass-through, `read` (String→Int via RTS bhc_read_int), `readMaybe` (String→Maybe Int via RTS bhc_try_read_int)
+- Fixed DefIds 11300-11302, VarIds 1000540-1000541
+- Show inference: readMaybe recognized as Maybe-returning
+- E2E test: string_read
+- 82 E2E tests pass
 
 ### 2026-02-12: Milestone E.24 Stock Deriving — Ord for User ADTs
 - Added `derived_compare_fns` dispatch table (mirrors derived_show_fns/derived_eq_fns from E.23)

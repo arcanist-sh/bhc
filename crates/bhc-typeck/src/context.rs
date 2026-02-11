@@ -2550,6 +2550,108 @@ impl TyCtxt {
                     )
                 }
 
+                // E.25: String type class methods
+                "fromString" => Scheme::mono(Ty::fun(
+                    self.builtins.string_ty.clone(),
+                    self.builtins.string_ty.clone(),
+                )),
+                "read" => Scheme::mono(Ty::fun(
+                    self.builtins.string_ty.clone(),
+                    self.builtins.int_ty.clone(),
+                )),
+                "readMaybe" => {
+                    let maybe_int = Ty::App(
+                        Box::new(Ty::Con(self.builtins.maybe_con.clone())),
+                        Box::new(self.builtins.int_ty.clone()),
+                    );
+                    Scheme::mono(Ty::fun(
+                        self.builtins.string_ty.clone(),
+                        maybe_int,
+                    ))
+                }
+
+                // E.26: List *By variants, sortOn, stripPrefix, insert, mapAccumL/R
+                "sortOn" => {
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(
+                            Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                            Ty::fun(list_a.clone(), list_a),
+                        ),
+                    )
+                }
+                "nubBy" | "groupBy" | "deleteBy" | "unionBy" | "intersectBy" => {
+                    // These all take (a -> a -> Bool) as first arg
+                    // Individual return types differ but the polymorphic scheme a -> a works
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    let eq_closure = Ty::fun(
+                        Ty::Var(a.clone()),
+                        Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
+                    );
+                    match name {
+                        "nubBy" => Scheme::poly(
+                            vec![a.clone()],
+                            Ty::fun(eq_closure, Ty::fun(list_a.clone(), list_a)),
+                        ),
+                        "groupBy" => Scheme::poly(
+                            vec![a.clone()],
+                            Ty::fun(
+                                eq_closure,
+                                Ty::fun(list_a.clone(), Ty::List(Box::new(list_a))),
+                            ),
+                        ),
+                        "deleteBy" => Scheme::poly(
+                            vec![a.clone()],
+                            Ty::fun(
+                                eq_closure,
+                                Ty::fun(Ty::Var(a.clone()), Ty::fun(list_a.clone(), list_a)),
+                            ),
+                        ),
+                        "unionBy" | "intersectBy" => Scheme::poly(
+                            vec![a.clone()],
+                            Ty::fun(
+                                eq_closure,
+                                Ty::fun(list_a.clone(), Ty::fun(list_a.clone(), list_a)),
+                            ),
+                        ),
+                        _ => unreachable!(),
+                    }
+                }
+                "stripPrefix" => {
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    let maybe_list_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.maybe_con.clone())),
+                        Box::new(list_a.clone()),
+                    );
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(list_a.clone(), Ty::fun(list_a, maybe_list_a)),
+                    )
+                }
+                "insert" => {
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(list_a.clone(), list_a)),
+                    )
+                }
+                "mapAccumL" | "mapAccumR" => {
+                    let pair_ab = Ty::Tuple(vec![Ty::Var(a.clone()), Ty::Var(b.clone())]);
+                    let pair_a_listb = Ty::Tuple(vec![
+                        Ty::Var(a.clone()),
+                        Ty::List(Box::new(Ty::Var(b.clone()))),
+                    ]);
+                    let list_c = Ty::List(Box::new(Ty::Var(c.clone())));
+                    Scheme::poly(
+                        vec![a.clone(), b.clone(), c.clone()],
+                        Ty::fun(
+                            Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(c.clone()), pair_ab)),
+                            Ty::fun(Ty::Var(a.clone()), Ty::fun(list_c, pair_a_listb)),
+                        ),
+                    )
+                }
+
                 // Unknown builtins - skip here, will be handled in second pass
                 _ => continue,
             };

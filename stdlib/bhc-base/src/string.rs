@@ -189,6 +189,59 @@ pub unsafe extern "C" fn bhc_string_unwords(words_list: *mut u8) -> *mut u8 {
     vec_to_list(&result)
 }
 
+/// `read :: String -> Int` (monomorphic for Int).
+///
+/// Walks a BHC char list (`[Char]`), collects digits, and parses as i64.
+/// Panics with "Prelude.read: no parse" on invalid input (matches GHC behavior).
+#[no_mangle]
+pub unsafe extern "C" fn bhc_read_int(str_list: *mut u8) -> i64 {
+    let chars = list_to_vec(str_list);
+    let s: String = chars
+        .iter()
+        .map(|&c| char::from_u32(char_val(c) as u32).unwrap_or('\0'))
+        .collect();
+    let trimmed = s.trim();
+    match trimmed.parse::<i64>() {
+        Ok(n) => n,
+        Err(_) => {
+            eprintln!("Prelude.read: no parse: \"{}\"", trimmed);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `readMaybe :: String -> Maybe Int` (monomorphic for Int).
+///
+/// Walks a BHC char list, tries to parse as i64.
+/// Returns a Maybe ADT: Nothing (tag=0) on failure, Just n (tag=1) on success.
+/// The Int value inside Just is stored as an int-as-pointer (BHC convention).
+#[no_mangle]
+pub unsafe extern "C" fn bhc_try_read_int(str_list: *mut u8) -> *mut u8 {
+    let chars = list_to_vec(str_list);
+    let s: String = chars
+        .iter()
+        .map(|&c| char::from_u32(char_val(c) as u32).unwrap_or('\0'))
+        .collect();
+    let trimmed = s.trim();
+    match trimmed.parse::<i64>() {
+        Ok(n) => {
+            // Just n: tag=1, 1 field (the Int as int-as-pointer)
+            let layout = Layout::from_size_align_unchecked(16, 8);
+            let ptr = alloc(layout);
+            *(ptr as *mut i64) = 1; // tag = 1 (Just)
+            *(ptr.add(8) as *mut *mut u8) = n as *mut u8; // field 0 = int-as-pointer
+            ptr
+        }
+        Err(_) => {
+            // Nothing: tag=0, 0 fields
+            let layout = Layout::from_size_align_unchecked(8, 8);
+            let ptr = alloc(layout);
+            *(ptr as *mut i64) = 0; // tag = 0 (Nothing)
+            ptr
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +373,68 @@ mod tests {
             let words = alloc_nil();
             let result = bhc_string_unwords(words);
             assert_eq!(collect_string(result), "");
+        }
+    }
+
+    // -- read tests --
+
+    #[test]
+    fn test_read_int_positive() {
+        unsafe {
+            let s = make_string("42");
+            assert_eq!(bhc_read_int(s), 42);
+        }
+    }
+
+    #[test]
+    fn test_read_int_negative() {
+        unsafe {
+            let s = make_string("-7");
+            assert_eq!(bhc_read_int(s), -7);
+        }
+    }
+
+    #[test]
+    fn test_read_int_with_spaces() {
+        unsafe {
+            let s = make_string("  123  ");
+            assert_eq!(bhc_read_int(s), 123);
+        }
+    }
+
+    // Note: test_read_int_invalid is omitted because panic! in extern "C"
+    // functions aborts the process rather than unwinding, preventing #[should_panic].
+
+    // -- readMaybe tests --
+
+    #[test]
+    fn test_try_read_int_valid() {
+        unsafe {
+            let s = make_string("123");
+            let result = bhc_try_read_int(s);
+            assert_eq!(get_tag(result), 1); // Just
+            let val = get_field(result, 0) as i64;
+            assert_eq!(val, 123);
+        }
+    }
+
+    #[test]
+    fn test_try_read_int_invalid() {
+        unsafe {
+            let s = make_string("abc");
+            let result = bhc_try_read_int(s);
+            assert_eq!(get_tag(result), 0); // Nothing
+        }
+    }
+
+    #[test]
+    fn test_try_read_int_negative() {
+        unsafe {
+            let s = make_string("-42");
+            let result = bhc_try_read_int(s);
+            assert_eq!(get_tag(result), 1); // Just
+            let val = get_field(result, 0) as i64;
+            assert_eq!(val, -42);
         }
     }
 }

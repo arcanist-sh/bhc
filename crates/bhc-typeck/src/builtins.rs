@@ -5187,6 +5187,181 @@ impl Builtins {
             );
         }
 
+        // E.25: String type class methods at fixed DefIds 11300-11302
+        {
+            let string_ty = self.string_ty.clone();
+            let int_ty = self.int_ty.clone();
+            let maybe_int = Ty::App(
+                Box::new(Ty::Con(self.maybe_con.clone())),
+                Box::new(int_ty.clone()),
+            );
+
+            // fromString :: String -> String (identity, since String = [Char])
+            env.register_value(
+                DefId::new(11300),
+                Symbol::intern("fromString"),
+                Scheme::mono(Ty::fun(string_ty.clone(), string_ty.clone())),
+            );
+
+            // read :: String -> Int (monomorphic for now)
+            env.register_value(
+                DefId::new(11301),
+                Symbol::intern("read"),
+                Scheme::mono(Ty::fun(string_ty.clone(), int_ty)),
+            );
+
+            // readMaybe :: String -> Maybe Int (monomorphic for now)
+            env.register_value(
+                DefId::new(11302),
+                Symbol::intern("readMaybe"),
+                Scheme::mono(Ty::fun(string_ty, maybe_int)),
+            );
+        }
+
+        // E.26: List *By variants, sortOn, stripPrefix, insert, mapAccumL/R
+        // at fixed DefIds 11400-11409
+        {
+            let a = TyVar::new_star(BUILTIN_TYVAR_A);
+            let b = TyVar::new_star(BUILTIN_TYVAR_B);
+            let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
+            let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+            let eq_closure = Ty::fun(
+                Ty::Var(a.clone()),
+                Ty::fun(Ty::Var(a.clone()), self.bool_ty.clone()),
+            );
+
+            // sortOn :: (a -> b) -> [a] -> [a]
+            env.register_value(
+                DefId::new(11400),
+                Symbol::intern("sortOn"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                        Ty::fun(list_a.clone(), list_a.clone()),
+                    ),
+                ),
+            );
+
+            // nubBy :: (a -> a -> Bool) -> [a] -> [a]
+            env.register_value(
+                DefId::new(11401),
+                Symbol::intern("nubBy"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(eq_closure.clone(), Ty::fun(list_a.clone(), list_a.clone())),
+                ),
+            );
+
+            // groupBy :: (a -> a -> Bool) -> [a] -> [[a]]
+            env.register_value(
+                DefId::new(11402),
+                Symbol::intern("groupBy"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        eq_closure.clone(),
+                        Ty::fun(list_a.clone(), Ty::List(Box::new(list_a.clone()))),
+                    ),
+                ),
+            );
+
+            // deleteBy :: (a -> a -> Bool) -> a -> [a] -> [a]
+            env.register_value(
+                DefId::new(11403),
+                Symbol::intern("deleteBy"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        eq_closure.clone(),
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(list_a.clone(), list_a.clone())),
+                    ),
+                ),
+            );
+
+            // unionBy :: (a -> a -> Bool) -> [a] -> [a] -> [a]
+            env.register_value(
+                DefId::new(11404),
+                Symbol::intern("unionBy"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        eq_closure.clone(),
+                        Ty::fun(list_a.clone(), Ty::fun(list_a.clone(), list_a.clone())),
+                    ),
+                ),
+            );
+
+            // intersectBy :: (a -> a -> Bool) -> [a] -> [a] -> [a]
+            env.register_value(
+                DefId::new(11405),
+                Symbol::intern("intersectBy"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        eq_closure.clone(),
+                        Ty::fun(list_a.clone(), Ty::fun(list_a.clone(), list_a.clone())),
+                    ),
+                ),
+            );
+
+            // stripPrefix :: [a] -> [a] -> Maybe [a]
+            let maybe_list_a = Ty::App(
+                Box::new(Ty::Con(self.maybe_con.clone())),
+                Box::new(list_a.clone()),
+            );
+            env.register_value(
+                DefId::new(11406),
+                Symbol::intern("stripPrefix"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(list_a.clone(), Ty::fun(list_a.clone(), maybe_list_a)),
+                ),
+            );
+
+            // insert :: a -> [a] -> [a]
+            env.register_value(
+                DefId::new(11407),
+                Symbol::intern("insert"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::fun(list_a.clone(), list_a.clone())),
+                ),
+            );
+
+            // mapAccumL :: (acc -> x -> (acc, y)) -> acc -> [x] -> (acc, [y])
+            let pair_ab = Ty::Tuple(vec![Ty::Var(a.clone()), Ty::Var(b.clone())]);
+            let pair_a_listb = Ty::Tuple(vec![
+                Ty::Var(a.clone()),
+                Ty::List(Box::new(Ty::Var(b.clone()))),
+            ]);
+            let list_c = Ty::List(Box::new(Ty::Var(c.clone())));
+            env.register_value(
+                DefId::new(11408),
+                Symbol::intern("mapAccumL"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone(), c.clone()],
+                    Ty::fun(
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(c.clone()), pair_ab.clone())),
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(list_c.clone(), pair_a_listb.clone())),
+                    ),
+                ),
+            );
+
+            // mapAccumR :: (acc -> x -> (acc, y)) -> acc -> [x] -> (acc, [y])
+            env.register_value(
+                DefId::new(11409),
+                Symbol::intern("mapAccumR"),
+                Scheme::poly(
+                    vec![a.clone(), b.clone(), c.clone()],
+                    Ty::fun(
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(c.clone()), pair_ab)),
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(list_c, pair_a_listb)),
+                    ),
+                ),
+            );
+        }
+
         // Register transformer types and operations at fixed DefIds (10000+)
         self.register_transformer_ops(env);
 

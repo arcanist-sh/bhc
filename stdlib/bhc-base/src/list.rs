@@ -40,6 +40,57 @@ unsafe fn alloc_cons(head: *mut u8, tail: *mut u8) -> *mut u8 {
 }
 
 // ---------------------------------------------------------------------------
+// Bool / Maybe / Tuple helpers (internal)
+// ---------------------------------------------------------------------------
+
+/// Extract bool from either tagged-int-as-pointer (0/1 from ==, <, >)
+/// or Bool ADT (heap pointer with tag 0=False, 1=True from even, odd, etc.).
+/// Heap pointers are always >> 1 so we can distinguish the two representations.
+unsafe fn extract_bool(val: *mut u8) -> bool {
+    let v = val as usize;
+    if v <= 1 {
+        v != 0
+    } else {
+        get_tag(val) != 0
+    }
+}
+
+/// Call a 2-arg equality closure and extract the Bool result.
+/// BHC closures are flat: fn(env, arg1, arg2) -> result.
+unsafe fn call_eq_closure(eq_fn: *mut u8, a: *mut u8, b: *mut u8) -> bool {
+    let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
+        std::mem::transmute(*(eq_fn as *const *mut u8));
+    extract_bool(fn_ptr(eq_fn, a, b))
+}
+
+/// Allocate Nothing ADT (tag=0, 8 bytes).
+unsafe fn alloc_nothing() -> *mut u8 {
+    let layout = Layout::from_size_align_unchecked(8, 8);
+    let ptr = alloc(layout);
+    *(ptr as *mut i64) = 0;
+    ptr
+}
+
+/// Allocate Just x ADT (tag=1, field at offset 8, 16 bytes).
+unsafe fn alloc_just(value: *mut u8) -> *mut u8 {
+    let layout = Layout::from_size_align_unchecked(16, 8);
+    let ptr = alloc(layout);
+    *(ptr as *mut i64) = 1;
+    *(ptr.add(8) as *mut *mut u8) = value;
+    ptr
+}
+
+/// Allocate a 2-tuple (tag=0, fst at offset 8, snd at offset 16, 24 bytes).
+unsafe fn alloc_tuple(fst: *mut u8, snd: *mut u8) -> *mut u8 {
+    let layout = Layout::from_size_align_unchecked(24, 8);
+    let ptr = alloc(layout);
+    *(ptr as *mut i64) = 0;
+    *(ptr.add(8) as *mut *mut u8) = fst;
+    *(ptr.add(16) as *mut *mut u8) = snd;
+    ptr
+}
+
+// ---------------------------------------------------------------------------
 // Conversion helpers (internal)
 // ---------------------------------------------------------------------------
 
@@ -199,6 +250,234 @@ pub unsafe extern "C" fn bhc_list_transpose(lists: *mut u8) -> *mut u8 {
 
     let sublists: Vec<*mut u8> = columns.iter().map(|c| vec_to_list(c)).collect();
     vec_to_list(&sublists)
+}
+
+/// Sort a list using a key-extraction closure (decorate-sort-undecorate).
+///
+/// `sortOn f xs` sorts `xs` by comparing `f x` values as `i64`.
+/// `key_fn` is a 1-arg closure: `fn(env, elem) -> key`.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_sort_on(key_fn: *mut u8, list: *mut u8) -> *mut u8 {
+    let fn_ptr: extern "C" fn(*mut u8, *mut u8) -> *mut u8 =
+        std::mem::transmute(*(key_fn as *const *mut u8));
+
+    let vec = list_to_vec(list);
+    let mut decorated: Vec<(i64, *mut u8)> = vec
+        .iter()
+        .map(|&elem| {
+            let key = fn_ptr(key_fn, elem);
+            (key as i64, elem)
+        })
+        .collect();
+    decorated.sort_by_key(|&(k, _)| k);
+    let sorted: Vec<*mut u8> = decorated.into_iter().map(|(_, e)| e).collect();
+    vec_to_list(&sorted)
+}
+
+/// Remove duplicates using a custom equality closure.
+///
+/// `nubBy eq xs` keeps the first occurrence of each element,
+/// removing later elements for which `eq earlier later` is True.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_nub_by(eq_fn: *mut u8, list: *mut u8) -> *mut u8 {
+    let vec = list_to_vec(list);
+    let mut result: Vec<*mut u8> = Vec::new();
+    for &elem in &vec {
+        let already = result.iter().any(|&kept| call_eq_closure(eq_fn, kept, elem));
+        if !already {
+            result.push(elem);
+        }
+    }
+    vec_to_list(&result)
+}
+
+/// Group consecutive elements using a custom equality closure.
+///
+/// `groupBy eq xs` groups consecutive elements where `eq a b` is True.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_group_by(eq_fn: *mut u8, list: *mut u8) -> *mut u8 {
+    let vec = list_to_vec(list);
+    if vec.is_empty() {
+        return alloc_nil();
+    }
+
+    let mut groups: Vec<Vec<*mut u8>> = Vec::new();
+    let mut current_group: Vec<*mut u8> = vec![vec[0]];
+
+    for &elem in &vec[1..] {
+        if call_eq_closure(eq_fn, *current_group.last().unwrap(), elem) {
+            current_group.push(elem);
+        } else {
+            groups.push(std::mem::take(&mut current_group));
+            current_group.push(elem);
+        }
+    }
+    groups.push(current_group);
+
+    let sublists: Vec<*mut u8> = groups.iter().map(|g| vec_to_list(g)).collect();
+    vec_to_list(&sublists)
+}
+
+/// Delete the first element matching by a custom equality closure.
+///
+/// `deleteBy eq x xs` removes the first `y` in `xs` where `eq x y` is True.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_delete_by(
+    eq_fn: *mut u8,
+    val: *mut u8,
+    list: *mut u8,
+) -> *mut u8 {
+    let vec = list_to_vec(list);
+    let mut result: Vec<*mut u8> = Vec::new();
+    let mut found = false;
+    for &elem in &vec {
+        if !found && call_eq_closure(eq_fn, val, elem) {
+            found = true;
+        } else {
+            result.push(elem);
+        }
+    }
+    vec_to_list(&result)
+}
+
+/// Union of two lists using a custom equality closure.
+///
+/// `unionBy eq xs ys = xs ++ [y | y <- ys, not (any (eq y) xs')]`
+/// where `xs'` grows as elements from `ys` are added.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_union_by(
+    eq_fn: *mut u8,
+    xs: *mut u8,
+    ys: *mut u8,
+) -> *mut u8 {
+    let xs_vec = list_to_vec(xs);
+    let ys_vec = list_to_vec(ys);
+    let mut result = xs_vec.clone();
+    for &y in &ys_vec {
+        let already = result.iter().any(|&x| call_eq_closure(eq_fn, x, y));
+        if !already {
+            result.push(y);
+        }
+    }
+    vec_to_list(&result)
+}
+
+/// Intersection of two lists using a custom equality closure.
+///
+/// `intersectBy eq xs ys = [x | x <- xs, any (eq x) ys]`
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_intersect_by(
+    eq_fn: *mut u8,
+    xs: *mut u8,
+    ys: *mut u8,
+) -> *mut u8 {
+    let xs_vec = list_to_vec(xs);
+    let ys_vec = list_to_vec(ys);
+    let result: Vec<*mut u8> = xs_vec
+        .into_iter()
+        .filter(|&x| ys_vec.iter().any(|&y| call_eq_closure(eq_fn, x, y)))
+        .collect();
+    vec_to_list(&result)
+}
+
+/// Strip a prefix from a list, returning `Just remainder` or `Nothing`.
+///
+/// Elements are compared as `i64` (pointer cast).
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_strip_prefix(
+    prefix: *mut u8,
+    list: *mut u8,
+) -> *mut u8 {
+    let mut p = prefix;
+    let mut l = list;
+    loop {
+        if get_tag(p) == 0 {
+            // Prefix exhausted — return Just remaining
+            return alloc_just(l);
+        }
+        if get_tag(l) == 0 {
+            // List exhausted before prefix — return Nothing
+            return alloc_nothing();
+        }
+        let p_head = get_field(p, 0);
+        let l_head = get_field(l, 0);
+        if p_head as i64 != l_head as i64 {
+            return alloc_nothing();
+        }
+        p = get_field(p, 1);
+        l = get_field(l, 1);
+    }
+}
+
+/// Insert an element into a sorted list at the correct position.
+///
+/// Elements are compared as `i64` (pointer cast).
+/// `insert 3 [1,2,4,5] = [1,2,3,4,5]`
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_insert(val: *mut u8, list: *mut u8) -> *mut u8 {
+    let vec = list_to_vec(list);
+    let v = val as i64;
+    let pos = vec.iter().position(|&e| (e as i64) > v).unwrap_or(vec.len());
+    let mut result = vec;
+    result.insert(pos, val);
+    vec_to_list(&result)
+}
+
+/// Left-to-right accumulating map.
+///
+/// `mapAccumL f acc xs` calls `f acc x` for each element left-to-right.
+/// The closure returns a 2-tuple `(new_acc, y)`. Returns `(final_acc, ys)`.
+/// `f` is a 2-arg closure: `fn(env, acc, x) -> tuple`.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_map_accum_l(
+    f: *mut u8,
+    acc: *mut u8,
+    list: *mut u8,
+) -> *mut u8 {
+    let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
+        std::mem::transmute(*(f as *const *mut u8));
+
+    let vec = list_to_vec(list);
+    let mut current_acc = acc;
+    let mut ys: Vec<*mut u8> = Vec::with_capacity(vec.len());
+
+    for &x in &vec {
+        let tuple = fn_ptr(f, current_acc, x);
+        current_acc = get_field(tuple, 0);
+        ys.push(get_field(tuple, 1));
+    }
+
+    let ys_list = vec_to_list(&ys);
+    alloc_tuple(current_acc, ys_list)
+}
+
+/// Right-to-left accumulating map.
+///
+/// `mapAccumR f acc xs` calls `f acc x` for each element right-to-left.
+/// The closure returns a 2-tuple `(new_acc, y)`. Returns `(final_acc, ys)`.
+/// `f` is a 2-arg closure: `fn(env, acc, x) -> tuple`.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_list_map_accum_r(
+    f: *mut u8,
+    acc: *mut u8,
+    list: *mut u8,
+) -> *mut u8 {
+    let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
+        std::mem::transmute(*(f as *const *mut u8));
+
+    let vec = list_to_vec(list);
+    let mut current_acc = acc;
+    let mut ys: Vec<*mut u8> = Vec::with_capacity(vec.len());
+
+    for &x in vec.iter().rev() {
+        let tuple = fn_ptr(f, current_acc, x);
+        current_acc = get_field(tuple, 0);
+        ys.push(get_field(tuple, 1));
+    }
+
+    ys.reverse();
+    let ys_list = vec_to_list(&ys);
+    alloc_tuple(current_acc, ys_list)
 }
 
 #[cfg(test)]

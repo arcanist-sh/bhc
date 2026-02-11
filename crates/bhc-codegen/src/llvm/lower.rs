@@ -1799,6 +1799,38 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let list_transpose = self.module.llvm_module().add_function("bhc_list_transpose", ptr_type.fn_type(&[ptr_type.into()], false), None);
         self.functions.insert(VarId::new(1000175), list_transpose);
 
+        // ---- E.26 List RTS functions (VarId 1000550-1000559) ----
+        // bhc_list_sort_on(key_fn, list) -> ptr
+        let list_sort_on = self.module.llvm_module().add_function("bhc_list_sort_on", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000550), list_sort_on);
+        // bhc_list_nub_by(eq_fn, list) -> ptr
+        let list_nub_by = self.module.llvm_module().add_function("bhc_list_nub_by", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000551), list_nub_by);
+        // bhc_list_group_by(eq_fn, list) -> ptr
+        let list_group_by = self.module.llvm_module().add_function("bhc_list_group_by", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000552), list_group_by);
+        // bhc_list_delete_by(eq_fn, val, list) -> ptr
+        let list_delete_by = self.module.llvm_module().add_function("bhc_list_delete_by", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000553), list_delete_by);
+        // bhc_list_union_by(eq_fn, xs, ys) -> ptr
+        let list_union_by = self.module.llvm_module().add_function("bhc_list_union_by", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000554), list_union_by);
+        // bhc_list_intersect_by(eq_fn, xs, ys) -> ptr
+        let list_intersect_by = self.module.llvm_module().add_function("bhc_list_intersect_by", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000555), list_intersect_by);
+        // bhc_list_strip_prefix(prefix, list) -> ptr
+        let list_strip_prefix = self.module.llvm_module().add_function("bhc_list_strip_prefix", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000556), list_strip_prefix);
+        // bhc_list_insert(val, list) -> ptr
+        let list_insert = self.module.llvm_module().add_function("bhc_list_insert", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000557), list_insert);
+        // bhc_list_map_accum_l(f, acc, list) -> ptr
+        let list_map_accum_l = self.module.llvm_module().add_function("bhc_list_map_accum_l", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000558), list_map_accum_l);
+        // bhc_list_map_accum_r(f, acc, list) -> ptr
+        let list_map_accum_r = self.module.llvm_module().add_function("bhc_list_map_accum_r", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000559), list_map_accum_r);
+
         // ---- String RTS functions (VarId 1176-1179) ----
         // bhc_string_lines(str_ptr) -> ptr
         let string_lines = self.module.llvm_module().add_function("bhc_string_lines", ptr_type.fn_type(&[ptr_type.into()], false), None);
@@ -2204,6 +2236,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.functions.insert(VarId::new(1000531), rename_file);
         let copy_file = self.module.llvm_module().add_function("bhc_copy_file", ptr_ptr_to_void, None);
         self.functions.insert(VarId::new(1000532), copy_file);
+
+        // E.25: String read functions
+        // bhc_read_int(ptr) -> i64  (read :: String -> Int)
+        let ptr_to_i64 = i64_type.fn_type(&[i8_ptr_type.into()], false);
+        let read_int = self.module.llvm_module().add_function("bhc_read_int", ptr_to_i64, None);
+        self.functions.insert(VarId::new(1000540), read_int);
+        // bhc_try_read_int(ptr) -> ptr  (readMaybe :: String -> Maybe Int)
+        let try_read_int = self.module.llvm_module().add_function("bhc_try_read_int", ptr_to_ptr, None);
+        self.functions.insert(VarId::new(1000541), try_read_int);
     }
 
     // ========================================================================
@@ -2722,6 +2763,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "intersperse" => Some(2),
             "transpose" => Some(1),
             "group" => Some(1),
+            "sortOn" => Some(2),
+            "nubBy" => Some(2),
+            "groupBy" => Some(2),
+            "deleteBy" => Some(3),
+            "unionBy" => Some(3),
+            "intersectBy" => Some(3),
+            "stripPrefix" => Some(2),
+            "insert" => Some(2),
+            "mapAccumL" => Some(3),
+            "mapAccumR" => Some(3),
             "splitAt" => Some(2),
             "break" => Some(2),
             "any" => Some(2),
@@ -2828,6 +2879,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "fix" => Some(1),
             "$" => Some(2),
             "." => Some(3),
+
+            // E.25: String type class methods
+            "fromString" => Some(1),
+            "read" => Some(1),
+            "readMaybe" => Some(1),
 
             // Show
             "show" => Some(1),
@@ -3316,6 +3372,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Numeric conversions (identity for BHC's single Int type)
             "fromIntegral" | "toInteger" | "fromInteger" => self.lower_expr(args[0]),
 
+            // String type class methods (E.25)
+            "fromString" => self.lower_expr(args[0]), // identity: String = [Char]
+            "read" => self.lower_builtin_read(args[0]),
+            "readMaybe" => self.lower_builtin_read_maybe(args[0]),
+
             // Ordering
             "compare" => self.lower_builtin_compare(args[0], args[1]),
 
@@ -3483,6 +3544,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "delete" => self.lower_builtin_delete(args[0], args[1]),
             "union" => self.lower_builtin_union(args[0], args[1]),
             "intersect" => self.lower_builtin_intersect(args[0], args[1]),
+            "sortOn" => self.lower_builtin_sort_on(args[0], args[1]),
+            "nubBy" => self.lower_builtin_nub_by(args[0], args[1]),
+            "groupBy" => self.lower_builtin_group_by(args[0], args[1]),
+            "deleteBy" => self.lower_builtin_delete_by(args[0], args[1], args[2]),
+            "unionBy" => self.lower_builtin_union_by(args[0], args[1], args[2]),
+            "intersectBy" => self.lower_builtin_intersect_by(args[0], args[1], args[2]),
+            "stripPrefix" => self.lower_builtin_strip_prefix(args[0], args[1]),
+            "insert" => self.lower_builtin_insert(args[0], args[1]),
+            "mapAccumL" => self.lower_builtin_map_accum_l(args[0], args[1], args[2]),
+            "mapAccumR" => self.lower_builtin_map_accum_r(args[0], args[1], args[2]),
             "scanl" => self.lower_builtin_scanl(args[0], args[1], args[2]),
             "scanl'" => self.lower_builtin_scanl(args[0], args[1], args[2]),
             "scanl1" => self.lower_builtin_scanl1(args[0], args[1]),
@@ -10415,7 +10486,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             name,
                             "length" | "ord" | "abs" | "signum" | "negate"
                                 | "fromIntegral" | "toInteger" | "fromInteger"
-                                | "digitToInt"
+                                | "digitToInt" | "read"
                         )
                     }
                     _ => false,
@@ -10474,6 +10545,27 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         | "lefts"
                         | "rights"
                         | "guard"
+                        | "sort"
+                        | "sortBy"
+                        | "sortOn"
+                        | "nub"
+                        | "nubBy"
+                        | "delete"
+                        | "deleteBy"
+                        | "union"
+                        | "unionBy"
+                        | "intersect"
+                        | "intersectBy"
+                        | "insert"
+                        | "concat"
+                        | "concatMap"
+                        | "zip"
+                        | "zipWith"
+                        | "zip3"
+                        | "zipWith3"
+                        | "transpose"
+                        | "intersperse"
+                        | "intercalate"
                 )
             }
             _ => false,
@@ -14985,9 +15077,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 if self.expr_returns_int(expr) {
                     return Some((ShowCoerce::Int, 1000072, "show_int"));
                 }
+                // Check if it's a function that returns a list
+                if self.expr_looks_like_list(f) {
+                    return Some((ShowCoerce::List, 1000093, "show_list"));
+                }
                 match f.as_ref() {
                     // Just x
                     Expr::Var(var, _) if var.name.as_str() == "Just" => {
+                        Some((ShowCoerce::MaybeOf, 1000094, "show_maybe"))
+                    }
+                    // Functions that return Maybe (readMaybe, lookupEnv, find, lookup, elemIndex, findIndex, listToMaybe)
+                    Expr::Var(var, _) if matches!(var.name.as_str(),
+                        "readMaybe" | "lookupEnv" | "find" | "lookup"
+                        | "elemIndex" | "findIndex" | "listToMaybe"
+                        | "Data.Map.lookup" | "stripPrefix"
+                    ) => {
                         Some((ShowCoerce::MaybeOf, 1000094, "show_maybe"))
                     }
                     // Left x or Right x
@@ -18899,6 +19003,213 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(result))
     }
 
+    // ---- E.26: *By variants, sortOn, stripPrefix, insert, mapAccumL/R ----
+
+    /// Lower `sortOn` — call RTS bhc_list_sort_on.
+    fn lower_builtin_sort_on(&mut self, key_expr: &Expr, list_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let key_val = self.lower_expr(key_expr)?
+            .ok_or_else(|| CodegenError::Internal("sortOn: no key fn".to_string()))?;
+        let key_ptr = self.value_to_ptr(key_val)?;
+        let list_val = self.lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("sortOn: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+        let rts_fn = self.functions.get(&VarId::new(1000550)).ok_or_else(|| {
+            CodegenError::Internal("bhc_list_sort_on not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[key_ptr.into(), list_ptr.into()], "sort_on")
+            .map_err(|e| CodegenError::Internal(format!("sort_on call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("sort_on: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Lower `nubBy` — call RTS bhc_list_nub_by.
+    fn lower_builtin_nub_by(&mut self, eq_expr: &Expr, list_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let eq_val = self.lower_expr(eq_expr)?
+            .ok_or_else(|| CodegenError::Internal("nubBy: no eq fn".to_string()))?;
+        let eq_ptr = self.value_to_ptr(eq_val)?;
+        let list_val = self.lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("nubBy: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+        let rts_fn = self.functions.get(&VarId::new(1000551)).ok_or_else(|| {
+            CodegenError::Internal("bhc_list_nub_by not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[eq_ptr.into(), list_ptr.into()], "nub_by")
+            .map_err(|e| CodegenError::Internal(format!("nub_by call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("nub_by: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Lower `groupBy` — call RTS bhc_list_group_by.
+    fn lower_builtin_group_by(&mut self, eq_expr: &Expr, list_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let eq_val = self.lower_expr(eq_expr)?
+            .ok_or_else(|| CodegenError::Internal("groupBy: no eq fn".to_string()))?;
+        let eq_ptr = self.value_to_ptr(eq_val)?;
+        let list_val = self.lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("groupBy: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+        let rts_fn = self.functions.get(&VarId::new(1000552)).ok_or_else(|| {
+            CodegenError::Internal("bhc_list_group_by not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[eq_ptr.into(), list_ptr.into()], "group_by")
+            .map_err(|e| CodegenError::Internal(format!("group_by call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("group_by: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Lower `deleteBy` — call RTS bhc_list_delete_by.
+    fn lower_builtin_delete_by(&mut self, eq_expr: &Expr, val_expr: &Expr, list_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let eq_val = self.lower_expr(eq_expr)?
+            .ok_or_else(|| CodegenError::Internal("deleteBy: no eq fn".to_string()))?;
+        let eq_ptr = self.value_to_ptr(eq_val)?;
+        let val = self.lower_expr(val_expr)?
+            .ok_or_else(|| CodegenError::Internal("deleteBy: no val".to_string()))?;
+        let val_ptr = self.value_to_ptr(val)?;
+        let list_val = self.lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("deleteBy: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+        let rts_fn = self.functions.get(&VarId::new(1000553)).ok_or_else(|| {
+            CodegenError::Internal("bhc_list_delete_by not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[eq_ptr.into(), val_ptr.into(), list_ptr.into()], "delete_by")
+            .map_err(|e| CodegenError::Internal(format!("delete_by call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("delete_by: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Lower `unionBy` — call RTS bhc_list_union_by.
+    fn lower_builtin_union_by(&mut self, eq_expr: &Expr, xs_expr: &Expr, ys_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let eq_val = self.lower_expr(eq_expr)?
+            .ok_or_else(|| CodegenError::Internal("unionBy: no eq fn".to_string()))?;
+        let eq_ptr = self.value_to_ptr(eq_val)?;
+        let xs_val = self.lower_expr(xs_expr)?
+            .ok_or_else(|| CodegenError::Internal("unionBy: no xs".to_string()))?;
+        let xs_ptr = self.value_to_ptr(xs_val)?;
+        let ys_val = self.lower_expr(ys_expr)?
+            .ok_or_else(|| CodegenError::Internal("unionBy: no ys".to_string()))?;
+        let ys_ptr = self.value_to_ptr(ys_val)?;
+        let rts_fn = self.functions.get(&VarId::new(1000554)).ok_or_else(|| {
+            CodegenError::Internal("bhc_list_union_by not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[eq_ptr.into(), xs_ptr.into(), ys_ptr.into()], "union_by")
+            .map_err(|e| CodegenError::Internal(format!("union_by call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("union_by: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Lower `intersectBy` — call RTS bhc_list_intersect_by.
+    fn lower_builtin_intersect_by(&mut self, eq_expr: &Expr, xs_expr: &Expr, ys_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let eq_val = self.lower_expr(eq_expr)?
+            .ok_or_else(|| CodegenError::Internal("intersectBy: no eq fn".to_string()))?;
+        let eq_ptr = self.value_to_ptr(eq_val)?;
+        let xs_val = self.lower_expr(xs_expr)?
+            .ok_or_else(|| CodegenError::Internal("intersectBy: no xs".to_string()))?;
+        let xs_ptr = self.value_to_ptr(xs_val)?;
+        let ys_val = self.lower_expr(ys_expr)?
+            .ok_or_else(|| CodegenError::Internal("intersectBy: no ys".to_string()))?;
+        let ys_ptr = self.value_to_ptr(ys_val)?;
+        let rts_fn = self.functions.get(&VarId::new(1000555)).ok_or_else(|| {
+            CodegenError::Internal("bhc_list_intersect_by not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[eq_ptr.into(), xs_ptr.into(), ys_ptr.into()], "intersect_by")
+            .map_err(|e| CodegenError::Internal(format!("intersect_by call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("intersect_by: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Lower `stripPrefix` — call RTS bhc_list_strip_prefix.
+    fn lower_builtin_strip_prefix(&mut self, prefix_expr: &Expr, list_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let prefix_val = self.lower_expr(prefix_expr)?
+            .ok_or_else(|| CodegenError::Internal("stripPrefix: no prefix".to_string()))?;
+        let prefix_ptr = self.value_to_ptr(prefix_val)?;
+        let list_val = self.lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("stripPrefix: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+        let rts_fn = self.functions.get(&VarId::new(1000556)).ok_or_else(|| {
+            CodegenError::Internal("bhc_list_strip_prefix not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[prefix_ptr.into(), list_ptr.into()], "strip_prefix")
+            .map_err(|e| CodegenError::Internal(format!("strip_prefix call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("strip_prefix: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Lower `insert` — call RTS bhc_list_insert.
+    fn lower_builtin_insert(&mut self, val_expr: &Expr, list_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let val = self.lower_expr(val_expr)?
+            .ok_or_else(|| CodegenError::Internal("insert: no val".to_string()))?;
+        let val_ptr = self.value_to_ptr(val)?;
+        let list_val = self.lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("insert: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+        let rts_fn = self.functions.get(&VarId::new(1000557)).ok_or_else(|| {
+            CodegenError::Internal("bhc_list_insert not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[val_ptr.into(), list_ptr.into()], "insert")
+            .map_err(|e| CodegenError::Internal(format!("insert call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("insert: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Lower `mapAccumL` — call RTS bhc_list_map_accum_l.
+    fn lower_builtin_map_accum_l(&mut self, f_expr: &Expr, acc_expr: &Expr, list_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let f_val = self.lower_expr(f_expr)?
+            .ok_or_else(|| CodegenError::Internal("mapAccumL: no fn".to_string()))?;
+        let f_ptr = self.value_to_ptr(f_val)?;
+        let acc_val = self.lower_expr(acc_expr)?
+            .ok_or_else(|| CodegenError::Internal("mapAccumL: no acc".to_string()))?;
+        let acc_ptr = self.value_to_ptr(acc_val)?;
+        let list_val = self.lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("mapAccumL: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+        let rts_fn = self.functions.get(&VarId::new(1000558)).ok_or_else(|| {
+            CodegenError::Internal("bhc_list_map_accum_l not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[f_ptr.into(), acc_ptr.into(), list_ptr.into()], "map_accum_l")
+            .map_err(|e| CodegenError::Internal(format!("mapAccumL call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("mapAccumL: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Lower `mapAccumR` — call RTS bhc_list_map_accum_r.
+    fn lower_builtin_map_accum_r(&mut self, f_expr: &Expr, acc_expr: &Expr, list_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let f_val = self.lower_expr(f_expr)?
+            .ok_or_else(|| CodegenError::Internal("mapAccumR: no fn".to_string()))?;
+        let f_ptr = self.value_to_ptr(f_val)?;
+        let acc_val = self.lower_expr(acc_expr)?
+            .ok_or_else(|| CodegenError::Internal("mapAccumR: no acc".to_string()))?;
+        let acc_ptr = self.value_to_ptr(acc_val)?;
+        let list_val = self.lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("mapAccumR: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+        let rts_fn = self.functions.get(&VarId::new(1000559)).ok_or_else(|| {
+            CodegenError::Internal("bhc_list_map_accum_r not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[f_ptr.into(), acc_ptr.into(), list_ptr.into()], "map_accum_r")
+            .map_err(|e| CodegenError::Internal(format!("mapAccumR call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("mapAccumR: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
     /// Lower `delete` — remove first occurrence of value from list.
     /// delete x [] = []
     /// delete x (y:ys) = if x == y then ys else y : delete x ys
@@ -19868,6 +20179,49 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Convert C-string result to [Char] linked list
         let char_list = self.cstring_to_char_list(cstr_result.into_pointer_value())?;
         Ok(Some(char_list.into()))
+    }
+
+    /// Lower `read :: String -> Int` (monomorphic).
+    ///
+    /// Passes the char list to the RTS `bhc_read_int` which returns an i64.
+    /// The result is converted to int-as-pointer (BHC convention for Int values).
+    fn lower_builtin_read(&mut self, str_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let str_val = self.lower_expr(str_expr)?
+            .ok_or_else(|| CodegenError::Internal("read: no string".to_string()))?;
+        let str_ptr = self.value_to_ptr(str_val)?;
+        let rts_fn = self.functions.get(&VarId::new(1000540)).ok_or_else(|| {
+            CodegenError::Internal("bhc_read_int not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[str_ptr.into()], "read_int")
+            .map_err(|e| CodegenError::Internal(format!("read call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("read: returned void".to_string()))?;
+        // Convert i64 to int-as-pointer
+        let i64_val = result.into_int_value();
+        let ptr_val = self.builder()
+            .build_int_to_ptr(i64_val, self.type_mapper().ptr_type(), "read_as_ptr")
+            .map_err(|e| CodegenError::Internal(format!("read int_to_ptr: {:?}", e)))?;
+        Ok(Some(ptr_val.into()))
+    }
+
+    /// Lower `readMaybe :: String -> Maybe Int` (monomorphic).
+    ///
+    /// Passes the char list to the RTS `bhc_try_read_int` which returns a
+    /// Maybe ADT pointer (Nothing on parse failure, Just n on success).
+    fn lower_builtin_read_maybe(&mut self, str_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let str_val = self.lower_expr(str_expr)?
+            .ok_or_else(|| CodegenError::Internal("readMaybe: no string".to_string()))?;
+        let str_ptr = self.value_to_ptr(str_val)?;
+        let rts_fn = self.functions.get(&VarId::new(1000541)).ok_or_else(|| {
+            CodegenError::Internal("bhc_try_read_int not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[str_ptr.into()], "try_read_int")
+            .map_err(|e| CodegenError::Internal(format!("readMaybe call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("readMaybe: returned void".to_string()))?;
+        Ok(Some(result))
     }
 
     /// Lower `zip3 :: [a] -> [b] -> [c] -> [(a,b,c)]`.

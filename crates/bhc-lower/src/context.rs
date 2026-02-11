@@ -1391,9 +1391,44 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
+        // E.25: String type class methods at fixed DefIds
+        let e25_string_builtins: &[(usize, &str)] = &[
+            (11300, "fromString"),
+            (11301, "read"),
+            (11302, "readMaybe"),
+        ];
+
+        for &(id, name) in e25_string_builtins {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
+        // E.26: List *By variants, sortOn, stripPrefix, insert, mapAccumL/R
+        let e26_list_builtins: &[(usize, &str)] = &[
+            (11400, "sortOn"),
+            (11401, "nubBy"),
+            (11402, "groupBy"),
+            (11403, "deleteBy"),
+            (11404, "unionBy"),
+            (11405, "intersectBy"),
+            (11406, "stripPrefix"),
+            (11407, "insert"),
+            (11408, "mapAccumL"),
+            (11409, "mapAccumR"),
+        ];
+
+        for &(id, name) in e26_list_builtins {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
         // Ensure next_def_id is past the fixed DefId ranges
-        if self.next_def_id <= 11274 {
-            self.next_def_id = 11274;
+        if self.next_def_id <= 11410 {
+            self.next_def_id = 11410;
         }
     }
 

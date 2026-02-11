@@ -440,6 +440,11 @@ fn test_tier3_intmap_intset_native() {
     run_native_test("tier3_io/intmap_intset", Profile::Default);
 }
 
+#[test]
+fn test_tier3_string_read_native() {
+    run_native_test("tier3_io/string_read", Profile::Default);
+}
+
 // =============================================================================
 // Discovery Tests
 // =============================================================================
@@ -504,6 +509,11 @@ fn test_tier2_derive_eq() {
 #[test]
 fn test_tier3_derive_ord() {
     run_native_test("tier3_io/derive_ord", Profile::Default);
+}
+
+#[test]
+fn test_tier3_list_by_ops_native() {
+    run_native_test("tier3_io/list_by_ops", Profile::Default);
 }
 
 // =============================================================================

@@ -3,7 +3,7 @@
 **Document ID:** BHC-TODO-PANDOC
 **Status:** In Progress
 **Created:** 2026-01-30
-**Updated:** 2026-02-09
+**Updated:** 2026-02-10
 
 ---
 
@@ -18,7 +18,7 @@ north-star integration target for BHC's real-world Haskell compatibility.
 ## Current State
 
 BHC compiles real Haskell programs to native executables via LLVM:
-- 72 native E2E tests passing (including monad transformers, file IO, markdown parser, JSON parser)
+- 76 native E2E tests passing (including monad transformers, file IO, markdown parser, JSON parser)
 - Monad transformers: StateT, ReaderT, ExceptT, WriterT all working
 - Nested transformer stacks: `StateT s (ReaderT r IO)` with cross-transformer `ask` working
 - MTL typeclasses registered: MonadReader, MonadState, MonadError, MonadWriter
@@ -41,16 +41,18 @@ BHC compiles real Haskell programs to native executables via LLVM:
 - Ordering ADT (LT/EQ/GT), compare returning Ordering (E.17)
 - System.FilePath: takeFileName, takeDirectory, takeExtension, dropExtension, takeBaseName, replaceExtension, isAbsolute, isRelative, hasExtension, splitExtension, </> (E.19)
 - System.Directory: setCurrentDirectory, removeDirectory, renameFile, copyFile (E.19)
-- All intermediate milestones A–E.19 done
+- Data.Map: full operation set including update, alter, unions, keysSet (E.21)
+- Fixed Bool ADT returns for container predicates (member, null, isSubmapOf) (E.21)
+- All intermediate milestones A–E.21 done
 
 ### Gap to Pandoc
 
-**Completed:** Self-contained programs with transformers, parsing, file IO, Text, ByteString, Text.IO, Data.Char, show for compound types, numeric conversions, IORef, exceptions, multi-package imports, Data.Maybe/Either utilities, extensive Data.List operations, when/unless/guard/any/all, monadic combinators (filterM/foldM/replicateM/zipWithM), Ordering ADT with compare, System.FilePath + System.Directory
+**Completed:** Self-contained programs with transformers, parsing, file IO, Text, ByteString, Text.IO, Data.Char, show for compound types, numeric conversions, IORef, exceptions, multi-package imports, Data.Maybe/Either utilities, extensive Data.List operations, when/unless/guard/any/all, monadic combinators (filterM/foldM/replicateM/zipWithM), Ordering ADT with compare, System.FilePath + System.Directory, Data.Map complete (update/alter/unions/keysSet), fixed DefId misalignment for Text/ByteString/exceptions (E.20), Bool ADT for container predicates (E.21)
 **Missing for Pandoc:**
 1. **Full package system** — Basic import paths work (E.6), but no Hackage .cabal parsing yet
 2. **Lazy Text/ByteString** — Only strict variants implemented
 3. **GHC.Generics or TH** — Required for aeson JSON deriving
-4. **show for Bool from builtins** — `show (and [...])` doesn't dispatch correctly (workaround: use if-then-else)
+4. ~~**show for Bool from builtins**~~ — Fixed in E.21: container predicates (member/null/isSubmapOf) now return proper Bool ADT; show inference recognizes qualified container names
 
 ---
 
@@ -208,7 +210,7 @@ compiled from Hackage source.
 - [x] Data.IntMap — shares Map RTS (basic ops done)
 - [x] Data.IntSet — shares Set RTS (basic ops done)
 - [ ] Data.Sequence — finger tree (not started)
-- [ ] Data.Map.update, Data.Map.alter, Data.Map.unions (still stubbed)
+- [x] Data.Map.update, Data.Map.alter, Data.Map.unions, Data.Map.keysSet (E.21)
 - [ ] Data.Graph, Data.Tree (used by some Pandoc deps)
 
 #### mtl / transformers
@@ -269,7 +271,7 @@ compiled from Hackage source.
 
 ### 3.1 Remaining Codegen Builtins
 
-**Status:** ~450+ of 587 builtins lowered (E.13–E.18 added ~50 functions)
+**Status:** ~470+ of 587 builtins lowered (E.13–E.21 added ~60+ functions)
 **Scope:** Small-Medium (ongoing)
 
 - [ ] Monadic codegen: general `>>=`, `>>`, `return` via dictionary dispatch
@@ -285,9 +287,9 @@ compiled from Hackage source.
 - [x] Data.List: elemIndex, findIndex, isPrefixOf, isSuffixOf, isInfixOf, tails, inits (E.16)
 - [x] maximumBy, minimumBy (E.16), compare returns Ordering ADT (E.17)
 - [x] Fixed stubs: maximum, minimum, and, or, Data.Map.notMember (E.16)
-- [ ] Data.Map.update, Data.Map.alter, Data.Map.unions
+- [x] Data.Map.update, Data.Map.alter, Data.Map.unions, Data.Map.keysSet (E.21)
 - [ ] Data.Set.unions, Data.Set.partition
-- [ ] `show` dispatch for Bool-returning builtins (and/or/isPrefixOf etc. — works via if-then-else workaround)
+- [x] `show` dispatch for Bool-returning container builtins (Data.Map.member/null, Data.Set.member/null, etc.) (E.21)
 - [x] `compare` returns Ordering ADT (LT/EQ/GT) with proper show support (E.17)
 
 ### 3.2 Numeric and Conversion Operations
@@ -467,6 +469,22 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 - [x] E2E tests: filepath_basic, directory_ops
 - [x] 72 total E2E tests pass (70+2 new, 4 pre-existing text/exception failures)
 
+### Milestone E.20: Fix DefId Misalignment for Text/ByteString/Exceptions ✅
+- [x] Fixed DefId misalignment for Data.Text (38 funcs), Data.ByteString (24 funcs), Data.Text.Encoding (2 funcs)
+- [x] Fixed DefIds 11200-11273 for all Text/ByteString/Encoding functions
+- [x] Added typeck/context.rs match entries for throwIO/throw/try/evaluate
+- [x] Added typeck/context.rs match entries for all Data.Text, Data.ByteString, Data.Map functions
+- [x] 74 total E2E tests pass (72 existing + 4 previously-broken text/exception tests fixed)
+
+### Milestone E.21: Data.Map Completion ✅
+- [x] Linked bhc-containers in driver (1-line change)
+- [x] Implemented 4 stubbed codegen functions: `unions` (cons-list fold), `keysSet` (iterate + set insert), `update` (lookup + Maybe closure + delete/insert), `alter` (build input Maybe + closure + delete/insert)
+- [x] Fixed Bool ADT returns: container predicates (member, null, isSubmapOf, set_member, set_null) now use `allocate_bool_adt()` instead of `int_to_ptr()`
+- [x] Fixed show inference: `expr_returns_bool()` now recognizes qualified container names (Data.Map.member, Data.Set.null, etc.)
+- [x] Fixed type signatures for `update` (`b -> Maybe b`) and `alter` (`Maybe b -> Maybe b`) in builtins.rs + typeck/context.rs
+- [x] E2E tests: map_basic (un-ignored), map_complete (new: update/alter/unions)
+- [x] 76 total E2E tests pass (74 existing + 2 new, 0 failures)
+
 ### Milestone F: Pandoc (Minimal)
 - [ ] Compile Pandoc with a subset of readers/writers (e.g., Markdown → HTML only)
 - [ ] Skip optional dependencies (skylighting, texmath, etc.)
@@ -504,6 +522,21 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 ---
 
 ## Recent Progress
+
+### 2026-02-10: Milestone E.21 Data.Map Completion
+- Linked bhc-containers in driver so Data.Map RTS functions are available at link time
+- Implemented 4 stubbed codegen functions: `unions` (cons-list fold via bhc_map_union), `keysSet` (iterate map keys into set), `update` (lookup + Maybe-returning closure + conditional delete/insert), `alter` (build input Maybe + closure + conditional delete/insert)
+- Fixed Bool ADT returns for 5 container predicates: `map_member`, `map_null`, `map_is_submap_of`, `set_null`, `set_member` — changed from `int_to_ptr()` (tagged-int-as-pointer) to `allocate_bool_adt()` (proper ADT struct)
+- Fixed show inference: `expr_returns_bool()` now recognizes qualified container names (Data.Map.member, Data.Map.null, Data.Set.member, Data.Set.null, Data.Map.isSubmapOf, etc.)
+- Fixed type signatures for `Data.Map.update` and `Data.Map.alter` in both builtins.rs and typeck/context.rs — closure types must include Maybe (`b -> Maybe b` and `Maybe b -> Maybe b`)
+- E2E tests: map_basic (un-ignored, was blocked by missing bhc-containers link), map_complete (new: tests update/alter/unions)
+- 76 E2E tests pass (74 existing + 2 new, 0 failures)
+
+### 2026-02-10: Milestone E.20 Fix DefId Misalignment
+- Fixed DefId misalignment for Data.Text (38 funcs), Data.ByteString (24 funcs), Data.Text.Encoding (2 funcs) + exception functions
+- Fixed DefIds 11200-11273 for all affected functions
+- Added typeck/context.rs match entries for throwIO/throw/try/evaluate and all Data.Text/ByteString/Map functions
+- 74 E2E tests pass (72 + 4 previously-broken text/exception tests fixed)
 
 ### 2026-02-09: Milestone E.19 System.FilePath + System.Directory
 - 14 RTS FFI functions in `rts/bhc-rts/src/ffi.rs`: takeFileName, takeDirectory, takeExtension, dropExtension, takeBaseName, replaceExtension, isAbsolute, isRelative, hasExtension, combine, setCurrentDirectory, removeDirectory, renameFile, copyFile

@@ -3,7 +3,7 @@
 **Document ID:** BHC-TODO-PANDOC
 **Status:** In Progress
 **Created:** 2026-01-30
-**Updated:** 2026-02-11
+**Updated:** 2026-02-12
 
 ---
 
@@ -18,7 +18,7 @@ north-star integration target for BHC's real-world Haskell compatibility.
 ## Current State
 
 BHC compiles real Haskell programs to native executables via LLVM:
-- 78 native E2E tests passing (including monad transformers, file IO, markdown parser, JSON parser)
+- 80 native E2E tests passing (including monad transformers, file IO, markdown parser, JSON parser)
 - Monad transformers: StateT, ReaderT, ExceptT, WriterT all working
 - Nested transformer stacks: `StateT s (ReaderT r IO)` with cross-transformer `ask` working
 - MTL typeclasses registered: MonadReader, MonadState, MonadError, MonadWriter
@@ -46,11 +46,12 @@ BHC compiles real Haskell programs to native executables via LLVM:
 - Data.IntMap/Data.IntSet: full type support + filter, foldr codegen (E.22)
 - Fixed Bool ADT returns for container predicates (member, null, isSubmapOf) (E.21)
 - Fixed VarId suffix bug in Set/IntSet binary/predicate dispatches (E.22)
-- All intermediate milestones A–E.22 done
+- Stock deriving: Eq and Show for user-defined ADTs (E.23)
+- All intermediate milestones A–E.23 done
 
 ### Gap to Pandoc
 
-**Completed:** Self-contained programs with transformers, parsing, file IO, Text, ByteString, Text.IO, Data.Char, show for compound types, numeric conversions, IORef, exceptions, multi-package imports, Data.Maybe/Either utilities, extensive Data.List operations, when/unless/guard/any/all, monadic combinators (filterM/foldM/replicateM/zipWithM), Ordering ADT with compare, System.FilePath + System.Directory, Data.Map complete (update/alter/unions/keysSet), fixed DefId misalignment for Text/ByteString/exceptions (E.20), Bool ADT for container predicates (E.21), Data.Set/IntMap/IntSet full type support + codegen completions (E.22)
+**Completed:** Self-contained programs with transformers, parsing, file IO, Text, ByteString, Text.IO, Data.Char, show for compound types, numeric conversions, IORef, exceptions, multi-package imports, Data.Maybe/Either utilities, extensive Data.List operations, when/unless/guard/any/all, monadic combinators (filterM/foldM/replicateM/zipWithM), Ordering ADT with compare, System.FilePath + System.Directory, Data.Map complete (update/alter/unions/keysSet), fixed DefId misalignment for Text/ByteString/exceptions (E.20), Bool ADT for container predicates (E.21), Data.Set/IntMap/IntSet full type support + codegen completions (E.22), stock deriving Eq/Show for user ADTs (E.23)
 **Missing for Pandoc:**
 1. **Full package system** — Basic import paths work (E.6), but no Hackage .cabal parsing yet
 2. **Lazy Text/ByteString** — Only strict variants implemented
@@ -262,7 +263,8 @@ compiled from Hackage source.
 - [ ] Generic representations: `V1`, `U1`, `K1`, `M1`, `:+:`, `:*:`
 - [ ] `from` / `to` methods for converting to/from generic rep
 - [ ] Derive `Generic` for user-defined types
-- [ ] Stock deriving: `Eq`, `Ord`, `Show`, `Read`, `Bounded`, `Enum`, `Ix`
+- [x] Stock deriving: `Eq`, `Show` for simple enums and ADTs with fields (E.23)
+- [ ] Stock deriving: `Ord`, `Read`, `Bounded`, `Enum`, `Ix`
 - [ ] `DerivingStrategies`: stock, newtype, anyclass, via
 - [ ] `DeriveAnyClass` for type classes with default method implementations
 - [ ] `DerivingVia` for newtype-based instance delegation
@@ -274,7 +276,7 @@ compiled from Hackage source.
 
 ### 3.1 Remaining Codegen Builtins
 
-**Status:** ~470+ of 587 builtins lowered (E.13–E.21 added ~60+ functions)
+**Status:** ~470+ of 587 builtins lowered (E.13–E.23 added ~60+ functions + derived dispatches)
 **Scope:** Small-Medium (ongoing)
 
 - [ ] Monadic codegen: general `>>=`, `>>`, `return` via dictionary dispatch
@@ -498,6 +500,21 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 - [x] E2E tests: set_basic (new: fromList/size/member/insert/delete/union/intersection/difference/filter/foldr), intmap_intset (new: IntSet size/member/filter/foldr + IntMap size/member/insert/delete)
 - [x] 78 total E2E tests pass (76 existing + 2 new, 0 failures)
 
+### Milestone E.23: Stock Deriving — Eq, Show for User ADTs ✅
+- [x] Fixed `fresh_var` off-by-one bug in `deriving.rs`: name used counter N but VarId used N+1
+- [x] Shared `DerivingContext` across all data types in a module (was recreated per type, causing VarId collision)
+- [x] `fresh_counter` starts at 50000 to avoid collision with fixed DefId ranges (10000-11273)
+- [x] Added `type_name: Option<String>` to `ConstructorMeta` for ADT type tracking
+- [x] Pre-pass `detect_derived_instance_methods`: scans `$derived_show_*`/`$derived_eq_*` bindings
+- [x] `strip_deriving_counter_suffix`: extracts clean type name from `Color_50000` → `Color`
+- [x] `tag_constructors_with_type`: walks derived binding bodies, tags constructors with their type name
+- [x] `infer_adt_type_from_expr`: checks constructor names in metadata for type dispatch
+- [x] `lower_builtin_show` dispatches to derived show via indirect call `fn(env_ptr, value) -> string_ptr`
+- [x] `PrimOp::Eq` dispatches to derived eq via indirect call `fn(env_ptr, lhs, rhs) -> Bool ADT` → `extract_adt_tag()`
+- [x] Fixed `register_constructor` to preserve existing `type_name` when re-registering
+- [x] E2E tests: derive_show (enum + ADT with fields), derive_eq (enum equality + inequality)
+- [x] 80 total E2E tests pass (78 existing + 2 new, 0 failures)
+
 ### Milestone F: Pandoc (Minimal)
 - [ ] Compile Pandoc with a subset of readers/writers (e.g., Markdown → HTML only)
 - [ ] Skip optional dependencies (skylighting, texmath, etc.)
@@ -535,6 +552,20 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 ---
 
 ## Recent Progress
+
+### 2026-02-12: Milestone E.23 Stock Deriving — Eq, Show for User ADTs
+- Fixed `fresh_var` off-by-one in `deriving.rs`: name used counter value N but VarId used N+1 (counter incremented between them). Fixed by capturing counter before increment.
+- Fixed `DerivingContext` creation: was recreated per data type in `context.rs`, causing VarId collision when multiple types derive in same module. Fixed by sharing single `DerivingContext` across module items.
+- `fresh_counter` starts at 50000 to avoid collision with fixed DefId ranges (10000-11273)
+- Added `type_name: Option<String>` to `ConstructorMeta` — tracks which data type each constructor belongs to
+- Pre-pass `detect_derived_instance_methods` scans bindings for `$derived_show_*`/`$derived_eq_*`, populates dispatch tables `derived_show_fns`/`derived_eq_fns`, and calls `tag_constructors_with_type` to label constructors
+- `strip_deriving_counter_suffix("Color_50000")` → `"Color"` using `rsplit_once('_')` + digit check
+- `infer_adt_type_from_expr` checks Var/App/Let/Case expressions against constructor_metadata for type_name
+- Show dispatch: `lower_builtin_show` calls derived show function via `build_indirect_call(fn_ptr, [env_ptr, value])` → returns string pointer
+- Eq dispatch: `PrimOp::Eq` calls derived eq function via `build_indirect_call(fn_ptr, [env_ptr, lhs, rhs])` → returns Bool ADT → `extract_adt_tag()` for i64 result
+- Fixed `register_constructor` to use `get_mut` + update (preserves existing `type_name`) instead of `.insert()` (which overwrote to None)
+- E2E tests: derive_show (Red/Green/Blue enum + Circle/Rectangle ADT with fields), derive_eq (enum equality and inequality)
+- 80 E2E tests pass (78 existing + 2 new, 0 failures)
 
 ### 2026-02-11: Milestone E.22 Data.Set/IntMap/IntSet Type Completion
 - Added ~70 type match entries to typeck/context.rs for Data.Set (30 entries), Data.IntMap (25 entries), Data.IntSet (15 entries) — fixes triple registration pitfall where functions were in builtins.rs and lower/context.rs but missing from typeck/context.rs

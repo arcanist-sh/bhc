@@ -2385,7 +2385,8 @@ impl TyCtxt {
                 "Data.Map.unionWith" | "Data.Map.intersectionWith"
                 | "Data.Map.differenceWith" | "Data.Map.unionWithKey" | "Data.Map.mapWithKey"
                 | "Data.Map.mapKeys" | "Data.Map.filterWithKey" | "Data.Map.foldrWithKey"
-                | "Data.Map.foldlWithKey" | "Data.Map.unions" | "Data.Map.keysSet" => {
+                | "Data.Map.foldlWithKey" | "Data.Map.unions" | "Data.Map.keysSet"
+                | "Data.Map.mapMaybe" | "Data.Map.mapMaybeWithKey" => {
                     Scheme::poly(
                         vec![a.clone(), b.clone()],
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),

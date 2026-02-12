@@ -3602,6 +3602,10 @@ impl Builtins {
             ("Data.Map.mapKeys", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())), Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone()))))),
             ("Data.Map.filter", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(b.clone()), self.bool_ty.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))))),
             ("Data.Map.filterWithKey", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), self.bool_ty.clone())), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))))),
+            // mapMaybe :: (a -> Maybe b) -> Map k a -> Map k b
+            ("Data.Map.mapMaybe", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))))),
+            // mapMaybeWithKey :: (k -> a -> Maybe b) -> Map k a -> Map k b
+            ("Data.Map.mapMaybeWithKey", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))))),
             ("Data.Map.foldr", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))), Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())))))),
             ("Data.Map.foldl", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(a.clone()))), Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(a.clone())))))),
             ("Data.Map.foldrWithKey", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))), Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())))))),

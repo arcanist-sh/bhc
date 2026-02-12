@@ -2958,6 +2958,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.Map.mapKeys" => Some(2),
                 "Data.Map.filter" => Some(2),
                 "Data.Map.filterWithKey" => Some(2),
+                "Data.Map.mapMaybe" => Some(2),
+                "Data.Map.mapMaybeWithKey" => Some(2),
                 "Data.Map.foldr" => Some(3),
                 "Data.Map.foldl" => Some(3),
                 "Data.Map.foldrWithKey" => Some(3),
@@ -3666,6 +3668,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.Map.foldl" => self.lower_builtin_map_foldl(args[0], args[1], args[2]),
                 "Data.Map.mapWithKey" => self.lower_builtin_map_map_with_key(args[0], args[1]),
                 "Data.Map.filterWithKey" => self.lower_builtin_map_filter_with_key(args[0], args[1]),
+                "Data.Map.mapMaybe" => self.lower_builtin_data_map_maybe(args[0], args[1]),
+                "Data.Map.mapMaybeWithKey" => self.lower_builtin_data_map_maybe_with_key(args[0], args[1]),
                 "Data.Map.foldlWithKey" | "Data.Map.foldlWithKey'" => self.lower_builtin_map_foldl_with_key(args[0], args[1], args[2]),
                 "Data.Map.foldrWithKey" => self.lower_builtin_map_foldr_with_key(args[0], args[1], args[2]),
                 "Data.Map.unionWith" | "Data.Map.unionWithKey" => self.lower_builtin_map_union_with(args[0], args[1], args[2]),
@@ -10550,6 +10554,38 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Check if a fully-applied expression returns Double/Float.
+    fn expr_returns_double(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Lit(Literal::Double(_), _, _) | Expr::Lit(Literal::Float(_), _, _) => true,
+            Expr::App(f, _, _) => {
+                match f.as_ref() {
+                    // Unary Double-returning functions
+                    Expr::Var(var, _) => {
+                        let n = var.name.as_str();
+                        matches!(n, "sqrt" | "sin" | "cos" | "tan" | "exp" | "log"
+                            | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh"
+                            | "abs" | "negate" | "signum" | "recip"
+                            | "ceiling" | "floor" | "round" | "truncate")
+                    }
+                    // Binary Double-returning: App(App(op, x), y) — f is App(op, x)
+                    Expr::App(ff, _, _) => {
+                        match ff.as_ref() {
+                            Expr::Var(var, _) => {
+                                let n = var.name.as_str();
+                                matches!(n, "/" | "**")
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                }
+            }
+            Expr::TyApp(inner, _, _) => self.expr_returns_double(inner),
+            _ => false,
+        }
+    }
+
     /// Check if a function expression returns Ordering (e.g., `compare`).
     fn expr_returns_ordering(&self, func_expr: &Expr) -> bool {
         match func_expr {
@@ -10623,6 +10659,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         | "transpose"
                         | "intersperse"
                         | "intercalate"
+                        | "Data.Map.toList"
+                        | "Data.Map.toAscList"
+                        | "Data.Map.toDescList"
+                        | "Data.Map.keys"
+                        | "Data.Map.elems"
+                        | "Data.Map.assocs"
+                        | "Data.Set.toList"
+                        | "Data.Set.toAscList"
+                        | "Data.Set.toDescList"
+                        | "Data.Set.elems"
                 )
             }
             _ => false,
@@ -15134,6 +15180,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 if self.expr_returns_int(expr) {
                     return Some((ShowCoerce::Int, 1000072, "show_int"));
                 }
+                // Check if it's a function/expression that returns Double/Float
+                if self.expr_returns_double(expr) {
+                    return Some((ShowCoerce::Double, 1000073, "show_double"));
+                }
                 // Check if it's a function that returns a list
                 if self.expr_looks_like_list(f) {
                     return Some((ShowCoerce::List, 1000093, "show_list"));
@@ -15374,10 +15424,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 int_val.into()
             }
             ShowCoerce::Double => {
-                let int_val = self.coerce_to_int(val)?;
-                let f64_val = self.builder().build_bit_cast(int_val, self.type_mapper().f64_type(), "to_f64")
-                    .map_err(|e| CodegenError::Internal(format!("{}: bitcast failed: {:?}", label, e)))?;
-                f64_val.into()
+                // Handle float values directly (e.g. from Float/Double literals)
+                match val {
+                    BasicValueEnum::FloatValue(fv) => {
+                        // Check if it's already f64
+                        if fv.get_type() == self.type_mapper().f64_type() {
+                            fv.into()
+                        } else {
+                            // f32 -> f64 extension
+                            let f64_val = self.builder().build_float_ext(fv, self.type_mapper().f64_type(), "f32_to_f64")
+                                .map_err(|e| CodegenError::Internal(format!("{}: float ext failed: {:?}", label, e)))?;
+                            f64_val.into()
+                        }
+                    }
+                    _ => {
+                        let int_val = self.coerce_to_int(val)?;
+                        let f64_val = self.builder().build_bit_cast(int_val, self.type_mapper().f64_type(), "to_f64")
+                            .map_err(|e| CodegenError::Internal(format!("{}: bitcast failed: {:?}", label, e)))?;
+                        f64_val.into()
+                    }
+                }
             }
             ShowCoerce::Float => {
                 let int_val = self.coerce_to_int(val)?;
@@ -15930,24 +15996,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     // Data.Function handlers
 
     /// Lower `flip f x y = f y x`.
+    /// Uses flat 3-arg call: fn(closure_env, arg2, arg1) — BHC calling convention.
     fn lower_builtin_flip(&mut self, func_expr: &Expr, arg1_expr: &Expr, arg2_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let func_val = self.lower_expr(func_expr)?.ok_or_else(|| CodegenError::Internal("flip: no function".to_string()))?;
-        let _arg1 = self.lower_expr(arg1_expr)?.ok_or_else(|| CodegenError::Internal("flip: no arg1".to_string()))?;
+        let arg1_val = self.lower_expr(arg1_expr)?.ok_or_else(|| CodegenError::Internal("flip: no arg1".to_string()))?;
         let arg2_val = self.lower_expr(arg2_expr)?.ok_or_else(|| CodegenError::Internal("flip: no arg2".to_string()))?;
         let func_ptr = match func_val { BasicValueEnum::PointerValue(p) => p, _ => return Err(CodegenError::TypeError("flip: function must be closure".to_string())) };
         let ptr_type = self.type_mapper().ptr_type();
-        let arg1_ptr = self.value_to_ptr(_arg1)?;
+        let arg1_ptr = self.value_to_ptr(arg1_val)?;
         let arg2_ptr = self.value_to_ptr(arg2_val)?;
         let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
-        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
-        let partial = self.builder().build_indirect_call(fn_type, fn_ptr, &[func_ptr.into(), arg2_ptr.into()], "flip_partial")
-            .map_err(|e| CodegenError::Internal(format!("flip partial failed: {:?}", e)))?
-            .try_as_basic_value().basic()
-            .ok_or_else(|| CodegenError::Internal("flip: partial returned void".to_string()))?;
-        let partial_ptr = match partial { BasicValueEnum::PointerValue(p) => p, _ => return Ok(Some(partial)) };
-        let fn_ptr2 = self.extract_closure_fn_ptr(partial_ptr)?;
-        let result = self.builder().build_indirect_call(fn_type, fn_ptr2, &[partial_ptr.into(), arg1_ptr.into()], "flip_result")
-            .map_err(|e| CodegenError::Internal(format!("flip result failed: {:?}", e)))?
+        // Flat 3-arg call: fn(closure_env, arg2, arg1) — args swapped
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let result = self.builder().build_indirect_call(fn_type, fn_ptr, &[func_ptr.into(), arg2_ptr.into(), arg1_ptr.into()], "flip_result")
+            .map_err(|e| CodegenError::Internal(format!("flip call failed: {:?}", e)))?
             .try_as_basic_value().basic()
             .ok_or_else(|| CodegenError::Internal("flip: result returned void".to_string()))?;
         Ok(Some(result))
@@ -22871,6 +22933,283 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(acc_phi.as_basic_value()))
     }
 
+    /// Lower `Data.Map.mapMaybe` — apply function returning Maybe, keep Just values.
+    /// mapMaybe :: (a -> Maybe b) -> Map k a -> Map k b
+    fn lower_builtin_data_map_maybe(
+        &mut self,
+        fn_expr: &Expr,
+        map_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let fn_val = self.lower_expr(fn_expr)?
+            .ok_or_else(|| CodegenError::Internal("mapMaybe: no function".to_string()))?;
+        let fn_ptr = self.value_to_ptr(fn_val)?;
+        let map_val = self.lower_expr(map_expr)?
+            .ok_or_else(|| CodegenError::Internal("mapMaybe: no map".to_string()))?;
+        let map_ptr = self.value_to_ptr(map_val)?;
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let count_fn = self.functions.get(&VarId::new(1000160)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_keys_count not declared".to_string())
+        })?;
+        let count = self.builder()
+            .build_call(*count_fn, &[map_ptr.into()], "count")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+
+        let key_at_fn = *self.functions.get(&VarId::new(1000161)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_key_at not declared".to_string())
+        })?;
+        let val_at_fn = *self.functions.get(&VarId::new(1000162)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_value_at not declared".to_string())
+        })?;
+        let insert_fn = *self.functions.get(&VarId::new(1000107)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_insert not declared".to_string())
+        })?;
+
+        let empty_fn = self.functions.get(&VarId::new(1000100)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_empty not declared".to_string())
+        })?;
+        let empty_map = self.builder()
+            .build_call(*empty_fn, &[], "empty")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        // 1-arg closure: fn(closure_env, val) -> Maybe b
+        let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
+        let call_fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "mm_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "mm_body");
+        let loop_insert = self.llvm_context().append_basic_block(current_fn, "mm_insert");
+        let loop_skip = self.llvm_context().append_basic_block(current_fn, "mm_skip");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "mm_exit");
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(ptr_type, "acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "idx")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SGE, idx, count, "done")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_body);
+        let key_i64 = self.builder()
+            .build_call(key_at_fn, &[map_ptr.into(), idx.into()], "key")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+        let val = self.builder()
+            .build_call(val_at_fn, &[map_ptr.into(), idx.into()], "val")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        // Call function: fn_ptr(closure, val) -> Maybe b
+        let maybe_result = self.builder()
+            .build_indirect_call(call_fn_type, closure_fn_ptr, &[fn_ptr.into(), val.into()], "maybe_res")
+            .map_err(|e| CodegenError::Internal(format!("indirect call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
+
+        // Check Maybe tag: 0=Nothing, 1=Just
+        let maybe_ptr = self.value_to_ptr(maybe_result)?;
+        let maybe_tag = self.extract_adt_tag(maybe_ptr)?;
+        let is_just = self.builder()
+            .build_int_compare(inkwell::IntPredicate::NE, maybe_tag, tm.i64_type().const_zero(), "is_just")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(is_just, loop_insert, loop_skip)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        // Insert branch: extract Just value and add (key, inner_val) to accumulator map
+        self.builder().position_at_end(loop_insert);
+        let inner_val = self.extract_adt_field(maybe_ptr, 1, 0)?;
+        let acc_ptr_ins = acc_phi.as_basic_value().into_pointer_value();
+        let inserted = self.builder()
+            .build_call(insert_fn, &[key_i64.into(), inner_val.into(), acc_ptr_ins.into()], "inserted")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+        self.builder().build_unconditional_branch(loop_skip)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        // Skip/merge block
+        self.builder().position_at_end(loop_skip);
+        let merge_phi = self.builder().build_phi(ptr_type, "merge_acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        merge_phi.add_incoming(&[(&inserted, loop_insert), (&acc_phi.as_basic_value(), loop_body)]);
+
+        let new_idx = self.builder()
+            .build_int_add(idx, tm.i64_type().const_int(1, false), "new_idx")
+            .map_err(|e| CodegenError::Internal(format!("add failed: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&empty_map, entry_block), (&merge_phi.as_basic_value(), loop_skip)]);
+        idx_phi.add_incoming(&[(&tm.i64_type().const_zero(), entry_block), (&new_idx, loop_skip)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
+    /// Lower `Data.Map.mapMaybeWithKey` — apply function with key returning Maybe, keep Just values.
+    /// mapMaybeWithKey :: (k -> a -> Maybe b) -> Map k a -> Map k b
+    fn lower_builtin_data_map_maybe_with_key(
+        &mut self,
+        fn_expr: &Expr,
+        map_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let fn_val = self.lower_expr(fn_expr)?
+            .ok_or_else(|| CodegenError::Internal("mapMaybeWithKey: no function".to_string()))?;
+        let fn_ptr = self.value_to_ptr(fn_val)?;
+        let map_val = self.lower_expr(map_expr)?
+            .ok_or_else(|| CodegenError::Internal("mapMaybeWithKey: no map".to_string()))?;
+        let map_ptr = self.value_to_ptr(map_val)?;
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let current_fn = self.builder().get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let count_fn = self.functions.get(&VarId::new(1000160)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_keys_count not declared".to_string())
+        })?;
+        let count = self.builder()
+            .build_call(*count_fn, &[map_ptr.into()], "count")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+
+        let key_at_fn = *self.functions.get(&VarId::new(1000161)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_key_at not declared".to_string())
+        })?;
+        let val_at_fn = *self.functions.get(&VarId::new(1000162)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_value_at not declared".to_string())
+        })?;
+        let insert_fn = *self.functions.get(&VarId::new(1000107)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_insert not declared".to_string())
+        })?;
+
+        let empty_fn = self.functions.get(&VarId::new(1000100)).ok_or_else(|| {
+            CodegenError::Internal("bhc_map_empty not declared".to_string())
+        })?;
+        let empty_map = self.builder()
+            .build_call(*empty_fn, &[], "empty")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        // 2-arg closure: fn(closure_env, key, val) -> Maybe b
+        let closure_fn_ptr = self.extract_closure_fn_ptr(fn_ptr)?;
+        let call_fn_type = ptr_type.fn_type(
+            &[ptr_type.into(), ptr_type.into(), ptr_type.into()],
+            false,
+        );
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "mmwk_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "mmwk_body");
+        let loop_insert = self.llvm_context().append_basic_block(current_fn, "mmwk_insert");
+        let loop_skip = self.llvm_context().append_basic_block(current_fn, "mmwk_skip");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "mmwk_exit");
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(ptr_type, "acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "idx")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SGE, idx, count, "done")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        self.builder().position_at_end(loop_body);
+        let key_i64 = self.builder()
+            .build_call(key_at_fn, &[map_ptr.into(), idx.into()], "key")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?
+            .into_int_value();
+        let val = self.builder()
+            .build_call(val_at_fn, &[map_ptr.into(), idx.into()], "val")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+
+        let key_ptr = self.int_to_ptr(key_i64)?;
+
+        // Call function: fn_ptr(closure, key_ptr, val) -> Maybe b
+        let maybe_result = self.builder()
+            .build_indirect_call(call_fn_type, closure_fn_ptr, &[fn_ptr.into(), key_ptr.into(), val.into()], "maybe_res")
+            .map_err(|e| CodegenError::Internal(format!("indirect call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("closure returned void".to_string()))?;
+
+        // Check Maybe tag: 0=Nothing, 1=Just
+        let maybe_ptr = self.value_to_ptr(maybe_result)?;
+        let maybe_tag = self.extract_adt_tag(maybe_ptr)?;
+        let is_just = self.builder()
+            .build_int_compare(inkwell::IntPredicate::NE, maybe_tag, tm.i64_type().const_zero(), "is_just")
+            .map_err(|e| CodegenError::Internal(format!("cmp failed: {:?}", e)))?;
+        self.builder().build_conditional_branch(is_just, loop_insert, loop_skip)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        // Insert branch: extract Just value and add (key, inner_val) to accumulator map
+        self.builder().position_at_end(loop_insert);
+        let inner_val = self.extract_adt_field(maybe_ptr, 1, 0)?;
+        let acc_ptr_ins = acc_phi.as_basic_value().into_pointer_value();
+        let inserted = self.builder()
+            .build_call(insert_fn, &[key_i64.into(), inner_val.into(), acc_ptr_ins.into()], "inserted")
+            .map_err(|e| CodegenError::Internal(format!("call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("void".to_string()))?;
+        self.builder().build_unconditional_branch(loop_skip)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        // Skip/merge block
+        self.builder().position_at_end(loop_skip);
+        let merge_phi = self.builder().build_phi(ptr_type, "merge_acc")
+            .map_err(|e| CodegenError::Internal(format!("phi failed: {:?}", e)))?;
+        merge_phi.add_incoming(&[(&inserted, loop_insert), (&acc_phi.as_basic_value(), loop_body)]);
+
+        let new_idx = self.builder()
+            .build_int_add(idx, tm.i64_type().const_int(1, false), "new_idx")
+            .map_err(|e| CodegenError::Internal(format!("add failed: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("branch failed: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&empty_map, entry_block), (&merge_phi.as_basic_value(), loop_skip)]);
+        idx_phi.add_incoming(&[(&tm.i64_type().const_zero(), entry_block), (&new_idx, loop_skip)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
     /// Lower `Data.Map.foldlWithKey'` -- strict left fold with key.
     /// foldlWithKey' :: (a -> k -> v -> a) -> a -> Map k v -> a
     fn lower_builtin_map_foldl_with_key(
@@ -29234,6 +29573,27 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .build_int_sub(y_int, x_int, "subtract")
                     .map_err(|e| CodegenError::Internal(format!("subtract: {:?}", e)))?;
                 Ok(Some(self.int_to_ptr(result)?.into()))
+            }
+            "const" => {
+                // const x y = x — return first argument
+                Ok(Some(args[0]))
+            }
+            "flip" => {
+                // flip f x y = f y x
+                // args[0] = f (closure), args[1] = x, args[2] = y
+                let f_ptr = args[0].into_pointer_value();
+                let fn_ptr = self.extract_closure_fn_ptr(f_ptr)?;
+                // Flat 3-arg call: fn(closure_env, y, x)
+                let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+                let result = self.builder().build_indirect_call(
+                    fn_type, fn_ptr,
+                    &[f_ptr.into(), args[2].into(), args[1].into()],
+                    "flip_direct",
+                )
+                    .map_err(|e| CodegenError::Internal(format!("flip_direct: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("flip_direct: void".to_string()))?;
+                Ok(Some(result))
             }
 
             _ => Err(CodegenError::Internal(format!(

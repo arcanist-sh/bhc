@@ -536,6 +536,21 @@ fn test_tier3_fold_misc_native() {
     run_native_test("tier3_io/fold_misc", Profile::Default);
 }
 
+#[test]
+fn test_tier3_flip_test_native() {
+    run_native_test("tier3_io/flip_test", Profile::Default);
+}
+
+#[test]
+fn test_tier3_show_double_native() {
+    run_native_test("tier3_io/show_double", Profile::Default);
+}
+
+#[test]
+fn test_tier3_map_maybe_native() {
+    run_native_test("tier3_io/map_maybe", Profile::Default);
+}
+
 // =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================

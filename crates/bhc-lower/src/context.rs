@@ -1468,9 +1468,21 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
+        // E.29: Map.mapMaybe
+        let e29_builtins: &[(usize, &str)] = &[
+            (11700, "Data.Map.mapMaybe"),
+            (11701, "Data.Map.mapMaybeWithKey"),
+        ];
+        for &(id, name) in e29_builtins {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
         // Ensure next_def_id is past the fixed DefId ranges
-        if self.next_def_id <= 11620 {
-            self.next_def_id = 11620;
+        if self.next_def_id <= 11710 {
+            self.next_def_id = 11710;
         }
     }
 

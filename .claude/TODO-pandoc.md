@@ -18,7 +18,7 @@ north-star integration target for BHC's real-world Haskell compatibility.
 ## Current State
 
 BHC compiles real Haskell programs to native executables via LLVM:
-- 85 native E2E tests passing (including monad transformers, file IO, markdown parser, JSON parser)
+- 87 native E2E tests passing (including monad transformers, file IO, markdown parser, JSON parser)
 - Monad transformers: StateT, ReaderT, ExceptT, WriterT all working
 - Nested transformer stacks: `StateT s (ReaderT r IO)` with cross-transformer `ask` working
 - MTL typeclasses registered: MonadReader, MonadState, MonadError, MonadWriter
@@ -52,11 +52,15 @@ BHC compiles real Haskell programs to native executables via LLVM:
 - Data.List: sortOn, nubBy, groupBy, deleteBy, unionBy, intersectBy, stripPrefix, insert, mapAccumL, mapAccumR (E.26)
 - Data.Function: succ, pred, (&) reverse application (E.27)
 - Data.Tuple: swap, curry, uncurry + fst/snd as first-class closures (E.27)
-- All intermediate milestones A–E.27 done
+- Arithmetic: min, max, subtract + Enum: enumFrom, enumFromThen, enumFromThenTo (E.28)
+- Folds: foldl1, foldr1 + Higher-order: comparing, until (E.28)
+- IO Input: getChar, isEOF, getContents, interact (E.28)
+- Partial application of codegen-only builtins: map (min 5) xs now works (E.28)
+- All intermediate milestones A–E.28 done
 
 ### Gap to Pandoc
 
-**Completed:** Self-contained programs with transformers, parsing, file IO, Text, ByteString, Text.IO, Data.Char, show for compound types, numeric conversions, IORef, exceptions, multi-package imports, Data.Maybe/Either utilities, extensive Data.List operations, when/unless/guard/any/all, monadic combinators (filterM/foldM/replicateM/zipWithM), Ordering ADT with compare, System.FilePath + System.Directory, Data.Map complete (update/alter/unions/keysSet), fixed DefId misalignment for Text/ByteString/exceptions (E.20), Bool ADT for container predicates (E.21), Data.Set/IntMap/IntSet full type support + codegen completions (E.22), stock deriving Eq/Show/Ord for user ADTs (E.23, E.24), String read/readMaybe/fromString (E.25), sortOn/nubBy/groupBy/deleteBy/unionBy/intersectBy/stripPrefix/insert/mapAccumL/mapAccumR (E.26), succ/pred/(&)/swap/curry/uncurry + fst/snd as first-class closures (E.27)
+**Completed:** Self-contained programs with transformers, parsing, file IO, Text, ByteString, Text.IO, Data.Char, show for compound types, numeric conversions, IORef, exceptions, multi-package imports, Data.Maybe/Either utilities, extensive Data.List operations, when/unless/guard/any/all, monadic combinators (filterM/foldM/replicateM/zipWithM), Ordering ADT with compare, System.FilePath + System.Directory, Data.Map complete (update/alter/unions/keysSet), fixed DefId misalignment for Text/ByteString/exceptions (E.20), Bool ADT for container predicates (E.21), Data.Set/IntMap/IntSet full type support + codegen completions (E.22), stock deriving Eq/Show/Ord for user ADTs (E.23, E.24), String read/readMaybe/fromString (E.25), sortOn/nubBy/groupBy/deleteBy/unionBy/intersectBy/stripPrefix/insert/mapAccumL/mapAccumR (E.26), succ/pred/(&)/swap/curry/uncurry + fst/snd as first-class closures (E.27), min/max/subtract/enumFrom/enumFromThen/enumFromThenTo/foldl1/foldr1/comparing/until/getChar/isEOF/getContents/interact + partial builtin application (E.28)
 **Missing for Pandoc:**
 1. **Full package system** — Basic import paths work (E.6), but no Hackage .cabal parsing yet
 2. **Lazy Text/ByteString** — Only strict variants implemented
@@ -565,6 +569,17 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 - [x] E2E tests: data_function (succ/pred/(&)/map succ/map pred), tuple_functions (fst/snd/swap/curry/uncurry/map fst/map snd/map swap)
 - [x] 85 total E2E tests pass (83 existing + 2 new, 0 failures)
 
+### Milestone E.28: Arithmetic, Enum, Folds, Higher-Order, IO Input ✅
+- [x] Arithmetic: `min`, `max`, `subtract` (inline LLVM compare+select / sub)
+- [x] Enumeration: `enumFrom`, `enumFromThen`, `enumFromThenTo` (list-building loops with step)
+- [x] Folds: `foldl1` (head as init, foldl tail), `foldr1` (reverse, head as init, foldl with flipped args)
+- [x] Higher-order: `comparing` (call f on both args, inline compare), `until` (loop with predicate + transform)
+- [x] IO Input: `getChar`, `isEOF`, `getContents` (3 RTS functions), `interact` (codegen-composed)
+- [x] Partial builtin application: `create_partial_builtin_closure()` enables `map (min 5) xs` for codegen-only builtins
+- [x] Fixed DefIds 11600-11613, VarIds 1000560-1000562
+- [x] E2E tests: enum_functions (min/max/subtract/enum/foldl1/foldr1/until), fold_misc (foldl1/foldr1 with user fn, map with partial min/max/subtract)
+- [x] 87 total E2E tests pass (85 existing + 2 new, 0 failures)
+
 ### Milestone F: Pandoc (Minimal)
 - [ ] Compile Pandoc with a subset of readers/writers (e.g., Markdown → HTML only)
 - [ ] Skip optional dependencies (skylighting, texmath, etc.)
@@ -602,6 +617,21 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 ---
 
 ## Recent Progress
+
+### 2026-02-12: Milestone E.28 Arithmetic, Enum, Folds, Higher-Order, IO Input
+- 14 new builtins: min, max, subtract, enumFrom, enumFromThen, enumFromThenTo, foldl1, foldr1, comparing, until, getChar, isEOF, getContents, interact
+- `min`/`max`: inline LLVM `icmp slt/sgt` + `select` + `int_to_ptr`
+- `subtract`: flipped subtraction `y - x` (Haskell semantics)
+- `enumFrom`/`enumFromThen`: build bounded list (10000 elements max), `enumFromThenTo`: finite with runtime step-sign check
+- `foldl1`: extract head as init accumulator, foldl on tail; `foldr1`: reverse list, head of reversed as init, foldl with f(elem, acc)
+- `comparing f x y`: call f(x), f(y) via closure, inline compare → `allocate_ordering_adt`
+- `until p f x`: loop with phi, call predicate via closure, `ptr_to_int` for Bool check (tagged-int-as-pointer, NOT ADT)
+- 3 RTS functions: `bhc_getChar` (read single byte), `bhc_isEOF` (BufRead::fill_buf), `bhc_getContents` (read_to_string)
+- `interact`: codegen-composed getContents → closure call → putStr
+- New `create_partial_builtin_closure()`: enables partial application of codegen-only builtins (e.g., `map (min 5) xs`). Creates wrapper that captures provided args in env, accepts remaining args.
+- Fixed DefIds 11600-11613, VarIds 1000560-1000562
+- E2E tests: enum_functions (9 assertions), fold_misc (5 assertions including partial application)
+- 87 E2E tests pass (85 existing + 2 new, 0 failures)
 
 ### 2026-02-12: Milestone E.27 Data.Function + Data.Tuple Builtins
 - 6 new builtins: succ, pred, (&), swap, curry, uncurry

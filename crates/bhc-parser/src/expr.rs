@@ -793,7 +793,7 @@ impl<'src> Parser<'src> {
                 Ok(Pat::Con(con_id, pats?, span))
             }
             Expr::Wildcard(span) => Ok(Pat::Wildcard(span)),
-            Expr::RecordCon(con, field_binds, span) => {
+            Expr::RecordCon(con, field_binds, has_wildcard, span) => {
                 // Record pattern: Con { field = pat, ... }
                 use bhc_ast::FieldPat;
                 let mut field_pats = Vec::new();
@@ -809,7 +809,7 @@ impl<'src> Parser<'src> {
                         span: fb.span,
                     });
                 }
-                Ok(Pat::Record(con, field_pats, span))
+                Ok(Pat::Record(con, field_pats, has_wildcard, span))
             }
             _ => Err(ParseError::Unexpected {
                 found: "expression".to_string(),
@@ -1116,24 +1116,35 @@ impl<'src> Parser<'src> {
         Ok(Expr::Lazy(Box::new(expr), span))
     }
 
-    /// Parse record construction: `Con { field = value, ... }`
+    /// Parse record construction: `Con { field = value, ... }` or `Con { field = value, .. }`
     fn parse_record_con(&mut self, con: Ident, start: Span) -> ParseResult<Expr> {
         self.expect(&TokenKind::LBrace)?;
 
         let mut fields = Vec::new();
+        let mut has_wildcard = false;
         if !self.check(&TokenKind::RBrace) {
-            fields.push(self.parse_field_bind()?);
-            while self.eat(&TokenKind::Comma) {
-                if self.check(&TokenKind::RBrace) {
-                    break;
-                }
+            // Check for leading `..`
+            if self.eat(&TokenKind::DotDot) {
+                has_wildcard = true;
+            } else {
                 fields.push(self.parse_field_bind()?);
+                while self.eat(&TokenKind::Comma) {
+                    if self.check(&TokenKind::RBrace) {
+                        break;
+                    }
+                    // Check for trailing `..`
+                    if self.eat(&TokenKind::DotDot) {
+                        has_wildcard = true;
+                        break;
+                    }
+                    fields.push(self.parse_field_bind()?);
+                }
             }
         }
 
         let end = self.expect(&TokenKind::RBrace)?;
         let span = start.to(end.span);
-        Ok(Expr::RecordCon(con, fields, span))
+        Ok(Expr::RecordCon(con, fields, has_wildcard, span))
     }
 
     /// Parse record update: `expr { field = value, ... }`

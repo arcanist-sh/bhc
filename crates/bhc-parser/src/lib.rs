@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn test_record_construction() {
         let expr = parse_expr_ok("Foo { bar = 1, baz = 2 }");
-        assert!(matches!(expr, Expr::RecordCon(_, _, _)));
+        assert!(matches!(expr, Expr::RecordCon(_, _, _, _)));
     }
 
     #[test]

@@ -1943,6 +1943,13 @@ impl LowerContext {
         self.defs.get(&def_id).map(|info| info.kind)
     }
 
+    /// Gets the field names for a record constructor, if any.
+    pub fn get_constructor_field_names(&self, def_id: DefId) -> Option<Vec<Symbol>> {
+        self.defs
+            .get(&def_id)
+            .and_then(|info| info.field_names.clone())
+    }
+
     /// Emits a warning if the given definition is a stub.
     /// Returns true if a warning was emitted.
     pub fn warn_if_stub(&mut self, def_id: DefId, name: &str, span: Span) -> bool {

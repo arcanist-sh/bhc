@@ -18,7 +18,7 @@ north-star integration target for BHC's real-world Haskell compatibility.
 ## Current State
 
 BHC compiles real Haskell programs to native executables via LLVM:
-- 87 native E2E tests passing (including monad transformers, file IO, markdown parser, JSON parser)
+- 96 native E2E tests passing (including monad transformers, file IO, markdown parser, JSON parser)
 - Monad transformers: StateT, ReaderT, ExceptT, WriterT all working
 - Nested transformer stacks: `StateT s (ReaderT r IO)` with cross-transformer `ask` working
 - MTL typeclasses registered: MonadReader, MonadState, MonadError, MonadWriter
@@ -29,6 +29,7 @@ BHC compiles real Haskell programs to native executables via LLVM:
 - Data.Char predicates, type-specialized show functions (E.9)
 - Data.Text.IO: native Text file/handle I/O (E.10)
 - Show for compound types: String, [a], Maybe, Either, (a,b), () (E.11)
+- Show for nested compound types: recursive ShowTypeDesc descriptors (E.31)
 - Numeric ops: even/odd, gcd/lcm, divMod/quotRem, fromIntegral + IORef (E.12)
 - Data.Maybe: fromMaybe, maybe, listToMaybe, maybeToList, catMaybes, mapMaybe (E.13)
 - Data.Either: either, fromLeft, fromRight, lefts, rights, partitionEithers (E.13)
@@ -41,7 +42,7 @@ BHC compiles real Haskell programs to native executables via LLVM:
 - Ordering ADT (LT/EQ/GT), compare returning Ordering (E.17)
 - System.FilePath: takeFileName, takeDirectory, takeExtension, dropExtension, takeBaseName, replaceExtension, isAbsolute, isRelative, hasExtension, splitExtension, </> (E.19)
 - System.Directory: setCurrentDirectory, removeDirectory, renameFile, copyFile (E.19)
-- Data.Map: full operation set including update, alter, unions, keysSet (E.21)
+- Data.Map: full operation set including update, alter, unions, keysSet, mapMaybe, mapMaybeWithKey (E.21, E.29)
 - Data.Set: full type support + unions, partition codegen (E.22)
 - Data.IntMap/Data.IntSet: full type support + filter, foldr codegen (E.22)
 - Fixed Bool ADT returns for container predicates (member, null, isSubmapOf) (E.21)
@@ -56,16 +57,27 @@ BHC compiles real Haskell programs to native executables via LLVM:
 - Folds: foldl1, foldr1 + Higher-order: comparing, until (E.28)
 - IO Input: getChar, isEOF, getContents, interact (E.28)
 - Partial application of codegen-only builtins: map (min 5) xs now works (E.28)
-- All intermediate milestones A–E.28 done
+- Fix flip calling convention (flat 3-arg), show Double/Float, Data.Map.mapMaybe (E.29)
+- Unified Bool extraction (extract_bool_tag) for filter/takeWhile/dropWhile/span/break/find/partition (E.30)
+- Show nested compound types: recursive ShowTypeDesc + bhc_show_with_desc (E.31)
+- All intermediate milestones A–E.31 done
 
 ### Gap to Pandoc
 
-**Completed:** Self-contained programs with transformers, parsing, file IO, Text, ByteString, Text.IO, Data.Char, show for compound types, numeric conversions, IORef, exceptions, multi-package imports, Data.Maybe/Either utilities, extensive Data.List operations, when/unless/guard/any/all, monadic combinators (filterM/foldM/replicateM/zipWithM), Ordering ADT with compare, System.FilePath + System.Directory, Data.Map complete (update/alter/unions/keysSet), fixed DefId misalignment for Text/ByteString/exceptions (E.20), Bool ADT for container predicates (E.21), Data.Set/IntMap/IntSet full type support + codegen completions (E.22), stock deriving Eq/Show/Ord for user ADTs (E.23, E.24), String read/readMaybe/fromString (E.25), sortOn/nubBy/groupBy/deleteBy/unionBy/intersectBy/stripPrefix/insert/mapAccumL/mapAccumR (E.26), succ/pred/(&)/swap/curry/uncurry + fst/snd as first-class closures (E.27), min/max/subtract/enumFrom/enumFromThen/enumFromThenTo/foldl1/foldr1/comparing/until/getChar/isEOF/getContents/interact + partial builtin application (E.28)
-**Missing for Pandoc:**
-1. **Full package system** — Basic import paths work (E.6), but no Hackage .cabal parsing yet
-2. **Lazy Text/ByteString** — Only strict variants implemented
-3. **GHC.Generics or TH** — Required for aeson JSON deriving
-4. ~~**show for Bool from builtins**~~ — Fixed in E.21: container predicates (member/null/isSubmapOf) now return proper Bool ADT; show inference recognizes qualified container names
+**Completed:** Self-contained programs with transformers, parsing, file IO, Text, ByteString, Text.IO, Data.Char, show for compound/nested types, numeric conversions, IORef, exceptions, multi-package imports, Data.Maybe/Either utilities, extensive Data.List operations, when/unless/guard/any/all, monadic combinators (filterM/foldM/replicateM/zipWithM), Ordering ADT with compare, System.FilePath + System.Directory, Data.Map complete (update/alter/unions/keysSet/mapMaybe), fixed DefId misalignment for Text/ByteString/exceptions (E.20), Bool ADT for container predicates (E.21), Data.Set/IntMap/IntSet full type support + codegen completions (E.22), stock deriving Eq/Show/Ord for user ADTs (E.23, E.24), String read/readMaybe/fromString (E.25), sortOn/nubBy/groupBy/... (E.26), succ/pred/(&)/swap/curry/uncurry (E.27), min/max/subtract/enum/folds/comparing/until/IO input + partial builtin application (E.28), flip/show Double/mapMaybe (E.29), unified Bool extraction (E.30), show nested compounds (E.31)
+
+**Missing for Pandoc (prioritized):**
+1. **OverloadedStrings + IsString** — Pandoc uses `{-# LANGUAGE OverloadedStrings #-}` pervasively. Need `IsString` typeclass with `fromString` method + implicit coercion from string literals to `Text`/`ByteString`
+2. **Record syntax** — Named fields, field accessors as functions, record update syntax `r { field = val }`, `RecordWildCards`
+3. **ViewPatterns codegen** — Parser recognizes `ViewPatterns` but codegen doesn't handle `f -> pat` in pattern positions
+4. **TupleSections + MultiWayIf** — `(,x)` partial tuple constructors; `if | cond1 -> ... | cond2 -> ...` syntax
+5. **GeneralizedNewtypeDeriving** — Lift instances through newtypes; critical for Pandoc's `newtype` wrappers
+6. **Full package system** — Basic import paths work (E.6), but no Hackage .cabal parsing yet
+7. **Lazy Text/ByteString** — Only strict variants implemented
+8. **GHC.Generics or TH** — Required for aeson JSON deriving
+9. **CPP preprocessing** — Pandoc and many deps use `#ifdef` for platform/version conditionals
+10. ~~**show for Bool from builtins**~~ — Fixed in E.21: container predicates now return proper Bool ADT
+11. ~~**show for nested types**~~ — Fixed in E.31: recursive ShowTypeDesc descriptors handle `[(1,2)]`, `Just [1,2]`, `[[1,2]]` etc.
 
 ---
 
@@ -286,7 +298,7 @@ compiled from Hackage source.
 
 ### 3.1 Remaining Codegen Builtins
 
-**Status:** ~490+ of 587 builtins lowered (E.13–E.27 added ~80+ functions + derived dispatches)
+**Status:** ~500+ of 587 builtins lowered (E.13–E.31 added ~90+ functions + derived dispatches)
 **Scope:** Small-Medium (ongoing)
 
 - [ ] Monadic codegen: general `>>=`, `>>`, `return` via dictionary dispatch
@@ -314,7 +326,8 @@ compiled from Hackage source.
 
 - [x] `show` for standard types: showInt, showBool, showChar, showFloat (type-specialized, E.9)
 - [x] `show` for compound types: String, [a], Maybe, Either, (a,b), () (E.11)
-- [ ] `show` for remaining types: Double, nested compound types
+- [x] `show` for Double/Float literals (E.29)
+- [x] `show` for nested compound types via recursive ShowTypeDesc (E.31)
 - [x] `read` for Int (RTS bhc_read_int, E.25)
 - [x] `readMaybe` for Int (RTS bhc_try_read_int, E.25)
 - [x] `fromString` (identity, E.25)
@@ -580,6 +593,82 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 - [x] E2E tests: enum_functions (min/max/subtract/enum/foldl1/foldr1/until), fold_misc (foldl1/foldr1 with user fn, map with partial min/max/subtract)
 - [x] 87 total E2E tests pass (85 existing + 2 new, 0 failures)
 
+### Milestone E.29: flip + show Double + Data.Map.mapMaybe ✅
+- [x] Fix flip calling convention: was using curried 2-step calls (segfault), fixed to flat 3-arg `fn(env, arg2, arg1)`
+- [x] Show Double/Float literals: `ShowCoerce::Double` handles `FloatValue` directly (fpext f32→f64)
+- [x] `expr_returns_double()`: recognizes unary (sqrt/sin/cos/...) and binary (/, **) Double-returning functions
+- [x] `expr_looks_like_list`: Added Data.Map.toList/keys/elems/assocs, Data.Set.toList/elems
+- [x] Data.Map.mapMaybe/mapMaybeWithKey: Fixed DefIds 11700-11701
+- [x] flip/const added to `lower_builtin_direct` for first-class use
+- [x] E2E tests: flip_test, show_double, map_maybe
+- [x] 90 total E2E tests pass
+
+### Milestone E.30: Unified Bool Extraction (extract_bool_tag) ✅
+- [x] Two Bool representations: tagged-int-as-pointer (0/1) vs Bool ADT (heap struct)
+- [x] `extract_bool_tag()`: checks `ptr_to_int <= 1` — if so, raw value; else loads ADT tag
+- [x] Applied to: filter, takeWhile, dropWhile, span, break, find, partition
+- [x] Phi predecessor pitfall: creates 3 new blocks; phi nodes must reference `bool_merge` block
+- [x] E2E tests: filter_bool, list_predicate_ops, partition_test
+- [x] 93 total E2E tests pass
+
+### Milestone E.31: Show Nested Compound Types ✅
+- [x] `ShowTypeDesc` struct: `#[repr(C)]` with `tag: i64`, `child1/child2: *const ShowTypeDesc`
+- [x] Tags: 0-7 primitives (Int/Double/Float/Bool/Char/String/Unit/Ordering), 10-13 compounds (List/Maybe/Tuple2/Either)
+- [x] `show_any()`: recursive dispatch in RTS, handles nested types at any depth
+- [x] `show_any_prec()`: precedence-aware parens for constructor apps (Just x, Left x, Right x)
+- [x] LLVM global descriptor trees built at compile time from expression structure analysis
+- [x] `bhc_show_with_desc(ptr, desc)` FFI entry point (VarId 1000099)
+- [x] Backward compatible: primitive ShowCoerce variants unchanged, compound types use new path
+- [x] E2E tests: show_nested (list of tuples), show_nested_maybe (Maybe of list), show_nested_list (list of lists)
+- [x] 96 total E2E tests pass
+
+### Milestone E.32+: Road to Pandoc (Proposed)
+
+The following milestones are prioritized based on Pandoc's requirements:
+
+#### E.32: OverloadedStrings + IsString (HIGH PRIORITY)
+- [ ] `IsString` typeclass with `fromString :: String -> a` method
+- [ ] `OverloadedStrings` extension: string literals desugar to `fromString "..."` calls
+- [ ] `IsString` instances for Text, ByteString (via pack)
+- [ ] Identity instance for String (already have `fromString` as pass-through)
+- **Why**: Pandoc uses `{-# LANGUAGE OverloadedStrings #-}` in nearly every module
+
+#### E.33: Record Syntax ✅
+- [x] Named field declarations in data types
+- [x] Field accessor functions (auto-generated from field names)
+- [x] Record construction syntax `Foo { bar = 1, baz = "x" }`
+- [x] Record update syntax `r { field = newVal }`
+- [x] `RecordWildCards` extension (`Foo{..}` brings fields into scope)
+- **Why**: Pandoc's AST types (Block, Inline, Meta, etc.) are record-heavy
+
+#### E.34: ViewPatterns Codegen
+- [ ] Lower `f -> pat` patterns to `let tmp = f arg in case tmp of pat -> ...`
+- [ ] Handle in case expressions and function argument patterns
+- **Why**: Parser already recognizes ViewPatterns; codegen is the remaining gap
+
+#### E.35: TupleSections + MultiWayIf
+- [ ] `TupleSections`: `(,x)` as partial tuple constructors, `(x,,z)` etc.
+- [ ] `MultiWayIf`: `if | cond1 -> e1 | cond2 -> e2 | otherwise -> e3`
+- **Why**: Common GHC extensions used in Pandoc and dependencies
+
+#### E.36: GeneralizedNewtypeDeriving
+- [ ] Lift typeclass instances through `newtype` wrappers
+- [ ] Support in `deriving` clause and standalone deriving
+- **Why**: Pandoc's newtypes (e.g., `newtype Pandoc = Pandoc ...`) need inherited instances
+
+#### E.37: CPP Preprocessing
+- [ ] `{-# LANGUAGE CPP #-}` — run C preprocessor on source before parsing
+- [ ] Handle `#ifdef`, `#if`, `#else`, `#endif`, `#define`, `#include`
+- [ ] Predefined macros: `__GLASGOW_HASKELL__`, `MIN_VERSION_base(...)`, OS/arch macros
+- **Why**: Many Hackage packages use CPP for platform/version conditionals
+
+#### E.38: Package Management + .cabal Parsing
+- [ ] Parse `.cabal` files (exposed-modules, build-depends, hs-source-dirs)
+- [ ] Resolve transitive dependency graphs
+- [ ] Fetch packages from Hackage (tar.gz download + unpack)
+- [ ] Cache compiled packages
+- **Why**: Pandoc depends on ~80 packages; manual compilation is impractical
+
 ### Milestone F: Pandoc (Minimal)
 - [ ] Compile Pandoc with a subset of readers/writers (e.g., Markdown → HTML only)
 - [ ] Skip optional dependencies (skylighting, texmath, etc.)
@@ -617,6 +706,36 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 ---
 
 ## Recent Progress
+
+### 2026-02-12: Milestone E.31 Show Nested Compound Types
+- Replaced flat i64 type tags with recursive `ShowTypeDesc` structs for nested show support
+- `ShowTypeDesc`: `#[repr(C)]` struct with `tag` (i64), `child1`/`child2` (*const ShowTypeDesc)
+- Tag scheme: 0-7 primitives, 10=List, 11=Maybe, 12=Tuple2, 13=Either
+- RTS: `show_any()` recursive dispatch, `show_any_prec()` for precedence parens, helper functions for list/maybe/tuple/either
+- `bhc_show_with_desc(ptr, desc)` FFI entry point at VarId 1000099
+- Codegen: `create_show_desc_global()` builds LLVM global constant descriptors at compile time
+- `build_show_descriptor()` recursively infers nested types from expression structure (Cons cells, Just/Nothing, tuple constructors, Left/Right)
+- Primitive ShowCoerce variants unchanged — backward compatible
+- E2E tests: show_nested `[(1,2),(3,4),(5,6)]`, show_nested_maybe `Just [10,20,30]`, show_nested_list `[[1,2],[3,4]]`
+- 96 E2E tests pass (93 existing + 3 new, 0 failures)
+
+### 2026-02-12: Milestone E.30 Fix Bool Predicate Bug
+- Two Bool representations: tagged-int-as-pointer (0/1 from comparison ops) and Bool ADT (heap struct from even/odd/isAlpha)
+- `extract_bool_tag()`: unified helper checks `ptr_to_int <= 1` — if so, raw value; else loads ADT tag from struct
+- Applied to 7 list functions: filter, takeWhile, dropWhile, span, break, find, partition
+- Creates 3 new blocks per call site; phi nodes must reference `bool_merge` block (via `get_insert_block()`)
+- E2E tests: filter_bool, list_predicate_ops, partition_test
+- 93 E2E tests pass (90 existing + 3 new, 0 failures)
+
+### 2026-02-12: Milestone E.29 flip + show Double + Data.Map.mapMaybe
+- Fixed flip calling convention: was using curried 2-step calls (segfault), fixed to flat 3-arg `fn(env, arg2, arg1)`
+- Show Double/Float literals: `ShowCoerce::Double` handles `FloatValue` directly via fpext f32→f64
+- `expr_returns_double()`: recognizes unary (sqrt/sin/cos/...) and binary (/, **) Double-returning functions
+- `expr_looks_like_list`: Added Data.Map.toList/keys/elems/assocs, Data.Set.toList/elems
+- Data.Map.mapMaybe/mapMaybeWithKey at Fixed DefIds 11700-11701
+- flip/const added to `lower_builtin_direct` for first-class closure use
+- E2E tests: flip_test, show_double, map_maybe
+- 90 E2E tests pass (87 existing + 3 new, 0 failures)
 
 ### 2026-02-12: Milestone E.28 Arithmetic, Enum, Folds, Higher-Order, IO Input
 - 14 new builtins: min, max, subtract, enumFrom, enumFromThen, enumFromThenTo, foldl1, foldr1, comparing, until, getChar, isEOF, getContents, interact

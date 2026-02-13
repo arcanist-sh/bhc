@@ -1093,7 +1093,7 @@ fn collect_pattern_vars_impl(pat: &ast::Pat, vars: &mut Vec<(Symbol, Span)>) {
             collect_pattern_vars_impl(left, vars);
             collect_pattern_vars_impl(right, vars);
         }
-        ast::Pat::Record(_, fields, _) | ast::Pat::QualRecord(_, _, fields, _) => {
+        ast::Pat::Record(_, fields, _, _) | ast::Pat::QualRecord(_, _, fields, _, _) => {
             for field in fields {
                 if let Some(p) = &field.pat {
                     collect_pattern_vars_impl(p, vars);
@@ -1850,7 +1850,7 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
             lower_arith_seq(ctx, seq, *span)
         }
 
-        ast::Expr::RecordCon(con, fields, span) => {
+        ast::Expr::RecordCon(con, fields, has_wildcard, span) => {
             let con_name = con.name;
             if let Some(def_id) = resolve_constructor(ctx, con_name, *span) {
                 let con_ref = ctx.def_ref(def_id, *span);
@@ -1873,6 +1873,24 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                         value,
                         span: f.span,
                     });
+                }
+                // RecordWildCards: expand `..` to include remaining fields from scope
+                if *has_wildcard {
+                    if let Some(field_names) = ctx.get_constructor_field_names(def_id) {
+                        let existing: rustc_hash::FxHashSet<_> =
+                            hir_fields.iter().map(|f| f.name).collect();
+                        for field_name in field_names {
+                            if !existing.contains(&field_name) {
+                                if let Some(val_id) = ctx.lookup_value(field_name) {
+                                    hir_fields.push(hir::FieldExpr {
+                                        name: field_name,
+                                        value: hir::Expr::Var(ctx.def_ref(val_id, *span)),
+                                        span: *span,
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
                 hir::Expr::Record(con_ref, hir_fields, *span)
             } else {
@@ -2115,7 +2133,7 @@ fn lower_pat(ctx: &mut LowerContext, pat: &ast::Pat) -> hir::Pat {
             lower_pat(ctx, inner)
         }
 
-        ast::Pat::Record(con, fields, span) => {
+        ast::Pat::Record(con, fields, has_wildcard, span) => {
             let con_name = con.name;
             if let Some(def_id) = resolve_constructor(ctx, con_name, *span) {
                 let con_ref = ctx.def_ref(def_id, *span);
@@ -2136,6 +2154,26 @@ fn lower_pat(ctx: &mut LowerContext, pat: &ast::Pat) -> hir::Pat {
                         pat,
                         span: f.span,
                     });
+                }
+                // RecordWildCards: expand `..` to bind remaining fields as variables
+                if *has_wildcard {
+                    if let Some(field_names) = ctx.get_constructor_field_names(def_id) {
+                        let existing: rustc_hash::FxHashSet<_> =
+                            hir_field_pats.iter().map(|f| f.name).collect();
+                        for field_name in field_names {
+                            if !existing.contains(&field_name) {
+                                // Reuse the DefId already bound by collect_pattern_bindings
+                                let field_def_id = ctx
+                                    .lookup_value(field_name)
+                                    .expect("wildcard field should be bound");
+                                hir_field_pats.push(hir::FieldPat {
+                                    name: field_name,
+                                    pat: hir::Pat::Var(field_name, field_def_id, *span),
+                                    span: *span,
+                                });
+                            }
+                        }
+                    }
                 }
                 hir::Pat::RecordCon(con_ref, hir_field_pats, *span)
             } else {
@@ -2167,7 +2205,7 @@ fn lower_pat(ctx: &mut LowerContext, pat: &ast::Pat) -> hir::Pat {
             }
         }
 
-        ast::Pat::QualRecord(module_name, con, fields, span) => {
+        ast::Pat::QualRecord(module_name, con, fields, _has_wildcard, span) => {
             // Qualified record pattern like XMonad.XConfig { modMask = m }
             let qualifier = Symbol::intern(&module_name.to_string());
             let con_name = con.name;

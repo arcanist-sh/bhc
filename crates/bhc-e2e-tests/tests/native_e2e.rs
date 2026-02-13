@@ -587,6 +587,31 @@ fn test_tier3_overloaded_strings_native() {
     run_native_test("tier3_io/overloaded_strings", Profile::Default);
 }
 
+#[test]
+fn test_tier3_record_basic_native() {
+    run_native_test("tier3_io/record_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_record_update_native() {
+    run_native_test("tier3_io/record_update", Profile::Default);
+}
+
+#[test]
+fn test_tier3_record_pattern_native() {
+    run_native_test("tier3_io/record_pattern", Profile::Default);
+}
+
+#[test]
+fn test_tier3_record_multi_native() {
+    run_native_test("tier3_io/record_multi", Profile::Default);
+}
+
+#[test]
+fn test_tier3_record_wildcards_native() {
+    run_native_test("tier3_io/record_wildcards", Profile::Default);
+}
+
 // =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================

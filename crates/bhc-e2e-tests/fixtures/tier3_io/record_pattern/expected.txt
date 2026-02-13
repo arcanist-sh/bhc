@@ -1,0 +1,4 @@
+Hello Alice, age 30
+Hello Bob, age 25
+Alice
+25

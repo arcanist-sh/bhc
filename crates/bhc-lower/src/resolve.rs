@@ -147,7 +147,8 @@ fn collect_pattern_bindings(
             collect_pattern_bindings(ctx, right, bindings);
         }
 
-        ast::Pat::Record(_, fields, _) | ast::Pat::QualRecord(_, _, fields, _) => {
+        ast::Pat::Record(con, fields, has_wildcard, span)
+        | ast::Pat::QualRecord(_, con, fields, has_wildcard, span) => {
             for field in fields {
                 if let Some(p) = &field.pat {
                     collect_pattern_bindings(ctx, p, bindings);
@@ -158,6 +159,24 @@ fn collect_pattern_bindings(
                     ctx.define(def_id, name, DefKind::PatVar, field.span);
                     ctx.bind_value(name, def_id);
                     bindings.push((name, def_id));
+                }
+            }
+            // RecordWildCards: bind remaining constructor fields as variables
+            if *has_wildcard {
+                let con_name = con.name;
+                if let Some(con_def_id) = ctx.lookup_constructor(con_name) {
+                    if let Some(field_names) = ctx.get_constructor_field_names(con_def_id) {
+                        let existing: rustc_hash::FxHashSet<_> =
+                            fields.iter().map(|f| f.name.name).collect();
+                        for field_name in field_names {
+                            if !existing.contains(&field_name) {
+                                let def_id = ctx.fresh_def_id();
+                                ctx.define(def_id, field_name, DefKind::PatVar, *span);
+                                ctx.bind_value(field_name, def_id);
+                                bindings.push((field_name, def_id));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -211,11 +230,31 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
                 ctx.define(type_def_id, type_name, DefKind::Type, data_decl.span);
                 ctx.bind_type(type_name, type_def_id);
 
+                let type_param_count = data_decl.params.len();
+
                 // Bind constructors
                 for con in &data_decl.constrs {
                     let con_name = con.name.name;
                     let con_def_id = ctx.fresh_def_id();
-                    ctx.define(con_def_id, con_name, DefKind::Constructor, con.span);
+
+                    // Extract field info for RecordWildCards support
+                    let (arity, field_names) = match &con.fields {
+                        ast::ConFields::Positional(fields) => (fields.len(), None),
+                        ast::ConFields::Record(fields) => {
+                            let names: Vec<Symbol> =
+                                fields.iter().map(|f| f.name.name).collect();
+                            (fields.len(), Some(names))
+                        }
+                    };
+                    ctx.define_constructor_with_type(
+                        con_def_id,
+                        con_name,
+                        con.span,
+                        arity,
+                        type_name,
+                        type_param_count,
+                        field_names,
+                    );
                     ctx.bind_constructor(con_name, con_def_id);
 
                     // Record fields also become functions
@@ -236,13 +275,27 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
                 ctx.define(type_def_id, type_name, DefKind::Type, newtype_decl.span);
                 ctx.bind_type(type_name, type_def_id);
 
+                let type_param_count = newtype_decl.params.len();
                 let con_name = newtype_decl.constr.name.name;
                 let con_def_id = ctx.fresh_def_id();
-                ctx.define(
+
+                // Extract field info for RecordWildCards support
+                let (arity, field_names) = match &newtype_decl.constr.fields {
+                    ast::ConFields::Positional(fields) => (fields.len(), None),
+                    ast::ConFields::Record(fields) => {
+                        let names: Vec<Symbol> =
+                            fields.iter().map(|f| f.name.name).collect();
+                        (fields.len(), Some(names))
+                    }
+                };
+                ctx.define_constructor_with_type(
                     con_def_id,
                     con_name,
-                    DefKind::Constructor,
                     newtype_decl.constr.span,
+                    arity,
+                    type_name,
+                    type_param_count,
+                    field_names,
                 );
                 ctx.bind_constructor(con_name, con_def_id);
 

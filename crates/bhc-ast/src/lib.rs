@@ -778,8 +778,8 @@ pub enum Expr {
     ArithSeq(ArithSeq, Span),
     /// List comprehension: `[x | x <- xs, x > 0]`
     ListComp(Box<Expr>, Vec<Stmt>, Span),
-    /// Record construction: `Foo { bar = 1 }`
-    RecordCon(Ident, Vec<FieldBind>, Span),
+    /// Record construction: `Foo { bar = 1 }` or `Foo { bar = 1, .. }` (RecordWildCards)
+    RecordCon(Ident, Vec<FieldBind>, bool, Span),
     /// Record update: `foo { bar = 1 }`
     RecordUpd(Box<Expr>, Vec<FieldBind>, Span),
     /// Infix operator: `a + b`
@@ -816,7 +816,7 @@ impl Expr {
             | Self::List(_, s)
             | Self::ArithSeq(_, s)
             | Self::ListComp(_, _, s)
-            | Self::RecordCon(_, _, s)
+            | Self::RecordCon(_, _, _, s)
             | Self::RecordUpd(_, _, s)
             | Self::Infix(_, _, _, s)
             | Self::Neg(_, s)
@@ -910,10 +910,10 @@ pub enum Pat {
     Tuple(Vec<Pat>, Span),
     /// List: `[a, b, c]`
     List(Vec<Pat>, Span),
-    /// Record: `Foo { bar = x }`
-    Record(Ident, Vec<FieldPat>, Span),
-    /// Qualified record: `M.Foo { bar = x }`
-    QualRecord(ModuleName, Ident, Vec<FieldPat>, Span),
+    /// Record: `Foo { bar = x }` or `Foo { bar = x, .. }` (RecordWildCards)
+    Record(Ident, Vec<FieldPat>, bool, Span),
+    /// Qualified record: `M.Foo { bar = x }` or `M.Foo { .. }` (RecordWildCards)
+    QualRecord(ModuleName, Ident, Vec<FieldPat>, bool, Span),
     /// As-pattern: `xs@(x:_)`
     As(Ident, Box<Pat>, Span),
     /// Lazy pattern: `~pat`
@@ -941,8 +941,8 @@ impl Pat {
             | Self::Infix(_, _, _, s)
             | Self::Tuple(_, s)
             | Self::List(_, s)
-            | Self::Record(_, _, s)
-            | Self::QualRecord(_, _, _, s)
+            | Self::Record(_, _, _, s)
+            | Self::QualRecord(_, _, _, _, s)
             | Self::As(_, _, s)
             | Self::Lazy(_, s)
             | Self::Bang(_, s)

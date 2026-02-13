@@ -367,27 +367,36 @@ impl<'src> Parser<'src> {
         Ok(Pat::List(pats, span))
     }
 
-    /// Parse a record pattern: `Con { field = pat, ... }`
+    /// Parse a record pattern: `Con { field = pat, ... }` or `Con { field = pat, .. }`
     fn parse_record_pattern(&mut self, con: Ident, start: Span) -> ParseResult<Pat> {
         self.expect(&TokenKind::LBrace)?;
 
         let mut fields = Vec::new();
+        let mut has_wildcard = false;
         if !self.check(&TokenKind::RBrace) {
-            fields.push(self.parse_field_pat()?);
-            while self.eat(&TokenKind::Comma) {
-                if self.check(&TokenKind::RBrace) {
-                    break;
-                }
+            if self.eat(&TokenKind::DotDot) {
+                has_wildcard = true;
+            } else {
                 fields.push(self.parse_field_pat()?);
+                while self.eat(&TokenKind::Comma) {
+                    if self.check(&TokenKind::RBrace) {
+                        break;
+                    }
+                    if self.eat(&TokenKind::DotDot) {
+                        has_wildcard = true;
+                        break;
+                    }
+                    fields.push(self.parse_field_pat()?);
+                }
             }
         }
 
         let end = self.expect(&TokenKind::RBrace)?;
         let span = start.to(end.span);
-        Ok(Pat::Record(con, fields, span))
+        Ok(Pat::Record(con, fields, has_wildcard, span))
     }
 
-    /// Parse a qualified record pattern: `Qual.Con { field = pat, ... }`
+    /// Parse a qualified record pattern: `Qual.Con { field = pat, ... }` or `Qual.Con { .. }`
     fn parse_qual_record_pattern(
         &mut self,
         module_name: ModuleName,
@@ -397,19 +406,28 @@ impl<'src> Parser<'src> {
         self.expect(&TokenKind::LBrace)?;
 
         let mut fields = Vec::new();
+        let mut has_wildcard = false;
         if !self.check(&TokenKind::RBrace) {
-            fields.push(self.parse_field_pat()?);
-            while self.eat(&TokenKind::Comma) {
-                if self.check(&TokenKind::RBrace) {
-                    break;
-                }
+            if self.eat(&TokenKind::DotDot) {
+                has_wildcard = true;
+            } else {
                 fields.push(self.parse_field_pat()?);
+                while self.eat(&TokenKind::Comma) {
+                    if self.check(&TokenKind::RBrace) {
+                        break;
+                    }
+                    if self.eat(&TokenKind::DotDot) {
+                        has_wildcard = true;
+                        break;
+                    }
+                    fields.push(self.parse_field_pat()?);
+                }
             }
         }
 
         let end = self.expect(&TokenKind::RBrace)?;
         let span = start.to(end.span);
-        Ok(Pat::QualRecord(module_name, con, fields, span))
+        Ok(Pat::QualRecord(module_name, con, fields, has_wildcard, span))
     }
 
     /// Parse a field pattern: `field = pat`, `Mod.field = pat`, or `field` (punning)

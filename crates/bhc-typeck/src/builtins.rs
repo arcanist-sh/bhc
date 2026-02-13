@@ -5213,12 +5213,16 @@ impl Builtins {
                 Box::new(int_ty.clone()),
             );
 
-            // fromString :: String -> String (identity, since String = [Char])
-            env.register_value(
-                DefId::new(11300),
-                Symbol::intern("fromString"),
-                Scheme::mono(Ty::fun(string_ty.clone(), string_ty.clone())),
-            );
+            // fromString :: IsString a => String -> a
+            // With OverloadedStrings, this is polymorphic. Without it, defaults to String.
+            {
+                let a = TyVar::new_star(0xFFFF_0100);
+                env.register_value(
+                    DefId::new(11300),
+                    Symbol::intern("fromString"),
+                    Scheme::poly(vec![a.clone()], Ty::fun(string_ty.clone(), Ty::Var(a))),
+                );
+            }
 
             // read :: String -> Int (monomorphic for now)
             env.register_value(

@@ -481,6 +481,8 @@ pub struct CoreModule {
     pub bindings: Vec<Bind>,
     /// Foreign exports.
     pub exports: Vec<ForeignExport>,
+    /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
+    pub overloaded_strings: bool,
 }
 
 /// A foreign export from Core.

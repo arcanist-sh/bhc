@@ -1442,6 +1442,7 @@ impl LowerContext {
             name: module.name,
             bindings,
             exports: vec![],
+            overloaded_strings: module.overloaded_strings,
         })
     }
 

@@ -171,6 +171,7 @@ mod tests {
             imports: vec![],
             items: vec![],
             span: Span::default(),
+            overloaded_strings: false,
         };
 
         let result = lower_module(&module);
@@ -223,6 +224,7 @@ mod tests {
             imports: vec![],
             items: vec![Item::Value(value_def)],
             span: Span::default(),
+            overloaded_strings: false,
         };
 
         // Set up type schemes
@@ -397,6 +399,7 @@ mod tests {
             imports: vec![],
             items: vec![Item::Class(class_def), Item::Instance(instance_def)],
             span: Span::default(),
+            overloaded_strings: false,
         };
 
         // Lower the module
@@ -507,6 +510,7 @@ mod tests {
             imports: vec![],
             items: vec![Item::Value(double_def), Item::Value(quadruple_def)],
             span: Span::default(),
+            overloaded_strings: false,
         };
 
         // Set up type schemes
@@ -693,6 +697,7 @@ mod tests {
                 Item::Value(test_def),
             ],
             span: Span::default(),
+            overloaded_strings: false,
         };
 
         // Register the myEq method as a variable
@@ -991,6 +996,7 @@ mod tests {
             imports: vec![],
             items: vec![Item::Class(class_def)],
             span: Span::default(),
+            overloaded_strings: false,
         };
 
         // Lower the module

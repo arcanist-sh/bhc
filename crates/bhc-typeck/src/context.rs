@@ -94,6 +94,9 @@ pub struct TyCtxt {
     /// Collected type class constraints during inference.
     /// These are solved after inference completes or defaulted if ambiguous.
     pub(crate) constraints: Vec<Constraint>,
+
+    /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
+    pub(crate) overloaded_strings: bool,
 }
 
 impl TyCtxt {
@@ -111,6 +114,7 @@ impl TyCtxt {
             def_schemes: FxHashMap::default(),
             con_field_defs: FxHashMap::default(),
             constraints: Vec::new(),
+            overloaded_strings: false,
         }
     }
 
@@ -395,12 +399,19 @@ impl TyCtxt {
                     ("Show", "Int") | ("Show", "Float") | ("Show", "Double") | ("Show", "Bool") |
                     ("Show", "Char") | ("Show", "String") |
                     // Fractional instances
-                    ("Fractional", "Float") | ("Fractional", "Double")
+                    ("Fractional", "Float") | ("Fractional", "Double") |
+                    // IsString instances
+                    ("IsString", "String") | ("IsString", "[Char]")
                 )
             }
             // List instances: Eq [a], Ord [a], Show [a] if element type has the instance
+            // IsString [Char] is always valid (String = [Char])
             Ty::List(elem) => {
-                matches!(class_name, "Eq" | "Ord" | "Show") && self.is_builtin_instance(class, elem)
+                if class_name == "IsString" {
+                    matches!(elem.as_ref(), Ty::Con(tc) if tc.name.as_str() == "Char")
+                } else {
+                    matches!(class_name, "Eq" | "Ord" | "Show") && self.is_builtin_instance(class, elem)
+                }
             }
             // Tuple instances: Eq (a, b), Ord (a, b), Show (a, b) if all elements have the instance
             Ty::Tuple(elems) => {
@@ -466,6 +477,10 @@ impl TyCtxt {
             "Fractional" | "Floating" | "RealFrac" | "RealFloat" => {
                 // Default to Double/Float
                 Some(self.builtins.float_ty.clone())
+            }
+            "IsString" => {
+                // Default to String ([Char]), matching GHC behavior
+                Some(self.builtins.string_ty.clone())
             }
             "Eq" | "Ord" | "Show" | "Read" => {
                 // These don't have defaults - leave ambiguous
@@ -2656,10 +2671,14 @@ impl TyCtxt {
                 }
 
                 // E.25: String type class methods
-                "fromString" => Scheme::mono(Ty::fun(
-                    self.builtins.string_ty.clone(),
-                    self.builtins.string_ty.clone(),
-                )),
+                // fromString :: IsString a => String -> a
+                "fromString" => {
+                    let a = TyVar::new_star(0xFFFF_0100);
+                    Scheme::poly(vec![a.clone()], Ty::fun(
+                        self.builtins.string_ty.clone(),
+                        Ty::Var(a),
+                    ))
+                }
                 "read" => Scheme::mono(Ty::fun(
                     self.builtins.string_ty.clone(),
                     self.builtins.int_ty.clone(),

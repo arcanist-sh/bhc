@@ -662,6 +662,8 @@ pub struct Module {
     pub items: Vec<Item>,
     /// Source span.
     pub span: Span,
+    /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
+    pub overloaded_strings: bool,
 }
 
 /// An export specification.

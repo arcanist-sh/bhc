@@ -582,6 +582,11 @@ fn test_tier3_show_nested_list_native() {
     run_native_test("tier3_io/show_nested_list", Profile::Default);
 }
 
+#[test]
+fn test_tier3_overloaded_strings_native() {
+    run_native_test("tier3_io/overloaded_strings", Profile::Default);
+}
+
 // =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================

@@ -233,6 +233,8 @@ pub struct Lowering<'ctx, 'm> {
     derived_compare_fns: FxHashMap<String, VarId>,
     /// Counter for generating unique show descriptor global names.
     show_desc_counter: usize,
+    /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
+    overloaded_strings: bool,
 }
 
 impl<'ctx, 'm> Lowering<'ctx, 'm> {
@@ -257,6 +259,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             derived_eq_fns: FxHashMap::default(),
             derived_compare_fns: FxHashMap::default(),
             show_desc_counter: 0,
+            overloaded_strings: false,
         };
         lowering.declare_rts_functions();
         lowering
@@ -291,6 +294,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             derived_eq_fns: FxHashMap::default(),
             derived_compare_fns: FxHashMap::default(),
             show_desc_counter: 0,
+            overloaded_strings: false,
         };
         lowering.declare_rts_functions();
         lowering.declare_external_symbols(imported_symbols)?;
@@ -27404,6 +27408,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower a Core module to LLVM IR.
     pub fn lower_module(&mut self, core_module: &CoreModule) -> CodegenResult<()> {
+        // Propagate language extensions from the Core module
+        self.overloaded_strings = core_module.overloaded_strings;
+
         // Pre-pass: collect all constructor metadata from case alternatives
         // This ensures constructors are known before we try to lower applications
         for bind in &core_module.bindings {

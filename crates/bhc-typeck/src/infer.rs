@@ -378,7 +378,17 @@ fn infer_lit(ctx: &mut TyCtxt, lit: &Lit, span: bhc_span::Span) -> Ty {
             ty
         }
         Lit::Char(_) => ctx.builtins.char_ty.clone(),
-        Lit::String(_) => ctx.builtins.string_ty.clone(),
+        Lit::String(_) => {
+            if ctx.overloaded_strings {
+                // With OverloadedStrings, string literals have type `IsString a => a`
+                let ty = ctx.fresh_ty();
+                let is_string_class = Symbol::intern("IsString");
+                ctx.emit_constraint(is_string_class, ty.clone(), span);
+                ty
+            } else {
+                ctx.builtins.string_ty.clone()
+            }
+        }
     }
 }
 

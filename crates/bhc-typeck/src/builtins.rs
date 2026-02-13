@@ -2566,14 +2566,14 @@ impl Builtins {
                 Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(pair_ab, pair_ba))
             }),
             // Character functions registered at fixed DefIds below (10200+)
-            // Enum functions (Int-specialized)
+            // Enum functions (polymorphic for Int and Char)
             ("succ", {
-                // succ :: Int -> Int (simplified for Int)
-                Scheme::mono(Ty::fun(self.int_ty.clone(), self.int_ty.clone()))
+                // succ :: a -> a (Enum a =>)
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))
             }),
             ("pred", {
-                // pred :: Int -> Int
-                Scheme::mono(Ty::fun(self.int_ty.clone(), self.int_ty.clone()))
+                // pred :: a -> a (Enum a =>)
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))
             }),
             ("toEnum", {
                 // toEnum :: Int -> a (polymorphic result)
@@ -2590,33 +2590,36 @@ impl Builtins {
                 )
             }),
             ("enumFrom", {
-                // enumFrom :: Int -> [Int] (Int-specialized, [n..])
-                let list_int = Ty::List(Box::new(self.int_ty.clone()));
-                Scheme::mono(Ty::fun(self.int_ty.clone(), list_int))
+                // enumFrom :: a -> [a] (Enum a =>, [n..])
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), list_a))
             }),
             ("enumFromThen", {
-                // enumFromThen :: Int -> Int -> [Int] (Int-specialized, [n,m..])
-                let list_int = Ty::List(Box::new(self.int_ty.clone()));
-                Scheme::mono(Ty::fun(
-                    self.int_ty.clone(),
-                    Ty::fun(self.int_ty.clone(), list_int),
-                ))
+                // enumFromThen :: a -> a -> [a] (Enum a =>, [n,m..])
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(a.clone()), list_a)),
+                )
             }),
             ("enumFromTo", {
-                // enumFromTo :: Int -> Int -> [Int] (Int-specialized, [n..m])
-                let list_int = Ty::List(Box::new(self.int_ty.clone()));
-                Scheme::mono(Ty::fun(
-                    self.int_ty.clone(),
-                    Ty::fun(self.int_ty.clone(), list_int),
-                ))
+                // enumFromTo :: a -> a -> [a] (Enum a =>, [n..m])
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(a.clone()), list_a)),
+                )
             }),
             ("enumFromThenTo", {
-                // enumFromThenTo :: Int -> Int -> Int -> [Int] (Int-specialized, [n,m..o])
-                let list_int = Ty::List(Box::new(self.int_ty.clone()));
-                Scheme::mono(Ty::fun(
-                    self.int_ty.clone(),
-                    Ty::fun(self.int_ty.clone(), Ty::fun(self.int_ty.clone(), list_int)),
-                ))
+                // enumFromThenTo :: a -> a -> a -> [a] (Enum a =>, [n,m..o])
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        Ty::Var(a.clone()),
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(a.clone()), list_a)),
+                    ),
+                )
             }),
             // Bounded (Int-specialized)
             ("minBound", {

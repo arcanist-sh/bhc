@@ -29794,6 +29794,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 ))
             }
 
+            "toUpper" | "toLower" => {
+                let rts_id = if name == "toUpper" { 1000036 } else { 1000037 };
+                let int_val = self.coerce_to_int(args[0])?;
+                let i32_type = self.type_mapper().i32_type();
+                let char_val = self.builder()
+                    .build_int_truncate(int_val, i32_type, "char_val")
+                    .map_err(|e| CodegenError::Internal(format!("{}: truncate failed: {:?}", name, e)))?;
+                let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
+                    CodegenError::Internal(format!("char conv {} not declared", name))
+                })?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[char_val.into()], name)
+                    .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", name, e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", name)))?;
+                let u32_val = result.into_int_value();
+                let extended = self.builder()
+                    .build_int_z_extend(u32_val, self.type_mapper().i64_type(), "char_ext")
+                    .map_err(|e| CodegenError::Internal(format!("{}: extend failed: {:?}", name, e)))?;
+                Ok(Some(self.int_to_ptr(extended)?.into()))
+            }
+
             _ => Err(CodegenError::Internal(format!(
                 "lower_builtin_direct: unhandled builtin '{}'",
                 name

@@ -1,0 +1,13 @@
+abcdefghijklmnopqrstuvwxyz
+ABCDEFGHIJKLMNOPQRSTUVWXYZ
+0123456789
+abcde
+xyz
+m
+
+bcd
+yxw
+26
+26
+10
+ABCDEF

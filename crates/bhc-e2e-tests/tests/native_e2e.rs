@@ -627,6 +627,17 @@ fn test_tier3_tuple_sections_native() {
     run_native_test("tier3_io/tuple_sections", Profile::Default);
 }
 
+// E.36: Char Enum ranges
+#[test]
+fn test_tier3_char_ranges_native() {
+    run_native_test("tier3_io/char_ranges", Profile::Default);
+}
+
+#[test]
+fn test_tier3_char_enum_step_native() {
+    run_native_test("tier3_io/char_enum_step", Profile::Default);
+}
+
 // =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================

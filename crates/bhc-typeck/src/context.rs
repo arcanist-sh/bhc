@@ -1282,13 +1282,13 @@ impl TyCtxt {
                         ),
                     )
                 }
-                // enumFromTo :: Int -> Int -> [Int]
+                // enumFromTo :: a -> a -> [a] (Enum a =>)
                 "enumFromTo" => {
-                    let list_int = Ty::List(Box::new(self.builtins.int_ty.clone()));
-                    Scheme::mono(Ty::fun(
-                        self.builtins.int_ty.clone(),
-                        Ty::fun(self.builtins.int_ty.clone(), list_int),
-                    ))
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(a.clone()), list_a)),
+                    )
                 }
                 // ord :: Char -> Int
                 "ord" => Scheme::mono(Ty::fun(
@@ -1319,11 +1319,11 @@ impl TyCtxt {
                     self.builtins.int_ty.clone(),
                     self.builtins.bool_ty.clone(),
                 )),
-                // succ, pred :: Int -> Int
-                "succ" | "pred" => Scheme::mono(Ty::fun(
-                    self.builtins.int_ty.clone(),
-                    self.builtins.int_ty.clone(),
-                )),
+                // succ, pred :: a -> a (Enum a =>)
+                "succ" | "pred" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
                 // (&) :: a -> (a -> b) -> b
                 "&" => Scheme::poly(
                     vec![a.clone(), b.clone()],
@@ -1480,25 +1480,25 @@ impl TyCtxt {
                     Ty::fun(self.builtins.int_ty.clone(), self.builtins.int_ty.clone()),
                 )),
                 "enumFrom" => {
-                    let list_int = Ty::List(Box::new(self.builtins.int_ty.clone()));
-                    Scheme::mono(Ty::fun(self.builtins.int_ty.clone(), list_int))
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), list_a))
                 }
                 "enumFromThen" => {
-                    let list_int = Ty::List(Box::new(self.builtins.int_ty.clone()));
-                    Scheme::mono(Ty::fun(
-                        self.builtins.int_ty.clone(),
-                        Ty::fun(self.builtins.int_ty.clone(), list_int),
-                    ))
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(a.clone()), list_a)),
+                    )
                 }
                 "enumFromThenTo" => {
-                    let list_int = Ty::List(Box::new(self.builtins.int_ty.clone()));
-                    Scheme::mono(Ty::fun(
-                        self.builtins.int_ty.clone(),
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(
+                        vec![a.clone()],
                         Ty::fun(
-                            self.builtins.int_ty.clone(),
-                            Ty::fun(self.builtins.int_ty.clone(), list_int),
+                            Ty::Var(a.clone()),
+                            Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(a.clone()), list_a)),
                         ),
-                    ))
+                    )
                 }
                 "foldl1" | "foldr1" => {
                     let list_a = Ty::List(Box::new(Ty::Var(a.clone())));

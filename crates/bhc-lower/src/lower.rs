@@ -1131,9 +1131,7 @@ fn lower_fun_bind(ctx: &mut LowerContext, fun_bind: &ast::FunBind) -> LowerResul
 
     // Look up the type signature if one was declared
     let sig = ctx.lookup_type_signature(name).cloned().map(|ty| {
-        // Convert AST type to a monomorphic scheme
-        // The type checker will handle generalization
-        bhc_types::Scheme::mono(lower_type(ctx, &ty))
+        lower_type_to_scheme(ctx, &ty)
     });
 
     Ok(hir::ValueDef {
@@ -1165,7 +1163,7 @@ fn lower_instance_method(
 
     // Look up the type signature if one was declared
     let sig = ctx.lookup_type_signature(name).cloned().map(|ty| {
-        bhc_types::Scheme::mono(lower_type(ctx, &ty))
+        lower_type_to_scheme(ctx, &ty)
     });
 
     Ok(hir::ValueDef {
@@ -2351,6 +2349,64 @@ fn lower_lit(lit: &ast::Lit) -> hir::Lit {
 }
 
 /// Lower a type.
+/// Lower an AST type into a type scheme, preserving constraints.
+///
+/// If the type has a `Constrained` wrapper (`Eq a => a -> Bool`), the
+/// constraints are extracted and placed in the scheme. Free type variables
+/// in the type are quantified over.
+fn lower_type_to_scheme(ctx: &mut LowerContext, ty: &ast::Type) -> bhc_types::Scheme {
+    match ty {
+        ast::Type::Constrained(constraints, inner, _span) => {
+            let inner_ty = lower_type(ctx, inner);
+
+            // Lower AST constraints to bhc_types::Constraint
+            let type_constraints: Vec<bhc_types::Constraint> = constraints
+                .iter()
+                .map(|c| {
+                    let args: Vec<bhc_types::Ty> =
+                        c.args.iter().map(|a| lower_type(ctx, a)).collect();
+                    bhc_types::Constraint::new_multi(c.class.name, args, c.span)
+                })
+                .collect();
+
+            // Collect free type variables for quantification
+            let mut fvs = inner_ty.free_vars();
+            for c in &type_constraints {
+                for arg in &c.args {
+                    for v in arg.free_vars() {
+                        if !fvs.iter().any(|fv| fv.id == v.id) {
+                            fvs.push(v);
+                        }
+                    }
+                }
+            }
+
+            if fvs.is_empty() && type_constraints.is_empty() {
+                bhc_types::Scheme::mono(inner_ty)
+            } else {
+                bhc_types::Scheme::qualified(fvs, type_constraints, inner_ty)
+            }
+        }
+        ast::Type::Forall(vars, inner, _) => {
+            // Handle explicit forall: `forall a. C a => a -> a`
+            let ty_vars: Vec<bhc_types::TyVar> = vars
+                .iter()
+                .map(|v| bhc_types::TyVar::new_star(v.name.name.as_u32()))
+                .collect();
+            let inner_scheme = lower_type_to_scheme(ctx, inner);
+            bhc_types::Scheme {
+                vars: ty_vars,
+                constraints: inner_scheme.constraints,
+                ty: inner_scheme.ty,
+            }
+        }
+        _ => {
+            // No constraints — produce a monomorphic scheme
+            bhc_types::Scheme::mono(lower_type(ctx, ty))
+        }
+    }
+}
+
 fn lower_type(ctx: &mut LowerContext, ty: &ast::Type) -> bhc_types::Ty {
     match ty {
         ast::Type::Var(tyvar, _) => {
@@ -2959,7 +3015,8 @@ fn lower_class_decl(ctx: &mut LowerContext, class: &ast::ClassDecl) -> LowerResu
                         .iter()
                         .map(|n| hir::MethodSig {
                             name: n.name,
-                            ty: bhc_types::Scheme::mono(lower_type(ctx, &sig.ty)),
+                            id: ctx.lookup_value(n.name).unwrap_or_else(|| ctx.fresh_def_id()),
+                            ty: lower_type_to_scheme(ctx, &sig.ty),
                             span: sig.span,
                         })
                         .collect::<Vec<_>>(),

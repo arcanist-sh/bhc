@@ -87,6 +87,11 @@ pub struct TyCtxt {
     /// Type schemes for definitions (`DefId` -> Scheme).
     pub(crate) def_schemes: FxHashMap<DefId, Scheme>,
 
+    /// DefIds that have explicit type signatures — their schemes should not
+    /// be modified by the finalization substitution step (the type variables
+    /// are universally quantified, not unification variables).
+    pub(crate) explicit_sig_defs: std::collections::HashSet<DefId>,
+
     /// Maps constructor DefId to named field definitions (name, type) pairs.
     /// Used for record construction type checking with out-of-order fields.
     pub(crate) con_field_defs: FxHashMap<DefId, Vec<(Symbol, Ty)>>,
@@ -97,6 +102,11 @@ pub struct TyCtxt {
 
     /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
     pub(crate) overloaded_strings: bool,
+
+    /// Classes defined by user code (from HIR ClassDef items).
+    /// Constraints for these classes flow through dict-passing.
+    /// Builtin classes (Show, Eq, Monad, MonadState, etc.) are handled by codegen.
+    pub(crate) user_defined_classes: rustc_hash::FxHashSet<Symbol>,
 }
 
 impl TyCtxt {
@@ -112,9 +122,11 @@ impl TyCtxt {
             file_id,
             expr_types: FxHashMap::default(),
             def_schemes: FxHashMap::default(),
+            explicit_sig_defs: std::collections::HashSet::new(),
             con_field_defs: FxHashMap::default(),
             constraints: Vec::new(),
             overloaded_strings: false,
+            user_defined_classes: rustc_hash::FxHashSet::default(),
         }
     }
 
@@ -146,6 +158,29 @@ impl TyCtxt {
     /// must have a `Num` instance.
     pub fn emit_constraint(&mut self, class: Symbol, ty: Ty, span: bhc_span::Span) {
         self.constraints.push(Constraint::new(class, ty, span));
+    }
+
+    /// Emit a type class constraint with multiple type arguments.
+    ///
+    /// Used for multi-parameter type classes and for emitting constraints
+    /// from type schemes during instantiation.
+    pub fn emit_constraint_multi(
+        &mut self,
+        class: Symbol,
+        args: Vec<Ty>,
+        span: bhc_span::Span,
+    ) {
+        self.constraints
+            .push(Constraint::new_multi(class, args, span));
+    }
+
+    /// Check if a class was defined by user code (not a builtin).
+    ///
+    /// Only user-defined class constraints are emitted during instantiation
+    /// for dict-passing. Builtin classes (Show, Eq, Monad, MonadState, etc.)
+    /// are handled by codegen and their constraints are not emitted.
+    pub fn is_user_defined_class(&self, class: Symbol) -> bool {
+        self.user_defined_classes.contains(&class)
     }
 
     /// Apply the current substitution to all collected constraints.
@@ -273,6 +308,86 @@ impl TyCtxt {
             let ty = self.subst.apply(&constraint.args[0]);
             diagnostics::emit_no_instance(self, constraint.class, &ty, constraint.span);
         }
+    }
+
+    /// Solve constraints accumulated since `start_idx`, returning unsolved ones.
+    ///
+    /// Unlike `solve_constraints()`, this does NOT emit errors for unsolved
+    /// constraints. Instead, it returns them so they can be incorporated into
+    /// a type scheme via `generalize_with_constraints()`.
+    ///
+    /// Constraints before `start_idx` are left untouched.
+    pub fn solve_constraints_partition(&mut self, start_idx: usize) -> Vec<Constraint> {
+        // Apply substitution to the new constraints
+        for c in self.constraints[start_idx..].iter_mut() {
+            c.args = c.args.iter().map(|t| self.subst.apply(t)).collect();
+        }
+
+        // Extract only the new constraints (leave earlier ones in place)
+        let new_constraints: Vec<Constraint> = self.constraints.drain(start_idx..).collect();
+
+        let mut unsolved = Vec::new();
+
+        for constraint in new_constraints {
+            if constraint.args.is_empty() {
+                continue;
+            }
+
+            // Apply substitution to all constraint arguments
+            let args: Vec<Ty> = constraint
+                .args
+                .iter()
+                .map(|t| self.subst.apply(t))
+                .collect();
+
+            // Try to solve the constraint
+            if self.try_solve_constraint_recursive(&constraint.class, &args, 0) {
+                continue;
+            }
+
+            // Check for built-in instances (single-arg only)
+            if args.len() == 1 && self.is_builtin_instance(constraint.class, &args[0]) {
+                continue;
+            }
+
+            // If all args are type variables, try defaulting (single-arg only)
+            if args.len() == 1 {
+                if let Ty::Var(ref v) = args[0] {
+                    if self.try_default_constraint(constraint.class, v) {
+                        continue;
+                    }
+                }
+            }
+
+            // Check if the constraint is on concrete types (no type variables).
+            // If so, it's an unsolvable error, not a deferred constraint.
+            let has_type_vars = args.iter().any(|t| !t.free_vars().is_empty());
+            if !has_type_vars {
+                // Concrete constraint that can't be solved — this is a type error
+                // (e.g., Num Bool from `if 42 then ...`)
+                let args_str = args
+                    .iter()
+                    .map(|t| format!("{:?}", t))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.diag.emit(Diagnostic::error(format!(
+                    "No instance for `{} {}`",
+                    constraint.class.as_str(),
+                    args_str
+                )));
+                continue;
+            }
+
+            // Constraint involves type variables and can't be resolved yet —
+            // return it for generalization into the type scheme
+            unsolved.push(Constraint::new_multi(
+                constraint.class,
+                args,
+                constraint.span,
+            ));
+        }
+
+        unsolved
     }
 
     /// Try to solve a constraint recursively, checking instance contexts.
@@ -2924,14 +3039,40 @@ impl TyCtxt {
 
         self.env.register_class(info);
 
+        // Track this as a user-defined class for dict-passing
+        self.user_defined_classes.insert(class.name);
+
         // Register class methods as globally available functions.
-        // Each method gets its declared type scheme, which includes the class
-        // constraint implicitly through the type variables.
+        // Each method gets its declared type scheme with the class constraint
+        // added (it's implicit from the class declaration).
         for method in &class.methods {
-            // The method's type scheme already has the correct form from lowering.
-            // We register it globally so expressions can reference the method.
+            let mut method_scheme = method.ty.clone();
+
+            // Add the class constraint to the method's scheme if not already present.
+            // For example, `describe :: a -> String` in `class Describable a` becomes
+            // `describe :: Describable a => a -> String`.
+            if !class.params.is_empty() {
+                let class_constraint = Constraint::new_multi(
+                    class.name,
+                    class.params.iter().map(|p| Ty::Var(p.clone())).collect(),
+                    method.span,
+                );
+                if !method_scheme.constraints.iter().any(|c| c.class == class.name) {
+                    method_scheme.constraints.push(class_constraint);
+                }
+                // Ensure type variables from the class are in the scheme's vars
+                for param in &class.params {
+                    if !method_scheme.vars.iter().any(|v| v.id == param.id) {
+                        method_scheme.vars.push(param.clone());
+                    }
+                }
+            }
+
             self.env
-                .insert_global_by_name(method.name, method.ty.clone());
+                .insert_global_by_name(method.name, method_scheme.clone());
+
+            // Also store by DefId so hir-to-core can look it up
+            self.def_schemes.insert(method.id, method_scheme);
         }
 
         // Type-check default method implementations.
@@ -3081,6 +3222,9 @@ impl TyCtxt {
                 self.check_item(item);
             }
             BindingGroup::Recursive(items) => {
+                // Save constraint count for the whole recursive group
+                let constraint_start = self.constraints.len();
+
                 // For recursive groups, first add all bindings with fresh type variables
                 let mut temp_schemes: Vec<(DefId, Scheme)> = Vec::new();
 
@@ -3101,10 +3245,20 @@ impl TyCtxt {
                     self.check_item(item);
                 }
 
-                // Generalize the types
+                // Solve constraints accumulated during this group's inference
+                let unsolved = self.solve_constraints_partition(constraint_start);
+
+                // Generalize the types with any unsolved constraints
                 for (def_id, _) in temp_schemes {
                     if let Some(scheme) = self.def_schemes.get(&def_id) {
-                        let generalized = self.generalize(&scheme.ty);
+                        let generalized = if unsolved.is_empty() {
+                            self.generalize(&scheme.ty)
+                        } else {
+                            self.generalize_with_constraints(
+                                &scheme.ty,
+                                unsolved.clone(),
+                            )
+                        };
                         self.def_schemes.insert(def_id, generalized.clone());
                         self.env.insert_global(def_id, generalized);
                     }
@@ -3134,6 +3288,9 @@ impl TyCtxt {
 
     /// Check a value definition.
     fn check_value_def(&mut self, value_def: &ValueDef) {
+        // Save constraint count for per-binding scoping
+        let constraint_start = self.constraints.len();
+
         // If there's a type signature, use it; otherwise infer
         let declared_ty = value_def.sig.as_ref().map(|s| s.ty.clone());
 
@@ -3145,12 +3302,25 @@ impl TyCtxt {
             self.unify(declared, &inferred_ty, value_def.span);
         }
 
+        // Solve constraints accumulated during this binding's inference.
+        // Unsolved constraints (involving type variables) become part of the scheme.
+        let unsolved = self.solve_constraints_partition(constraint_start);
+
         // Generalize and store the scheme
         let final_ty = self.apply_subst(&inferred_ty);
-        let scheme = value_def
-            .sig
-            .as_ref()
-            .map_or_else(|| self.generalize(&final_ty), Clone::clone);
+        let scheme = if let Some(sig) = &value_def.sig {
+            // Has explicit type signature — use it (it already has constraints).
+            // Mark as explicit so finalization doesn't substitute away the
+            // universally quantified type variables.
+            self.explicit_sig_defs.insert(value_def.id);
+            sig.clone()
+        } else if unsolved.is_empty() {
+            // No unsolved constraints — simple generalization
+            self.generalize(&final_ty)
+        } else {
+            // Unsolved constraints — generalize with them
+            self.generalize_with_constraints(&final_ty, unsolved)
+        };
 
         self.def_schemes.insert(value_def.id, scheme.clone());
         self.env.insert_global(value_def.id, scheme);
@@ -3232,34 +3402,77 @@ impl TyCtxt {
 
         // Apply final substitution to all definition schemes
         // Also clean up quantified variables that have been resolved
+        let explicit_sig_defs = &self.explicit_sig_defs;
         let def_schemes = self
             .def_schemes
             .into_iter()
             .map(|(id, scheme)| {
+                // For functions with explicit type signatures, preserve the original
+                // scheme as-is. The type variables are universally quantified and
+                // should not be resolved by unification with call-site types.
+                if explicit_sig_defs.contains(&id) {
+                    return (id, scheme);
+                }
+
                 let applied_ty = self.subst.apply(&scheme.ty);
-                // Only keep quantified variables that are still free in the type
-                let remaining_free_vars = applied_ty.free_vars();
-                let remaining_free_var_ids: std::collections::HashSet<u32> =
-                    remaining_free_vars.iter().map(|v| v.id).collect();
-                let remaining_vars: Vec<_> = scheme
+
+                // Apply substitution to constraint args too, so type variable IDs
+                // stay consistent between the type and constraints
+                let applied_constraints: Vec<_> = scheme
+                    .constraints
+                    .into_iter()
+                    .map(|c| {
+                        let applied_args: Vec<Ty> = c
+                            .args
+                            .iter()
+                            .map(|arg| self.subst.apply(arg))
+                            .collect();
+                        Constraint::new_multi(c.class, applied_args, c.span)
+                    })
+                    .collect();
+
+                // Collect all free vars from both the type and constraints
+                let mut all_free_vars = applied_ty.free_vars();
+                for c in &applied_constraints {
+                    for arg in &c.args {
+                        for v in arg.free_vars() {
+                            if !all_free_vars.iter().any(|fv| fv.id == v.id) {
+                                all_free_vars.push(v);
+                            }
+                        }
+                    }
+                }
+                let all_free_var_ids: std::collections::HashSet<u32> =
+                    all_free_vars.iter().map(|v| v.id).collect();
+
+                // Rebuild vars from free vars in the applied type and constraints.
+                // First try to keep original vars that are still free,
+                // then add any new free vars from substitution.
+                let mut remaining_vars: Vec<_> = scheme
                     .vars
                     .into_iter()
-                    .filter(|v| remaining_free_var_ids.contains(&v.id))
+                    .filter(|v| all_free_var_ids.contains(&v.id))
                     .collect();
+                let remaining_var_ids: std::collections::HashSet<u32> =
+                    remaining_vars.iter().map(|v| v.id).collect();
+                for fv in &all_free_vars {
+                    if !remaining_var_ids.contains(&fv.id) {
+                        remaining_vars.push(fv.clone());
+                    }
+                }
+
                 // Filter constraints to only those relevant to remaining variables
-                let remaining_constraints: Vec<_> = scheme
-                    .constraints
+                let remaining_constraints: Vec<_> = applied_constraints
                     .into_iter()
                     .filter(|c| {
                         c.args.iter().any(|arg| {
-                            let arg_ty = self.subst.apply(arg);
-                            arg_ty
-                                .free_vars()
+                            arg.free_vars()
                                 .iter()
-                                .any(|v| remaining_free_var_ids.contains(&v.id))
+                                .any(|v| all_free_var_ids.contains(&v.id))
                         })
                     })
                     .collect();
+
                 (
                     id,
                     Scheme {
@@ -3295,6 +3508,16 @@ impl TyCtxt {
     #[must_use]
     pub fn generalize(&self, ty: &Ty) -> Scheme {
         crate::generalize::generalize(self, ty)
+    }
+
+    /// Generalize a type with constraints (implemented in generalize.rs).
+    #[must_use]
+    pub fn generalize_with_constraints(
+        &self,
+        ty: &Ty,
+        constraints: Vec<Constraint>,
+    ) -> Scheme {
+        crate::generalize::generalize_with_constraints(self, ty, constraints)
     }
 
     /// Infer the type of an expression (implemented in infer.rs).

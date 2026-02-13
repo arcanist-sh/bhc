@@ -14,7 +14,7 @@ use bhc_intern::Symbol;
 use bhc_span::Span;
 use bhc_types::{Constraint, Kind, Ty, TyCon};
 
-use crate::context::LowerContext;
+use crate::context::{has_type_variables, LowerContext};
 use crate::pattern::lower_pat_to_alt;
 use crate::{LowerError, LowerResult};
 
@@ -76,11 +76,7 @@ pub fn lower_expr(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<core:
 
         Expr::Con(def_ref) => lower_con(ctx, def_ref),
 
-        Expr::App(f, x, span) => {
-            let f_core = lower_expr(ctx, f)?;
-            let x_core = lower_expr(ctx, x)?;
-            Ok(core::Expr::App(Box::new(f_core), Box::new(x_core), *span))
-        }
+        Expr::App(f, x, span) => lower_app(ctx, f, x, *span),
 
         Expr::Lam(pats, body, span) => lower_lambda(ctx, pats, body, *span),
 
@@ -159,7 +155,8 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
 
     if let Some(name) = var_name {
         // Check if this is a class method
-        if let Some(class_name) = ctx.is_class_method(name) {
+        let is_method = ctx.is_class_method(name);
+        if let Some(class_name) = is_method {
             // This is a class method - we need to select it from a dictionary
             // Look for an in-scope dictionary for this class
             if let Some(dict_var) = ctx.lookup_dict(class_name) {
@@ -169,9 +166,14 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 {
                     return Ok(method_expr);
                 }
+            } else if ctx.is_user_class(class_name) {
+                // User-defined class method with no dict in scope.
+                // Don't try to resolve here — the App case in lower_app will
+                // handle resolution when the argument type is known.
+                let var = ctx.lookup_var(def_ref.def_id).cloned().unwrap();
+                return Ok(core::Expr::Var(var, def_ref.span));
             }
-            // No dictionary in scope - fall through to regular handling
-            // This might happen at top-level where instance resolution is needed
+            // Builtin class method with no dict — fall through to regular handling
         }
     }
 
@@ -189,33 +191,54 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         core::Expr::Var(placeholder, def_ref.span)
     };
 
-    // Check if the referenced function has constraints that need dictionary arguments
+    // Check if the referenced function has user-defined class constraints
+    // that need dictionary arguments.
+    // IMPORTANT: Only apply dictionary-passing for USER-DEFINED classes.
+    // Builtin classes (Eq, Ord, Num, Show, etc.) are handled by codegen's
+    // hardcoded dispatch and must NOT go through dictionary construction,
+    // because the builtin class registry uses DefIds that don't match the
+    // lowering context's actual DefId assignments.
     if let Some(scheme) = ctx.lookup_scheme(def_ref.def_id) {
-        if !scheme.constraints.is_empty() {
-            let constraints = scheme.constraints.clone();
+        // Filter to only user-defined class constraints
+        let user_constraints: Vec<_> = scheme
+            .constraints
+            .iter()
+            .filter(|c| ctx.is_user_class(c.class))
+            .cloned()
+            .collect();
 
-            // Apply dictionaries for each constraint
+        if !user_constraints.is_empty() {
+            // Check if ALL user-class constraints have type variables
+            // (meaning they can't be resolved yet — defer to App-level)
+            let all_deferred = user_constraints
+                .iter()
+                .all(|c| c.args.iter().any(has_type_variables));
+            if all_deferred {
+                return Ok(base_expr);
+            }
+
+            // Apply dictionaries for each user-defined class constraint
             let mut result = base_expr;
-            for constraint in &constraints {
+            for constraint in &user_constraints {
+                // Skip constraints with type variables (deferred to App)
+                if constraint.args.iter().any(has_type_variables) {
+                    continue;
+                }
+
                 // Try to resolve the dictionary
                 if let Some(dict_expr) = ctx.resolve_dictionary(constraint, def_ref.span) {
-                    result = core::Expr::App(Box::new(result), Box::new(dict_expr), def_ref.span);
+                    result =
+                        core::Expr::App(Box::new(result), Box::new(dict_expr), def_ref.span);
                 } else {
-                    // Dictionary not available - this indicates either:
-                    // 1. A type error that should have been caught earlier
-                    // 2. A constraint on a type variable where the dictionary should
-                    //    come from an enclosing scope but doesn't
-                    //
-                    // Generate an error expression that will fail at runtime with
-                    // a clear message. This is better than a placeholder variable
-                    // that would cause confusing "not in scope" errors.
+                    // Dictionary not available - generate an error expression
                     let error_msg = format!(
                         "No {} dictionary available for constraint {}",
                         constraint.class.as_str(),
                         format_constraint(constraint)
                     );
                     let error_expr = make_error_expr(&error_msg, def_ref.span);
-                    result = core::Expr::App(Box::new(result), Box::new(error_expr), def_ref.span);
+                    result =
+                        core::Expr::App(Box::new(result), Box::new(error_expr), def_ref.span);
                 }
             }
             return Ok(result);
@@ -223,6 +246,131 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
     }
 
     Ok(base_expr)
+}
+
+/// Try to infer the concrete type of an HIR expression.
+///
+/// Returns `Some(Ty)` for expressions with obvious types:
+/// - Constructors: look up the constructor's type name
+/// - Int/Float/Char/String literals: return the corresponding type
+/// - Other expressions: return None (type not inferrable without type checker)
+fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
+    match expr {
+        Expr::Con(def_ref) => {
+            // Look up the constructor's data type
+            if let Some(con_info) = ctx.lookup_constructor(def_ref.def_id) {
+                Some(Ty::Con(TyCon::new(con_info.type_name, Kind::Star)))
+            } else {
+                None
+            }
+        }
+        Expr::Lit(lit, _) => match lit {
+            Lit::Int(_) => Some(Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star))),
+            Lit::Float(_) => Some(Ty::Con(TyCon::new(Symbol::intern("Double"), Kind::Star))),
+            Lit::Char(_) => Some(Ty::Con(TyCon::new(Symbol::intern("Char"), Kind::Star))),
+            Lit::String(_) => Some(Ty::List(Box::new(Ty::Con(TyCon::new(
+                Symbol::intern("Char"),
+                Kind::Star,
+            ))))),
+        },
+        _ => None,
+    }
+}
+
+/// Lower a function application, handling dictionary-passing for class methods
+/// and constrained functions when the argument type is known.
+///
+/// When `f` is a class method or constrained function and we can infer the
+/// argument type, we resolve dictionaries at this concrete type. This handles
+/// cases like `describe Red` where `describe` is a class method of `Describable`
+/// and `Red` is a `Color` constructor.
+fn lower_app(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<core::Expr> {
+    // Check if f is a Var referencing a class method or constrained function
+    if let Expr::Var(def_ref) = f {
+        if let Some(var) = ctx.lookup_var(def_ref.def_id).cloned() {
+            let method_name = var.name;
+
+            // Case 1: User-defined class method with no dict in scope
+            // Only apply dictionary resolution for user-defined classes.
+            // Builtin classes (Eq, Ord, Num, Show, etc.) are handled by codegen.
+            if let Some(class_name) = ctx.is_class_method(method_name) {
+                if ctx.is_user_class(class_name) && ctx.lookup_dict(class_name).is_none() {
+                    // No dict in scope — try to resolve at concrete type from argument
+                    let inferred = try_infer_arg_type(ctx, x);
+                    if let Some(concrete_ty) = inferred {
+                        let resolved = ctx.resolve_method_at_concrete_type(
+                            method_name,
+                            class_name,
+                            &concrete_ty,
+                            span,
+                        );
+                        if let Some(method_expr) = resolved {
+                            // Apply the resolved method to the lowered argument
+                            let x_core = lower_expr(ctx, x)?;
+                            return Ok(core::Expr::App(
+                                Box::new(method_expr),
+                                Box::new(x_core),
+                                span,
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Case 2: Constrained function with unresolved type-variable constraints
+            if let Some(scheme) = ctx.lookup_scheme(def_ref.def_id) {
+                let has_unresolved = scheme.constraints.iter().any(|c| {
+                    // Only user-defined classes (not builtins like Show/Eq/Ord/Num)
+                    ctx.is_user_class(c.class)
+                        && c.args.iter().any(has_type_variables)
+                });
+                if has_unresolved {
+                    if let Some(concrete_ty) = try_infer_arg_type(ctx, x) {
+                        // Resolve dictionaries with the concrete type substituted in
+                        let constraints = scheme.constraints.clone();
+                        let mut result =
+                            core::Expr::Var(var.clone(), def_ref.span);
+
+                        for constraint in &constraints {
+                            if ctx.is_user_class(constraint.class)
+                                && constraint.args.iter().any(has_type_variables)
+                            {
+                                // Replace type variables with the concrete type
+                                let concrete_constraint = Constraint::new(
+                                    constraint.class,
+                                    concrete_ty.clone(),
+                                    constraint.span,
+                                );
+                                if let Some(dict_expr) =
+                                    ctx.resolve_dictionary(&concrete_constraint, span)
+                                {
+                                    result = core::Expr::App(
+                                        Box::new(result),
+                                        Box::new(dict_expr),
+                                        span,
+                                    );
+                                }
+                            }
+                        }
+
+                        // Now apply the argument
+                        let x_core = lower_expr(ctx, x)?;
+                        return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
+                    }
+                }
+            }
+        }
+    }
+
+    // Default: lower f and x normally
+    let f_core = lower_expr(ctx, f)?;
+    let x_core = lower_expr(ctx, x)?;
+    Ok(core::Expr::App(Box::new(f_core), Box::new(x_core), span))
 }
 
 /// Lower a type application expression.
@@ -243,14 +391,18 @@ fn lower_type_app(
         if let Some(var) = ctx.lookup_var(def_ref.def_id) {
             let method_name = var.name;
 
-            // Check if this is a class method
+            // Check if this is a user-defined class method
+            // Only apply dictionary resolution for user-defined classes.
+            // Builtin classes (Eq, Ord, Num, Show, etc.) are handled by codegen.
             if let Some(class_name) = ctx.is_class_method(method_name) {
-                // This is a class method being instantiated at a concrete type
-                // Construct the dictionary and select the method from it
-                if let Some(method_expr) =
-                    ctx.resolve_method_at_concrete_type(method_name, class_name, ty, span)
-                {
-                    return Ok(method_expr);
+                if ctx.is_user_class(class_name) {
+                    // This is a user-defined class method being instantiated at a concrete type
+                    // Construct the dictionary and select the method from it
+                    if let Some(method_expr) =
+                        ctx.resolve_method_at_concrete_type(method_name, class_name, ty, span)
+                    {
+                        return Ok(method_expr);
+                    }
                 }
                 // Fall through to regular handling if resolution fails
             }

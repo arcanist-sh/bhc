@@ -666,6 +666,17 @@ fn test_tier3_readfile_native() {
     run_native_test("tier3_io/readfile", Profile::Default);
 }
 
+// E.39: User-defined typeclasses with dictionary passing
+#[test]
+fn test_tier3_user_typeclass_native() {
+    run_native_test("tier3_io/user_typeclass", Profile::Default);
+}
+
+#[test]
+fn test_tier3_multi_method_class_native() {
+    run_native_test("tier3_io/multi_method_class", Profile::Default);
+}
+
 // =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================

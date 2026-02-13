@@ -34,8 +34,8 @@ use crate::context::TyCtxt;
 /// let ty = instantiate(ctx, &scheme);
 /// ```
 pub fn instantiate(ctx: &mut TyCtxt, scheme: &Scheme) -> Ty {
-    // If monomorphic, no instantiation needed
-    if scheme.is_mono() {
+    // If monomorphic and no constraints, no instantiation needed
+    if scheme.is_mono() && scheme.constraints.is_empty() {
         return scheme.ty.clone();
     }
 
@@ -44,6 +44,24 @@ pub fn instantiate(ctx: &mut TyCtxt, scheme: &Scheme) -> Ty {
     for var in &scheme.vars {
         let fresh = ctx.fresh_ty_var_with_kind(var.kind.clone());
         subst.insert(var.id, Ty::Var(fresh));
+    }
+
+    // Emit substituted constraints from the scheme for user-defined classes.
+    // Builtin class constraints (Show, Eq, Monad, MonadState, etc.) are
+    // handled by codegen and don't need dict-passing infrastructure.
+    for constraint in &scheme.constraints {
+        if ctx.is_user_defined_class(constraint.class) {
+            let substituted_args: Vec<Ty> = constraint
+                .args
+                .iter()
+                .map(|t| substitute(t, &subst))
+                .collect();
+            ctx.emit_constraint_multi(
+                constraint.class,
+                substituted_args,
+                constraint.span,
+            );
+        }
     }
 
     // Apply substitution to the type

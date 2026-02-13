@@ -981,6 +981,7 @@ fn test_class_declaration() {
         supers: vec![],
         methods: vec![MethodSig {
             name: Symbol::intern("=="),
+            id: DefId::new(0),
             ty: method_scheme.clone(),
             span: Span::DUMMY,
         }],
@@ -1032,11 +1033,13 @@ fn test_class_with_multiple_methods() {
         methods: vec![
             MethodSig {
                 name: Symbol::intern("compare"),
+                id: DefId::new(0),
                 ty: compare_scheme,
                 span: Span::DUMMY,
             },
             MethodSig {
                 name: Symbol::intern("<"),
+                id: DefId::new(0),
                 ty: lt_scheme,
                 span: Span::DUMMY,
             },
@@ -1080,6 +1083,7 @@ fn test_instance_declaration() {
         supers: vec![],
         methods: vec![MethodSig {
             name: Symbol::intern("myEq"),
+            id: DefId::new(0),
             ty: myeq_scheme,
             span: Span::DUMMY,
         }],
@@ -1157,11 +1161,13 @@ fn test_instance_with_multiple_methods() {
         methods: vec![
             MethodSig {
                 name: Symbol::intern("isZero"),
+                id: DefId::new(0),
                 ty: is_zero_scheme,
                 span: Span::DUMMY,
             },
             MethodSig {
                 name: Symbol::intern("isPositive"),
+                id: DefId::new(0),
                 ty: is_positive_scheme,
                 span: Span::DUMMY,
             },
@@ -1251,6 +1257,7 @@ fn test_functional_dependency_type_inference() {
         supers: vec![],
         methods: vec![MethodSig {
             name: Symbol::intern("convert"),
+            id: DefId::new(0),
             ty: convert_scheme,
             span: Span::DUMMY,
         }],
@@ -1335,11 +1342,13 @@ fn test_fundep_bidirectional() {
         methods: vec![
             MethodSig {
                 name: Symbol::intern("to"),
+                id: DefId::new(0),
                 ty: to_scheme,
                 span: Span::DUMMY,
             },
             MethodSig {
                 name: Symbol::intern("from"),
+                id: DefId::new(0),
                 ty: from_scheme,
                 span: Span::DUMMY,
             },

@@ -182,23 +182,26 @@ mod tests {
 
     #[test]
     fn test_constrained_function_gets_dict_lambdas() {
-        // Create a constrained function: f :: Num a => a -> a
+        // Create a constrained function: f :: MyNum a => a -> a
         // f x = x
+        //
+        // Uses a user-defined class "MyNum" (not the builtin "Num") because
+        // dictionary-passing only applies to user-defined classes.
         let f_def_id = DefId::new(100);
         let x_def_id = DefId::new(101);
 
-        let num_class = Symbol::intern("Num");
-        let a_var = TyVar::new(0, Kind::Star); // Use numeric ID
+        let mynum_class = Symbol::intern("MyNum");
+        let a_var = TyVar::new(0, Kind::Star);
 
-        // Create a type scheme with Num constraint
+        // Create a type scheme with MyNum constraint
         let f_scheme = Scheme {
             vars: vec![a_var.clone()],
             constraints: vec![Constraint::new(
-                num_class,
+                mynum_class,
                 Ty::Var(a_var.clone()),
                 Span::default(),
             )],
-            ty: Ty::Fun(Box::new(Ty::Var(a_var.clone())), Box::new(Ty::Var(a_var))),
+            ty: Ty::Fun(Box::new(Ty::Var(a_var.clone())), Box::new(Ty::Var(a_var.clone()))),
         };
 
         // Create the HIR value definition
@@ -218,11 +221,39 @@ mod tests {
             span: Span::default(),
         };
 
+        // Create a class definition for MyNum so it's registered in the class registry
+        let class_def = bhc_hir::ClassDef {
+            id: DefId::new(150),
+            name: mynum_class,
+            params: vec![a_var.clone()],
+            fundeps: vec![],
+            supers: vec![],
+            methods: vec![bhc_hir::MethodSig {
+                name: Symbol::intern("myAdd"),
+                id: DefId::new(0),
+                ty: Scheme {
+                    vars: vec![],
+                    constraints: vec![],
+                    ty: Ty::Fun(
+                        Box::new(Ty::Var(TyVar::new(0, Kind::Star))),
+                        Box::new(Ty::Fun(
+                            Box::new(Ty::Var(TyVar::new(0, Kind::Star))),
+                            Box::new(Ty::Var(TyVar::new(0, Kind::Star))),
+                        )),
+                    ),
+                },
+                span: Span::default(),
+            }],
+            defaults: vec![],
+            assoc_types: vec![],
+            span: Span::default(),
+        };
+
         let module = HirModule {
             name: Symbol::intern("Test"),
             exports: None,
             imports: vec![],
-            items: vec![Item::Value(value_def)],
+            items: vec![Item::Class(class_def), Item::Value(value_def)],
             span: Span::default(),
             overloaded_strings: false,
         };
@@ -235,11 +266,14 @@ mod tests {
         assert!(result.is_ok());
         let core_module = result.unwrap();
 
-        // We should have exactly one binding
-        assert_eq!(core_module.bindings.len(), 1);
+        // Find the `f` binding (there may also be instance method bindings)
+        let f_bind = core_module.bindings.iter().find(|b| match b {
+            bhc_core::Bind::NonRec(var, _) => var.name.as_str() == "f",
+            _ => false,
+        });
+        assert!(f_bind.is_some(), "Should have binding for f");
 
-        // The binding should be for `f`
-        let bind = &core_module.bindings[0];
+        let bind = f_bind.unwrap();
         match bind {
             bhc_core::Bind::NonRec(var, expr) => {
                 assert_eq!(var.name.as_str(), "f");
@@ -249,8 +283,8 @@ mod tests {
                     bhc_core::Expr::Lam(dict_var, body, _) => {
                         // The dictionary parameter should have a name starting with $d
                         assert!(
-                            dict_var.name.as_str().starts_with("$dNum"),
-                            "Expected dictionary parameter starting with $dNum, got: {}",
+                            dict_var.name.as_str().starts_with("$dMyNum"),
+                            "Expected dictionary parameter starting with $dMyNum, got: {}",
                             dict_var.name.as_str()
                         );
 
@@ -295,6 +329,7 @@ mod tests {
             methods: vec![
                 bhc_hir::MethodSig {
                     name: Symbol::intern("myEq"),
+                    id: DefId::new(0),
                     ty: Scheme {
                         vars: vec![],
                         constraints: vec![],
@@ -313,6 +348,7 @@ mod tests {
                 },
                 bhc_hir::MethodSig {
                     name: Symbol::intern("myNeq"),
+                    id: DefId::new(0),
                     ty: Scheme {
                         vars: vec![],
                         constraints: vec![],
@@ -435,39 +471,42 @@ mod tests {
     #[test]
     fn test_dict_passing_at_call_site() {
         // Create two constrained functions:
-        // double :: Num a => a -> a
-        // double x = x + x
+        // double :: MyNum a => a -> a
+        // double x = x
         //
-        // quadruple :: Num a => a -> a
-        // quadruple x = double (double x)
+        // quadruple :: MyNum a => a -> a
+        // quadruple x = double x
         //
         // When we lower `quadruple`, the calls to `double` should pass
         // the dictionary variable from `quadruple`.
+        //
+        // Uses a user-defined class "MyNum" (not the builtin "Num") because
+        // dictionary-passing only applies to user-defined classes.
 
         let double_def_id = DefId::new(200);
         let quadruple_def_id = DefId::new(201);
         let x_def_id = DefId::new(202);
         let y_def_id = DefId::new(203);
 
-        let num_class = Symbol::intern("Num");
-        let a_var = TyVar::new(0, Kind::Star); // Use numeric ID
+        let mynum_class = Symbol::intern("MyNum");
+        let a_var = TyVar::new(0, Kind::Star);
 
-        // Create type scheme with Num constraint
-        let num_a_to_a = Scheme {
+        // Create type scheme with MyNum constraint
+        let mynum_a_to_a = Scheme {
             vars: vec![a_var.clone()],
             constraints: vec![Constraint::new(
-                num_class,
+                mynum_class,
                 Ty::Var(a_var.clone()),
                 Span::default(),
             )],
-            ty: Ty::Fun(Box::new(Ty::Var(a_var.clone())), Box::new(Ty::Var(a_var))),
+            ty: Ty::Fun(Box::new(Ty::Var(a_var.clone())), Box::new(Ty::Var(a_var.clone()))),
         };
 
         // double x = x (simplified - just returns x)
         let double_def = ValueDef {
             id: double_def_id,
             name: Symbol::intern("double"),
-            sig: Some(num_a_to_a.clone()),
+            sig: Some(mynum_a_to_a.clone()),
             equations: vec![Equation {
                 pats: vec![Pat::Var(Symbol::intern("x"), x_def_id, Span::default())],
                 guards: vec![],
@@ -484,7 +523,7 @@ mod tests {
         let quadruple_def = ValueDef {
             id: quadruple_def_id,
             name: Symbol::intern("quadruple"),
-            sig: Some(num_a_to_a.clone()),
+            sig: Some(mynum_a_to_a.clone()),
             equations: vec![Equation {
                 pats: vec![Pat::Var(Symbol::intern("y"), y_def_id, Span::default())],
                 guards: vec![],
@@ -504,26 +543,55 @@ mod tests {
             span: Span::default(),
         };
 
+        // Create a class definition for MyNum so it's registered
+        let class_def = bhc_hir::ClassDef {
+            id: DefId::new(250),
+            name: mynum_class,
+            params: vec![a_var],
+            fundeps: vec![],
+            supers: vec![],
+            methods: vec![bhc_hir::MethodSig {
+                name: Symbol::intern("myAdd"),
+                id: DefId::new(0),
+                ty: Scheme {
+                    vars: vec![],
+                    constraints: vec![],
+                    ty: Ty::Fun(
+                        Box::new(Ty::Var(TyVar::new(0, Kind::Star))),
+                        Box::new(Ty::Fun(
+                            Box::new(Ty::Var(TyVar::new(0, Kind::Star))),
+                            Box::new(Ty::Var(TyVar::new(0, Kind::Star))),
+                        )),
+                    ),
+                },
+                span: Span::default(),
+            }],
+            defaults: vec![],
+            assoc_types: vec![],
+            span: Span::default(),
+        };
+
         let module = HirModule {
             name: Symbol::intern("Test"),
             exports: None,
             imports: vec![],
-            items: vec![Item::Value(double_def), Item::Value(quadruple_def)],
+            items: vec![
+                Item::Class(class_def),
+                Item::Value(double_def),
+                Item::Value(quadruple_def),
+            ],
             span: Span::default(),
             overloaded_strings: false,
         };
 
         // Set up type schemes
         let mut type_schemes = TypeSchemeMap::default();
-        type_schemes.insert(double_def_id, num_a_to_a.clone());
-        type_schemes.insert(quadruple_def_id, num_a_to_a);
+        type_schemes.insert(double_def_id, mynum_a_to_a.clone());
+        type_schemes.insert(quadruple_def_id, mynum_a_to_a);
 
         let result = lower_module_with_defs(&module, None, Some(&type_schemes));
         assert!(result.is_ok());
         let core_module = result.unwrap();
-
-        // We should have two bindings
-        assert_eq!(core_module.bindings.len(), 2);
 
         // Find the quadruple binding
         let quadruple_bind = core_module.bindings.iter().find(|b| match b {
@@ -533,20 +601,19 @@ mod tests {
         assert!(quadruple_bind.is_some(), "Should have quadruple binding");
 
         // The quadruple function should have the structure:
-        // \$dNum -> \y -> (double $dNum) y
-        // where `double $dNum` shows the dictionary being passed
+        // \$dMyNum -> \y -> (double $dMyNum) y
+        // where `double $dMyNum` shows the dictionary being passed
         if let bhc_core::Bind::NonRec(_, expr) = quadruple_bind.unwrap() {
             // Check it's a lambda with dict param
             if let bhc_core::Expr::Lam(dict_var, body, _) = expr.as_ref() {
                 assert!(
-                    dict_var.name.as_str().starts_with("$dNum"),
+                    dict_var.name.as_str().starts_with("$dMyNum"),
                     "Outer lambda should bind dictionary"
                 );
 
                 // Inside should be another lambda for y
                 if let bhc_core::Expr::Lam(_, inner_body, _) = body.as_ref() {
                     // The inner body should contain an application of double with a dict
-                    // Let's just check that the core structure is built
                     fn count_apps(e: &bhc_core::Expr) -> usize {
                         match e {
                             bhc_core::Expr::App(f, x, _) => 1 + count_apps(f) + count_apps(x),
@@ -620,6 +687,7 @@ mod tests {
             supers: vec![],
             methods: vec![bhc_hir::MethodSig {
                 name: Symbol::intern("myEq"),
+                id: DefId::new(0),
                 ty: Scheme {
                     vars: vec![],
                     constraints: vec![],
@@ -931,6 +999,7 @@ mod tests {
             methods: vec![
                 bhc_hir::MethodSig {
                     name: Symbol::intern("myEq"),
+                    id: DefId::new(0),
                     ty: Scheme {
                         vars: vec![a_var.clone()],
                         constraints: vec![],
@@ -949,6 +1018,7 @@ mod tests {
                 },
                 bhc_hir::MethodSig {
                     name: Symbol::intern("myNeq"),
+                    id: DefId::new(0),
                     ty: Scheme {
                         vars: vec![a_var.clone()],
                         constraints: vec![],

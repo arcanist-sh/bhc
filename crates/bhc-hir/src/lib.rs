@@ -563,6 +563,8 @@ pub struct AssocTypeSig {
 pub struct MethodSig {
     /// The method name.
     pub name: Symbol,
+    /// The definition ID (from name resolution).
+    pub id: DefId,
     /// The method type (with class constraint implicit).
     pub ty: Scheme,
     /// Source span.

@@ -27856,10 +27856,24 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ) -> CodegenResult<FunctionValue<'ctx>> {
         let param_count = self.count_lambda_params(expr);
 
-        // Only use fallback typing for functions with parameters and Error types
-        // For type variables, lower_function_type handles them correctly (as pointers)
-        let fn_type = if param_count > 0 && matches!(&var.ty, Ty::Error) {
-            // Fallback for Error types only - use pointers for uniform calling convention
+        // Count type-level parameters for comparison
+        let type_param_count = {
+            let mut count = 0;
+            let mut current = &var.ty;
+            while let Ty::Fun(_, ret) = current {
+                count += 1;
+                current = ret;
+            }
+            count
+        };
+
+        // Use expression-based (pointer) typing when:
+        // 1. Error types (derived/generated bindings)
+        // 2. Expression has more lambdas than the type suggests (dictionary params
+        //    from typeclass constraints are not reflected in the Haskell type)
+        let fn_type = if param_count > 0
+            && (matches!(&var.ty, Ty::Error) || param_count > type_param_count)
+        {
             let tm = self.type_mapper();
 
             // All functions take (env_ptr, args...) for uniform closure calling convention
@@ -29952,10 +29966,37 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 Ok(Some(self.int_to_ptr(extended)?.into()))
             }
 
-            _ => Err(CodegenError::Internal(format!(
-                "lower_builtin_direct: unhandled builtin '{}'",
-                name
-            ))),
+            _ => {
+                // Check for field selector pattern: $sel_N
+                if name.starts_with("$sel_") {
+                    if let Ok(field_index) = name[5..].parse::<u32>() {
+                        let tuple_ptr = args[0].into_pointer_value();
+                        let tm = self.type_mapper();
+                        let field_offset = 1 + field_index;
+                        let field_ptr = unsafe {
+                            self.builder()
+                                .build_gep(
+                                    tm.i64_type(),
+                                    tuple_ptr,
+                                    &[tm.i64_type().const_int(field_offset as u64, false)],
+                                    &format!("sel_field_ptr_{}", field_index),
+                                )
+                                .map_err(|e| {
+                                    CodegenError::Internal(format!("$sel_{} gep failed: {:?}", field_index, e))
+                                })?
+                        };
+                        let field_val = self
+                            .builder()
+                            .build_load(tm.ptr_type(), field_ptr, &format!("sel_field_{}", field_index))
+                            .map_err(|e| CodegenError::Internal(format!("$sel_{} load failed: {:?}", field_index, e)))?;
+                        return Ok(Some(field_val));
+                    }
+                }
+                Err(CodegenError::Internal(format!(
+                    "lower_builtin_direct: unhandled builtin '{}'",
+                    name
+                )))
+            }
         }
     }
 
@@ -31289,12 +31330,24 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         // Partial application: create a closure that captures the provided args
                         // and accepts the remaining args
                         return self.create_partial_builtin_closure(name, arity, &args);
+                    } else if n_provided == arity {
+                        // Exact application through builtin dispatch
+                        return self.lower_builtin(name, &args);
                     } else {
-                        // Saturated call through closure (shouldn't normally reach here since
-                        // is_saturated_builtin should catch it, but handle gracefully)
-                        let closure = self.create_builtin_closure(name, arity)?
-                            .ok_or_else(|| CodegenError::Internal(format!("failed to create closure for builtin: {}", name)))?;
-                        return self.lower_closure_call(closure, &args);
+                        // Over-application: call the builtin with its expected args,
+                        // then call the result (a closure/function) with remaining args.
+                        // This happens for e.g. App(App($sel_0, dict), x) where
+                        // $sel_0 has arity 1 but we have 2 args.
+                        let (builtin_args, remaining_args) = args.split_at(arity as usize);
+                        let result = self.lower_builtin(name, builtin_args)?;
+                        if let Some(result_val) = result {
+                            return self.lower_closure_call(result_val, remaining_args);
+                        } else {
+                            return Err(CodegenError::Internal(format!(
+                                "builtin {} returned no value for over-application",
+                                name
+                            )));
+                        }
                     }
                 }
 

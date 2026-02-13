@@ -62,7 +62,6 @@ pub fn generalize(ctx: &TyCtxt, ty: &Ty) -> Scheme {
 ///
 /// Similar to `generalize`, but also handles type class constraints
 /// that apply to the quantified variables.
-#[allow(dead_code)]
 pub fn generalize_with_constraints(
     ctx: &TyCtxt,
     ty: &Ty,

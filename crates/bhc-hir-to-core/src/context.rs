@@ -1078,8 +1078,9 @@ impl LowerContext {
         // (only works for concrete types)
         if let Some(ty) = constraint.args.first() {
             if !has_type_variables(ty) {
-                // Create a DictContext to construct the dictionary
-                let mut dict_ctx = DictContext::new(&self.class_registry);
+                // Create a DictContext with var_map so method_reference uses correct names
+                let mut dict_ctx =
+                    DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
                 let dict_expr = dict_ctx.get_dictionary(constraint, span)?;
 
                 // If the dictionary construction generated bindings, wrap the
@@ -1119,8 +1120,9 @@ impl LowerContext {
         // Create a constraint for the concrete type
         let constraint = Constraint::new(class_name, concrete_type.clone(), span);
 
-        // Construct the dictionary
-        let mut dict_ctx = DictContext::new(&self.class_registry);
+        // Construct the dictionary with var_map for correct method names
+        let mut dict_ctx =
+            DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
         let dict_expr = dict_ctx.get_dictionary(&constraint, span)?;
         let bindings = dict_ctx.take_bindings();
 
@@ -1175,6 +1177,48 @@ impl LowerContext {
             }
         }
         None
+    }
+
+    /// Check if a class name is a user-defined class (not a builtin like Eq, Ord, Show, etc.).
+    ///
+    /// This is used to determine whether dictionary-passing should be used for a class.
+    /// Builtin classes (Eq, Ord, Num, Show, etc.) are dispatched via hardcoded codegen,
+    /// while user-defined classes use the dictionary-passing transformation.
+    #[must_use]
+    pub fn is_user_class(&self, class_name: Symbol) -> bool {
+        static BUILTIN_CLASSES: &[&str] = &[
+            "Eq",
+            "Ord",
+            "Show",
+            "Read",
+            "Num",
+            "Integral",
+            "Fractional",
+            "Floating",
+            "Real",
+            "RealFrac",
+            "RealFloat",
+            "Enum",
+            "Bounded",
+            "Functor",
+            "Applicative",
+            "Monad",
+            "MonadFail",
+            "MonadIO",
+            "MonadTrans",
+            "MonadReader",
+            "MonadState",
+            "MonadError",
+            "MonadWriter",
+            "Foldable",
+            "Traversable",
+            "Semigroup",
+            "Monoid",
+            "IsString",
+        ];
+        let name_str = class_name.as_str();
+        !BUILTIN_CLASSES.contains(&name_str)
+            && self.class_registry.lookup_class(class_name).is_some()
     }
 
     /// Register a type class definition in the class registry.
@@ -1277,6 +1321,19 @@ impl LowerContext {
                     self.register_var(value_def.id, var);
                 }
                 Item::Class(class_def) => {
+                    // Register the class in the class registry FIRST so that
+                    // is_class_method() works when lowering value definitions
+                    // that reference class methods.
+                    self.register_class_def(class_def);
+
+                    // Register variables for class methods so that references
+                    // to them (via DefRef) can be resolved during lowering.
+                    for method_sig in &class_def.methods {
+                        let ty = self.lookup_type(method_sig.id);
+                        let var = self.named_var(method_sig.name, ty);
+                        self.register_var(method_sig.id, var);
+                    }
+
                     // Also register variables for default method implementations
                     for default_def in &class_def.defaults {
                         let ty = self.lookup_type(default_def.id);
@@ -1285,6 +1342,10 @@ impl LowerContext {
                     }
                 }
                 Item::Instance(instance_def) => {
+                    // Register the instance in the class registry FIRST so that
+                    // dictionary construction works when lowering value definitions.
+                    self.register_instance_def(instance_def);
+
                     // Pre-register instance method variables so they can be
                     // referenced during the lowering pass.
                     // Use $instance_{method}_{TypeName} naming convention
@@ -1410,8 +1471,7 @@ impl LowerContext {
                     // Type aliases don't produce bindings
                 }
                 Item::Class(class_def) => {
-                    // Register the class in the class registry for dictionary construction
-                    self.register_class_def(class_def);
+                    // Class already registered in first pass (register_class_def)
 
                     // Lower default method implementations
                     // Default methods need the class constraint, so we lower them specially
@@ -1422,8 +1482,7 @@ impl LowerContext {
                     }
                 }
                 Item::Instance(instance_def) => {
-                    // Register the instance in the class registry for dictionary construction
-                    self.register_instance_def(instance_def);
+                    // Instance already registered in first pass (register_instance_def)
 
                     // Lower instance method bodies to Core bindings.
                     // Each method in the instance provides an implementation that
@@ -1471,15 +1530,23 @@ impl LowerContext {
             .cloned()
             .ok_or_else(|| LowerError::Internal("missing variable for value def".into()))?;
 
-        // Check if the definition has type class constraints
-        let constraints = self
-            .lookup_scheme(value_def.id)
-            .map(|s| s.constraints.clone())
+        // Check if the definition has user-defined class constraints.
+        // Only user-defined classes use dictionary-passing; builtin classes
+        // (Eq, Ord, Num, Show, etc.) are dispatched via hardcoded codegen.
+        let scheme = self.lookup_scheme(value_def.id);
+        let user_constraints: Vec<_> = scheme
+            .map(|s| {
+                s.constraints
+                    .iter()
+                    .filter(|c| self.is_user_class(c.class))
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
 
-        // If there are constraints, create dictionary variables and push them into scope
-        // BEFORE compiling the body, so references in the body can use them.
-        let dict_vars: Vec<(Symbol, Var)> = constraints
+        // If there are user-defined class constraints, create dictionary variables
+        // and push them into scope BEFORE compiling the body.
+        let dict_vars: Vec<(Symbol, Var)> = user_constraints
             .iter()
             .map(|c| {
                 let dict_var = self.make_dict_var(c);
@@ -1777,7 +1844,7 @@ impl Default for LowerContext {
 }
 
 /// Check if a type contains type variables.
-fn has_type_variables(ty: &Ty) -> bool {
+pub(crate) fn has_type_variables(ty: &Ty) -> bool {
     match ty {
         Ty::Var(_) => true,
         Ty::Con(_) | Ty::Prim(_) | Ty::Error => false,

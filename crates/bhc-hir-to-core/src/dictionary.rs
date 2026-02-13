@@ -301,6 +301,11 @@ pub struct DictContext<'a> {
     pub dict_bindings: Vec<Bind>,
     /// Cache of already-constructed dictionaries (class, type) -> Var.
     dict_cache: FxHashMap<(Symbol, String), Var>,
+    /// Optional variable map for looking up registered variable names.
+    /// When set, method_reference uses the registered name instead of the
+    /// instance method name, which is important for instance methods that
+    /// have been renamed (e.g., `$instance_describe_Color`).
+    var_map: Option<FxHashMap<DefId, Var>>,
 }
 
 impl<'a> DictContext<'a> {
@@ -311,6 +316,21 @@ impl<'a> DictContext<'a> {
             fresh_counter: 1000, // Start high to avoid collisions
             dict_bindings: Vec::new(),
             dict_cache: FxHashMap::default(),
+            var_map: None,
+        }
+    }
+
+    /// Create a new dictionary context with a variable map for name resolution.
+    pub fn new_with_var_map(
+        registry: &'a ClassRegistry,
+        var_map: FxHashMap<DefId, Var>,
+    ) -> Self {
+        Self {
+            registry,
+            fresh_counter: 1000,
+            dict_bindings: Vec::new(),
+            dict_cache: FxHashMap::default(),
+            var_map: Some(var_map),
         }
     }
 
@@ -460,6 +480,14 @@ impl<'a> DictContext<'a> {
 
     /// Create a reference to a method implementation.
     fn method_reference(&self, def_id: DefId, span: Span) -> core::Expr {
+        // First, check the var_map for the registered variable name.
+        // This handles instance methods that have been renamed (e.g., $instance_describe_Color).
+        if let Some(var_map) = &self.var_map {
+            if let Some(var) = var_map.get(&def_id) {
+                return core::Expr::Var(var.clone(), span);
+            }
+        }
+
         // For transformer instance methods (DefIds 10000-10055), use qualified names
         // so codegen can distinguish ReaderT.>>= from IO's >>= etc.
         let name = self
@@ -568,10 +596,18 @@ pub fn select_method(
     let superclass_count = class_info.superclasses.len();
     let method_index = class_info.methods.iter().position(|m| *m == method_name)?;
 
+    let total_fields = superclass_count + class_info.methods.len();
+
+    // For single-field dictionaries (one method, no superclasses), the dictionary
+    // IS the method itself (make_tuple returns the element directly for len==1).
+    // No selector needed — just return the dict var.
+    if total_fields == 1 {
+        return Some(core::Expr::Var(dict_var.clone(), span));
+    }
+
     let field_index = superclass_count + method_index;
 
     // Generate a selector expression
-    // For now, use a simple tuple selector pattern
     Some(make_field_selector(dict_var, field_index, span))
 }
 

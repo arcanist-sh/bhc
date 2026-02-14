@@ -683,6 +683,17 @@ fn test_tier3_hk_typeclass_native() {
     run_native_test("tier3_io/hk_typeclass", Profile::Default);
 }
 
+// E.41: Default methods and superclass constraints
+#[test]
+fn test_tier3_default_method_native() {
+    run_native_test("tier3_io/default_method", Profile::Default);
+}
+
+#[test]
+fn test_tier3_superclass_native() {
+    run_native_test("tier3_io/superclass", Profile::Default);
+}
+
 // =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================

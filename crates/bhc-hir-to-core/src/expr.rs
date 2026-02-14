@@ -167,9 +167,16 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                     return Ok(method_expr);
                 }
             } else if ctx.is_user_class(class_name) {
-                // User-defined class method with no dict in scope.
-                // Don't try to resolve here — the App case in lower_app will
-                // handle resolution when the argument type is known.
+                // No direct dict in scope — try superclass extraction.
+                // If we have MyOrd in scope and need MyEq, extract MyEq from MyOrd.
+                if let Some(method_expr) =
+                    ctx.select_method_via_superclass(class_name, name, def_ref.span)
+                {
+                    return Ok(method_expr);
+                }
+                // Still no dict — don't try to resolve here.
+                // The App case in lower_app will handle resolution
+                // when the argument type is known.
                 let var = ctx.lookup_var(def_ref.def_id).cloned().unwrap();
                 return Ok(core::Expr::Var(var, def_ref.span));
             }
@@ -262,6 +269,15 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
                 Some(Ty::Con(TyCon::new(con_info.type_name, Kind::Star)))
             } else {
                 None
+            }
+        }
+        Expr::Var(def_ref) => {
+            // Look up the type of this variable from the type checker.
+            // Only return concrete (non-polymorphic) types.
+            let ty = ctx.lookup_type(def_ref.def_id);
+            match &ty {
+                Ty::Con(_) => Some(ty),
+                _ => None,
             }
         }
         Expr::Lit(lit, _) => match lit {

@@ -421,6 +421,14 @@ impl<'a> DictContext<'a> {
     /// This is crucial for polymorphic instances: when we match `instance Eq a => Eq [a]`
     /// against `Eq [Int]`, the substitution is `{a -> Int}`, and we need to
     /// recursively construct the dictionary for `Eq Int` (not `Eq a`).
+    ///
+    /// When an instance omits methods that have defaults, we use a two-phase approach:
+    /// 1. Build a "partial dict" with superclass dicts + instance methods + error placeholders
+    /// 2. Build the final dict, applying default functions to the partial dict
+    ///
+    /// This works because default methods are lowered as `\$dClass -> body` where
+    /// `body` uses `$sel_N $dClass` to call other class methods. Passing the partial
+    /// dict gives the default access to the instance-provided methods.
     fn construct_dictionary(
         &mut self,
         class: &ClassInfo,
@@ -428,54 +436,106 @@ impl<'a> DictContext<'a> {
         subst: &Subst,
         span: Span,
     ) -> Option<core::Expr> {
-        let mut fields: Vec<core::Expr> = Vec::new();
-
-        // First, add superclass dictionaries
+        // Build superclass dictionaries (shared by both paths)
+        let mut super_fields: Vec<core::Expr> = Vec::new();
         for (i, superclass) in class.superclasses.iter().enumerate() {
-            // Get the superclass instance type (may contain type variables)
             let super_ty = instance.superclass_instances.get(i)?;
-
-            // Apply the substitution to get the concrete superclass type
-            // e.g., for `instance Eq a => Eq [a]` matching `Eq [Int]`,
-            // super_ty is `a` and subst maps `a -> Int`, so we get `Int`
             let concrete_super_ty = subst.apply(super_ty);
-
-            // Recursively get the superclass dictionary for the concrete type
             let super_constraint = Constraint::new(*superclass, concrete_super_ty, span);
             let super_dict = self.get_dictionary(&super_constraint, span)?;
-            fields.push(super_dict);
+            super_fields.push(super_dict);
         }
 
-        // Then add method implementations
-        for method_name in &class.methods {
-            let method_expr = if let Some(&method_def_id) = instance.methods.get(method_name) {
-                // Instance provides this method
-                self.method_reference(method_def_id, span)
-            } else if let Some(&default_def_id) = class.defaults.get(method_name) {
-                // Use default implementation
-                self.method_reference(default_def_id, span)
-            } else {
-                // No implementation and no default - generate a runtime error
-                // This should normally be caught at type checking, but we generate
-                // a proper error expression rather than a placeholder variable
-                let error_msg = format!(
-                    "No implementation for method '{}' in instance {} {}",
-                    method_name.as_str(),
-                    instance.class.as_str(),
-                    instance
-                        .instance_types
-                        .iter()
-                        .map(|t| format!("{:?}", t))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-                make_error_expr(&error_msg, span)
-            };
-            fields.push(method_expr);
-        }
+        // Check if any defaults are needed
+        let needs_defaults = class
+            .methods
+            .iter()
+            .any(|m| !instance.methods.contains_key(m) && class.defaults.contains_key(m));
 
-        // Construct dictionary as a tuple
-        Some(make_tuple(fields, span))
+        if needs_defaults {
+            // Phase 1: Build partial dict with null placeholders for defaults.
+            // These slots are never accessed at runtime because the final dict
+            // replaces them with applied default methods. Using an int literal 0
+            // (null pointer) avoids the codegen issue where `error` (noreturn)
+            // would terminate the basic block during tuple construction.
+            // If a default method calls another default, this will segfault —
+            // a known limitation of E.41.
+            let mut partial_fields = super_fields.clone();
+            for method_name in &class.methods {
+                if let Some(&method_def_id) = instance.methods.get(method_name) {
+                    partial_fields.push(self.method_reference(method_def_id, span));
+                } else {
+                    partial_fields.push(core::Expr::Lit(
+                        core::Literal::Int(0),
+                        Ty::Error,
+                        span,
+                    ));
+                }
+            }
+
+            let partial_dict_var = self.fresh_var("$partial_dict", Ty::Error, span);
+            self.dict_bindings.push(Bind::NonRec(
+                partial_dict_var.clone(),
+                Box::new(make_tuple(partial_fields, span)),
+            ));
+
+            // Phase 2: Build final dict with applied defaults
+            let mut final_fields = super_fields;
+            for method_name in &class.methods {
+                if let Some(&method_def_id) = instance.methods.get(method_name) {
+                    final_fields.push(self.method_reference(method_def_id, span));
+                } else if let Some(&default_def_id) = class.defaults.get(method_name) {
+                    // Apply the default function to the partial dict.
+                    // Default is `\$dClass -> body`, so `default partial_dict`
+                    // produces the method implementation.
+                    let default_ref = self.method_reference(default_def_id, span);
+                    final_fields.push(core::Expr::App(
+                        Box::new(default_ref),
+                        Box::new(core::Expr::Var(partial_dict_var.clone(), span)),
+                        span,
+                    ));
+                } else {
+                    let error_msg = format!(
+                        "No implementation for method '{}' in instance {} {}",
+                        method_name.as_str(),
+                        instance.class.as_str(),
+                        instance
+                            .instance_types
+                            .iter()
+                            .map(|t| format!("{:?}", t))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                    final_fields.push(make_error_expr(&error_msg, span));
+                }
+            }
+
+            Some(make_tuple(final_fields, span))
+        } else {
+            // No defaults needed — straightforward dictionary construction
+            let mut fields = super_fields;
+            for method_name in &class.methods {
+                let method_expr =
+                    if let Some(&method_def_id) = instance.methods.get(method_name) {
+                        self.method_reference(method_def_id, span)
+                    } else {
+                        let error_msg = format!(
+                            "No implementation for method '{}' in instance {} {}",
+                            method_name.as_str(),
+                            instance.class.as_str(),
+                            instance
+                                .instance_types
+                                .iter()
+                                .map(|t| format!("{:?}", t))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                        make_error_expr(&error_msg, span)
+                    };
+                fields.push(method_expr);
+            }
+            Some(make_tuple(fields, span))
+        }
     }
 
     /// Create a reference to a method implementation.

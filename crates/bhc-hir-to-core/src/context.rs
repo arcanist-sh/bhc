@@ -1152,6 +1152,55 @@ impl LowerContext {
         Some(result)
     }
 
+    /// Select a method via superclass dictionary extraction.
+    ///
+    /// When a function has a `MyOrd a =>` constraint but calls `myEqual` (a method
+    /// of superclass `MyEq`), we need to:
+    /// 1. Extract the `MyEq` dictionary from the `MyOrd` dictionary
+    /// 2. Select `myEqual` from the extracted `MyEq` dictionary
+    ///
+    /// Returns the method expression if successful, or None if no superclass path exists.
+    pub fn select_method_via_superclass(
+        &mut self,
+        needed_class: Symbol,
+        method_name: Symbol,
+        span: Span,
+    ) -> Option<core::Expr> {
+        let (subclass, subclass_dict) = self.lookup_superclass_dict(needed_class)?;
+
+        // Extract the superclass dictionary from the subclass dictionary
+        let super_dict_expr = crate::dictionary::select_superclass(
+            subclass_dict,
+            subclass,
+            needed_class,
+            &self.class_registry,
+            span,
+        )?;
+
+        // Create a fresh variable to hold the extracted superclass dictionary
+        let temp_var = self.fresh_var(
+            &format!("$super_{}", needed_class.as_str()),
+            Ty::Error,
+            span,
+        );
+
+        // Select the method from the superclass dictionary
+        let method_expr = crate::dictionary::select_method(
+            &temp_var,
+            needed_class,
+            method_name,
+            &self.class_registry,
+            span,
+        )?;
+
+        // Wrap in a let binding: let $super_MyEq = $sel_0 $dMyOrd in $sel_N $super_MyEq
+        Some(core::Expr::Let(
+            Box::new(Bind::NonRec(temp_var, Box::new(super_dict_expr))),
+            Box::new(method_expr),
+            span,
+        ))
+    }
+
     /// Select a method from a dictionary.
     ///
     /// Given a dictionary variable and a method name, returns an expression
@@ -1289,13 +1338,24 @@ impl LowerContext {
         // Get the instance type (first type in the types list)
         let instance_type = instance_def.types.first().cloned().unwrap_or(Ty::Error);
 
-        // For superclass instances, we need to figure out what types satisfy
-        // the superclass constraints. For now, we assume the same instance type.
-        let superclass_instances = instance_def
-            .constraints
-            .iter()
-            .map(|_| instance_type.clone())
-            .collect();
+        // For superclass instances, use the CLASS's superclass list (not the
+        // instance's constraints, which may be empty). For each superclass,
+        // we assume the same instance type satisfies it.
+        let superclass_instances =
+            if let Some(class_info) = self.class_registry.lookup_class(instance_def.class) {
+                class_info
+                    .superclasses
+                    .iter()
+                    .map(|_| instance_type.clone())
+                    .collect()
+            } else {
+                // Builtin class not in registry — fall back to instance constraints
+                instance_def
+                    .constraints
+                    .iter()
+                    .map(|_| instance_type.clone())
+                    .collect()
+            };
 
         let instance_info = InstanceInfo {
             class: instance_def.class,

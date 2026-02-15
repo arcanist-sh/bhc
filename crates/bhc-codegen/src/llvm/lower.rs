@@ -27443,6 +27443,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Propagate language extensions from the Core module
         self.overloaded_strings = core_module.overloaded_strings;
 
+        // Register constructors from CoreModule metadata.
+        // This ensures all constructors defined in the module are known to codegen,
+        // even if they are only used as values (not in case alternatives).
+        for con in &core_module.constructors {
+            self.register_constructor(&con.name, con.tag, con.arity);
+            if let Some(ref type_name) = con.type_name {
+                if let Some(meta) = self.constructor_metadata.get_mut(&con.name) {
+                    if meta.type_name.is_none() {
+                        meta.type_name = Some(type_name.clone());
+                    }
+                }
+            }
+        }
+
         // Pre-pass: collect all constructor metadata from case alternatives
         // This ensures constructors are known before we try to lower applications
         for bind in &core_module.bindings {

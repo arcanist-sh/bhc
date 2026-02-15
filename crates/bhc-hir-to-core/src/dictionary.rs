@@ -476,7 +476,7 @@ impl<'a> DictContext<'a> {
             let partial_dict_var = self.fresh_var("$partial_dict", Ty::Error, span);
             self.dict_bindings.push(Bind::NonRec(
                 partial_dict_var.clone(),
-                Box::new(make_tuple(partial_fields, span)),
+                Box::new(make_dict(partial_fields, span)),
             ));
 
             // Phase 2: Build final dict with applied defaults
@@ -510,7 +510,7 @@ impl<'a> DictContext<'a> {
                 }
             }
 
-            Some(make_tuple(final_fields, span))
+            Some(make_dict(final_fields, span))
         } else {
             // No defaults needed — straightforward dictionary construction
             let mut fields = super_fields;
@@ -534,7 +534,7 @@ impl<'a> DictContext<'a> {
                     };
                 fields.push(method_expr);
             }
-            Some(make_tuple(fields, span))
+            Some(make_dict(fields, span))
         }
     }
 
@@ -658,12 +658,8 @@ pub fn select_method(
 
     let total_fields = superclass_count + class_info.methods.len();
 
-    // For single-field dictionaries (one method, no superclasses), the dictionary
-    // IS the method itself (make_tuple returns the element directly for len==1).
-    // No selector needed — just return the dict var.
-    if total_fields == 1 {
-        return Some(core::Expr::Var(dict_var.clone(), span));
-    }
+    // Note: even for single-method classes, the dictionary is always a proper
+    // tuple (padded by make_dict), so $sel_0 is always used.
 
     let field_index = superclass_count + method_index;
 
@@ -730,6 +726,24 @@ fn make_tuple(fields: Vec<core::Expr>, span: Span) -> core::Expr {
     }
 
     result
+}
+
+/// Build a dictionary tuple, padding single-element dictionaries to 2 elements.
+///
+/// Dictionaries are extracted with `$sel_N` which expects a proper tuple struct
+/// (tag + fields). When a class has only 1 method and no superclasses, the
+/// standard `make_tuple` would optimize away the tuple wrapper, causing
+/// `$sel_0` to fail. This function pads 1-element dictionaries with a
+/// dummy field to ensure a valid 2-tuple is always created.
+fn make_dict(fields: Vec<core::Expr>, span: Span) -> core::Expr {
+    if fields.len() == 1 {
+        // Pad to 2 elements so (,) creates a proper tuple for $sel_0
+        let mut padded = fields;
+        padded.push(core::Expr::Lit(core::Literal::Int(0), Ty::Error, span));
+        return make_tuple(padded, span);
+    }
+
+    make_tuple(fields, span)
 }
 
 /// Create an error expression that will fail at runtime with a message.

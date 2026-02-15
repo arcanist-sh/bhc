@@ -6,15 +6,15 @@
 //! - Type environment
 //! - Constructor metadata for ADTs
 
-use bhc_core::{self as core, Bind, CoreModule, Var, VarId};
+use bhc_core::{self as core, Bind, CoreConstructor, CoreModule, Var, VarId};
 use bhc_hir::{DefId, Item, Module as HirModule, ValueDef};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
-use bhc_types::{Constraint, Scheme, Ty};
+use bhc_types::{Constraint, Kind, Scheme, Ty, TyCon, TyVar};
 use rustc_hash::FxHashMap;
 
-use crate::deriving::DerivingContext;
+use crate::deriving::{DerivedInstance, DerivingContext};
 use crate::dictionary::{ClassInfo, ClassRegistry, DictContext, InstanceInfo};
 
 /// Metadata about a data constructor.
@@ -503,8 +503,6 @@ impl LowerContext {
     /// This sets up the type class hierarchy (Eq, Ord, Num, etc.) and
     /// registers instances for built-in types (Int, Float, Bool, Char).
     fn register_builtin_classes(&mut self) {
-        use bhc_types::{Kind, TyCon};
-
         // Helper to create a type constructor
         let make_ty = |name: &str| -> Ty { Ty::Con(TyCon::new(Symbol::intern(name), Kind::Star)) };
 
@@ -1270,6 +1268,46 @@ impl LowerContext {
             && self.class_registry.lookup_class(class_name).is_some()
     }
 
+    /// Try to derive an instance for a user-defined typeclass (DeriveAnyClass).
+    ///
+    /// Creates an empty instance (no method bindings) that relies entirely on
+    /// default method implementations from the class definition. This mirrors
+    /// GHC's `DeriveAnyClass` extension.
+    fn try_derive_any_class(
+        &self,
+        type_name: Symbol,
+        params: &[TyVar],
+        class_name: Symbol,
+        _span: Span,
+    ) -> Option<DerivedInstance> {
+        if !self.is_user_class(class_name) {
+            return None;
+        }
+
+        // Build instance type (e.g., `Color` or `Maybe a`)
+        let base = Ty::Con(TyCon::new(type_name, Kind::Star));
+        let instance_type = if params.is_empty() {
+            base
+        } else {
+            params.iter().fold(base, |acc, param| {
+                Ty::App(Box::new(acc), Box::new(Ty::Var(param.clone())))
+            })
+        };
+
+        let instance = InstanceInfo {
+            class: class_name,
+            instance_types: vec![instance_type],
+            methods: FxHashMap::default(),
+            superclass_instances: vec![],
+            assoc_type_impls: FxHashMap::default(),
+        };
+
+        Some(DerivedInstance {
+            instance,
+            bindings: vec![],
+        })
+    }
+
     /// Register a type class definition in the class registry.
     fn register_class_def(&mut self, class_def: &bhc_hir::ClassDef) {
         use crate::dictionary::AssocTypeInfo;
@@ -1499,6 +1537,9 @@ impl LowerContext {
                             .iter()
                             .filter_map(|class_name| {
                                 deriv_ctx.derive_for_data(data_def, *class_name)
+                                    .or_else(|| self.try_derive_any_class(
+                                        data_def.name, &data_def.params, *class_name, data_def.span,
+                                    ))
                             })
                             .collect();
                         for derived in derived_instances {
@@ -1519,6 +1560,9 @@ impl LowerContext {
                             .iter()
                             .filter_map(|class_name| {
                                 deriv_ctx.derive_for_newtype(newtype_def, *class_name)
+                                    .or_else(|| self.try_derive_any_class(
+                                        newtype_def.name, &newtype_def.params, *class_name, newtype_def.span,
+                                    ))
                             })
                             .collect();
                         for derived in derived_instances {
@@ -1575,11 +1619,24 @@ impl LowerContext {
             return Err(LowerError::Multiple(self.take_errors()));
         }
 
+        // Collect constructor metadata for codegen
+        let constructors: Vec<CoreConstructor> = self
+            .constructor_map
+            .values()
+            .map(|info| CoreConstructor {
+                name: info.name.as_str().to_string(),
+                tag: info.tag,
+                arity: info.arity,
+                type_name: Some(info.type_name.as_str().to_string()),
+            })
+            .collect();
+
         Ok(CoreModule {
             name: module.name,
             bindings,
             exports: vec![],
             overloaded_strings: module.overloaded_strings,
+            constructors,
         })
     }
 

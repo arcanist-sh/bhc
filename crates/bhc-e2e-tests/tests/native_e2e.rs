@@ -694,6 +694,17 @@ fn test_tier3_superclass_native() {
     run_native_test("tier3_io/superclass", Profile::Default);
 }
 
+// E.42: Deriving for user-defined typeclasses (DeriveAnyClass)
+#[test]
+fn test_tier3_derive_any_class_native() {
+    run_native_test("tier3_io/derive_any_class", Profile::Default);
+}
+
+#[test]
+fn test_tier3_derive_any_class_multi_native() {
+    run_native_test("tier3_io/derive_any_class_multi", Profile::Default);
+}
+
 // =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================

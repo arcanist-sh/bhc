@@ -472,6 +472,19 @@ pub enum Tick {
     SourceNote(Span),
 }
 
+/// Metadata about a data constructor, carried through Core IR.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CoreConstructor {
+    /// The constructor name (e.g., "Just", "Red").
+    pub name: String,
+    /// The constructor's tag (0-based index within its data type).
+    pub tag: u32,
+    /// The number of fields this constructor has.
+    pub arity: u32,
+    /// The data type this constructor belongs to (e.g., "Maybe", "Color").
+    pub type_name: Option<String>,
+}
+
 /// A Core module containing definitions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CoreModule {
@@ -483,6 +496,9 @@ pub struct CoreModule {
     pub exports: Vec<ForeignExport>,
     /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
     pub overloaded_strings: bool,
+    /// Constructor metadata for all data types defined in this module.
+    /// Used by codegen to recognize constructors used as values.
+    pub constructors: Vec<CoreConstructor>,
 }
 
 /// A foreign export from Core.

@@ -222,6 +222,60 @@ data PolyLoop = PolyLoop
 
 ---
 
+## Core IR Optimization Passes
+
+The Core IR is the primary optimization target. Unlike Tensor IR (which has
+domain-specific fusion) or Loop IR (which LLVM can optimize), Core IR
+transformations operate at the level of algebraic data types, closures, and
+thunks — abstractions invisible to LLVM.
+
+### Required Pass Pipeline
+
+```
+Core IR (from HIR-to-Core)
+    │
+    ▼
+  Simplifier (iterate to fixpoint)
+    │  - Beta reduction
+    │  - Case-of-known-constructor
+    │  - Inlining (size-based + reference counting)
+    │  - Dead binding elimination
+    │  - Constant folding
+    │  - Case-of-case (with size budget)
+    ▼
+  Demand Analysis (Default profile only)
+    │  - Compute strictness per argument
+    │  - Boolean-tree abstract interpretation
+    ▼
+  Worker/Wrapper (Default profile only)
+    │  - Split strict-arg functions into worker + wrapper
+    ▼
+  Dictionary Specialization
+    │  - Monomorphize known-instance call sites
+    │  - Inline method selections on known dictionaries
+    ▼
+  Simplifier (second round — clean up after transforms)
+    │
+    ▼
+  Codegen (LLVM)
+```
+
+See `rules/013-optimization.md` for detailed design of each pass,
+including the simplifier architecture, pattern match compilation algorithm,
+and strictness analysis approach.
+
+### Pattern Match Compilation
+
+Pattern matches MUST be compiled using column-based decision trees
+(Augustsson/Sestoft algorithm), NOT equation-by-equation linear search.
+Exhaustiveness and overlap checking MUST be performed and surfaced as
+compiler warnings.
+
+See `rules/013-optimization.md` § Pattern Match Compilation for the
+full algorithm specification.
+
+---
+
 ## IR Transformation Guidelines
 
 ### 1. Sound Transformations

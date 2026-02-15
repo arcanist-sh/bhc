@@ -243,6 +243,33 @@ Currently, BHC's parser requires explicit braces `{}` and doesn't support many s
 - [ ] Associated type families in classes
 - [ ] Constraint kinds: `(Show a, Eq a) => ...`
 
+#### Phase 7: Core IR Optimization Pipeline
+
+BHC currently has no general-purpose optimizer — this is the most critical
+infrastructure gap for compiling real Haskell programs. Design informed by
+HBC's (Lennart Augustsson) proven simplifier and analysis passes.
+
+- [ ] **Core Simplifier** — iterate-to-fixpoint pass with:
+  - Beta reduction
+  - Case-of-known-constructor
+  - Dead binding elimination
+  - Constant folding
+  - Inlining (reference-counting + size threshold)
+  - Case-of-case (with size budget)
+- [ ] **Pattern Match Compilation** — replace naive equation-by-equation with:
+  - Column-based decision tree generation (Augustsson algorithm)
+  - Exhaustiveness checking and warnings
+  - Overlap/redundancy detection and warnings
+- [ ] **Demand Analysis** — per-function strictness (Default profile):
+  - Boolean-tree abstract interpretation
+  - Fixpoint iteration for recursive groups
+  - Worker/wrapper transformation for strict arguments
+- [ ] **Dictionary Specialization** — monomorphize typeclass-polymorphic code:
+  - Direct method selection on known dictionaries
+  - SPECIALIZE pragma support
+
+See `rules/013-optimization.md` for detailed design.
+
 ### Test Strategy
 
 Each phase will be validated against real codebases:
@@ -253,6 +280,7 @@ Each phase will be validated against real codebases:
 | 3 | Resolve imports in a multi-module project |
 | 4 | Compile base library's Data.List |
 | 5-6 | Parse lens library type signatures |
+| 7 | Compiled programs run measurably faster; non-exhaustive pattern warnings emitted |
 
 ### Exit Criteria
 
@@ -261,6 +289,8 @@ Each phase will be validated against real codebases:
 - [ ] All Haskell 2010 Report features supported
 - [ ] Common GHC extensions parsed (even if semantics simplified)
 - [ ] Clear error messages for unsupported extensions
+- [ ] Core simplifier reduces code size by ≥20% on test programs
+- [ ] Non-exhaustive pattern matches produce compiler warnings
 
 ### Key Files to Modify
 

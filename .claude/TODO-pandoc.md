@@ -342,13 +342,60 @@ compiled from Hackage source.
 - [x] `Data.Char` predicates: isAlpha, isDigit, isUpper, isLower, isAlphaNum, isSpace, isPunctuation, toUpper, toLower, ord, chr, digitToInt, intToDigit (E.9)
 - [ ] `Data.Char` full Unicode categories (currently ASCII-only)
 
-### 3.3 Performance
+### 3.3 Performance (Core IR Optimization Pipeline)
 
-- [ ] Strictness analysis to avoid thunk buildup
-- [ ] Specialization of polymorphic functions
-- [ ] Worker/wrapper transformation
-- [ ] Inlining for small functions
-- [ ] Stream fusion for list operations
+**Status:** Not started — BHC currently has NO general-purpose optimizer
+**Scope:** Large (foundational infrastructure)
+**Reference:** `rules/013-optimization.md`, HBC/HCT simplifier architecture
+
+BHC compiles to correct code but performs no Core IR optimization. Every
+binding, beta-redex, and known-constructor case dispatch is passed unoptimized
+to LLVM, which cannot reason about ADTs, closures, or thunks. Real Haskell
+programs (pandoc) will exhibit thunk buildup, redundant allocation, and
+unexploited compile-time information without these passes.
+
+#### Phase O.1: Core Simplifier (CRITICAL — prerequisite for everything else)
+- [ ] Beta reduction: `(\x -> body) arg` → `body[x := arg]`
+- [ ] Case-of-known-constructor: `case Just 42 of { Just x -> x }` → `42`
+- [ ] Dead binding elimination: remove unused let-bindings
+- [ ] Constant folding: `1 + 2` → `3` for literals
+- [ ] Inlining: substitute small/single-use bindings (reference-counting heuristic)
+- [ ] Iterate to fixpoint (cap at 10 iterations)
+- [ ] `-ddump-core-after-simpl` dump flag
+
+#### Phase O.2: Pattern Match Compilation (HIGH — correctness + quality)
+- [ ] Replace equation-by-equation compilation with Augustsson decision trees
+- [ ] Exhaustiveness checking with non-exhaustive pattern warnings
+- [ ] Overlap/redundancy detection with shadowed pattern warnings
+- [ ] Guard compilation via nested case fallthrough
+
+#### Phase O.3: Demand Analysis + Worker/Wrapper (MEDIUM — Default profile perf)
+- [ ] Boolean-tree demand analysis for strictness signatures
+- [ ] Fixpoint iteration for recursive binding groups
+- [ ] Annotate strict arguments
+- [ ] Worker/wrapper split for strict-arg functions (unboxed workers)
+- [ ] `-ddump-core-after-demand` dump flag
+
+#### Phase O.4: Dictionary Specialization (MEDIUM — typeclass perf)
+- [ ] Direct method selection when dictionary is known constructor
+- [ ] Monomorphize polymorphic functions at concrete call sites
+- [ ] SPECIALIZE pragma support
+- [ ] Second simplifier round to clean up after specialization
+
+#### Key Files (to create)
+```
+crates/bhc-core/src/
+├── simplify.rs              # Core simplifier
+├── simplify/
+│   ├── beta.rs              # Beta reduction
+│   ├── case.rs              # Case transformations
+│   ├── dead.rs              # Dead binding elimination
+│   ├── fold.rs              # Constant folding
+│   └── inline.rs            # Inlining decisions
+├── demand.rs                # Demand analysis
+├── worker_wrapper.rs        # Worker/wrapper transformation
+└── specialize.rs            # Dictionary specialization
+```
 
 ---
 

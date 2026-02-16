@@ -142,9 +142,16 @@ pub fn infer_pattern(ctx: &mut TyCtxt, pat: &Pat) -> Ty {
         }
 
         Pat::Ann(inner, ty, _span) => {
-            // Annotated pattern: check inner against annotation
-            check_pattern(ctx, inner, ty);
-            ty.clone()
+            // Annotated pattern: check inner against annotation.
+            // If ScopedTypeVariables is enabled, resolve scoped type variables
+            // in the annotation type.
+            let resolved_ty = if ctx.scoped_type_variables {
+                ctx.resolve_scoped_type_vars(ty)
+            } else {
+                ty.clone()
+            };
+            check_pattern(ctx, inner, &resolved_ty);
+            resolved_ty
         }
 
         Pat::View(view_expr, result_pat, _span) => {

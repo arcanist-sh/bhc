@@ -743,6 +743,20 @@ fn test_tier3_integer_large_native() {
 }
 
 // =============================================================================
+// E.46: ScopedTypeVariables
+// =============================================================================
+
+#[test]
+fn test_tier3_scoped_tyvars_basic_native() {
+    run_native_test("tier3_io/scoped_tyvars_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_scoped_tyvars_list_native() {
+    run_native_test("tier3_io/scoped_tyvars_list", Profile::Default);
+}
+
+// =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================
 

@@ -68,8 +68,34 @@ pub fn instantiate(ctx: &mut TyCtxt, scheme: &Scheme) -> Ty {
     substitute(&scheme.ty, &subst)
 }
 
+/// Instantiate a type scheme with fresh type variables, returning the substitution map.
+///
+/// Like `instantiate`, but also returns the mapping from scheme-bound variable IDs
+/// to their fresh type variables. Used for ScopedTypeVariables: the map tells us
+/// which fresh unification variables correspond to which forall-bound names.
+///
+/// Does NOT emit class constraints — the caller handles those separately.
+pub fn instantiate_scoped(ctx: &mut TyCtxt, scheme: &Scheme) -> (Ty, FxHashMap<u32, Ty>) {
+    if scheme.vars.is_empty() {
+        return (scheme.ty.clone(), FxHashMap::default());
+    }
+
+    // Create fresh type variables for each bound variable
+    let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
+    for var in &scheme.vars {
+        let fresh = ctx.fresh_ty_var_with_kind(var.kind.clone());
+        subst.insert(var.id, Ty::Var(fresh));
+    }
+
+    let instantiated = substitute(&scheme.ty, &subst);
+    (instantiated, subst)
+}
+
 /// Apply a substitution (mapping var IDs to types) to a type.
-fn substitute(ty: &Ty, subst: &FxHashMap<u32, Ty>) -> Ty {
+///
+/// This is also used by `resolve_scoped_type_vars` to replace scoped
+/// type variables in annotation types.
+pub fn substitute(ty: &Ty, subst: &FxHashMap<u32, Ty>) -> Ty {
     match ty {
         Ty::Var(v) => subst.get(&v.id).cloned().unwrap_or_else(|| ty.clone()),
         Ty::Con(_) | Ty::Prim(_) => ty.clone(),

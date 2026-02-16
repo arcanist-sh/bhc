@@ -103,6 +103,14 @@ pub struct TyCtxt {
     /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
     pub(crate) overloaded_strings: bool,
 
+    /// Whether {-# LANGUAGE ScopedTypeVariables #-} is enabled.
+    pub(crate) scoped_type_variables: bool,
+
+    /// Scoped type variables: maps forall-bound variable ID → fresh unification type.
+    /// When ScopedTypeVariables is enabled, forall-bound vars from explicit signatures
+    /// are available in expression/pattern type annotations within the function body.
+    pub(crate) scoped_type_vars: FxHashMap<u32, Ty>,
+
     /// Classes defined by user code (from HIR ClassDef items).
     /// Constraints for these classes flow through dict-passing.
     /// Builtin classes (Show, Eq, Monad, MonadState, etc.) are handled by codegen.
@@ -126,6 +134,8 @@ impl TyCtxt {
             con_field_defs: FxHashMap::default(),
             constraints: Vec::new(),
             overloaded_strings: false,
+            scoped_type_variables: false,
+            scoped_type_vars: FxHashMap::default(),
             user_defined_classes: rustc_hash::FxHashSet::default(),
         }
     }
@@ -149,6 +159,37 @@ impl TyCtxt {
     #[must_use]
     pub fn apply_subst(&self, ty: &Ty) -> Ty {
         self.subst.apply(ty)
+    }
+
+    /// Push scoped type variables from a signature's forall-bound vars.
+    ///
+    /// When ScopedTypeVariables is enabled, forall-bound type variables from
+    /// an explicit signature are available in expression/pattern annotations
+    /// within the function body.
+    ///
+    /// `subst` maps the scheme's bound variable IDs → fresh unification types.
+    pub(crate) fn push_scoped_type_vars(&mut self, subst: &FxHashMap<u32, Ty>) {
+        for (var_id, ty) in subst {
+            self.scoped_type_vars.insert(*var_id, ty.clone());
+        }
+    }
+
+    /// Remove scoped type variables (when exiting function scope).
+    pub(crate) fn pop_scoped_type_vars(&mut self, var_ids: &[u32]) {
+        for var_id in var_ids {
+            self.scoped_type_vars.remove(var_id);
+        }
+    }
+
+    /// Resolve scoped type variables in a type.
+    ///
+    /// Walks the type and replaces any `Ty::Var(v)` where `v.id` matches
+    /// a scoped type variable with the corresponding fresh unification type.
+    pub(crate) fn resolve_scoped_type_vars(&self, ty: &Ty) -> Ty {
+        if self.scoped_type_vars.is_empty() {
+            return ty.clone();
+        }
+        crate::instantiate::substitute(ty, &self.scoped_type_vars)
     }
 
     /// Emit a type class constraint.
@@ -3319,11 +3360,38 @@ impl TyCtxt {
         // Save constraint count for per-binding scoping
         let constraint_start = self.constraints.len();
 
-        // If there's a type signature, use it; otherwise infer
-        let declared_ty = value_def.sig.as_ref().map(|s| s.ty.clone());
+        // If ScopedTypeVariables is enabled and the sig has forall-bound vars,
+        // instantiate the scheme and register scoped type variables so that
+        // body annotations can reference the same type variables.
+        let scoped_var_ids: Vec<u32>;
+        let declared_ty = if self.scoped_type_variables {
+            if let Some(sig) = &value_def.sig {
+                if !sig.vars.is_empty() {
+                    let (instantiated, subst) =
+                        crate::instantiate::instantiate_scoped(self, sig);
+                    scoped_var_ids = sig.vars.iter().map(|v| v.id).collect();
+                    self.push_scoped_type_vars(&subst);
+                    Some(instantiated)
+                } else {
+                    scoped_var_ids = Vec::new();
+                    Some(sig.ty.clone())
+                }
+            } else {
+                scoped_var_ids = Vec::new();
+                None
+            }
+        } else {
+            scoped_var_ids = Vec::new();
+            value_def.sig.as_ref().map(|s| s.ty.clone())
+        };
 
         // Infer the type from equations
         let inferred_ty = self.infer_equations(&value_def.equations, value_def.span);
+
+        // Pop scoped type variables after inference
+        if !scoped_var_ids.is_empty() {
+            self.pop_scoped_type_vars(&scoped_var_ids);
+        }
 
         // If there's a declared type, unify with inferred type
         if let Some(declared) = &declared_ty {

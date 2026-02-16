@@ -335,10 +335,18 @@ pub fn infer_expr(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
         }
 
         Expr::Ann(inner, ty, span) => {
-            // Type annotation: check inner against declared type
+            // Type annotation: check inner against declared type.
+            // If ScopedTypeVariables is enabled, resolve any scoped type variables
+            // in the annotation type so they refer to the same types as the
+            // enclosing function's forall-bound variables.
+            let resolved_ty = if ctx.scoped_type_variables {
+                ctx.resolve_scoped_type_vars(ty)
+            } else {
+                ty.clone()
+            };
             let inner_ty = infer_expr(ctx, inner);
-            ctx.unify(&inner_ty, ty, *span);
-            ty.clone()
+            ctx.unify(&inner_ty, &resolved_ty, *span);
+            resolved_ty
         }
 
         Expr::TypeApp(inner, _ty_arg, _span) => {

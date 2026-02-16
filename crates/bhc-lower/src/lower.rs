@@ -83,6 +83,14 @@ pub fn lower_module_with_cache(
         }
     });
 
+    let has_scoped_type_variables = module.pragmas.iter().any(|p| {
+        if let ast::PragmaKind::Language(exts) = &p.kind {
+            exts.iter().any(|e| e.as_str() == "ScopedTypeVariables")
+        } else {
+            false
+        }
+    });
+
     let already_imports_prelude = module.imports.iter().any(|imp| {
         let name = imp
             .module
@@ -160,6 +168,7 @@ pub fn lower_module_with_cache(
         items,
         span: module.span,
         overloaded_strings: has_overloaded_strings,
+        scoped_type_variables: has_scoped_type_variables,
     })
 }
 

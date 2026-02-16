@@ -35,6 +35,7 @@ fn module_with_items(items: Vec<Item>) -> Module {
         items,
         span: Span::DUMMY,
         overloaded_strings: false,
+        scoped_type_variables: false,
     }
 }
 

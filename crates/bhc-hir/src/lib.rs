@@ -671,6 +671,8 @@ pub struct Module {
     pub span: Span,
     /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
     pub overloaded_strings: bool,
+    /// Whether {-# LANGUAGE ScopedTypeVariables #-} is enabled.
+    pub scoped_type_variables: bool,
 }
 
 /// An export specification.

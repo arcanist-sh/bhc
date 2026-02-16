@@ -505,18 +505,29 @@ impl TyCtxt {
                     (class_name, type_name),
                     // Num instances
                     ("Num", "Int") | ("Num", "Float") | ("Num", "Double") | ("Num", "Integer") |
+                    ("Num", "Word") | ("Num", "Word8") | ("Num", "Word16") | ("Num", "Word32") | ("Num", "Word64") |
                     // Eq instances
                     ("Eq", "Int") | ("Eq", "Float") | ("Eq", "Double") | ("Eq", "Bool") |
-                    ("Eq", "Char") | ("Eq", "String") |
+                    ("Eq", "Char") | ("Eq", "String") | ("Eq", "Integer") |
+                    ("Eq", "Word") | ("Eq", "Word8") | ("Eq", "Word16") | ("Eq", "Word32") | ("Eq", "Word64") |
                     // Ord instances
-                    ("Ord", "Int") | ("Ord", "Float") | ("Ord", "Double") | ("Ord", "Char") |
+                    ("Ord", "Int") | ("Ord", "Float") | ("Ord", "Double") | ("Ord", "Char") | ("Ord", "Integer") |
+                    ("Ord", "Word") | ("Ord", "Word8") | ("Ord", "Word16") | ("Ord", "Word32") | ("Ord", "Word64") |
                     // Show instances
                     ("Show", "Int") | ("Show", "Float") | ("Show", "Double") | ("Show", "Bool") |
-                    ("Show", "Char") | ("Show", "String") |
+                    ("Show", "Char") | ("Show", "String") | ("Show", "Integer") |
+                    ("Show", "Word") | ("Show", "Word8") | ("Show", "Word16") | ("Show", "Word32") | ("Show", "Word64") |
                     // Fractional instances
                     ("Fractional", "Float") | ("Fractional", "Double") |
                     // IsString instances
-                    ("IsString", "String") | ("IsString", "[Char]")
+                    ("IsString", "String") | ("IsString", "[Char]") |
+                    // Enum/Bounded instances for Word types and Integer
+                    ("Enum", "Integer") |
+                    ("Enum", "Word") | ("Enum", "Word8") | ("Enum", "Word16") | ("Enum", "Word32") | ("Enum", "Word64") |
+                    ("Bounded", "Word") | ("Bounded", "Word8") | ("Bounded", "Word16") | ("Bounded", "Word32") | ("Bounded", "Word64") |
+                    // Integral instances
+                    ("Integral", "Integer") |
+                    ("Integral", "Word") | ("Integral", "Word8") | ("Integral", "Word16") | ("Integral", "Word32") | ("Integral", "Word64")
                 )
             }
             // List instances: Eq [a], Ord [a], Show [a] if element type has the instance
@@ -757,6 +768,17 @@ impl TyCtxt {
         self.env.register_type_con(self.builtins.maybe_con.clone());
         self.env.register_type_con(self.builtins.either_con.clone());
         self.env.register_type_con(self.builtins.io_con.clone());
+
+        // Register Integer type constructor
+        self.env
+            .register_type_con(self.builtins.integer_con.clone());
+
+        // Register Word type constructors
+        self.env.register_type_con(self.builtins.word_con.clone());
+        self.env.register_type_con(self.builtins.word8_con.clone());
+        self.env.register_type_con(self.builtins.word16_con.clone());
+        self.env.register_type_con(self.builtins.word32_con.clone());
+        self.env.register_type_con(self.builtins.word64_con.clone());
 
         // Register shape-indexed tensor type constructors
         self.env.register_type_con(self.builtins.tensor_con.clone());
@@ -1002,11 +1024,14 @@ impl TyCtxt {
 
         // Helper to create common type schemes
         let num_binop = || {
-            // a -> a -> a (for Num types, we simplify to Int for now)
-            Scheme::mono(Ty::fun(
-                self.builtins.int_ty.clone(),
-                Ty::fun(self.builtins.int_ty.clone(), self.builtins.int_ty.clone()),
-            ))
+            // a -> a -> a (polymorphic, allows Int, Integer, Float, Double)
+            Scheme::poly(
+                vec![a.clone()],
+                Ty::fun(
+                    Ty::Var(a.clone()),
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
+            )
         };
 
         let cmp_binop = || {
@@ -1329,11 +1354,11 @@ impl TyCtxt {
                         Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
                     ),
                 ),
-                // negate, abs, signum :: Int -> Int
-                "negate" | "abs" | "signum" => Scheme::mono(Ty::fun(
-                    self.builtins.int_ty.clone(),
-                    self.builtins.int_ty.clone(),
-                )),
+                // negate, abs, signum :: a -> a (polymorphic)
+                "negate" | "abs" | "signum" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
                 // not :: Bool -> Bool
                 "not" => Scheme::mono(Ty::fun(
                     self.builtins.bool_ty.clone(),
@@ -1584,11 +1609,14 @@ impl TyCtxt {
                         ),
                     )
                 }
-                // min, max :: Int -> Int -> Int (Int-specialized for now)
-                "min" | "max" => Scheme::mono(Ty::fun(
-                    self.builtins.int_ty.clone(),
-                    Ty::fun(self.builtins.int_ty.clone(), self.builtins.int_ty.clone()),
-                )),
+                // min, max :: a -> a -> a (polymorphic)
+                "min" | "max" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        Ty::Var(a.clone()),
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                    ),
+                ),
                 // E.28: Arithmetic, enum, folds, higher-order, IO input
                 "subtract" => Scheme::mono(Ty::fun(
                     self.builtins.int_ty.clone(),

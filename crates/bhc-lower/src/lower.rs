@@ -880,6 +880,13 @@ fn register_standard_module_exports(ctx: &mut LowerContext, module_name: &str) {
             "absurd",
             "vacuous",
         ],
+        "Data.Word" => &[
+            "Word",
+            "Word8",
+            "Word16",
+            "Word32",
+            "Word64",
+        ],
         "Data.Text.IO" => &[
             "readFile",
             "writeFile",

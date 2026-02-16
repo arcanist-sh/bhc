@@ -424,6 +424,9 @@ pub const BHC_TAG_THUNK: i64 = -1;
 /// Thunk tag constant: blackhole (being evaluated, used to detect cycles)
 pub const BHC_TAG_BLACKHOLE: i64 = -2;
 
+/// Thunk tag constant: indirection (evaluated thunk, result cached at offset 8)
+pub const BHC_TAG_INDIRECTION: i64 = -3;
+
 /// Force evaluation of a thunk to Weak Head Normal Form (WHNF).
 ///
 /// # Arguments
@@ -447,6 +450,12 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
     // Read the tag (i64 at offset 0)
     let tag_ptr = obj as *mut i64;
     let tag = unsafe { *tag_ptr };
+
+    // Check for indirection (previously evaluated thunk) — must check before tag >= 0
+    if tag == BHC_TAG_INDIRECTION {
+        // Return cached result from offset 8
+        return unsafe { *(obj.add(8) as *const *mut u8) };
+    }
 
     if tag >= 0 {
         // Already evaluated (ADT or value), return as-is
@@ -480,11 +489,10 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
         // Call the evaluation function with the environment
         let result = eval_fn(env_ptr as *mut u8);
 
-        // Update the thunk with the result (update in place)
-        // Set tag to 0 (indicating evaluated/indirection)
-        // Store result pointer in payload slot
+        // Update the thunk with the result (indirection)
+        // Set tag to -3 (INDIRECTION) so re-forcing returns cached result
         unsafe {
-            *tag_ptr = 0; // Mark as evaluated indirection
+            *tag_ptr = BHC_TAG_INDIRECTION;
             *(obj.add(8) as *mut *mut u8) = result;
         }
 
@@ -3155,6 +3163,181 @@ pub extern "C" fn bhc_exit_success() -> ! {
 pub extern "C" fn bhc_exit_failure() -> ! {
     bhc_shutdown();
     std::process::exit(1)
+}
+
+// =============================================================================
+// Arbitrary-Precision Integer (num-bigint)
+// =============================================================================
+
+use num_bigint::BigInt;
+
+/// Create a BigInt from an i64 value. Returns a heap-allocated Box<BigInt>.
+#[no_mangle]
+pub extern "C" fn bhc_integer_from_i64(n: i64) -> *mut u8 {
+    let big = Box::new(BigInt::from(n));
+    Box::into_raw(big) as *mut u8
+}
+
+/// Create a BigInt from a C string representation. Returns a heap-allocated Box<BigInt>.
+#[no_mangle]
+pub extern "C" fn bhc_integer_from_str(s: *const c_char) -> *mut u8 {
+    let c_str = unsafe { CStr::from_ptr(s) };
+    let str_val = c_str.to_str().unwrap_or("0");
+    let big = str_val.parse::<BigInt>().unwrap_or_default();
+    Box::into_raw(Box::new(big)) as *mut u8
+}
+
+/// Convert a BigInt to i64 (truncating if necessary).
+#[no_mangle]
+pub extern "C" fn bhc_integer_to_i64(ptr: *const u8) -> i64 {
+    let big = unsafe { &*(ptr as *const BigInt) };
+    use num_traits::ToPrimitive;
+    big.to_i64().unwrap_or(0)
+}
+
+/// Add two BigInts.
+#[no_mangle]
+pub extern "C" fn bhc_integer_add(a: *const u8, b: *const u8) -> *mut u8 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    Box::into_raw(Box::new(a + b)) as *mut u8
+}
+
+/// Subtract two BigInts.
+#[no_mangle]
+pub extern "C" fn bhc_integer_sub(a: *const u8, b: *const u8) -> *mut u8 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    Box::into_raw(Box::new(a - b)) as *mut u8
+}
+
+/// Multiply two BigInts.
+#[no_mangle]
+pub extern "C" fn bhc_integer_mul(a: *const u8, b: *const u8) -> *mut u8 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    Box::into_raw(Box::new(a * b)) as *mut u8
+}
+
+/// Divide two BigInts (floor division, like Haskell's `div`).
+#[no_mangle]
+pub extern "C" fn bhc_integer_div(a: *const u8, b: *const u8) -> *mut u8 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    use num_traits::Zero;
+    if b.is_zero() {
+        eprintln!("bhc_integer_div: division by zero");
+        std::process::exit(1);
+    }
+    use num_integer::Integer;
+    Box::into_raw(Box::new(a.div_floor(b))) as *mut u8
+}
+
+/// Modulo of two BigInts (floor mod, like Haskell's `mod`).
+#[no_mangle]
+pub extern "C" fn bhc_integer_mod(a: *const u8, b: *const u8) -> *mut u8 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    use num_traits::Zero;
+    if b.is_zero() {
+        eprintln!("bhc_integer_mod: division by zero");
+        std::process::exit(1);
+    }
+    use num_integer::Integer;
+    Box::into_raw(Box::new(a.mod_floor(b))) as *mut u8
+}
+
+/// Negate a BigInt.
+#[no_mangle]
+pub extern "C" fn bhc_integer_negate(a: *const u8) -> *mut u8 {
+    let a = unsafe { &*(a as *const BigInt) };
+    Box::into_raw(Box::new(-a)) as *mut u8
+}
+
+/// Absolute value of a BigInt.
+#[no_mangle]
+pub extern "C" fn bhc_integer_abs(a: *const u8) -> *mut u8 {
+    let a = unsafe { &*(a as *const BigInt) };
+    use num_traits::Signed;
+    Box::into_raw(Box::new(a.abs())) as *mut u8
+}
+
+/// Signum of a BigInt (-1, 0, or 1).
+#[no_mangle]
+pub extern "C" fn bhc_integer_signum(a: *const u8) -> *mut u8 {
+    let a = unsafe { &*(a as *const BigInt) };
+    use num_traits::Signed;
+    Box::into_raw(Box::new(a.signum())) as *mut u8
+}
+
+/// GCD of two BigInts.
+#[no_mangle]
+pub extern "C" fn bhc_integer_gcd(a: *const u8, b: *const u8) -> *mut u8 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    use num_integer::Integer;
+    Box::into_raw(Box::new(a.gcd(b))) as *mut u8
+}
+
+/// Equality check for two BigInts.
+#[no_mangle]
+pub extern "C" fn bhc_integer_eq(a: *const u8, b: *const u8) -> i64 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    if a == b { 1 } else { 0 }
+}
+
+/// Less-than comparison for two BigInts.
+#[no_mangle]
+pub extern "C" fn bhc_integer_lt(a: *const u8, b: *const u8) -> i64 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    if a < b { 1 } else { 0 }
+}
+
+/// Less-than-or-equal comparison for two BigInts.
+#[no_mangle]
+pub extern "C" fn bhc_integer_le(a: *const u8, b: *const u8) -> i64 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    if a <= b { 1 } else { 0 }
+}
+
+/// Greater-than comparison for two BigInts.
+#[no_mangle]
+pub extern "C" fn bhc_integer_gt(a: *const u8, b: *const u8) -> i64 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    if a > b { 1 } else { 0 }
+}
+
+/// Greater-than-or-equal comparison for two BigInts.
+#[no_mangle]
+pub extern "C" fn bhc_integer_ge(a: *const u8, b: *const u8) -> i64 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    if a >= b { 1 } else { 0 }
+}
+
+/// Compare two BigInts, returning Ordering tag (0=LT, 1=EQ, 2=GT).
+#[no_mangle]
+pub extern "C" fn bhc_integer_compare(a: *const u8, b: *const u8) -> i64 {
+    let a = unsafe { &*(a as *const BigInt) };
+    let b = unsafe { &*(b as *const BigInt) };
+    match a.cmp(b) {
+        std::cmp::Ordering::Less => 0,
+        std::cmp::Ordering::Equal => 1,
+        std::cmp::Ordering::Greater => 2,
+    }
+}
+
+/// Show a BigInt as a C string.
+#[no_mangle]
+pub extern "C" fn bhc_integer_show(ptr: *const u8) -> *mut c_char {
+    let big = unsafe { &*(ptr as *const BigInt) };
+    let s = big.to_string();
+    let c_string = CString::new(s).unwrap_or_else(|_| CString::new("0").unwrap());
+    c_string.into_raw()
 }
 
 #[cfg(test)]

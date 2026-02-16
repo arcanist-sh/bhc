@@ -1480,9 +1480,76 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
+        // E.43: Word types at fixed DefIds 11800-11809
+        // Types are registered at fixed DefIds to avoid sequential array misalignment.
+        let word_types: &[(usize, &str)] = &[
+            (11800, "Word"),
+            (11801, "Word8"),
+            (11802, "Word16"),
+            (11803, "Word32"),
+            (11804, "Word64"),
+        ];
+        for &(id, name) in word_types {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Type, Span::default());
+            self.bind_type(sym, def_id);
+        }
+        // Qualified names for Data.Word module
+        let word_qualified: &[(usize, &str)] = &[
+            (11805, "Data.Word.Word"),
+            (11806, "Data.Word.Word8"),
+            (11807, "Data.Word.Word16"),
+            (11808, "Data.Word.Word32"),
+            (11809, "Data.Word.Word64"),
+        ];
+        for &(id, name) in word_qualified {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
+        // E.45: Integer type (arbitrary precision)
+        {
+            let def_id = DefId::new(11900);
+            let sym = Symbol::intern("Integer");
+            self.define(def_id, sym, DefKind::Type, Span::default());
+            self.bind_type(sym, def_id);
+        }
+
+        // E.45: Integer RTS functions (fixed DefIds 11901-11920)
+        let integer_fns: &[(usize, &str)] = &[
+            (11901, "bhc_integer_from_i64"),
+            (11902, "bhc_integer_from_str"),
+            (11903, "bhc_integer_to_i64"),
+            (11904, "bhc_integer_add"),
+            (11905, "bhc_integer_sub"),
+            (11906, "bhc_integer_mul"),
+            (11907, "bhc_integer_div"),
+            (11908, "bhc_integer_mod"),
+            (11909, "bhc_integer_negate"),
+            (11910, "bhc_integer_abs"),
+            (11911, "bhc_integer_signum"),
+            (11912, "bhc_integer_gcd"),
+            (11913, "bhc_integer_eq"),
+            (11914, "bhc_integer_lt"),
+            (11915, "bhc_integer_le"),
+            (11916, "bhc_integer_gt"),
+            (11917, "bhc_integer_ge"),
+            (11918, "bhc_integer_compare"),
+            (11919, "bhc_integer_show"),
+        ];
+        for &(id, name) in integer_fns {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
         // Ensure next_def_id is past the fixed DefId ranges
-        if self.next_def_id <= 11710 {
-            self.next_def_id = 11710;
+        if self.next_def_id <= 11920 {
+            self.next_def_id = 11920;
         }
     }
 

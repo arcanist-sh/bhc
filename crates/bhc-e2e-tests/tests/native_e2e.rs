@@ -706,6 +706,43 @@ fn test_tier3_derive_any_class_multi_native() {
 }
 
 // =============================================================================
+// E.43: Word Types
+// =============================================================================
+
+#[test]
+fn test_tier3_word_types_native() {
+    run_native_test("tier3_io/word_types", Profile::Default);
+}
+
+#[test]
+fn test_tier3_word_conversion_native() {
+    run_native_test("tier3_io/word_conversion", Profile::Default);
+}
+
+// =============================================================================
+// E.44: Lazy Let-Bindings
+// =============================================================================
+
+#[test]
+fn test_tier3_lazy_let_native() {
+    run_native_test("tier3_io/lazy_let", Profile::Default);
+}
+
+// =============================================================================
+// E.45: Integer (Arbitrary Precision)
+// =============================================================================
+
+#[test]
+fn test_tier3_integer_basic_native() {
+    run_native_test("tier3_io/integer_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_integer_large_native() {
+    run_native_test("tier3_io/integer_large", Profile::Default);
+}
+
+// =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================
 

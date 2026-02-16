@@ -96,7 +96,37 @@ pub fn lower_expr(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<core:
 
         Expr::RecordUpdate(expr, fields, span) => lower_record_update(ctx, expr, fields, *span),
 
-        Expr::Ann(expr, _ty, _span) => {
+        Expr::Ann(expr, ty, span) => {
+            // Check if this is an Integer-annotated literal — if so, create Literal::Integer
+            if let Expr::Lit(Lit::Int(n), _) = expr.as_ref() {
+                if matches!(ty, Ty::Con(tc) if tc.name.as_str() == "Integer") {
+                    return Ok(core::Expr::Lit(
+                        Literal::Integer(*n as i128),
+                        Ty::Con(TyCon::new(Symbol::intern("Integer"), Kind::Star)),
+                        *span,
+                    ));
+                }
+            }
+            // Check for negated Integer literal: negate (Int n) :: Integer
+            if let Expr::App(f, arg, _) = expr.as_ref() {
+                if let Expr::Var(def_ref) = f.as_ref() {
+                    let is_negate = ctx
+                        .lookup_var(def_ref.def_id)
+                        .map(|v| v.name.as_str() == "negate")
+                        .unwrap_or(false);
+                    if is_negate {
+                        if let Expr::Lit(Lit::Int(n), _) = arg.as_ref() {
+                            if matches!(ty, Ty::Con(tc) if tc.name.as_str() == "Integer") {
+                                return Ok(core::Expr::Lit(
+                                    Literal::Integer(-(*n as i128)),
+                                    Ty::Con(TyCon::new(Symbol::intern("Integer"), Kind::Star)),
+                                    *span,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
             // Type annotations are erased in Core (types are tracked separately)
             lower_expr(ctx, expr)
         }

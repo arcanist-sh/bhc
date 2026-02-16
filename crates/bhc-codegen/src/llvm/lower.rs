@@ -127,6 +127,8 @@ enum ShowCoerce {
     Unit,
     /// Extract ADT tag (i64) for show_ordering
     Ordering,
+    /// Pass pointer directly for show_integer (arbitrary precision)
+    Integer,
 }
 
 /// A stack of transformer layers, tracking the full transformer stack.
@@ -235,6 +237,12 @@ pub struct Lowering<'ctx, 'm> {
     show_desc_counter: usize,
     /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
     overloaded_strings: bool,
+    /// E.44: Set of variable IDs that were thunked (lazy let-bindings).
+    /// When these variables are looked up, they must be forced via bhc_force.
+    thunked_vars: FxHashSet<VarId>,
+    /// E.45: Set of variable IDs that hold Integer (arbitrary precision) values.
+    /// Used by show dispatch to route to bhc_integer_show instead of show_int.
+    integer_vars: FxHashSet<VarId>,
 }
 
 impl<'ctx, 'm> Lowering<'ctx, 'm> {
@@ -260,6 +268,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             derived_compare_fns: FxHashMap::default(),
             show_desc_counter: 0,
             overloaded_strings: false,
+            thunked_vars: FxHashSet::default(),
+            integer_vars: FxHashSet::default(),
         };
         lowering.declare_rts_functions();
         lowering
@@ -295,6 +305,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             derived_compare_fns: FxHashMap::default(),
             show_desc_counter: 0,
             overloaded_strings: false,
+            thunked_vars: FxHashSet::default(),
+            integer_vars: FxHashSet::default(),
         };
         lowering.declare_rts_functions();
         lowering.declare_external_symbols(imported_symbols)?;
@@ -1851,6 +1863,141 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.functions.insert(VarId::new(1000561), is_eof_fn);
         let get_contents_fn = self.module.llvm_module().add_function("bhc_getContents", ptr_type.fn_type(&[], false), None);
         self.functions.insert(VarId::new(1000562), get_contents_fn);
+
+        // ---- E.45: Integer (arbitrary precision) RTS functions (VarId 1000600-1000619) ----
+        // bhc_integer_from_i64(i64) -> ptr
+        let int_from_i64 = self.module.llvm_module().add_function(
+            "bhc_integer_from_i64",
+            ptr_type.fn_type(&[i64_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000600), int_from_i64);
+        // bhc_integer_from_str(ptr) -> ptr
+        let int_from_str = self.module.llvm_module().add_function(
+            "bhc_integer_from_str",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000601), int_from_str);
+        // bhc_integer_to_i64(ptr) -> i64
+        let int_to_i64 = self.module.llvm_module().add_function(
+            "bhc_integer_to_i64",
+            i64_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000602), int_to_i64);
+        // bhc_integer_add(ptr, ptr) -> ptr
+        let int_add = self.module.llvm_module().add_function(
+            "bhc_integer_add",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000603), int_add);
+        // bhc_integer_sub(ptr, ptr) -> ptr
+        let int_sub = self.module.llvm_module().add_function(
+            "bhc_integer_sub",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000604), int_sub);
+        // bhc_integer_mul(ptr, ptr) -> ptr
+        let int_mul = self.module.llvm_module().add_function(
+            "bhc_integer_mul",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000605), int_mul);
+        // bhc_integer_div(ptr, ptr) -> ptr
+        let int_div = self.module.llvm_module().add_function(
+            "bhc_integer_div",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000606), int_div);
+        // bhc_integer_mod(ptr, ptr) -> ptr
+        let int_mod = self.module.llvm_module().add_function(
+            "bhc_integer_mod",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000607), int_mod);
+        // bhc_integer_negate(ptr) -> ptr
+        let int_negate = self.module.llvm_module().add_function(
+            "bhc_integer_negate",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000608), int_negate);
+        // bhc_integer_abs(ptr) -> ptr
+        let int_abs = self.module.llvm_module().add_function(
+            "bhc_integer_abs",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000609), int_abs);
+        // bhc_integer_signum(ptr) -> ptr
+        let int_signum = self.module.llvm_module().add_function(
+            "bhc_integer_signum",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000610), int_signum);
+        // bhc_integer_gcd(ptr, ptr) -> ptr
+        let int_gcd = self.module.llvm_module().add_function(
+            "bhc_integer_gcd",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000611), int_gcd);
+        // bhc_integer_eq(ptr, ptr) -> i64
+        let int_eq = self.module.llvm_module().add_function(
+            "bhc_integer_eq",
+            i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000612), int_eq);
+        // bhc_integer_lt(ptr, ptr) -> i64
+        let int_lt = self.module.llvm_module().add_function(
+            "bhc_integer_lt",
+            i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000613), int_lt);
+        // bhc_integer_le(ptr, ptr) -> i64
+        let int_le = self.module.llvm_module().add_function(
+            "bhc_integer_le",
+            i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000614), int_le);
+        // bhc_integer_gt(ptr, ptr) -> i64
+        let int_gt = self.module.llvm_module().add_function(
+            "bhc_integer_gt",
+            i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000615), int_gt);
+        // bhc_integer_ge(ptr, ptr) -> i64
+        let int_ge = self.module.llvm_module().add_function(
+            "bhc_integer_ge",
+            i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000616), int_ge);
+        // bhc_integer_compare(ptr, ptr) -> i64
+        let int_compare = self.module.llvm_module().add_function(
+            "bhc_integer_compare",
+            i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000617), int_compare);
+        // bhc_integer_show(ptr) -> ptr
+        let int_show = self.module.llvm_module().add_function(
+            "bhc_integer_show",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000618), int_show);
 
         // ---- String RTS functions (VarId 1176-1179) ----
         // bhc_string_lines(str_ptr) -> ptr
@@ -10312,7 +10459,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let name = con.name.as_str();
                 matches!(
                     name,
-                    "Int" | "Int#" | "Int64" | "Int32" | "Integer" | "Word" | "Word64" | "Word32"
+                    "Int" | "Int#" | "Int64" | "Int32" | "Word" | "Word64" | "Word32"
                 )
             }
             Ty::Prim(prim) => {
@@ -10323,6 +10470,56 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Ty::Forall(_, body) => self.is_int_type(body),
             _ => false,
         }
+    }
+
+    /// E.45: Check if a type is the Integer (arbitrary precision) type.
+    fn is_integer_type(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Con(con) => con.name.as_str() == "Integer",
+            Ty::App(f, _) => self.is_integer_type(f),
+            Ty::Forall(_, body) => self.is_integer_type(body),
+            _ => false,
+        }
+    }
+
+    /// E.45: Check if the parameter at `param_idx` in a function type is Integer.
+    /// Walks through Ty::Fun(param, result) chain to find the param at the given index.
+    fn is_integer_param_at(&self, fn_ty: &Ty, param_idx: usize) -> bool {
+        let mut current = fn_ty;
+        // Skip through foralls
+        while let Ty::Forall(_, body) = current {
+            current = body;
+        }
+        // Walk the function arrow chain to the param_idx-th parameter
+        for _ in 0..param_idx {
+            if let Ty::Fun(_, result) = current {
+                current = result;
+            } else {
+                return false;
+            }
+        }
+        if let Ty::Fun(param, _) = current {
+            self.is_integer_type(param)
+        } else {
+            false
+        }
+    }
+
+    /// E.45: Extract a list of which parameter positions in a function type are Integer.
+    /// For `Integer -> Integer -> IO ()`, returns `[true, true]`.
+    fn extract_integer_param_positions(&self, fn_ty: &Ty) -> Vec<bool> {
+        let mut positions = Vec::new();
+        let mut current = fn_ty;
+        // Skip through foralls
+        while let Ty::Forall(_, body) = current {
+            current = body;
+        }
+        // Walk the function arrow chain
+        while let Ty::Fun(param, result) = current {
+            positions.push(self.is_integer_type(param));
+            current = result;
+        }
+        positions
     }
 
     /// Check if a type is a float type.
@@ -15179,6 +15376,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             if self.is_unit_type(&ty) {
                 return self.lower_builtin_show_typed(expr, 1000097, "show_unit", ShowCoerce::Unit);
             }
+            if self.is_integer_type(&ty) {
+                return self.lower_builtin_show_typed(expr, 1000618, "show_integer", ShowCoerce::Integer);
+            }
             if self.is_int_type(&ty) {
                 return self.lower_builtin_show_typed(expr, 1000072, "show_int", ShowCoerce::Int);
             }
@@ -15230,6 +15430,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Expr::Lit(Literal::Int(_), _, _) => {
                 Some((ShowCoerce::Int, 1000072, "show_int"))
             }
+            // Integer literal (arbitrary precision)
+            Expr::Lit(Literal::Integer(_), _, _) => {
+                Some((ShowCoerce::Integer, 1000618, "show_integer"))
+            }
             // Float/Double literal
             Expr::Lit(Literal::Float(_), _, _) | Expr::Lit(Literal::Double(_), _, _) => {
                 Some((ShowCoerce::Double, 1000073, "show_double"))
@@ -15254,6 +15458,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Expr::Var(var, _) if var.name.as_str() == "Nothing" => {
                 Some((ShowCoerce::MaybeOf, 1000094, "show_maybe"))
             }
+            // E.45: Integer variable (tracked from let-binding or by type)
+            Expr::Var(var, _) if self.integer_vars.contains(&var.id) || self.is_integer_type(&var.ty) => {
+                Some((ShowCoerce::Integer, 1000618, "show_integer"))
+            }
             // Empty list []
             Expr::Var(var, _) if var.name.as_str() == "[]" => {
                 // Could be [a] for any a - use List with Int default
@@ -15261,6 +15469,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             // Function applications returning known types
             Expr::App(f, _arg, _) => {
+                // E.45: Check if it's a function that returns Integer
+                if self.is_integer_expr(expr) {
+                    return Some((ShowCoerce::Integer, 1000618, "show_integer"));
+                }
                 // Check if it's a function that returns Bool
                 if self.expr_returns_bool(f) {
                     return Some((ShowCoerce::Bool, 1000091, "show_bool"));
@@ -15486,6 +15698,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             ShowCoerce::StringList => self.get_primitive_show_desc(5),
             ShowCoerce::Unit => self.get_primitive_show_desc(6),
             ShowCoerce::Ordering => self.get_primitive_show_desc(7),
+            ShowCoerce::Integer => self.get_primitive_show_desc(0), // Use Int tag (0) — Integer show is handled separately
             ShowCoerce::List => {
                 let elem_desc = self.build_list_elem_descriptor(expr);
                 self.create_show_desc_global(10, Some(elem_desc), None)
@@ -15599,7 +15812,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // For compound types, use bhc_show_with_desc with recursive descriptors
         match coerce {
-            ShowCoerce::StringList | ShowCoerce::Unit => {
+            ShowCoerce::StringList | ShowCoerce::Unit | ShowCoerce::Integer => {
                 // Pass pointer directly: fn(ptr) -> ptr (simple, no nesting)
                 let rts_fn = *self.functions.get(&VarId::new(var_id)).ok_or_else(|| CodegenError::Internal(format!("bhc_{} not declared", label)))?;
                 let ptr = self.value_to_ptr(val)?;
@@ -26876,6 +27089,227 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// E.45: Check if an expression is an Integer (arbitrary precision) value.
+    fn is_integer_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Lit(Literal::Integer(_), _, _) => true,
+            Expr::Lit(_, ty, _) => matches!(ty, Ty::Con(tc) if tc.name.as_str() == "Integer"),
+            Expr::Var(var, _) => {
+                self.integer_vars.contains(&var.id)
+                    || self.is_integer_type(&var.ty)
+            }
+            // Type application wrapping
+            Expr::TyApp(inner, _, _) => self.is_integer_expr(inner),
+            // Application of known Integer RHS functions
+            Expr::App(f, arg, _) => {
+                if let Expr::Var(var, _) = f.as_ref() {
+                    // negate on Integer
+                    if var.name.as_str() == "negate" && self.is_integer_expr(arg) {
+                        return true;
+                    }
+                    // Check function's return type from its type signature
+                    if let Ty::Fun(_, result) = &var.ty {
+                        if self.is_integer_type(result) {
+                            return true;
+                        }
+                    }
+                    // E.45: Known function with Integer parameter → result is Integer
+                    // e.g., factorial :: Integer -> Integer, when applied to an arg
+                    if self.integer_vars.contains(&var.id) {
+                        // If the function itself is tracked as returning Integer
+                        return true;
+                    }
+                }
+                // Also check for curried apps: f x y where f :: a -> b -> Integer
+                if let Expr::App(f2, inner_arg, _) = f.as_ref() {
+                    if let Expr::Var(var, _) = f2.as_ref() {
+                        // Check if the return type is concretely Integer
+                        if let Ty::Fun(_, inner) = &var.ty {
+                            if let Ty::Fun(_, result) = inner.as_ref() {
+                                if self.is_integer_type(result) {
+                                    return true;
+                                }
+                            }
+                        }
+                        // E.45: For polymorphic arithmetic operators (+ - * div mod etc.),
+                        // if either operand is Integer, the result is Integer too.
+                        let name = var.name.as_str();
+                        if matches!(name, "+" | "-" | "*" | "div" | "mod" | "rem" | "quot"
+                            | "abs" | "signum" | "gcd" | "lcm")
+                        {
+                            if self.is_integer_expr(inner_arg) || self.is_integer_expr(arg) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                // Check type annotation
+                let ty = expr.ty();
+                matches!(ty, Ty::Con(tc) if tc.name.as_str() == "Integer")
+            }
+            _ => {
+                // Check type annotation
+                let ty = expr.ty();
+                matches!(ty, Ty::Con(tc) if tc.name.as_str() == "Integer")
+            }
+        }
+    }
+
+    /// E.45: Lower a PrimOp on Integer (arbitrary precision) operands.
+    /// Dispatches to RTS functions (bhc_integer_add, bhc_integer_sub, etc.)
+    fn lower_integer_primop(
+        &mut self,
+        op: PrimOp,
+        args: &[&Expr],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Map PrimOp to RTS VarId
+        let (rts_var_id, rts_name): (usize, &str) = match op {
+            PrimOp::Add => (1000603, "bhc_integer_add"),
+            PrimOp::Sub => (1000604, "bhc_integer_sub"),
+            PrimOp::Mul => (1000605, "bhc_integer_mul"),
+            PrimOp::Div => (1000606, "bhc_integer_div"),
+            PrimOp::Mod => (1000607, "bhc_integer_mod"),
+            PrimOp::Rem => (1000607, "bhc_integer_mod"), // rem == mod for Integer
+            PrimOp::Quot => (1000606, "bhc_integer_div"), // quot == div for Integer
+            PrimOp::Negate => (1000608, "bhc_integer_negate"),
+            PrimOp::Eq => (1000612, "bhc_integer_eq"),
+            PrimOp::Ne => (1000612, "bhc_integer_eq"), // negate result
+            PrimOp::Lt => (1000613, "bhc_integer_lt"),
+            PrimOp::Le => (1000614, "bhc_integer_le"),
+            PrimOp::Gt => (1000615, "bhc_integer_gt"),
+            PrimOp::Ge => (1000616, "bhc_integer_ge"),
+            _ => return Err(CodegenError::Internal(format!("unsupported Integer PrimOp: {:?}", op))),
+        };
+
+        if matches!(op, PrimOp::Negate) {
+            // Unary: negate(x)
+            let arg = self.lower_expr(args[0])?
+                .ok_or_else(|| CodegenError::Internal("integer negate: no arg".to_string()))?;
+            let rts_fn = *self.functions.get(&VarId::new(rts_var_id)).ok_or_else(|| {
+                CodegenError::Internal(format!("{} not declared", rts_name))
+            })?;
+            let result = self.builder()
+                .build_call(rts_fn, &[arg.into()], "integer_negate")
+                .map_err(|e| CodegenError::Internal(format!("integer negate call: {:?}", e)))?;
+            let val = result.try_as_basic_value().basic().ok_or_else(|| {
+                CodegenError::Internal("integer negate returned void".to_string())
+            })?;
+            return Ok(Some(val));
+        }
+
+        // Binary operations
+        let lhs_is_integer = self.is_integer_expr(args[0]);
+        let rhs_is_integer = self.is_integer_expr(args[1]);
+        let lhs = self.lower_expr(args[0])?
+            .ok_or_else(|| CodegenError::Internal("integer primop: no lhs".to_string()))?;
+        let rhs = self.lower_expr(args[1])?
+            .ok_or_else(|| CodegenError::Internal("integer primop: no rhs".to_string()))?;
+
+        // Convert non-Integer operands to Integer via bhc_integer_from_i64
+        let lhs_ptr = if lhs_is_integer {
+            self.value_to_ptr(lhs)?
+        } else {
+            // Int value — convert to Integer
+            let from_i64_fn = *self.functions.get(&VarId::new(1000600)).ok_or_else(|| {
+                CodegenError::Internal("bhc_integer_from_i64 not declared".to_string())
+            })?;
+            let int_val = if lhs.is_int_value() {
+                lhs.into_int_value()
+            } else {
+                self.ptr_to_int(lhs.into_pointer_value())?
+            };
+            let result = self.builder()
+                .build_call(from_i64_fn, &[int_val.into()], "int_to_integer_lhs")
+                .map_err(|e| CodegenError::Internal(format!("int_to_integer: {:?}", e)))?;
+            let ptr = result.try_as_basic_value().basic().ok_or_else(|| {
+                CodegenError::Internal("int_to_integer returned void".to_string())
+            })?;
+            ptr.into_pointer_value()
+        };
+        let rhs_ptr = if rhs_is_integer {
+            self.value_to_ptr(rhs)?
+        } else {
+            let from_i64_fn = *self.functions.get(&VarId::new(1000600)).ok_or_else(|| {
+                CodegenError::Internal("bhc_integer_from_i64 not declared".to_string())
+            })?;
+            let int_val = if rhs.is_int_value() {
+                rhs.into_int_value()
+            } else {
+                self.ptr_to_int(rhs.into_pointer_value())?
+            };
+            let result = self.builder()
+                .build_call(from_i64_fn, &[int_val.into()], "int_to_integer_rhs")
+                .map_err(|e| CodegenError::Internal(format!("int_to_integer: {:?}", e)))?;
+            let ptr = result.try_as_basic_value().basic().ok_or_else(|| {
+                CodegenError::Internal("int_to_integer returned void".to_string())
+            })?;
+            ptr.into_pointer_value()
+        };
+
+        let rts_fn = *self.functions.get(&VarId::new(rts_var_id)).ok_or_else(|| {
+            CodegenError::Internal(format!("{} not declared", rts_name))
+        })?;
+
+        let result = self.builder()
+            .build_call(rts_fn, &[lhs_ptr.into(), rhs_ptr.into()], &format!("integer_{:?}", op))
+            .map_err(|e| CodegenError::Internal(format!("integer {:?} call: {:?}", op, e)))?;
+        let val = result.try_as_basic_value().basic().ok_or_else(|| {
+            CodegenError::Internal(format!("integer {:?} returned void", op))
+        })?;
+
+        // For comparison operations, the RTS returns i64 (0 or 1)
+        // We need to handle Ne specially (negate eq result)
+        if matches!(op, PrimOp::Eq | PrimOp::Ne | PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge) {
+            // RTS returns i64 (0 or 1) — extract the int value
+            let int_result = if val.is_int_value() {
+                val.into_int_value()
+            } else {
+                // If declared as returning ptr, convert ptr→int
+                self.ptr_to_int(val.into_pointer_value())?
+            };
+            if matches!(op, PrimOp::Ne) {
+                // Negate: 0→1, 1→0
+                let one = self.type_mapper().i64_type().const_int(1, false);
+                let inverted = self.builder()
+                    .build_int_sub(one, int_result, "integer_ne")
+                    .map_err(|e| CodegenError::Internal(format!("integer ne: {:?}", e)))?;
+                return Ok(Some(inverted.into()));
+            }
+            return Ok(Some(int_result.into()));
+        }
+
+        // For arithmetic operations, result is an Integer pointer — track it
+        Ok(Some(val))
+    }
+
+    /// E.45: Promote an Int value to Integer via bhc_integer_from_i64.
+    /// If the value is already a pointer (e.g., already Integer), returns it unchanged.
+    fn promote_to_integer(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        if value.is_pointer_value() {
+            // Already a pointer — assume it's an Integer value
+            return Ok(value);
+        }
+        // Int value → convert to Integer via bhc_integer_from_i64
+        let int_val = if value.is_int_value() {
+            value.into_int_value()
+        } else {
+            return Ok(value); // Unexpected type, don't convert
+        };
+        let from_i64_fn = *self.functions.get(&VarId::new(1000600)).ok_or_else(|| {
+            CodegenError::Internal("bhc_integer_from_i64 not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(from_i64_fn, &[int_val.into()], "promote_to_integer")
+            .map_err(|e| CodegenError::Internal(format!("promote_to_integer: {:?}", e)))?;
+        let ptr = result.try_as_basic_value().basic().ok_or_else(|| {
+            CodegenError::Internal("promote_to_integer returned void".to_string())
+        })?;
+        Ok(ptr)
+    }
+
     /// Check if a name is a data constructor and return (tag, arity).
     ///
     /// This function checks:
@@ -27253,6 +27687,70 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Tag constant for unevaluated thunks.
     const THUNK_TAG: i64 = -1;
+
+    /// Tag constant for indirections (evaluated thunks with cached result).
+    #[allow(dead_code)]
+    const INDIRECTION_TAG: i64 = -3;
+
+    /// Check if an expression should be thunked in a let-binding.
+    ///
+    /// WHNF (Weak Head Normal Form) expressions don't need thunking:
+    /// - Literals: already values
+    /// - Variables: already evaluated or thunked themselves
+    /// - Lambdas: already values (closures)
+    /// - Constructors: already values
+    ///
+    /// Non-WHNF expressions need thunking to achieve lazy evaluation:
+    /// - Applications: may trigger computation
+    /// - Case expressions: pattern matching
+    /// - Let expressions: nested bindings
+    /// - PrimOp: primitive operations
+    /// Check if an expression should be thunked in a let-binding.
+    ///
+    /// WHNF (Weak Head Normal Form) expressions don't need thunking:
+    /// - Literals, variables, lambdas, constructors are already values
+    ///
+    /// Non-WHNF expressions need thunking for lazy evaluation.
+    #[allow(dead_code)]
+    fn should_thunk_expr(expr: &Expr) -> bool {
+        match expr {
+            Expr::Lit(_, _, _) => false,
+            Expr::Var(_, _) => false,
+            Expr::Lam(_, _, _) => false,
+            Expr::TyLam(_, _, _) => false,
+            Expr::Type(_, _) => false,
+            // Applications, case, let, primops are non-WHNF — need thunking
+            Expr::App(_, _, _) => true,
+            Expr::Case(_, _, _, _) => true,
+            Expr::Let(_, _, _) => true,
+            _ => true,
+        }
+    }
+
+    /// Check if an expression is "deferrable" — safe to wrap in a thunk.
+    ///
+    /// Conservative approach: only thunk expressions that are known to crash
+    /// if evaluated eagerly but should not crash if the binding is unused.
+    /// This includes `error "..."` and `undefined`.
+    fn is_deferrable_expr(expr: &Expr) -> bool {
+        match expr {
+            // error "message" — should be deferred (don't crash if unused)
+            Expr::App(func, _, _) => {
+                if let Expr::Var(var, _) = func.as_ref() {
+                    let name = var.name.as_str();
+                    name == "error" || name == "undefined" || name == "throw" || name == "throwIO"
+                } else {
+                    false
+                }
+            }
+            // bare undefined
+            Expr::Var(var, _) => {
+                let name = var.name.as_str();
+                name == "undefined"
+            }
+            _ => false,
+        }
+    }
 
     /// Get the LLVM struct type for a thunk with the given environment size.
     ///
@@ -27987,8 +28485,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.push_transformer_layer(layer);
         }
 
+        // E.45: Extract Integer parameter positions from the function's type signature.
+        // This is needed because Core IR lambda params have Ty::Error (type info lost).
+        let integer_param_positions = self.extract_integer_param_positions(&var.ty);
+
         // Lower the function body, handling lambda parameters
-        let result = self.lower_function_body(fn_val, expr)?;
+        let result = self.lower_function_body(fn_val, expr, &integer_param_positions)?;
 
         // Pop all the pushed layers
         if extra_layer.is_some() {
@@ -28057,7 +28559,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
                 // Look up the variable in the environment
                 if let Some(val) = self.env.get(&var.id) {
-                    Ok(Some(*val))
+                    // E.44: Force thunks on variable lookup.
+                    // Only force if this variable was thunked (tracked in thunked_vars set).
+                    if self.thunked_vars.contains(&var.id) {
+                        let forced = self.build_force(*val)?;
+                        Ok(Some(forced))
+                    } else {
+                        Ok(Some(*val))
+                    }
                 } else if let Some(fn_val) = self.functions.get(&var.id) {
                     // It's a function reference
                     // Check if it's a CAF (only env pointer, no real arguments)
@@ -28112,7 +28621,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             Expr::Let(bind, body, _span) => self.lower_let(bind, body),
 
-            Expr::Case(scrut, alts, _ty, _span) => self.lower_case(scrut, alts),
+            Expr::Case(scrut, alts, ty, _span) => self.lower_case(scrut, alts, ty),
 
             Expr::TyApp(expr, _ty, _span) => {
                 // Type applications are erased at runtime
@@ -28158,9 +28667,60 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Literal::Int(n) => Ok(tm.i64_type().const_int(*n as u64, true).into()),
 
             Literal::Integer(n) => {
-                // For large integers, we'd need arbitrary precision
-                // For now, truncate to i64
-                Ok(tm.i64_type().const_int(*n as u64, true).into())
+                // Arbitrary-precision Integer: call bhc_integer_from_i64 for values that fit in i64,
+                // or bhc_integer_from_str for larger values
+                if *n >= i64::MIN as i128 && *n <= i64::MAX as i128 {
+                    let from_i64 = self.functions.get(&VarId::new(1000600)).ok_or_else(|| {
+                        CodegenError::Internal("bhc_integer_from_i64 not declared".to_string())
+                    })?;
+                    let i64_val = tm.i64_type().const_int(*n as u64, true);
+                    let result = self
+                        .builder()
+                        .build_call(*from_i64, &[i64_val.into()], "integer_from_i64")
+                        .map_err(|e| {
+                            CodegenError::Internal(format!("integer_from_i64 call failed: {:?}", e))
+                        })?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| {
+                            CodegenError::Internal("integer_from_i64 returned void".to_string())
+                        })?;
+                    Ok(result)
+                } else {
+                    // Large integer: pass as string
+                    let s = n.to_string();
+                    let global = self
+                        .builder()
+                        .build_global_string_ptr(&s, "integer_str")
+                        .map_err(|e| {
+                            CodegenError::Internal(format!(
+                                "failed to create integer string: {:?}",
+                                e
+                            ))
+                        })?;
+                    let from_str = self.functions.get(&VarId::new(1000601)).ok_or_else(|| {
+                        CodegenError::Internal("bhc_integer_from_str not declared".to_string())
+                    })?;
+                    let result = self
+                        .builder()
+                        .build_call(
+                            *from_str,
+                            &[global.as_pointer_value().into()],
+                            "integer_from_str",
+                        )
+                        .map_err(|e| {
+                            CodegenError::Internal(format!(
+                                "integer_from_str call failed: {:?}",
+                                e
+                            ))
+                        })?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| {
+                            CodegenError::Internal("integer_from_str returned void".to_string())
+                        })?;
+                    Ok(result)
+                }
             }
 
             Literal::Float(f) => Ok(tm.f32_type().const_float(*f as f64).into()),
@@ -28386,17 +28946,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Lower the inner expression (this produces the actual computation)
         let result = self.lower_expr(inner)?;
 
-        // Build return
-        if let Some(val) = result {
-            let ret_ptr = self.value_to_ptr(val)?;
-            self.builder()
-                .build_return(Some(&ret_ptr))
-                .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
-        } else {
-            let null = ptr_type.const_null();
-            self.builder()
-                .build_return(Some(&null))
-                .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
+        // Build return — but only if the current block doesn't already have a terminator.
+        // Expressions like `error "..."` generate an `unreachable` terminator.
+        let current_bb = self.builder().get_insert_block();
+        let has_terminator = current_bb
+            .map(|bb| bb.get_terminator().is_some())
+            .unwrap_or(false);
+
+        if !has_terminator {
+            if let Some(val) = result {
+                let ret_ptr = self.value_to_ptr(val)?;
+                self.builder()
+                    .build_return(Some(&ret_ptr))
+                    .map_err(|e| {
+                        CodegenError::Internal(format!("failed to build return: {:?}", e))
+                    })?;
+            } else {
+                let null = ptr_type.const_null();
+                self.builder()
+                    .build_return(Some(&null))
+                    .map_err(|e| {
+                        CodegenError::Internal(format!("failed to build return: {:?}", e))
+                    })?;
+            }
         }
 
         // Restore old environment
@@ -30349,6 +30921,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         op: PrimOp,
         args: &[&Expr],
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // E.45: Check if operands are Integer (arbitrary precision) — dispatch to RTS
+        if !args.is_empty() && self.is_integer_expr(args[0]) {
+            match op {
+                PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div | PrimOp::Mod
+                | PrimOp::Rem | PrimOp::Quot | PrimOp::Negate
+                | PrimOp::Eq | PrimOp::Ne | PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge => {
+                    return self.lower_integer_primop(op, args);
+                }
+                _ => {}
+            }
+        }
+        // Also check second arg for Integer (e.g., `1 + x` where x is Integer)
+        if args.len() >= 2 && self.is_integer_expr(args[1]) {
+            match op {
+                PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div | PrimOp::Mod
+                | PrimOp::Rem | PrimOp::Quot
+                | PrimOp::Eq | PrimOp::Ne | PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge => {
+                    return self.lower_integer_primop(op, args);
+                }
+                _ => {}
+            }
+        }
+
         match op {
             // Binary arithmetic operations
             PrimOp::Add
@@ -31318,12 +31913,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     let fn_val = self.functions.get(&rts_id).copied().ok_or_else(|| {
                         CodegenError::Internal(format!("RTS function not declared: {}", name))
                     })?;
-                    return self.lower_direct_call(fn_val, &args);
+                    return self.lower_direct_call(fn_val, &args, None);
                 }
 
                 // Check if this is a known top-level function
                 if let Some(fn_val) = self.functions.get(&var.id).copied() {
-                    return self.lower_direct_call(fn_val, &args);
+                    // E.45: Pass callee type for Integer argument promotion
+                    return self.lower_direct_call(fn_val, &args, Some(&var.ty));
                 }
 
                 // Check if this is a closure in the environment
@@ -31333,7 +31929,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
                 // Check if this is an imported (external) function from another module
                 if let Some(&fn_val) = self.external_functions.get(&var.name) {
-                    return self.lower_direct_call(fn_val, &args);
+                    return self.lower_direct_call(fn_val, &args, Some(&var.ty));
                 }
 
                 // Check if this is an unsaturated builtin (partial application)
@@ -31383,10 +31979,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower a direct function call (to a known function).
+    /// `callee_ty` is the Haskell-level type of the callee, used for E.45 Integer promotion.
     fn lower_direct_call(
         &mut self,
         fn_val: FunctionValue<'ctx>,
         args: &[&Expr],
+        callee_ty: Option<&Ty>,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // Get the function's expected parameter count (excluding env pointer)
         let fn_type = fn_val.get_type();
@@ -31403,7 +32001,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let (fn_args, remaining_args) = args.split_at(expected_args);
 
             // Call the function with its expected args
-            let closure_result = self.lower_direct_call_inner(fn_val, fn_args)?;
+            let closure_result = self.lower_direct_call_inner(fn_val, fn_args, callee_ty)?;
 
             // The result should be a closure - call it with remaining args
             if let Some(closure_val) = closure_result {
@@ -31421,7 +32019,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         // Exact application
-        self.lower_direct_call_inner(fn_val, args)
+        self.lower_direct_call_inner(fn_val, args, callee_ty)
     }
 
     /// Lower a partial application (under-application) to a PAP closure.
@@ -31563,10 +32161,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Inner implementation of direct call (doesn't handle over-application).
+    /// `callee_ty` is the Haskell-level type of the callee, used for E.45 Integer promotion.
     fn lower_direct_call_inner(
         &mut self,
         fn_val: FunctionValue<'ctx>,
         args: &[&Expr],
+        callee_ty: Option<&Ty>,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // Arguments are not in tail position
         let was_tail = self.in_tail_position;
@@ -31579,10 +32179,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         llvm_args.push(null_env.into());
 
         // Lower remaining arguments and convert to pointers
-        for arg_expr in args {
+        for (i, arg_expr) in args.iter().enumerate() {
             if let Some(val) = self.lower_expr(arg_expr)? {
-                // Box non-pointer values to pointers for uniform calling convention
-                let ptr_val = self.value_to_ptr(val)?;
+                // E.45: If callee expects Integer at this position and we have an Int value,
+                // promote to Integer via bhc_integer_from_i64 instead of int_to_ptr
+                let ptr_val = if val.is_int_value()
+                    && callee_ty.map_or(false, |ty| self.is_integer_param_at(ty, i))
+                {
+                    self.promote_to_integer(val)?.into_pointer_value()
+                } else {
+                    self.value_to_ptr(val)?
+                };
                 llvm_args.push(ptr_val.into());
             }
         }
@@ -31704,15 +32311,35 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         match bind {
             Bind::NonRec(var, rhs) => {
-                // Lower the right-hand side (NOT in tail position)
-                let was_tail = self.in_tail_position;
-                self.in_tail_position = false;
-                let rhs_result = self.lower_expr(rhs.as_ref())?;
-                self.in_tail_position = was_tail;
+                // E.44: Selective thunking for lazy let-bindings.
+                // Only thunk expressions that are known to be safe to defer:
+                // - `error "..."` calls (should not evaluate if binding is unused)
+                // - `undefined` (should not evaluate if binding is unused)
+                // Everything else is evaluated eagerly (BHC's default strict semantics).
+                let should_thunk = Self::is_deferrable_expr(rhs.as_ref());
 
-                if let Some(val) = rhs_result {
-                    // Bind the variable
-                    self.env.insert(var.id, val);
+                if should_thunk {
+                    // Create a thunk for lazy evaluation
+                    let thunk_result = self.lower_lazy(rhs.as_ref())?;
+                    if let Some(val) = thunk_result {
+                        self.env.insert(var.id, val);
+                        self.thunked_vars.insert(var.id);
+                    }
+                } else {
+                    // Eager evaluation (default behavior)
+                    let was_tail = self.in_tail_position;
+                    self.in_tail_position = false;
+                    let rhs_result = self.lower_expr(rhs.as_ref())?;
+                    self.in_tail_position = was_tail;
+
+                    if let Some(val) = rhs_result {
+                        self.env.insert(var.id, val);
+                    }
+
+                    // E.45: Track Integer variables for show dispatch
+                    if self.is_integer_expr(rhs.as_ref()) {
+                        self.integer_vars.insert(var.id);
+                    }
                 }
 
                 // Lower the body (preserves tail position from parent)
@@ -31778,8 +32405,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let entry = self.llvm_context().append_basic_block(fn_val, "entry");
         self.builder().position_at_end(entry);
 
+        // E.45: Extract Integer parameter positions from the function's type signature
+        let integer_param_positions = self.extract_integer_param_positions(&var.ty);
+
         // Handle lambda parameters
-        let result = self.lower_function_body(fn_val, expr)?;
+        let result = self.lower_function_body(fn_val, expr, &integer_param_positions)?;
 
         // Check if the current block already has a terminator (e.g., from `error` or `unreachable`)
         // If so, don't add another terminator
@@ -31816,11 +32446,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         fn_val: FunctionValue<'ctx>,
         expr: &Expr,
+        integer_param_positions: &[bool],
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // If the expression is a lambda, bind parameters to function arguments
         // Note: param_idx starts at 1 because index 0 is the env/closure pointer
         let mut current = expr;
         let mut param_idx = 1;
+        let mut lambda_idx = 0usize; // Index into integer_param_positions
 
         // Unwrap lambdas, type lambdas, and trivial case expressions.
         // - Lambdas (Lam): bind parameter to function argument
@@ -31833,7 +32465,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     if let Some(arg) = fn_val.get_nth_param(param_idx) {
                         self.env.insert(param.id, arg);
                     }
+                    // E.45: Track Integer parameters using function type signature
+                    // (param.ty is Ty::Error in Core IR, so use declared type instead)
+                    if self.is_integer_type(&param.ty)
+                        || integer_param_positions.get(lambda_idx).copied().unwrap_or(false)
+                    {
+                        self.integer_vars.insert(param.id);
+                    }
                     param_idx += 1;
+                    lambda_idx += 1;
                     current = body.as_ref();
                 }
                 Expr::TyLam(_tyvar, body, _span) => {
@@ -31956,6 +32596,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         scrut: &Expr,
         alts: &[Alt],
+        case_ty: &Ty,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // Scrutinee is NOT in tail position
         let was_tail = self.in_tail_position;
@@ -32102,7 +32743,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 _ => scrut_val, // Fall through to datacon handling
             };
             if matches!(int_scrut, BasicValueEnum::IntValue(_)) {
-                return self.lower_case_bool_as_int(int_scrut, alts);
+                return self.lower_case_bool_as_int(int_scrut, alts, case_ty);
             }
         }
 
@@ -32901,6 +33542,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         scrut_val: BasicValueEnum<'ctx>,
         alts: &[Alt],
+        case_ty: &Ty,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let scrut_int = match scrut_val {
             BasicValueEnum::IntValue(i) => i,
@@ -32992,10 +33634,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             CodegenError::Internal("no current block after lower_expr".to_string())
         })?;
 
-        // Determine target type from the first available value
-        let target_type = true_rhs
-            .map(|v| v.get_type())
-            .or_else(|| false_rhs.map(|v| v.get_type()));
+        // E.45: Check if the case result type is Integer — we need special promotion
+        // case_ty is often Ty::Error in Core IR, so also check if any branch RHS is Integer
+        let is_integer_case = self.is_integer_type(case_ty)
+            || alts.iter().any(|alt| self.is_integer_expr(&alt.rhs));
+
+        // Determine target type: prefer pointer if one branch is pointer (for Integer cases)
+        let target_type = if is_integer_case {
+            // For Integer cases, target is pointer
+            Some(self.type_mapper().ptr_type().into())
+        } else {
+            true_rhs
+                .map(|v| v.get_type())
+                .or_else(|| false_rhs.map(|v| v.get_type()))
+        };
 
         // Pass 2: Coerce values and build branches
         let mut phi_values: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
@@ -33005,7 +33657,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(true_end_block);
         if true_end_block.get_terminator().is_none() {
             if let Some(val) = true_rhs {
-                let final_val = if let Some(target) = target_type {
+                let final_val = if is_integer_case && val.is_int_value() {
+                    // Promote Int to Integer via bhc_integer_from_i64
+                    self.promote_to_integer(val)?
+                } else if let Some(target) = target_type {
                     if val.get_type() != target {
                         self.coerce_to_type(val, target)?
                     } else {
@@ -33028,7 +33683,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder().position_at_end(false_end_block);
         if false_end_block.get_terminator().is_none() {
             if let Some(val) = false_rhs {
-                let final_val = if let Some(target) = target_type {
+                let final_val = if is_integer_case && val.is_int_value() {
+                    // Promote Int to Integer via bhc_integer_from_i64
+                    self.promote_to_integer(val)?
+                } else if let Some(target) = target_type {
                     if val.get_type() != target {
                         self.coerce_to_type(val, target)?
                     } else {

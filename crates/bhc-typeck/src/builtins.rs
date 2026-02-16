@@ -96,6 +96,31 @@ pub struct Builtins {
     pub bytestring_ty: Ty,
     /// The `Ordering` type.
     pub ordering_ty: Ty,
+    /// The `Integer` type constructor (arbitrary precision).
+    pub integer_con: TyCon,
+    /// The `Integer` type (arbitrary precision).
+    pub integer_ty: Ty,
+    // Word types (unsigned integers)
+    /// The `Word` type constructor (unsigned machine-width integer).
+    pub word_con: TyCon,
+    /// The `Word8` type constructor.
+    pub word8_con: TyCon,
+    /// The `Word16` type constructor.
+    pub word16_con: TyCon,
+    /// The `Word32` type constructor.
+    pub word32_con: TyCon,
+    /// The `Word64` type constructor.
+    pub word64_con: TyCon,
+    /// The `Word` type.
+    pub word_ty: Ty,
+    /// The `Word8` type.
+    pub word8_ty: Ty,
+    /// The `Word16` type.
+    pub word16_ty: Ty,
+    /// The `Word32` type.
+    pub word32_ty: Ty,
+    /// The `Word64` type.
+    pub word64_ty: Ty,
 }
 
 impl Default for Builtins {
@@ -117,6 +142,16 @@ impl Builtins {
         let text_con = TyCon::new(Symbol::intern("Text"), Kind::Star);
         let bytestring_con = TyCon::new(Symbol::intern("ByteString"), Kind::Star);
         let ordering_con = TyCon::new(Symbol::intern("Ordering"), Kind::Star);
+
+        // Arbitrary-precision Integer type constructor
+        let integer_con = TyCon::new(Symbol::intern("Integer"), Kind::Star);
+
+        // Word type constructors (unsigned integers)
+        let word_con = TyCon::new(Symbol::intern("Word"), Kind::Star);
+        let word8_con = TyCon::new(Symbol::intern("Word8"), Kind::Star);
+        let word16_con = TyCon::new(Symbol::intern("Word16"), Kind::Star);
+        let word32_con = TyCon::new(Symbol::intern("Word32"), Kind::Star);
+        let word64_con = TyCon::new(Symbol::intern("Word64"), Kind::Star);
 
         // Type constructors with kind * -> *
         let list_con = TyCon::new(Symbol::intern("[]"), Kind::star_to_star());
@@ -162,6 +197,16 @@ impl Builtins {
         // Ordering is an ADT: LT | EQ | GT
         let ordering_ty = Ty::Con(ordering_con.clone());
 
+        // Arbitrary-precision Integer type
+        let integer_ty = Ty::Con(integer_con.clone());
+
+        // Word types (unsigned integers)
+        let word_ty = Ty::Con(word_con.clone());
+        let word8_ty = Ty::Con(word8_con.clone());
+        let word16_ty = Ty::Con(word16_con.clone());
+        let word32_ty = Ty::Con(word32_con.clone());
+        let word64_ty = Ty::Con(word64_con.clone());
+
         Self {
             int_con,
             float_con,
@@ -186,6 +231,18 @@ impl Builtins {
             text_ty,
             bytestring_ty,
             ordering_ty,
+            integer_con,
+            integer_ty,
+            word_con,
+            word8_con,
+            word16_con,
+            word32_con,
+            word64_con,
+            word_ty,
+            word8_ty,
+            word16_ty,
+            word32_ty,
+            word64_ty,
         }
     }
 
@@ -482,11 +539,14 @@ impl Builtins {
 
         // Helper to create common type schemes
         let num_binop = || {
-            // a -> a -> a (for Num types, we simplify to Int for now)
-            Scheme::mono(Ty::fun(
-                self.int_ty.clone(),
-                Ty::fun(self.int_ty.clone(), self.int_ty.clone()),
-            ))
+            // a -> a -> a (polymorphic, allows Int, Integer, Float, Double)
+            Scheme::poly(
+                vec![a.clone()],
+                Ty::fun(
+                    Ty::Var(a.clone()),
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
+            )
         };
 
         let cmp_binop = || {
@@ -2341,15 +2401,24 @@ impl Builtins {
             }),
             (
                 "negate",
-                Scheme::mono(Ty::fun(self.int_ty.clone(), self.int_ty.clone())),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
             ),
             (
                 "abs",
-                Scheme::mono(Ty::fun(self.int_ty.clone(), self.int_ty.clone())),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
             ),
             (
                 "signum",
-                Scheme::mono(Ty::fun(self.int_ty.clone(), self.int_ty.clone())),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                ),
             ),
             (
                 "sqrt",

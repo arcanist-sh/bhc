@@ -1087,6 +1087,7 @@ mod tests {
                 tag: 0,
                 arity: 2,
                 field_names: vec![name_sym, age_sym], // canonical order: name, age
+                is_newtype: false,
             },
         );
 

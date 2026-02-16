@@ -483,6 +483,8 @@ pub struct CoreConstructor {
     pub arity: u32,
     /// The data type this constructor belongs to (e.g., "Maybe", "Color").
     pub type_name: Option<String>,
+    /// Whether this constructor is a newtype constructor (identity at runtime).
+    pub is_newtype: bool,
 }
 
 /// A Core module containing definitions.

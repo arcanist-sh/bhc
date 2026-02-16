@@ -81,6 +81,8 @@ pub struct ConstructorInfo {
     /// For record constructors, the ordered list of field names.
     /// None for positional constructors.
     pub field_names: Option<Vec<Symbol>>,
+    /// Whether this constructor is a newtype constructor (identity at runtime).
+    pub is_newtype: bool,
 }
 
 /// Exports collected from a loaded module.
@@ -326,6 +328,7 @@ fn collect_decl_exports(
                                 type_param_count,
                                 tag: tag as u32,
                                 field_names,
+                                is_newtype: false,
                             },
                         );
 
@@ -387,6 +390,7 @@ fn collect_decl_exports(
                             type_param_count,
                             tag: 0,
                             field_names,
+                            is_newtype: true,
                         },
                     );
 

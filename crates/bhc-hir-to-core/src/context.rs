@@ -34,6 +34,8 @@ pub struct ConstructorInfo {
     /// Field names for record constructors (in canonical order).
     /// Empty for positional constructors.
     pub field_names: Vec<Symbol>,
+    /// Whether this constructor is a newtype constructor (identity at runtime).
+    pub is_newtype: bool,
 }
 
 /// Metadata about a record field selector function.
@@ -92,6 +94,9 @@ pub struct LowerContext {
 
     /// Accumulated errors.
     errors: Vec<LowerError>,
+
+    /// Whether GeneralizedNewtypeDeriving is enabled for the current module.
+    pub generalized_newtype_deriving: bool,
 }
 
 impl LowerContext {
@@ -108,6 +113,7 @@ impl LowerContext {
             dict_scope: vec![FxHashMap::default()], // Start with empty root scope
             class_registry: ClassRegistry::new(),
             errors: Vec::new(),
+            generalized_newtype_deriving: false,
         };
         ctx.register_builtins();
         ctx.register_builtin_constructors();
@@ -153,6 +159,7 @@ impl LowerContext {
                 tag: 1,
                 arity: 0,
                 field_names: vec![],
+                is_newtype: false,
             },
         );
         self.constructor_map.insert(
@@ -163,6 +170,7 @@ impl LowerContext {
                 tag: 0,
                 arity: 0,
                 field_names: vec![],
+                is_newtype: false,
             },
         );
 
@@ -176,6 +184,7 @@ impl LowerContext {
                 tag: 0,
                 arity: 0,
                 field_names: vec![],
+                is_newtype: false,
             },
         );
         self.constructor_map.insert(
@@ -186,6 +195,7 @@ impl LowerContext {
                 tag: 1,
                 arity: 1,
                 field_names: vec![],
+                is_newtype: false,
             },
         );
 
@@ -199,6 +209,7 @@ impl LowerContext {
                 tag: 0,
                 arity: 1,
                 field_names: vec![],
+                is_newtype: false,
             },
         );
         self.constructor_map.insert(
@@ -209,6 +220,7 @@ impl LowerContext {
                 tag: 1,
                 arity: 1,
                 field_names: vec![],
+                is_newtype: false,
             },
         );
 
@@ -222,6 +234,7 @@ impl LowerContext {
                 tag: 0,
                 arity: 0,
                 field_names: vec![],
+                is_newtype: false,
             },
         );
         self.constructor_map.insert(
@@ -232,6 +245,7 @@ impl LowerContext {
                 tag: 1,
                 arity: 2,
                 field_names: vec![],
+                is_newtype: false,
             },
         );
 
@@ -245,6 +259,7 @@ impl LowerContext {
                 tag: 0,
                 arity: 0,
                 field_names: vec![],
+                is_newtype: false,
             },
         );
     }
@@ -1408,6 +1423,9 @@ impl LowerContext {
 
     /// Lower a HIR module to Core.
     pub fn lower_module(&mut self, module: &HirModule) -> LowerResult<CoreModule> {
+        // Propagate extension flags
+        self.generalized_newtype_deriving = module.generalized_newtype_deriving;
+
         // First pass: collect all top-level definitions and create Core variables
         // We use named_var here to preserve the original names for external visibility
         for item in &module.items {
@@ -1526,6 +1544,7 @@ impl LowerContext {
                                 tag: tag as u32,
                                 arity,
                                 field_names,
+                                is_newtype: false,
                             },
                         );
                     }
@@ -1552,6 +1571,29 @@ impl LowerContext {
                     // Register the newtype constructor
                     let var = self.named_var(newtype_def.con.name, Ty::Error);
                     self.register_var(newtype_def.con.id, var);
+
+                    // Register constructor metadata for codegen (newtype = identity)
+                    let arity = match &newtype_def.con.fields {
+                        bhc_hir::ConFields::Positional(fields) => fields.len() as u32,
+                        bhc_hir::ConFields::Named(fields) => fields.len() as u32,
+                    };
+                    let field_names = match &newtype_def.con.fields {
+                        bhc_hir::ConFields::Positional(_) => vec![],
+                        bhc_hir::ConFields::Named(fields) => {
+                            fields.iter().map(|f| f.name).collect()
+                        }
+                    };
+                    self.register_constructor(
+                        newtype_def.con.id,
+                        ConstructorInfo {
+                            name: newtype_def.con.name,
+                            type_name: newtype_def.name,
+                            tag: 0,
+                            arity,
+                            field_names,
+                            is_newtype: true,
+                        },
+                    );
 
                     // Process deriving clauses
                     if !newtype_def.deriving.is_empty() {
@@ -1628,6 +1670,7 @@ impl LowerContext {
                 tag: info.tag,
                 arity: info.arity,
                 type_name: Some(info.type_name.as_str().to_string()),
+                is_newtype: info.is_newtype,
             })
             .collect();
 

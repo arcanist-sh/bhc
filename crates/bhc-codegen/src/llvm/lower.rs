@@ -74,6 +74,8 @@ pub struct ConstructorMeta {
     pub arity: u32,
     /// The data type this constructor belongs to (if known).
     pub type_name: Option<String>,
+    /// Whether this constructor is a newtype constructor (identity at runtime).
+    pub is_newtype: bool,
 }
 
 /// A symbol exported by an already-compiled module, used for cross-module linking.
@@ -1156,11 +1158,25 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if let Some(existing) = self.constructor_metadata.get_mut(&key) {
             existing.tag = tag;
             existing.arity = arity;
-            // Preserve type_name if already set
+            // Preserve type_name and is_newtype if already set
         } else {
-            self.constructor_metadata
-                .insert(key, ConstructorMeta { tag, arity, type_name: None });
+            self.constructor_metadata.insert(
+                key,
+                ConstructorMeta {
+                    tag,
+                    arity,
+                    type_name: None,
+                    is_newtype: false,
+                },
+            );
         }
+    }
+
+    /// Check if a constructor is a newtype constructor (identity at runtime).
+    pub fn is_newtype_constructor(&self, name: &str) -> bool {
+        self.constructor_metadata
+            .get(name)
+            .map_or(false, |meta| meta.is_newtype)
     }
 
     /// Declare external RTS functions.
@@ -27913,7 +27929,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Check if an expression is a saturated constructor application.
     ///
     /// Returns Some((tag, collected_args)) if the expression is a fully-applied constructor.
-    fn is_saturated_constructor<'a>(&self, expr: &'a Expr) -> Option<(u32, u32, Vec<&'a Expr>)> {
+    fn is_saturated_constructor<'a>(
+        &self,
+        expr: &'a Expr,
+    ) -> Option<(u32, u32, Vec<&'a Expr>, String)> {
         // Collect arguments while unwrapping applications
         let mut args = Vec::new();
         let mut current = expr;
@@ -27928,7 +27947,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             if let Some((tag, arity)) = self.constructor_info(var.name.as_str()) {
                 args.reverse();
                 if args.len() == arity as usize {
-                    return Some((tag, arity, args));
+                    return Some((tag, arity, args, var.name.as_str().to_string()));
                 }
             }
         }
@@ -27946,11 +27965,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // even if they are only used as values (not in case alternatives).
         for con in &core_module.constructors {
             self.register_constructor(&con.name, con.tag, con.arity);
-            if let Some(ref type_name) = con.type_name {
-                if let Some(meta) = self.constructor_metadata.get_mut(&con.name) {
+            if let Some(meta) = self.constructor_metadata.get_mut(&con.name) {
+                if let Some(ref type_name) = con.type_name {
                     if meta.type_name.is_none() {
                         meta.type_name = Some(type_name.clone());
                     }
+                }
+                if con.is_newtype {
+                    meta.is_newtype = true;
                 }
             }
         }
@@ -31879,7 +31901,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         // Check if this is a saturated constructor application
-        if let Some((tag, arity, con_args)) = self.is_saturated_constructor(&full_app) {
+        if let Some((tag, arity, con_args, con_name)) = self.is_saturated_constructor(&full_app) {
+            // Newtype erasure: newtype constructor is identity at runtime
+            if self.is_newtype_constructor(&con_name) && arity == 1 {
+                return self.lower_expr(con_args[0]);
+            }
             return self.lower_constructor_application(tag, arity, &con_args);
         }
 
@@ -33317,6 +33343,40 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         alts: &[Alt],
         scrut_ty: &Ty,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Newtype erasure: if the case matches a single newtype constructor,
+        // the scrutinee IS the inner value (no ADT struct to destructure).
+        // Just bind the scrutinee to the binder and evaluate the RHS.
+        if let Some(alt) = alts.first() {
+            if let AltCon::DataCon(con) = &alt.con {
+                if self.is_newtype_constructor(con.name.as_str()) && con.arity == 1 {
+                    // Bind the single field to the scrutinee value directly
+                    if let Some(binder) = alt.binders.first() {
+                        self.env.insert(binder.id, scrut_val);
+                    }
+                    let result = self.lower_expr(&alt.rhs)?;
+                    // Clean up bindings
+                    for binder in &alt.binders {
+                        self.env.remove(&binder.id);
+                    }
+                    return Ok(result);
+                }
+            }
+            // Also handle Default alt that binds the scrutinee for newtype cases
+            if let AltCon::Default = &alt.con {
+                if alts.len() == 1 {
+                    // Single default alt — bind scrutinee if there's a binder
+                    if let Some(binder) = alt.binders.first() {
+                        self.env.insert(binder.id, scrut_val);
+                    }
+                    let result = self.lower_expr(&alt.rhs)?;
+                    for binder in &alt.binders {
+                        self.env.remove(&binder.id);
+                    }
+                    return Ok(result);
+                }
+            }
+        }
+
         // Count existing case_alt blocks before we add more
         let current_fn = self
             .builder()
@@ -34302,6 +34362,11 @@ pub fn lower_core_module_multimodule_with_constructors<'ctx, 'm>(
     // constructors from other modules (e.g., Types.hs constructors used in Parser.hs).
     for (name, meta) in imported_constructors {
         lowering.register_constructor(name, meta.tag, meta.arity);
+        if meta.is_newtype {
+            if let Some(m) = lowering.constructor_metadata.get_mut(name.as_str()) {
+                m.is_newtype = true;
+            }
+        }
     }
     lowering.lower_module(core_module)
 }

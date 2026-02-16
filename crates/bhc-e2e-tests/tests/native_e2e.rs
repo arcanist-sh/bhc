@@ -756,6 +756,16 @@ fn test_tier3_scoped_tyvars_list_native() {
     run_native_test("tier3_io/scoped_tyvars_list", Profile::Default);
 }
 
+#[test]
+fn test_tier3_gnd_basic_native() {
+    run_native_test("tier3_io/gnd_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_gnd_newtype_erasure_native() {
+    run_native_test("tier3_io/gnd_newtype_erasure", Profile::Default);
+}
+
 // =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================

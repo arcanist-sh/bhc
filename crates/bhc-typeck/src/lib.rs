@@ -249,6 +249,7 @@ mod tests {
             span: bhc_span::Span::DUMMY,
             overloaded_strings: false,
             scoped_type_variables: false,
+            generalized_newtype_deriving: false,
         };
 
         let result = type_check_module(&module, FileId::new(0));

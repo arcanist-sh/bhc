@@ -173,6 +173,7 @@ mod tests {
             span: Span::default(),
             overloaded_strings: false,
             scoped_type_variables: false,
+            generalized_newtype_deriving: false,
         };
 
         let result = lower_module(&module);
@@ -258,6 +259,7 @@ mod tests {
             span: Span::default(),
             overloaded_strings: false,
             scoped_type_variables: false,
+            generalized_newtype_deriving: false,
         };
 
         // Set up type schemes
@@ -439,6 +441,7 @@ mod tests {
             span: Span::default(),
             overloaded_strings: false,
             scoped_type_variables: false,
+            generalized_newtype_deriving: false,
         };
 
         // Lower the module
@@ -586,6 +589,7 @@ mod tests {
             span: Span::default(),
             overloaded_strings: false,
             scoped_type_variables: false,
+            generalized_newtype_deriving: false,
         };
 
         // Set up type schemes
@@ -771,6 +775,7 @@ mod tests {
             span: Span::default(),
             overloaded_strings: false,
             scoped_type_variables: false,
+            generalized_newtype_deriving: false,
         };
 
         // Register the myEq method as a variable
@@ -1073,6 +1078,7 @@ mod tests {
             span: Span::default(),
             overloaded_strings: false,
             scoped_type_variables: false,
+            generalized_newtype_deriving: false,
         };
 
         // Lower the module

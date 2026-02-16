@@ -1116,6 +1116,7 @@ impl Compiler {
                             tag: con_info.tag,
                             arity: con_info.arity as u32,
                             type_name: None,
+                            is_newtype: con_info.is_newtype,
                         },
                     )
                 })
@@ -1260,6 +1261,13 @@ impl Compiler {
                             }
                         })
                     });
+                    let is_newtype = hir.items.iter().any(|item| {
+                        if let bhc_hir::Item::Newtype(nt) = item {
+                            nt.con.id == def_info.id
+                        } else {
+                            false
+                        }
+                    });
                     let con_info = bhc_lower::loader::ConstructorInfo {
                         def_id: def_info.id,
                         arity,
@@ -1267,6 +1275,7 @@ impl Compiler {
                         type_param_count,
                         tag,
                         field_names,
+                        is_newtype,
                     };
                     exports.constructors.insert(def_info.name, con_info);
                 }
@@ -1333,6 +1342,7 @@ impl Compiler {
                                 .as_ref()
                                 .cloned()
                                 .unwrap_or_default(),
+                            is_newtype: con_info.is_newtype,
                         },
                     );
                 }

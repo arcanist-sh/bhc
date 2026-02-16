@@ -673,6 +673,8 @@ pub struct Module {
     pub overloaded_strings: bool,
     /// Whether {-# LANGUAGE ScopedTypeVariables #-} is enabled.
     pub scoped_type_variables: bool,
+    /// Whether {-# LANGUAGE GeneralizedNewtypeDeriving #-} is enabled.
+    pub generalized_newtype_deriving: bool,
 }
 
 /// An export specification.

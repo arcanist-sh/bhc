@@ -748,6 +748,20 @@ fn test_tier3_lazy_let_native() {
 }
 
 // =============================================================================
+// E.58: Lazy Let-Bindings (full)
+// =============================================================================
+
+#[test]
+fn test_tier3_lazy_let_basic_native() {
+    run_native_test("tier3_io/lazy_let_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_lazy_let_conditional_native() {
+    run_native_test("tier3_io/lazy_let_conditional", Profile::Default);
+}
+
+// =============================================================================
 // E.45: Integer (Arbitrary Precision)
 // =============================================================================
 

@@ -30122,46 +30122,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Check if an expression should be thunked in a let-binding.
     ///
     /// WHNF (Weak Head Normal Form) expressions don't need thunking:
-    /// - Literals, variables, lambdas, constructors are already values
-    ///
-    /// Non-WHNF expressions need thunking for lazy evaluation.
-    #[allow(dead_code)]
-    fn should_thunk_expr(expr: &Expr) -> bool {
+    /// E.58: Check if an expression is trivial (doesn't need thunking).
+    /// Trivial expressions are cheap to evaluate and have no side effects,
+    /// so they can be evaluated eagerly without waste.
+    /// Everything else should be thunked for lazy evaluation.
+    fn is_trivial_expr(expr: &Expr) -> bool {
         match expr {
-            Expr::Lit(_, _, _) => false,
-            Expr::Var(_, _) => false,
-            Expr::Lam(_, _, _) => false,
-            Expr::TyLam(_, _, _) => false,
-            Expr::Type(_, _) => false,
-            // Applications, case, let, primops are non-WHNF — need thunking
-            Expr::App(_, _, _) => true,
-            Expr::Case(_, _, _, _) => true,
-            Expr::Let(_, _, _) => true,
-            _ => true,
-        }
-    }
-
-    /// Check if an expression is "deferrable" — safe to wrap in a thunk.
-    ///
-    /// Conservative approach: only thunk expressions that are known to crash
-    /// if evaluated eagerly but should not crash if the binding is unused.
-    /// This includes `error "..."` and `undefined`.
-    fn is_deferrable_expr(expr: &Expr) -> bool {
-        match expr {
-            // error "message" — should be deferred (don't crash if unused)
-            Expr::App(func, _, _) => {
-                if let Expr::Var(var, _) = func.as_ref() {
-                    let name = var.name.as_str();
-                    name == "error" || name == "undefined" || name == "throw" || name == "throwIO"
-                } else {
-                    false
-                }
-            }
-            // bare undefined
-            Expr::Var(var, _) => {
-                let name = var.name.as_str();
-                name == "undefined"
-            }
+            // Literals are trivial
+            Expr::Lit(_, _, _) => true,
+            // Variable references are trivial (just a lookup)
+            Expr::Var(_, _) => true,
+            // Lambdas are trivial (just a closure allocation, no computation)
+            Expr::Lam(_, _, _) => true,
+            // Type-level wrappers are trivial if their inner expression is
+            Expr::TyLam(_, inner, _) => Self::is_trivial_expr(inner),
+            Expr::TyApp(inner, _, _) => Self::is_trivial_expr(inner),
+            Expr::Cast(inner, _, _) => Self::is_trivial_expr(inner),
+            Expr::Tick(_, inner, _) => Self::is_trivial_expr(inner),
+            Expr::Type(_, _) => true,
+            Expr::Coercion(_, _) => true,
+            // Everything else is non-trivial (App, Case, Let, Lazy)
             _ => false,
         }
     }
@@ -30311,17 +30291,27 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Generate a unique name for a thunk evaluation function.
+    /// Includes module name to avoid cross-module duplicate symbols.
     fn next_thunk_name(&mut self) -> String {
-        let name = format!("__thunk_eval_{}", self.closure_counter);
+        let counter = self.closure_counter;
         self.closure_counter += 1;
-        name
+        if let Some(ref mod_name) = self.module_name {
+            format!("__thunk_eval_{}.{}", mod_name, counter)
+        } else {
+            format!("__thunk_eval_{}", counter)
+        }
     }
 
     /// Generate a unique name for a closure function.
+    /// Includes module name to avoid cross-module duplicate symbols.
     fn next_closure_name(&mut self) -> String {
-        let name = format!("__closure_{}", self.closure_counter);
+        let counter = self.closure_counter;
         self.closure_counter += 1;
-        name
+        if let Some(ref mod_name) = self.module_name {
+            format!("__closure_{}.{}", mod_name, counter)
+        } else {
+            format!("__closure_{}", counter)
+        }
     }
 
     /// Check if an expression is a saturated constructor application.
@@ -34922,14 +34912,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         match bind {
             Bind::NonRec(var, rhs) => {
-                // E.44: Selective thunking for lazy let-bindings.
-                // Only thunk expressions that are known to be safe to defer:
-                // - `error "..."` calls (should not evaluate if binding is unused)
-                // - `undefined` (should not evaluate if binding is unused)
-                // Everything else is evaluated eagerly (BHC's default strict semantics).
-                let should_thunk = Self::is_deferrable_expr(rhs.as_ref());
+                // E.58: Lazy let-bindings.
+                // Thunk non-trivial expressions for lazy evaluation.
+                // Trivial expressions (literals, vars, lambdas) are evaluated eagerly.
+                let should_thunk = !Self::is_trivial_expr(rhs.as_ref());
 
                 if should_thunk {
+                    // E.45: Track Integer variables BEFORE thunking
+                    // (is_integer_expr inspects expression structure, not thunk wrapper)
+                    if self.is_integer_expr(rhs.as_ref()) {
+                        self.integer_vars.insert(var.id);
+                    }
+
                     // Create a thunk for lazy evaluation
                     let thunk_result = self.lower_lazy(rhs.as_ref())?;
                     if let Some(val) = thunk_result {
@@ -34937,7 +34931,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         self.thunked_vars.insert(var.id);
                     }
                 } else {
-                    // Eager evaluation (default behavior)
+                    // Eager evaluation for trivial expressions
                     let was_tail = self.in_tail_position;
                     self.in_tail_position = false;
                     let rhs_result = self.lower_expr(rhs.as_ref())?;
@@ -34956,8 +34950,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // Lower the body (preserves tail position from parent)
                 let result = self.lower_expr(body)?;
 
-                // Remove the binding (for proper scoping)
+                // Remove bindings for proper scoping
                 self.env.remove(&var.id);
+                self.thunked_vars.remove(&var.id);
 
                 Ok(result)
             }

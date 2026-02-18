@@ -189,6 +189,21 @@ impl TransformerStack {
             && self.layers[0] == TransformerLayer::StateT
             && self.layers.iter().skip(1).any(|&l| l == TransformerLayer::ReaderT)
     }
+
+    /// Check if this is a genuine nested ReaderT over StateT context.
+    ///
+    /// Returns true if the top two layers are [ReaderT, StateT] with no additional
+    /// transformer layers below (only IO or empty). This distinguishes genuine RtOvSt
+    /// from auto-lift artifacts in StOvRt, where the stack looks like
+    /// [ReaderT, StateT, StateT, ReaderT, IO].
+    fn is_reader_t_over_state_t(&self) -> bool {
+        self.layers.len() >= 2
+            && self.layers[0] == TransformerLayer::ReaderT
+            && self.layers[1] == TransformerLayer::StateT
+            && !self.layers.iter().skip(2).any(|&l| {
+                l == TransformerLayer::StateT || l == TransformerLayer::ReaderT
+            })
+    }
 }
 
 /// State for lowering Core IR to LLVM IR.
@@ -3585,6 +3600,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Monadic operations — dispatch based on transformer stack.
             // Detects the operation's native layer and inserts lifts if needed.
             ">>=" => {
+                // For ReaderT-over-StateT, bypass auto-lift and route directly
+                // to nested ReaderT bind which threads state through 3-arg closures
+                if self.transformer_stack.is_reader_t_over_state_t() {
+                    return self.lower_builtin_reader_t_bind(args[0], args[1]);
+                }
+
                 let op_layer = self.detect_operation_layer(args[0]);
                 let current = self.current_transformer_layer();
 
@@ -3611,6 +3632,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
             }
             ">>" => {
+                // For ReaderT-over-StateT, bypass auto-lift and route directly
+                // to nested ReaderT then which threads state through 3-arg closures
+                if self.transformer_stack.is_reader_t_over_state_t() {
+                    return self.lower_builtin_reader_t_then(args[0], args[1]);
+                }
+
                 let op_layer = self.detect_operation_layer(args[0]);
                 let current = self.current_transformer_layer();
 
@@ -3637,6 +3664,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
             }
             "return" | "pure" => {
+                // For ReaderT-over-StateT, route to nested ReaderT pure
+                if self.transformer_stack.is_reader_t_over_state_t() {
+                    return self.lower_builtin_reader_t_pure(args[0]);
+                }
                 match self.current_transformer_layer() {
                     TransformerLayer::ReaderT => self.lower_builtin_reader_t_pure(args[0]),
                     TransformerLayer::StateT => self.lower_builtin_state_t_pure(args[0]),
@@ -11689,15 +11720,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// runReaderT for ReaderT r (StateT s IO) - returns a StateT closure.
+    ///
+    /// The returned StateT closure takes (env, state) and internally calls m with 3 args:
+    /// m(m, reader_env, state) -> (value, final_state)
     fn lower_run_reader_t_over_state_t(
         &mut self,
         m_expr: &Expr,
         r_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        self.push_transformer_layer(TransformerLayer::ReaderT);
+        // Lower m — m is typically a top-level function reference whose body
+        // is already lowered with the correct transformer stack by its own handler.
+        // Do NOT push extra layers here — they would stack on top of the function's own
+        // layers if m's body is lowered inline (forward reference).
         let m_val = self.lower_expr(m_expr)?
             .ok_or_else(|| CodegenError::Internal("runReaderT/StateT: m has no value".to_string()))?;
-        self.pop_transformer_layer();
         let r_val = self.lower_expr(r_expr)?
             .ok_or_else(|| CodegenError::Internal("runReaderT/StateT: r has no value".to_string()))?;
 
@@ -11710,24 +11746,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let saved_bb = self.builder().get_insert_block();
             self.builder().position_at_end(entry);
 
-            // Parameters: (env, state)
+            // Parameters: (env, state) — this is a StateT closure
             // env contains: [m, reader_env]
             let env = func.get_nth_param(0).unwrap().into_pointer_value();
             let state = func.get_nth_param(1).unwrap();
             let m = self.extract_closure_env_elem(env, 2, 0)?;
             let reader_env = self.extract_closure_env_elem(env, 2, 1)?;
 
-            // Call m with reader_env - returns result (for pure ReaderT ops)
-            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            // Call m with 3 args: m(m, reader_env, state) -> (value, final_state)
+            let fn_type_3 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
             let m_fn = self.extract_closure_fn_ptr(m)?;
-            let result = self.builder()
-                .build_indirect_call(fn_type, m_fn, &[m.into(), reader_env.into()], "run_rt_result")
+            let pair = self.builder()
+                .build_indirect_call(fn_type_3, m_fn, &[m.into(), reader_env.into(), state.into()], "run_rt_st_result")
                 .map_err(|e| CodegenError::Internal(format!("runReaderT/StateT call m: {:?}", e)))?
                 .try_as_basic_value().basic()
                 .ok_or_else(|| CodegenError::Internal("runReaderT/StateT m: void".to_string()))?;
 
-            // Return (result, state) pair (state unchanged for pure ReaderT computations)
-            let pair = self.alloc_pair(result, state)?;
+            // Return the (value, final_state) pair directly — state is threaded through m
             self.builder().build_return(Some(&pair))
                 .map_err(|e| CodegenError::Internal(format!("runReaderT/StateT return: {:?}", e)))?;
             if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
@@ -11748,8 +11783,32 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ///
     /// When in StateT context (nested), ask is lifted:
     /// ask = closure \(env, s, reader_env) -> (reader_env, s)
+    ///
+    /// When in ReaderT-over-StateT context:
+    /// ask = closure \(env, reader_env, state) -> (reader_env, state)
     fn lower_builtin_ask(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let ptr_type = self.type_mapper().ptr_type();
+        // Check if we're in a ReaderT-over-StateT context
+        if self.transformer_stack.is_reader_t_over_state_t() {
+            // Nested: \(_env, reader_env, state) -> (reader_env, state)
+            let fn_name = "bhc_ask_in_reader_t_over_state_t";
+            let func = self.get_or_create_nested_transformer_fn(fn_name);
+            if func.count_basic_blocks() == 0 {
+                let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                let saved_bb = self.builder().get_insert_block();
+                self.builder().position_at_end(entry);
+                // param 0 = env, param 1 = reader_env, param 2 = state
+                let reader_env = func.get_nth_param(1).unwrap();
+                let state = func.get_nth_param(2).unwrap();
+                let pair = self.alloc_pair(reader_env, state)?;
+                self.builder().build_return(Some(&pair))
+                    .map_err(|e| CodegenError::Internal(format!("ask_rt_over_st return: {:?}", e)))?;
+                if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+            }
+            let fn_ptr = func.as_global_value().as_pointer_value();
+            let closure_ptr = self.alloc_closure(fn_ptr, &[])?;
+            return Ok(Some(closure_ptr.into()));
+        }
 
         // Check if we're in a StateT context - if so, lift ask
         if self.transformer_stack.is_state_t_over_reader_t() {
@@ -11891,6 +11950,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// ReaderT.pure x = closure \r -> x
+    ///
+    /// For RtOvSt: \(env, _r, s) -> (x, s) where x = env[0]
     fn lower_builtin_reader_t_pure(
         &mut self,
         x_expr: &Expr,
@@ -11899,6 +11960,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("ReaderT.pure: x has no value".to_string()))?;
 
         let ptr_type = self.type_mapper().ptr_type();
+
+        // ReaderT-over-StateT: return (x, s) pair
+        if self.transformer_stack.is_reader_t_over_state_t() {
+            let fn_name = "bhc_reader_t_pure_rt_over_st";
+            let func = self.get_or_create_nested_transformer_fn(fn_name);
+            if func.count_basic_blocks() == 0 {
+                let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                let saved_bb = self.builder().get_insert_block();
+                self.builder().position_at_end(entry);
+                // \(env, _r, s) -> (x, s) where x = env[0]
+                let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                let s = func.get_nth_param(2).unwrap();
+                let x = self.extract_closure_env_elem(env, 1, 0)?;
+                let pair = self.alloc_pair(x.into(), s)?;
+                self.builder().build_return(Some(&pair))
+                    .map_err(|e| CodegenError::Internal(format!("reader_t_pure_rt_over_st return: {:?}", e)))?;
+                if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+            }
+            let fn_ptr = func.as_global_value().as_pointer_value();
+            let x_ptr = self.value_to_ptr(x_val)?;
+            let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), x_ptr.into())])?;
+            return Ok(Some(closure_ptr.into()));
+        }
+
         let fn_name = "bhc_reader_t_pure";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -11921,6 +12006,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// ReaderT.>>= m k = closure \r -> let a = m(r) in k(a)(r)
+    ///
+    /// For RtOvSt: \(env, r, s) ->
+    ///   let (a, s') = m(m, r, s)
+    ///   let kr = k(k, a)
+    ///   kr(kr, r, s')
     fn lower_builtin_reader_t_bind(
         &mut self,
         m_expr: &Expr,
@@ -11932,6 +12022,69 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("ReaderT.>>=: k has no value".to_string()))?;
 
         let ptr_type = self.type_mapper().ptr_type();
+
+        // ReaderT-over-StateT: 3-arg closures threading state
+        if self.transformer_stack.is_reader_t_over_state_t() {
+            let fn_name = "bhc_reader_t_bind_rt_over_st";
+            let func = self.get_or_create_nested_transformer_fn(fn_name);
+            if func.count_basic_blocks() == 0 {
+                let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                let saved_bb = self.builder().get_insert_block();
+                self.builder().position_at_end(entry);
+                // \(env, r, s) -> ...
+                let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                let r = func.get_nth_param(1).unwrap();
+                let s = func.get_nth_param(2).unwrap();
+                let m = self.extract_closure_env_elem(env, 2, 0)?;
+                let k = self.extract_closure_env_elem(env, 2, 1)?;
+
+                let fn_type_3 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+                let fn_type_2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+                // (a, s') = m(m, r, s)
+                let m_fn = self.extract_closure_fn_ptr(m)?;
+                let pair = self.builder()
+                    .build_indirect_call(fn_type_3, m_fn, &[m.into(), r.into(), s.into()], "rt_st_bind_pair")
+                    .map_err(|e| CodegenError::Internal(format!("ReaderT/StateT bind m: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("ReaderT/StateT bind m: void".to_string()))?
+                    .into_pointer_value();
+
+                let a = self.extract_pair_fst(pair)?;
+                let s_prime = self.extract_pair_snd(pair)?;
+
+                // kr = k(k, a) — produces a new 3-arg closure
+                let k_fn = self.extract_closure_fn_ptr(k)?;
+                let kr = self.builder()
+                    .build_indirect_call(fn_type_2, k_fn, &[k.into(), a.into()], "rt_st_bind_kr")
+                    .map_err(|e| CodegenError::Internal(format!("ReaderT/StateT bind k: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("ReaderT/StateT bind k: void".to_string()))?;
+
+                // result = kr(kr, r, s')
+                let kr_ptr = kr.into_pointer_value();
+                let kr_fn = self.extract_closure_fn_ptr(kr_ptr)?;
+                let result = self.builder()
+                    .build_indirect_call(fn_type_3, kr_fn, &[kr_ptr.into(), r.into(), s_prime.into()], "rt_st_bind_result")
+                    .map_err(|e| CodegenError::Internal(format!("ReaderT/StateT bind kr: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("ReaderT/StateT bind kr: void".to_string()))?;
+
+                self.builder().build_return(Some(&result))
+                    .map_err(|e| CodegenError::Internal(format!("reader_t_bind_rt_over_st return: {:?}", e)))?;
+                if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+            }
+
+            let fn_ptr = func.as_global_value().as_pointer_value();
+            let m_ptr = self.value_to_ptr(m_val)?;
+            let k_ptr = self.value_to_ptr(k_val)?;
+            let closure_ptr = self.alloc_closure(fn_ptr, &[
+                (VarId::new(900000), m_ptr.into()),
+                (VarId::new(900001), k_ptr.into()),
+            ])?;
+            return Ok(Some(closure_ptr.into()));
+        }
+
         let fn_name = "bhc_reader_t_bind";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -11989,6 +12142,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// ReaderT.>> m1 m2 = closure \r -> m1(r); m2(r)
+    ///
+    /// For RtOvSt: \(env, r, s) ->
+    ///   let (_, s') = m1(m1, r, s)
+    ///   m2(m2, r, s')
     fn lower_builtin_reader_t_then(
         &mut self,
         m1_expr: &Expr,
@@ -12000,6 +12157,58 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("ReaderT.>>: m2 has no value".to_string()))?;
 
         let ptr_type = self.type_mapper().ptr_type();
+
+        // ReaderT-over-StateT: 3-arg closures threading state
+        if self.transformer_stack.is_reader_t_over_state_t() {
+            let fn_name = "bhc_reader_t_then_rt_over_st";
+            let func = self.get_or_create_nested_transformer_fn(fn_name);
+            if func.count_basic_blocks() == 0 {
+                let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                let saved_bb = self.builder().get_insert_block();
+                self.builder().position_at_end(entry);
+                // \(env, r, s) -> ...
+                let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                let r = func.get_nth_param(1).unwrap();
+                let s = func.get_nth_param(2).unwrap();
+                let m1 = self.extract_closure_env_elem(env, 2, 0)?;
+                let m2 = self.extract_closure_env_elem(env, 2, 1)?;
+
+                let fn_type_3 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+
+                // (_, s') = m1(m1, r, s)
+                let m1_fn = self.extract_closure_fn_ptr(m1)?;
+                let pair1 = self.builder()
+                    .build_indirect_call(fn_type_3, m1_fn, &[m1.into(), r.into(), s.into()], "rt_st_then_pair")
+                    .map_err(|e| CodegenError::Internal(format!("ReaderT/StateT then m1: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("ReaderT/StateT then m1: void".to_string()))?
+                    .into_pointer_value();
+
+                let s_prime = self.extract_pair_snd(pair1)?;
+
+                // result = m2(m2, r, s')
+                let m2_fn = self.extract_closure_fn_ptr(m2)?;
+                let result = self.builder()
+                    .build_indirect_call(fn_type_3, m2_fn, &[m2.into(), r.into(), s_prime.into()], "rt_st_then_result")
+                    .map_err(|e| CodegenError::Internal(format!("ReaderT/StateT then m2: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("ReaderT/StateT then m2: void".to_string()))?;
+
+                self.builder().build_return(Some(&result))
+                    .map_err(|e| CodegenError::Internal(format!("reader_t_then_rt_over_st return: {:?}", e)))?;
+                if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+            }
+
+            let fn_ptr = func.as_global_value().as_pointer_value();
+            let m1_ptr = self.value_to_ptr(m1_val)?;
+            let m2_ptr = self.value_to_ptr(m2_val)?;
+            let closure_ptr = self.alloc_closure(fn_ptr, &[
+                (VarId::new(900000), m1_ptr.into()),
+                (VarId::new(900001), m2_ptr.into()),
+            ])?;
+            return Ok(Some(closure_ptr.into()));
+        }
+
         let fn_name = "bhc_reader_t_then";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -12223,7 +12432,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.lower_run_state_t_over_reader_t(m_expr, s_expr)
             }
             Some(TransformerLayer::IO) | None => {
-                // StateT s IO - direct execution (current behavior)
+                // StateT s IO - direct execution
                 self.lower_run_state_t_direct(m_expr, s_expr)
             }
             Some(_other) => {
@@ -12365,9 +12574,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// get = closure \s -> (s, s)
     ///
-    /// For nested transformers: \(_env, s, _reader_env) -> (s, s)
+    /// For nested transformers (StOvRt): \(_env, s, _reader_env) -> (s, s)
+    /// For nested transformers (RtOvSt): \(_env, _reader_env, s) -> (s, s)
     fn lower_builtin_get(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let ptr_type = self.type_mapper().ptr_type();
+
+        // ReaderT-over-StateT: state is at param 2
+        if self.transformer_stack.is_reader_t_over_state_t() {
+            let fn_name = "bhc_state_t_get_rt_over_st";
+            let func = self.get_or_create_nested_transformer_fn(fn_name);
+            if func.count_basic_blocks() == 0 {
+                let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                let saved_bb = self.builder().get_insert_block();
+                self.builder().position_at_end(entry);
+                // \(_env, _reader_env, s) -> (s, s)
+                let s = func.get_nth_param(2).unwrap();
+                let pair = self.alloc_pair(s, s)?;
+                self.builder().build_return(Some(&pair))
+                    .map_err(|e| CodegenError::Internal(format!("get_rt_over_st return: {:?}", e)))?;
+                if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+            }
+            let fn_ptr = func.as_global_value().as_pointer_value();
+            let closure_ptr = self.alloc_closure(fn_ptr, &[])?;
+            return Ok(Some(closure_ptr.into()));
+        }
+
         let is_nested = self.transformer_stack.is_state_t_over_reader_t();
         let fn_name = if is_nested { "bhc_state_t_get_nested" } else { "bhc_state_t_get" };
 
@@ -12394,6 +12625,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// put s' = closure \_ -> ((), s')
+    ///
+    /// For RtOvSt: \(env, _reader_env, _s) -> ((), s') where s' = env[0]
     fn lower_builtin_put(
         &mut self,
         s_expr: &Expr,
@@ -12402,6 +12635,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("put: s has no value".to_string()))?;
 
         let ptr_type = self.type_mapper().ptr_type();
+
+        // ReaderT-over-StateT: 3-arg closure
+        if self.transformer_stack.is_reader_t_over_state_t() {
+            let fn_name = "bhc_state_t_put_rt_over_st";
+            let func = self.get_or_create_nested_transformer_fn(fn_name);
+            if func.count_basic_blocks() == 0 {
+                let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                let saved_bb = self.builder().get_insert_block();
+                self.builder().position_at_end(entry);
+                // \(env, _reader_env, _s) -> ((), s') where s' = env[0]
+                let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                let s_new = self.extract_closure_env_elem(env, 1, 0)?;
+                let unit = ptr_type.const_null();
+                let pair = self.alloc_pair(unit.into(), s_new.into())?;
+                self.builder().build_return(Some(&pair))
+                    .map_err(|e| CodegenError::Internal(format!("put_rt_over_st return: {:?}", e)))?;
+                if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+            }
+            let fn_ptr = func.as_global_value().as_pointer_value();
+            let s_ptr = self.value_to_ptr(s_val)?;
+            let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), s_ptr.into())])?;
+            return Ok(Some(closure_ptr.into()));
+        }
+
         let fn_name = "bhc_state_t_put";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -12426,6 +12683,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// modify f = closure \s -> ((), f(s))
+    ///
+    /// For RtOvSt: \(env, _reader_env, s) -> ((), f(s)) where f = env[0]
     fn lower_builtin_modify(
         &mut self,
         f_expr: &Expr,
@@ -12434,6 +12693,41 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("modify: f has no value".to_string()))?;
 
         let ptr_type = self.type_mapper().ptr_type();
+
+        // ReaderT-over-StateT: 3-arg closure
+        if self.transformer_stack.is_reader_t_over_state_t() {
+            let fn_name = "bhc_state_t_modify_rt_over_st";
+            let func = self.get_or_create_nested_transformer_fn(fn_name);
+            if func.count_basic_blocks() == 0 {
+                let entry = self.llvm_ctx.append_basic_block(func, "entry");
+                let saved_bb = self.builder().get_insert_block();
+                self.builder().position_at_end(entry);
+                // \(env, _reader_env, s) -> ((), f(s)) where f = env[0]
+                let env = func.get_nth_param(0).unwrap().into_pointer_value();
+                let s = func.get_nth_param(2).unwrap();
+                let f = self.extract_closure_env_elem(env, 1, 0)?;
+
+                let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                let f_fn = self.extract_closure_fn_ptr(f)?;
+                let s_ptr = self.value_to_ptr(s)?;
+                let s_new = self.builder()
+                    .build_indirect_call(fn_type, f_fn, &[f.into(), s_ptr.into()], "modify_rt_st_s")
+                    .map_err(|e| CodegenError::Internal(format!("modify_rt_over_st f: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("modify_rt_over_st f: void".to_string()))?;
+
+                let unit = ptr_type.const_null();
+                let pair = self.alloc_pair(unit.into(), s_new)?;
+                self.builder().build_return(Some(&pair))
+                    .map_err(|e| CodegenError::Internal(format!("modify_rt_over_st return: {:?}", e)))?;
+                if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+            }
+            let fn_ptr = func.as_global_value().as_pointer_value();
+            let f_ptr = self.value_to_ptr(f_val)?;
+            let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), f_ptr.into())])?;
+            return Ok(Some(closure_ptr.into()));
+        }
+
         let fn_name = "bhc_state_t_modify";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -13057,14 +13351,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         m_expr: &Expr,
         s_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        // Lower m and s - the StateT computation needs nested context pushed
-        // so that operations like ask/get use the 3-arg calling convention
-        self.push_transformer_layer(TransformerLayer::StateT);
-        self.push_transformer_layer(TransformerLayer::ReaderT);
+        // Lower m — m is typically a top-level function reference whose body
+        // is already lowered with the correct transformer stack by its own handler.
+        // Do NOT push extra layers here — they would stack on top of the function's own
+        // layers if m's body is lowered inline (forward reference).
         let m_val = self.lower_expr(m_expr)?
             .ok_or_else(|| CodegenError::Internal("evalStateT/ReaderT: m has no value".to_string()))?;
-        self.pop_transformer_layer(); // pop ReaderT
-        self.pop_transformer_layer(); // pop StateT
         let s_val = self.lower_expr(s_expr)?
             .ok_or_else(|| CodegenError::Internal("evalStateT/ReaderT: s has no value".to_string()))?;
 
@@ -29293,7 +29585,6 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // For [StateT, ReaderT], we push ReaderT first, then StateT, resulting in [StateT, ReaderT, IO]
         let layers_to_push: Vec<_> = transformer_stack_from_type.iter().rev().cloned().collect();
         let pushed_count = layers_to_push.len();
-
         // Push the full transformer stack (innermost first since push inserts at position 0)
         for layer in &layers_to_push {
             let fn_name = var.name.as_str().to_string();

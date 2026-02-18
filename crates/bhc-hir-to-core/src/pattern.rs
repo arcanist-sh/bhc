@@ -770,6 +770,15 @@ fn get_constructor_tag(name: &str, fallback: u32) -> u32 {
         // Unit constructor
         "()" => 0,
 
+        // Tuple constructors (single constructor per type = tag 0)
+        "(,)" => 0,
+        "(,,)" => 0,
+        "(,,,)" => 0,
+        "(,,,,)" => 0,
+        "(,,,,,)" => 0,
+        "(,,,,,,)" => 0,
+        "(,,,,,,,)" => 0,
+
         // Ordering constructors
         "LT" => 0,
         "EQ" => 1,

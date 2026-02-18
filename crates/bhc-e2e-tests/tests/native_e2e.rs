@@ -245,7 +245,6 @@ fn test_tier3_cross_state_reader_native() {
 }
 
 #[test]
-#[ignore = "ReaderT r (StateT s IO) requires lifting StateT operations into ReaderT context - not yet implemented"]
 fn test_tier3_cross_reader_state_native() {
     run_native_test("tier3_io/cross_reader_state", Profile::Default);
 }

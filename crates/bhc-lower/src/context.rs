@@ -558,15 +558,12 @@ impl LowerContext {
             // Enum functions
             "succ",
             "pred",
-            "toEnum",
-            "fromEnum",
+            // toEnum/fromEnum registered at fixed DefIds below (12100+)
             "enumFrom",
             "enumFromThen",
             "enumFromTo",
             "enumFromThenTo",
-            // Bounded
-            "minBound",
-            "maxBound",
+            // minBound/maxBound registered at fixed DefIds below (12100+)
             // Read functions
             "read",
             "reads",
@@ -1561,9 +1558,23 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
+        // E.54: Enum/Bounded (fixed DefIds 12100-12103)
+        let enum_bounded_fns: &[(usize, &str)] = &[
+            (12100, "fromEnum"),
+            (12101, "toEnum"),
+            (12102, "minBound"),
+            (12103, "maxBound"),
+        ];
+        for &(id, name) in enum_bounded_fns {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
         // Ensure next_def_id is past the fixed DefId ranges
-        if self.next_def_id <= 12006 {
-            self.next_def_id = 12006;
+        if self.next_def_id <= 12104 {
+            self.next_def_id = 12104;
         }
     }
 

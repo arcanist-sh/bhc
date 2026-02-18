@@ -814,6 +814,11 @@ fn test_tier3_derive_traversable_native() {
     run_native_test("tier3_io/derive_traversable", Profile::Default);
 }
 
+#[test]
+fn test_tier3_derive_enum_native() {
+    run_native_test("tier3_io/derive_enum", Profile::Default);
+}
+
 // =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================

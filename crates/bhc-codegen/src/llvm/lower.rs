@@ -241,6 +241,14 @@ pub struct Lowering<'ctx, 'm> {
     derived_foldable_fns: FxHashMap<String, VarId>,
     /// Map from type name → VarId of the $derived_traverse_TypeName function.
     derived_traversable_fns: FxHashMap<String, VarId>,
+    /// Map from type name → VarId of the $derived_fromEnum_TypeName function.
+    derived_from_enum_fns: FxHashMap<String, VarId>,
+    /// Map from type name → VarId of the $derived_toEnum_TypeName function.
+    derived_to_enum_fns: FxHashMap<String, VarId>,
+    /// Map from type name → VarId of the $derived_minBound_TypeName function.
+    derived_min_bound_fns: FxHashMap<String, VarId>,
+    /// Map from type name → VarId of the $derived_maxBound_TypeName function.
+    derived_max_bound_fns: FxHashMap<String, VarId>,
     /// Counter for generating unique show descriptor global names.
     show_desc_counter: usize,
     /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
@@ -277,6 +285,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             derived_functor_fns: FxHashMap::default(),
             derived_foldable_fns: FxHashMap::default(),
             derived_traversable_fns: FxHashMap::default(),
+            derived_from_enum_fns: FxHashMap::default(),
+            derived_to_enum_fns: FxHashMap::default(),
+            derived_min_bound_fns: FxHashMap::default(),
+            derived_max_bound_fns: FxHashMap::default(),
             show_desc_counter: 0,
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
@@ -317,6 +329,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             derived_functor_fns: FxHashMap::default(),
             derived_foldable_fns: FxHashMap::default(),
             derived_traversable_fns: FxHashMap::default(),
+            derived_from_enum_fns: FxHashMap::default(),
+            derived_to_enum_fns: FxHashMap::default(),
+            derived_min_bound_fns: FxHashMap::default(),
+            derived_max_bound_fns: FxHashMap::default(),
             show_desc_counter: 0,
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
@@ -3136,6 +3152,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "." => Some(3),
             "succ" => Some(1),
             "pred" => Some(1),
+            "fromEnum" => Some(1),
+            "toEnum" => Some(1),
+            "minBound" => Some(0),
+            "maxBound" => Some(0),
 
             // E.28: Arithmetic, enum, folds, higher-order, IO input
             "min" => Some(2),
@@ -3786,6 +3806,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "uncurry" => self.lower_builtin_uncurry(args[0], args[1]),
             "succ" => self.lower_builtin_succ(args[0]),
             "pred" => self.lower_builtin_pred(args[0]),
+            "fromEnum" => self.lower_builtin_from_enum(args[0]),
+            "toEnum" => self.lower_builtin_to_enum(args[0]),
+            "minBound" => self.lower_builtin_min_bound(),
+            "maxBound" => self.lower_builtin_max_bound(),
 
             // E.28: Arithmetic, enum, folds, higher-order, IO input
             "min" => self.lower_builtin_min(args[0], args[1]),
@@ -5279,6 +5303,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         from_expr: &Expr,
         to_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Check if arguments are user enum constructors
+        if let Some(type_name) = self.infer_adt_type_from_expr(from_expr) {
+            if self.derived_from_enum_fns.contains_key(&type_name)
+                && self.derived_to_enum_fns.contains_key(&type_name)
+            {
+                return self.lower_enum_from_to_user_enum(from_expr, to_expr, &type_name);
+            }
+        }
+
         let from_val = self
             .lower_expr(from_expr)?
             .ok_or_else(|| CodegenError::Internal("enumFromTo: from has no value".to_string()))?;
@@ -5350,6 +5383,92 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         acc_phi.add_incoming(&[(&nil, entry_block), (&new_acc, loop_body)]);
         current_phi.add_incoming(&[(&to, entry_block), (&prev_current, loop_body)]);
+
+        // Return result
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
+    /// Lower `enumFromTo` for user-defined enum types.
+    /// Converts from/to to Int via fromEnum, iterates, converts each back via toEnum.
+    fn lower_enum_from_to_user_enum(
+        &mut self,
+        from_expr: &Expr,
+        to_expr: &Expr,
+        type_name: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let from_val = self
+            .lower_expr(from_expr)?
+            .ok_or_else(|| CodegenError::Internal("enumFromTo: from has no value".to_string()))?;
+        let to_val = self
+            .lower_expr(to_expr)?
+            .ok_or_else(|| CodegenError::Internal("enumFromTo: to has no value".to_string()))?;
+
+        // Convert from/to to Int tags via fromEnum
+        let from_tag = self.call_derived_from_enum(type_name, from_val)?;
+        let to_tag = self.call_derived_from_enum(type_name, to_val)?;
+
+        let ptr_ty = self.type_mapper().ptr_type();
+        let i64_ty = self.type_mapper().i64_type();
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        // Build list backwards from to_tag down to from_tag
+        let loop_header = self
+            .llvm_context()
+            .append_basic_block(current_fn, "uenum_header");
+        let loop_body = self
+            .llvm_context()
+            .append_basic_block(current_fn, "uenum_body");
+        let loop_exit = self
+            .llvm_context()
+            .append_basic_block(current_fn, "uenum_exit");
+
+        let nil = self.build_nil()?;
+        self.builder()
+            .build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("uenum: branch: {:?}", e)))?;
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+
+        // Loop header
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self
+            .builder()
+            .build_phi(ptr_ty, "acc")
+            .map_err(|e| CodegenError::Internal(format!("uenum: phi: {:?}", e)))?;
+        let current_phi = self
+            .builder()
+            .build_phi(i64_ty, "current")
+            .map_err(|e| CodegenError::Internal(format!("uenum: phi: {:?}", e)))?;
+
+        // Check if current < from_tag (done)
+        let current = current_phi.as_basic_value().into_int_value();
+        let done = self
+            .builder()
+            .build_int_compare(inkwell::IntPredicate::SLT, current, from_tag, "done")
+            .map_err(|e| CodegenError::Internal(format!("uenum: cmp: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("uenum: branch: {:?}", e)))?;
+
+        // Loop body: convert current tag to enum constructor, cons onto accumulator
+        self.builder().position_at_end(loop_body);
+        let enum_val = self.call_derived_to_enum(type_name, current)?;
+        let new_acc = self.build_cons(enum_val, acc_phi.as_basic_value())?;
+        let prev = self
+            .builder()
+            .build_int_sub(current, i64_ty.const_int(1, false), "prev")
+            .map_err(|e| CodegenError::Internal(format!("uenum: sub: {:?}", e)))?;
+        self.builder()
+            .build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("uenum: branch: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&nil, entry_block), (&new_acc, loop_body)]);
+        current_phi.add_incoming(&[(&to_tag, entry_block), (&prev, loop_body)]);
 
         // Return result
         self.builder().position_at_end(loop_exit);
@@ -10838,6 +10957,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // Unary Int ops
                     Expr::Var(var, _) => {
                         let name = var.name.as_str();
+                        if name == "succ" || name == "pred" {
+                            // E.54: succ/pred on user enums return ADT, not Int
+                            if let Expr::App(_, arg, _) = expr {
+                                return self.infer_adt_type_from_expr(arg).is_none();
+                            }
+                        }
                         matches!(
                             name,
                             "length" | "ord" | "abs" | "signum" | "negate"
@@ -16928,8 +17053,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     // E.27: succ, pred, (&), swap, curry, uncurry
     // ========================================================================
 
-    /// Lower `succ` - successor function (n + 1).
+    /// Lower `succ` - successor function (n + 1), or user enum succ via fromEnum/toEnum.
     fn lower_builtin_succ(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Check if argument is a user enum type
+        if let Some(type_name) = self.infer_adt_type_from_expr(expr) {
+            if self.derived_from_enum_fns.contains_key(&type_name)
+                && self.derived_to_enum_fns.contains_key(&type_name)
+            {
+                // succ x = toEnum(fromEnum(x) + 1)
+                let val = self
+                    .lower_expr(expr)?
+                    .ok_or_else(|| CodegenError::Internal("succ: no value".to_string()))?;
+                let tag = self.call_derived_from_enum(&type_name, val)?;
+                let one = self.type_mapper().i64_type().const_int(1, false);
+                let tag_plus_1 = self
+                    .builder()
+                    .build_int_add(tag, one, "succ_tag")
+                    .map_err(|e| CodegenError::Internal(format!("succ add: {:?}", e)))?;
+                let result = self.call_derived_to_enum(&type_name, tag_plus_1)?;
+                return Ok(Some(result));
+            }
+        }
+        // Fallback: Int succ (n + 1)
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("succ: no value".to_string()))?;
@@ -16942,8 +17087,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(self.int_to_ptr(result)?.into()))
     }
 
-    /// Lower `pred` - predecessor function (n - 1).
+    /// Lower `pred` - predecessor function (n - 1), or user enum pred via fromEnum/toEnum.
     fn lower_builtin_pred(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Check if argument is a user enum type
+        if let Some(type_name) = self.infer_adt_type_from_expr(expr) {
+            if self.derived_from_enum_fns.contains_key(&type_name)
+                && self.derived_to_enum_fns.contains_key(&type_name)
+            {
+                // pred x = toEnum(fromEnum(x) - 1)
+                let val = self
+                    .lower_expr(expr)?
+                    .ok_or_else(|| CodegenError::Internal("pred: no value".to_string()))?;
+                let tag = self.call_derived_from_enum(&type_name, val)?;
+                let one = self.type_mapper().i64_type().const_int(1, false);
+                let tag_minus_1 = self
+                    .builder()
+                    .build_int_sub(tag, one, "pred_tag")
+                    .map_err(|e| CodegenError::Internal(format!("pred sub: {:?}", e)))?;
+                let result = self.call_derived_to_enum(&type_name, tag_minus_1)?;
+                return Ok(Some(result));
+            }
+        }
+        // Fallback: Int pred (n - 1)
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("pred: no value".to_string()))?;
@@ -16954,6 +17119,163 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_sub(int_val, one, "pred")
             .map_err(|e| CodegenError::Internal(format!("pred failed: {:?}", e)))?;
         Ok(Some(self.int_to_ptr(result)?.into()))
+    }
+
+    /// Lower `fromEnum` - convert enum value to Int.
+    fn lower_builtin_from_enum(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Check if argument is a user enum type
+        if let Some(type_name) = self.infer_adt_type_from_expr(expr) {
+            if let Some(&var_id) = self.derived_from_enum_fns.get(&type_name) {
+                if let Some(fn_val) = self.functions.get(&var_id).copied() {
+                    let val = self
+                        .lower_expr(expr)?
+                        .ok_or_else(|| CodegenError::Internal("fromEnum: no value".to_string()))?;
+                    // Call derived fromEnum: fn(env, x) -> Int (as tagged int pointer)
+                    let null_env = self.type_mapper().ptr_type().const_null();
+                    let fn_ptr = fn_val.as_global_value().as_pointer_value();
+                    let fn_type = self.type_mapper().ptr_type().fn_type(
+                        &[self.type_mapper().ptr_type().into(), self.type_mapper().ptr_type().into()],
+                        false,
+                    );
+                    let result = self
+                        .builder()
+                        .build_indirect_call(fn_type, fn_ptr, &[null_env.into(), val.into()], "derived_from_enum")
+                        .map_err(|e| CodegenError::Internal(format!("fromEnum call: {:?}", e)))?;
+                    return Ok(result.try_as_basic_value().basic());
+                }
+            }
+        }
+        // Fallback: identity (fromEnum on Int = identity)
+        self.lower_expr(expr)
+    }
+
+    /// Lower `toEnum` - convert Int to enum value.
+    fn lower_builtin_to_enum(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // If there's exactly one user enum with derived Enum, use it
+        if self.derived_to_enum_fns.len() == 1 {
+            let (type_name, &var_id) = self.derived_to_enum_fns.iter().next().unwrap();
+            let type_name = type_name.clone();
+            if let Some(fn_val) = self.functions.get(&var_id).copied() {
+                let val = self
+                    .lower_expr(expr)?
+                    .ok_or_else(|| CodegenError::Internal("toEnum: no value".to_string()))?;
+                // Convert Int value to pointer for the call (derived functions use ptr calling convention)
+                let val_ptr = self.value_to_ptr(val)?;
+                // Call derived toEnum: fn(env, n) -> Constructor pointer
+                let null_env = self.type_mapper().ptr_type().const_null();
+                let fn_ptr = fn_val.as_global_value().as_pointer_value();
+                let fn_type = self.type_mapper().ptr_type().fn_type(
+                    &[self.type_mapper().ptr_type().into(), self.type_mapper().ptr_type().into()],
+                    false,
+                );
+                let result = self
+                    .builder()
+                    .build_indirect_call(fn_type, fn_ptr, &[null_env.into(), val_ptr.into()], "derived_to_enum")
+                    .map_err(|e| CodegenError::Internal(format!("toEnum call: {:?}", e)))?;
+                let _ = type_name;
+                return Ok(result.try_as_basic_value().basic());
+            }
+        }
+        // Fallback: identity (toEnum on Int = identity)
+        self.lower_expr(expr)
+    }
+
+    /// Lower `minBound` - return the minimum value of a Bounded type.
+    fn lower_builtin_min_bound(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // If there's exactly one user enum with derived Bounded, use it
+        if self.derived_min_bound_fns.len() == 1 {
+            let (type_name, &var_id) = self.derived_min_bound_fns.iter().next().unwrap();
+            let type_name = type_name.clone();
+            if let Some(fn_val) = self.functions.get(&var_id).copied() {
+                // Call derived minBound: fn(env) -> Constructor pointer
+                let null_env = self.type_mapper().ptr_type().const_null();
+                let fn_ptr = fn_val.as_global_value().as_pointer_value();
+                let fn_type = self.type_mapper().ptr_type().fn_type(
+                    &[self.type_mapper().ptr_type().into()],
+                    false,
+                );
+                let result = self
+                    .builder()
+                    .build_indirect_call(fn_type, fn_ptr, &[null_env.into()], "derived_min_bound")
+                    .map_err(|e| CodegenError::Internal(format!("minBound call: {:?}", e)))?;
+                let _ = type_name;
+                return Ok(result.try_as_basic_value().basic());
+            }
+        }
+        // Fallback: Int.MIN_VALUE
+        let min_val = self.type_mapper().i64_type().const_int(i64::MIN as u64, true);
+        Ok(Some(self.int_to_ptr(min_val)?.into()))
+    }
+
+    /// Lower `maxBound` - return the maximum value of a Bounded type.
+    fn lower_builtin_max_bound(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // If there's exactly one user enum with derived Bounded, use it
+        if self.derived_max_bound_fns.len() == 1 {
+            let (type_name, &var_id) = self.derived_max_bound_fns.iter().next().unwrap();
+            let type_name = type_name.clone();
+            if let Some(fn_val) = self.functions.get(&var_id).copied() {
+                // Call derived maxBound: fn(env) -> Constructor pointer
+                let null_env = self.type_mapper().ptr_type().const_null();
+                let fn_ptr = fn_val.as_global_value().as_pointer_value();
+                let fn_type = self.type_mapper().ptr_type().fn_type(
+                    &[self.type_mapper().ptr_type().into()],
+                    false,
+                );
+                let result = self
+                    .builder()
+                    .build_indirect_call(fn_type, fn_ptr, &[null_env.into()], "derived_max_bound")
+                    .map_err(|e| CodegenError::Internal(format!("maxBound call: {:?}", e)))?;
+                let _ = type_name;
+                return Ok(result.try_as_basic_value().basic());
+            }
+        }
+        // Fallback: Int.MAX_VALUE
+        let max_val = self.type_mapper().i64_type().const_int(i64::MAX as u64, true);
+        Ok(Some(self.int_to_ptr(max_val)?.into()))
+    }
+
+    /// Helper: Call a derived fromEnum function on a value, returning the Int tag.
+    fn call_derived_from_enum(&mut self, type_name: &str, val: BasicValueEnum<'ctx>) -> CodegenResult<IntValue<'ctx>> {
+        let var_id = self.derived_from_enum_fns.get(type_name).copied()
+            .ok_or_else(|| CodegenError::Internal(format!("no derived fromEnum for {}", type_name)))?;
+        let fn_val = self.functions.get(&var_id).copied()
+            .ok_or_else(|| CodegenError::Internal(format!("fromEnum function not found for {}", type_name)))?;
+        let null_env = self.type_mapper().ptr_type().const_null();
+        let fn_ptr = fn_val.as_global_value().as_pointer_value();
+        let fn_type = self.type_mapper().ptr_type().fn_type(
+            &[self.type_mapper().ptr_type().into(), self.type_mapper().ptr_type().into()],
+            false,
+        );
+        let result = self
+            .builder()
+            .build_indirect_call(fn_type, fn_ptr, &[null_env.into(), val.into()], "from_enum_call")
+            .map_err(|e| CodegenError::Internal(format!("fromEnum call: {:?}", e)))?;
+        // The derived fromEnum returns an Int value as a tagged pointer
+        let result_ptr = result.try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("fromEnum: no return value".to_string()))?;
+        self.coerce_to_int(result_ptr)
+    }
+
+    /// Helper: Call a derived toEnum function with an Int tag, returning the constructor pointer.
+    fn call_derived_to_enum(&mut self, type_name: &str, tag: IntValue<'ctx>) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let var_id = self.derived_to_enum_fns.get(type_name).copied()
+            .ok_or_else(|| CodegenError::Internal(format!("no derived toEnum for {}", type_name)))?;
+        let fn_val = self.functions.get(&var_id).copied()
+            .ok_or_else(|| CodegenError::Internal(format!("toEnum function not found for {}", type_name)))?;
+        let null_env = self.type_mapper().ptr_type().const_null();
+        let fn_ptr = fn_val.as_global_value().as_pointer_value();
+        let fn_type = self.type_mapper().ptr_type().fn_type(
+            &[self.type_mapper().ptr_type().into(), self.type_mapper().ptr_type().into()],
+            false,
+        );
+        // Convert Int tag to tagged pointer for the call
+        let tag_ptr = self.int_to_ptr(tag)?;
+        let result = self
+            .builder()
+            .build_indirect_call(fn_type, fn_ptr, &[null_env.into(), tag_ptr.into()], "to_enum_call")
+            .map_err(|e| CodegenError::Internal(format!("toEnum call: {:?}", e)))?;
+        result.try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("toEnum: no return value".to_string()))
     }
 
     // ====================================================================
@@ -28587,6 +28909,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     self.derived_traversable_fns.insert(type_name.clone(), var.id);
                     self.tag_constructors_with_type(expr, &type_name);
                 }
+                // Detect auto-derived Enum instance methods ($derived_fromEnum_TypeName_COUNTER, $derived_toEnum_TypeName_COUNTER)
+                else if let Some(remainder) = name.strip_prefix("$derived_fromEnum_") {
+                    let type_name = Self::strip_deriving_counter_suffix(remainder);
+                    self.derived_from_enum_fns.insert(type_name.clone(), var.id);
+                    self.tag_constructors_with_type(expr, &type_name);
+                }
+                else if let Some(remainder) = name.strip_prefix("$derived_toEnum_") {
+                    let type_name = Self::strip_deriving_counter_suffix(remainder);
+                    self.derived_to_enum_fns.insert(type_name.clone(), var.id);
+                    self.tag_constructors_with_type(expr, &type_name);
+                }
+                // Detect auto-derived Bounded instance methods ($derived_minBound_TypeName_COUNTER, $derived_maxBound_TypeName_COUNTER)
+                else if let Some(remainder) = name.strip_prefix("$derived_minBound_") {
+                    let type_name = Self::strip_deriving_counter_suffix(remainder);
+                    self.derived_min_bound_fns.insert(type_name.clone(), var.id);
+                    self.tag_constructors_with_type(expr, &type_name);
+                }
+                else if let Some(remainder) = name.strip_prefix("$derived_maxBound_") {
+                    let type_name = Self::strip_deriving_counter_suffix(remainder);
+                    self.derived_max_bound_fns.insert(type_name.clone(), var.id);
+                    self.tag_constructors_with_type(expr, &type_name);
+                }
                 // Detect manual instance methods ($instance_show_TypeName)
                 else if let Some(type_name) = name.strip_prefix("$instance_show_") {
                     self.derived_show_fns
@@ -28609,6 +28953,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     self.tag_constructors_with_type(expr, type_name);
                 } else if let Some(type_name) = name.strip_prefix("$instance_traverse_") {
                     self.derived_traversable_fns
+                        .insert(type_name.to_string(), var.id);
+                    self.tag_constructors_with_type(expr, type_name);
+                } else if let Some(type_name) = name.strip_prefix("$instance_fromEnum_") {
+                    self.derived_from_enum_fns
+                        .insert(type_name.to_string(), var.id);
+                    self.tag_constructors_with_type(expr, type_name);
+                } else if let Some(type_name) = name.strip_prefix("$instance_toEnum_") {
+                    self.derived_to_enum_fns
+                        .insert(type_name.to_string(), var.id);
+                    self.tag_constructors_with_type(expr, type_name);
+                } else if let Some(type_name) = name.strip_prefix("$instance_minBound_") {
+                    self.derived_min_bound_fns
+                        .insert(type_name.to_string(), var.id);
+                    self.tag_constructors_with_type(expr, type_name);
+                } else if let Some(type_name) = name.strip_prefix("$instance_maxBound_") {
+                    self.derived_max_bound_fns
                         .insert(type_name.to_string(), var.id);
                     self.tag_constructors_with_type(expr, type_name);
                 }
@@ -28665,12 +29025,45 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 if let Some(meta) = self.constructor_metadata.get(name) {
                     return meta.type_name.clone();
                 }
+                // E.54: minBound/maxBound — use single-enum heuristic
+                if (name == "minBound" || name == "maxBound")
+                    && self.derived_min_bound_fns.len() == 1
+                {
+                    return Some(
+                        self.derived_min_bound_fns
+                            .keys()
+                            .next()
+                            .unwrap()
+                            .clone(),
+                    );
+                }
                 None
             }
             // A constructor application: e.g., `Circle 5`
-            Expr::App(f, _, _) => self.infer_adt_type_from_expr(f),
+            Expr::App(f, arg, _) => {
+                // E.54: succ/pred preserve ADT type from their argument
+                if let Expr::Var(fv, _) = f.as_ref() {
+                    let fname = fv.name.as_str();
+                    if fname == "succ" || fname == "pred" {
+                        return self.infer_adt_type_from_expr(arg);
+                    }
+                    // E.54: toEnum — use single-enum heuristic
+                    if fname == "toEnum" && self.derived_to_enum_fns.len() == 1 {
+                        return Some(
+                            self.derived_to_enum_fns
+                                .keys()
+                                .next()
+                                .unwrap()
+                                .clone(),
+                        );
+                    }
+                }
+                self.infer_adt_type_from_expr(f)
+            }
             // Let binding: check body
             Expr::Let(_, body, _) => self.infer_adt_type_from_expr(body),
+            // Type application: check inner
+            Expr::TyApp(inner, _, _) => self.infer_adt_type_from_expr(inner),
             // Case expression: check any alternative's DataCon for type info
             Expr::Case(_, alts, _, _) => {
                 for alt in alts {
@@ -31055,6 +31448,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .map_err(|e| CodegenError::Internal(format!("digitToInt: extend failed: {:?}", e)))?;
                 Ok(Some(self.int_to_ptr(extended)?.into()))
             }
+
+            // E.54: Enum/Bounded as first-class values
+            "minBound" => self.lower_builtin_min_bound(),
+            "maxBound" => self.lower_builtin_max_bound(),
 
             "intToDigit" => {
                 let int_val = self.coerce_to_int(args[0])?;

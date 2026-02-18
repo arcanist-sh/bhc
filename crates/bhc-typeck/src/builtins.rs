@@ -2649,20 +2649,7 @@ impl Builtins {
                 // pred :: a -> a (Enum a =>)
                 Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))
             }),
-            ("toEnum", {
-                // toEnum :: Int -> a (polymorphic result)
-                Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(self.int_ty.clone(), Ty::Var(a.clone())),
-                )
-            }),
-            ("fromEnum", {
-                // fromEnum :: a -> Int (polymorphic input)
-                Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), self.int_ty.clone()),
-                )
-            }),
+            // toEnum/fromEnum registered at fixed DefIds below (12100+)
             ("enumFrom", {
                 // enumFrom :: a -> [a] (Enum a =>, [n..])
                 let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
@@ -2695,15 +2682,7 @@ impl Builtins {
                     ),
                 )
             }),
-            // Bounded (Int-specialized)
-            ("minBound", {
-                // minBound :: Int (for Int, returns minimum Int value)
-                Scheme::mono(self.int_ty.clone())
-            }),
-            ("maxBound", {
-                // maxBound :: Int (for Int, returns maximum Int value)
-                Scheme::mono(self.int_ty.clone())
-            }),
+            // minBound/maxBound registered at fixed DefIds below (12100+)
             // Read functions (simplified)
             ("read", {
                 // read :: String -> a (polymorphic result, may fail at runtime)
@@ -5468,6 +5447,41 @@ impl Builtins {
                     vec![c.clone()],
                     Ty::fun(Ty::Var(c), io_unit),
                 ),
+            );
+        }
+
+        // E.54: Enum/Bounded at fixed DefIds 12100-12103
+        {
+            let a = TyVar::new(BUILTIN_TYVAR_A, Kind::Star);
+            // fromEnum :: a -> Int
+            env.register_value(
+                DefId::new(12100),
+                Symbol::intern("fromEnum"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), self.int_ty.clone()),
+                ),
+            );
+            // toEnum :: Int -> a
+            env.register_value(
+                DefId::new(12101),
+                Symbol::intern("toEnum"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(self.int_ty.clone(), Ty::Var(a.clone())),
+                ),
+            );
+            // minBound :: a
+            env.register_value(
+                DefId::new(12102),
+                Symbol::intern("minBound"),
+                Scheme::poly(vec![a.clone()], Ty::Var(a.clone())),
+            );
+            // maxBound :: a
+            env.register_value(
+                DefId::new(12103),
+                Symbol::intern("maxBound"),
+                Scheme::poly(vec![a.clone()], Ty::Var(a)),
             );
         }
 

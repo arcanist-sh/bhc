@@ -1124,10 +1124,15 @@ impl<'src> Parser<'src> {
         let name = self.parse_conid()?;
         let params = self.parse_ty_var_list()?;
 
-        self.expect(&TokenKind::Eq)?;
-
-        let constrs = self.parse_constructors()?;
-        let deriving = self.parse_deriving()?;
+        // EmptyDataDecls: allow data declarations without `=` or constructors
+        let (constrs, deriving) = if self.eat(&TokenKind::Eq) {
+            let constrs = self.parse_constructors()?;
+            let deriving = self.parse_deriving()?;
+            (constrs, deriving)
+        } else {
+            let deriving = self.parse_deriving()?;
+            (vec![], deriving)
+        };
 
         let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
 

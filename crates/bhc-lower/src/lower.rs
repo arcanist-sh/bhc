@@ -2509,8 +2509,13 @@ fn lower_type(ctx: &mut LowerContext, ty: &ast::Type) -> bhc_types::Ty {
 
         ast::Type::NatLit(n, _) => bhc_types::Ty::nat_lit(*n),
 
-        ast::Type::PromotedList(_, _) | ast::Type::Bang(_, _) | ast::Type::Lazy(_, _) => {
-            // TODO: handle these types
+        ast::Type::Bang(inner, _) | ast::Type::Lazy(inner, _) => {
+            // Strip strictness/laziness annotations and lower the inner type
+            lower_type(ctx, inner)
+        }
+
+        ast::Type::PromotedList(_, _) => {
+            // TODO: handle promoted lists
             bhc_types::Ty::Error
         }
     }

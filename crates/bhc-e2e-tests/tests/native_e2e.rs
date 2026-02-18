@@ -853,6 +853,36 @@ fn test_tier3_derive_enum_native() {
 }
 
 // =============================================================================
+// E.59: Tier 1 Extensions (LambdaCase, NamedFieldPuns, InstanceSigs,
+//       EmptyDataDecls, StrictData)
+// =============================================================================
+
+#[test]
+fn test_tier3_lambda_case_native() {
+    run_native_test("tier3_io/lambda_case", Profile::Default);
+}
+
+#[test]
+fn test_tier3_named_field_puns_native() {
+    run_native_test("tier3_io/named_field_puns", Profile::Default);
+}
+
+#[test]
+fn test_tier3_instance_sigs_native() {
+    run_native_test("tier3_io/instance_sigs", Profile::Default);
+}
+
+#[test]
+fn test_tier3_empty_data_decl_native() {
+    run_native_test("tier3_io/empty_data_decl", Profile::Default);
+}
+
+#[test]
+fn test_tier3_strict_fields_native() {
+    run_native_test("tier3_io/strict_fields", Profile::Default);
+}
+
+// =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================
 

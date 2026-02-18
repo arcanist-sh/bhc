@@ -249,6 +249,16 @@ fn test_tier3_cross_reader_state_native() {
     run_native_test("tier3_io/cross_reader_state", Profile::Default);
 }
 
+#[test]
+fn test_tier3_cross_except_state_native() {
+    run_native_test("tier3_io/cross_except_state", Profile::Default);
+}
+
+#[test]
+fn test_tier3_cross_except_reader_native() {
+    run_native_test("tier3_io/cross_except_reader", Profile::Default);
+}
+
 // Package import test - demonstrates importing from external package directories
 #[test]
 fn test_tier3_package_import_native() {

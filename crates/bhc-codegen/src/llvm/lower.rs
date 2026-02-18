@@ -232,6 +232,34 @@ impl TransformerStack {
                     || l == TransformerLayer::ReaderT
             })
     }
+
+    /// Check if this is a nested WriterT over StateT context.
+    ///
+    /// Returns true if the top two layers are [WriterT, StateT] with no additional
+    /// WriterT/StateT/ReaderT below. Excludes auto-lift transient stacks.
+    fn is_writer_t_over_state_t(&self) -> bool {
+        self.layers.len() >= 2
+            && self.layers[0] == TransformerLayer::WriterT
+            && self.layers[1] == TransformerLayer::StateT
+            && !self.layers.iter().skip(2).any(|&l| {
+                l == TransformerLayer::WriterT || l == TransformerLayer::StateT
+                    || l == TransformerLayer::ReaderT
+            })
+    }
+
+    /// Check if this is a nested WriterT over ReaderT context.
+    ///
+    /// Returns true if the top two layers are [WriterT, ReaderT] with no additional
+    /// WriterT/StateT/ReaderT below. Excludes auto-lift transient stacks.
+    fn is_writer_t_over_reader_t(&self) -> bool {
+        self.layers.len() >= 2
+            && self.layers[0] == TransformerLayer::WriterT
+            && self.layers[1] == TransformerLayer::ReaderT
+            && !self.layers.iter().skip(2).any(|&l| {
+                l == TransformerLayer::WriterT || l == TransformerLayer::StateT
+                    || l == TransformerLayer::ReaderT
+            })
+    }
 }
 
 /// State for lowering Core IR to LLVM IR.
@@ -822,6 +850,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         action_val: BasicValueEnum<'ctx>,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        // WriterT over StateT: \(env, s) -> ((action(action, s).fst, []), action(action, s).snd)
+        if self.transformer_stack.is_writer_t_over_state_t() {
+            return self.apply_writer_t_lift_to_value_over_st(action_val);
+        }
+        // WriterT over ReaderT: \(env, r) -> (action(action, r), [])
+        if self.transformer_stack.is_writer_t_over_reader_t() {
+            return self.apply_writer_t_lift_to_value_over_rt(action_val);
+        }
+
         let fn_name = "bhc_writer_t_lift_auto";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -3653,6 +3690,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 {
                     return self.lower_builtin_except_t_bind(args[0], args[1]);
                 }
+                // For WriterT over StateT/ReaderT, bypass auto-lift and route
+                // to nested WriterT bind which threads state/reader-env
+                if self.transformer_stack.is_writer_t_over_state_t()
+                    || self.transformer_stack.is_writer_t_over_reader_t()
+                {
+                    return self.lower_builtin_writer_t_bind(args[0], args[1]);
+                }
 
                 let op_layer = self.detect_operation_layer(args[0]);
                 let current = self.current_transformer_layer();
@@ -3691,6 +3735,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 {
                     return self.lower_builtin_except_t_then(args[0], args[1]);
                 }
+                // For WriterT over StateT/ReaderT, bypass auto-lift
+                if self.transformer_stack.is_writer_t_over_state_t()
+                    || self.transformer_stack.is_writer_t_over_reader_t()
+                {
+                    return self.lower_builtin_writer_t_then(args[0], args[1]);
+                }
 
                 let op_layer = self.detect_operation_layer(args[0]);
                 let current = self.current_transformer_layer();
@@ -3727,6 +3777,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     || self.transformer_stack.is_except_t_over_reader_t()
                 {
                     return self.lower_builtin_except_t_pure(args[0]);
+                }
+                // For WriterT over StateT, route to nested WriterT pure
+                // (WriterT over ReaderT: r is absorbed by unused second arg, same as plain)
+                if self.transformer_stack.is_writer_t_over_state_t() {
+                    return self.lower_builtin_writer_t_pure(args[0]);
                 }
                 match self.current_transformer_layer() {
                     TransformerLayer::ReaderT => self.lower_builtin_reader_t_pure(args[0]),
@@ -14919,6 +14974,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("runWriterT: m has no value".to_string()))?;
         self.pop_transformer_layer();
 
+        // In nested context (WriterT over StateT/ReaderT), the m_val IS the transformer
+        // closure that expects state/reader-env. Return it as-is — the outer
+        // runStateT/runReaderT will call it with the appropriate argument.
+        let current = self.current_transformer_layer();
+        if current == TransformerLayer::StateT || current == TransformerLayer::ReaderT {
+            return Ok(Some(m_val));
+        }
+
         let m_ptr = match m_val {
             BasicValueEnum::PointerValue(p) => p,
             _ => return Err(CodegenError::TypeError("runWriterT: expected closure".to_string())),
@@ -14954,6 +15017,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         x_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // WriterT over StateT: \(env, s) -> ((x, []), s)
+        if self.transformer_stack.is_writer_t_over_state_t() {
+            return self.lower_builtin_writer_t_pure_over_st(x_expr);
+        }
+        // WriterT over ReaderT: r is absorbed by unused second arg, same as plain
+
         let x_val = self.lower_expr(x_expr)?
             .ok_or_else(|| CodegenError::Internal("WriterT.pure: x has no value".to_string()))?;
 
@@ -14987,6 +15056,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         w_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // WriterT over StateT: \(env, s) -> (((), w), s)
+        if self.transformer_stack.is_writer_t_over_state_t() {
+            return self.lower_builtin_tell_over_st(w_expr);
+        }
+        // WriterT over ReaderT: r is absorbed by unused second arg, same as plain
+
         let w_val = self.lower_expr(w_expr)?
             .ok_or_else(|| CodegenError::Internal("tell: w has no value".to_string()))?;
 
@@ -15023,6 +15098,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         m_expr: &Expr,
         k_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // WriterT over StateT: threads state through closures
+        if self.transformer_stack.is_writer_t_over_state_t() {
+            return self.lower_builtin_writer_t_bind_over_st(m_expr, k_expr);
+        }
+        // WriterT over ReaderT: threads reader-env through closures
+        if self.transformer_stack.is_writer_t_over_reader_t() {
+            return self.lower_builtin_writer_t_bind_over_rt(m_expr, k_expr);
+        }
+
         let m_val = self.lower_expr(m_expr)?
             .ok_or_else(|| CodegenError::Internal("WriterT.>>=: m has no value".to_string()))?;
         let k_val = self.lower_expr(k_expr)?
@@ -15106,6 +15190,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         m1_expr: &Expr,
         m2_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // WriterT over StateT: threads state through closures
+        if self.transformer_stack.is_writer_t_over_state_t() {
+            return self.lower_builtin_writer_t_then_over_st(m1_expr, m2_expr);
+        }
+        // WriterT over ReaderT: threads reader-env through closures
+        if self.transformer_stack.is_writer_t_over_reader_t() {
+            return self.lower_builtin_writer_t_then_over_rt(m1_expr, m2_expr);
+        }
+
         let m1_val = self.lower_expr(m1_expr)?
             .ok_or_else(|| CodegenError::Internal("WriterT.>>: m1 has no value".to_string()))?;
         let m2_val = self.lower_expr(m2_expr)?
@@ -15218,6 +15311,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         io_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // In nested contexts, the inner action is a closure that needs
+        // state/reader-env threaded through. Route to nested lift functions.
+        if self.transformer_stack.is_writer_t_over_state_t() {
+            let io_val = self.lower_expr(io_expr)?
+                .ok_or_else(|| CodegenError::Internal("WriterT.lift/st: io has no value".to_string()))?;
+            return Ok(Some(self.apply_writer_t_lift_to_value_over_st(io_val)?));
+        }
+        if self.transformer_stack.is_writer_t_over_reader_t() {
+            let io_val = self.lower_expr(io_expr)?
+                .ok_or_else(|| CodegenError::Internal("WriterT.lift/rt: io has no value".to_string()))?;
+            return Ok(Some(self.apply_writer_t_lift_to_value_over_rt(io_val)?));
+        }
+
         let io_val = self.lower_expr(io_expr)?
             .ok_or_else(|| CodegenError::Internal("WriterT.lift: io has no value".to_string()))?;
 
@@ -15385,6 +15491,490 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             (VarId::new(900001), ma_ptr.into()),
         ])?;
         Ok(Some(closure_ptr.into()))
+    }
+
+    // ========================================================================
+    // WriterT Cross-Transformer Operations (WriterT over StateT / ReaderT)
+    // ========================================================================
+
+    /// WriterT.pure over StateT: \(env, s) -> ((x, []), s)
+    fn lower_builtin_writer_t_pure_over_st(
+        &mut self,
+        x_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let x_val = self.lower_expr(x_expr)?
+            .ok_or_else(|| CodegenError::Internal("WriterT.pure/st: x has no value".to_string()))?;
+
+        let fn_name = "bhc_writer_t_pure_over_st";
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap().into_pointer_value();
+            let x = self.extract_closure_env_elem(env, 1, 0)?;
+            let empty = self.build_nil()?;
+            let inner_pair = self.alloc_pair(x.into(), empty.into())?;
+            let outer_pair = self.alloc_pair(inner_pair.into(), s.into())?;
+            self.builder().build_return(Some(&outer_pair))
+                .map_err(|e| CodegenError::Internal(format!("writer_t_pure/st return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let x_ptr = self.value_to_ptr(x_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), x_ptr.into())])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// tell over StateT: \(env, s) -> (((), w), s)
+    fn lower_builtin_tell_over_st(
+        &mut self,
+        w_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let w_val = self.lower_expr(w_expr)?
+            .ok_or_else(|| CodegenError::Internal("tell/st: w has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_writer_t_tell_over_st";
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap().into_pointer_value();
+            let w = self.extract_closure_env_elem(env, 1, 0)?;
+            let unit = ptr_type.const_null();
+            let inner_pair = self.alloc_pair(unit.into(), w.into())?;
+            let outer_pair = self.alloc_pair(inner_pair.into(), s.into())?;
+            self.builder().build_return(Some(&outer_pair))
+                .map_err(|e| CodegenError::Internal(format!("writer_t_tell/st return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let w_ptr = self.value_to_ptr(w_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), w_ptr.into())])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// WriterT.>>= over StateT: \(env, s) ->
+    ///   outer1 = m(m, s)              → ((a, w1), s')
+    ///   a = fst(fst(outer1)), w1 = snd(fst(outer1)), s' = snd(outer1)
+    ///   kr = k(k, a)                  → new closure
+    ///   outer2 = kr(kr, s')           → ((b, w2), s'')
+    ///   b = fst(fst(outer2)), w2 = snd(fst(outer2)), s'' = snd(outer2)
+    ///   return ((b, w1++w2), s'')
+    fn lower_builtin_writer_t_bind_over_st(
+        &mut self,
+        m_expr: &Expr,
+        k_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let m_val = self.lower_expr(m_expr)?
+            .ok_or_else(|| CodegenError::Internal("WriterT.>>=/st: m has no value".to_string()))?;
+        let k_val = self.lower_expr(k_expr)?
+            .ok_or_else(|| CodegenError::Internal("WriterT.>>=/st: k has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_writer_t_bind_over_st";
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap().into_pointer_value();
+            let m = self.extract_closure_env_elem(env, 2, 0)?;
+            let k = self.extract_closure_env_elem(env, 2, 1)?;
+
+            let fn_type2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            // outer1 = m(m, s) → ((a, w1), s')
+            let m_fn = self.extract_closure_fn_ptr(m)?;
+            let outer1 = self.builder()
+                .build_indirect_call(fn_type2, m_fn, &[m.into(), s.into()], "wt_bind_st_outer1")
+                .map_err(|e| CodegenError::Internal(format!("WriterT bind/st m: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("WriterT bind/st m: void".to_string()))?
+                .into_pointer_value();
+
+            let inner1 = self.extract_pair_fst(outer1)?;
+            let s_prime = self.extract_pair_snd(outer1)?;
+            let a = self.extract_pair_fst(inner1)?;
+            let w1 = self.extract_pair_snd(inner1)?;
+
+            // kr = k(k, a) → new closure
+            let k_fn = self.extract_closure_fn_ptr(k)?;
+            let kr = self.builder()
+                .build_indirect_call(fn_type2, k_fn, &[k.into(), a.into()], "wt_bind_st_kr")
+                .map_err(|e| CodegenError::Internal(format!("WriterT bind/st k: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("WriterT bind/st k: void".to_string()))?
+                .into_pointer_value();
+
+            // outer2 = kr(kr, s') → ((b, w2), s'')
+            let kr_fn = self.extract_closure_fn_ptr(kr)?;
+            let outer2 = self.builder()
+                .build_indirect_call(fn_type2, kr_fn, &[kr.into(), s_prime.into()], "wt_bind_st_outer2")
+                .map_err(|e| CodegenError::Internal(format!("WriterT bind/st kr: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("WriterT bind/st kr: void".to_string()))?
+                .into_pointer_value();
+
+            let inner2 = self.extract_pair_fst(outer2)?;
+            let s_double_prime = self.extract_pair_snd(outer2)?;
+            let b = self.extract_pair_fst(inner2)?;
+            let w2 = self.extract_pair_snd(inner2)?;
+
+            // w_combined = w1 ++ w2
+            let append_fn = self.get_or_create_list_append_fn()?;
+            let w_combined = self.builder()
+                .build_call(append_fn, &[w1.into(), w2.into()], "wt_bind_st_append")
+                .map_err(|e| CodegenError::Internal(format!("WriterT bind/st append: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("WriterT bind/st append: void".to_string()))?;
+
+            let result_inner = self.alloc_pair(b.into(), w_combined)?;
+            let result_outer = self.alloc_pair(result_inner.into(), s_double_prime.into())?;
+            self.builder().build_return(Some(&result_outer))
+                .map_err(|e| CodegenError::Internal(format!("writer_t_bind/st return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let m_ptr = self.value_to_ptr(m_val)?;
+        let k_ptr = self.value_to_ptr(k_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[
+            (VarId::new(900000), m_ptr.into()),
+            (VarId::new(900001), k_ptr.into()),
+        ])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// WriterT.>>= over ReaderT: \(env, r) ->
+    ///   pair1 = m(m, r) → (a, w1)
+    ///   kr = k(k, a) → new closure
+    ///   pair2 = kr(kr, r) → (b, w2)
+    ///   return (b, w1++w2)
+    fn lower_builtin_writer_t_bind_over_rt(
+        &mut self,
+        m_expr: &Expr,
+        k_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let m_val = self.lower_expr(m_expr)?
+            .ok_or_else(|| CodegenError::Internal("WriterT.>>=/rt: m has no value".to_string()))?;
+        let k_val = self.lower_expr(k_expr)?
+            .ok_or_else(|| CodegenError::Internal("WriterT.>>=/rt: k has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_writer_t_bind_over_rt";
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let r = func.get_nth_param(1).unwrap().into_pointer_value();
+            let m = self.extract_closure_env_elem(env, 2, 0)?;
+            let k = self.extract_closure_env_elem(env, 2, 1)?;
+
+            let fn_type2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            // pair1 = m(m, r) → (a, w1)
+            let m_fn = self.extract_closure_fn_ptr(m)?;
+            let pair1 = self.builder()
+                .build_indirect_call(fn_type2, m_fn, &[m.into(), r.into()], "wt_bind_rt_pair1")
+                .map_err(|e| CodegenError::Internal(format!("WriterT bind/rt m: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("WriterT bind/rt m: void".to_string()))?
+                .into_pointer_value();
+
+            let a = self.extract_pair_fst(pair1)?;
+            let w1 = self.extract_pair_snd(pair1)?;
+
+            // kr = k(k, a) → new closure
+            let k_fn = self.extract_closure_fn_ptr(k)?;
+            let kr = self.builder()
+                .build_indirect_call(fn_type2, k_fn, &[k.into(), a.into()], "wt_bind_rt_kr")
+                .map_err(|e| CodegenError::Internal(format!("WriterT bind/rt k: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("WriterT bind/rt k: void".to_string()))?
+                .into_pointer_value();
+
+            // pair2 = kr(kr, r) → (b, w2)
+            let kr_fn = self.extract_closure_fn_ptr(kr)?;
+            let pair2 = self.builder()
+                .build_indirect_call(fn_type2, kr_fn, &[kr.into(), r.into()], "wt_bind_rt_pair2")
+                .map_err(|e| CodegenError::Internal(format!("WriterT bind/rt kr: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("WriterT bind/rt kr: void".to_string()))?
+                .into_pointer_value();
+
+            let b = self.extract_pair_fst(pair2)?;
+            let w2 = self.extract_pair_snd(pair2)?;
+
+            // w_combined = w1 ++ w2
+            let append_fn = self.get_or_create_list_append_fn()?;
+            let w_combined = self.builder()
+                .build_call(append_fn, &[w1.into(), w2.into()], "wt_bind_rt_append")
+                .map_err(|e| CodegenError::Internal(format!("WriterT bind/rt append: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("WriterT bind/rt append: void".to_string()))?;
+
+            let result_pair = self.alloc_pair(b.into(), w_combined)?;
+            self.builder().build_return(Some(&result_pair))
+                .map_err(|e| CodegenError::Internal(format!("writer_t_bind/rt return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let m_ptr = self.value_to_ptr(m_val)?;
+        let k_ptr = self.value_to_ptr(k_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[
+            (VarId::new(900000), m_ptr.into()),
+            (VarId::new(900001), k_ptr.into()),
+        ])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// WriterT.>> over StateT: \(env, s) ->
+    ///   outer1 = m1(m1, s) → ((_, w1), s')
+    ///   outer2 = m2(m2, s') → ((b, w2), s'')
+    ///   return ((b, w1++w2), s'')
+    fn lower_builtin_writer_t_then_over_st(
+        &mut self,
+        m1_expr: &Expr,
+        m2_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let m1_val = self.lower_expr(m1_expr)?
+            .ok_or_else(|| CodegenError::Internal("WriterT.>>/st: m1 has no value".to_string()))?;
+        let m2_val = self.lower_expr(m2_expr)?
+            .ok_or_else(|| CodegenError::Internal("WriterT.>>/st: m2 has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_writer_t_then_over_st";
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap().into_pointer_value();
+            let m1 = self.extract_closure_env_elem(env, 2, 0)?;
+            let m2 = self.extract_closure_env_elem(env, 2, 1)?;
+
+            let fn_type2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            // outer1 = m1(m1, s) → ((_, w1), s')
+            let m1_fn = self.extract_closure_fn_ptr(m1)?;
+            let outer1 = self.builder()
+                .build_indirect_call(fn_type2, m1_fn, &[m1.into(), s.into()], "wt_then_st_outer1")
+                .map_err(|e| CodegenError::Internal(format!("WriterT then/st m1: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("WriterT then/st m1: void".to_string()))?
+                .into_pointer_value();
+
+            let inner1 = self.extract_pair_fst(outer1)?;
+            let s_prime = self.extract_pair_snd(outer1)?;
+            let w1 = self.extract_pair_snd(inner1)?;
+
+            // outer2 = m2(m2, s') → ((b, w2), s'')
+            let m2_fn = self.extract_closure_fn_ptr(m2)?;
+            let outer2 = self.builder()
+                .build_indirect_call(fn_type2, m2_fn, &[m2.into(), s_prime.into()], "wt_then_st_outer2")
+                .map_err(|e| CodegenError::Internal(format!("WriterT then/st m2: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("WriterT then/st m2: void".to_string()))?
+                .into_pointer_value();
+
+            let inner2 = self.extract_pair_fst(outer2)?;
+            let s_double_prime = self.extract_pair_snd(outer2)?;
+            let b = self.extract_pair_fst(inner2)?;
+            let w2 = self.extract_pair_snd(inner2)?;
+
+            // w_combined = w1 ++ w2
+            let append_fn = self.get_or_create_list_append_fn()?;
+            let w_combined = self.builder()
+                .build_call(append_fn, &[w1.into(), w2.into()], "wt_then_st_append")
+                .map_err(|e| CodegenError::Internal(format!("WriterT then/st append: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("WriterT then/st append: void".to_string()))?;
+
+            let result_inner = self.alloc_pair(b.into(), w_combined)?;
+            let result_outer = self.alloc_pair(result_inner.into(), s_double_prime.into())?;
+            self.builder().build_return(Some(&result_outer))
+                .map_err(|e| CodegenError::Internal(format!("writer_t_then/st return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let m1_ptr = self.value_to_ptr(m1_val)?;
+        let m2_ptr = self.value_to_ptr(m2_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[
+            (VarId::new(900000), m1_ptr.into()),
+            (VarId::new(900001), m2_ptr.into()),
+        ])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// WriterT.>> over ReaderT: \(env, r) ->
+    ///   pair1 = m1(m1, r) → (_, w1)
+    ///   pair2 = m2(m2, r) → (b, w2)
+    ///   return (b, w1++w2)
+    fn lower_builtin_writer_t_then_over_rt(
+        &mut self,
+        m1_expr: &Expr,
+        m2_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let m1_val = self.lower_expr(m1_expr)?
+            .ok_or_else(|| CodegenError::Internal("WriterT.>>/rt: m1 has no value".to_string()))?;
+        let m2_val = self.lower_expr(m2_expr)?
+            .ok_or_else(|| CodegenError::Internal("WriterT.>>/rt: m2 has no value".to_string()))?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_writer_t_then_over_rt";
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let r = func.get_nth_param(1).unwrap().into_pointer_value();
+            let m1 = self.extract_closure_env_elem(env, 2, 0)?;
+            let m2 = self.extract_closure_env_elem(env, 2, 1)?;
+
+            let fn_type2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            // pair1 = m1(m1, r) → (_, w1)
+            let m1_fn = self.extract_closure_fn_ptr(m1)?;
+            let pair1 = self.builder()
+                .build_indirect_call(fn_type2, m1_fn, &[m1.into(), r.into()], "wt_then_rt_pair1")
+                .map_err(|e| CodegenError::Internal(format!("WriterT then/rt m1: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("WriterT then/rt m1: void".to_string()))?
+                .into_pointer_value();
+
+            let w1 = self.extract_pair_snd(pair1)?;
+
+            // pair2 = m2(m2, r) → (b, w2)
+            let m2_fn = self.extract_closure_fn_ptr(m2)?;
+            let pair2 = self.builder()
+                .build_indirect_call(fn_type2, m2_fn, &[m2.into(), r.into()], "wt_then_rt_pair2")
+                .map_err(|e| CodegenError::Internal(format!("WriterT then/rt m2: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("WriterT then/rt m2: void".to_string()))?
+                .into_pointer_value();
+
+            let b = self.extract_pair_fst(pair2)?;
+            let w2 = self.extract_pair_snd(pair2)?;
+
+            // w_combined = w1 ++ w2
+            let append_fn = self.get_or_create_list_append_fn()?;
+            let w_combined = self.builder()
+                .build_call(append_fn, &[w1.into(), w2.into()], "wt_then_rt_append")
+                .map_err(|e| CodegenError::Internal(format!("WriterT then/rt append: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("WriterT then/rt append: void".to_string()))?;
+
+            let result_pair = self.alloc_pair(b.into(), w_combined)?;
+            self.builder().build_return(Some(&result_pair))
+                .map_err(|e| CodegenError::Internal(format!("writer_t_then/rt return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let m1_ptr = self.value_to_ptr(m1_val)?;
+        let m2_ptr = self.value_to_ptr(m2_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[
+            (VarId::new(900000), m1_ptr.into()),
+            (VarId::new(900001), m2_ptr.into()),
+        ])?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// WriterT.lift auto over StateT: \(env, s) -> ((action(action, s).fst, []), action(action, s).snd)
+    fn apply_writer_t_lift_to_value_over_st(
+        &mut self,
+        action_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let fn_name = "bhc_writer_t_lift_auto_over_st";
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap().into_pointer_value();
+            let action = self.extract_closure_env_elem(env, 1, 0)?;
+
+            let ptr_type = self.type_mapper().ptr_type();
+            let fn_type2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            // pair = action(action, s) → (value, s')
+            let action_fn = self.extract_closure_fn_ptr(action)?;
+            let pair = self.builder()
+                .build_indirect_call(fn_type2, action_fn, &[action.into(), s.into()], "wt_lift_st_pair")
+                .map_err(|e| CodegenError::Internal(format!("writer_t_lift/st action: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("writer_t_lift/st: void".to_string()))?
+                .into_pointer_value();
+
+            let a = self.extract_pair_fst(pair)?;
+            let s_prime = self.extract_pair_snd(pair)?;
+
+            let empty = self.build_nil()?;
+            let inner_pair = self.alloc_pair(a.into(), empty.into())?;
+            let outer_pair = self.alloc_pair(inner_pair.into(), s_prime.into())?;
+            self.builder().build_return(Some(&outer_pair))
+                .map_err(|e| CodegenError::Internal(format!("writer_t_lift/st return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let action_ptr = self.value_to_ptr(action_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900103), action_ptr.into())])?;
+        Ok(closure_ptr.into())
+    }
+
+    /// WriterT.lift auto over ReaderT: \(env, r) -> (action(action, r), [])
+    fn apply_writer_t_lift_to_value_over_rt(
+        &mut self,
+        action_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let fn_name = "bhc_writer_t_lift_auto_over_rt";
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let r = func.get_nth_param(1).unwrap().into_pointer_value();
+            let action = self.extract_closure_env_elem(env, 1, 0)?;
+
+            let ptr_type = self.type_mapper().ptr_type();
+            let fn_type2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            // a = action(action, r) — ReaderT action returns value directly
+            let action_fn = self.extract_closure_fn_ptr(action)?;
+            let a = self.builder()
+                .build_indirect_call(fn_type2, action_fn, &[action.into(), r.into()], "wt_lift_rt_a")
+                .map_err(|e| CodegenError::Internal(format!("writer_t_lift/rt action: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("writer_t_lift/rt: void".to_string()))?;
+
+            let empty = self.build_nil()?;
+            let pair = self.alloc_pair(a, empty.into())?;
+            self.builder().build_return(Some(&pair))
+                .map_err(|e| CodegenError::Internal(format!("writer_t_lift/rt return: {:?}", e)))?;
+            if let Some(bb) = saved_bb { self.builder().position_at_end(bb); }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let action_ptr = self.value_to_ptr(action_val)?;
+        let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900103), action_ptr.into())])?;
+        Ok(closure_ptr.into())
     }
 
     // ========================================================================

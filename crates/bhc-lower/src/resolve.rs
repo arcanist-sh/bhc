@@ -445,6 +445,12 @@ fn collect_type_vars(ctx: &mut LowerContext, ty: &ast::Type, bindings: &mut Vec<
             collect_type_vars(ctx, inner, bindings);
         }
 
+        ast::Type::InfixOp(lhs, _, rhs, _) => {
+            // Recurse into both operands; the operator itself is a constructor
+            collect_type_vars(ctx, lhs, bindings);
+            collect_type_vars(ctx, rhs, bindings);
+        }
+
         ast::Type::Con(_, _)
         | ast::Type::QualCon(_, _, _)
         | ast::Type::NatLit(_, _)

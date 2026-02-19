@@ -1121,8 +1121,49 @@ impl<'src> Parser<'src> {
         let start = self.current_span();
         self.expect(&TokenKind::Data)?;
 
-        let name = self.parse_conid()?;
-        let params = self.parse_ty_var_list()?;
+        // Check for infix operator data declaration: `data a :+: b = ...`
+        // Pattern: Ident ConOperator Ident (type_var operator type_var)
+        let (name, params) = if let Some(TokenKind::Ident(_)) = self.current_kind() {
+            // Save position to try infix pattern
+            let saved_pos = self.pos;
+            if let Some(TokenKind::Ident(lhs_sym)) = self.current_kind().cloned() {
+                let lhs_span = self.current_span();
+                self.advance();
+                if let Some(TokenKind::ConOperator(op_sym)) = self.current_kind().cloned() {
+                    self.advance();
+                    if let Some(TokenKind::Ident(rhs_sym)) = self.current_kind().cloned() {
+                        let rhs_span = self.current_span();
+                        self.advance();
+                        // Successfully parsed infix: `a :+: b`
+                        let op_name = Ident::new(op_sym);
+                        let lhs_var = TyVar { name: Ident::new(lhs_sym), span: lhs_span };
+                        let rhs_var = TyVar { name: Ident::new(rhs_sym), span: rhs_span };
+                        (op_name, vec![lhs_var, rhs_var])
+                    } else {
+                        // Not infix pattern, backtrack
+                        self.pos = saved_pos;
+                        let name = self.parse_conid()?;
+                        let params = self.parse_ty_var_list()?;
+                        (name, params)
+                    }
+                } else {
+                    // Not infix pattern, backtrack
+                    self.pos = saved_pos;
+                    let name = self.parse_conid()?;
+                    let params = self.parse_ty_var_list()?;
+                    (name, params)
+                }
+            } else {
+                self.pos = saved_pos;
+                let name = self.parse_conid()?;
+                let params = self.parse_ty_var_list()?;
+                (name, params)
+            }
+        } else {
+            let name = self.parse_conid_or_op()?;
+            let params = self.parse_ty_var_list()?;
+            (name, params)
+        };
 
         // Three forms:
         // 1. H98: `data T a = Con1 a | Con2`
@@ -1223,6 +1264,51 @@ impl<'src> Parser<'src> {
                 found: tok.node.kind.description().to_string(),
                 expected: "constructor".to_string(),
                 span: tok.span,
+            }),
+        }
+    }
+
+    /// Parse a constructor name: either a `ConId` or a parenthesized `ConOperator`.
+    fn parse_conid_or_op(&mut self) -> ParseResult<Ident> {
+        // Extract kind and span upfront to avoid borrow conflict
+        let (kind, span) = match self.current() {
+            Some(tok) => (tok.node.kind.clone(), tok.span),
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "constructor".to_string(),
+                });
+            }
+        };
+
+        match &kind {
+            TokenKind::ConId(sym) => {
+                let ident = Ident::new(*sym);
+                self.advance();
+                Ok(ident)
+            }
+            TokenKind::LParen => {
+                // Check for parenthesized constructor operator: (:+:)
+                let saved = self.pos;
+                self.advance(); // consume (
+                if let Some(TokenKind::ConOperator(sym)) = self.current_kind().cloned() {
+                    let ident = Ident::new(sym);
+                    self.advance(); // consume operator
+                    if self.eat(&TokenKind::RParen) {
+                        return Ok(ident);
+                    }
+                }
+                // Not a parenthesized operator, backtrack
+                self.pos = saved;
+                Err(ParseError::Unexpected {
+                    found: kind.description().to_string(),
+                    expected: "constructor".to_string(),
+                    span,
+                })
+            }
+            _ => Err(ParseError::Unexpected {
+                found: kind.description().to_string(),
+                expected: "constructor".to_string(),
+                span,
             }),
         }
     }
@@ -1330,7 +1416,7 @@ impl<'src> Parser<'src> {
             }
         }
 
-        let name = self.parse_conid()?;
+        let name = self.parse_conid_or_op()?;
 
         let fields = if self.check(&TokenKind::LBrace) {
             self.parse_record_fields()?

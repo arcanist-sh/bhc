@@ -356,6 +356,9 @@ fn format_type(ty: &bhc_ast::Type) -> String {
         bhc_ast::Type::NatLit(n, _) => n.to_string(),
         bhc_ast::Type::Bang(inner, _) => format!("!{}", format_type_atom(inner)),
         bhc_ast::Type::Lazy(inner, _) => format!("~{}", format_type_atom(inner)),
+        bhc_ast::Type::InfixOp(lhs, op, rhs, _) => {
+            format!("{} {} {}", format_type_atom(lhs), op.name.as_str(), format_type_atom(rhs))
+        }
     }
 }
 

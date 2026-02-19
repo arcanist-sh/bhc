@@ -124,7 +124,7 @@ impl<'src> Parser<'src> {
 
     /// Parse a function type: `a -> b`.
     fn parse_fun_type(&mut self) -> ParseResult<Type> {
-        let lhs = self.parse_app_type()?;
+        let lhs = self.parse_infix_type()?;
 
         // Skip any doc comments before checking for ->
         // (Haddock argument documentation like `-- ^`)
@@ -134,6 +134,23 @@ impl<'src> Parser<'src> {
             let rhs = self.parse_fun_type()?;
             let span = lhs.span().to(rhs.span());
             Ok(Type::Fun(Box::new(lhs), Box::new(rhs), span))
+        } else {
+            Ok(lhs)
+        }
+    }
+
+    /// Parse an infix type operator: `a :+: b` (right-associative).
+    fn parse_infix_type(&mut self) -> ParseResult<Type> {
+        let lhs = self.parse_app_type()?;
+
+        // Check for ConOperator (constructor operator like :+:, :*:, :|)
+        if let Some(TokenKind::ConOperator(sym)) = self.current_kind().cloned() {
+            let op = Ident::new(sym);
+            self.advance();
+            // Right-associative: recurse into parse_infix_type for RHS
+            let rhs = self.parse_infix_type()?;
+            let span = lhs.span().to(rhs.span());
+            Ok(Type::InfixOp(Box::new(lhs), op, Box::new(rhs), span))
         } else {
             Ok(lhs)
         }
@@ -296,6 +313,20 @@ impl<'src> Parser<'src> {
             let end = self.expect(&TokenKind::RParen)?;
             let span = start.to(end.span);
             return Ok(Type::Con(Ident::from_str("->"), span));
+        }
+
+        // Check for constructor operator in parens: (:+:)
+        if let Some(TokenKind::ConOperator(sym)) = self.current_kind().cloned() {
+            let saved = self.pos;
+            let ident = Ident::new(sym);
+            self.advance();
+            if self.check(&TokenKind::RParen) {
+                let end = self.expect(&TokenKind::RParen)?;
+                let span = start.to(end.span);
+                return Ok(Type::Con(ident, span));
+            }
+            // Not just `(:+:)`, backtrack and parse as regular type
+            self.pos = saved;
         }
 
         let first = self.parse_type()?;

@@ -2527,6 +2527,16 @@ fn lower_type(ctx: &mut LowerContext, ty: &ast::Type) -> bhc_types::Ty {
             // TODO: handle promoted lists
             bhc_types::Ty::Error
         }
+
+        ast::Type::InfixOp(lhs, op, rhs, _) => {
+            let op_ty = bhc_types::Ty::Con(bhc_types::TyCon::new(op.name, bhc_types::Kind::Star));
+            let lhs_ty = lower_type(ctx, lhs);
+            let rhs_ty = lower_type(ctx, rhs);
+            bhc_types::Ty::App(
+                Box::new(bhc_types::Ty::App(Box::new(op_ty), Box::new(lhs_ty))),
+                Box::new(rhs_ty),
+            )
+        }
     }
 }
 
@@ -2762,6 +2772,8 @@ fn infer_param_arity_in_type(param_name: Symbol, ty: &ast::Type) -> usize {
         ast::Type::Forall(_, inner, _) => infer_param_arity_in_type(param_name, inner),
         // Type constructors, qualified constructors, constrained types, promoted lists,
         // type-level literals, etc. don't contain our type parameter in a way that matters.
+        ast::Type::InfixOp(lhs, _, rhs, _) => infer_param_arity_in_type(param_name, lhs)
+            .max(infer_param_arity_in_type(param_name, rhs)),
         ast::Type::Con(_, _)
         | ast::Type::QualCon(_, _, _)
         | ast::Type::Constrained(_, _, _)

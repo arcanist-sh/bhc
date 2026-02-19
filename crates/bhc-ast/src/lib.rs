@@ -1016,6 +1016,9 @@ pub enum Type {
 
     /// Lazy type annotation: `~Int` in constructor fields
     Lazy(Box<Type>, Span),
+
+    /// Infix type operator: `a :+: b` (requires TypeOperators)
+    InfixOp(Box<Type>, Ident, Box<Type>, Span),
 }
 
 impl Type {
@@ -1036,7 +1039,8 @@ impl Type {
             | Self::PromotedList(_, s)
             | Self::NatLit(_, s)
             | Self::Bang(_, s)
-            | Self::Lazy(_, s) => *s,
+            | Self::Lazy(_, s)
+            | Self::InfixOp(_, _, _, s) => *s,
         }
     }
 }

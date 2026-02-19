@@ -893,6 +893,20 @@ fn test_tier3_gadt_phantom_native() {
 }
 
 // =============================================================================
+// E.61: TypeOperators
+// =============================================================================
+
+#[test]
+fn test_tier3_type_operators_basic_native() {
+    run_native_test("tier3_io/type_operators_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_type_operators_prefix_native() {
+    run_native_test("tier3_io/type_operators_prefix", Profile::Default);
+}
+
+// =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================
 

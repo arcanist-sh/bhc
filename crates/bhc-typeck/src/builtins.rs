@@ -5214,6 +5214,19 @@ impl Builtins {
             );
         }
 
+        // E.64: OverloadedLists — fromList at fixed DefId 11310
+        {
+            let a = TyVar::new_star(BUILTIN_TYVAR_A);
+            let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+
+            // fromList :: [a] -> [a] (identity for lists)
+            env.register_value(
+                DefId::new(11310),
+                Symbol::intern("fromList"),
+                Scheme::poly(vec![a.clone()], Ty::fun(list_a.clone(), list_a)),
+            );
+        }
+
         // E.26: List *By variants, sortOn, stripPrefix, insert, mapAccumL/R
         // at fixed DefIds 11400-11409
         {

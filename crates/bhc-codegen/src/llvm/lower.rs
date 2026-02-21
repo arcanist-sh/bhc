@@ -3268,6 +3268,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // E.25: String type class methods
             "fromString" => Some(1),
+            // E.64: OverloadedLists
+            "fromList" => Some(1),
             "read" => Some(1),
             "readMaybe" => Some(1),
 
@@ -3835,6 +3837,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // String type class methods (E.25)
             "fromString" => self.lower_expr(args[0]), // identity: String = [Char]
+            // OverloadedLists (E.64)
+            "fromList" => self.lower_expr(args[0]), // identity: list stays as list
             "read" => self.lower_builtin_read(args[0]),
             "readMaybe" => self.lower_builtin_read_maybe(args[0]),
 
@@ -35243,6 +35247,24 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         alts: &[Alt],
         case_ty: &Ty,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // EmptyCase: `case x of {}` — zero alternatives means bottom/unreachable
+        if alts.is_empty() {
+            // Still evaluate the scrutinee for side effects
+            let was_tail = self.in_tail_position;
+            self.in_tail_position = false;
+            let _scrut_val = self.lower_expr(scrut)?;
+            self.in_tail_position = was_tail;
+            self.builder()
+                .build_unreachable()
+                .map_err(|e| {
+                    CodegenError::Internal(format!(
+                        "failed to build unreachable for empty case: {:?}",
+                        e
+                    ))
+                })?;
+            return Ok(None);
+        }
+
         // Scrutinee is NOT in tail position
         let was_tail = self.in_tail_position;
         self.in_tail_position = false;
@@ -35254,7 +35276,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Check if all alternatives are Default (no actual pattern matching needed)
         // This happens for simple variable patterns like `f n = 42`
         let all_default = alts.iter().all(|alt| matches!(&alt.con, AltCon::Default));
-        if all_default && !alts.is_empty() {
+        if all_default {
             // Just use the first (and likely only) default alternative
             let alt = &alts[0];
 

@@ -174,6 +174,11 @@ mod tests {
             overloaded_strings: false,
             scoped_type_variables: false,
             generalized_newtype_deriving: false,
+            flexible_instances: false,
+            flexible_contexts: false,
+            gadts: false,
+            strict_data: false,
+            overloaded_lists: false,
         };
 
         let result = lower_module(&module);
@@ -260,6 +265,11 @@ mod tests {
             overloaded_strings: false,
             scoped_type_variables: false,
             generalized_newtype_deriving: false,
+            flexible_instances: false,
+            flexible_contexts: false,
+            gadts: false,
+            strict_data: false,
+            overloaded_lists: false,
         };
 
         // Set up type schemes
@@ -442,6 +452,11 @@ mod tests {
             overloaded_strings: false,
             scoped_type_variables: false,
             generalized_newtype_deriving: false,
+            flexible_instances: false,
+            flexible_contexts: false,
+            gadts: false,
+            strict_data: false,
+            overloaded_lists: false,
         };
 
         // Lower the module
@@ -590,6 +605,11 @@ mod tests {
             overloaded_strings: false,
             scoped_type_variables: false,
             generalized_newtype_deriving: false,
+            flexible_instances: false,
+            flexible_contexts: false,
+            gadts: false,
+            strict_data: false,
+            overloaded_lists: false,
         };
 
         // Set up type schemes
@@ -776,6 +796,11 @@ mod tests {
             overloaded_strings: false,
             scoped_type_variables: false,
             generalized_newtype_deriving: false,
+            flexible_instances: false,
+            flexible_contexts: false,
+            gadts: false,
+            strict_data: false,
+            overloaded_lists: false,
         };
 
         // Register the myEq method as a variable
@@ -1079,6 +1104,11 @@ mod tests {
             overloaded_strings: false,
             scoped_type_variables: false,
             generalized_newtype_deriving: false,
+            flexible_instances: false,
+            flexible_contexts: false,
+            gadts: false,
+            strict_data: false,
+            overloaded_lists: false,
         };
 
         // Lower the module

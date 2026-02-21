@@ -37,6 +37,11 @@ fn module_with_items(items: Vec<Item>) -> Module {
         overloaded_strings: false,
         scoped_type_variables: false,
         generalized_newtype_deriving: false,
+        flexible_instances: false,
+        flexible_contexts: false,
+        gadts: false,
+        strict_data: false,
+        overloaded_lists: false,
     }
 }
 

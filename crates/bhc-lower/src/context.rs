@@ -1403,6 +1403,14 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
+        // E.64: OverloadedLists — fromList at fixed DefId
+        {
+            let sym = Symbol::intern("fromList");
+            let def_id = DefId::new(11310);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
         // E.26: List *By variants, sortOn, stripPrefix, insert, mapAccumL/R
         let e26_list_builtins: &[(usize, &str)] = &[
             (11400, "sortOn"),

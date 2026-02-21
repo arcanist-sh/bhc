@@ -940,6 +940,25 @@ fn test_tier3_type_operators_prefix_native() {
 }
 
 // =============================================================================
+// E.64: EmptyCase, DefaultSignatures, OverloadedLists
+// =============================================================================
+
+#[test]
+fn test_tier3_empty_case_native() {
+    run_native_test("tier3_io/empty_case", Profile::Default);
+}
+
+#[test]
+fn test_tier3_default_signatures_native() {
+    run_native_test("tier3_io/default_signatures", Profile::Default);
+}
+
+#[test]
+fn test_tier3_overloaded_lists_native() {
+    run_native_test("tier3_io/overloaded_lists", Profile::Default);
+}
+
+// =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================
 

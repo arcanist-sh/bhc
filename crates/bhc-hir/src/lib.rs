@@ -717,6 +717,11 @@ pub struct Module {
     pub flexible_contexts: bool,
     /// Whether {-# LANGUAGE GADTs #-} is enabled.
     pub gadts: bool,
+    /// Whether {-# LANGUAGE StrictData #-} is enabled.
+    /// Note: BHC is already strict-by-default, so this is a no-op semantically.
+    pub strict_data: bool,
+    /// Whether {-# LANGUAGE OverloadedLists #-} is enabled.
+    pub overloaded_lists: bool,
 }
 
 /// An export specification.

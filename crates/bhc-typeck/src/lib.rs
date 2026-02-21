@@ -145,6 +145,7 @@ pub fn type_check_module_with_defs(
 ) -> Result<TypedModule, Vec<Diagnostic>> {
     let mut ctx = TyCtxt::new(file_id);
     ctx.overloaded_strings = hir.overloaded_strings;
+    ctx.overloaded_lists = hir.overloaded_lists;
     ctx.scoped_type_variables = hir.scoped_type_variables;
 
     // Register built-in types
@@ -250,6 +251,11 @@ mod tests {
             overloaded_strings: false,
             scoped_type_variables: false,
             generalized_newtype_deriving: false,
+            flexible_instances: false,
+            flexible_contexts: false,
+            gadts: false,
+            strict_data: false,
+            overloaded_lists: false,
         };
 
         let result = type_check_module(&module, FileId::new(0));

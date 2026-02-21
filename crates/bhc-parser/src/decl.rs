@@ -1987,6 +1987,13 @@ impl<'src> Parser<'src> {
         if self.check(&TokenKind::Type) {
             let assoc_type = self.parse_assoc_type_decl()?;
             assoc_types.push(assoc_type);
+        } else if self.check(&TokenKind::Default) {
+            // DefaultSignatures: `default methodName :: ConstrainedType`
+            // Parse and discard — BHC handles default method bodies via FunBind.
+            // The `default` keyword before a type sig is purely informational.
+            self.advance(); // eat 'default'
+            let _decl = self.parse_value_decl()?;
+            // Discard: it's just a more-constrained type sig for the default
         } else {
             let decl = self.parse_value_decl()?;
             methods.push(decl);

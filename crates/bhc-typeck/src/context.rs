@@ -103,6 +103,9 @@ pub struct TyCtxt {
     /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
     pub(crate) overloaded_strings: bool,
 
+    /// Whether {-# LANGUAGE OverloadedLists #-} is enabled.
+    pub(crate) overloaded_lists: bool,
+
     /// Whether {-# LANGUAGE ScopedTypeVariables #-} is enabled.
     pub(crate) scoped_type_variables: bool,
 
@@ -138,6 +141,7 @@ impl TyCtxt {
             con_field_defs: FxHashMap::default(),
             constraints: Vec::new(),
             overloaded_strings: false,
+            overloaded_lists: false,
             scoped_type_variables: false,
             scoped_type_vars: FxHashMap::default(),
             user_defined_classes: rustc_hash::FxHashSet::default(),
@@ -582,6 +586,8 @@ impl TyCtxt {
                     ("Fractional", "Float") | ("Fractional", "Double") |
                     // IsString instances
                     ("IsString", "String") | ("IsString", "[Char]") |
+                    // IsList instances (OverloadedLists)
+                    ("IsList", "[]") |
                     // Enum/Bounded instances for Word types and Integer
                     ("Enum", "Integer") |
                     ("Enum", "Word") | ("Enum", "Word8") | ("Enum", "Word16") | ("Enum", "Word32") | ("Enum", "Word64") |
@@ -596,6 +602,8 @@ impl TyCtxt {
             Ty::List(elem) => {
                 if class_name == "IsString" {
                     matches!(elem.as_ref(), Ty::Con(tc) if tc.name.as_str() == "Char")
+                } else if class_name == "IsList" {
+                    true // [a] is always an IsList instance
                 } else {
                     matches!(class_name, "Eq" | "Ord" | "Show") && self.is_builtin_instance(class, elem)
                 }
@@ -668,6 +676,12 @@ impl TyCtxt {
             "IsString" => {
                 // Default to String ([Char]), matching GHC behavior
                 Some(self.builtins.string_ty.clone())
+            }
+            "IsList" => {
+                // Default to list type, matching GHC behavior
+                // Create [Int] as a reasonable default, but the element
+                // type will be constrained by the literal elements anyway
+                Some(Ty::List(Box::new(self.builtins.int_ty.clone())))
             }
             "Eq" | "Ord" | "Show" | "Read" => {
                 // These don't have defaults - leave ambiguous
@@ -2882,6 +2896,11 @@ impl TyCtxt {
                         self.builtins.string_ty.clone(),
                         Ty::Var(a),
                     ))
+                }
+                // E.64: OverloadedLists — fromList :: [a] -> [a] (identity for lists)
+                "fromList" => {
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone()], Ty::fun(list_a.clone(), list_a))
                 }
                 "read" => Scheme::mono(Ty::fun(
                     self.builtins.string_ty.clone(),

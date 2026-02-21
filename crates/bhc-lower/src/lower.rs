@@ -125,6 +125,22 @@ pub fn lower_module_with_cache(
         }
     });
 
+    let has_strict_data = module.pragmas.iter().any(|p| {
+        if let ast::PragmaKind::Language(exts) = &p.kind {
+            exts.iter().any(|e| e.as_str() == "StrictData")
+        } else {
+            false
+        }
+    });
+
+    let has_overloaded_lists = module.pragmas.iter().any(|p| {
+        if let ast::PragmaKind::Language(exts) = &p.kind {
+            exts.iter().any(|e| e.as_str() == "OverloadedLists")
+        } else {
+            false
+        }
+    });
+
     let already_imports_prelude = module.imports.iter().any(|imp| {
         let name = imp
             .module
@@ -207,6 +223,8 @@ pub fn lower_module_with_cache(
         flexible_instances: has_flexible_instances,
         flexible_contexts: has_flexible_contexts,
         gadts: has_gadts,
+        strict_data: has_strict_data,
+        overloaded_lists: has_overloaded_lists,
     })
 }
 

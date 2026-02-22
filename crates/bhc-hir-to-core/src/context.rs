@@ -95,6 +95,9 @@ pub struct LowerContext {
     /// Accumulated errors.
     errors: Vec<LowerError>,
 
+    /// Accumulated warnings (non-fatal diagnostics).
+    warnings: Vec<String>,
+
     /// Whether GeneralizedNewtypeDeriving is enabled for the current module.
     pub generalized_newtype_deriving: bool,
 }
@@ -113,6 +116,7 @@ impl LowerContext {
             dict_scope: vec![FxHashMap::default()], // Start with empty root scope
             class_registry: ClassRegistry::new(),
             errors: Vec::new(),
+            warnings: Vec::new(),
             generalized_newtype_deriving: false,
         };
         ctx.register_builtins();
@@ -955,6 +959,31 @@ impl LowerContext {
     /// Take all recorded errors.
     pub fn take_errors(&mut self) -> Vec<LowerError> {
         std::mem::take(&mut self.errors)
+    }
+
+    /// Record a warning (non-fatal diagnostic).
+    pub fn warn(&mut self, message: String) {
+        self.warnings.push(message);
+    }
+
+    /// Take all recorded warnings.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
+    }
+
+    /// Get all constructors for a given type name.
+    ///
+    /// Returns a vector of `(tag, name, arity)` tuples sorted by tag.
+    pub fn constructors_for_type_name(&self, type_name: Symbol) -> Vec<(u32, Symbol, u32)> {
+        let mut cons: Vec<(u32, Symbol, u32)> = self
+            .constructor_map
+            .values()
+            .filter(|info| info.type_name == type_name)
+            .map(|info| (info.tag, info.name, info.arity))
+            .collect();
+        cons.sort_by_key(|(tag, _, _)| *tag);
+        cons.dedup_by_key(|(tag, _, _)| *tag);
+        cons
     }
 
     /// Register a HIR definition with a Core variable.
@@ -1806,6 +1835,12 @@ impl LowerContext {
             return Err(LowerError::Multiple(self.take_errors()));
         }
 
+        // Print any warnings (non-fatal diagnostics)
+        let warnings = self.take_warnings();
+        for warning in &warnings {
+            eprintln!("{}", warning);
+        }
+
         // Collect constructor metadata for codegen
         let constructors: Vec<CoreConstructor> = self
             .constructor_map
@@ -2060,36 +2095,8 @@ impl LowerContext {
             })
             .collect();
 
-        // Find which argument position(s) need constructor matching
-        // If only one position has constructors, we can avoid tuple patterns
-        let constructor_positions = self.find_constructor_positions(value_def);
-
-        let case_expr = if arity == 1 || constructor_positions.len() != 1 {
-            // Single argument or complex case: use original approach
-            let scrutinee = if arity == 1 {
-                core::Expr::Var(args[0].clone(), value_def.span)
-            } else {
-                // Multiple arguments: create a tuple scrutinee
-                self.make_tuple_expr(&args, value_def.span)
-            };
-
-            // Compile pattern matching
-            let case_alts = self.compile_pattern_match(value_def, &args)?;
-
-            core::Expr::Case(
-                Box::new(scrutinee),
-                case_alts,
-                Ty::Error, // Result type placeholder
-                value_def.span,
-            )
-        } else {
-            // Optimization: only one argument has constructor patterns
-            // Case on just that argument, bind others directly
-            let match_pos = constructor_positions[0];
-            let match_arg = &args[match_pos];
-
-            self.compile_single_position_match(value_def, &args, match_pos)?
-        };
+        // Use decision tree compilation for all multi-equation pattern matching
+        let case_expr = self.compile_pattern_match_expr(value_def, &args)?;
 
         // Wrap in lambdas
         let mut result = case_expr;
@@ -2101,110 +2108,16 @@ impl LowerContext {
     }
 
     /// Make a tuple expression from variables.
-    fn make_tuple_expr(&mut self, vars: &[Var], span: Span) -> core::Expr {
-        // Build tuple constructor application
-        let tuple_con_name = Symbol::intern(&format!("({})", ",".repeat(vars.len() - 1)));
-
-        let mut expr = core::Expr::Var(
-            Var {
-                name: tuple_con_name,
-                id: VarId::new(0),
-                ty: Ty::Error,
-            },
-            span,
-        );
-
-        for var in vars {
-            expr = core::Expr::App(
-                Box::new(expr),
-                Box::new(core::Expr::Var(var.clone(), span)),
-                span,
-            );
-        }
-
-        expr
-    }
-
-    /// Compile pattern matching for multiple equations.
-    fn compile_pattern_match(
+    /// Compile pattern matching for multiple equations using decision trees.
+    ///
+    /// Returns a Core expression (case tree) that performs the pattern dispatch.
+    fn compile_pattern_match_expr(
         &mut self,
         value_def: &ValueDef,
         args: &[Var],
-    ) -> LowerResult<Vec<core::Alt>> {
-        use crate::pattern::compile_match;
-        compile_match(self, value_def, args)
-    }
-
-    /// Find which argument positions have constructor patterns.
-    fn find_constructor_positions(&self, value_def: &ValueDef) -> Vec<usize> {
-        use bhc_hir::Pat;
-
-        let mut positions = Vec::new();
-        let arity = value_def
-            .equations
-            .get(0)
-            .map(|eq| eq.pats.len())
-            .unwrap_or(0);
-
-        for pos in 0..arity {
-            let has_constructor = value_def.equations.iter().any(|eq| {
-                eq.pats
-                    .get(pos)
-                    .map(|pat| matches!(pat, Pat::Con(_, _, _) | Pat::Lit(_, _)))
-                    .unwrap_or(false)
-            });
-            if has_constructor {
-                positions.push(pos);
-            }
-        }
-
-        positions
-    }
-
-    /// Compile pattern matching when only one argument position has constructors.
-    fn compile_single_position_match(
-        &mut self,
-        value_def: &ValueDef,
-        args: &[Var],
-        match_pos: usize,
     ) -> LowerResult<core::Expr> {
-        use crate::pattern::{bind_pattern_vars, lower_pat_to_alt};
-        use bhc_hir::Pat;
-
-        let span = value_def.span;
-        let mut alts = Vec::new();
-
-        for eq in &value_def.equations {
-            // Register all pattern variables before lowering RHS
-            for (i, pat) in eq.pats.iter().enumerate() {
-                let arg_var = args.get(i).cloned();
-                bind_pattern_vars(self, pat, arg_var.as_ref());
-            }
-
-            // Lower the RHS
-            let rhs = lower_expr(self, &eq.rhs)?;
-
-            // Get the pattern at the match position
-            if let Some(pat) = eq.pats.get(match_pos) {
-                let alt = lower_pat_to_alt(self, pat, rhs, span)?;
-                alts.push(alt);
-            }
-        }
-
-        // Add default error case
-        alts.push(core::Alt {
-            con: core::AltCon::Default,
-            binders: vec![],
-            rhs: crate::pattern::make_pattern_error(span),
-        });
-
-        // Case on the matching argument
-        Ok(core::Expr::Case(
-            Box::new(core::Expr::Var(args[match_pos].clone(), span)),
-            alts,
-            Ty::Error,
-            span,
-        ))
+        use crate::pattern::compile_match_to_expr;
+        compile_match_to_expr(self, value_def, args)
     }
 }
 

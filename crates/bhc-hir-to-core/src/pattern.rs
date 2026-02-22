@@ -1,16 +1,22 @@
 //! Pattern compilation for HIR to Core lowering.
 //!
 //! This module handles the compilation of HIR patterns into Core case
-//! alternatives. The main challenge is compiling multi-equation function
-//! definitions with overlapping patterns into efficient decision trees.
+//! alternatives using the Augustsson/Sestoft column-based decision tree
+//! algorithm.
 //!
 //! ## Pattern Compilation Strategy
 //!
-//! We use a simplified version of the algorithm from:
-//! "The Implementation of Functional Programming Languages" by SPJ
+//! Multi-equation function definitions are compiled via a match matrix:
+//! 1. Select the column with the most constructor information
+//! 2. Group rows by head constructor in that column
+//! 3. Generate a case dispatch with one branch per constructor group
+//! 4. Recurse on remaining columns within each group
 //!
-//! For now, we use a straightforward approach that generates one alternative
-//! per equation. This is correct but may generate redundant checks.
+//! This produces sharing of common tests across equations and enables
+//! exhaustiveness and overlap checking.
+//!
+//! Single-alternative case expressions still use `lower_pat_to_alt`
+//! for direct compilation without the matrix machinery.
 
 use bhc_core::{self as core, Alt, AltCon, DataCon, Literal, Var, VarId};
 use bhc_hir::{self as hir, Pat, ValueDef};
@@ -18,6 +24,7 @@ use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
 use bhc_types::{Kind, Ty, TyCon};
+use std::collections::BTreeMap;
 
 use crate::context::LowerContext;
 use crate::expr::lower_expr;
@@ -78,14 +85,8 @@ pub fn lower_pat_to_alt_with_fallthrough(
 
         Pat::Lit(lit, _) => {
             // Literal pattern
-            let core_lit = match lit {
-                hir::Lit::Int(n) => Literal::Int(*n as i64),
-                hir::Lit::Float(f) => Literal::Float(*f as f32),
-                hir::Lit::Char(c) => Literal::Char(*c),
-                hir::Lit::String(s) => Literal::String(*s),
-            };
             Ok(Alt {
-                con: AltCon::Lit(core_lit),
+                con: AltCon::Lit(hir_lit_to_core(lit)),
                 binders: vec![],
                 rhs,
             })
@@ -400,33 +401,828 @@ pub fn lower_pat_to_alt_with_fallthrough(
     }
 }
 
-/// Compile pattern matching for multiple equations.
+// ============================================================
+// Decision Tree Pattern Compilation (Augustsson/Sestoft)
+// ============================================================
+
+/// The head of a pattern for grouping purposes.
 ///
-/// This takes a function definition with multiple equations and compiles
-/// them into a list of Core case alternatives.
-pub fn compile_match(
+/// We use a string key for `Lit` because `Literal` contains floats
+/// which don't implement `Eq`/`Ord`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum PatHead {
+    /// Constructor with (type_name, con_name, tag, arity).
+    Con(Symbol, Symbol, u32, u32),
+    /// Literal, represented as a string key for grouping.
+    Lit(String),
+    /// Wildcard/variable — matches anything.
+    Wild,
+}
+
+/// Convert a HIR literal to a Core literal.
+fn hir_lit_to_core(lit: &hir::Lit) -> Literal {
+    match lit {
+        hir::Lit::Int(n) => Literal::Int(*n as i64),
+        hir::Lit::Float(f) => Literal::Float(*f as f32),
+        hir::Lit::Char(c) => Literal::Char(*c),
+        hir::Lit::String(s) => Literal::String(*s),
+    }
+}
+
+/// Create a string key for a literal (for grouping).
+fn literal_key(lit: &hir::Lit) -> String {
+    match lit {
+        hir::Lit::Int(n) => format!("Int:{}", n),
+        hir::Lit::Float(f) => format!("Float:{}", f),
+        hir::Lit::Char(c) => format!("Char:{}", *c as u32),
+        hir::Lit::String(s) => format!("Str:{}", s.as_str()),
+    }
+}
+
+/// A row in the match matrix.
+struct ClauseRow {
+    /// One pattern per scrutinee column.
+    pats: Vec<hir::Pat>,
+    /// Optional guard condition.
+    guard: Option<hir::Expr>,
+    /// Right-hand side expression.
+    rhs: hir::Expr,
+    /// Source location.
+    span: Span,
+    /// Original row index (for overlap detection).
+    row_index: usize,
+}
+
+/// The match matrix: rows of patterns compiled against a vector of scrutinees.
+struct MatchMatrix {
+    /// Variables being matched (one per column).
+    scrutinees: Vec<Var>,
+    /// Rows of equations.
+    rows: Vec<ClauseRow>,
+}
+
+/// Compiled decision tree.
+enum DecisionTree {
+    /// Leaf: matched successfully.
+    Leaf {
+        /// Variable bindings from pattern matching.
+        bindings: Vec<(VarId, core::Expr)>,
+        /// Guard condition (if any).
+        guard: Option<hir::Expr>,
+        /// Right-hand side.
+        rhs: hir::Expr,
+        /// Source span.
+        span: Span,
+        /// Original row index.
+        row_index: usize,
+    },
+    /// Switch on a scrutinee, branching by constructor/literal.
+    Switch {
+        /// Variable to scrutinize.
+        scrutinee: Var,
+        /// One branch per constructor: (AltCon, bound vars, sub-tree).
+        branches: Vec<(AltCon, Vec<Var>, DecisionTree)>,
+        /// Default branch (for wildcards / uncovered constructors).
+        default: Option<Box<DecisionTree>>,
+        /// Source span for diagnostics.
+        span: Span,
+    },
+    /// Match failure — non-exhaustive patterns.
+    Fail(Span),
+}
+
+/// Compile pattern matching for multiple equations using decision trees.
+///
+/// Returns a Core expression that performs the pattern dispatch.
+/// The caller is responsible for wrapping this in lambdas for the arguments.
+pub fn compile_match_to_expr(
     ctx: &mut LowerContext,
     value_def: &ValueDef,
     args: &[Var],
-) -> LowerResult<Vec<Alt>> {
-    compile_equations(ctx, &value_def.equations, args, value_def.span)
+) -> LowerResult<core::Expr> {
+    // Check for view patterns or guards — these need special handling and
+    // bypass the decision tree algorithm.
+    let has_view = value_def.equations.iter().any(|eq| {
+        eq.pats.iter().any(|p| matches!(p, Pat::View(_, _, _)))
+    });
+    let has_guards = value_def.equations.iter().any(|eq| !eq.guards.is_empty());
+
+    if has_view || has_guards {
+        // Fall back to linear compilation for view patterns and guards
+        let alts = compile_equations_linear(ctx, &value_def.equations, args, value_def.span)?;
+        let scrutinee = if args.len() == 1 {
+            core::Expr::Var(args[0].clone(), value_def.span)
+        } else {
+            // Multi-arg: create a tuple scrutinee
+            let tuple_con_name =
+                Symbol::intern(&format!("({})", ",".repeat(args.len() - 1)));
+            let mut expr = core::Expr::Var(
+                Var {
+                    name: tuple_con_name,
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                },
+                value_def.span,
+            );
+            for arg in args {
+                expr = core::Expr::App(
+                    Box::new(expr),
+                    Box::new(core::Expr::Var(arg.clone(), value_def.span)),
+                    value_def.span,
+                );
+            }
+            expr
+        };
+        return Ok(core::Expr::Case(
+            Box::new(scrutinee),
+            alts,
+            Ty::Error,
+            value_def.span,
+        ));
+    }
+
+    // Build the match matrix from equations
+    let mut rows = Vec::with_capacity(value_def.equations.len());
+    for (i, eq) in value_def.equations.iter().enumerate() {
+        // Flatten or-patterns into separate rows
+        let expanded = expand_equation_or_patterns(eq);
+        for expanded_eq in expanded {
+            rows.push(ClauseRow {
+                pats: expanded_eq.0,
+                guard: expanded_eq.1,
+                rhs: expanded_eq.2,
+                span: eq.span,
+                row_index: i,
+            });
+        }
+    }
+
+    let matrix = MatchMatrix {
+        scrutinees: args.to_vec(),
+        rows,
+    };
+
+    // Build the decision tree
+    let tree = build_decision_tree(ctx, matrix, value_def.span);
+
+    // Check exhaustiveness
+    check_exhaustiveness_tree(ctx, &tree, value_def.name.as_str());
+
+    // Check for redundant equations
+    let total_equations = value_def.equations.len();
+    check_overlap(ctx, &tree, total_equations, value_def.name.as_str());
+
+    // Convert decision tree to Core expression
+    tree_to_core(ctx, tree)
 }
 
-/// Check if a pattern is (or contains at the top level) a view pattern.
-fn is_view_pattern(pat: &hir::Pat) -> bool {
-    matches!(pat, Pat::View(_, _, _))
+/// Expand or-patterns in an equation into multiple (pats, guard, rhs) tuples.
+fn expand_equation_or_patterns(
+    eq: &hir::Equation,
+) -> Vec<(Vec<hir::Pat>, Option<hir::Expr>, hir::Expr)> {
+    // For each pattern position, flatten or-patterns
+    let flattened: Vec<Vec<hir::Pat>> = eq
+        .pats
+        .iter()
+        .map(flatten_nested_or_patterns)
+        .collect();
+
+    if flattened.is_empty() {
+        return vec![(vec![], eq.guards.first().map(|g| g.cond.clone()), eq.rhs.clone())];
+    }
+
+    // Cross product of all expanded patterns
+    let combinations = cross_product(&flattened);
+
+    let guard = if eq.guards.is_empty() {
+        None
+    } else {
+        // Multiple guards are ANDed together
+        Some(eq.guards[0].cond.clone())
+    };
+
+    combinations
+        .into_iter()
+        .map(|pats| (pats, guard.clone(), eq.rhs.clone()))
+        .collect()
 }
 
-/// Compile a slice of equations into Core case alternatives.
-/// View pattern equations are compiled with fallthrough to remaining equations.
-fn compile_equations(
+/// Extract the head of a pattern for grouping.
+fn pat_head(ctx: &LowerContext, pat: &hir::Pat) -> PatHead {
+    match pat {
+        Pat::Wild(_) | Pat::Var(_, _, _) => PatHead::Wild,
+        Pat::Lit(lit, _) => PatHead::Lit(literal_key(lit)),
+        Pat::Con(def_ref, sub_pats, _) => {
+            if let Some(info) = ctx.lookup_constructor(def_ref.def_id) {
+                PatHead::Con(info.type_name, info.name, info.tag, info.arity)
+            } else {
+                // Fallback: use name-based lookup
+                let name = ctx
+                    .lookup_var(def_ref.def_id)
+                    .map(|v| v.name)
+                    .unwrap_or_else(|| Symbol::intern("Con"));
+                let tag = get_constructor_tag(name.as_str(), def_ref.def_id.index() as u32);
+                PatHead::Con(
+                    Symbol::intern("DataType"),
+                    name,
+                    tag,
+                    sub_pats.len() as u32,
+                )
+            }
+        }
+        Pat::RecordCon(def_ref, field_pats, _) => {
+            if let Some(info) = ctx.lookup_constructor(def_ref.def_id) {
+                PatHead::Con(info.type_name, info.name, info.tag, info.arity)
+            } else {
+                let name = ctx
+                    .lookup_var(def_ref.def_id)
+                    .map(|v| v.name)
+                    .unwrap_or_else(|| Symbol::intern("Con"));
+                let tag = get_constructor_tag(name.as_str(), def_ref.def_id.index() as u32);
+                PatHead::Con(
+                    Symbol::intern("DataType"),
+                    name,
+                    tag,
+                    field_pats.len() as u32,
+                )
+            }
+        }
+        Pat::As(_, _, inner, _) => pat_head(ctx, inner),
+        Pat::Ann(inner, _, _) => pat_head(ctx, inner),
+        Pat::Or(left, _, _) => pat_head(ctx, left), // shouldn't happen after expansion
+        Pat::View(_, _, _) => PatHead::Wild,        // handled separately
+        Pat::Error(_) => PatHead::Wild,
+    }
+}
+
+/// Extract the sub-patterns from a constructor pattern.
+/// For a wildcard, returns `arity` wildcard sub-patterns.
+fn pat_sub_patterns(ctx: &LowerContext, pat: &hir::Pat, arity: u32, span: Span) -> Vec<hir::Pat> {
+    match pat {
+        Pat::Con(_, sub_pats, _) => sub_pats.clone(),
+        Pat::RecordCon(def_ref, field_pats, _) => {
+            // Reorder fields into canonical order
+            let canonical_fields = ctx
+                .lookup_constructor(def_ref.def_id)
+                .map(|info| info.field_names.clone())
+                .unwrap_or_default();
+
+            if canonical_fields.is_empty() {
+                field_pats.iter().map(|fp| fp.pat.clone()).collect()
+            } else {
+                let field_map: std::collections::HashMap<Symbol, &hir::Pat> =
+                    field_pats.iter().map(|fp| (fp.name, &fp.pat)).collect();
+                canonical_fields
+                    .iter()
+                    .map(|name| {
+                        field_map
+                            .get(name)
+                            .cloned()
+                            .cloned()
+                            .unwrap_or(Pat::Wild(span))
+                    })
+                    .collect()
+            }
+        }
+        Pat::As(_, _, inner, _) => pat_sub_patterns(ctx, inner, arity, span),
+        Pat::Ann(inner, _, _) => pat_sub_patterns(ctx, inner, arity, span),
+        Pat::Wild(_) | Pat::Var(_, _, _) => {
+            // Wildcard matches any constructor — generate wildcard sub-patterns
+            (0..arity).map(|_| Pat::Wild(span)).collect()
+        }
+        _ => (0..arity).map(|_| Pat::Wild(span)).collect(),
+    }
+}
+
+/// Select the best column to match on.
+///
+/// Heuristic: prefer columns with constructor patterns (more information
+/// for branching). Among constructor columns, prefer the one with the
+/// most distinct constructors.
+fn select_column(ctx: &LowerContext, matrix: &MatchMatrix) -> usize {
+    if matrix.scrutinees.is_empty() {
+        return 0;
+    }
+
+    let ncols = matrix.scrutinees.len();
+    let mut best_col = 0;
+    let mut best_score: i32 = -1;
+
+    for col in 0..ncols {
+        let mut n_constructors = 0i32;
+        let mut has_any_con = false;
+        let mut seen = std::collections::HashSet::new();
+
+        for row in &matrix.rows {
+            if col < row.pats.len() {
+                let head = pat_head(ctx, &row.pats[col]);
+                match &head {
+                    PatHead::Con(_, _, _, _) | PatHead::Lit(_) => {
+                        has_any_con = true;
+                        if seen.insert(head.clone()) {
+                            n_constructors += 1;
+                        }
+                    }
+                    PatHead::Wild => {}
+                }
+            }
+        }
+
+        if has_any_con && n_constructors > best_score {
+            best_score = n_constructors;
+            best_col = col;
+        }
+    }
+
+    best_col
+}
+
+/// Build a decision tree from a match matrix.
+fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) -> DecisionTree {
+    // Base case: no rows → match failure
+    if matrix.rows.is_empty() {
+        return DecisionTree::Fail(span);
+    }
+
+    // Check if first row is all wildcards/vars (match success)
+    let all_wild = matrix.rows[0].pats.iter().all(|p| {
+        matches!(pat_head(ctx, p), PatHead::Wild)
+    });
+
+    if all_wild || matrix.rows[0].pats.is_empty() {
+        // Register variable bindings for variables in the first row
+        for (col, pat) in matrix.rows[0].pats.iter().enumerate() {
+            if col < matrix.scrutinees.len() {
+                register_wildcard_bindings(ctx, pat, &matrix.scrutinees[col]);
+            }
+        }
+
+        let rhs = matrix.rows[0].rhs.clone();
+        let row_span = matrix.rows[0].span;
+        let row_index = matrix.rows[0].row_index;
+
+        return DecisionTree::Leaf {
+            bindings: vec![],
+            guard: None,
+            rhs,
+            span: row_span,
+            row_index,
+        };
+    }
+
+    // Select best column to match on
+    let col = select_column(ctx, &matrix);
+    let scrutinee = matrix.scrutinees[col].clone();
+    let row_span = matrix.rows[0].span;
+
+    // Group rows by head constructor/literal at the selected column
+    let mut groups: BTreeMap<PatHead, Vec<&ClauseRow>> = BTreeMap::new();
+    let mut default_rows: Vec<&ClauseRow> = Vec::new();
+
+    for row in &matrix.rows {
+        let head = if col < row.pats.len() {
+            pat_head(ctx, &row.pats[col])
+        } else {
+            PatHead::Wild
+        };
+
+        match &head {
+            PatHead::Wild => {
+                default_rows.push(row);
+                // Wildcards also participate in all constructor groups
+                for (_, group) in groups.iter_mut() {
+                    group.push(row);
+                }
+            }
+            _ => {
+                groups.entry(head.clone()).or_default().push(row);
+                // Also add existing default rows to this new group
+                for dr in &default_rows {
+                    groups.get_mut(&head).unwrap().push(dr);
+                }
+            }
+        }
+    }
+
+    // Build branches
+    let mut branches: Vec<(AltCon, Vec<Var>, DecisionTree)> = Vec::new();
+
+    for (head, group_rows) in &groups {
+        match head {
+            PatHead::Con(type_name, con_name, tag, arity) => {
+                let tycon = TyCon::new(*type_name, Kind::Star);
+                let con = DataCon {
+                    name: *con_name,
+                    ty_con: tycon,
+                    tag: *tag,
+                    arity: *arity,
+                };
+
+                // Create fresh variables for constructor fields
+                let field_vars: Vec<Var> = (0..*arity)
+                    .map(|i| {
+                        ctx.fresh_var(
+                            &format!("_pat{}_{}", col, i),
+                            Ty::Error,
+                            row_span,
+                        )
+                    })
+                    .collect();
+
+                // Register variable bindings for wild/var rows participating
+                // in this constructor group. When a Var pattern at column `col`
+                // is removed by specialization, we must bind it to the scrutinee.
+                for row in group_rows {
+                    if col < row.pats.len() {
+                        if matches!(pat_head(ctx, &row.pats[col]), PatHead::Wild) {
+                            register_wildcard_bindings(ctx, &row.pats[col], &scrutinee);
+                        }
+                    }
+                }
+
+                // Build sub-matrix: specialize for this constructor
+                let sub_matrix = specialize_matrix(
+                    ctx,
+                    &matrix,
+                    col,
+                    head,
+                    &field_vars,
+                    group_rows,
+                    row_span,
+                );
+
+                let sub_tree = build_decision_tree(ctx, sub_matrix, row_span);
+                branches.push((AltCon::DataCon(con), field_vars, sub_tree));
+            }
+            PatHead::Lit(_) => {
+                // Find the actual literal from the first row in this group
+                let core_lit = group_rows
+                    .iter()
+                    .find_map(|row| {
+                        if col < row.pats.len() {
+                            if let Pat::Lit(lit, _) = &row.pats[col] {
+                                Some(hir_lit_to_core(lit))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(Literal::Int(0));
+
+                // Register variable bindings for wild/var rows in this
+                // literal group (same logic as constructor groups above).
+                for row in group_rows {
+                    if col < row.pats.len() {
+                        if matches!(pat_head(ctx, &row.pats[col]), PatHead::Wild) {
+                            register_wildcard_bindings(ctx, &row.pats[col], &scrutinee);
+                        }
+                    }
+                }
+
+                // Literal branches have no field variables
+                let sub_matrix = specialize_matrix(
+                    ctx,
+                    &matrix,
+                    col,
+                    head,
+                    &[],
+                    group_rows,
+                    row_span,
+                );
+                let sub_tree = build_decision_tree(ctx, sub_matrix, row_span);
+                branches.push((AltCon::Lit(core_lit), vec![], sub_tree));
+            }
+            PatHead::Wild => unreachable!("wild should not appear as group key"),
+        }
+    }
+
+    // Build default branch from rows that match anything at this column.
+    // Register variable bindings for patterns being removed from column `col`.
+    let default = if !default_rows.is_empty() {
+        for row in &default_rows {
+            if col < row.pats.len() {
+                register_wildcard_bindings(ctx, &row.pats[col], &scrutinee);
+            }
+        }
+        let sub_matrix = default_matrix(ctx, &matrix, col, &default_rows, row_span);
+        Some(Box::new(build_decision_tree(ctx, sub_matrix, row_span)))
+    } else {
+        None
+    };
+
+    DecisionTree::Switch {
+        scrutinee,
+        branches,
+        default,
+        span: row_span,
+    }
+}
+
+/// Specialize the match matrix for a given constructor in a column.
+///
+/// For rows matching the constructor, replace the column with sub-pattern columns.
+/// For wildcard rows, expand to wildcard sub-patterns.
+fn specialize_matrix(
+    ctx: &LowerContext,
+    matrix: &MatchMatrix,
+    col: usize,
+    head: &PatHead,
+    field_vars: &[Var],
+    group_rows: &[&ClauseRow],
+    span: Span,
+) -> MatchMatrix {
+    let arity = field_vars.len();
+
+    // New scrutinee vector: replace col with field variables
+    let mut new_scrutinees = Vec::with_capacity(matrix.scrutinees.len() - 1 + arity);
+    for (i, s) in matrix.scrutinees.iter().enumerate() {
+        if i == col {
+            new_scrutinees.extend(field_vars.iter().cloned());
+        } else {
+            new_scrutinees.push(s.clone());
+        }
+    }
+
+    let mut new_rows = Vec::new();
+    for row in group_rows {
+        let pat = if col < row.pats.len() {
+            &row.pats[col]
+        } else {
+            // Pad with wildcard if row is shorter
+            &Pat::Wild(span)
+        };
+
+        // Get sub-patterns for this constructor
+        let sub_pats = pat_sub_patterns(ctx, pat, arity as u32, span);
+
+        // Build new pattern row: replace col with sub-patterns
+        let mut new_pats = Vec::with_capacity(row.pats.len() - 1 + arity);
+        for (i, p) in row.pats.iter().enumerate() {
+            if i == col {
+                new_pats.extend(sub_pats.iter().cloned());
+            } else {
+                new_pats.push(p.clone());
+            }
+        }
+
+        new_rows.push(ClauseRow {
+            pats: new_pats,
+            guard: row.guard.clone(),
+            rhs: row.rhs.clone(),
+            span: row.span,
+            row_index: row.row_index,
+        });
+    }
+
+    MatchMatrix {
+        scrutinees: new_scrutinees,
+        rows: new_rows,
+    }
+}
+
+/// Build the default sub-matrix (for rows matching any constructor).
+fn default_matrix(
+    _ctx: &LowerContext,
+    matrix: &MatchMatrix,
+    col: usize,
+    default_rows: &[&ClauseRow],
+    span: Span,
+) -> MatchMatrix {
+    // Remove the matched column
+    let new_scrutinees: Vec<Var> = matrix
+        .scrutinees
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != col)
+        .map(|(_, s)| s.clone())
+        .collect();
+
+    let new_rows: Vec<ClauseRow> = default_rows
+        .iter()
+        .map(|row| {
+            let new_pats: Vec<hir::Pat> = row
+                .pats
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != col)
+                .map(|(_, p)| p.clone())
+                .collect();
+            ClauseRow {
+                pats: new_pats,
+                guard: row.guard.clone(),
+                rhs: row.rhs.clone(),
+                span: row.span,
+                row_index: row.row_index,
+            }
+        })
+        .collect();
+
+    MatchMatrix {
+        scrutinees: new_scrutinees,
+        rows: new_rows,
+    }
+}
+
+/// Register variable bindings from a wildcard/var pattern into the context.
+fn register_wildcard_bindings(ctx: &mut LowerContext, pat: &hir::Pat, scrutinee: &Var) {
+    match pat {
+        Pat::Var(_name, def_id, _) => {
+            ctx.register_var(*def_id, scrutinee.clone());
+        }
+        Pat::As(_name, def_id, inner, _) => {
+            ctx.register_var(*def_id, scrutinee.clone());
+            register_wildcard_bindings(ctx, inner, scrutinee);
+        }
+        Pat::Ann(inner, _, _) => {
+            register_wildcard_bindings(ctx, inner, scrutinee);
+        }
+        _ => {}
+    }
+}
+
+/// Convert a decision tree to Core IR.
+fn tree_to_core(ctx: &mut LowerContext, tree: DecisionTree) -> LowerResult<core::Expr> {
+    match tree {
+        DecisionTree::Leaf {
+            bindings: _,
+            guard,
+            rhs,
+            span,
+            row_index: _,
+        } => {
+            let core_rhs = lower_expr(ctx, &rhs)?;
+
+            if let Some(guard_expr) = guard {
+                let core_guard = lower_expr(ctx, &guard_expr)?;
+                Ok(make_if(core_guard, core_rhs, make_pattern_error(span), span))
+            } else {
+                Ok(core_rhs)
+            }
+        }
+
+        DecisionTree::Switch {
+            scrutinee,
+            branches,
+            default,
+            span,
+        } => {
+            let scrut_expr = core::Expr::Var(scrutinee.clone(), span);
+
+            let mut alts: Vec<Alt> = Vec::new();
+
+            for (con, vars, sub_tree) in branches {
+                // Register the field variables in context before lowering the sub-tree
+                let sub_rhs = tree_to_core(ctx, sub_tree)?;
+                alts.push(Alt {
+                    con,
+                    binders: vars,
+                    rhs: sub_rhs,
+                });
+            }
+
+            if let Some(def_tree) = default {
+                let def_rhs = tree_to_core(ctx, *def_tree)?;
+                alts.push(Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    rhs: def_rhs,
+                });
+            }
+
+            // If no default and no branches, generate error
+            if alts.is_empty() {
+                return Ok(make_pattern_error(span));
+            }
+
+            Ok(core::Expr::Case(
+                Box::new(scrut_expr),
+                alts,
+                Ty::Error,
+                span,
+            ))
+        }
+
+        DecisionTree::Fail(span) => Ok(make_pattern_error(span)),
+    }
+}
+
+/// Check the decision tree for non-exhaustive patterns and emit warnings.
+fn check_exhaustiveness_tree(ctx: &mut LowerContext, tree: &DecisionTree, func_name: &str) {
+    match tree {
+        DecisionTree::Fail(span) => {
+            ctx.warn(format!(
+                "warning: Pattern match(es) are non-exhaustive in '{}'\n\
+                 Patterns not matched: (could not determine missing patterns)",
+                func_name
+            ));
+        }
+        DecisionTree::Switch {
+            scrutinee,
+            branches,
+            default,
+            span,
+        } => {
+            // Check if all constructors of the type are covered
+            let covered_cons: Vec<Symbol> = branches
+                .iter()
+                .filter_map(|(con, _, _)| match con {
+                    AltCon::DataCon(dc) => Some(dc.name),
+                    _ => None,
+                })
+                .collect();
+
+            // Get type name from first branch
+            if let Some((AltCon::DataCon(dc), _, _)) = branches.first() {
+                let type_name = dc.ty_con.name;
+                let all_cons = ctx.constructors_for_type_name(type_name);
+
+                if !all_cons.is_empty() && default.is_none() {
+                    let missing: Vec<Symbol> = all_cons
+                        .iter()
+                        .filter(|(_, name, _)| !covered_cons.contains(name))
+                        .map(|(_, name, _)| *name)
+                        .collect();
+
+                    if !missing.is_empty() {
+                        let missing_names: Vec<&str> =
+                            missing.iter().map(|s| s.as_str()).collect();
+                        ctx.warn(format!(
+                            "warning: Pattern match(es) are non-exhaustive in '{}'\n\
+                             Patterns not matched: {}",
+                            func_name,
+                            missing_names.join(", ")
+                        ));
+                    }
+                }
+            }
+
+            // Recurse into sub-trees
+            for (_, _, sub_tree) in branches {
+                check_exhaustiveness_tree(ctx, sub_tree, func_name);
+            }
+            if let Some(def) = default {
+                check_exhaustiveness_tree(ctx, def, func_name);
+            }
+        }
+        DecisionTree::Leaf { .. } => {
+            // Leaf is fine — match succeeded
+        }
+    }
+}
+
+/// Check for redundant/unreachable equations.
+fn check_overlap(
+    ctx: &mut LowerContext,
+    tree: &DecisionTree,
+    total_equations: usize,
+    func_name: &str,
+) {
+    let mut reached = std::collections::HashSet::new();
+    collect_reached_rows(tree, &mut reached);
+
+    for i in 0..total_equations {
+        if !reached.contains(&i) {
+            ctx.warn(format!(
+                "warning: Pattern match is redundant in '{}'\n\
+                 Equation {} is never reached",
+                func_name,
+                i + 1
+            ));
+        }
+    }
+}
+
+/// Collect all row indices that are reachable in the decision tree.
+fn collect_reached_rows(tree: &DecisionTree, reached: &mut std::collections::HashSet<usize>) {
+    match tree {
+        DecisionTree::Leaf { row_index, .. } => {
+            reached.insert(*row_index);
+        }
+        DecisionTree::Switch {
+            branches, default, ..
+        } => {
+            for (_, _, sub_tree) in branches {
+                collect_reached_rows(sub_tree, reached);
+            }
+            if let Some(def) = default {
+                collect_reached_rows(def, reached);
+            }
+        }
+        DecisionTree::Fail(_) => {}
+    }
+}
+
+/// Linear (equation-by-equation) compilation for view patterns and guards.
+/// This preserves the original approach for cases the decision tree doesn't handle.
+fn compile_equations_linear(
     ctx: &mut LowerContext,
     equations: &[hir::Equation],
     args: &[Var],
     span: Span,
 ) -> LowerResult<Vec<Alt>> {
     if equations.is_empty() {
-        // No equations left - add a default error case
         return Ok(vec![Alt {
             con: AltCon::Default,
             binders: vec![],
@@ -434,9 +1230,8 @@ fn compile_equations(
         }]);
     }
 
-    // Check if the first equation has a view pattern (single-pattern case)
     let eq = &equations[0];
-    let has_view = eq.pats.len() == 1 && is_view_pattern(&eq.pats[0]);
+    let has_view = eq.pats.len() == 1 && matches!(&eq.pats[0], Pat::View(_, _, _));
 
     if has_view {
         // View pattern equation: compile with fallthrough to remaining equations
@@ -450,17 +1245,15 @@ fn compile_equations(
             bind_pattern_vars(ctx, pat, arg_var.as_ref());
         }
 
-        // Lower the RHS
         let rhs = if eq.guards.is_empty() {
             lower_expr(ctx, &eq.rhs)?
         } else {
             compile_guarded_rhs(ctx, &eq.guards, &eq.rhs, eq.span)?
         };
 
-        // Compile remaining equations for fallthrough
-        let remaining_alts = compile_equations(ctx, &equations[1..], args, span)?;
+        let remaining_alts =
+            compile_equations_linear(ctx, &equations[1..], args, span)?;
 
-        // Build fallthrough: case arg of { remaining_alts }
         let fallthrough_expr = if let Some(arg) = args.first() {
             core::Expr::Case(
                 Box::new(core::Expr::Var(arg.clone(), span)),
@@ -472,10 +1265,7 @@ fn compile_equations(
             make_pattern_error(span)
         };
 
-        // Lower the view expression
         let core_view_expr = lower_expr(ctx, view_expr)?;
-
-        // Apply view function to the argument
         let arg_var = args
             .first()
             .cloned()
@@ -486,7 +1276,6 @@ fn compile_equations(
             *view_span,
         );
 
-        // Inner case: case (view arg) of { result_pat -> rhs; _ -> fallthrough }
         let inner_alt = lower_pat_to_alt(ctx, result_pat, rhs, eq.span)?;
         let fallthrough_alt = Alt {
             con: AltCon::Default,
@@ -501,14 +1290,12 @@ fn compile_equations(
             *view_span,
         );
 
-        // Outer: Default alt that binds scrutinee and does the view case
         Ok(vec![Alt {
             con: AltCon::Default,
             binders: vec![arg_var],
             rhs: view_case,
         }])
     } else {
-        // Normal equation (no view pattern) - use the existing flat approach
         let mut alts = Vec::new();
 
         // Bind pattern variables
@@ -517,14 +1304,12 @@ fn compile_equations(
             bind_pattern_vars(ctx, pat, arg_var.as_ref());
         }
 
-        // Lower the RHS
         let rhs = if eq.guards.is_empty() {
             lower_expr(ctx, &eq.rhs)?
         } else {
             compile_guarded_rhs(ctx, &eq.guards, &eq.rhs, eq.span)?
         };
 
-        // Handle pattern matching
         if eq.pats.is_empty() {
             alts.push(Alt {
                 con: AltCon::Default,
@@ -539,12 +1324,11 @@ fn compile_equations(
             alts.push(tuple_alt);
         }
 
-        // Add remaining equations
         if equations.len() > 1 {
-            let remaining = compile_equations(ctx, &equations[1..], args, span)?;
+            let remaining =
+                compile_equations_linear(ctx, &equations[1..], args, span)?;
             alts.extend(remaining);
         } else {
-            // Last equation - add default error case
             alts.push(Alt {
                 con: AltCon::Default,
                 binders: vec![],
@@ -813,19 +1597,6 @@ fn get_constructor_tag(name: &str, fallback: u32) -> u32 {
 ///
 /// Given a pattern like `Left x | Right x`, this produces alternatives
 /// for both `Left x` and `Right x` with the same RHS.
-/// NOTE: This only expands top-level or-patterns. Use `flatten_nested_or_patterns`
-/// for deep expansion of nested or-patterns.
-pub fn expand_or_patterns(pat: &hir::Pat) -> Vec<&hir::Pat> {
-    match pat {
-        Pat::Or(left, right, _) => {
-            let mut result = expand_or_patterns(left);
-            result.extend(expand_or_patterns(right));
-            result
-        }
-        _ => vec![pat],
-    }
-}
-
 /// Deeply flatten all or-patterns in a pattern, including nested ones.
 ///
 /// For example:
@@ -1056,21 +1827,21 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_or_patterns() {
+    fn test_flatten_or_patterns() {
         let span = Span::default();
         let def_id = DefId::new(100);
         let x = Symbol::intern("x");
 
         // Simple pattern - no expansion
         let simple_pat = Pat::Var(x, def_id, span);
-        let expanded = expand_or_patterns(&simple_pat);
+        let expanded = flatten_nested_or_patterns(&simple_pat);
         assert_eq!(expanded.len(), 1);
 
         // Or-pattern - should expand to 2
         let left = Box::new(Pat::Lit(hir::Lit::Int(1), span));
         let right = Box::new(Pat::Lit(hir::Lit::Int(2), span));
         let or_pat = Pat::Or(left, right, span);
-        let expanded = expand_or_patterns(&or_pat);
+        let expanded = flatten_nested_or_patterns(&or_pat);
         assert_eq!(expanded.len(), 2);
     }
 
@@ -1092,6 +1863,365 @@ mod tests {
         assert_eq!(alts.len(), 2);
         assert!(matches!(alts[0].con, AltCon::Lit(Literal::Int(1))));
         assert!(matches!(alts[1].con, AltCon::Lit(Literal::Int(2))));
+    }
+
+    // ================================================================
+    // Decision tree tests
+    // ================================================================
+
+    /// Helper: build a ClauseRow from patterns and a literal RHS.
+    fn clause(pats: Vec<Pat>, rhs_val: i128, idx: usize) -> ClauseRow {
+        ClauseRow {
+            pats,
+            guard: None,
+            rhs: hir::Expr::Lit(hir::Lit::Int(rhs_val), Span::default()),
+            span: Span::default(),
+            row_index: idx,
+        }
+    }
+
+    #[test]
+    fn test_decision_tree_single_wildcard() {
+        // f _ = 1  →  Leaf
+        let mut ctx = LowerContext::new();
+        let arg0 = ctx.fresh_var("arg0", Ty::Error, Span::default());
+        let matrix = MatchMatrix {
+            scrutinees: vec![arg0],
+            rows: vec![clause(vec![Pat::Wild(Span::default())], 1, 0)],
+        };
+        let tree = build_decision_tree(&mut ctx, matrix, Span::default());
+        assert!(matches!(tree, DecisionTree::Leaf { row_index: 0, .. }));
+    }
+
+    #[test]
+    fn test_decision_tree_single_var() {
+        // f x = 1  →  Leaf (x bound to arg0)
+        let mut ctx = LowerContext::new();
+        let arg0 = ctx.fresh_var("arg0", Ty::Error, Span::default());
+        let x_id = DefId::new(50);
+        let matrix = MatchMatrix {
+            scrutinees: vec![arg0.clone()],
+            rows: vec![clause(
+                vec![Pat::Var(Symbol::intern("x"), x_id, Span::default())],
+                1,
+                0,
+            )],
+        };
+        let tree = build_decision_tree(&mut ctx, matrix, Span::default());
+        assert!(matches!(tree, DecisionTree::Leaf { row_index: 0, .. }));
+        // x should be registered as arg0
+        assert!(ctx.lookup_var(x_id).is_some());
+    }
+
+    #[test]
+    fn test_decision_tree_literal_and_default() {
+        // f 0 = 1; f n = 2  →  Switch(arg0, [Lit(0) → Leaf(1)], default → Leaf(2))
+        let mut ctx = LowerContext::new();
+        let arg0 = ctx.fresh_var("arg0", Ty::Error, Span::default());
+        let n_id = DefId::new(51);
+        let matrix = MatchMatrix {
+            scrutinees: vec![arg0],
+            rows: vec![
+                clause(vec![Pat::Lit(hir::Lit::Int(0), Span::default())], 1, 0),
+                clause(
+                    vec![Pat::Var(Symbol::intern("n"), n_id, Span::default())],
+                    2,
+                    1,
+                ),
+            ],
+        };
+        let tree = build_decision_tree(&mut ctx, matrix, Span::default());
+        match &tree {
+            DecisionTree::Switch {
+                branches, default, ..
+            } => {
+                assert_eq!(branches.len(), 1);
+                assert!(matches!(&branches[0].0, AltCon::Lit(Literal::Int(0))));
+                assert!(default.is_some());
+                assert!(matches!(
+                    default.as_ref().unwrap().as_ref(),
+                    DecisionTree::Leaf { row_index: 1, .. }
+                ));
+            }
+            _ => panic!("Expected Switch"),
+        }
+    }
+
+    #[test]
+    fn test_decision_tree_two_constructors() {
+        use crate::context::ConstructorInfo;
+        // f True = 1; f False = 0  →  Switch with 2 branches, no default
+        let mut ctx = LowerContext::new();
+        let arg0 = ctx.fresh_var("arg0", Ty::Error, Span::default());
+
+        let true_id = DefId::new(60);
+        let false_id = DefId::new(61);
+        let bool_sym = Symbol::intern("Bool");
+        let true_sym = Symbol::intern("True");
+        let false_sym = Symbol::intern("False");
+
+        ctx.register_constructor(
+            true_id,
+            ConstructorInfo {
+                name: true_sym,
+                type_name: bool_sym,
+                tag: 1,
+                arity: 0,
+                field_names: vec![],
+                is_newtype: false,
+            },
+        );
+        ctx.register_constructor(
+            false_id,
+            ConstructorInfo {
+                name: false_sym,
+                type_name: bool_sym,
+                tag: 0,
+                arity: 0,
+                field_names: vec![],
+                is_newtype: false,
+            },
+        );
+
+        let true_ref = DefRef {
+            def_id: true_id,
+            span: Span::default(),
+        };
+        let false_ref = DefRef {
+            def_id: false_id,
+            span: Span::default(),
+        };
+
+        let matrix = MatchMatrix {
+            scrutinees: vec![arg0],
+            rows: vec![
+                clause(vec![Pat::Con(true_ref, vec![], Span::default())], 1, 0),
+                clause(vec![Pat::Con(false_ref, vec![], Span::default())], 0, 1),
+            ],
+        };
+        let tree = build_decision_tree(&mut ctx, matrix, Span::default());
+        match &tree {
+            DecisionTree::Switch {
+                branches, default, ..
+            } => {
+                assert_eq!(branches.len(), 2);
+                assert!(default.is_none());
+            }
+            _ => panic!("Expected Switch"),
+        }
+    }
+
+    #[test]
+    fn test_exhaustiveness_complete_bool() {
+        use crate::context::ConstructorInfo;
+        // f True = 1; f False = 0  →  no warnings
+        let mut ctx = LowerContext::new();
+        let arg0 = ctx.fresh_var("arg0", Ty::Error, Span::default());
+        let bool_sym = Symbol::intern("Bool");
+        let true_sym = Symbol::intern("True");
+        let false_sym = Symbol::intern("False");
+        let true_id = DefId::new(70);
+        let false_id = DefId::new(71);
+
+        ctx.register_constructor(
+            true_id,
+            ConstructorInfo {
+                name: true_sym,
+                type_name: bool_sym,
+                tag: 1,
+                arity: 0,
+                field_names: vec![],
+                is_newtype: false,
+            },
+        );
+        ctx.register_constructor(
+            false_id,
+            ConstructorInfo {
+                name: false_sym,
+                type_name: bool_sym,
+                tag: 0,
+                arity: 0,
+                field_names: vec![],
+                is_newtype: false,
+            },
+        );
+
+        let true_ref = DefRef {
+            def_id: true_id,
+            span: Span::default(),
+        };
+        let false_ref = DefRef {
+            def_id: false_id,
+            span: Span::default(),
+        };
+
+        let matrix = MatchMatrix {
+            scrutinees: vec![arg0],
+            rows: vec![
+                clause(vec![Pat::Con(true_ref, vec![], Span::default())], 1, 0),
+                clause(vec![Pat::Con(false_ref, vec![], Span::default())], 0, 1),
+            ],
+        };
+        let tree = build_decision_tree(&mut ctx, matrix, Span::default());
+        check_exhaustiveness_tree(&mut ctx, &tree, "f");
+        let warnings = ctx.take_warnings();
+        assert!(
+            warnings.is_empty(),
+            "Should have no exhaustiveness warnings for complete Bool match"
+        );
+    }
+
+    #[test]
+    fn test_exhaustiveness_incomplete_bool() {
+        use crate::context::ConstructorInfo;
+        // f True = 1  →  warning about missing False
+        let mut ctx = LowerContext::new();
+        let arg0 = ctx.fresh_var("arg0", Ty::Error, Span::default());
+        let bool_sym = Symbol::intern("Bool");
+        let true_sym = Symbol::intern("True");
+        let false_sym = Symbol::intern("False");
+        let true_id = DefId::new(80);
+        let false_id = DefId::new(81);
+
+        ctx.register_constructor(
+            true_id,
+            ConstructorInfo {
+                name: true_sym,
+                type_name: bool_sym,
+                tag: 1,
+                arity: 0,
+                field_names: vec![],
+                is_newtype: false,
+            },
+        );
+        ctx.register_constructor(
+            false_id,
+            ConstructorInfo {
+                name: false_sym,
+                type_name: bool_sym,
+                tag: 0,
+                arity: 0,
+                field_names: vec![],
+                is_newtype: false,
+            },
+        );
+
+        let true_ref = DefRef {
+            def_id: true_id,
+            span: Span::default(),
+        };
+
+        let matrix = MatchMatrix {
+            scrutinees: vec![arg0],
+            rows: vec![clause(
+                vec![Pat::Con(true_ref, vec![], Span::default())],
+                1,
+                0,
+            )],
+        };
+        let tree = build_decision_tree(&mut ctx, matrix, Span::default());
+        check_exhaustiveness_tree(&mut ctx, &tree, "f");
+        let warnings = ctx.take_warnings();
+        assert!(
+            !warnings.is_empty(),
+            "Should warn about missing False"
+        );
+        assert!(warnings[0].contains("False"), "Warning should mention False");
+    }
+
+    #[test]
+    fn test_overlap_detection() {
+        // f _ = 1; f 0 = 2  →  row 1 is redundant
+        let mut ctx = LowerContext::new();
+        let arg0 = ctx.fresh_var("arg0", Ty::Error, Span::default());
+        let matrix = MatchMatrix {
+            scrutinees: vec![arg0],
+            rows: vec![
+                clause(vec![Pat::Wild(Span::default())], 1, 0),
+                clause(vec![Pat::Lit(hir::Lit::Int(0), Span::default())], 2, 1),
+            ],
+        };
+        let tree = build_decision_tree(&mut ctx, matrix, Span::default());
+        check_overlap(&mut ctx, &tree, 2, "f");
+        let warnings = ctx.take_warnings();
+        assert!(
+            !warnings.is_empty(),
+            "Should warn about redundant equation"
+        );
+        assert!(
+            warnings[0].contains("redundant"),
+            "Warning should say redundant"
+        );
+    }
+
+    #[test]
+    fn test_decision_tree_literal_patterns() {
+        // f 0 = 1; f 1 = 2; f _ = 3  →  Switch on literals + default
+        let mut ctx = LowerContext::new();
+        let arg0 = ctx.fresh_var("arg0", Ty::Error, Span::default());
+        let matrix = MatchMatrix {
+            scrutinees: vec![arg0],
+            rows: vec![
+                clause(vec![Pat::Lit(hir::Lit::Int(0), Span::default())], 1, 0),
+                clause(vec![Pat::Lit(hir::Lit::Int(1), Span::default())], 2, 1),
+                clause(vec![Pat::Wild(Span::default())], 3, 2),
+            ],
+        };
+        let tree = build_decision_tree(&mut ctx, matrix, Span::default());
+        match &tree {
+            DecisionTree::Switch {
+                branches, default, ..
+            } => {
+                assert_eq!(branches.len(), 2, "Should have 2 literal branches");
+                assert!(default.is_some(), "Should have default branch");
+            }
+            _ => panic!("Expected Switch"),
+        }
+    }
+
+    #[test]
+    fn test_or_pattern_expansion() {
+        // Equation: f (1 | 2) = 42  →  expands to 2 rows
+        let span = Span::default();
+        let left = Box::new(Pat::Lit(hir::Lit::Int(1), span));
+        let right = Box::new(Pat::Lit(hir::Lit::Int(2), span));
+        let or_pat = Pat::Or(left, right, span);
+
+        let eq = hir::Equation {
+            pats: vec![or_pat],
+            guards: vec![],
+            rhs: hir::Expr::Lit(hir::Lit::Int(42), span),
+            span,
+        };
+
+        let expanded = expand_equation_or_patterns(&eq);
+        assert_eq!(expanded.len(), 2);
+    }
+
+    #[test]
+    fn test_no_overlap_for_proper_dispatch() {
+        // f 0 = 1; f n = 2  →  no redundancy (both equations reachable)
+        let mut ctx = LowerContext::new();
+        let arg0 = ctx.fresh_var("arg0", Ty::Error, Span::default());
+        let n_id = DefId::new(90);
+        let matrix = MatchMatrix {
+            scrutinees: vec![arg0],
+            rows: vec![
+                clause(vec![Pat::Lit(hir::Lit::Int(0), Span::default())], 1, 0),
+                clause(
+                    vec![Pat::Var(Symbol::intern("n"), n_id, Span::default())],
+                    2,
+                    1,
+                ),
+            ],
+        };
+        let tree = build_decision_tree(&mut ctx, matrix, Span::default());
+        check_overlap(&mut ctx, &tree, 2, "f");
+        let warnings = ctx.take_warnings();
+        assert!(
+            warnings.is_empty(),
+            "No equations should be redundant"
+        );
     }
 
     #[test]

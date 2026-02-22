@@ -412,11 +412,11 @@ compilation, demand analysis, and dictionary specialization remain to be impleme
 - [x] Iterate to fixpoint (cap at 10 iterations)
 - [ ] `-ddump-core-after-simpl` dump flag
 
-#### Phase O.2: Pattern Match Compilation (HIGH — correctness + quality)
-- [ ] Replace equation-by-equation compilation with Augustsson decision trees
-- [ ] Exhaustiveness checking with non-exhaustive pattern warnings
-- [ ] Overlap/redundancy detection with shadowed pattern warnings
-- [ ] Guard compilation via nested case fallthrough
+#### Phase O.2: Pattern Match Compilation (HIGH — correctness + quality) ✅ COMPLETE (E.70)
+- [x] Replace equation-by-equation compilation with Augustsson decision trees
+- [x] Exhaustiveness checking with non-exhaustive pattern warnings
+- [x] Overlap/redundancy detection with shadowed pattern warnings
+- [x] Guard compilation via nested case fallthrough (linear fallback)
 
 #### Phase O.3: Demand Analysis + Worker/Wrapper (MEDIUM — Default profile perf)
 - [ ] Boolean-tree demand analysis for strictness signatures

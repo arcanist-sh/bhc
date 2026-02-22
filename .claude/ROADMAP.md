@@ -280,8 +280,8 @@ Design informed by HBC's (Lennart Augustsson) proven simplifier and analysis pas
   - [x] Top-level inlining (cheap-only: Var aliases, Lit constants; protected names skipped)
   - [x] Top-level dead binding elimination (export-aware; cheap RHS only)
   - [x] Case-of-case (with size budget)
-- [ ] **Pattern Match Compilation** — replace naive equation-by-equation with:
-  - Column-based decision tree generation (Augustsson algorithm)
+- [x] **Pattern Match Compilation** (E.70) — replaced equation-by-equation with:
+  - Column-based decision tree generation (Augustsson/Sestoft algorithm)
   - Exhaustiveness checking and warnings
   - Overlap/redundancy detection and warnings
 - [ ] **Demand Analysis** — per-function strictness (Default profile):

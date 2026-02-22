@@ -20,7 +20,9 @@ pub mod inline;
 pub mod occurrence;
 pub mod subst;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+
+use bhc_intern::Symbol;
 
 use crate::{Alt, Bind, CoreModule, Expr, VarId};
 
@@ -37,6 +39,10 @@ pub struct SimplifyConfig {
     pub constant_fold: bool,
     /// Whether to enable case-of-case (default true).
     pub case_of_case: bool,
+    /// Names exported from the module. `None` means all top-level bindings
+    /// are treated as exported (conservative). `Some(set)` enables dead
+    /// binding elimination for non-exported, non-protected bindings.
+    pub exported_names: Option<FxHashSet<Symbol>>,
 }
 
 impl Default for SimplifyConfig {
@@ -47,6 +53,7 @@ impl Default for SimplifyConfig {
             case_of_case_budget: 100,
             constant_fold: true,
             case_of_case: true,
+            exported_names: None,
         }
     }
 }
@@ -119,20 +126,45 @@ pub fn simplify_module(module: &mut CoreModule, config: &SimplifyConfig) -> Simp
         // Phase 1: occurrence analysis over all bindings
         let occs = occurrence::analyze_module_occurrences(&module.bindings);
 
-        // Top-level inlining is disabled: the codegen dispatches on
-        // var.name.as_str() for builtins, constructors, and derived
-        // methods. Inlining a top-level binding replaces Var references
-        // with the binding's RHS, changing what the codegen sees.
-        let inline_env: FxHashMap<VarId, Expr> = FxHashMap::default();
+        // Phase 1b: build top-level inline environment.
+        // Only inline *cheap* RHS (Var aliases, Lit constants) for
+        // non-protected names. This is safe because:
+        // - Substituting a Var preserves the target name for codegen dispatch
+        // - Substituting a Lit is always safe
+        // - Protected names ($derived_*, main, bhc_*, etc.) are never touched
+        let mut inline_env: FxHashMap<VarId, Expr> = FxHashMap::default();
+        for bind in &module.bindings {
+            if let Bind::NonRec(var, rhs) = bind {
+                if !is_inline_protected(var.name.as_str()) && expr_util::is_cheap(rhs) {
+                    inline_env.insert(var.id, *rhs.clone());
+                }
+            }
+        }
 
-        // Phase 2: simplify each binding's RHS
-        // Top-level dead binding elimination is disabled: any top-level
-        // binding could be imported by another module, and occurrence
-        // analysis is module-local so cannot see cross-module references.
+        // Phase 2: simplify each binding's RHS with export-aware dead
+        // binding elimination. Non-exported, non-protected bindings with
+        // cheap RHS that are dead (zero occurrences) are removed.
         let mut new_bindings = Vec::with_capacity(module.bindings.len());
         for bind in std::mem::take(&mut module.bindings) {
             match bind {
                 Bind::NonRec(var, rhs) => {
+                    let name = var.name.as_str();
+
+                    // Top-level dead binding elimination (export-aware)
+                    if !is_inline_protected(name)
+                        && !is_exported(name, &config.exported_names)
+                    {
+                        if matches!(
+                            occs.get(&var.id),
+                            None | Some(occurrence::OccCount::Dead)
+                        ) && expr_util::is_cheap(&rhs)
+                        {
+                            total_stats.dead_bindings += 1;
+                            changed = true;
+                            continue;
+                        }
+                    }
+
                     let mut stats = SimplifyStats::default();
                     let new_rhs =
                         simplify_expr(*rhs, &inline_env, config, &mut stats);
@@ -143,7 +175,33 @@ pub fn simplify_module(module: &mut CoreModule, config: &SimplifyConfig) -> Simp
                     new_bindings.push(Bind::NonRec(var, Box::new(new_rhs)));
                 }
                 Bind::Rec(pairs) => {
-                    let new_pairs: Vec<_> = pairs
+                    // Filter dead entries from recursive groups
+                    let filtered: Vec<_> = pairs
+                        .into_iter()
+                        .filter(|(v, rhs)| {
+                            let name = v.name.as_str();
+                            if !is_inline_protected(name)
+                                && !is_exported(name, &config.exported_names)
+                                && matches!(
+                                    occs.get(&v.id),
+                                    None | Some(occurrence::OccCount::Dead)
+                                )
+                                && expr_util::is_cheap(rhs)
+                            {
+                                total_stats.dead_bindings += 1;
+                                changed = true;
+                                false
+                            } else {
+                                true
+                            }
+                        })
+                        .collect();
+
+                    if filtered.is_empty() {
+                        continue;
+                    }
+
+                    let new_pairs: Vec<_> = filtered
                         .into_iter()
                         .map(|(v, rhs)| {
                             let mut stats = SimplifyStats::default();
@@ -171,12 +229,27 @@ pub fn simplify_module(module: &mut CoreModule, config: &SimplifyConfig) -> Simp
     total_stats
 }
 
-/// Check if a top-level name must be preserved (never eliminated).
-fn is_top_level_required(name: &str) -> bool {
+/// Names that must never be inlined or eliminated at the top level.
+///
+/// This covers `main`, codegen-dispatched prefixes (`$derived_*`,
+/// `$instance_*`, `$sel_*`, etc.), RTS functions (`bhc_*`), and
+/// qualified names containing `::`.
+fn is_inline_protected(name: &str) -> bool {
     name == "main"
-        || name.starts_with("$")
+        || name.starts_with('$')
         || name.starts_with("bhc_")
         || name.contains("::")
+}
+
+/// Check if a binding name is exported from the module.
+///
+/// When `exported_names` is `None` (no explicit export list), every
+/// top-level binding is treated as exported (conservative).
+fn is_exported(name: &str, exported_names: &Option<FxHashSet<Symbol>>) -> bool {
+    match exported_names {
+        None => true,
+        Some(set) => set.contains(&Symbol::intern(name)),
+    }
 }
 
 impl SimplifyStats {
@@ -655,5 +728,173 @@ mod tests {
         } else {
             panic!("expected NonRec binding");
         }
+    }
+
+    // --- Top-level inlining tests ---
+
+    #[test]
+    fn test_top_level_cheap_inline() {
+        // x = 42; main = x
+        // After top-level inlining: main = 42
+        let mut module = mk_module(vec![
+            Bind::NonRec(mk_var("x", 1), Box::new(mk_int(42))),
+            Bind::NonRec(mk_var("main", 2), Box::new(mk_var_expr("x", 1))),
+        ]);
+        let config = SimplifyConfig::default();
+        let stats = simplify_module(&mut module, &config);
+        assert!(stats.inlines > 0);
+
+        // main's RHS should be 42 (inlined from x)
+        let main_bind = module.bindings.iter().find(|b| match b {
+            Bind::NonRec(v, _) => v.name.as_str() == "main",
+            _ => false,
+        });
+        if let Some(Bind::NonRec(_, rhs)) = main_bind {
+            assert!(
+                matches!(rhs.as_ref(), Expr::Lit(Literal::Int(42), _, _)),
+                "expected 42, got {:?}",
+                rhs
+            );
+        } else {
+            panic!("expected main binding");
+        }
+    }
+
+    #[test]
+    fn test_top_level_var_alias_inline() {
+        // x = y; main = x
+        // After top-level inlining: main = y
+        let mut module = mk_module(vec![
+            Bind::NonRec(mk_var("x", 1), Box::new(mk_var_expr("y", 3))),
+            Bind::NonRec(mk_var("main", 2), Box::new(mk_var_expr("x", 1))),
+        ]);
+        let config = SimplifyConfig::default();
+        let stats = simplify_module(&mut module, &config);
+        assert!(stats.inlines > 0);
+
+        let main_bind = module.bindings.iter().find(|b| match b {
+            Bind::NonRec(v, _) => v.name.as_str() == "main",
+            _ => false,
+        });
+        if let Some(Bind::NonRec(_, rhs)) = main_bind {
+            match rhs.as_ref() {
+                Expr::Var(v, _) => assert_eq!(v.name.as_str(), "y"),
+                other => panic!("expected Var(y), got {:?}", other),
+            }
+        } else {
+            panic!("expected main binding");
+        }
+    }
+
+    #[test]
+    fn test_top_level_protected_not_inlined() {
+        // $derived_show_Foo = 42; main = $derived_show_Foo
+        // Protected names must NOT be inlined
+        let mut module = mk_module(vec![
+            Bind::NonRec(mk_var("$derived_show_Foo", 1), Box::new(mk_int(42))),
+            Bind::NonRec(
+                mk_var("main", 2),
+                Box::new(mk_var_expr("$derived_show_Foo", 1)),
+            ),
+        ]);
+        let config = SimplifyConfig::default();
+        let _stats = simplify_module(&mut module, &config);
+
+        // main's RHS should still be a Var reference
+        let main_bind = module.bindings.iter().find(|b| match b {
+            Bind::NonRec(v, _) => v.name.as_str() == "main",
+            _ => false,
+        });
+        if let Some(Bind::NonRec(_, rhs)) = main_bind {
+            assert!(
+                matches!(rhs.as_ref(), Expr::Var(_, _)),
+                "expected Var, got {:?}",
+                rhs
+            );
+        } else {
+            panic!("expected main binding");
+        }
+    }
+
+    // --- Top-level dead binding elimination tests ---
+
+    #[test]
+    fn test_top_level_dead_with_explicit_exports() {
+        // unused = 42; main = 1
+        // With exported_names = {"main"}, unused should be removed
+        let mut module = mk_module(vec![
+            Bind::NonRec(mk_var("unused", 1), Box::new(mk_int(42))),
+            Bind::NonRec(mk_var("main", 2), Box::new(mk_int(1))),
+        ]);
+        let mut exports = FxHashSet::default();
+        exports.insert(Symbol::intern("main"));
+        let config = SimplifyConfig {
+            exported_names: Some(exports),
+            ..Default::default()
+        };
+        let stats = simplify_module(&mut module, &config);
+        assert!(stats.dead_bindings > 0);
+        assert_eq!(module.bindings.len(), 1);
+        match &module.bindings[0] {
+            Bind::NonRec(v, _) => assert_eq!(v.name.as_str(), "main"),
+            _ => panic!("expected main binding"),
+        }
+    }
+
+    #[test]
+    fn test_top_level_dead_preserved_when_exported() {
+        // helper = 42; main = 1
+        // With exported_names = {"helper", "main"}, both preserved
+        let mut module = mk_module(vec![
+            Bind::NonRec(mk_var("helper", 1), Box::new(mk_int(42))),
+            Bind::NonRec(mk_var("main", 2), Box::new(mk_int(1))),
+        ]);
+        let mut exports = FxHashSet::default();
+        exports.insert(Symbol::intern("helper"));
+        exports.insert(Symbol::intern("main"));
+        let config = SimplifyConfig {
+            exported_names: Some(exports),
+            ..Default::default()
+        };
+        let _stats = simplify_module(&mut module, &config);
+        assert_eq!(module.bindings.len(), 2);
+    }
+
+    #[test]
+    fn test_top_level_dead_preserved_no_export_list() {
+        // unused = 42; main = 1
+        // With exported_names = None (conservative), both preserved
+        let mut module = mk_module(vec![
+            Bind::NonRec(mk_var("unused", 1), Box::new(mk_int(42))),
+            Bind::NonRec(mk_var("main", 2), Box::new(mk_int(1))),
+        ]);
+        let config = SimplifyConfig::default(); // exported_names = None
+        let _stats = simplify_module(&mut module, &config);
+        assert_eq!(module.bindings.len(), 2);
+    }
+
+    #[test]
+    fn test_top_level_dead_non_cheap_preserved() {
+        // dead_app = f x; main = 1
+        // Even with explicit exports, non-cheap dead bindings are preserved
+        // (they might have side effects)
+        let app = Expr::App(
+            Box::new(mk_var_expr("f", 10)),
+            Box::new(mk_var_expr("x", 11)),
+            Span::default(),
+        );
+        let mut module = mk_module(vec![
+            Bind::NonRec(mk_var("dead_app", 1), Box::new(app)),
+            Bind::NonRec(mk_var("main", 2), Box::new(mk_int(1))),
+        ]);
+        let mut exports = FxHashSet::default();
+        exports.insert(Symbol::intern("main"));
+        let config = SimplifyConfig {
+            exported_names: Some(exports),
+            ..Default::default()
+        };
+        let _stats = simplify_module(&mut module, &config);
+        // Non-cheap binding should be preserved even though dead
+        assert_eq!(module.bindings.len(), 2);
     }
 }

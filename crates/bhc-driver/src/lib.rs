@@ -1039,9 +1039,18 @@ impl Compiler {
 
         // Core IR optimization (simplifier)
         if self.session.options.opt_level != bhc_session::OptLevel::None {
-            let config = bhc_core::simplify::SimplifyConfig::from_opt_level(
-                self.session.options.opt_level,
-            );
+            let exported_names = hir.exports.as_ref().map(|exports| {
+                exports
+                    .iter()
+                    .map(|e| e.name)
+                    .collect::<rustc_hash::FxHashSet<_>>()
+            });
+            let config = bhc_core::simplify::SimplifyConfig {
+                exported_names,
+                ..bhc_core::simplify::SimplifyConfig::from_opt_level(
+                    self.session.options.opt_level,
+                )
+            };
             let stats = bhc_core::simplify::simplify_module(&mut core, &config);
             debug!(
                 iterations = stats.iterations,

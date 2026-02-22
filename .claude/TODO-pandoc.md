@@ -386,23 +386,30 @@ compiled from Hackage source.
 
 ### 3.3 Performance (Core IR Optimization Pipeline)
 
-**Status:** Not started — BHC currently has NO general-purpose optimizer
+**Status:** Phase O.1 (Core Simplifier) landed in E.68 — local transforms only
 **Scope:** Large (foundational infrastructure)
 **Reference:** `rules/013-optimization.md`, HBC/HCT simplifier architecture
 
-BHC compiles to correct code but performs no Core IR optimization. Every
-binding, beta-redex, and known-constructor case dispatch is passed unoptimized
-to LLVM, which cannot reason about ADTs, closures, or thunks. Real Haskell
-programs (pandoc) will exhibit thunk buildup, redundant allocation, and
-unexploited compile-time information without these passes.
+BHC has a Core IR simplifier (E.68-E.69) with full local and top-level transforms:
+constant folding, beta reduction, case-of-known-constructor, case-of-case (with size
+budget), local and top-level dead binding elimination, local let inlining, and
+top-level cheap inlining (Var aliases, Lit constants). Top-level inlining skips
+protected names (`$derived_*`, `main`, `bhc_*`, etc.) for codegen safety. Top-level
+dead elimination is export-aware (respects module export lists). Pattern match
+compilation, demand analysis, and dictionary specialization remain to be implemented.
 
-#### Phase O.1: Core Simplifier (CRITICAL — prerequisite for everything else)
-- [ ] Beta reduction: `(\x -> body) arg` → `body[x := arg]`
-- [ ] Case-of-known-constructor: `case Just 42 of { Just x -> x }` → `42`
-- [ ] Dead binding elimination: remove unused let-bindings
-- [ ] Constant folding: `1 + 2` → `3` for literals
-- [ ] Inlining: substitute small/single-use bindings (reference-counting heuristic)
-- [ ] Iterate to fixpoint (cap at 10 iterations)
+#### Phase O.1: Core Simplifier ✅ COMPLETE (E.68-E.69)
+- [x] Beta reduction: `(\x -> body) arg` → `body[x := arg]` (cheap args only)
+- [x] Case-of-known-constructor: `case Just 42 of { Just x -> x }` → `42`
+- [x] Case-of-case: push outer case into inner case alternatives (with size budget)
+- [x] Dead binding elimination: local lets + top-level (export-aware, cheap RHS only)
+- [x] Constant folding: `1 + 2` → `3` for Int/Double literals
+- [x] Local let inlining: substitute cheap single-use local bindings
+- [x] Top-level inlining: cheap-only (Var aliases, Lit constants); protected names skipped
+- [x] Top-level dead binding elimination: export-aware; non-exported cheap bindings removed
+- [x] Occurrence analysis: Dead/Once/OnceInLam/Many reference counting
+- [x] Capture-avoiding substitution with alpha-renaming
+- [x] Iterate to fixpoint (cap at 10 iterations)
 - [ ] `-ddump-core-after-simpl` dump flag
 
 #### Phase O.2: Pattern Match Compilation (HIGH — correctness + quality)
@@ -424,19 +431,22 @@ unexploited compile-time information without these passes.
 - [ ] SPECIALIZE pragma support
 - [ ] Second simplifier round to clean up after specialization
 
-#### Key Files (to create)
+#### Key Files
 ```
 crates/bhc-core/src/
-├── simplify.rs              # Core simplifier
 ├── simplify/
-│   ├── beta.rs              # Beta reduction
-│   ├── case.rs              # Case transformations
-│   ├── dead.rs              # Dead binding elimination
-│   ├── fold.rs              # Constant folding
-│   └── inline.rs            # Inlining decisions
-├── demand.rs                # Demand analysis
-├── worker_wrapper.rs        # Worker/wrapper transformation
-└── specialize.rs            # Dictionary specialization
+│   ├── mod.rs               # ✅ Main simplifier loop, config, stats
+│   ├── expr_util.rs         # ✅ Shared utilities (is_cheap, expr_size, free_var_ids)
+│   ├── subst.rs             # ✅ Capture-avoiding substitution
+│   ├── occurrence.rs        # ✅ Occurrence analysis (Dead/Once/OnceInLam/Many)
+│   ├── beta.rs              # ✅ Beta reduction
+│   ├── case.rs              # ✅ Case-of-known-constructor
+│   ├── dead.rs              # ✅ Dead binding elimination
+│   ├── fold.rs              # ✅ Constant folding
+│   └── inline.rs            # ✅ Inlining decisions
+├── demand.rs                # 🔴 Demand analysis (not started)
+├── worker_wrapper.rs        # 🔴 Worker/wrapper transformation (not started)
+└── specialize.rs            # 🔴 Dictionary specialization (not started)
 ```
 
 ---

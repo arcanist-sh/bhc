@@ -177,15 +177,16 @@ This roadmap tracks the implementation of the Basel Haskell Compiler (BHC) from 
 
 **Goal:** Enable BHC to compile real-world Haskell projects like xmonad, pandoc, and lens.
 
-**Progress:** 162 E2E tests, 66 milestones (E.1–E.66), 30+ GHC extensions implemented.
+**Progress:** 168 E2E tests, 68 milestones (E.1–E.68), 30+ GHC extensions implemented.
 BHC now compiles non-trivial Haskell programs with records, GADTs, typeclasses,
-deriving, monad transformers, and most common GHC extensions. E.66 added the full
-separate compilation pipeline (`-c` mode, `.bhi` generation/consumption, `--odir`/
-`--hidir`/`--package-db` flags) needed by the hx package manager. The hx build
-pipeline is now wired: `hx-bhc` generates correct BHC CLI flags, uses filesystem-
-based package DB (no `bhc-pkg`), and maps 12 standard Haskell packages to BHC
-builtins. Focus is shifting to end-to-end testing with real Hackage packages and
-remaining compiler gaps (CPP, type families, Core IR optimizer).
+deriving, monad transformers, and most common GHC extensions. E.67 added a built-in
+CPP preprocessor. E.68 implemented the Core IR simplifier with constant folding,
+beta reduction, case-of-known-constructor, dead binding elimination, and local
+inlining. The hx build pipeline is wired: `hx-bhc` generates correct BHC CLI flags,
+uses filesystem-based package DB (no `bhc-pkg`), and maps 12 standard Haskell
+packages to BHC builtins. Focus is shifting to remaining compiler gaps (type
+families, pattern match compilation, demand analysis) and end-to-end testing with
+real Hackage packages.
 
 See `TODO-pandoc.md` for the detailed Pandoc compilation roadmap.
 
@@ -266,17 +267,19 @@ tests including edge cases and a comprehensive layout-focused E2E test (E.65).
 
 #### Phase 7: Core IR Optimization Pipeline
 
-BHC currently has no general-purpose optimizer — this is the most critical
-infrastructure gap for compiling real Haskell programs. Design informed by
-HBC's (Lennart Augustsson) proven simplifier and analysis passes.
+Design informed by HBC's (Lennart Augustsson) proven simplifier and analysis passes.
 
-- [ ] **Core Simplifier** — iterate-to-fixpoint pass with:
-  - Beta reduction
-  - Case-of-known-constructor
-  - Dead binding elimination
-  - Constant folding
-  - Inlining (reference-counting + size threshold)
-  - Case-of-case (with size budget)
+- [x] **Core Simplifier** (E.68) — iterate-to-fixpoint pass with:
+  - [x] Constant folding (Int/Double arithmetic, negate, String `++`)
+  - [x] Beta reduction (cheap args only — variables, literals)
+  - [x] Case-of-known-constructor
+  - [x] Local dead binding elimination (cheap RHS only)
+  - [x] Local let inlining (cheap RHS only)
+  - [x] Occurrence analysis (Dead/Once/OnceInLam/Many)
+  - [x] Capture-avoiding substitution with alpha-renaming
+  - [x] Top-level inlining (cheap-only: Var aliases, Lit constants; protected names skipped)
+  - [x] Top-level dead binding elimination (export-aware; cheap RHS only)
+  - [x] Case-of-case (with size budget)
 - [ ] **Pattern Match Compilation** — replace naive equation-by-equation with:
   - Column-based decision tree generation (Augustsson algorithm)
   - Exhaustiveness checking and warnings
@@ -303,7 +306,7 @@ Each phase will be validated against real codebases:
 | 4 | Compile programs with classes, instances, GADTs | ✅ Working (E.38–E.64) |
 | 5 | Parse lens library type signatures | Blocked on type families |
 | 6 | Full type system coverage | Mostly done, type families remaining |
-| 7 | Compiled programs run measurably faster | Not started |
+| 7 | Compiled programs run measurably faster | 🟡 Core simplifier (E.68-E.69): local + top-level transforms, case-of-case |
 
 ### Exit Criteria
 

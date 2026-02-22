@@ -3,7 +3,7 @@
 **Document ID:** BHC-TODO-PANDOC
 **Status:** In Progress
 **Created:** 2026-01-30
-**Updated:** 2026-02-21
+**Updated:** 2026-02-22
 
 ---
 
@@ -18,8 +18,10 @@ north-star integration target for BHC's real-world Haskell compatibility.
 ## Current State
 
 BHC compiles real Haskell programs to native executables via LLVM:
-- **163 native E2E tests** registered (including monad transformers, file IO, markdown parser, JSON parser, GADTs, type extensions)
-- All intermediate milestones A–E.64 done
+- **162 native E2E tests** passing (including monad transformers, file IO, markdown parser, JSON parser, GADTs, type extensions)
+- All intermediate milestones A–E.66 done
+- **Separate compilation pipeline**: `-c` mode, `.bhi` interface generation and consumption, `--odir`/`--hidir`/`--numeric-version`/`--package-db` flags
+- **hx package manager integration** wired — hx has .cabal parsing, Hackage fetch, dependency solver, BHC backend crate with correct CLI flags, filesystem-based package DB, and BHC builtin package mapping
 
 ### Standard Library & IO (E.5–E.31)
 - Monad transformers: StateT, ReaderT, ExceptT, WriterT all working
@@ -77,10 +79,10 @@ BHC compiles real Haskell programs to native executables via LLVM:
 6. ~~GHC.Generics~~ — Partial (E.63): DeriveGeneric stubs for Pandoc compatibility
 
 **Still missing for Pandoc (prioritized):**
-1. **Full package system** — Basic import paths work (E.6), but no Hackage .cabal parsing yet
-2. **Lazy Text/ByteString** — Only strict variants implemented
-3. **Template Haskell** — Required for aeson JSON deriving (alternative: full GHC.Generics)
-4. **CPP preprocessing** — Pandoc and many deps use `#ifdef` for platform/version conditionals
+1. **Full package system** — BHC has `-c` mode, `.bhi` interface generation/consumption, and `--odir`/`--hidir`/`--package-db` flags (E.66). The hx package manager's BHC backend (`hx-bhc`) is now wired with correct CLI flags, filesystem-based package DB (no `bhc-pkg`), and BHC builtin package mapping (base→bhc-base, text→bhc-text, etc.). Remaining: end-to-end testing with real Hackage packages, conditional dependencies, `.hs-boot` mutual recursion
+2. **CPP preprocessing** — Pandoc and many deps use `#ifdef` for platform/version conditionals
+3. **Lazy Text/ByteString** — Only strict variants implemented
+4. **Template Haskell** — Required for aeson JSON deriving (alternative: full GHC.Generics)
 5. **Exception hierarchy** — `Exception` typeclass with `toException`/`fromException`
 6. **Full GHC.Generics** — E.63 added stubs; full `Rep` type family + `from`/`to` still needed
 7. **parsec/megaparsec** — Pandoc depends on parsec for some formats
@@ -96,26 +98,48 @@ These must be resolved before any real-world Haskell program can compile.
 
 ### 1.1 Package System Integration
 
-**Status:** Basic import paths working (E.6), full Hackage integration not yet connected
-**Scope:** Large
+**Status:** ✅ Compile-only pipeline complete (E.66), hx build pipeline wired
+**Scope:** Medium (remaining: end-to-end testing, CPP, conditional deps)
 
-Multi-package support with `-I` import paths is working (E.6). The `bhc-package`
-crate exists with TOML manifests, semver resolution, and lockfile support.
-Pandoc depends on ~80 packages from Hackage.
+Multi-package support with `-I` import paths is working (E.6). BHC now has a
+full separate compilation pipeline: `-c` mode compiles single modules to `.o` +
+`.bhi`, with `--odir`/`--hidir`/`--package-db` flags. The `TypeConverter` bridge
+converts `.bhi` interface types to internal `Ty`/`Scheme` for cross-module type
+checking. The [hx](https://github.com/raskell-io/hx) package manager has full
+`.cabal` parsing, Hackage integration, dependency resolution, and its BHC backend
+crate (`hx-bhc`) is now fully wired: CLI flags match BHC's actual clap-based CLI,
+package DB uses filesystem operations (no `bhc-pkg`), and BHC builtin packages
+(base, text, containers, etc.) are mapped to skip compilation.
 
 - [x] Wire package resolution into `bhc-driver` compilation pipeline (basic import paths)
-- [ ] Parse `.cabal` files (at minimum: exposed-modules, build-depends, hs-source-dirs)
-- [ ] Resolve transitive dependency graph from a cabal file
-- [ ] Fetch packages from Hackage (tar.gz download + unpack)
+- [x] `--numeric-version` flag (hx-bhc's `BhcCompilerConfig::detect_with_path()` calls this)
+- [x] `-c` (compile-only) mode: compile to `.o` without linking
+- [x] `--odir`/`--hidir` flags: output directories for `.o` and `.bhi` files
+- [x] `-package-db` flag: package database location (repeatable)
+- [x] `-package-id` flag: expose a dependency by package ID (repeatable)
+- [x] Generate `.bhi` interface files from compiled modules (`bhc-interface/generate.rs`)
+- [x] Consume `.bhi` interface files during type checking (`TypeConverter` + `DefInfo.type_scheme`)
+- [x] Load `.bhi` files for imported modules from hidir and package-db directories
+- [x] Wire `hx build --backend bhc` through full pipeline (hx repo) — flags fixed, 45 hx-bhc tests pass
+- [x] Filesystem-based package DB in hx-bhc (no bhc-pkg, just directory scan of `.conf` files)
+- [x] BHC builtin package mapping (base→bhc-base, text→bhc-text, etc.) in hx-bhc
+- [ ] Parse `.cabal` files (hx-solver already has this — needs testing with BHC)
+- [ ] Resolve transitive dependency graph (hx-solver already has this)
+- [ ] Fetch packages from Hackage (hx-solver already has this)
 - [ ] Support `PackageImports` extension for disambiguating modules
 - [ ] Handle conditional dependencies (flags, OS checks, impl checks)
-- [ ] Generate and consume interface files (`.bhi`) across package boundaries
 - [ ] Cache compiled packages to avoid recompilation
+- [ ] Handle mutual module recursion (`.hs-boot` files)
+- [ ] Incremental recompilation (check timestamps / hashes)
 
 **Key files:**
-- `crates/bhc-package/` — existing package infrastructure
-- `crates/bhc-driver/` — compilation orchestration
-- `crates/bhc-interface/` — module interface files
+- `crates/bhc/src/main.rs` — CLI flags (`-c`, `--odir`, `--hidir`, etc.)
+- `crates/bhc-session/src/lib.rs` — `Options` struct with compile-only fields
+- `crates/bhc-driver/src/lib.rs` — `compile_module_only()`, `load_interfaces_for_imports()`
+- `crates/bhc-interface/src/convert.rs` — `TypeConverter` (.bhi → internal types)
+- `crates/bhc-interface/src/generate.rs` — `.bhi` generation from compiled modules
+- `crates/bhc-lower/src/context.rs` — `DefInfo.type_scheme`, `define_with_type()`
+- `crates/bhc-typeck/src/context.rs` — Interface type scheme consumption in `register_lowered_builtins()`
 
 ### 1.2 Data.Text and Data.ByteString
 
@@ -222,14 +246,16 @@ Required for Pandoc but solvable without architectural changes.
 
 ### 2.2 Multi-Module Compilation
 
-**Status:** Core workflow complete, persistence deferred
-**Scope:** Medium
+**Status:** ✅ Core workflow complete including `.bhi` interface files (E.66)
+**Scope:** Small (remaining: `.hs-boot` mutual recursion, incremental recompilation)
 
 - [x] Compile multiple modules in dependency order (BFS discovery + Kahn's toposort)
 - [x] Cross-module type info via ModuleRegistry (types flow between modules)
 - [x] Separate compilation: each module to `.o`, link at end
 - [x] Module-qualified symbol mangling (no link-time collisions)
-- [ ] Generate and read `.bhi` interface files (infrastructure exists in bhc-interface, not wired)
+- [x] Generate `.bhi` interface files from compiled modules (E.66)
+- [x] Read `.bhi` interface files during type checking with correct type schemes (E.66)
+- [x] `-c` compile-only mode: produce `.o` + `.bhi` without linking (E.66)
 - [ ] Handle mutual module recursion (`.hs-boot` files)
 - [ ] Incremental recompilation (check timestamps / hashes)
 
@@ -811,7 +837,26 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 - [x] `DefaultSignatures` — default method type signatures in classes
 - [x] `OverloadedLists` — list literal desugaring via `fromList`
 
-#### E.65+: Remaining Road to Pandoc (Proposed)
+#### E.65: Layout Rule Verification ✅
+- [x] Verified layout rule is fully complete for Haskell 2010
+- [x] All 162 E2E tests use indentation-based layout (only 3 use explicit braces)
+- [x] 39 lexer unit tests cover edge cases
+- [x] Comprehensive layout-focused E2E test validates all layout contexts
+
+#### E.66: Separate Compilation Pipeline + hx Integration ✅
+- [x] `--numeric-version` flag for hx-bhc detection
+- [x] `-c` (compile-only) mode: compile to `.o` without linking
+- [x] `--odir`/`--hidir` flags for output directories
+- [x] `-package-db`/`-package-id` flags for package database
+- [x] `compile_module_only()` in driver: parse → lower → typecheck → codegen → write `.o` + `.bhi`
+- [x] Interface generation: `bhc-interface/generate.rs` walks AST/typed module to extract exports
+- [x] `TypeConverter` bridge: `bhc-interface/convert.rs` converts interface types → internal `Ty`/`Scheme`
+- [x] `.bhi` consumption in type checker: `DefInfo.type_scheme` carries types through lowering pipeline
+- [x] `load_interfaces_for_imports()`: searches hidir + package-db directories for `.bhi` files
+- [x] `register_lowered_builtins()` uses interface type schemes instead of fresh variables
+- [x] Integration tests verify type roundtrip through `.bhi` files
+
+#### E.67+: Remaining Road to Pandoc (Proposed)
 
 ### Milestone F: Pandoc (Minimal)
 - [ ] Compile Pandoc with a subset of readers/writers (e.g., Markdown → HTML only)
@@ -829,17 +874,22 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 
 | File | Role |
 |------|------|
+| `crates/bhc/src/main.rs` | CLI flags (`-c`, `--odir`, `--hidir`, `--numeric-version`, etc.) |
+| `crates/bhc-session/src/lib.rs` | Session options (compile_only, odir, hidir, package_dbs) |
+| `crates/bhc-driver/src/lib.rs` | Compilation orchestration, `compile_module_only()`, `.bhi` loading |
 | `crates/bhc-codegen/src/llvm/lower.rs` | LLVM lowering — add builtin handlers here |
 | `crates/bhc-typeck/src/builtins.rs` | Type signatures for all builtins |
+| `crates/bhc-typeck/src/context.rs` | Type checker context, `register_lowered_builtins()` |
+| `crates/bhc-lower/src/context.rs` | Lowering context, `DefInfo.type_scheme`, `define_with_type()` |
+| `crates/bhc-interface/src/lib.rs` | Module interface types and serialization |
+| `crates/bhc-interface/src/convert.rs` | `TypeConverter` (.bhi → internal types) |
+| `crates/bhc-interface/src/generate.rs` | `.bhi` generation from compiled modules |
 | `crates/bhc-core/src/eval/mod.rs` | Evaluator implementations |
-| `crates/bhc-driver/` | Compilation orchestration |
-| `crates/bhc-package/` | Package management |
-| `crates/bhc-interface/` | Module interface files |
-| `stdlib/bhc-base/` | Base library RTS functions |
+| `crates/bhc-package/` | Package management (to be superseded by hx) |
+| `stdlib/bhc-base/` | Base library RTS functions, Data.Char predicates |
 | `stdlib/bhc-text/src/text.rs` | Text RTS (25+ FFI functions, E.7+E.8) |
 | `stdlib/bhc-text/src/text_io.rs` | Text.IO RTS (7 FFI functions, E.10) |
 | `stdlib/bhc-text/src/bytestring.rs` | ByteString RTS (24 FFI functions, E.8) |
-| `stdlib/bhc-base/` | Base library: Data.Char predicates, show functions (E.9) |
 | `stdlib/bhc-system/` | System/IO operations |
 | `rts/bhc-rts/src/ffi.rs` | FFI functions for FilePath/Directory (E.19) |
 | `stdlib/bhc-containers/` | Container data structures |
@@ -850,6 +900,49 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 ---
 
 ## Recent Progress
+
+### 2026-02-22: hx Build Pipeline Wiring
+
+Wired the hx package manager's BHC backend (`hx-bhc`) to generate correct CLI
+flags matching BHC's actual clap-based CLI. Six changes across the hx repo:
+
+1. **compile.rs**: Fixed 7 flag formats (`--hidir`, `--odir`, `--import-path`,
+   `--package-db`, `-O 2`, `--Wall`, `--Werror`) + `.hi` → `.bhi` extension
+2. **native.rs**: Fixed `--package-db` and `--package` flags
+3. **package_db.rs**: Replaced `bhc-pkg` subprocess calls with filesystem ops
+   (directory scan of `.conf` files via `tokio::fs`)
+4. **build.rs (CLI)**: Removed `--make`, fixed flag formats for direct BHC invocation
+5. **builtin_packages.rs** (new): Maps 12 Haskell packages (base, text, containers,
+   transformers, etc.) to BHC builtins with synthetic package IDs
+6. **full_native.rs**: Integrated builtin package check in dependency builder
+
+All 45 hx-bhc tests pass, full hx workspace builds cleanly, 162 BHC E2E tests unaffected.
+
+### 2026-02-21: Separate Compilation + hx Integration (E.65–E.66)
+
+**E.65: Layout Rule Verification** — Verified Haskell 2010 layout rule is fully complete.
+All 162 E2E tests use indentation-based layout. 39 lexer unit tests cover edge cases.
+
+**E.66: Separate Compilation Pipeline** — Two commits implementing the full GHC-compatible
+compilation protocol needed by hx-bhc:
+
+1. **Compile-only mode** (`e81cdac`): Added `--numeric-version`, `-c`, `--odir`/`--hidir`,
+   `-package-db`/`-package-id` CLI flags. `compile_module_only()` runs parse → lower →
+   typecheck → codegen, writes `.o` to odir and `.bhi` to hidir. Interface generation via
+   `bhc-interface/generate.rs` walks AST/typed module to extract exported values, types,
+   classes, instances, and constructors.
+
+2. **Interface consumption** (`87b91a2`): `TypeConverter` bridge (`bhc-interface/convert.rs`)
+   converts `.bhi` interface types to internal `Ty`/`Scheme`. Added `DefInfo.type_scheme`
+   to carry type schemes from driver → lowering → type checker. `register_lowered_builtins()`
+   now uses interface type schemes instead of fresh variables. `load_interfaces_for_imports()`
+   searches hidir + package-db directories for `.bhi` files of imported modules.
+
+**Impact on Pandoc gaps:** The BHC side of the package compilation protocol is now complete.
+The hx package manager (separate repo) already has .cabal parsing, Hackage integration,
+dependency resolution, and a BHC backend crate (`hx-bhc`). Remaining work is in the hx
+repo: wire `hx build --backend bhc` through the full pipeline, create filesystem-based
+package DB, and add BHC builtin package mapping.
 
 ### 2026-02-21: Roadmap Assessment (E.32–E.64)
 

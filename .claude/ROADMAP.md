@@ -2,7 +2,7 @@
 
 **Document ID:** BHC-ROAD-0001
 **Status:** Active
-**Last Updated:** 2026-02-21
+**Last Updated:** 2026-02-22
 
 ---
 
@@ -177,10 +177,15 @@ This roadmap tracks the implementation of the Basel Haskell Compiler (BHC) from 
 
 **Goal:** Enable BHC to compile real-world Haskell projects like xmonad, pandoc, and lens.
 
-**Progress:** 163 E2E tests, 65 milestones (E.1–E.65), 30+ GHC extensions implemented.
+**Progress:** 162 E2E tests, 66 milestones (E.1–E.66), 30+ GHC extensions implemented.
 BHC now compiles non-trivial Haskell programs with records, GADTs, typeclasses,
-deriving, monad transformers, and most common GHC extensions. The focus has shifted
-from basic syntax support to the remaining infrastructure for Pandoc compilation.
+deriving, monad transformers, and most common GHC extensions. E.66 added the full
+separate compilation pipeline (`-c` mode, `.bhi` generation/consumption, `--odir`/
+`--hidir`/`--package-db` flags) needed by the hx package manager. The hx build
+pipeline is now wired: `hx-bhc` generates correct BHC CLI flags, uses filesystem-
+based package DB (no `bhc-pkg`), and maps 12 standard Haskell packages to BHC
+builtins. Focus is shifting to end-to-end testing with real Hackage packages and
+remaining compiler gaps (CPP, type families, Core IR optimizer).
 
 See `TODO-pandoc.md` for the detailed Pandoc compilation roadmap.
 

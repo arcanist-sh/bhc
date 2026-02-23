@@ -1827,6 +1827,9 @@ impl LowerContext {
                     // Pattern synonyms are fully handled during AST→HIR lowering.
                     // No Core bindings needed.
                 }
+                Item::TypeFamily(_) | Item::TypeFamilyInst(_) => {
+                    // Type families are purely type-level; no Core bindings needed.
+                }
             }
         }
 

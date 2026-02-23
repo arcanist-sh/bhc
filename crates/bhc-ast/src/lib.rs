@@ -442,6 +442,10 @@ pub enum Decl {
     StandaloneDeriving(StandaloneDeriving),
     /// Pattern synonym: `pattern Zero = Lit 0`
     PatternSynonym(PatternSynonymDecl),
+    /// Standalone type family: `type family F a` or `type family F a where ...`
+    TypeFamilyDecl(TypeFamilyDecl),
+    /// Standalone type family instance: `type instance F Int = Bool`
+    TypeInstanceDecl(TypeInstanceDecl),
 }
 
 /// A standalone deriving declaration: `deriving instance Show Foo`
@@ -467,6 +471,65 @@ pub struct PatternSynonymDecl {
     /// The RHS pattern.
     pub pattern: Pat,
     /// Source span.
+    pub span: Span,
+}
+
+/// Whether a type family is open or closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeFamilyKind {
+    /// Open type family: `type family F a`
+    Open,
+    /// Closed type family: `type family F a where ...`
+    Closed,
+}
+
+/// A standalone type family declaration.
+///
+/// Open:   `type family F a`
+/// Closed: `type family F a where F Int = Bool; F a = ()`
+#[derive(Clone, Debug)]
+pub struct TypeFamilyDecl {
+    /// Documentation comment.
+    pub doc: Option<DocComment>,
+    /// The family name.
+    pub name: Ident,
+    /// Type parameters.
+    pub params: Vec<TyVar>,
+    /// Optional result kind signature.
+    pub kind: Option<Kind>,
+    /// Whether this family is open or closed.
+    pub family_kind: TypeFamilyKind,
+    /// Equations (only for closed families).
+    pub equations: Vec<TypeFamilyEqn>,
+    /// The span.
+    pub span: Span,
+}
+
+/// A single equation in a closed type family.
+#[derive(Clone, Debug)]
+pub struct TypeFamilyEqn {
+    /// Type argument patterns.
+    pub args: Vec<Type>,
+    /// The right-hand side type.
+    pub rhs: Type,
+    /// The span.
+    pub span: Span,
+}
+
+/// A standalone type instance declaration (for open type families).
+///
+/// `type instance F Int = Bool`
+#[derive(Clone, Debug)]
+pub struct TypeInstanceDecl {
+    /// Documentation comment.
+    pub doc: Option<DocComment>,
+    /// The family name.
+    pub name: Ident,
+    /// Type argument patterns.
+    pub args: Vec<Type>,
+    /// The right-hand side type.
+    pub rhs: Type,
+    /// The span.
     pub span: Span,
 }
 

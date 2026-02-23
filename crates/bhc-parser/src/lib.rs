@@ -396,7 +396,7 @@ pub fn parse_import_decl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bhc_ast::ImportSpec;
+    use bhc_ast::{Decl, ImportSpec, TypeFamilyKind};
 
     fn parse_expr_ok(src: &str) -> Expr {
         let (expr, diags) = parse_expr(src, FileId::new(0));
@@ -1791,6 +1791,78 @@ bar = 2"#;
         match &import.spec {
             Some(ImportSpec::Hiding(_)) => {}
             _ => panic!("Expected hiding import"),
+        }
+    }
+
+    // Type family tests
+
+    #[test]
+    fn test_open_type_family() {
+        let module = parse_module_ok("type family F a");
+        assert_eq!(module.decls.len(), 1);
+        match &module.decls[0] {
+            Decl::TypeFamilyDecl(tf) => {
+                assert_eq!(tf.name.name.as_str(), "F");
+                assert_eq!(tf.params.len(), 1);
+                assert_eq!(tf.family_kind, TypeFamilyKind::Open);
+                assert!(tf.equations.is_empty());
+            }
+            _ => panic!("Expected TypeFamilyDecl"),
+        }
+    }
+
+    #[test]
+    fn test_closed_type_family() {
+        let src = "type family F a where\n  F Int = Bool\n  F a = ()";
+        let module = parse_module_ok(src);
+        assert_eq!(module.decls.len(), 1);
+        match &module.decls[0] {
+            Decl::TypeFamilyDecl(tf) => {
+                assert_eq!(tf.name.name.as_str(), "F");
+                assert_eq!(tf.family_kind, TypeFamilyKind::Closed);
+                assert_eq!(tf.equations.len(), 2);
+            }
+            _ => panic!("Expected TypeFamilyDecl"),
+        }
+    }
+
+    #[test]
+    fn test_type_instance() {
+        let module = parse_module_ok("type instance F Int = Bool");
+        assert_eq!(module.decls.len(), 1);
+        match &module.decls[0] {
+            Decl::TypeInstanceDecl(ti) => {
+                assert_eq!(ti.name.name.as_str(), "F");
+                assert_eq!(ti.args.len(), 1);
+            }
+            _ => panic!("Expected TypeInstanceDecl"),
+        }
+    }
+
+    #[test]
+    fn test_type_family_with_kind_sig() {
+        let module = parse_module_ok("type family F a :: * -> *");
+        assert_eq!(module.decls.len(), 1);
+        match &module.decls[0] {
+            Decl::TypeFamilyDecl(tf) => {
+                assert_eq!(tf.name.name.as_str(), "F");
+                assert!(tf.kind.is_some());
+                assert_eq!(tf.family_kind, TypeFamilyKind::Open);
+            }
+            _ => panic!("Expected TypeFamilyDecl"),
+        }
+    }
+
+    #[test]
+    fn test_type_alias_still_works() {
+        // Regression: ensure type aliases still parse correctly
+        let module = parse_module_ok("type Foo = Int");
+        assert!(!module.decls.is_empty());
+        match &module.decls[0] {
+            Decl::TypeAlias(ta) => {
+                assert_eq!(ta.name.name.as_str(), "Foo");
+            }
+            _ => panic!("Expected TypeAlias"),
         }
     }
 }

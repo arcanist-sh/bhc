@@ -230,6 +230,15 @@ pub fn unify(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
 
 /// Inner unification after substitution has been applied.
 fn unify_inner(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
+    // Try to reduce type family applications before structural matching.
+    // This handles cases where a type family application appears as a
+    // sub-component (e.g., in `Fun(Int, Size Int)` where `Size Int` should
+    // reduce to `Int`).
+    let t1_reduced = try_reduce_type_family(ctx, t1);
+    let t2_reduced = try_reduce_type_family(ctx, t2);
+    let t1 = if t1_reduced != *t1 { &t1_reduced } else { t1 };
+    let t2 = if t2_reduced != *t2 { &t2_reduced } else { t2 };
+
     match (t1, t2) {
         // Error types unify with anything (error recovery)
         (Ty::Error, _) | (_, Ty::Error) => {}

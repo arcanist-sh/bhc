@@ -216,6 +216,18 @@ pub fn type_check_module_with_defs(
         }
     }
 
+    // Register standalone type families
+    for item in &hir.items {
+        if let bhc_hir::Item::TypeFamily(tf) = item {
+            ctx.register_type_family(tf);
+        }
+    }
+    for item in &hir.items {
+        if let bhc_hir::Item::TypeFamilyInst(inst) = item {
+            ctx.register_type_family_instance(inst);
+        }
+    }
+
     // Compute binding groups (SCCs) for mutual recursion
     let groups = binding_groups::compute_binding_groups(&hir.items);
 

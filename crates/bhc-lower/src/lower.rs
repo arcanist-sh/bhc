@@ -1083,6 +1083,16 @@ fn lower_decl(ctx: &mut LowerContext, decl: &ast::Decl) -> LowerResult<Vec<hir::
             // lower_pat / lower_expr. No HIR item needed.
             Ok(vec![])
         }
+
+        ast::Decl::TypeFamilyDecl(tf_decl) => {
+            let item = lower_type_family_decl(ctx, tf_decl)?;
+            Ok(vec![hir::Item::TypeFamily(item)])
+        }
+
+        ast::Decl::TypeInstanceDecl(ti_decl) => {
+            let item = lower_type_instance_decl(ctx, ti_decl);
+            Ok(vec![hir::Item::TypeFamilyInst(item)])
+        }
     }
 }
 
@@ -3197,6 +3207,66 @@ fn lower_type_alias(
         ty,
         span: type_alias.span,
     })
+}
+
+/// Lower a standalone type family declaration to HIR.
+fn lower_type_family_decl(
+    ctx: &mut LowerContext,
+    tf: &ast::TypeFamilyDecl,
+) -> LowerResult<hir::TypeFamilyDef> {
+    let def_id = ctx
+        .lookup_type(tf.name.name)
+        .expect("type family should be pre-bound");
+
+    let params: Vec<bhc_types::TyVar> = tf
+        .params
+        .iter()
+        .map(|p| bhc_types::TyVar::new_star(p.name.name.as_u32()))
+        .collect();
+
+    let kind = tf
+        .kind
+        .as_ref()
+        .map(lower_kind)
+        .unwrap_or(bhc_types::Kind::Star);
+
+    let family_kind = match tf.family_kind {
+        ast::TypeFamilyKind::Open => hir::TypeFamilyKind::Open,
+        ast::TypeFamilyKind::Closed => hir::TypeFamilyKind::Closed,
+    };
+
+    let equations: Vec<hir::TypeFamilyEqn> = tf
+        .equations
+        .iter()
+        .map(|eq| hir::TypeFamilyEqn {
+            args: eq.args.iter().map(|a| lower_type(ctx, a)).collect(),
+            rhs: lower_type(ctx, &eq.rhs),
+            span: eq.span,
+        })
+        .collect();
+
+    Ok(hir::TypeFamilyDef {
+        id: def_id,
+        name: tf.name.name,
+        params,
+        kind,
+        family_kind,
+        equations,
+        span: tf.span,
+    })
+}
+
+/// Lower a standalone type instance declaration to HIR.
+fn lower_type_instance_decl(
+    ctx: &mut LowerContext,
+    ti: &ast::TypeInstanceDecl,
+) -> hir::TypeFamilyInstance {
+    hir::TypeFamilyInstance {
+        name: ti.name.name,
+        args: ti.args.iter().map(|a| lower_type(ctx, a)).collect(),
+        rhs: lower_type(ctx, &ti.rhs),
+        span: ti.span,
+    }
 }
 
 /// Lower an AST kind to a bhc_types kind.

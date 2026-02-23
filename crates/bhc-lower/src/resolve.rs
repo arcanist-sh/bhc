@@ -372,6 +372,17 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
                 }
             }
 
+            ast::Decl::TypeFamilyDecl(tf) => {
+                let name = tf.name.name;
+                let def_id = ctx.fresh_def_id();
+                ctx.define(def_id, name, DefKind::Type, tf.span);
+                ctx.bind_type(name, def_id);
+            }
+
+            ast::Decl::TypeInstanceDecl(_) => {
+                // Type instances don't introduce new names
+            }
+
             ast::Decl::Fixity(_) | ast::Decl::InstanceDecl(_) | ast::Decl::PragmaDecl(_)
             | ast::Decl::StandaloneDeriving(_) => {
                 // These don't introduce new names

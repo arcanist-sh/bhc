@@ -454,8 +454,10 @@ fn collect_decl_exports(
         ast::Decl::Fixity(_)
         | ast::Decl::PragmaDecl(_)
         | ast::Decl::StandaloneDeriving(_)
-        | ast::Decl::PatternSynonym(_) => {
-            // These don't create exports
+        | ast::Decl::PatternSynonym(_)
+        | ast::Decl::TypeFamilyDecl(_)
+        | ast::Decl::TypeInstanceDecl(_) => {
+            // These don't create exports (type families are type-level only)
         }
     }
 }

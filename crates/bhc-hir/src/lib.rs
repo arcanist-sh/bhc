@@ -394,6 +394,12 @@ pub enum Item {
 
     /// A pattern synonym definition.
     PatternSynonym(PatternSynonymDef),
+
+    /// A standalone type family definition.
+    TypeFamily(TypeFamilyDef),
+
+    /// A standalone type family instance (for open families).
+    TypeFamilyInst(TypeFamilyInstance),
 }
 
 /// A value (function) definition.
@@ -508,6 +514,58 @@ pub struct TypeAlias {
     pub params: Vec<TyVar>,
     /// The aliased type.
     pub ty: Ty,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Whether a type family is open or closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypeFamilyKind {
+    /// Open type family: `type family F a`
+    Open,
+    /// Closed type family: `type family F a where ...`
+    Closed,
+}
+
+/// A standalone type family definition.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TypeFamilyDef {
+    /// The unique ID of this definition.
+    pub id: DefId,
+    /// The family name.
+    pub name: Symbol,
+    /// Type parameters.
+    pub params: Vec<TyVar>,
+    /// Result kind.
+    pub kind: bhc_types::Kind,
+    /// Whether this family is open or closed.
+    pub family_kind: TypeFamilyKind,
+    /// Equations (only for closed families).
+    pub equations: Vec<TypeFamilyEqn>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// A single type family equation (for closed families or open instances).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TypeFamilyEqn {
+    /// Type argument patterns.
+    pub args: Vec<Ty>,
+    /// The right-hand side type.
+    pub rhs: Ty,
+    /// Source span.
+    pub span: Span,
+}
+
+/// A standalone type family instance (for open families).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TypeFamilyInstance {
+    /// The family name.
+    pub name: Symbol,
+    /// Type argument patterns.
+    pub args: Vec<Ty>,
+    /// The right-hand side type.
+    pub rhs: Ty,
     /// Source span.
     pub span: Span,
 }

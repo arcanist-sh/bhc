@@ -94,6 +94,30 @@ pub struct InstanceInfo {
     pub assoc_type_impls: Vec<AssocTypeImpl>,
 }
 
+/// Information about a standalone type family.
+#[derive(Clone, Debug)]
+pub struct TypeFamilyInfo {
+    /// The family name.
+    pub name: Symbol,
+    /// Type parameters.
+    pub params: Vec<TyVar>,
+    /// Result kind.
+    pub kind: bhc_types::Kind,
+    /// Whether this family is closed (true) or open (false).
+    pub is_closed: bool,
+    /// Equations — for closed families, in declaration order.
+    pub equations: Vec<TypeFamilyEquation>,
+}
+
+/// A single type family equation.
+#[derive(Clone, Debug)]
+pub struct TypeFamilyEquation {
+    /// Type argument patterns.
+    pub args: Vec<Ty>,
+    /// The right-hand side type.
+    pub rhs: Ty,
+}
+
 /// The type environment during type checking.
 ///
 /// Maintains bindings at various scopes:
@@ -103,6 +127,7 @@ pub struct InstanceInfo {
 /// - Data constructors: Constructor names to `DataConInfo`
 /// - Type classes: Class definitions
 /// - Instances: Type class instances for resolution
+/// - Standalone type families
 #[derive(Debug)]
 pub struct TypeEnv {
     /// Global definitions (module-level, indexed by `DefId`).
@@ -127,6 +152,12 @@ pub struct TypeEnv {
     /// Type class instances (class name -> list of instances).
     /// Multiple instances can exist for the same class with different types.
     instances: FxHashMap<Symbol, Vec<InstanceInfo>>,
+
+    /// Standalone type family declarations.
+    type_families: FxHashMap<Symbol, TypeFamilyInfo>,
+
+    /// Open type family instances (family name -> list of equations).
+    type_family_instances: FxHashMap<Symbol, Vec<TypeFamilyEquation>>,
 }
 
 impl Default for TypeEnv {
@@ -147,6 +178,8 @@ impl TypeEnv {
             data_cons_by_id: FxHashMap::default(),
             classes: FxHashMap::default(),
             instances: FxHashMap::default(),
+            type_families: FxHashMap::default(),
+            type_family_instances: FxHashMap::default(),
         }
     }
 
@@ -395,6 +428,73 @@ impl TypeEnv {
     /// Then `reduce_type_family("Unwrap", [Int])` returns `Some(Int)`.
     #[must_use]
     pub fn reduce_type_family(&self, family_name: Symbol, args: &[Ty]) -> Option<Ty> {
+        // 1. Try standalone type families first
+        if let Some(result) = self.reduce_standalone_family(family_name, args) {
+            return Some(result);
+        }
+
+        // 2. Fall back to associated type families
+        self.reduce_assoc_type_family(family_name, args)
+    }
+
+    /// Try to reduce a standalone type family application.
+    fn reduce_standalone_family(&self, family_name: Symbol, args: &[Ty]) -> Option<Ty> {
+        if let Some(family_info) = self.type_families.get(&family_name) {
+            if family_info.is_closed {
+                // Closed family: try equations in declaration order (first match wins)
+                for eq in &family_info.equations {
+                    if let Some(result) = self.try_match_family_equation(eq, args) {
+                        return Some(result);
+                    }
+                }
+            } else {
+                // Open family: try registered instances
+                if let Some(instances) = self.type_family_instances.get(&family_name) {
+                    for eq in instances {
+                        if let Some(result) = self.try_match_family_equation(eq, args) {
+                            return Some(result);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Try to match a single type family equation against arguments.
+    fn try_match_family_equation(
+        &self,
+        eq: &TypeFamilyEquation,
+        args: &[Ty],
+    ) -> Option<Ty> {
+        if eq.args.len() != args.len() {
+            return None;
+        }
+
+        // Collect bindable vars from the equation's argument patterns
+        let mut bindable_vars = Vec::new();
+        for pat_ty in &eq.args {
+            for v in pat_ty.free_vars() {
+                if !bindable_vars.contains(&v) {
+                    bindable_vars.push(v);
+                }
+            }
+        }
+
+        let mut subst = bhc_types::Subst::new();
+        for (pat_ty, arg_ty) in eq.args.iter().zip(args.iter()) {
+            if let Some(s) = self.match_types(pat_ty, arg_ty, &bindable_vars) {
+                subst = subst.compose(&s);
+            } else {
+                return None;
+            }
+        }
+
+        Some(subst.apply(&eq.rhs))
+    }
+
+    /// Reduce an associated type family (class-associated types).
+    fn reduce_assoc_type_family(&self, family_name: Symbol, args: &[Ty]) -> Option<Ty> {
         // Find which class defines this associated type
         let (class_info, assoc_info) = self.lookup_assoc_type(family_name)?;
 
@@ -418,14 +518,6 @@ impl TypeEnv {
                 // Instance matched but doesn't provide this associated type.
                 // Check if the class has a default.
                 if let Some(default_ty) = &assoc_info.default {
-                    // The default is written in terms of class type parameters.
-                    // We need to substitute those with the concrete instance types.
-                    //
-                    // For example, if:
-                    //   class Wrapper w where type Unwrap w = w
-                    //   instance Wrapper Int
-                    //
-                    // The default `w` needs to be substituted with `Int`.
                     let default_subst = self.build_class_param_subst(&class_info.params, args);
                     return Some(default_subst.apply(default_ty));
                 }
@@ -433,6 +525,29 @@ impl TypeEnv {
         }
 
         None
+    }
+
+    /// Register a standalone type family.
+    pub fn register_type_family(&mut self, info: TypeFamilyInfo) {
+        self.type_families.insert(info.name, info);
+    }
+
+    /// Register an instance for an open type family.
+    pub fn register_type_family_instance(
+        &mut self,
+        family_name: Symbol,
+        eqn: TypeFamilyEquation,
+    ) {
+        self.type_family_instances
+            .entry(family_name)
+            .or_default()
+            .push(eqn);
+    }
+
+    /// Look up a standalone type family.
+    #[must_use]
+    pub fn lookup_type_family(&self, name: Symbol) -> Option<&TypeFamilyInfo> {
+        self.type_families.get(&name)
     }
 
     /// Build a substitution from class type parameters to concrete argument types.
@@ -978,5 +1093,190 @@ mod tests {
         // The default is `c`, which gets substituted with `[Int]`
         let reduced = result.unwrap();
         assert_eq!(reduced, list_int);
+    }
+
+    #[test]
+    fn test_closed_type_family_reduction() {
+        let mut env = TypeEnv::new();
+        let f = Symbol::intern("F");
+        let int_name = Symbol::intern("Int");
+        let bool_name = Symbol::intern("Bool");
+        let unit_name = Symbol::intern("()");
+
+        let int_ty = Ty::Con(TyCon::new(int_name, Kind::Star));
+        let bool_ty = Ty::Con(TyCon::new(bool_name, Kind::Star));
+        let unit_ty = Ty::Con(TyCon::new(unit_name, Kind::Star));
+
+        // type family F a where
+        //   F Int = Bool
+        //   F a   = ()
+        let a_var = TyVar::new_star(99);
+        let info = TypeFamilyInfo {
+            name: f,
+            params: vec![a_var.clone()],
+            kind: Kind::Star,
+            is_closed: true,
+            equations: vec![
+                TypeFamilyEquation {
+                    args: vec![int_ty.clone()],
+                    rhs: bool_ty.clone(),
+                },
+                TypeFamilyEquation {
+                    args: vec![Ty::Var(a_var.clone())],
+                    rhs: unit_ty.clone(),
+                },
+            ],
+        };
+        env.register_type_family(info);
+
+        // F Int should reduce to Bool
+        let result = env.reduce_type_family(f, &[int_ty.clone()]);
+        assert_eq!(result, Some(bool_ty.clone()));
+
+        // F Bool should reduce to () via catch-all
+        let result = env.reduce_type_family(f, &[bool_ty.clone()]);
+        assert_eq!(result, Some(unit_ty.clone()));
+    }
+
+    #[test]
+    fn test_closed_type_family_first_match() {
+        let mut env = TypeEnv::new();
+        let f = Symbol::intern("F");
+        let int_name = Symbol::intern("Int");
+        let bool_name = Symbol::intern("Bool");
+        let char_name = Symbol::intern("Char");
+
+        let int_ty = Ty::Con(TyCon::new(int_name, Kind::Star));
+        let bool_ty = Ty::Con(TyCon::new(bool_name, Kind::Star));
+        let char_ty = Ty::Con(TyCon::new(char_name, Kind::Star));
+
+        // Overlapping equations: first match wins
+        let a_var = TyVar::new_star(100);
+        let info = TypeFamilyInfo {
+            name: f,
+            params: vec![a_var.clone()],
+            kind: Kind::Star,
+            is_closed: true,
+            equations: vec![
+                TypeFamilyEquation {
+                    args: vec![Ty::Var(a_var.clone())],
+                    rhs: bool_ty.clone(),
+                },
+                TypeFamilyEquation {
+                    args: vec![int_ty.clone()],
+                    rhs: char_ty.clone(),
+                },
+            ],
+        };
+        env.register_type_family(info);
+
+        // F Int matches first equation (catch-all), returns Bool not Char
+        let result = env.reduce_type_family(f, &[int_ty]);
+        assert_eq!(result, Some(bool_ty));
+    }
+
+    #[test]
+    fn test_open_type_family_reduction() {
+        let mut env = TypeEnv::new();
+        let f = Symbol::intern("Size");
+        let int_name = Symbol::intern("Int");
+
+        let int_ty = Ty::Con(TyCon::new(int_name, Kind::Star));
+
+        // type family Size a  (open)
+        let a_var = TyVar::new_star(101);
+        let info = TypeFamilyInfo {
+            name: f,
+            params: vec![a_var],
+            kind: Kind::Star,
+            is_closed: false,
+            equations: vec![],
+        };
+        env.register_type_family(info);
+
+        // No instances yet — should return None
+        assert!(env.reduce_type_family(f, &[int_ty.clone()]).is_none());
+
+        // Register instance: type instance Size Int = Int
+        env.register_type_family_instance(f, TypeFamilyEquation {
+            args: vec![int_ty.clone()],
+            rhs: int_ty.clone(),
+        });
+
+        // Now should reduce
+        let result = env.reduce_type_family(f, &[int_ty.clone()]);
+        assert_eq!(result, Some(int_ty));
+    }
+
+    #[test]
+    fn test_standalone_and_assoc_coexist() {
+        let mut env = TypeEnv::new();
+
+        // Register a standalone type family
+        let standalone = Symbol::intern("StandaloneF");
+        let int_name = Symbol::intern("Int");
+        let bool_name = Symbol::intern("Bool");
+
+        let int_ty = Ty::Con(TyCon::new(int_name, Kind::Star));
+        let bool_ty = Ty::Con(TyCon::new(bool_name, Kind::Star));
+
+        let a_var = TyVar::new_star(102);
+        let info = TypeFamilyInfo {
+            name: standalone,
+            params: vec![a_var],
+            kind: Kind::Star,
+            is_closed: true,
+            equations: vec![TypeFamilyEquation {
+                args: vec![int_ty.clone()],
+                rhs: bool_ty.clone(),
+            }],
+        };
+        env.register_type_family(info);
+
+        // Standalone should reduce
+        assert_eq!(
+            env.reduce_type_family(standalone, &[int_ty.clone()]),
+            Some(bool_ty)
+        );
+
+        // Unknown name should return None
+        let unknown = Symbol::intern("Unknown");
+        assert!(env.reduce_type_family(unknown, &[int_ty]).is_none());
+    }
+
+    #[test]
+    fn test_multi_param_type_family() {
+        let mut env = TypeEnv::new();
+        let f = Symbol::intern("F");
+        let int_name = Symbol::intern("Int");
+        let bool_name = Symbol::intern("Bool");
+        let char_name = Symbol::intern("Char");
+
+        let int_ty = Ty::Con(TyCon::new(int_name, Kind::Star));
+        let bool_ty = Ty::Con(TyCon::new(bool_name, Kind::Star));
+        let char_ty = Ty::Con(TyCon::new(char_name, Kind::Star));
+
+        // type family F a b where F Int Bool = Char
+        let a_var = TyVar::new_star(103);
+        let b_var = TyVar::new_star(104);
+        let info = TypeFamilyInfo {
+            name: f,
+            params: vec![a_var, b_var],
+            kind: Kind::Star,
+            is_closed: true,
+            equations: vec![TypeFamilyEquation {
+                args: vec![int_ty.clone(), bool_ty.clone()],
+                rhs: char_ty.clone(),
+            }],
+        };
+        env.register_type_family(info);
+
+        // F Int Bool = Char
+        let result = env.reduce_type_family(f, &[int_ty.clone(), bool_ty]);
+        assert_eq!(result, Some(char_ty));
+
+        // F Int Int = None (no match)
+        let result = env.reduce_type_family(f, &[int_ty.clone(), int_ty]);
+        assert!(result.is_none());
     }
 }

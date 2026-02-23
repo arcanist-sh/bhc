@@ -997,6 +997,20 @@ fn test_tier3_cpp_nested_native() {
 }
 
 // =============================================================================
+// Standalone Type Families
+// =============================================================================
+
+#[test]
+fn test_tier3_type_family_closed_native() {
+    run_native_test("tier3_io/type_family_closed", Profile::Default);
+}
+
+#[test]
+fn test_tier3_type_family_open_native() {
+    run_native_test("tier3_io/type_family_open", Profile::Default);
+}
+
+// =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================
 

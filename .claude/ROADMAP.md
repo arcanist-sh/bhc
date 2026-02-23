@@ -262,8 +262,8 @@ tests including edge cases and a comprehensive layout-focused E2E test (E.65).
 - [x] FlexibleInstances, FlexibleContexts (E.48)
 - [x] TypeOperators (E.61)
 - [ ] Type applications: `f @Int x`
-- [ ] Type families: `type family F a where ...`
-- [ ] Associated type families in classes
+- [x] Type families: open (`type family F a` + `type instance`), closed (`type family F a where ...`)
+- [x] Associated type families in classes
 
 #### Phase 7: Core IR Optimization Pipeline
 
@@ -305,8 +305,8 @@ Each phase will be validated against real codebases:
 | 2 | Parse xmonad's StackSet.hs without errors | Layout rule ✅, needs package system |
 | 3 | Resolve imports in a multi-module project | ✅ Working (E.6) |
 | 4 | Compile programs with classes, instances, GADTs | ✅ Working (E.38–E.64) |
-| 5 | Parse lens library type signatures | Blocked on type families |
-| 6 | Full type system coverage | Mostly done, type families remaining |
+| 5 | Parse lens library type signatures | ✅ Type families implemented |
+| 6 | Full type system coverage | ✅ Type families done; data families remaining |
 | 7 | Compiled programs run measurably faster | 🟡 Core simplifier (E.68-E.69): local + top-level transforms, case-of-case; demand analysis + worker/wrapper (O.3) |
 
 ### Exit Criteria

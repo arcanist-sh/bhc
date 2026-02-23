@@ -3232,6 +3232,47 @@ impl TyCtxt {
         }
     }
 
+    /// Register a standalone type family in the type environment.
+    pub fn register_type_family(&mut self, tf: &bhc_hir::TypeFamilyDef) {
+        // Register as a type constructor so it can appear in type expressions.
+        // Build a kind from arity: e.g., 2 params -> * -> * -> *
+        let kind = if tf.params.is_empty() {
+            tf.kind.clone()
+        } else {
+            Self::compute_type_con_kind(tf.params.len())
+        };
+        let tycon = TyCon { name: tf.name, kind };
+        self.env.register_type_con(tycon);
+
+        // Register the family info for reduction
+        let equations = tf
+            .equations
+            .iter()
+            .map(|eq| crate::env::TypeFamilyEquation {
+                args: eq.args.clone(),
+                rhs: eq.rhs.clone(),
+            })
+            .collect();
+
+        let info = crate::env::TypeFamilyInfo {
+            name: tf.name,
+            params: tf.params.clone(),
+            kind: tf.kind.clone(),
+            is_closed: tf.family_kind == bhc_hir::TypeFamilyKind::Closed,
+            equations,
+        };
+        self.env.register_type_family(info);
+    }
+
+    /// Register a standalone type family instance (for open families).
+    pub fn register_type_family_instance(&mut self, inst: &bhc_hir::TypeFamilyInstance) {
+        let eqn = crate::env::TypeFamilyEquation {
+            args: inst.args.clone(),
+            rhs: inst.rhs.clone(),
+        };
+        self.env.register_type_family_instance(inst.name, eqn);
+    }
+
     /// Compute the kind of a type constructor given its arity.
     fn compute_type_con_kind(arity: usize) -> Kind {
         let mut kind = Kind::Star;
@@ -3424,7 +3465,9 @@ impl TyCtxt {
             | Item::Fixity(_)
             | Item::Foreign(_)
             | Item::StandaloneDeriving(_)
-            | Item::PatternSynonym(_) => {}
+            | Item::PatternSynonym(_)
+            | Item::TypeFamily(_)
+            | Item::TypeFamilyInst(_) => {}
         }
     }
 

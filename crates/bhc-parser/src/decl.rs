@@ -611,7 +611,7 @@ impl<'src> Parser<'src> {
 
         match &tok.node.kind {
             TokenKind::Data => self.parse_data_decl_with_doc(doc),
-            TokenKind::Type => self.parse_type_alias_with_doc(doc),
+            TokenKind::Type => self.parse_type_decl_with_doc(doc),
             TokenKind::Newtype => self.parse_newtype_decl_with_doc(doc),
             TokenKind::Class => self.parse_class_decl_with_doc(doc),
             TokenKind::Instance => self.parse_instance_decl_with_doc(doc),
@@ -1650,14 +1650,31 @@ impl<'src> Parser<'src> {
     /// Parse a type alias.
     #[allow(dead_code)]
     fn parse_type_alias(&mut self) -> ParseResult<Decl> {
-        self.parse_type_alias_with_doc(None)
+        self.parse_type_decl_with_doc(None)
     }
 
     /// Parse a type alias with optional documentation.
-    fn parse_type_alias_with_doc(&mut self, doc: Option<DocComment>) -> ParseResult<Decl> {
+    /// Dispatch `type` declarations: type alias, type family, or type instance.
+    fn parse_type_decl_with_doc(&mut self, doc: Option<DocComment>) -> ParseResult<Decl> {
         let start = self.current_span();
         self.expect(&TokenKind::Type)?;
 
+        if self.check(&TokenKind::Family) {
+            return self.parse_type_family_decl(start, doc);
+        }
+        if self.check(&TokenKind::Instance) {
+            return self.parse_type_instance_decl(start, doc);
+        }
+        // Fall through to existing type alias parsing
+        self.parse_type_alias_after_type(start, doc)
+    }
+
+    /// Parse a type alias after the `type` keyword has been consumed.
+    fn parse_type_alias_after_type(
+        &mut self,
+        start: Span,
+        doc: Option<DocComment>,
+    ) -> ParseResult<Decl> {
         let name = self.parse_conid()?;
         let params = self.parse_ty_var_list()?;
 
@@ -1670,6 +1687,142 @@ impl<'src> Parser<'src> {
             name,
             params,
             ty,
+            span,
+        }))
+    }
+
+    /// Parse a standalone type family declaration.
+    ///
+    /// Open:   `type family F a`
+    /// Closed: `type family F a where { F Int = Bool; F a = () }`
+    fn parse_type_family_decl(
+        &mut self,
+        start: Span,
+        doc: Option<DocComment>,
+    ) -> ParseResult<Decl> {
+        self.expect(&TokenKind::Family)?;
+
+        let name = self.parse_conid()?;
+        let params = self.parse_ty_var_list()?;
+
+        // Optional kind signature: `:: * -> *`
+        let kind = if self.eat(&TokenKind::DoubleColon) {
+            Some(self.parse_kind()?)
+        } else {
+            None
+        };
+
+        // Check for `where` (closed family) vs end (open family)
+        if self.eat(&TokenKind::Where) {
+            let equations = self.parse_type_family_equations(&name)?;
+            let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+            Ok(Decl::TypeFamilyDecl(TypeFamilyDecl {
+                doc,
+                name,
+                params,
+                kind,
+                family_kind: TypeFamilyKind::Closed,
+                equations,
+                span,
+            }))
+        } else {
+            let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+            Ok(Decl::TypeFamilyDecl(TypeFamilyDecl {
+                doc,
+                name,
+                params,
+                kind,
+                family_kind: TypeFamilyKind::Open,
+                equations: vec![],
+                span,
+            }))
+        }
+    }
+
+    /// Parse equations within a closed type family `where` block.
+    fn parse_type_family_equations(
+        &mut self,
+        _family_name: &Ident,
+    ) -> ParseResult<Vec<TypeFamilyEqn>> {
+        let mut equations = Vec::new();
+
+        if self.eat(&TokenKind::LBrace) {
+            // Explicit braces
+            if !self.check(&TokenKind::RBrace) {
+                equations.push(self.parse_type_family_equation()?);
+                while self.eat(&TokenKind::Semi) {
+                    if self.check(&TokenKind::RBrace) {
+                        break;
+                    }
+                    equations.push(self.parse_type_family_equation()?);
+                }
+            }
+            self.expect(&TokenKind::RBrace)?;
+        } else if self.eat(&TokenKind::VirtualLBrace) {
+            // Layout-based
+            if !self.check(&TokenKind::VirtualRBrace) {
+                equations.push(self.parse_type_family_equation()?);
+                while self.eat(&TokenKind::VirtualSemi) {
+                    if self.check(&TokenKind::VirtualRBrace) {
+                        break;
+                    }
+                    equations.push(self.parse_type_family_equation()?);
+                }
+            }
+            self.eat(&TokenKind::VirtualRBrace);
+        } else {
+            // Single equation on same line
+            equations.push(self.parse_type_family_equation()?);
+        }
+
+        Ok(equations)
+    }
+
+    /// Parse a single type family equation: `F Int = Bool`
+    fn parse_type_family_equation(&mut self) -> ParseResult<TypeFamilyEqn> {
+        let start = self.current_span();
+
+        // Parse family name (skip it, we already know it)
+        let _name = self.parse_conid()?;
+
+        // Parse type argument patterns
+        let mut args = Vec::new();
+        while !self.check(&TokenKind::Eq) && !self.at_eof() {
+            args.push(self.parse_atype()?);
+        }
+
+        self.expect(&TokenKind::Eq)?;
+        let rhs = self.parse_type()?;
+
+        let span = start.to(rhs.span());
+        Ok(TypeFamilyEqn { args, rhs, span })
+    }
+
+    /// Parse a standalone type instance: `type instance F Int = Bool`
+    fn parse_type_instance_decl(
+        &mut self,
+        start: Span,
+        doc: Option<DocComment>,
+    ) -> ParseResult<Decl> {
+        self.expect(&TokenKind::Instance)?;
+
+        let name = self.parse_conid()?;
+
+        // Parse type argument patterns
+        let mut args = Vec::new();
+        while !self.check(&TokenKind::Eq) && !self.at_eof() {
+            args.push(self.parse_atype()?);
+        }
+
+        self.expect(&TokenKind::Eq)?;
+        let rhs = self.parse_type()?;
+
+        let span = start.to(rhs.span());
+        Ok(Decl::TypeInstanceDecl(TypeInstanceDecl {
+            doc,
+            name,
+            args,
+            rhs,
             span,
         }))
     }
@@ -2063,7 +2216,11 @@ impl<'src> Parser<'src> {
 
     /// Parse an atomic kind.
     fn parse_kind_atom(&mut self) -> ParseResult<Kind> {
-        // Check for `*` or `Type`
+        // Check for `*` (Star token) or `Type`
+        if self.check(&TokenKind::Star) {
+            self.advance();
+            return Ok(Kind::Star);
+        }
         if let Some(TokenKind::Operator(sym)) = self.current_kind() {
             if sym.as_str() == "*" {
                 self.advance();

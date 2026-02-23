@@ -61,11 +61,13 @@
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
 
+pub mod demand;
 pub mod escape;
 pub mod eval;
 pub mod pretty;
 pub mod simplify;
 pub mod uarray;
+pub mod worker_wrapper;
 
 use bhc_index::Idx;
 use bhc_intern::Symbol;

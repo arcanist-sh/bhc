@@ -386,7 +386,7 @@ compiled from Hackage source.
 
 ### 3.3 Performance (Core IR Optimization Pipeline)
 
-**Status:** Phase O.1 (Core Simplifier) landed in E.68 — local transforms only
+**Status:** Phases O.1-O.3 complete (Core Simplifier E.68-E.69, Pattern Match E.70, Demand Analysis + Worker/Wrapper O.3)
 **Scope:** Large (foundational infrastructure)
 **Reference:** `rules/013-optimization.md`, HBC/HCT simplifier architecture
 
@@ -396,7 +396,12 @@ budget), local and top-level dead binding elimination, local let inlining, and
 top-level cheap inlining (Var aliases, Lit constants). Top-level inlining skips
 protected names (`$derived_*`, `main`, `bhc_*`, etc.) for codegen safety. Top-level
 dead elimination is export-aware (respects module export lists). Pattern match
-compilation, demand analysis, and dictionary specialization remain to be implemented.
+compilation (E.70) uses Augustsson/Sestoft decision trees with exhaustiveness and
+overlap checking. Demand analysis + worker/wrapper (O.3) computes boolean-tree
+strictness signatures with fixpoint iteration for recursive groups, and splits
+strict-arg functions into worker/wrapper pairs. Wired into the driver pipeline
+after the first simplifier pass, gated on lazy profiles (Default/Server/Realtime)
+and opt_level != None. Dictionary specialization remains to be implemented.
 
 #### Phase O.1: Core Simplifier ✅ COMPLETE (E.68-E.69)
 - [x] Beta reduction: `(\x -> body) arg` → `body[x := arg]` (cheap args only)
@@ -418,11 +423,11 @@ compilation, demand analysis, and dictionary specialization remain to be impleme
 - [x] Overlap/redundancy detection with shadowed pattern warnings
 - [x] Guard compilation via nested case fallthrough (linear fallback)
 
-#### Phase O.3: Demand Analysis + Worker/Wrapper (MEDIUM — Default profile perf)
-- [ ] Boolean-tree demand analysis for strictness signatures
-- [ ] Fixpoint iteration for recursive binding groups
-- [ ] Annotate strict arguments
-- [ ] Worker/wrapper split for strict-arg functions (unboxed workers)
+#### Phase O.3: Demand Analysis + Worker/Wrapper (MEDIUM — Default profile perf) ✅ COMPLETE (O.3)
+- [x] Boolean-tree demand analysis for strictness signatures
+- [x] Fixpoint iteration for recursive binding groups
+- [x] Annotate strict arguments
+- [x] Worker/wrapper split for strict-arg functions (unboxed workers)
 - [ ] `-ddump-core-after-demand` dump flag
 
 #### Phase O.4: Dictionary Specialization (MEDIUM — typeclass perf)
@@ -444,8 +449,8 @@ crates/bhc-core/src/
 │   ├── dead.rs              # ✅ Dead binding elimination
 │   ├── fold.rs              # ✅ Constant folding
 │   └── inline.rs            # ✅ Inlining decisions
-├── demand.rs                # 🔴 Demand analysis (not started)
-├── worker_wrapper.rs        # 🔴 Worker/wrapper transformation (not started)
+├── demand.rs                # ✅ Demand analysis (boolean-tree strictness, fixpoint iteration)
+├── worker_wrapper.rs        # ✅ Worker/wrapper transformation (case-wrapping strict args)
 └── specialize.rs            # 🔴 Dictionary specialization (not started)
 ```
 

@@ -1062,6 +1062,41 @@ impl Compiler {
                 inlines = stats.inlines,
                 "Core simplifier complete"
             );
+
+            // Demand analysis + worker/wrapper (lazy profiles only)
+            if matches!(
+                self.session.options.profile,
+                bhc_session::Profile::Default
+                    | bhc_session::Profile::Server
+                    | bhc_session::Profile::Realtime
+            ) {
+                let demands = bhc_core::demand::analyze_module(&core.bindings);
+                let ww_count =
+                    bhc_core::worker_wrapper::apply_worker_wrapper(&mut core, &demands);
+
+                if ww_count > 0 {
+                    debug!(
+                        transformed = ww_count,
+                        "Worker/wrapper transformation complete"
+                    );
+
+                    // Second simplifier pass to clean up after worker/wrapper
+                    let config2 = bhc_core::simplify::SimplifyConfig {
+                        max_iterations: 4,
+                        ..config.clone()
+                    };
+                    let stats2 = bhc_core::simplify::simplify_module(&mut core, &config2);
+                    debug!(
+                        iterations = stats2.iterations,
+                        beta = stats2.beta_reductions,
+                        case_known = stats2.case_of_known,
+                        dead = stats2.dead_bindings,
+                        folds = stats2.constant_folds,
+                        inlines = stats2.inlines,
+                        "Post-W/W simplifier complete"
+                    );
+                }
+            }
         }
 
         Ok(core)

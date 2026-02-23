@@ -284,10 +284,11 @@ Design informed by HBC's (Lennart Augustsson) proven simplifier and analysis pas
   - Column-based decision tree generation (Augustsson/Sestoft algorithm)
   - Exhaustiveness checking and warnings
   - Overlap/redundancy detection and warnings
-- [ ] **Demand Analysis** — per-function strictness (Default profile):
+- [x] **Demand Analysis + Worker/Wrapper** (O.3) — per-function strictness (Default profile):
   - Boolean-tree abstract interpretation
-  - Fixpoint iteration for recursive groups
+  - Fixpoint iteration for recursive binding groups
   - Worker/wrapper transformation for strict arguments
+  - Wired into driver pipeline after first simplifier pass, gated on lazy profiles
 - [ ] **Dictionary Specialization** — monomorphize typeclass-polymorphic code:
   - Direct method selection on known dictionaries
   - SPECIALIZE pragma support
@@ -306,7 +307,7 @@ Each phase will be validated against real codebases:
 | 4 | Compile programs with classes, instances, GADTs | ✅ Working (E.38–E.64) |
 | 5 | Parse lens library type signatures | Blocked on type families |
 | 6 | Full type system coverage | Mostly done, type families remaining |
-| 7 | Compiled programs run measurably faster | 🟡 Core simplifier (E.68-E.69): local + top-level transforms, case-of-case |
+| 7 | Compiled programs run measurably faster | 🟡 Core simplifier (E.68-E.69): local + top-level transforms, case-of-case; demand analysis + worker/wrapper (O.3) |
 
 ### Exit Criteria
 

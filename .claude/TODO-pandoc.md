@@ -430,11 +430,11 @@ and opt_level != None. Dictionary specialization remains to be implemented.
 - [x] Worker/wrapper split for strict-arg functions (unboxed workers)
 - [ ] `-ddump-core-after-demand` dump flag
 
-#### Phase O.4: Dictionary Specialization (MEDIUM — typeclass perf)
-- [ ] Direct method selection when dictionary is known constructor
-- [ ] Monomorphize polymorphic functions at concrete call sites
-- [ ] SPECIALIZE pragma support
-- [ ] Second simplifier round to clean up after specialization
+#### Phase O.4: Dictionary Specialization ✅
+- [x] Direct method selection when dictionary is known constructor
+- [x] Cleanup simplifier pass after specialization
+- [ ] Monomorphize polymorphic functions at concrete call sites (future)
+- [ ] SPECIALIZE pragma support (future)
 
 #### Key Files
 ```
@@ -451,7 +451,7 @@ crates/bhc-core/src/
 │   └── inline.rs            # ✅ Inlining decisions
 ├── demand.rs                # ✅ Demand analysis (boolean-tree strictness, fixpoint iteration)
 ├── worker_wrapper.rs        # ✅ Worker/wrapper transformation (case-wrapping strict args)
-└── specialize.rs            # 🔴 Dictionary specialization (not started)
+└── specialize.rs            # ✅ Dictionary specialization (O.4)
 ```
 
 ---

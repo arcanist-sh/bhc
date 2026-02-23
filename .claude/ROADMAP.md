@@ -289,9 +289,9 @@ Design informed by HBC's (Lennart Augustsson) proven simplifier and analysis pas
   - Fixpoint iteration for recursive binding groups
   - Worker/wrapper transformation for strict arguments
   - Wired into driver pipeline after first simplifier pass, gated on lazy profiles
-- [ ] **Dictionary Specialization** — monomorphize typeclass-polymorphic code:
+- [x] **Dictionary Specialization** (O.4) — monomorphize typeclass-polymorphic code:
   - Direct method selection on known dictionaries
-  - SPECIALIZE pragma support
+  - Cleanup simplifier pass after specialization
 
 See `rules/013-optimization.md` for detailed design.
 

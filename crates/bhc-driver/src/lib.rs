@@ -1097,6 +1097,29 @@ impl Compiler {
                     );
                 }
             }
+
+            // Dictionary specialization (all profiles)
+            let spec_count = bhc_core::specialize::specialize_dictionaries(&mut core);
+            if spec_count > 0 {
+                debug!(
+                    specialized = spec_count,
+                    "Dictionary specialization complete"
+                );
+
+                // Cleanup simplifier pass after specialization
+                let config3 = bhc_core::simplify::SimplifyConfig {
+                    max_iterations: 4,
+                    ..config.clone()
+                };
+                let stats3 = bhc_core::simplify::simplify_module(&mut core, &config3);
+                debug!(
+                    iterations = stats3.iterations,
+                    beta = stats3.beta_reductions,
+                    dead = stats3.dead_bindings,
+                    inlines = stats3.inlines,
+                    "Post-specialization simplifier complete"
+                );
+            }
         }
 
         Ok(core)

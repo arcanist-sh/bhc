@@ -66,6 +66,7 @@ pub mod escape;
 pub mod eval;
 pub mod pretty;
 pub mod simplify;
+pub mod specialize;
 pub mod uarray;
 pub mod worker_wrapper;
 

@@ -118,6 +118,15 @@ pub struct TypeFamilyEquation {
     pub rhs: Ty,
 }
 
+/// Information about a data family instance.
+#[derive(Clone, Debug)]
+pub struct DataFamilyInstanceInfo {
+    /// Type argument patterns for this instance (e.g., `[Int]`).
+    pub args: Vec<Ty>,
+    /// Constructor DefIds for this instance.
+    pub con_ids: Vec<DefId>,
+}
+
 /// The type environment during type checking.
 ///
 /// Maintains bindings at various scopes:
@@ -158,6 +167,9 @@ pub struct TypeEnv {
 
     /// Open type family instances (family name -> list of equations).
     type_family_instances: FxHashMap<Symbol, Vec<TypeFamilyEquation>>,
+
+    /// Data family instances (family name -> list of instance info).
+    data_family_instances: FxHashMap<Symbol, Vec<DataFamilyInstanceInfo>>,
 }
 
 impl Default for TypeEnv {
@@ -180,6 +192,7 @@ impl TypeEnv {
             instances: FxHashMap::default(),
             type_families: FxHashMap::default(),
             type_family_instances: FxHashMap::default(),
+            data_family_instances: FxHashMap::default(),
         }
     }
 
@@ -542,6 +555,18 @@ impl TypeEnv {
             .entry(family_name)
             .or_default()
             .push(eqn);
+    }
+
+    /// Register a data family instance.
+    pub fn register_data_family_instance(
+        &mut self,
+        family_name: Symbol,
+        info: DataFamilyInstanceInfo,
+    ) {
+        self.data_family_instances
+            .entry(family_name)
+            .or_default()
+            .push(info);
     }
 
     /// Look up a standalone type family.

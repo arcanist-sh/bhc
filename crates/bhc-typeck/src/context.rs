@@ -3273,6 +3273,65 @@ impl TyCtxt {
         self.env.register_type_family_instance(inst.name, eqn);
     }
 
+    /// Register a standalone data family in the type environment.
+    pub fn register_data_family(&mut self, df: &bhc_hir::DataFamilyDef) {
+        // Register as a type constructor so it can appear in type expressions
+        let kind = if df.params.is_empty() {
+            df.kind.clone()
+        } else {
+            Self::compute_type_con_kind(df.params.len())
+        };
+        let tycon = TyCon { name: df.name, kind };
+        self.env.register_type_con(tycon);
+    }
+
+    /// Register a data family instance.
+    pub fn register_data_family_instance(&mut self, inst: &bhc_hir::DataFamilyInstance) {
+        use bhc_hir::ConFields;
+
+        // Register each constructor as a data constructor
+        for con in &inst.cons {
+            // Build the constructor type scheme
+            // Return type is FamilyName arg1 arg2 ...
+            let result_ty = {
+                let base_kind = Self::compute_type_con_kind(inst.args.len());
+                let base = Ty::Con(TyCon::new(inst.family_name, base_kind));
+                inst.args
+                    .iter()
+                    .fold(base, |acc, arg| Ty::App(Box::new(acc), Box::new(arg.clone())))
+            };
+
+            let field_types = match &con.fields {
+                ConFields::Positional(tys) => tys.clone(),
+                ConFields::Named(fields) => fields.iter().map(|f| f.ty.clone()).collect(),
+            };
+
+            // Build: field1 -> field2 -> ... -> FamilyName args
+            let con_ty = field_types
+                .into_iter()
+                .rev()
+                .fold(result_ty, |acc, field_ty| Ty::fun(field_ty, acc));
+
+            // Quantify over free type variables
+            let free = con_ty.free_vars();
+            let scheme = if free.is_empty() {
+                Scheme::mono(con_ty)
+            } else {
+                Scheme::poly(free, con_ty)
+            };
+
+            self.env.register_data_con(con.id, con.name, scheme);
+        }
+
+        // Track instance for resolution
+        let info = crate::env::DataFamilyInstanceInfo {
+            args: inst.args.clone(),
+            con_ids: inst.cons.iter().map(|c| c.id).collect(),
+        };
+        self.env
+            .register_data_family_instance(inst.family_name, info);
+    }
+
     /// Compute the kind of a type constructor given its arity.
     fn compute_type_con_kind(arity: usize) -> Kind {
         let mut kind = Kind::Star;
@@ -3467,7 +3526,9 @@ impl TyCtxt {
             | Item::StandaloneDeriving(_)
             | Item::PatternSynonym(_)
             | Item::TypeFamily(_)
-            | Item::TypeFamilyInst(_) => {}
+            | Item::TypeFamilyInst(_)
+            | Item::DataFamily(_)
+            | Item::DataFamilyInst(_) => {}
         }
     }
 

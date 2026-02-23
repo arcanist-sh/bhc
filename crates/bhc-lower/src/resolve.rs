@@ -383,6 +383,73 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
                 // Type instances don't introduce new names
             }
 
+            ast::Decl::DataFamilyDecl(df) => {
+                let name = df.name.name;
+                let def_id = ctx.fresh_def_id();
+                ctx.define(def_id, name, DefKind::Type, df.span);
+                ctx.bind_type(name, def_id);
+            }
+
+            ast::Decl::DataInstanceDecl(di) => {
+                // Data family instances define constructors but not a new type name
+                let type_name = di.family_name.name;
+                let type_param_count = di.args.len();
+
+                // Bind H98 constructors
+                for con in &di.constrs {
+                    let con_name = con.name.name;
+                    let con_def_id = ctx.fresh_def_id();
+                    let (arity, field_names) = match &con.fields {
+                        ast::ConFields::Positional(fields) => (fields.len(), None),
+                        ast::ConFields::Record(fields) => {
+                            let names: Vec<Symbol> =
+                                fields.iter().map(|f| f.name.name).collect();
+                            (fields.len(), Some(names))
+                        }
+                    };
+                    ctx.define_constructor_with_type(
+                        con_def_id,
+                        con_name,
+                        con.span,
+                        arity,
+                        type_name,
+                        type_param_count,
+                        field_names,
+                    );
+                    ctx.bind_constructor(con_name, con_def_id);
+
+                    if let ast::ConFields::Record(fields) = &con.fields {
+                        for field in fields {
+                            let field_def_id = ctx.fresh_def_id();
+                            ctx.define(
+                                field_def_id,
+                                field.name.name,
+                                DefKind::Value,
+                                field.span,
+                            );
+                            ctx.bind_value(field.name.name, field_def_id);
+                        }
+                    }
+                }
+
+                // Bind GADT constructors
+                for con in &di.gadt_constrs {
+                    let con_name = con.name.name;
+                    let con_def_id = ctx.fresh_def_id();
+                    let arity = count_type_arrows(&con.ty);
+                    ctx.define_constructor_with_type(
+                        con_def_id,
+                        con_name,
+                        con.span,
+                        arity,
+                        type_name,
+                        type_param_count,
+                        None,
+                    );
+                    ctx.bind_constructor(con_name, con_def_id);
+                }
+            }
+
             ast::Decl::Fixity(_) | ast::Decl::InstanceDecl(_) | ast::Decl::PragmaDecl(_)
             | ast::Decl::StandaloneDeriving(_) => {
                 // These don't introduce new names

@@ -400,6 +400,12 @@ pub enum Item {
 
     /// A standalone type family instance (for open families).
     TypeFamilyInst(TypeFamilyInstance),
+
+    /// A standalone data family definition.
+    DataFamily(DataFamilyDef),
+
+    /// A data family instance.
+    DataFamilyInst(DataFamilyInstance),
 }
 
 /// A value (function) definition.
@@ -566,6 +572,40 @@ pub struct TypeFamilyInstance {
     pub args: Vec<Ty>,
     /// The right-hand side type.
     pub rhs: Ty,
+    /// Source span.
+    pub span: Span,
+}
+
+/// A standalone data family definition.
+///
+/// Example: `data family Container a`
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DataFamilyDef {
+    /// The unique ID of this definition.
+    pub id: DefId,
+    /// The family name.
+    pub name: Symbol,
+    /// Type parameters.
+    pub params: Vec<TyVar>,
+    /// Result kind.
+    pub kind: bhc_types::Kind,
+    /// Source span.
+    pub span: Span,
+}
+
+/// A data family instance.
+///
+/// Example: `data instance Container Int = IntContainer !Int !Int`
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DataFamilyInstance {
+    /// The family name.
+    pub family_name: Symbol,
+    /// Type argument patterns (e.g., `[Int]`).
+    pub args: Vec<Ty>,
+    /// The data constructors for this instance.
+    pub cons: Vec<ConDef>,
+    /// Derived instances.
+    pub deriving: Vec<Symbol>,
     /// Source span.
     pub span: Span,
 }

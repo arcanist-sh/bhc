@@ -1123,6 +1123,14 @@ impl<'src> Parser<'src> {
         let start = self.current_span();
         self.expect(&TokenKind::Data)?;
 
+        // Check for data family / data instance
+        if self.check(&TokenKind::Family) {
+            return self.parse_data_family_decl(start, doc);
+        }
+        if self.check(&TokenKind::Instance) {
+            return self.parse_data_instance_decl(start, doc);
+        }
+
         // Check for infix operator data declaration: `data a :+: b = ...`
         // Pattern: Ident ConOperator Ident (type_var operator type_var)
         let (name, params) = if let Some(TokenKind::Ident(_)) = self.current_kind() {
@@ -1823,6 +1831,78 @@ impl<'src> Parser<'src> {
             name,
             args,
             rhs,
+            span,
+        }))
+    }
+
+    /// Parse a standalone data family declaration: `data family F a`
+    fn parse_data_family_decl(
+        &mut self,
+        start: Span,
+        doc: Option<DocComment>,
+    ) -> ParseResult<Decl> {
+        self.expect(&TokenKind::Family)?;
+
+        let name = self.parse_conid()?;
+        let params = self.parse_ty_var_list()?;
+
+        // Optional kind signature: `:: * -> *`
+        let kind = if self.eat(&TokenKind::DoubleColon) {
+            Some(self.parse_kind()?)
+        } else {
+            None
+        };
+
+        let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+        Ok(Decl::DataFamilyDecl(DataFamilyDecl {
+            doc,
+            name,
+            params,
+            kind,
+            span,
+        }))
+    }
+
+    /// Parse a data family instance: `data instance F Int = Con1 Int | Con2`
+    fn parse_data_instance_decl(
+        &mut self,
+        start: Span,
+        doc: Option<DocComment>,
+    ) -> ParseResult<Decl> {
+        self.expect(&TokenKind::Instance)?;
+
+        let family_name = self.parse_conid()?;
+
+        // Parse type argument patterns (stop at = or where)
+        let mut args = Vec::new();
+        while !self.check(&TokenKind::Eq)
+            && !self.check(&TokenKind::Where)
+            && !self.at_eof()
+        {
+            args.push(self.parse_atype()?);
+        }
+
+        // Parse constructors (same as regular data decl)
+        let (constrs, gadt_constrs, deriving) = if self.eat(&TokenKind::Eq) {
+            let constrs = self.parse_constructors()?;
+            let deriving = self.parse_deriving()?;
+            (constrs, vec![], deriving)
+        } else if self.check(&TokenKind::Where) {
+            let gadt_constrs = self.parse_gadt_constructors()?;
+            let deriving = self.parse_deriving()?;
+            (vec![], gadt_constrs, deriving)
+        } else {
+            (vec![], vec![], vec![])
+        };
+
+        let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+        Ok(Decl::DataInstanceDecl(DataInstanceDecl {
+            doc,
+            family_name,
+            args,
+            constrs,
+            gadt_constrs,
+            deriving,
             span,
         }))
     }

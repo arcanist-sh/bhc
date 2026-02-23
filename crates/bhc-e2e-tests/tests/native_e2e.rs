@@ -1010,6 +1010,11 @@ fn test_tier3_type_family_open_native() {
     run_native_test("tier3_io/type_family_open", Profile::Default);
 }
 
+#[test]
+fn test_tier3_data_family_basic_native() {
+    run_native_test("tier3_io/data_family_basic", Profile::Default);
+}
+
 // =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================

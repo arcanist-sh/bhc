@@ -120,8 +120,10 @@ const fn get_item_def_id(item: &Item) -> Option<DefId> {
         Item::Class(c) => Some(c.id),
         Item::Instance(_) | Item::Fixity(_) | Item::Foreign(_)
         | Item::StandaloneDeriving(_) | Item::PatternSynonym(_)
-        | Item::TypeFamilyInst(_) => None,
+        | Item::TypeFamilyInst(_)
+        | Item::DataFamilyInst(_) => None,
         Item::TypeFamily(tf) => Some(tf.id),
+        Item::DataFamily(df) => Some(df.id),
     }
 }
 

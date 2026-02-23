@@ -228,6 +228,18 @@ pub fn type_check_module_with_defs(
         }
     }
 
+    // Register data families and their instances
+    for item in &hir.items {
+        if let bhc_hir::Item::DataFamily(df) = item {
+            ctx.register_data_family(df);
+        }
+    }
+    for item in &hir.items {
+        if let bhc_hir::Item::DataFamilyInst(inst) = item {
+            ctx.register_data_family_instance(inst);
+        }
+    }
+
     // Compute binding groups (SCCs) for mutual recursion
     let groups = binding_groups::compute_binding_groups(&hir.items);
 

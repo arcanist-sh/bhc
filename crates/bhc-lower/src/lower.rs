@@ -1093,6 +1093,16 @@ fn lower_decl(ctx: &mut LowerContext, decl: &ast::Decl) -> LowerResult<Vec<hir::
             let item = lower_type_instance_decl(ctx, ti_decl);
             Ok(vec![hir::Item::TypeFamilyInst(item)])
         }
+
+        ast::Decl::DataFamilyDecl(df_decl) => {
+            let item = lower_data_family_decl(ctx, df_decl)?;
+            Ok(vec![hir::Item::DataFamily(item)])
+        }
+
+        ast::Decl::DataInstanceDecl(di_decl) => {
+            let item = lower_data_instance_decl(ctx, di_decl);
+            Ok(vec![hir::Item::DataFamilyInst(item)])
+        }
     }
 }
 
@@ -3266,6 +3276,61 @@ fn lower_type_instance_decl(
         args: ti.args.iter().map(|a| lower_type(ctx, a)).collect(),
         rhs: lower_type(ctx, &ti.rhs),
         span: ti.span,
+    }
+}
+
+/// Lower a standalone data family declaration to HIR.
+fn lower_data_family_decl(
+    ctx: &mut LowerContext,
+    df: &ast::DataFamilyDecl,
+) -> LowerResult<hir::DataFamilyDef> {
+    let def_id = ctx
+        .lookup_type(df.name.name)
+        .expect("data family should be pre-bound");
+
+    let params: Vec<bhc_types::TyVar> = df
+        .params
+        .iter()
+        .map(|p| bhc_types::TyVar::new_star(p.name.name.as_u32()))
+        .collect();
+
+    let kind = df
+        .kind
+        .as_ref()
+        .map(lower_kind)
+        .unwrap_or(bhc_types::Kind::Star);
+
+    Ok(hir::DataFamilyDef {
+        id: def_id,
+        name: df.name.name,
+        params,
+        kind,
+        span: df.span,
+    })
+}
+
+/// Lower a data family instance declaration to HIR.
+fn lower_data_instance_decl(
+    ctx: &mut LowerContext,
+    di: &ast::DataInstanceDecl,
+) -> hir::DataFamilyInstance {
+    let cons: Vec<hir::ConDef> = if !di.gadt_constrs.is_empty() {
+        di.gadt_constrs
+            .iter()
+            .map(|c| lower_gadt_con_def(ctx, c))
+            .collect()
+    } else {
+        di.constrs.iter().map(|c| lower_con_def(ctx, c)).collect()
+    };
+
+    let deriving: Vec<Symbol> = di.deriving.iter().map(|c| c.name).collect();
+
+    hir::DataFamilyInstance {
+        family_name: di.family_name.name,
+        args: di.args.iter().map(|a| lower_type(ctx, a)).collect(),
+        cons,
+        deriving,
+        span: di.span,
     }
 }
 

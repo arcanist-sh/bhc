@@ -456,8 +456,11 @@ fn collect_decl_exports(
         | ast::Decl::StandaloneDeriving(_)
         | ast::Decl::PatternSynonym(_)
         | ast::Decl::TypeFamilyDecl(_)
-        | ast::Decl::TypeInstanceDecl(_) => {
-            // These don't create exports (type families are type-level only)
+        | ast::Decl::TypeInstanceDecl(_)
+        | ast::Decl::DataFamilyDecl(_)
+        | ast::Decl::DataInstanceDecl(_) => {
+            // These don't create exports (data/type families are type-level only,
+            // constructors from data instances are handled via their family name)
         }
     }
 }

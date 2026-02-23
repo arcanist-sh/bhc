@@ -234,15 +234,15 @@ Required for Pandoc but solvable without architectural changes.
 
 ### 2.1 GADT and Type Family Completion
 
-**Status:** ✅ GADTs working (E.60), type families working (open, closed, associated)
-**Scope:** Small (remaining: data families)
+**Status:** ✅ GADTs working (E.60), type families working (open, closed, associated), data families working
+**Scope:** Small (remaining: kind inference improvements)
 
 - [x] GADT type checking: refine types in branches based on constructor (E.60)
 - [x] Type family reduction during type checking
 - [x] Closed type families with overlapping equations (first-match semantics)
 - [x] Open type families with standalone instances
 - [x] Associated type families (class-associated, with defaults)
-- [ ] Data families
+- [x] Data families (standalone data families with data instances)
 - [ ] Kind inference improvements (currently requires manual signatures)
 
 ### 2.2 Multi-Module Compilation
@@ -992,7 +992,7 @@ package DB, and add BHC builtin package mapping.
 
 **Impact on Pandoc gaps:** Items #1-5 from the original "Missing for Pandoc" list are now complete
 (OverloadedStrings, Records, ViewPatterns, TupleSections/MultiWayIf, GeneralizedNewtypeDeriving).
-Remaining blockers: package system, CPP preprocessing, full GHC.Generics, data families.
+Remaining blockers: package system, CPP preprocessing, full GHC.Generics.
 
 ### 2026-02-12: Milestones E.25–E.31
 - E.25: String read/readMaybe/fromString (82 tests)

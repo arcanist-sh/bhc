@@ -446,6 +446,10 @@ pub enum Decl {
     TypeFamilyDecl(TypeFamilyDecl),
     /// Standalone type family instance: `type instance F Int = Bool`
     TypeInstanceDecl(TypeInstanceDecl),
+    /// Standalone data family: `data family F a`
+    DataFamilyDecl(DataFamilyDecl),
+    /// Data family instance: `data instance F Int = Con1 Int | Con2`
+    DataInstanceDecl(DataInstanceDecl),
 }
 
 /// A standalone deriving declaration: `deriving instance Show Foo`
@@ -529,6 +533,40 @@ pub struct TypeInstanceDecl {
     pub args: Vec<Type>,
     /// The right-hand side type.
     pub rhs: Type,
+    /// The span.
+    pub span: Span,
+}
+
+/// A standalone data family declaration: `data family F a`
+#[derive(Clone, Debug)]
+pub struct DataFamilyDecl {
+    /// Documentation comment.
+    pub doc: Option<DocComment>,
+    /// The family name.
+    pub name: Ident,
+    /// Type parameters.
+    pub params: Vec<TyVar>,
+    /// Optional result kind signature.
+    pub kind: Option<Kind>,
+    /// The span.
+    pub span: Span,
+}
+
+/// A data family instance: `data instance F Int = Con1 Int | Con2`
+#[derive(Clone, Debug)]
+pub struct DataInstanceDecl {
+    /// Documentation comment.
+    pub doc: Option<DocComment>,
+    /// The family name.
+    pub family_name: Ident,
+    /// Type argument patterns (e.g., `[Int]`).
+    pub args: Vec<Type>,
+    /// H98 constructors.
+    pub constrs: Vec<ConDecl>,
+    /// GADT constructors.
+    pub gadt_constrs: Vec<GadtConDecl>,
+    /// Deriving clause.
+    pub deriving: Vec<Ident>,
     /// The span.
     pub span: Span,
 }

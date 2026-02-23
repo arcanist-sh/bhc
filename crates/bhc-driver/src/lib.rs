@@ -1417,6 +1417,14 @@ impl Compiler {
                     (newtype_def.name, newtype_def.params.len(), 0),
                 );
             }
+            if let bhc_hir::Item::DataFamilyInst(inst) = item {
+                for (tag, con) in inst.cons.iter().enumerate() {
+                    con_type_info.insert(
+                        con.id,
+                        (inst.family_name, inst.args.len(), tag as u32),
+                    );
+                }
+            }
         }
 
         // Also export types and constructors defined in this module

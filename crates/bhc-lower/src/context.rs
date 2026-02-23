@@ -761,6 +761,8 @@ impl LowerContext {
             "fromException",
             "toException",
             "displayException",
+            "userError",
+            "ioError",
             // ---- Phase 1 new PrimOps ----
             // Scans
             "scanl1",

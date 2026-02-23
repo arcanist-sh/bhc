@@ -1793,10 +1793,11 @@ pub extern "C" fn bhc_readFile(path: *const c_char) -> *mut c_char {
             CString::new(contents).map_or(ptr::null_mut(), |cs| cs.into_raw())
         }
         Err(e) => {
-            // Throw an exception with the error message as a C string
+            // Throw an IOException with the error message as payload
             let msg = format!("{}: {}", path_str, e);
-            let exc = CString::new(msg).map_or(ptr::null_mut(), |cs| cs.into_raw());
-            bhc_throw(exc as *mut u8) as *mut c_char
+            let payload = CString::new(msg).map_or(ptr::null_mut(), |cs| cs.into_raw());
+            let exc = bhc_make_some_exception(EXC_TAG_IO_EXCEPTION, payload as *mut u8);
+            bhc_throw(exc) as *mut c_char
         }
     }
 }
@@ -1984,6 +1985,182 @@ thread_local! {
 /// bhc_catch checks for pending exceptions after the action returns.
 const BHC_EXCEPTION_SENTINEL: *mut u8 = ptr::null_mut();
 
+// ============================================================================
+// SomeException — Tagged Exception Type
+// ============================================================================
+//
+// SomeException is a 2-word struct: [type_tag: i64, payload: *mut u8]
+// The tag identifies the exception type for type-filtered catch:
+//   0 = SomeException (catch-all)
+//   1 = IOException
+//   2 = ErrorCall
+// The payload is the original exception value (typically a C-string message).
+// ============================================================================
+
+/// Exception type tag for catch-all (SomeException).
+const EXC_TAG_SOME_EXCEPTION: i64 = 0;
+/// Exception type tag for IOException.
+const EXC_TAG_IO_EXCEPTION: i64 = 1;
+/// Exception type tag for ErrorCall.
+const EXC_TAG_ERROR_CALL: i64 = 2;
+
+/// Allocate a SomeException struct with the given type tag and payload.
+///
+/// The struct is heap-allocated as 16 bytes: [i64 tag, *mut u8 payload].
+///
+/// # Arguments
+///
+/// * `type_tag` - Exception type tag (0=SomeException, 1=IOException, 2=ErrorCall).
+/// * `payload` - Pointer to the exception payload (typically a C-string message).
+///
+/// # Returns
+///
+/// Pointer to the allocated SomeException struct.
+#[no_mangle]
+pub extern "C" fn bhc_make_some_exception(type_tag: i64, payload: *mut u8) -> *mut u8 {
+    let layout = std::alloc::Layout::from_size_align(16, 8).unwrap();
+    let ptr = unsafe { std::alloc::alloc(layout) };
+    if ptr.is_null() {
+        return ptr::null_mut();
+    }
+    unsafe {
+        *(ptr as *mut i64) = type_tag;
+        *((ptr as *mut u8).add(8) as *mut *mut u8) = payload;
+    }
+    ptr
+}
+
+/// Get the type tag from a SomeException pointer.
+///
+/// # Arguments
+///
+/// * `exc` - Pointer to a SomeException struct.
+///
+/// # Returns
+///
+/// The exception type tag (0=SomeException, 1=IOException, 2=ErrorCall).
+#[no_mangle]
+pub extern "C" fn bhc_exc_get_tag(exc: *mut u8) -> i64 {
+    if exc.is_null() {
+        return EXC_TAG_SOME_EXCEPTION;
+    }
+    unsafe { *(exc as *const i64) }
+}
+
+/// Get the payload from a SomeException pointer.
+///
+/// # Arguments
+///
+/// * `exc` - Pointer to a SomeException struct.
+///
+/// # Returns
+///
+/// The payload pointer from the exception.
+#[no_mangle]
+pub extern "C" fn bhc_exc_get_payload(exc: *mut u8) -> *mut u8 {
+    if exc.is_null() {
+        return ptr::null_mut();
+    }
+    unsafe { *((exc as *mut u8).add(8) as *const *mut u8) }
+}
+
+/// Get a human-readable string representation of a SomeException.
+///
+/// # Arguments
+///
+/// * `exc` - Pointer to a SomeException struct.
+///
+/// # Returns
+///
+/// A heap-allocated C-string describing the exception.
+#[no_mangle]
+pub extern "C" fn bhc_show_exception(exc: *mut u8) -> *mut u8 {
+    if exc.is_null() {
+        let msg = CString::new("<<unknown exception>>").unwrap();
+        return msg.into_raw() as *mut u8;
+    }
+    let tag = bhc_exc_get_tag(exc);
+    let payload = bhc_exc_get_payload(exc);
+
+    let payload_str = if payload.is_null() {
+        "<null>".to_string()
+    } else {
+        unsafe { CStr::from_ptr(payload as *const c_char) }
+            .to_str()
+            .unwrap_or("<invalid utf8>")
+            .to_string()
+    };
+
+    let msg = match tag {
+        EXC_TAG_IO_EXCEPTION => format!("{}", payload_str),
+        EXC_TAG_ERROR_CALL => format!("{}", payload_str),
+        _ => format!("{}", payload_str),
+    };
+
+    CString::new(msg)
+        .map(|cs| cs.into_raw() as *mut u8)
+        .unwrap_or(ptr::null_mut())
+}
+
+/// Type-filtered exception catch.
+///
+/// Runs `action_fn(action_env)`. If an exception is thrown, checks its type tag
+/// against `type_tag`. If they match (or `type_tag == 0` for catch-all), invokes
+/// the handler with the exception payload. If the tag doesn't match, re-throws.
+///
+/// # Arguments
+///
+/// * `action_fn` - Function pointer for the IO action.
+/// * `action_env` - Environment/closure pointer for the action.
+/// * `handler_fn` - Function pointer for the exception handler.
+/// * `handler_env` - Environment/closure pointer for the handler.
+/// * `type_tag` - Exception type to catch (0=all, 1=IOException, 2=ErrorCall).
+///
+/// # Returns
+///
+/// The result of either the action or the handler.
+#[no_mangle]
+pub extern "C" fn bhc_catch_typed(
+    action_fn: extern "C" fn(*mut u8) -> *mut u8,
+    action_env: *mut u8,
+    handler_fn: extern "C" fn(*mut u8, *mut u8) -> *mut u8,
+    handler_env: *mut u8,
+    type_tag: i64,
+) -> *mut u8 {
+    // Save any pre-existing exception state
+    let saved = BHC_EXCEPTION.with(|cell| cell.replace(None));
+
+    // Run the action
+    let result = action_fn(action_env);
+
+    // Check if an exception was thrown during the action
+    let thrown = BHC_EXCEPTION.with(|cell| cell.replace(None));
+
+    match thrown {
+        Some(exc_ptr) => {
+            // Get the tag of the thrown exception
+            let exc_tag = bhc_exc_get_tag(exc_ptr);
+            let payload = bhc_exc_get_payload(exc_ptr);
+
+            if type_tag == EXC_TAG_SOME_EXCEPTION || exc_tag == type_tag {
+                // Tag matches (or catch-all) — invoke handler with payload
+                handler_fn(handler_env, payload)
+            } else {
+                // Tag doesn't match — re-throw the exception
+                BHC_EXCEPTION.with(|cell| cell.set(Some(exc_ptr)));
+                BHC_EXCEPTION_SENTINEL
+            }
+        }
+        None => {
+            // No exception — restore saved state and return result
+            if saved.is_some() {
+                BHC_EXCEPTION.with(|cell| cell.set(saved));
+            }
+            result
+        }
+    }
+}
+
 /// Throw a Haskell exception.
 ///
 /// Stores the exception pointer in thread-local storage and aborts the
@@ -2007,11 +2184,10 @@ pub extern "C" fn bhc_throw(exception_ptr: *mut u8) -> *mut u8 {
     BHC_EXCEPTION_SENTINEL
 }
 
-/// Catch a Haskell exception.
+/// Catch a Haskell exception (catch-all).
 ///
-/// Runs `action_fn(action_env)`. If the action (or any function it calls)
-/// invokes `bhc_throw`, the exception is caught and `handler_fn` is called
-/// with the exception pointer.
+/// Delegates to `bhc_catch_typed` with `type_tag = 0` (SomeException),
+/// which catches all exception types.
 ///
 /// # Arguments
 ///
@@ -2034,28 +2210,7 @@ pub extern "C" fn bhc_catch(
     handler_fn: extern "C" fn(*mut u8, *mut u8) -> *mut u8,
     handler_env: *mut u8,
 ) -> *mut u8 {
-    // Save any pre-existing exception state
-    let saved = BHC_EXCEPTION.with(|cell| cell.replace(None));
-
-    // Run the action
-    let result = action_fn(action_env);
-
-    // Check if an exception was thrown during the action
-    let thrown = BHC_EXCEPTION.with(|cell| cell.replace(None));
-
-    match thrown {
-        Some(exc_ptr) => {
-            // Exception was thrown — invoke the handler
-            handler_fn(handler_env, exc_ptr)
-        }
-        None => {
-            // No exception — restore saved state and return result
-            if saved.is_some() {
-                BHC_EXCEPTION.with(|cell| cell.set(saved));
-            }
-            result
-        }
-    }
+    bhc_catch_typed(action_fn, action_env, handler_fn, handler_env, EXC_TAG_SOME_EXCEPTION)
 }
 
 /// Force a value to Weak Head Normal Form.
@@ -3493,10 +3648,11 @@ mod tests {
     #[test]
     fn test_bhc_catch_with_exception() {
         extern "C" fn action(_env: *mut u8) -> *mut u8 {
-            bhc_throw(77usize as *mut u8)
+            let exc = bhc_make_some_exception(EXC_TAG_SOME_EXCEPTION, 77usize as *mut u8);
+            bhc_throw(exc)
         }
         extern "C" fn handler(_env: *mut u8, exc: *mut u8) -> *mut u8 {
-            // Return the exception pointer as the result
+            // Handler receives the payload (not the SomeException wrapper)
             exc
         }
         let result = bhc_catch(action, ptr::null_mut(), handler, ptr::null_mut());
@@ -3537,7 +3693,8 @@ mod tests {
     #[test]
     fn test_bhc_finally_with_exception() {
         extern "C" fn action(_env: *mut u8) -> *mut u8 {
-            bhc_throw(77usize as *mut u8)
+            let exc = bhc_make_some_exception(EXC_TAG_SOME_EXCEPTION, 77usize as *mut u8);
+            bhc_throw(exc)
         }
         extern "C" fn cleanup(_env: *mut u8) -> *mut u8 {
             ptr::null_mut()
@@ -3545,9 +3702,10 @@ mod tests {
         // finally should re-throw; verify exception is pending
         let result = bhc_finally(action, ptr::null_mut(), cleanup, ptr::null_mut());
         assert_eq!(result, BHC_EXCEPTION_SENTINEL);
-        // Exception should be pending in TLS
+        // Exception should be pending in TLS as SomeException
         let exc = BHC_EXCEPTION.with(|cell| cell.replace(None));
-        assert_eq!(exc.unwrap() as usize, 77);
+        let exc_ptr = exc.unwrap();
+        assert_eq!(bhc_exc_get_payload(exc_ptr) as usize, 77);
     }
 
     #[test]
@@ -3565,7 +3723,8 @@ mod tests {
     #[test]
     fn test_bhc_on_exception_with_exception() {
         extern "C" fn action(_env: *mut u8) -> *mut u8 {
-            bhc_throw(77usize as *mut u8)
+            let exc = bhc_make_some_exception(EXC_TAG_SOME_EXCEPTION, 77usize as *mut u8);
+            bhc_throw(exc)
         }
         static mut HANDLER_CALLED: bool = false;
         extern "C" fn handler(_env: *mut u8) -> *mut u8 {
@@ -3576,9 +3735,10 @@ mod tests {
         let result = bhc_on_exception(action, ptr::null_mut(), handler, ptr::null_mut());
         assert_eq!(result, BHC_EXCEPTION_SENTINEL);
         assert!(unsafe { HANDLER_CALLED });
-        // Exception should be pending in TLS (re-thrown)
+        // Exception should be pending in TLS as SomeException (re-thrown)
         let exc = BHC_EXCEPTION.with(|cell| cell.replace(None));
-        assert_eq!(exc.unwrap() as usize, 77);
+        let exc_ptr = exc.unwrap();
+        assert_eq!(bhc_exc_get_payload(exc_ptr) as usize, 77);
     }
 
     #[test]
@@ -3616,7 +3776,8 @@ mod tests {
             ptr::null_mut()
         }
         extern "C" fn use_fn(_env: *mut u8, _resource: *mut u8) -> *mut u8 {
-            bhc_throw(77usize as *mut u8)
+            let exc = bhc_make_some_exception(EXC_TAG_SOME_EXCEPTION, 77usize as *mut u8);
+            bhc_throw(exc)
         }
         unsafe { RELEASED = false; }
         let result = bhc_bracket(
@@ -3627,9 +3788,63 @@ mod tests {
         assert_eq!(result, BHC_EXCEPTION_SENTINEL);
         // Release must have been called even though use threw
         assert!(unsafe { RELEASED });
-        // Exception should be pending in TLS
+        // Exception should be pending in TLS as SomeException
         let exc = BHC_EXCEPTION.with(|cell| cell.replace(None));
-        assert_eq!(exc.unwrap() as usize, 77);
+        let exc_ptr = exc.unwrap();
+        assert_eq!(bhc_exc_get_payload(exc_ptr) as usize, 77);
+    }
+
+    #[test]
+    fn test_bhc_catch_typed_matching_tag() {
+        extern "C" fn action(_env: *mut u8) -> *mut u8 {
+            let exc = bhc_make_some_exception(EXC_TAG_IO_EXCEPTION, 88usize as *mut u8);
+            bhc_throw(exc)
+        }
+        extern "C" fn handler(_env: *mut u8, exc: *mut u8) -> *mut u8 {
+            exc
+        }
+        // Catch IOException — should match
+        let result = bhc_catch_typed(action, ptr::null_mut(), handler, ptr::null_mut(), EXC_TAG_IO_EXCEPTION);
+        assert_eq!(result as usize, 88);
+    }
+
+    #[test]
+    fn test_bhc_catch_typed_non_matching_tag() {
+        extern "C" fn action(_env: *mut u8) -> *mut u8 {
+            let exc = bhc_make_some_exception(EXC_TAG_IO_EXCEPTION, 88usize as *mut u8);
+            bhc_throw(exc)
+        }
+        extern "C" fn handler(_env: *mut u8, exc: *mut u8) -> *mut u8 {
+            99usize as *mut u8
+        }
+        // Catch ErrorCall — should NOT match IOException
+        let result = bhc_catch_typed(action, ptr::null_mut(), handler, ptr::null_mut(), EXC_TAG_ERROR_CALL);
+        assert_eq!(result, BHC_EXCEPTION_SENTINEL);
+        // Exception should be re-thrown in TLS
+        let exc = BHC_EXCEPTION.with(|cell| cell.replace(None));
+        assert!(exc.is_some());
+    }
+
+    #[test]
+    fn test_bhc_catch_typed_catch_all() {
+        extern "C" fn action(_env: *mut u8) -> *mut u8 {
+            let exc = bhc_make_some_exception(EXC_TAG_ERROR_CALL, 55usize as *mut u8);
+            bhc_throw(exc)
+        }
+        extern "C" fn handler(_env: *mut u8, exc: *mut u8) -> *mut u8 {
+            exc
+        }
+        // Catch all (tag=0) — should match any exception type
+        let result = bhc_catch_typed(action, ptr::null_mut(), handler, ptr::null_mut(), EXC_TAG_SOME_EXCEPTION);
+        assert_eq!(result as usize, 55);
+    }
+
+    #[test]
+    fn test_bhc_make_some_exception() {
+        let exc = bhc_make_some_exception(EXC_TAG_IO_EXCEPTION, 42usize as *mut u8);
+        assert!(!exc.is_null());
+        assert_eq!(bhc_exc_get_tag(exc), EXC_TAG_IO_EXCEPTION);
+        assert_eq!(bhc_exc_get_payload(exc) as usize, 42);
     }
 
     #[test]

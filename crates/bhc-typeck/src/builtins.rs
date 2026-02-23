@@ -3341,6 +3341,20 @@ impl Builtins {
                     Ty::fun(Ty::Var(a.clone()), self.string_ty.clone()),
                 )
             }),
+            ("userError", {
+                // userError :: String -> IOException (modeled as String -> String)
+                Scheme::mono(Ty::fun(self.string_ty.clone(), self.string_ty.clone()))
+            }),
+            ("ioError", {
+                // ioError :: IOException -> IO a (modeled as String -> IO a)
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(self.string_ty.clone(), Ty::App(
+                        Box::new(Ty::Con(self.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    )),
+                )
+            }),
             // ---- Phase 1 new PrimOps (must also be added to context.rs) ----
             // Scans
             ("scanl1", {

@@ -2439,6 +2439,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let bracket_fn = self.module.llvm_module().add_function("bhc_bracket", bracket_type, None);
         self.functions.insert(VarId::new(1000090), bracket_fn);
 
+        // ---- SomeException / typed catch RTS functions (VarId 1000700-1000704) ----
+        // bhc_make_some_exception(i64, ptr) -> ptr
+        let make_exc_type = ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false);
+        let make_exc_fn = self.module.llvm_module().add_function("bhc_make_some_exception", make_exc_type, None);
+        self.functions.insert(VarId::new(1000700), make_exc_fn);
+        // bhc_exc_get_tag(ptr) -> i64
+        let get_tag_type = i64_type.fn_type(&[ptr_type.into()], false);
+        let get_tag_fn = self.module.llvm_module().add_function("bhc_exc_get_tag", get_tag_type, None);
+        self.functions.insert(VarId::new(1000701), get_tag_fn);
+        // bhc_exc_get_payload(ptr) -> ptr
+        let get_payload_fn = self.module.llvm_module().add_function("bhc_exc_get_payload", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000702), get_payload_fn);
+        // bhc_catch_typed(action_fn, action_env, handler_fn, handler_env, type_tag: i64) -> ptr
+        let catch_typed_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into(), i64_type.into()], false);
+        let catch_typed_fn = self.module.llvm_module().add_function("bhc_catch_typed", catch_typed_type, None);
+        self.functions.insert(VarId::new(1000703), catch_typed_fn);
+        // bhc_show_exception(ptr) -> ptr
+        let show_exc_fn = self.module.llvm_module().add_function("bhc_show_exception", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000704), show_exc_fn);
+
         // ---- Additional IO RTS functions (VarId 1300-1314) ----
         // NOTE: Previously used VarId 1085-1099 which collided with exception
         // functions (finally=1088, on_exception=1089, bracket=1090). Moved to
@@ -3013,6 +3033,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "try" => Some(1),
             "bracket" => Some(3),
             "finally" | "onException" => Some(2),
+            "toException" => Some(1),
+            "fromException" => Some(1),
+            "displayException" => Some(1),
+            "userError" => Some(1),
+            "ioError" => Some(1),
 
             // Misc
             "seq" => Some(2),
@@ -3664,6 +3689,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "bracket" => self.lower_builtin_bracket(args[0], args[1], args[2]),
             "finally" => self.lower_builtin_finally(args[0], args[1]),
             "onException" => self.lower_builtin_on_exception(args[0], args[1]),
+            "toException" => self.lower_builtin_to_exception(args[0]),
+            "fromException" => self.lower_builtin_from_exception(args[0]),
+            "displayException" => self.lower_builtin_display_exception(args[0]),
+            "userError" => self.lower_builtin_user_error(args[0]),
+            "ioError" => self.lower_builtin_throw(args[0]),
 
             // Misc
             "seq" => self.lower_builtin_seq(args[0], args[1]),
@@ -10026,7 +10056,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(rev_acc.as_basic_value()))
     }
 
-    /// Lower `error` - runtime error.
+    /// Lower `error` - throw an ErrorCall exception (catchable).
+    ///
+    /// Wraps the error message in a SomeException with tag 2 (ErrorCall)
+    /// and calls bhc_throw, making `error "msg"` catchable by `catch`.
     fn lower_builtin_error(
         &mut self,
         msg_expr: &Expr,
@@ -10044,21 +10077,41 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
         };
 
-        let error_fn = self
+        // Convert Haskell char list to C-string for the payload
+        let cstr_ptr = self.char_list_to_cstring(msg_ptr)?;
+
+        // Wrap in SomeException with tag 2 (ErrorCall)
+        let make_exc_fn = self
             .functions
-            .get(&VarId::new(1000006))
-            .ok_or_else(|| CodegenError::Internal("bhc_error not declared".to_string()))?;
+            .get(&VarId::new(1000700))
+            .ok_or_else(|| CodegenError::Internal("bhc_make_some_exception not declared".to_string()))?;
 
-        self.builder()
-            .build_call(*error_fn, &[msg_ptr.into()], "")
-            .map_err(|e| CodegenError::Internal(format!("failed to call error: {:?}", e)))?;
+        let i64_type = self.llvm_context().i64_type();
+        let tag_val = i64_type.const_int(2, false); // EXC_TAG_ERROR_CALL
 
-        self.builder()
-            .build_unreachable()
-            .map_err(|e| CodegenError::Internal(format!("failed to build unreachable: {:?}", e)))?;
+        let some_exc = self
+            .builder()
+            .build_call(*make_exc_fn, &[tag_val.into(), cstr_ptr.into()], "error_exc")
+            .map_err(|e| CodegenError::Internal(format!("failed to make ErrorCall: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("make_some_exception: returned void".to_string()))?;
 
-        // error never returns, but we need to return something for the type system
-        Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+        // Throw the exception (returns sentinel null)
+        let throw_fn = self
+            .functions
+            .get(&VarId::new(1000080))
+            .ok_or_else(|| CodegenError::Internal("bhc_throw not declared".to_string()))?;
+
+        let result = self
+            .builder()
+            .build_call(*throw_fn, &[some_exc.into()], "error_sentinel")
+            .map_err(|e| CodegenError::Internal(format!("failed to call throw: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("throw: returned void".to_string()))?;
+
+        Ok(Some(result))
     }
 
     /// Lower `undefined` - always errors.
@@ -10082,7 +10135,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(self.type_mapper().ptr_type().const_null().into()))
     }
 
-    /// Lower `throw` / `throwIO` - call bhc_throw and return the sentinel.
+    /// Lower `throw` / `throwIO` - wrap in SomeException, call bhc_throw.
     fn lower_builtin_throw(
         &mut self,
         msg_expr: &Expr,
@@ -10093,6 +10146,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         let msg_ptr = self.value_to_ptr(msg_val)?;
 
+        // Wrap in SomeException with tag 0 (generic)
+        let make_exc_fn = self
+            .functions
+            .get(&VarId::new(1000700))
+            .ok_or_else(|| CodegenError::Internal("bhc_make_some_exception not declared".to_string()))?;
+
+        let i64_type = self.llvm_context().i64_type();
+        let tag_val = i64_type.const_int(0, false);
+
+        let some_exc = self
+            .builder()
+            .build_call(*make_exc_fn, &[tag_val.into(), msg_ptr.into()], "some_exc")
+            .map_err(|e| CodegenError::Internal(format!("failed to make SomeException: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("make_some_exception: returned void".to_string()))?;
+
         let throw_fn = self
             .functions
             .get(&VarId::new(1000080))
@@ -10100,7 +10170,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         let result = self
             .builder()
-            .build_call(*throw_fn, &[msg_ptr.into()], "throw_sentinel")
+            .build_call(*throw_fn, &[some_exc.into()], "throw_sentinel")
             .map_err(|e| CodegenError::Internal(format!("failed to call throw: {:?}", e)))?
             .try_as_basic_value()
             .basic()
@@ -10215,10 +10285,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let action_fn = self.extract_closure_fn_ptr(action_closure)?;
         let handler_fn = self.extract_closure_fn_ptr(handler_closure)?;
 
+        // Infer exception type tag from handler expression
+        let type_tag = self.infer_exception_tag_from_handler(handler_expr);
+        let i64_type = self.llvm_context().i64_type();
+        let tag_val = i64_type.const_int(type_tag, false);
+
+        // Use bhc_catch_typed for type-filtered catch
         let catch_rts = self
             .functions
-            .get(&VarId::new(1000081))
-            .ok_or_else(|| CodegenError::Internal("bhc_catch not declared".to_string()))?;
+            .get(&VarId::new(1000703))
+            .ok_or_else(|| CodegenError::Internal("bhc_catch_typed not declared".to_string()))?;
 
         let result = self
             .builder()
@@ -10229,6 +10305,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     action_closure.into(),
                     handler_fn.into(),
                     handler_closure.into(),
+                    tag_val.into(),
                 ],
                 "catch_result",
             )
@@ -10236,6 +10313,145 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| CodegenError::Internal("catch: returned void".to_string()))?;
+
+        Ok(Some(result))
+    }
+
+    /// Infer the exception type tag from the handler expression's parameter type.
+    ///
+    /// Returns 0 (catch-all) for most cases, 1 for IOException, 2 for ErrorCall.
+    fn infer_exception_tag_from_handler(&self, handler_expr: &Expr) -> u64 {
+        // Try to extract the handler's parameter type from its lambda variable
+        match handler_expr {
+            Expr::Lam(var, _, _) => {
+                let ty_name = format!("{:?}", var.ty);
+                if ty_name.contains("IOException") {
+                    1 // EXC_TAG_IO_EXCEPTION
+                } else if ty_name.contains("ErrorCall") {
+                    2 // EXC_TAG_ERROR_CALL
+                } else {
+                    0 // EXC_TAG_SOME_EXCEPTION (catch-all)
+                }
+            }
+            _ => 0, // Default: catch-all
+        }
+    }
+
+    /// Lower `toException` - wrap a value in SomeException (tag 0).
+    fn lower_builtin_to_exception(
+        &mut self,
+        val_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let val = self
+            .lower_expr(val_expr)?
+            .ok_or_else(|| CodegenError::Internal("toException: value has no value".to_string()))?;
+        let val_ptr = self.value_to_ptr(val)?;
+
+        let make_exc_fn = self
+            .functions
+            .get(&VarId::new(1000700))
+            .ok_or_else(|| CodegenError::Internal("bhc_make_some_exception not declared".to_string()))?;
+
+        let i64_type = self.llvm_context().i64_type();
+        let tag_val = i64_type.const_int(0, false);
+
+        let result = self
+            .builder()
+            .build_call(*make_exc_fn, &[tag_val.into(), val_ptr.into()], "to_exc")
+            .map_err(|e| CodegenError::Internal(format!("toException failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("toException: returned void".to_string()))?;
+
+        Ok(Some(result))
+    }
+
+    /// Lower `fromException` - extract payload from SomeException, wrap in Just.
+    fn lower_builtin_from_exception(
+        &mut self,
+        exc_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let exc_val = self
+            .lower_expr(exc_expr)?
+            .ok_or_else(|| CodegenError::Internal("fromException: no value".to_string()))?;
+        let exc_ptr = self.value_to_ptr(exc_val)?;
+
+        let get_payload_fn = self
+            .functions
+            .get(&VarId::new(1000702))
+            .ok_or_else(|| CodegenError::Internal("bhc_exc_get_payload not declared".to_string()))?;
+
+        let payload = self
+            .builder()
+            .build_call(*get_payload_fn, &[exc_ptr.into()], "exc_payload")
+            .map_err(|e| CodegenError::Internal(format!("fromException failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("fromException: returned void".to_string()))?;
+
+        // Wrap in Just (tag=1, arity=1)
+        let just = self.alloc_adt(1, 1)?;
+        self.store_adt_field(just, 1, 0, payload)?;
+        Ok(Some(just.into()))
+    }
+
+    /// Lower `displayException` - convert exception to string.
+    fn lower_builtin_display_exception(
+        &mut self,
+        exc_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let exc_val = self
+            .lower_expr(exc_expr)?
+            .ok_or_else(|| CodegenError::Internal("displayException: no value".to_string()))?;
+        let exc_ptr = self.value_to_ptr(exc_val)?;
+
+        let show_exc_fn = self
+            .functions
+            .get(&VarId::new(1000704))
+            .ok_or_else(|| CodegenError::Internal("bhc_show_exception not declared".to_string()))?;
+
+        let cstr = self
+            .builder()
+            .build_call(*show_exc_fn, &[exc_ptr.into()], "exc_str")
+            .map_err(|e| CodegenError::Internal(format!("displayException failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("displayException: returned void".to_string()))?;
+
+        // Convert C-string to Haskell char list
+        let result = self.cstring_to_char_list(cstr.into_pointer_value())?;
+        Ok(Some(result.into()))
+    }
+
+    /// Lower `userError` - create an IOException from a String.
+    fn lower_builtin_user_error(
+        &mut self,
+        msg_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let msg_val = self
+            .lower_expr(msg_expr)?
+            .ok_or_else(|| CodegenError::Internal("userError: no value".to_string()))?;
+        let msg_ptr = self.value_to_ptr(msg_val)?;
+
+        // Convert char list to C-string
+        let cstr_ptr = self.char_list_to_cstring(msg_ptr)?;
+
+        // Create IOException (tag 1)
+        let make_exc_fn = self
+            .functions
+            .get(&VarId::new(1000700))
+            .ok_or_else(|| CodegenError::Internal("bhc_make_some_exception not declared".to_string()))?;
+
+        let i64_type = self.llvm_context().i64_type();
+        let tag_val = i64_type.const_int(1, false); // EXC_TAG_IO_EXCEPTION
+
+        let result = self
+            .builder()
+            .build_call(*make_exc_fn, &[tag_val.into(), cstr_ptr.into()], "user_error")
+            .map_err(|e| CodegenError::Internal(format!("userError failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("userError: returned void".to_string()))?;
 
         Ok(Some(result))
     }

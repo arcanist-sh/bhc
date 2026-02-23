@@ -719,6 +719,11 @@ fn register_standard_module_exports(ctx: &mut LowerContext, module_name: &str) {
             "uninterruptibleMask",
             "uninterruptibleMask_",
             "throwTo",
+            "toException",
+            "fromException",
+            "displayException",
+            "userError",
+            "ioError",
         ],
         "Control.Concurrent" => &[
             "forkIO",

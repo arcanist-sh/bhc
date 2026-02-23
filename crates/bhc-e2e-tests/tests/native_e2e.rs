@@ -158,6 +158,11 @@ fn test_tier3_exception_test_native() {
 }
 
 #[test]
+fn test_tier3_exception_hierarchy_native() {
+    run_native_test("tier3_io/exception_hierarchy", Profile::Default);
+}
+
+#[test]
 fn test_tier3_handle_io_native() {
     run_native_test("tier3_io/handle_io", Profile::Default);
 }

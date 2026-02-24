@@ -177,16 +177,18 @@ This roadmap tracks the implementation of the Basel Haskell Compiler (BHC) from 
 
 **Goal:** Enable BHC to compile real-world Haskell projects like xmonad, pandoc, and lens.
 
-**Progress:** 168 E2E tests, 68 milestones (E.1–E.68), 30+ GHC extensions implemented.
+**Progress:** 175 E2E tests, 70 milestones (E.1–E.70), 30+ GHC extensions implemented.
 BHC now compiles non-trivial Haskell programs with records, GADTs, typeclasses,
-deriving, monad transformers, and most common GHC extensions. E.67 added a built-in
-CPP preprocessor. E.68 implemented the Core IR simplifier with constant folding,
-beta reduction, case-of-known-constructor, dead binding elimination, and local
-inlining. The hx build pipeline is wired: `hx-bhc` generates correct BHC CLI flags,
-uses filesystem-based package DB (no `bhc-pkg`), and maps 12 standard Haskell
-packages to BHC builtins. Focus is shifting to remaining compiler gaps (type
-families, pattern match compilation, demand analysis) and end-to-end testing with
-real Hackage packages.
+deriving, monad transformers, and most common GHC extensions. The full standard
+library includes Data.Text, Data.ByteString (strict + lazy + Builder), containers,
+monad transformers, exception handling with typed catch, and 500+ builtin functions.
+The Core IR optimizer includes a simplifier (E.68-E.69), pattern match compilation
+with decision trees (E.70), demand analysis + worker/wrapper (O.3), and dictionary
+specialization (O.4). Type families (open, closed, associated) and data families
+are complete. CPP preprocessing is built-in. The hx build pipeline is wired:
+`hx-bhc` generates correct BHC CLI flags, uses filesystem-based package DB, and
+maps 12 standard Haskell packages to BHC builtins. Focus is shifting to end-to-end
+testing with real Hackage packages and remaining Pandoc dependencies.
 
 See `TODO-pandoc.md` for the detailed Pandoc compilation roadmap.
 
@@ -306,7 +308,7 @@ Each phase will be validated against real codebases:
 | 3 | Resolve imports in a multi-module project | ✅ Working (E.6) |
 | 4 | Compile programs with classes, instances, GADTs | ✅ Working (E.38–E.64) |
 | 5 | Parse lens library type signatures | ✅ Type families implemented |
-| 6 | Full type system coverage | ✅ Type families done; data families remaining |
+| 6 | Full type system coverage | ✅ Type families + data families done |
 | 7 | Compiled programs run measurably faster | 🟡 Core simplifier (E.68-E.69): local + top-level transforms, case-of-case; demand analysis + worker/wrapper (O.3) |
 
 ### Exit Criteria

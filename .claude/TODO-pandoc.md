@@ -80,7 +80,7 @@ BHC compiles real Haskell programs to native executables via LLVM:
 
 **Still missing for Pandoc (prioritized):**
 1. **Full package system** — BHC has `-c` mode, `.bhi` interface generation/consumption, and `--odir`/`--hidir`/`--package-db` flags (E.66). The hx package manager's BHC backend (`hx-bhc`) is now wired with correct CLI flags, filesystem-based package DB (no `bhc-pkg`), and BHC builtin package mapping (base→bhc-base, text→bhc-text, etc.). Remaining: end-to-end testing with real Hackage packages, conditional dependencies, `.hs-boot` mutual recursion
-2. **CPP preprocessing** — Pandoc and many deps use `#ifdef` for platform/version conditionals
+2. ~~CPP preprocessing~~ — Done (E.67): Built-in Rust preprocessor with `#ifdef`/`#if`/`#elif`/`#else`/`#endif`/`#define`/`#undef`
 3. ~~Lazy Text/ByteString~~ — Done: Data.Text.Lazy (14 functions), Data.ByteString.Lazy (20 functions), Data.ByteString.Lazy.Char8 (6 functions), Data.Text.Lazy.Encoding (2 functions)
 4. **Template Haskell** — Required for aeson JSON deriving (alternative: full GHC.Generics)
 5. ~~Exception hierarchy~~ — Done: `SomeException`/`IOException`/`ErrorCall` tags, `bhc_catch_typed`, `error` catchable
@@ -166,7 +166,7 @@ encodeUtf8/decodeUtf8 bridge.
 - [x] ByteString.Lazy (20 functions): empty, fromStrict, toStrict, fromChunks, toChunks, null, length, pack, append, head, tail, take, drop, filter, isPrefixOf, readFile, writeFile, putStr, hPutStr, hGetContents
 - [x] ByteString.Lazy.Char8 (6 functions): unpack, lines, unlines, take, dropWhile, cons
 - [x] Data.Text.Lazy.Encoding: encodeUtf8, decodeUtf8
-- [ ] ByteString.Builder
+- [x] ByteString.Builder (16 RTS functions + codegen dispatch, E2E test)
 - [ ] SIMD-optimized operations where applicable (memchr, memcmp, etc.)
 
 **Key files:**
@@ -921,6 +921,27 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 ---
 
 ## Recent Progress
+
+### 2026-02-24: ByteString.Builder
+
+Implemented `Data.ByteString.Builder` with 16 new RTS functions and ~45 codegen
+dispatch entries. Builder uses the same chunk-list representation as lazy ByteString
+(`Empty | Chunk !BS LazyBS`), so `toLazyByteString` and `lazyByteString` are identity
+operations. Many functions (empty, append, byteString, hPutBuilder) reuse existing
+lazy ByteString RTS functions via codegen dispatch.
+
+1. **RTS** (`builder.rs`): 16 functions (VarIds 1000478-1000493) — singleton, charUtf8,
+   stringUtf8, intDec, char7/8, string7/8, word16/32/64 BE/LE, wordHex, word8HexFixed
+2. **Codegen**: 16 LLVM declarations + ~45 arity/dispatch entries + composed helpers
+   for float/double encoding (inline LLVM fptrunc/bitcast) and hex fixed-width
+3. **Type system**: `builder_con`/`builder_ty` + ~62 function type signatures
+4. **Lowering**: Fixed DefIds 11450-11498 + 11510-11521 (avoiding E.27 collision at 11500-11505)
+5. **E2E test**: `builder_basic` — empty/singleton/intDec/append/stringUtf8 with length verification
+
+175 total E2E tests pass (174 passed + 1 ignored). 88 bhc-text unit tests pass.
+
+**Known limitation**: `hPutBuilder` expects PointerValue handle but integer sentinel
+(2=stdout) is IntValue — needs int-to-ptr coercion (deferred).
 
 ### 2026-02-24: Lazy Text + Lazy ByteString
 

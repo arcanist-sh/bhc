@@ -18,7 +18,7 @@ north-star integration target for BHC's real-world Haskell compatibility.
 ## Current State
 
 BHC compiles real Haskell programs to native executables via LLVM:
-- **173 native E2E tests** passing (including monad transformers, file IO, markdown parser, JSON parser, GADTs, type extensions)
+- **175 native E2E tests** passing (including monad transformers, file IO, markdown parser, JSON parser, GADTs, type extensions, lazy Text/ByteString)
 - All intermediate milestones A–E.70 done
 - **Separate compilation pipeline**: `-c` mode, `.bhi` interface generation and consumption, `--odir`/`--hidir`/`--numeric-version`/`--package-db` flags
 - **hx package manager integration** wired — hx has .cabal parsing, Hackage fetch, dependency solver, BHC backend crate with correct CLI flags, filesystem-based package DB, and BHC builtin package mapping
@@ -81,7 +81,7 @@ BHC compiles real Haskell programs to native executables via LLVM:
 **Still missing for Pandoc (prioritized):**
 1. **Full package system** — BHC has `-c` mode, `.bhi` interface generation/consumption, and `--odir`/`--hidir`/`--package-db` flags (E.66). The hx package manager's BHC backend (`hx-bhc`) is now wired with correct CLI flags, filesystem-based package DB (no `bhc-pkg`), and BHC builtin package mapping (base→bhc-base, text→bhc-text, etc.). Remaining: end-to-end testing with real Hackage packages, conditional dependencies, `.hs-boot` mutual recursion
 2. **CPP preprocessing** — Pandoc and many deps use `#ifdef` for platform/version conditionals
-3. **Lazy Text/ByteString** — Only strict variants implemented
+3. ~~Lazy Text/ByteString~~ — Done: Data.Text.Lazy (14 functions), Data.ByteString.Lazy (20 functions), Data.ByteString.Lazy.Char8 (6 functions), Data.Text.Lazy.Encoding (2 functions)
 4. **Template Haskell** — Required for aeson JSON deriving (alternative: full GHC.Generics)
 5. ~~Exception hierarchy~~ — Done: `SomeException`/`IOException`/`ErrorCall` tags, `bhc_catch_typed`, `error` catchable
 6. **Full GHC.Generics** — E.63 added stubs; full `Rep` type family + `from`/`to` still needed
@@ -143,8 +143,8 @@ package DB uses filesystem operations (no `bhc-pkg`), and BHC builtin packages
 
 ### 1.2 Data.Text and Data.ByteString
 
-**Status:** ✅ Core APIs complete (E.7 + E.8), Text.IO complete (E.10), Lazy variants remaining
-**Scope:** Medium (remaining: Lazy variants)
+**Status:** ✅ Core APIs complete (E.7 + E.8), Text.IO complete (E.10), Lazy variants complete
+**Scope:** Small (remaining: decodeUtf8', SIMD)
 
 Data.Text (E.7): packed UTF-8 with 25+ operations. Data.ByteString (E.8): 24
 RTS functions with identical memory layout. Data.Text.Encoding (E.8): zero-copy
@@ -158,19 +158,24 @@ encodeUtf8/decodeUtf8 bridge.
 - [x] Text.IO: readFile, writeFile, appendFile, hGetContents, hGetLine, hPutStr, hPutStrLn, putStr, putStrLn, getLine, getContents
 - [x] Text.Encoding: encodeUtf8, decodeUtf8
 - [ ] Text.Encoding: decodeUtf8' (with Either error handling)
-- [ ] Lazy Text variant (Data.Text.Lazy, Data.Text.Lazy.IO)
+- [x] Lazy Text: Data.Text.Lazy (14 functions: empty, fromStrict, toStrict, pack, unpack, null, length, append, fromChunks, toChunks, head, tail, take, drop)
 - [x] ByteString: packed byte array type (identical layout to Text)
 - [x] ByteString API (24 functions): pack, unpack, empty, singleton, append,
       cons, snoc, head, last, tail, init, length, null, take, drop, reverse,
       elem, index, eq, compare, isPrefixOf, isSuffixOf, readFile, writeFile
-- [ ] ByteString.Lazy and ByteString.Builder
+- [x] ByteString.Lazy (20 functions): empty, fromStrict, toStrict, fromChunks, toChunks, null, length, pack, append, head, tail, take, drop, filter, isPrefixOf, readFile, writeFile, putStr, hPutStr, hGetContents
+- [x] ByteString.Lazy.Char8 (6 functions): unpack, lines, unlines, take, dropWhile, cons
+- [x] Data.Text.Lazy.Encoding: encodeUtf8, decodeUtf8
+- [ ] ByteString.Builder
 - [ ] SIMD-optimized operations where applicable (memchr, memcmp, etc.)
 
 **Key files:**
 - `stdlib/bhc-text/src/text.rs` — Text RTS (25+ FFI functions)
 - `stdlib/bhc-text/src/bytestring.rs` — ByteString RTS (24 FFI functions)
 - `crates/bhc-typeck/src/builtins.rs` — type registrations
-- `crates/bhc-codegen/src/llvm/lower.rs` — VarIds 1000200-1000431
+- `stdlib/bhc-text/src/lazy_text.rs` — Lazy Text RTS (14 FFI functions)
+- `stdlib/bhc-text/src/lazy_bytestring.rs` — Lazy ByteString + Char8 + Encoding RTS (28 FFI functions)
+- `crates/bhc-codegen/src/llvm/lower.rs` — VarIds 1000200-1000477
 
 ### 1.3 Full IO and Exception Handling
 
@@ -917,6 +922,30 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 
 ## Recent Progress
 
+### 2026-02-24: Lazy Text + Lazy ByteString
+
+Implemented lazy Text and lazy ByteString as chunk-lists (matching GHC's
+`Empty | Chunk !StrictVariant LazyVariant` representation) with 42 RTS functions
+covering the Pandoc-essential subset.
+
+1. **RTS** (`lazy_text.rs`): 14 functions (VarIds 1000270-1000283) — empty, fromStrict,
+   toStrict, pack, unpack, null, length, append, fromChunks, toChunks, head, tail, take, drop
+2. **RTS** (`lazy_bytestring.rs`): 28 functions (VarIds 1000440-1000477) — 20 core BS.Lazy
+   functions + 6 Char8 functions (unpack, lines, unlines, take, dropWhile, cons) + 2
+   encoding functions (encodeUtf8, decodeUtf8)
+3. **Codegen**: 42 LLVM declarations + arity entries + dispatch entries in lower.rs
+4. **Type system**: LazyText + LazyByteString type constructors + 42 function signatures
+5. **Lowering**: Fixed DefIds 11380-11441 across 4 modules (Data.Text.Lazy,
+   Data.ByteString.Lazy, Data.ByteString.Lazy.Char8, Data.Text.Lazy.Encoding)
+6. **E2E tests**: `lazy_text_basic` and `lazy_bytestring_basic` (fromStrict/toStrict
+   roundtrip, length, head, append, pack/unpack)
+
+175 total E2E tests pass (173 existing + 2 new, 0 failures). 79 bhc-text unit tests pass.
+
+**Bug found**: BHC's lexer treats `strict` as a keyword (it is NOT a Haskell keyword).
+Using `let strict = ...` silently drops `main` from the AST. Workaround: use different
+variable names. Parser fix deferred.
+
 ### 2026-02-24: Exception Hierarchy (SomeException / IOException / ErrorCall)
 
 Added tagged `SomeException` struct to the RTS enabling type-filtered `catch`. Three
@@ -933,7 +962,7 @@ exception types: `SomeException` (tag 0, catch-all), `IOException` (tag 1), `Err
    registered in builtins + context + Control.Exception exports.
 4. **E2E test**: `exception_hierarchy` — catch-all, catchable `error`, IO error catch.
 
-173 total E2E tests pass (172 existing + 1 new, 0 failures). 53 RTS unit tests pass.
+173 total E2E tests passed at time of that commit (172 existing + 1 new, 0 failures). 53 RTS unit tests pass.
 
 ### 2026-02-22: hx Build Pipeline Wiring
 

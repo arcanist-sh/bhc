@@ -761,6 +761,20 @@ fn test_tier3_derive_generic_native() {
 }
 
 // =============================================================================
+// GHC.Generics: Full from/to roundtrip
+// =============================================================================
+
+#[test]
+fn test_tier3_generic_from_to_native() {
+    run_native_test("tier3_io/generic_from_to", Profile::Default);
+}
+
+#[test]
+fn test_tier3_generic_pattern_native() {
+    run_native_test("tier3_io/generic_pattern", Profile::Default);
+}
+
+// =============================================================================
 // E.43: Word Types
 // =============================================================================
 

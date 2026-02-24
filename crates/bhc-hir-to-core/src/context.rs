@@ -266,6 +266,75 @@ impl LowerContext {
                 is_newtype: false,
             },
         );
+
+        // GHC.Generics representation constructors (DefIds 12410-12415)
+        let sum_sym = Symbol::intern(":+:");
+        self.constructor_map.insert(
+            DefId::new(12410),
+            ConstructorInfo {
+                name: Symbol::intern("U1"),
+                type_name: Symbol::intern("U1"),
+                tag: 0,
+                arity: 0,
+                field_names: vec![],
+                is_newtype: false,
+            },
+        );
+        self.constructor_map.insert(
+            DefId::new(12411),
+            ConstructorInfo {
+                name: Symbol::intern("K1"),
+                type_name: Symbol::intern("K1"),
+                tag: 0,
+                arity: 1,
+                field_names: vec![],
+                is_newtype: false,
+            },
+        );
+        self.constructor_map.insert(
+            DefId::new(12412),
+            ConstructorInfo {
+                name: Symbol::intern("M1"),
+                type_name: Symbol::intern("M1"),
+                tag: 0,
+                arity: 1,
+                field_names: vec![],
+                is_newtype: false,
+            },
+        );
+        self.constructor_map.insert(
+            DefId::new(12413),
+            ConstructorInfo {
+                name: Symbol::intern("L1"),
+                type_name: sum_sym,
+                tag: 0,
+                arity: 1,
+                field_names: vec![],
+                is_newtype: false,
+            },
+        );
+        self.constructor_map.insert(
+            DefId::new(12414),
+            ConstructorInfo {
+                name: Symbol::intern("R1"),
+                type_name: sum_sym,
+                tag: 1,
+                arity: 1,
+                field_names: vec![],
+                is_newtype: false,
+            },
+        );
+        self.constructor_map.insert(
+            DefId::new(12415),
+            ConstructorInfo {
+                name: Symbol::intern(":*:"),
+                type_name: Symbol::intern(":*:"),
+                tag: 0,
+                arity: 2,
+                field_names: vec![],
+                is_newtype: false,
+            },
+        );
     }
 
     /// Register builtin operators and constructors.
@@ -292,6 +361,25 @@ impl LowerContext {
                 name: Symbol::intern(name),
                 id: VarId::new(id),
                 ty: Ty::Error, // Types resolved during evaluation
+            };
+            self.var_map.insert(def_id, var);
+        }
+
+        // GHC.Generics representation constructors (fixed DefIds 12410-12415)
+        let generics_cons = [
+            (12410, "U1"),
+            (12411, "K1"),
+            (12412, "M1"),
+            (12413, "L1"),
+            (12414, "R1"),
+            (12415, ":*:"),
+        ];
+        for (id, name) in generics_cons {
+            let def_id = DefId::new(id);
+            let var = Var {
+                name: Symbol::intern(name),
+                id: VarId::new(id),
+                ty: Ty::Error,
             };
             self.var_map.insert(def_id, var);
         }

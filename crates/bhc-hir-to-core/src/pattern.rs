@@ -1588,6 +1588,14 @@ fn get_constructor_tag(name: &str, fallback: u32) -> u32 {
         "EQ" => 1,
         "GT" => 2,
 
+        // GHC.Generics representation constructors
+        "U1" => 0,
+        "K1" => 0,
+        "M1" => 0,
+        "L1" => 0,
+        "R1" => 1,
+        ":*:" => 0,
+
         // User-defined constructors: use fallback
         _ => fallback,
     }

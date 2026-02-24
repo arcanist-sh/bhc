@@ -5592,13 +5592,13 @@ impl Builtins {
         {
             let a = TyVar::new(BUILTIN_TYVAR_A, Kind::Star);
             let b = TyVar::new(BUILTIN_TYVAR_B, Kind::Star);
-            // from :: a -> Rep a  (stub — not used at runtime)
+            // from :: a -> a  (polymorphic; derived instances generate type-specific from)
             env.register_value(
                 DefId::new(12200),
                 Symbol::intern("from"),
                 Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
             );
-            // to :: Rep a -> a  (stub — not used at runtime)
+            // to :: a -> a  (polymorphic; derived instances generate type-specific to)
             env.register_value(
                 DefId::new(12201),
                 Symbol::intern("to"),
@@ -5625,6 +5625,82 @@ impl Builtins {
                 Symbol::intern("force"),
                 Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a))),
             );
+        }
+
+        // GHC.Generics representation types at fixed DefIds 12400-12430
+        {
+            let a = TyVar::new(BUILTIN_TYVAR_A, Kind::Star);
+
+            // Type constructors for representation types
+            env.register_type_con(TyCon::new(Symbol::intern("V1"), Kind::Star));
+            env.register_type_con(TyCon::new(Symbol::intern("U1"), Kind::Star));
+            env.register_type_con(TyCon::new(Symbol::intern("K1"), Kind::Star));
+            env.register_type_con(TyCon::new(Symbol::intern("M1"), Kind::Star));
+            env.register_type_con(TyCon::new(Symbol::intern(":+:"), Kind::Star));
+            env.register_type_con(TyCon::new(Symbol::intern(":*:"), Kind::Star));
+
+            // Type aliases for readability (Rec0 = K1, D1 = M1, C1 = M1, S1 = M1)
+            env.register_type_con(TyCon::new(Symbol::intern("Rec0"), Kind::Star));
+            env.register_type_con(TyCon::new(Symbol::intern("D1"), Kind::Star));
+            env.register_type_con(TyCon::new(Symbol::intern("C1"), Kind::Star));
+            env.register_type_con(TyCon::new(Symbol::intern("S1"), Kind::Star));
+
+            // Data constructors
+            // U1 :: U1  (unit, no fields)
+            env.register_data_con(
+                DefId::new(12410),
+                Symbol::intern("U1"),
+                Scheme::mono(Ty::Con(TyCon::new(Symbol::intern("U1"), Kind::Star))),
+            );
+            // K1 :: a -> K1  (field wrapper)
+            env.register_data_con(
+                DefId::new(12411),
+                Symbol::intern("K1"),
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
+            );
+            // M1 :: a -> M1  (metadata wrapper)
+            env.register_data_con(
+                DefId::new(12412),
+                Symbol::intern("M1"),
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
+            );
+            // L1 :: a -> :+: (left branch of sum)
+            env.register_data_con(
+                DefId::new(12413),
+                Symbol::intern("L1"),
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
+            );
+            // R1 :: a -> :+: (right branch of sum)
+            env.register_data_con(
+                DefId::new(12414),
+                Symbol::intern("R1"),
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
+            );
+            // :*: :: a -> a -> :*: (product)
+            env.register_data_con(
+                DefId::new(12415),
+                Symbol::intern(":*:"),
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
+                ),
+            );
+
+            // Register constructor values so they can be used as functions
+            for &(id, name) in &[
+                (12410usize, "U1"),
+                (12411, "K1"),
+                (12412, "M1"),
+                (12413, "L1"),
+                (12414, "R1"),
+                (12415, ":*:"),
+            ] {
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
+                );
+            }
         }
 
         // Data.ByteString.Builder at fixed DefIds 11450-11494
@@ -7325,15 +7401,29 @@ impl Builtins {
             assoc_type_impls: vec![],
         });
 
-        // E.63: Register Generic class (stub — no real from/to codegen)
+        // GHC.Generics: Register Generic class with from/to methods and Rep associated type
         let generic_sym = Symbol::intern("Generic");
+        let mut generic_methods = rustc_hash::FxHashMap::default();
+        generic_methods.insert(
+            Symbol::intern("from"),
+            Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
+        );
+        generic_methods.insert(
+            Symbol::intern("to"),
+            Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
+        );
         let generic_class = ClassInfo {
             name: generic_sym,
             params: vec![a.clone()],
             fundeps: vec![],
             supers: vec![],
-            methods: rustc_hash::FxHashMap::default(), // Empty: stub class
-            assoc_types: vec![],
+            methods: generic_methods,
+            assoc_types: vec![crate::env::AssocTypeInfo {
+                name: Symbol::intern("Rep"),
+                params: vec![],
+                kind: bhc_types::Kind::Star,
+                default: None,
+            }],
         };
         env.register_class(generic_class);
 

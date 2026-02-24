@@ -80,7 +80,8 @@ impl DerivingContext {
             "Functor" => self.derive_functor_data(data_def),
             "Foldable" => self.derive_foldable_data(data_def),
             "Traversable" => self.derive_traversable_data(data_def),
-            "Generic" | "NFData" => self.derive_empty_instance(data_def.name, &data_def.params, class_name),
+            "Generic" => self.derive_generic_data(data_def),
+            "NFData" => self.derive_empty_instance(data_def.name, &data_def.params, class_name),
             _ => {
                 // Unsupported class for derivation
                 None
@@ -102,18 +103,581 @@ impl DerivingContext {
             "Functor" => self.derive_functor_newtype(newtype_def),
             "Foldable" => self.derive_foldable_newtype(newtype_def),
             "Traversable" => self.derive_traversable_newtype(newtype_def),
-            "Generic" | "NFData" => self.derive_empty_instance(newtype_def.name, &newtype_def.params, class_name),
+            "Generic" => self.derive_generic_newtype(newtype_def),
+            "NFData" => self.derive_empty_instance(newtype_def.name, &newtype_def.params, class_name),
             _ => None,
         }
     }
 
     // =========================================================================
-    // Empty instance derivation (Generic, NFData)
+    // GHC.Generics derivation
     // =========================================================================
 
-    /// Derive an empty instance (no bindings) for classes like Generic and NFData.
+    /// Derive a Generic instance for a data type.
     ///
-    /// Generic is a stub class in BHC — no from/to methods are generated.
+    /// Generates `from` and `to` functions that convert between the data type
+    /// and its generic representation using V1, U1, K1, M1, :+:, :*:.
+    fn derive_generic_data(&mut self, data_def: &DataDef) -> Option<DerivedInstance> {
+        let span = data_def.span;
+        let instance_type = self.build_instance_type(data_def.name, &data_def.params);
+
+        // Generate the `from` function: original type -> generic rep
+        let from_method_var = self.fresh_var(
+            &format!("$derived_from_{}", data_def.name.as_str()),
+            Ty::Error,
+        );
+        let from_body = self.generate_generic_from(data_def, span);
+
+        // Generate the `to` function: generic rep -> original type
+        let to_method_var = self.fresh_var(
+            &format!("$derived_to_{}", data_def.name.as_str()),
+            Ty::Error,
+        );
+        let to_body = self.generate_generic_to(data_def, span);
+
+        let mut methods = FxHashMap::default();
+        methods.insert(
+            Symbol::intern("from"),
+            bhc_hir::DefId::new(from_method_var.id.index()),
+        );
+        methods.insert(
+            Symbol::intern("to"),
+            bhc_hir::DefId::new(to_method_var.id.index()),
+        );
+
+        let instance = InstanceInfo {
+            class: Symbol::intern("Generic"),
+            instance_types: vec![instance_type],
+            methods,
+            superclass_instances: vec![],
+            assoc_type_impls: FxHashMap::default(),
+            instance_constraints: vec![],
+        };
+
+        let bindings = vec![
+            Bind::NonRec(from_method_var, Box::new(from_body)),
+            Bind::NonRec(to_method_var, Box::new(to_body)),
+        ];
+
+        Some(DerivedInstance { instance, bindings })
+    }
+
+    /// Derive a Generic instance for a newtype.
+    fn derive_generic_newtype(&mut self, newtype_def: &NewtypeDef) -> Option<DerivedInstance> {
+        let span = newtype_def.span;
+        let instance_type = self.build_instance_type(newtype_def.name, &newtype_def.params);
+
+        let from_method_var = self.fresh_var(
+            &format!("$derived_from_{}", newtype_def.name.as_str()),
+            Ty::Error,
+        );
+        let to_method_var = self.fresh_var(
+            &format!("$derived_to_{}", newtype_def.name.as_str()),
+            Ty::Error,
+        );
+
+        // Newtype: single constructor, single field
+        // from (NT x) = M1 (M1 (M1 (K1 x)))
+        let from_body = {
+            let x_var = self.fresh_var("x", Ty::Error);
+            let type_con = TyCon::new(newtype_def.name, Kind::Star);
+            let data_con = DataCon {
+                name: newtype_def.con.name,
+                ty_con: type_con,
+                tag: 0,
+                arity: 1,
+            };
+            let field_var = self.fresh_var("f", Ty::Error);
+            let inner = self.wrap_m1(self.wrap_m1(self.wrap_m1(
+                self.wrap_k1(core::Expr::Var(field_var.clone(), span), span),
+                span,
+            ), span), span);
+            let alt = Alt {
+                con: AltCon::DataCon(data_con),
+                binders: vec![field_var],
+                rhs: inner,
+            };
+            let case_expr = self.make_case(core::Expr::Var(x_var.clone(), span), vec![alt], span);
+            core::Expr::Lam(x_var, Box::new(case_expr), span)
+        };
+
+        // to (M1 x0) = case x0 of { M1 x1 -> case x1 of { M1 x2 -> case x2 of { K1 x3 -> NT x3 } } }
+        let to_body = {
+            let rep_var = self.fresh_var("rep", Ty::Error);
+            let type_con = TyCon::new(newtype_def.name, Kind::Star);
+            let data_con = DataCon {
+                name: newtype_def.con.name,
+                ty_con: type_con,
+                tag: 0,
+                arity: 1,
+            };
+
+            // Innermost: case x2 of { K1 x3 -> NT x3 }
+            let x3 = self.fresh_var("x3", Ty::Error);
+            let nt_expr = self.apply_constructor(data_con, vec![core::Expr::Var(x3.clone(), span)], span);
+            let k1_con = self.make_generics_data_con("K1", 0, 1);
+            let x2 = self.fresh_var("x2", Ty::Error);
+            let k1_case = self.make_case(core::Expr::Var(x2.clone(), span), vec![
+                Alt { con: AltCon::DataCon(k1_con), binders: vec![x3], rhs: nt_expr },
+            ], span);
+
+            // case x1 of { M1 x2 -> ... }
+            let m1_con_s = self.make_generics_data_con("M1", 0, 1);
+            let x1 = self.fresh_var("x1", Ty::Error);
+            let m1_case_2 = self.make_case(core::Expr::Var(x1.clone(), span), vec![
+                Alt { con: AltCon::DataCon(m1_con_s), binders: vec![x2], rhs: k1_case },
+            ], span);
+
+            // case x0 of { M1 x1 -> ... }
+            let m1_con_c = self.make_generics_data_con("M1", 0, 1);
+            let x0 = self.fresh_var("x0", Ty::Error);
+            let m1_case_1 = self.make_case(core::Expr::Var(x0.clone(), span), vec![
+                Alt { con: AltCon::DataCon(m1_con_c), binders: vec![x1], rhs: m1_case_2 },
+            ], span);
+
+            // Outer: case rep of { M1 x0 -> ... }
+            let m1_con_d = self.make_generics_data_con("M1", 0, 1);
+            let body = self.make_case(core::Expr::Var(rep_var.clone(), span), vec![
+                Alt { con: AltCon::DataCon(m1_con_d), binders: vec![x0], rhs: m1_case_1 },
+            ], span);
+
+            core::Expr::Lam(rep_var, Box::new(body), span)
+        };
+
+        let mut methods = FxHashMap::default();
+        methods.insert(
+            Symbol::intern("from"),
+            bhc_hir::DefId::new(from_method_var.id.index()),
+        );
+        methods.insert(
+            Symbol::intern("to"),
+            bhc_hir::DefId::new(to_method_var.id.index()),
+        );
+
+        let instance = InstanceInfo {
+            class: Symbol::intern("Generic"),
+            instance_types: vec![instance_type],
+            methods,
+            superclass_instances: vec![],
+            assoc_type_impls: FxHashMap::default(),
+            instance_constraints: vec![],
+        };
+
+        let bindings = vec![
+            Bind::NonRec(from_method_var, Box::new(from_body)),
+            Bind::NonRec(to_method_var, Box::new(to_body)),
+        ];
+
+        Some(DerivedInstance { instance, bindings })
+    }
+
+    /// Generate the `from` function body for a data type.
+    ///
+    /// `from x = M1 (case x of { Con1 f1..fn -> <sum_path>(M1(<product>)); ... })`
+    fn generate_generic_from(&mut self, data_def: &DataDef, span: Span) -> core::Expr {
+        let x_var = self.fresh_var("x", Ty::Error);
+        let type_con = TyCon::new(data_def.name, Kind::Star);
+        let num_cons = data_def.cons.len();
+
+        let mut alts = Vec::new();
+
+        for (tag, con) in data_def.cons.iter().enumerate() {
+            let field_count = match &con.fields {
+                ConFields::Positional(fields) => fields.len(),
+                ConFields::Named(fields) => fields.len(),
+            };
+
+            let data_con = DataCon {
+                name: con.name,
+                ty_con: type_con.clone(),
+                tag: tag as u32,
+                arity: field_count as u32,
+            };
+
+            // Bind field variables
+            let fields: Vec<Var> = (0..field_count)
+                .map(|i| self.fresh_var(&format!("f{}", i), Ty::Error))
+                .collect();
+
+            // Build the product representation for this constructor's fields
+            let product_rep = self.build_from_product(&fields, span);
+
+            // Wrap in M1 (constructor metadata)
+            let con_rep = self.wrap_m1(product_rep, span);
+
+            // Wrap in sum path (L1/R1 encoding)
+            let sum_rep = self.wrap_in_sum_path(con_rep, tag, num_cons, span);
+
+            alts.push(Alt {
+                con: AltCon::DataCon(data_con),
+                binders: fields,
+                rhs: sum_rep,
+            });
+        }
+
+        let case_expr = self.make_case(core::Expr::Var(x_var.clone(), span), alts, span);
+
+        // Wrap the entire case in M1 (datatype metadata)
+        let body = self.wrap_m1(case_expr, span);
+
+        core::Expr::Lam(x_var, Box::new(body), span)
+    }
+
+    /// Generate the `to` function body for a data type.
+    ///
+    /// `to (M1 inner) = <sum_match on inner to reconstruct constructors>`
+    fn generate_generic_to(&mut self, data_def: &DataDef, span: Span) -> core::Expr {
+        let rep_var = self.fresh_var("rep", Ty::Error);
+
+        let num_cons = data_def.cons.len();
+
+        // Build the body that matches on the sum structure
+        let inner_var = self.fresh_var("inner", Ty::Error);
+        let sum_body = self.build_to_sum_match(data_def, &inner_var, 0, num_cons, span);
+
+        // Unwrap the outer M1 (datatype metadata)
+        let m1_con = self.make_generics_data_con("M1", 0, 1);
+        let outer_alt = Alt {
+            con: AltCon::DataCon(m1_con),
+            binders: vec![inner_var],
+            rhs: sum_body,
+        };
+        let body = self.make_case(
+            core::Expr::Var(rep_var.clone(), span),
+            vec![outer_alt],
+            span,
+        );
+
+        core::Expr::Lam(rep_var, Box::new(body), span)
+    }
+
+    /// Build the product representation for a constructor's fields.
+    ///
+    /// 0 fields: U1
+    /// 1 field:  M1(K1(field))
+    /// N fields: balanced :*: tree of M1(K1(field_i))
+    fn build_from_product(&self, fields: &[Var], span: Span) -> core::Expr {
+        if fields.is_empty() {
+            // U1 (no fields)
+            let u1_con = self.make_generics_data_con("U1", 0, 0);
+            return self.make_constructor(u1_con, span);
+        }
+
+        // Build leaf nodes: M1(K1(field_i)) for each field
+        let leaves: Vec<core::Expr> = fields
+            .iter()
+            .map(|f| {
+                let k1 = self.wrap_k1(core::Expr::Var(f.clone(), span), span);
+                self.wrap_m1(k1, span)
+            })
+            .collect();
+
+        self.build_product_tree(&leaves, span)
+    }
+
+    /// Build a balanced binary tree of :*: from a list of leaf expressions.
+    fn build_product_tree(&self, leaves: &[core::Expr], span: Span) -> core::Expr {
+        assert!(!leaves.is_empty());
+        if leaves.len() == 1 {
+            return leaves[0].clone();
+        }
+        // Split at midpoint: left-biased ((n+1)/2)
+        let mid = (leaves.len() + 1) / 2;
+        let left = self.build_product_tree(&leaves[..mid], span);
+        let right = self.build_product_tree(&leaves[mid..], span);
+        self.wrap_product(left, right, span)
+    }
+
+    /// Wrap two expressions in a :*: product constructor.
+    fn wrap_product(&self, left: core::Expr, right: core::Expr, span: Span) -> core::Expr {
+        let prod_con = self.make_generics_data_con(":*:", 0, 2);
+        self.apply_constructor(prod_con, vec![left, right], span)
+    }
+
+    /// Wrap an expression in the M1 constructor.
+    fn wrap_m1(&self, inner: core::Expr, span: Span) -> core::Expr {
+        let m1_con = self.make_generics_data_con("M1", 0, 1);
+        self.apply_constructor(m1_con, vec![inner], span)
+    }
+
+    /// Wrap an expression in the K1 constructor.
+    fn wrap_k1(&self, inner: core::Expr, span: Span) -> core::Expr {
+        let k1_con = self.make_generics_data_con("K1", 0, 1);
+        self.apply_constructor(k1_con, vec![inner], span)
+    }
+
+    /// Wrap an expression in the L1 constructor.
+    fn wrap_l1(&self, inner: core::Expr, span: Span) -> core::Expr {
+        let l1_con = self.make_generics_data_con("L1", 0, 1);
+        self.apply_constructor(l1_con, vec![inner], span)
+    }
+
+    /// Wrap an expression in the R1 constructor.
+    fn wrap_r1(&self, inner: core::Expr, span: Span) -> core::Expr {
+        let r1_con = self.make_generics_data_con("R1", 1, 1);
+        self.apply_constructor(r1_con, vec![inner], span)
+    }
+
+    /// Wrap an expression in L1/R1 constructors based on its position in the sum.
+    ///
+    /// Uses balanced binary tree encoding:
+    /// 1 constructor:  no wrapping
+    /// 2 constructors: L1 / R1
+    /// 3 constructors: L1(L1) / L1(R1) / R1 — left-biased split at (n+1)/2
+    /// N constructors: recursive balanced tree
+    fn wrap_in_sum_path(
+        &self,
+        inner: core::Expr,
+        index: usize,
+        total: usize,
+        span: Span,
+    ) -> core::Expr {
+        if total <= 1 {
+            return inner;
+        }
+        let mid = (total + 1) / 2;
+        if index < mid {
+            // Left branch
+            let wrapped = self.wrap_in_sum_path(inner, index, mid, span);
+            self.wrap_l1(wrapped, span)
+        } else {
+            // Right branch
+            let wrapped = self.wrap_in_sum_path(inner, index - mid, total - mid, span);
+            self.wrap_r1(wrapped, span)
+        }
+    }
+
+    /// Build the sum matching for `to`: recursively match L1/R1 to find the constructor.
+    ///
+    /// For a range of constructors [start, start+count), generate case expressions
+    /// that pattern-match L1/R1 to decode the balanced sum tree.
+    fn build_to_sum_match(
+        &mut self,
+        data_def: &DataDef,
+        scrutinee: &Var,
+        start: usize,
+        count: usize,
+        span: Span,
+    ) -> core::Expr {
+        if count == 1 {
+            // Base case: unwrap M1 (constructor metadata), decode product
+            return self.build_to_constructor(data_def, start, scrutinee, span);
+        }
+
+        let mid = (count + 1) / 2;
+
+        // Left branch: L1 contains constructors [start, start+mid)
+        let left_var = self.fresh_var("left", Ty::Error);
+        let left_body = self.build_to_sum_match(data_def, &left_var, start, mid, span);
+        let l1_con = self.make_generics_data_con("L1", 0, 1);
+        let left_alt = Alt {
+            con: AltCon::DataCon(l1_con),
+            binders: vec![left_var],
+            rhs: left_body,
+        };
+
+        // Right branch: R1 contains constructors [start+mid, start+count)
+        let right_var = self.fresh_var("right", Ty::Error);
+        let right_body = self.build_to_sum_match(data_def, &right_var, start + mid, count - mid, span);
+        let r1_con = self.make_generics_data_con("R1", 1, 1);
+        let right_alt = Alt {
+            con: AltCon::DataCon(r1_con),
+            binders: vec![right_var],
+            rhs: right_body,
+        };
+
+        self.make_case(
+            core::Expr::Var(scrutinee.clone(), span),
+            vec![left_alt, right_alt],
+            span,
+        )
+    }
+
+    /// Build code to reconstruct a single constructor from its generic product representation.
+    ///
+    /// Unwraps M1 (constructor metadata), then decodes the product tree.
+    fn build_to_constructor(
+        &mut self,
+        data_def: &DataDef,
+        con_index: usize,
+        scrutinee: &Var,
+        span: Span,
+    ) -> core::Expr {
+        let con = &data_def.cons[con_index];
+        let type_con = TyCon::new(data_def.name, Kind::Star);
+        let field_count = match &con.fields {
+            ConFields::Positional(fields) => fields.len(),
+            ConFields::Named(fields) => fields.len(),
+        };
+
+        let data_con = DataCon {
+            name: con.name,
+            ty_con: type_con,
+            tag: con_index as u32,
+            arity: field_count as u32,
+        };
+
+        // Unwrap M1 (constructor metadata layer)
+        let inner_var = self.fresh_var("con_inner", Ty::Error);
+        let product_decode = self.build_to_product(data_con, field_count, &inner_var, span);
+
+        let m1_con = self.make_generics_data_con("M1", 0, 1);
+        let m1_alt = Alt {
+            con: AltCon::DataCon(m1_con),
+            binders: vec![inner_var],
+            rhs: product_decode,
+        };
+
+        self.make_case(
+            core::Expr::Var(scrutinee.clone(), span),
+            vec![m1_alt],
+            span,
+        )
+    }
+
+    /// Decode a product representation and apply the original constructor.
+    ///
+    /// 0 fields: match U1 -> Con
+    /// 1 field:  case scrutinee of { M1 k -> case k of { K1 x -> Con x } }
+    /// N fields: decode balanced :*: tree, unwrap each M1(K1(xi)) -> Con x0 x1 ... xn
+    fn build_to_product(
+        &mut self,
+        data_con: DataCon,
+        field_count: usize,
+        scrutinee: &Var,
+        span: Span,
+    ) -> core::Expr {
+        if field_count == 0 {
+            // Match U1 -> constructor with no args
+            let u1_con = self.make_generics_data_con("U1", 0, 0);
+            let con_expr = self.make_constructor(data_con, span);
+            let u1_alt = Alt {
+                con: AltCon::DataCon(u1_con),
+                binders: vec![],
+                rhs: con_expr,
+            };
+            return self.make_case(
+                core::Expr::Var(scrutinee.clone(), span),
+                vec![u1_alt],
+                span,
+            );
+        }
+
+        // Build field variable list and nested case expressions
+        let mut field_vars = Vec::new();
+        for _ in 0..field_count {
+            field_vars.push(self.fresh_var("fld", Ty::Error));
+        }
+
+        // The innermost expression: apply the constructor with all fields
+        let field_exprs: Vec<core::Expr> = field_vars
+            .iter()
+            .map(|v| core::Expr::Var(v.clone(), span))
+            .collect();
+        let con_expr = self.apply_constructor(data_con, field_exprs, span);
+
+        // Build the product decode tree from the inside out
+        self.build_to_product_tree(
+            &core::Expr::Var(scrutinee.clone(), span),
+            &field_vars,
+            con_expr,
+            span,
+        )
+    }
+
+    /// Build nested case expressions to decode a balanced :*: product tree.
+    ///
+    /// `scrutinee_expr` is the current expression to pattern match.
+    /// `fields` are the field variables to bind.
+    /// `body` is the expression to evaluate once all fields are bound.
+    fn build_to_product_tree(
+        &mut self,
+        scrutinee_expr: &core::Expr,
+        fields: &[Var],
+        body: core::Expr,
+        span: Span,
+    ) -> core::Expr {
+        assert!(!fields.is_empty());
+
+        if fields.len() == 1 {
+            // Single field: case scrutinee of { M1 k -> case k of { K1 x -> body } }
+            let k_var = self.fresh_var("k", Ty::Error);
+            let k1_con = self.make_generics_data_con("K1", 0, 1);
+            let k1_case = self.make_case(
+                core::Expr::Var(k_var.clone(), span),
+                vec![Alt {
+                    con: AltCon::DataCon(k1_con),
+                    binders: vec![fields[0].clone()],
+                    rhs: body,
+                }],
+                span,
+            );
+            let m1_con = self.make_generics_data_con("M1", 0, 1);
+            return self.make_case(
+                scrutinee_expr.clone(),
+                vec![Alt {
+                    con: AltCon::DataCon(m1_con),
+                    binders: vec![k_var],
+                    rhs: k1_case,
+                }],
+                span,
+            );
+        }
+
+        // Multiple fields: case scrutinee of { :*: left right -> ... }
+        let mid = (fields.len() + 1) / 2;
+        let left_var = self.fresh_var("pl", Ty::Error);
+        let right_var = self.fresh_var("pr", Ty::Error);
+
+        // Recursively decode right half first (produces inner body)
+        let right_decoded = self.build_to_product_tree(
+            &core::Expr::Var(right_var.clone(), span),
+            &fields[mid..],
+            body,
+            span,
+        );
+
+        // Then decode left half (wraps around right)
+        let left_decoded = self.build_to_product_tree(
+            &core::Expr::Var(left_var.clone(), span),
+            &fields[..mid],
+            right_decoded,
+            span,
+        );
+
+        let prod_con = self.make_generics_data_con(":*:", 0, 2);
+        self.make_case(
+            scrutinee_expr.clone(),
+            vec![Alt {
+                con: AltCon::DataCon(prod_con),
+                binders: vec![left_var, right_var],
+                rhs: left_decoded,
+            }],
+            span,
+        )
+    }
+
+    /// Make a DataCon for a GHC.Generics representation type.
+    fn make_generics_data_con(&self, name: &str, tag: u32, arity: u32) -> DataCon {
+        let type_name = match name {
+            "L1" | "R1" => ":+:",
+            ":*:" => ":*:",
+            _ => name,
+        };
+        DataCon {
+            name: Symbol::intern(name),
+            ty_con: TyCon::new(Symbol::intern(type_name), Kind::Star),
+            tag,
+            arity,
+        }
+    }
+
+    // =========================================================================
+    // Empty instance derivation (NFData)
+    // =========================================================================
+
+    /// Derive an empty instance (no bindings) for classes like NFData.
+    ///
     /// NFData is a no-op since BHC evaluates strictly by default.
     fn derive_empty_instance(
         &mut self,

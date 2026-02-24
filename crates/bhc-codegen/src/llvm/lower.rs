@@ -320,6 +320,10 @@ pub struct Lowering<'ctx, 'm> {
     derived_min_bound_fns: FxHashMap<String, VarId>,
     /// Map from type name → VarId of the $derived_maxBound_TypeName function.
     derived_max_bound_fns: FxHashMap<String, VarId>,
+    /// Map from type name → VarId of the $derived_from_TypeName function (GHC.Generics).
+    derived_from_fns: FxHashMap<String, VarId>,
+    /// Map from type name → VarId of the $derived_to_TypeName function (GHC.Generics).
+    derived_to_fns: FxHashMap<String, VarId>,
     /// Counter for generating unique show descriptor global names.
     show_desc_counter: usize,
     /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
@@ -360,6 +364,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             derived_to_enum_fns: FxHashMap::default(),
             derived_min_bound_fns: FxHashMap::default(),
             derived_max_bound_fns: FxHashMap::default(),
+            derived_from_fns: FxHashMap::default(),
+            derived_to_fns: FxHashMap::default(),
             show_desc_counter: 0,
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
@@ -404,6 +410,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             derived_to_enum_fns: FxHashMap::default(),
             derived_min_bound_fns: FxHashMap::default(),
             derived_max_bound_fns: FxHashMap::default(),
+            derived_from_fns: FxHashMap::default(),
+            derived_to_fns: FxHashMap::default(),
             show_desc_counter: 0,
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
@@ -3284,6 +3292,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // E.63: DeepSeq stubs (no-ops in strict runtime)
             "rnf" => Some(1),
             "deepseq" => Some(2),
+            // GHC.Generics from/to
+            "from" => Some(1),
+            "to" => Some(1),
             "force" => Some(1),
 
             // IO operations
@@ -4060,6 +4071,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "force" => {
                 // force is identity — value is already in normal form
                 self.lower_expr(args[0])
+            }
+            // GHC.Generics from/to — dispatch to derived functions
+            "from" => {
+                self.lower_builtin_generic_from(args[0])
+            }
+            "to" => {
+                self.lower_builtin_generic_to(args[0])
             }
             "otherwise" => Ok(Some(
                 self.type_mapper().i64_type().const_int(1, false).into(),
@@ -16938,6 +16956,125 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(ptr.into()))
     }
 
+    /// Lower `from x` (GHC.Generics) — dispatch to derived $derived_from_TypeName.
+    fn lower_builtin_generic_from(
+        &mut self,
+        arg_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Try to infer the ADT type from the argument expression
+        let type_name = self.infer_adt_type_from_expr(arg_expr);
+
+        // Fallback: if there's exactly one derived_from_fn, use it (common case)
+        let type_name = type_name.or_else(|| {
+            if self.derived_from_fns.len() == 1 {
+                Some(self.derived_from_fns.keys().next().unwrap().clone())
+            } else {
+                None
+            }
+        });
+
+        if let Some(type_name) = type_name {
+            if let Some(from_var_id) = self.derived_from_fns.get(&type_name).copied() {
+                if let Some(from_fn) = self.functions.get(&from_var_id).copied() {
+                    let value = self.lower_expr(arg_expr)?.ok_or_else(|| {
+                        CodegenError::Internal("from: failed to lower ADT value".to_string())
+                    })?;
+                    // Call derived from: fn(env_ptr, value) -> rep_ptr
+                    let null_env = self.type_mapper().ptr_type().const_null();
+                    let fn_ptr = from_fn.as_global_value().as_pointer_value();
+                    let fn_type = self.type_mapper().ptr_type().fn_type(
+                        &[self.type_mapper().ptr_type().into(), self.type_mapper().ptr_type().into()],
+                        false,
+                    );
+                    let result = self
+                        .builder()
+                        .build_indirect_call(fn_type, fn_ptr, &[null_env.into(), value.into()], "derived_from")
+                        .map_err(|e| CodegenError::Internal(format!("from: call failed: {:?}", e)))?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| CodegenError::Internal("from: void result".to_string()))?;
+                    return Ok(Some(result));
+                }
+            }
+        }
+        // Fallback: identity (for types without Generic instance)
+        self.lower_expr(arg_expr)
+    }
+
+    /// Lower `to rep` (GHC.Generics) — dispatch to derived $derived_to_TypeName.
+    /// Note: `to` dispatches based on what the result type should be, which is
+    /// determined from the expression context. Since we can't easily infer the
+    /// result type, we look at the argument's rep structure to find the original type.
+    fn lower_builtin_generic_to(
+        &mut self,
+        arg_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // For `to`, we need to find which type this is for.
+        // Strategy: check if the argument was produced by `from` of a known type,
+        // or look for derived_to_fns and try each one.
+        // Simplest approach: if there's exactly one derived_to_fn, use it.
+        // Otherwise, check if the argument expression gives us a hint.
+
+        // Check if argument is (from x) — then we know the type from x
+        if let Expr::App(f, inner_arg, _) = arg_expr {
+            if let Expr::Var(fv, _) = f.as_ref() {
+                if fv.name.as_str() == "from" {
+                    if let Some(type_name) = self.infer_adt_type_from_expr(inner_arg) {
+                        if let Some(to_var_id) = self.derived_to_fns.get(&type_name).copied() {
+                            if let Some(to_fn) = self.functions.get(&to_var_id).copied() {
+                                let value = self.lower_expr(arg_expr)?.ok_or_else(|| {
+                                    CodegenError::Internal("to: failed to lower rep value".to_string())
+                                })?;
+                                let null_env = self.type_mapper().ptr_type().const_null();
+                                let fn_ptr = to_fn.as_global_value().as_pointer_value();
+                                let fn_type = self.type_mapper().ptr_type().fn_type(
+                                    &[self.type_mapper().ptr_type().into(), self.type_mapper().ptr_type().into()],
+                                    false,
+                                );
+                                let result = self
+                                    .builder()
+                                    .build_indirect_call(fn_type, fn_ptr, &[null_env.into(), value.into()], "derived_to")
+                                    .map_err(|e| CodegenError::Internal(format!("to: call failed: {:?}", e)))?
+                                    .try_as_basic_value()
+                                    .basic()
+                                    .ok_or_else(|| CodegenError::Internal("to: void result".to_string()))?;
+                                return Ok(Some(result));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // If there's exactly one derived_to_fn, use it (common case in tests)
+        if self.derived_to_fns.len() == 1 {
+            let (_, to_var_id) = self.derived_to_fns.iter().next().unwrap();
+            let to_var_id = *to_var_id;
+            if let Some(to_fn) = self.functions.get(&to_var_id).copied() {
+                let value = self.lower_expr(arg_expr)?.ok_or_else(|| {
+                    CodegenError::Internal("to: failed to lower rep value".to_string())
+                })?;
+                let null_env = self.type_mapper().ptr_type().const_null();
+                let fn_ptr = to_fn.as_global_value().as_pointer_value();
+                let fn_type = self.type_mapper().ptr_type().fn_type(
+                    &[self.type_mapper().ptr_type().into(), self.type_mapper().ptr_type().into()],
+                    false,
+                );
+                let result = self
+                    .builder()
+                    .build_indirect_call(fn_type, fn_ptr, &[null_env.into(), value.into()], "derived_to")
+                    .map_err(|e| CodegenError::Internal(format!("to: call failed: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("to: void result".to_string()))?;
+                return Ok(Some(result));
+            }
+        }
+
+        // Fallback: identity
+        self.lower_expr(arg_expr)
+    }
+
     /// Lower `compare a b` — returns Ordering ADT (tag 0=LT, 1=EQ, 2=GT).
     fn lower_builtin_compare(
         &mut self,
@@ -18030,7 +18167,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Expr::App(f, _arg, _) => {
                 // E.63: force/id are identity functions — infer from argument
                 if let Expr::Var(fv, _) = f.as_ref() {
-                    if fv.name.as_str() == "force" || fv.name.as_str() == "id" {
+                    if fv.name.as_str() == "force" || fv.name.as_str() == "id" || fv.name.as_str() == "to" {
                         return self.infer_show_from_expr(_arg);
                     }
                 }
@@ -30780,6 +30917,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "EQ" => return Some((1, 0)), // tag=1, arity=0
             "GT" => return Some((2, 0)), // tag=2, arity=0
 
+            // GHC.Generics representation constructors
+            "U1" => return Some((0, 0)),  // tag=0, arity=0 (unit)
+            "K1" => return Some((0, 1)),  // tag=0, arity=1 (field wrapper)
+            "M1" => return Some((0, 1)),  // tag=0, arity=1 (metadata wrapper)
+            "L1" => return Some((0, 1)),  // tag=0, arity=1 (left sum)
+            "R1" => return Some((1, 1)),  // tag=1, arity=1 (right sum)
+            ":*:" => return Some((0, 2)), // tag=0, arity=2 (product)
+
             // IOMode constructors
             "ReadMode" => return Some((0, 0)),      // tag=0, arity=0
             "WriteMode" => return Some((1, 0)),     // tag=1, arity=0
@@ -31630,6 +31775,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     self.derived_max_bound_fns.insert(type_name.clone(), var.id);
                     self.tag_constructors_with_type(expr, &type_name);
                 }
+                // Detect auto-derived Generic instance methods ($derived_from_TypeName_COUNTER, $derived_to_TypeName_COUNTER)
+                else if let Some(remainder) = name.strip_prefix("$derived_from_") {
+                    let type_name = Self::strip_deriving_counter_suffix(remainder);
+                    self.derived_from_fns.insert(type_name.clone(), var.id);
+                    self.tag_constructors_with_type(expr, &type_name);
+                }
+                else if let Some(remainder) = name.strip_prefix("$derived_to_") {
+                    let type_name = Self::strip_deriving_counter_suffix(remainder);
+                    self.derived_to_fns.insert(type_name.clone(), var.id);
+                    self.tag_constructors_with_type(expr, &type_name);
+                }
                 // Detect manual instance methods ($instance_show_TypeName)
                 else if let Some(type_name) = name.strip_prefix("$instance_show_") {
                     self.derived_show_fns
@@ -31744,7 +31900,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // E.63: force/id are identity — preserve ADT type from argument
                 if let Expr::Var(fv, _) = f.as_ref() {
                     let fname = fv.name.as_str();
-                    if fname == "succ" || fname == "pred" || fname == "force" || fname == "id" {
+                    if fname == "succ" || fname == "pred" || fname == "force" || fname == "id" || fname == "to" || fname == "from" {
                         return self.infer_adt_type_from_expr(arg);
                     }
                     // E.54: toEnum — use single-enum heuristic
@@ -34310,6 +34466,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             "force" => {
                 // force: identity — value already in normal form
+                Ok(Some(args[0]))
+            }
+            // GHC.Generics from/to — identity passthrough in direct mode
+            "from" | "to" => {
                 Ok(Some(args[0]))
             }
 

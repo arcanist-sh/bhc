@@ -304,6 +304,8 @@ impl LowerContext {
             // GHC.Generics
             ("All", "All", 1),
             ("Any", "Any", 1),
+            // GHC.Generics representation constructors are at fixed DefIds 12410-12415 only
+            // (NOT in this sequential array — dual registration causes DefId collision)
             // Note: X11/System.Posix stub constructors are now in define_stubs()
         ];
 
@@ -1650,6 +1652,22 @@ impl LowerContext {
             let def_id = DefId::new(id);
             self.define(def_id, sym, DefKind::Value, Span::default());
             self.bind_value(sym, def_id);
+        }
+
+        // GHC.Generics representation constructors (fixed DefIds 12410-12415)
+        let generics_cons: &[(usize, &str)] = &[
+            (12410, "U1"),
+            (12411, "K1"),
+            (12412, "M1"),
+            (12413, "L1"),
+            (12414, "R1"),
+            (12415, ":*:"),
+        ];
+        for &(id, name) in generics_cons {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Constructor, Span::default());
+            self.bind_constructor(sym, def_id);
         }
 
         // Data.ByteString.Builder at fixed DefIds 11450-11510

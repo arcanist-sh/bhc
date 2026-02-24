@@ -1,0 +1,5 @@
+Hello, Lazy Text!
+0
+17
+Packed lazy
+Hello World

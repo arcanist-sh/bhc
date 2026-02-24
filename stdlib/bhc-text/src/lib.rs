@@ -32,6 +32,8 @@
 
 pub mod bytearray;
 pub mod bytestring;
+pub mod lazy_bytestring;
+pub mod lazy_text;
 pub mod simd;
 pub mod text;
 pub mod text_io;

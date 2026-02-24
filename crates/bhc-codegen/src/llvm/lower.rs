@@ -2408,6 +2408,140 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let word64_to_double = self.module.llvm_module().add_function("bhc_word64_to_double", i64_to_f64, None);
         self.functions.insert(VarId::new(1000261), word64_to_double);
 
+        // ---- Lazy Text RTS functions (VarId 1000270-1000283) ----
+        // bhc_lazy_text_empty() -> ptr
+        let lt_empty = self.module.llvm_module().add_function("bhc_lazy_text_empty", ptr_type.fn_type(&[], false), None);
+        self.functions.insert(VarId::new(1000270), lt_empty);
+        // bhc_lazy_text_from_strict(ptr) -> ptr
+        let lt_from_strict = self.module.llvm_module().add_function("bhc_lazy_text_from_strict", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000271), lt_from_strict);
+        // bhc_lazy_text_to_strict(ptr) -> ptr
+        let lt_to_strict = self.module.llvm_module().add_function("bhc_lazy_text_to_strict", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000272), lt_to_strict);
+        // bhc_lazy_text_pack(ptr) -> ptr
+        let lt_pack = self.module.llvm_module().add_function("bhc_lazy_text_pack", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000273), lt_pack);
+        // bhc_lazy_text_unpack(ptr) -> ptr
+        let lt_unpack = self.module.llvm_module().add_function("bhc_lazy_text_unpack", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000274), lt_unpack);
+        // bhc_lazy_text_null(ptr) -> i64
+        let lt_null = self.module.llvm_module().add_function("bhc_lazy_text_null", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000275), lt_null);
+        // bhc_lazy_text_length(ptr) -> i64
+        let lt_length = self.module.llvm_module().add_function("bhc_lazy_text_length", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000276), lt_length);
+        // bhc_lazy_text_append(ptr, ptr) -> ptr
+        let lt_append = self.module.llvm_module().add_function("bhc_lazy_text_append", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000277), lt_append);
+        // bhc_lazy_text_from_chunks(ptr) -> ptr
+        let lt_from_chunks = self.module.llvm_module().add_function("bhc_lazy_text_from_chunks", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000278), lt_from_chunks);
+        // bhc_lazy_text_to_chunks(ptr) -> ptr
+        let lt_to_chunks = self.module.llvm_module().add_function("bhc_lazy_text_to_chunks", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000279), lt_to_chunks);
+        // bhc_lazy_text_head(ptr) -> i64
+        let lt_head = self.module.llvm_module().add_function("bhc_lazy_text_head", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000280), lt_head);
+        // bhc_lazy_text_tail(ptr) -> ptr
+        let lt_tail = self.module.llvm_module().add_function("bhc_lazy_text_tail", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000281), lt_tail);
+        // bhc_lazy_text_take(i64, ptr) -> ptr
+        let lt_take = self.module.llvm_module().add_function("bhc_lazy_text_take", ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000282), lt_take);
+        // bhc_lazy_text_drop(i64, ptr) -> ptr
+        let lt_drop = self.module.llvm_module().add_function("bhc_lazy_text_drop", ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000283), lt_drop);
+
+        // ---- Lazy ByteString RTS functions (VarId 1000440-1000459) ----
+        // bhc_lazy_bs_empty() -> ptr
+        let lbs_empty = self.module.llvm_module().add_function("bhc_lazy_bs_empty", ptr_type.fn_type(&[], false), None);
+        self.functions.insert(VarId::new(1000440), lbs_empty);
+        // bhc_lazy_bs_from_strict(ptr) -> ptr
+        let lbs_from_strict = self.module.llvm_module().add_function("bhc_lazy_bs_from_strict", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000441), lbs_from_strict);
+        // bhc_lazy_bs_to_strict(ptr) -> ptr
+        let lbs_to_strict = self.module.llvm_module().add_function("bhc_lazy_bs_to_strict", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000442), lbs_to_strict);
+        // bhc_lazy_bs_from_chunks(ptr) -> ptr
+        let lbs_from_chunks = self.module.llvm_module().add_function("bhc_lazy_bs_from_chunks", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000443), lbs_from_chunks);
+        // bhc_lazy_bs_to_chunks(ptr) -> ptr
+        let lbs_to_chunks = self.module.llvm_module().add_function("bhc_lazy_bs_to_chunks", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000444), lbs_to_chunks);
+        // bhc_lazy_bs_null(ptr) -> i64
+        let lbs_null = self.module.llvm_module().add_function("bhc_lazy_bs_null", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000445), lbs_null);
+        // bhc_lazy_bs_length(ptr) -> i64
+        let lbs_length = self.module.llvm_module().add_function("bhc_lazy_bs_length", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000446), lbs_length);
+        // bhc_lazy_bs_pack(ptr) -> ptr
+        let lbs_pack = self.module.llvm_module().add_function("bhc_lazy_bs_pack", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000447), lbs_pack);
+        // bhc_lazy_bs_append(ptr, ptr) -> ptr
+        let lbs_append = self.module.llvm_module().add_function("bhc_lazy_bs_append", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000448), lbs_append);
+        // bhc_lazy_bs_head(ptr) -> i64
+        let lbs_head = self.module.llvm_module().add_function("bhc_lazy_bs_head", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000449), lbs_head);
+        // bhc_lazy_bs_tail(ptr) -> ptr
+        let lbs_tail = self.module.llvm_module().add_function("bhc_lazy_bs_tail", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000450), lbs_tail);
+        // bhc_lazy_bs_take(i64, ptr) -> ptr
+        let lbs_take = self.module.llvm_module().add_function("bhc_lazy_bs_take", ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000451), lbs_take);
+        // bhc_lazy_bs_drop(i64, ptr) -> ptr
+        let lbs_drop = self.module.llvm_module().add_function("bhc_lazy_bs_drop", ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000452), lbs_drop);
+        // bhc_lazy_bs_filter(fn_ptr, env_ptr, ptr) -> ptr
+        let lbs_filter = self.module.llvm_module().add_function("bhc_lazy_bs_filter", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000453), lbs_filter);
+        // bhc_lazy_bs_is_prefix_of(ptr, ptr) -> i64
+        let lbs_is_prefix = self.module.llvm_module().add_function("bhc_lazy_bs_is_prefix_of", i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000454), lbs_is_prefix);
+        // bhc_lazy_bs_read_file(ptr) -> ptr
+        let lbs_read_file = self.module.llvm_module().add_function("bhc_lazy_bs_read_file", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000455), lbs_read_file);
+        // bhc_lazy_bs_write_file(ptr, ptr) -> void
+        let lbs_write_file = self.module.llvm_module().add_function("bhc_lazy_bs_write_file", void_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000456), lbs_write_file);
+        // bhc_lazy_bs_put_str(ptr) -> void
+        let lbs_put_str = self.module.llvm_module().add_function("bhc_lazy_bs_put_str", void_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000457), lbs_put_str);
+        // bhc_lazy_bs_h_put_str(ptr, ptr) -> void
+        let lbs_h_put_str = self.module.llvm_module().add_function("bhc_lazy_bs_h_put_str", void_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000458), lbs_h_put_str);
+        // bhc_lazy_bs_h_get_contents(ptr) -> ptr
+        let lbs_h_get_contents = self.module.llvm_module().add_function("bhc_lazy_bs_h_get_contents", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000459), lbs_h_get_contents);
+
+        // ---- Lazy ByteString Char8 RTS functions (VarId 1000470-1000475) ----
+        // bhc_lazy_bs_char8_unpack(ptr) -> ptr
+        let lbs_c8_unpack = self.module.llvm_module().add_function("bhc_lazy_bs_char8_unpack", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000470), lbs_c8_unpack);
+        // bhc_lazy_bs_char8_lines(ptr) -> ptr
+        let lbs_c8_lines = self.module.llvm_module().add_function("bhc_lazy_bs_char8_lines", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000471), lbs_c8_lines);
+        // bhc_lazy_bs_char8_unlines(ptr) -> ptr
+        let lbs_c8_unlines = self.module.llvm_module().add_function("bhc_lazy_bs_char8_unlines", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000472), lbs_c8_unlines);
+        // bhc_lazy_bs_char8_take(i64, ptr) -> ptr
+        let lbs_c8_take = self.module.llvm_module().add_function("bhc_lazy_bs_char8_take", ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000473), lbs_c8_take);
+        // bhc_lazy_bs_char8_drop_while(fn_ptr, env_ptr, ptr) -> ptr
+        let lbs_c8_drop_while = self.module.llvm_module().add_function("bhc_lazy_bs_char8_drop_while", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000474), lbs_c8_drop_while);
+        // bhc_lazy_bs_char8_cons(i64, ptr) -> ptr
+        let lbs_c8_cons = self.module.llvm_module().add_function("bhc_lazy_bs_char8_cons", ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000475), lbs_c8_cons);
+
+        // ---- Lazy Text Encoding RTS functions (VarId 1000476-1000477) ----
+        // bhc_lazy_text_encode_utf8(ptr) -> ptr
+        let lt_encode_utf8 = self.module.llvm_module().add_function("bhc_lazy_text_encode_utf8", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000476), lt_encode_utf8);
+        // bhc_lazy_text_decode_utf8(ptr) -> ptr
+        let lt_decode_utf8 = self.module.llvm_module().add_function("bhc_lazy_text_decode_utf8", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000477), lt_decode_utf8);
+
         // ---- Exception RTS functions (VarId 1080-1091) ----
         // bhc_throw(ptr) -> ptr (stores exception in TLS, returns sentinel null)
         let throw_fn = self.module.llvm_module().add_function("bhc_throw", ptr_type.fn_type(&[ptr_type.into()], false), None);
@@ -3508,6 +3642,56 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.ByteString.readFile" => Some(1),
                 "Data.ByteString.writeFile" => Some(2),
 
+                // Data.Text.Lazy operations
+                "Data.Text.Lazy.empty" => Some(0),
+                "Data.Text.Lazy.fromStrict" => Some(1),
+                "Data.Text.Lazy.toStrict" => Some(1),
+                "Data.Text.Lazy.pack" => Some(1),
+                "Data.Text.Lazy.unpack" => Some(1),
+                "Data.Text.Lazy.null" => Some(1),
+                "Data.Text.Lazy.length" => Some(1),
+                "Data.Text.Lazy.append" | "Data.Text.Lazy.<>" => Some(2),
+                "Data.Text.Lazy.fromChunks" => Some(1),
+                "Data.Text.Lazy.toChunks" => Some(1),
+                "Data.Text.Lazy.head" => Some(1),
+                "Data.Text.Lazy.tail" => Some(1),
+                "Data.Text.Lazy.take" => Some(2),
+                "Data.Text.Lazy.drop" => Some(2),
+
+                // Data.ByteString.Lazy operations
+                "Data.ByteString.Lazy.empty" => Some(0),
+                "Data.ByteString.Lazy.fromStrict" => Some(1),
+                "Data.ByteString.Lazy.toStrict" => Some(1),
+                "Data.ByteString.Lazy.fromChunks" => Some(1),
+                "Data.ByteString.Lazy.toChunks" => Some(1),
+                "Data.ByteString.Lazy.null" => Some(1),
+                "Data.ByteString.Lazy.length" => Some(1),
+                "Data.ByteString.Lazy.pack" => Some(1),
+                "Data.ByteString.Lazy.append" | "Data.ByteString.Lazy.<>" => Some(2),
+                "Data.ByteString.Lazy.head" => Some(1),
+                "Data.ByteString.Lazy.tail" => Some(1),
+                "Data.ByteString.Lazy.take" => Some(2),
+                "Data.ByteString.Lazy.drop" => Some(2),
+                "Data.ByteString.Lazy.filter" => Some(2),
+                "Data.ByteString.Lazy.isPrefixOf" => Some(2),
+                "Data.ByteString.Lazy.readFile" => Some(1),
+                "Data.ByteString.Lazy.writeFile" => Some(2),
+                "Data.ByteString.Lazy.putStr" => Some(1),
+                "Data.ByteString.Lazy.hPut" | "Data.ByteString.Lazy.hPutStr" => Some(2),
+                "Data.ByteString.Lazy.hGetContents" => Some(1),
+
+                // Data.ByteString.Lazy.Char8 operations
+                "Data.ByteString.Lazy.Char8.unpack" => Some(1),
+                "Data.ByteString.Lazy.Char8.lines" => Some(1),
+                "Data.ByteString.Lazy.Char8.unlines" => Some(1),
+                "Data.ByteString.Lazy.Char8.take" => Some(2),
+                "Data.ByteString.Lazy.Char8.dropWhile" => Some(2),
+                "Data.ByteString.Lazy.Char8.cons" => Some(2),
+
+                // Data.Text.Lazy.Encoding operations
+                "Data.Text.Lazy.Encoding.encodeUtf8" => Some(1),
+                "Data.Text.Lazy.Encoding.decodeUtf8" => Some(1),
+
             // Identity operations
             "Identity" => Some(1),
             "runIdentity" => Some(1),
@@ -4345,6 +4529,56 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.ByteString.bhc_poke_byte" => self.lower_builtin_ba_poke(args[0], args[1], args[2]),
                 "Data.ByteString.bhc_cstring_length" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1256, "ba_strlen"),
                 "Data.ByteString.bhc_peek_array" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1257, "ba_peek_array"),
+
+                // Data.Text.Lazy operations (VarIds 1000270-1000283)
+                "Data.Text.Lazy.empty" => self.lower_builtin_text_nullary(1000270, "lt_empty"),
+                "Data.Text.Lazy.fromStrict" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000271, "lt_from_strict"),
+                "Data.Text.Lazy.toStrict" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000272, "lt_to_strict"),
+                "Data.Text.Lazy.pack" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000273, "lt_pack"),
+                "Data.Text.Lazy.unpack" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000274, "lt_unpack"),
+                "Data.Text.Lazy.null" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1000275, "lt_null"),
+                "Data.Text.Lazy.length" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1000276, "lt_length"),
+                "Data.Text.Lazy.append" | "Data.Text.Lazy.<>" => self.lower_builtin_text_binary_ptr_to_ptr(args[0], args[1], 1000277, "lt_append"),
+                "Data.Text.Lazy.fromChunks" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000278, "lt_from_chunks"),
+                "Data.Text.Lazy.toChunks" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000279, "lt_to_chunks"),
+                "Data.Text.Lazy.head" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1000280, "lt_head"),
+                "Data.Text.Lazy.tail" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000281, "lt_tail"),
+                "Data.Text.Lazy.take" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000282, "lt_take"),
+                "Data.Text.Lazy.drop" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000283, "lt_drop"),
+
+                // Data.ByteString.Lazy operations (VarIds 1000440-1000459)
+                "Data.ByteString.Lazy.empty" => self.lower_builtin_text_nullary(1000440, "lbs_empty"),
+                "Data.ByteString.Lazy.fromStrict" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000441, "lbs_from_strict"),
+                "Data.ByteString.Lazy.toStrict" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000442, "lbs_to_strict"),
+                "Data.ByteString.Lazy.fromChunks" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000443, "lbs_from_chunks"),
+                "Data.ByteString.Lazy.toChunks" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000444, "lbs_to_chunks"),
+                "Data.ByteString.Lazy.null" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1000445, "lbs_null"),
+                "Data.ByteString.Lazy.length" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1000446, "lbs_length"),
+                "Data.ByteString.Lazy.pack" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000447, "lbs_pack"),
+                "Data.ByteString.Lazy.append" | "Data.ByteString.Lazy.<>" => self.lower_builtin_text_binary_ptr_to_ptr(args[0], args[1], 1000448, "lbs_append"),
+                "Data.ByteString.Lazy.head" => self.lower_builtin_text_unary_ptr_to_int(args[0], 1000449, "lbs_head"),
+                "Data.ByteString.Lazy.tail" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000450, "lbs_tail"),
+                "Data.ByteString.Lazy.take" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000451, "lbs_take"),
+                "Data.ByteString.Lazy.drop" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000452, "lbs_drop"),
+                "Data.ByteString.Lazy.filter" => self.lower_builtin_lazy_bs_filter(args[0], args[1]),
+                "Data.ByteString.Lazy.isPrefixOf" => self.lower_builtin_text_binary_ptr_to_int(args[0], args[1], 1000454, "lbs_is_prefix_of"),
+                "Data.ByteString.Lazy.readFile" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000455, "lbs_read_file"),
+                "Data.ByteString.Lazy.writeFile" => self.lower_builtin_lazy_bs_write_file(args[0], args[1]),
+                "Data.ByteString.Lazy.putStr" => self.lower_builtin_text_io_stdout_text(args[0], 1000457, "lbs_put_str"),
+                "Data.ByteString.Lazy.hPut" | "Data.ByteString.Lazy.hPutStr" => self.lower_builtin_text_io_handle_text_void(args[0], args[1], 1000458, "lbs_h_put_str"),
+                "Data.ByteString.Lazy.hGetContents" => self.lower_builtin_text_io_handle_to_text(args[0], 1000459, "lbs_h_get_contents"),
+
+                // Data.ByteString.Lazy.Char8 operations (VarIds 1000470-1000475)
+                "Data.ByteString.Lazy.Char8.unpack" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000470, "lbs_c8_unpack"),
+                "Data.ByteString.Lazy.Char8.lines" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000471, "lbs_c8_lines"),
+                "Data.ByteString.Lazy.Char8.unlines" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000472, "lbs_c8_unlines"),
+                "Data.ByteString.Lazy.Char8.take" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000473, "lbs_c8_take"),
+                "Data.ByteString.Lazy.Char8.dropWhile" => self.lower_builtin_lazy_bs_drop_while(args[0], args[1]),
+                "Data.ByteString.Lazy.Char8.cons" => self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000475, "lbs_c8_cons"),
+
+                // Data.Text.Lazy.Encoding operations (VarIds 1000476-1000477)
+                "Data.Text.Lazy.Encoding.encodeUtf8" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000476, "lt_encode_utf8"),
+                "Data.Text.Lazy.Encoding.decodeUtf8" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000477, "lt_decode_utf8"),
 
             // Identity operations (newtype = pass through)
             "Identity" | "runIdentity" => self.lower_expr(args[0]),
@@ -29723,6 +29957,74 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(unit.into()))
     }
 
+    /// Lazy ByteString filter: (Word8 -> Bool) -> LazyByteString -> LazyByteString
+    fn lower_builtin_lazy_bs_filter(
+        &mut self,
+        func_expr: &Expr,
+        bs_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self.lower_expr(func_expr)?
+            .ok_or_else(|| CodegenError::Internal("lazy_bs_filter: no func".to_string()))?;
+        let bs = self.lower_expr(bs_expr)?
+            .ok_or_else(|| CodegenError::Internal("lazy_bs_filter: no bs".to_string()))?;
+        let func_ptr = self.value_to_ptr(func)?;
+        let bs_ptr = self.value_to_ptr(bs)?;
+        let rts_fn = self.functions.get(&VarId::new(1000453)).ok_or_else(|| {
+            CodegenError::Internal("bhc_lazy_bs_filter not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[func_ptr.into(), func_ptr.into(), bs_ptr.into()], "lazy_bs_filter")
+            .map_err(|e| CodegenError::Internal(format!("lazy_bs_filter call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("lazy_bs_filter: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Lazy ByteString Char8 dropWhile: (Char -> Bool) -> LazyByteString -> LazyByteString
+    fn lower_builtin_lazy_bs_drop_while(
+        &mut self,
+        func_expr: &Expr,
+        bs_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self.lower_expr(func_expr)?
+            .ok_or_else(|| CodegenError::Internal("lazy_bs_drop_while: no func".to_string()))?;
+        let bs = self.lower_expr(bs_expr)?
+            .ok_or_else(|| CodegenError::Internal("lazy_bs_drop_while: no bs".to_string()))?;
+        let func_ptr = self.value_to_ptr(func)?;
+        let bs_ptr = self.value_to_ptr(bs)?;
+        let rts_fn = self.functions.get(&VarId::new(1000474)).ok_or_else(|| {
+            CodegenError::Internal("bhc_lazy_bs_char8_drop_while not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[func_ptr.into(), func_ptr.into(), bs_ptr.into()], "lazy_bs_drop_while")
+            .map_err(|e| CodegenError::Internal(format!("lazy_bs_drop_while call failed: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("lazy_bs_drop_while: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Lazy ByteString writeFile: FilePath -> LazyByteString -> IO ()
+    fn lower_builtin_lazy_bs_write_file(
+        &mut self,
+        path_expr: &Expr,
+        bs_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let path = self.lower_expr(path_expr)?
+            .ok_or_else(|| CodegenError::Internal("lazy_bs_write_file: no path".to_string()))?;
+        let bs = self.lower_expr(bs_expr)?
+            .ok_or_else(|| CodegenError::Internal("lazy_bs_write_file: no bs".to_string()))?;
+        let path_ptr = self.value_to_ptr(path)?;
+        let bs_ptr = self.value_to_ptr(bs)?;
+        let rts_fn = self.functions.get(&VarId::new(1000456)).ok_or_else(|| {
+            CodegenError::Internal("bhc_lazy_bs_write_file not declared".to_string())
+        })?;
+        self.builder()
+            .build_call(*rts_fn, &[path_ptr.into(), bs_ptr.into()], "lazy_bs_write_file")
+            .map_err(|e| CodegenError::Internal(format!("lazy_bs_write_file call failed: {:?}", e)))?;
+        let unit = self.type_mapper().ptr_type().const_null();
+        Ok(Some(unit.into()))
+    }
+
     /// Check if an expression is structurally a list (Cons applications or Nil).
     /// This is used when type information isn't available.
     fn is_list_expr(expr: &Expr) -> bool {
@@ -33134,6 +33436,154 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .map_err(|e| CodegenError::Internal(format!("text_drop: {:?}", e)))?
                     .try_as_basic_value().basic()
                     .ok_or_else(|| CodegenError::Internal("text_drop: void".to_string()))?;
+                Ok(Some(result))
+            }
+
+            // Data.Text.Lazy — direct RTS dispatch
+            "Data.Text.Lazy.empty" => {
+                let rts_fn = self.functions.get(&VarId::new(1000270)).ok_or_else(|| CodegenError::Internal("bhc_lazy_text_empty not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[], "lt_empty").map_err(|e| CodegenError::Internal(format!("lt_empty: {:?}", e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal("lt_empty: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.Lazy.fromStrict" | "Data.Text.Lazy.toStrict" | "Data.Text.Lazy.pack"
+            | "Data.Text.Lazy.unpack" | "Data.Text.Lazy.fromChunks" | "Data.Text.Lazy.toChunks"
+            | "Data.Text.Lazy.tail" => {
+                let var_id = match name {
+                    "Data.Text.Lazy.fromStrict" => 1000271,
+                    "Data.Text.Lazy.toStrict" => 1000272,
+                    "Data.Text.Lazy.pack" => 1000273,
+                    "Data.Text.Lazy.unpack" => 1000274,
+                    "Data.Text.Lazy.fromChunks" => 1000278,
+                    "Data.Text.Lazy.toChunks" => 1000279,
+                    "Data.Text.Lazy.tail" => 1000281,
+                    _ => unreachable!(),
+                };
+                let rts_fn = self.functions.get(&VarId::new(var_id)).ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "lt_unary").map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal(format!("{}: void", name)))?;
+                Ok(Some(result))
+            }
+            "Data.Text.Lazy.null" | "Data.Text.Lazy.length" | "Data.Text.Lazy.head" => {
+                let var_id = match name {
+                    "Data.Text.Lazy.null" => 1000275,
+                    "Data.Text.Lazy.length" => 1000276,
+                    "Data.Text.Lazy.head" => 1000280,
+                    _ => unreachable!(),
+                };
+                let rts_fn = self.functions.get(&VarId::new(var_id)).ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "lt_to_int").map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal(format!("{}: void", name)))?;
+                Ok(Some(self.int_to_ptr(result.into_int_value())?.into()))
+            }
+            "Data.Text.Lazy.append" | "Data.Text.Lazy.<>" => {
+                let rts_fn = self.functions.get(&VarId::new(1000277)).ok_or_else(|| CodegenError::Internal("bhc_lazy_text_append not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into(), args[1].into()], "lt_append").map_err(|e| CodegenError::Internal(format!("lt_append: {:?}", e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal("lt_append: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.Lazy.take" | "Data.Text.Lazy.drop" => {
+                let var_id = if name == "Data.Text.Lazy.take" { 1000282 } else { 1000283 };
+                let rts_fn = self.functions.get(&VarId::new(var_id)).ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into(), args[1].into()], "lt_int_ptr").map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal(format!("{}: void", name)))?;
+                Ok(Some(result))
+            }
+
+            // Data.ByteString.Lazy — direct RTS dispatch
+            "Data.ByteString.Lazy.empty" => {
+                let rts_fn = self.functions.get(&VarId::new(1000440)).ok_or_else(|| CodegenError::Internal("bhc_lazy_bs_empty not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[], "lbs_empty").map_err(|e| CodegenError::Internal(format!("lbs_empty: {:?}", e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal("lbs_empty: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.ByteString.Lazy.fromStrict" | "Data.ByteString.Lazy.toStrict"
+            | "Data.ByteString.Lazy.fromChunks" | "Data.ByteString.Lazy.toChunks"
+            | "Data.ByteString.Lazy.pack" | "Data.ByteString.Lazy.tail"
+            | "Data.ByteString.Lazy.putStr" => {
+                let var_id = match name {
+                    "Data.ByteString.Lazy.fromStrict" => 1000441,
+                    "Data.ByteString.Lazy.toStrict" => 1000442,
+                    "Data.ByteString.Lazy.fromChunks" => 1000443,
+                    "Data.ByteString.Lazy.toChunks" => 1000444,
+                    "Data.ByteString.Lazy.pack" => 1000447,
+                    "Data.ByteString.Lazy.tail" => 1000450,
+                    "Data.ByteString.Lazy.putStr" => 1000457,
+                    _ => unreachable!(),
+                };
+                let rts_fn = self.functions.get(&VarId::new(var_id)).ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "lbs_unary").map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal(format!("{}: void", name)))?;
+                Ok(Some(result))
+            }
+            "Data.ByteString.Lazy.null" | "Data.ByteString.Lazy.length"
+            | "Data.ByteString.Lazy.head" => {
+                let var_id = match name {
+                    "Data.ByteString.Lazy.null" => 1000445,
+                    "Data.ByteString.Lazy.length" => 1000446,
+                    "Data.ByteString.Lazy.head" => 1000449,
+                    _ => unreachable!(),
+                };
+                let rts_fn = self.functions.get(&VarId::new(var_id)).ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "lbs_to_int").map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal(format!("{}: void", name)))?;
+                Ok(Some(self.int_to_ptr(result.into_int_value())?.into()))
+            }
+            "Data.ByteString.Lazy.append" | "Data.ByteString.Lazy.<>"
+            | "Data.ByteString.Lazy.isPrefixOf" | "Data.ByteString.Lazy.hPutStr" => {
+                let var_id = match name {
+                    "Data.ByteString.Lazy.append" | "Data.ByteString.Lazy.<>" => 1000448,
+                    "Data.ByteString.Lazy.isPrefixOf" => 1000454,
+                    "Data.ByteString.Lazy.hPutStr" => 1000458,
+                    _ => unreachable!(),
+                };
+                let rts_fn = self.functions.get(&VarId::new(var_id)).ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into(), args[1].into()], "lbs_binary").map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal(format!("{}: void", name)))?;
+                Ok(Some(result))
+            }
+            "Data.ByteString.Lazy.take" | "Data.ByteString.Lazy.drop" => {
+                let var_id = if name == "Data.ByteString.Lazy.take" { 1000451 } else { 1000452 };
+                let rts_fn = self.functions.get(&VarId::new(var_id)).ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into(), args[1].into()], "lbs_int_ptr").map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal(format!("{}: void", name)))?;
+                Ok(Some(result))
+            }
+            "Data.ByteString.Lazy.readFile" | "Data.ByteString.Lazy.hGetContents" => {
+                let var_id = if name == "Data.ByteString.Lazy.readFile" { 1000455 } else { 1000459 };
+                let rts_fn = self.functions.get(&VarId::new(var_id)).ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "lbs_io_unary").map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal(format!("{}: void", name)))?;
+                Ok(Some(result))
+            }
+            "Data.ByteString.Lazy.writeFile" => {
+                let rts_fn = self.functions.get(&VarId::new(1000456)).ok_or_else(|| CodegenError::Internal("bhc_lazy_bs_write_file not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into(), args[1].into()], "lbs_write_file").map_err(|e| CodegenError::Internal(format!("lbs_write_file: {:?}", e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal("lbs_write_file: void".to_string()))?;
+                Ok(Some(result))
+            }
+
+            // Data.ByteString.Lazy.Char8 — direct RTS dispatch
+            "Data.ByteString.Lazy.Char8.unpack" | "Data.ByteString.Lazy.Char8.lines"
+            | "Data.ByteString.Lazy.Char8.unlines" => {
+                let var_id = match name {
+                    "Data.ByteString.Lazy.Char8.unpack" => 1000470,
+                    "Data.ByteString.Lazy.Char8.lines" => 1000471,
+                    "Data.ByteString.Lazy.Char8.unlines" => 1000472,
+                    _ => unreachable!(),
+                };
+                let rts_fn = self.functions.get(&VarId::new(var_id)).ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "lbs_c8_unary").map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal(format!("{}: void", name)))?;
+                Ok(Some(result))
+            }
+            "Data.ByteString.Lazy.Char8.take" => {
+                let rts_fn = self.functions.get(&VarId::new(1000473)).ok_or_else(|| CodegenError::Internal("bhc_lazy_bs_char8_take not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into(), args[1].into()], "lbs_c8_take").map_err(|e| CodegenError::Internal(format!("lbs_c8_take: {:?}", e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal("lbs_c8_take: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.ByteString.Lazy.Char8.cons" => {
+                let rts_fn = self.functions.get(&VarId::new(1000475)).ok_or_else(|| CodegenError::Internal("bhc_lazy_bs_char8_cons not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into(), args[1].into()], "lbs_c8_cons").map_err(|e| CodegenError::Internal(format!("lbs_c8_cons: {:?}", e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal("lbs_c8_cons: void".to_string()))?;
+                Ok(Some(result))
+            }
+
+            // Data.Text.Lazy.Encoding — direct RTS dispatch
+            "Data.Text.Lazy.Encoding.encodeUtf8" => {
+                let rts_fn = self.functions.get(&VarId::new(1000476)).ok_or_else(|| CodegenError::Internal("bhc_lazy_text_encode_utf8 not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "lt_encode_utf8").map_err(|e| CodegenError::Internal(format!("lt_encode_utf8: {:?}", e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal("lt_encode_utf8: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.Lazy.Encoding.decodeUtf8" => {
+                let rts_fn = self.functions.get(&VarId::new(1000477)).ok_or_else(|| CodegenError::Internal("bhc_lazy_text_decode_utf8 not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "lt_decode_utf8").map_err(|e| CodegenError::Internal(format!("lt_decode_utf8: {:?}", e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal("lt_decode_utf8: void".to_string()))?;
                 Ok(Some(result))
             }
 

@@ -55,6 +55,10 @@ pub struct Builtins {
     pub text_con: TyCon,
     /// The `ByteString` type constructor (packed bytes).
     pub bytestring_con: TyCon,
+    /// The `LazyText` type constructor (chunked UTF-8).
+    pub lazy_text_con: TyCon,
+    /// The `LazyByteString` type constructor (chunked bytes).
+    pub lazy_bs_con: TyCon,
     /// The `Ordering` type constructor.
     pub ordering_con: TyCon,
     /// The `[]` (list) type constructor.
@@ -94,6 +98,10 @@ pub struct Builtins {
     pub text_ty: Ty,
     /// The `ByteString` type (packed bytes).
     pub bytestring_ty: Ty,
+    /// The `LazyText` type (chunked UTF-8).
+    pub lazy_text_ty: Ty,
+    /// The `LazyByteString` type (chunked bytes).
+    pub lazy_bs_ty: Ty,
     /// The `Ordering` type.
     pub ordering_ty: Ty,
     /// The `Integer` type constructor (arbitrary precision).
@@ -141,6 +149,8 @@ impl Builtins {
         let string_con = TyCon::new(Symbol::intern("String"), Kind::Star);
         let text_con = TyCon::new(Symbol::intern("Text"), Kind::Star);
         let bytestring_con = TyCon::new(Symbol::intern("ByteString"), Kind::Star);
+        let lazy_text_con = TyCon::new(Symbol::intern("LazyText"), Kind::Star);
+        let lazy_bs_con = TyCon::new(Symbol::intern("LazyByteString"), Kind::Star);
         let ordering_con = TyCon::new(Symbol::intern("Ordering"), Kind::Star);
 
         // Arbitrary-precision Integer type constructor
@@ -194,6 +204,10 @@ impl Builtins {
         let text_ty = Ty::Con(text_con.clone());
         // ByteString is a packed byte array type
         let bytestring_ty = Ty::Con(bytestring_con.clone());
+        // LazyText is a chunked UTF-8 type
+        let lazy_text_ty = Ty::Con(lazy_text_con.clone());
+        // LazyByteString is a chunked byte array type
+        let lazy_bs_ty = Ty::Con(lazy_bs_con.clone());
         // Ordering is an ADT: LT | EQ | GT
         let ordering_ty = Ty::Con(ordering_con.clone());
 
@@ -215,6 +229,8 @@ impl Builtins {
             string_con,
             text_con,
             bytestring_con,
+            lazy_text_con,
+            lazy_bs_con,
             ordering_con,
             list_con,
             maybe_con,
@@ -230,6 +246,8 @@ impl Builtins {
             string_ty,
             text_ty,
             bytestring_ty,
+            lazy_text_ty,
+            lazy_bs_ty,
             ordering_ty,
             integer_con,
             integer_ty,
@@ -3750,6 +3768,54 @@ impl Builtins {
             ("Data.ByteString.isSuffixOf", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), Ty::fun(self.bytestring_ty.clone(), self.bool_ty.clone())))),
             ("Data.ByteString.readFile", Scheme::mono(Ty::fun(self.string_ty.clone(), Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(self.bytestring_ty.clone()))))),
             ("Data.ByteString.writeFile", Scheme::mono(Ty::fun(self.string_ty.clone(), Ty::fun(self.bytestring_ty.clone(), Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(Ty::Tuple(vec![]))))))),
+            // Data.Text.Lazy PrimOps: chunked lazy text
+            ("Data.Text.Lazy.empty", Scheme::mono(self.lazy_text_ty.clone())),
+            ("Data.Text.Lazy.fromStrict", Scheme::mono(Ty::fun(self.text_ty.clone(), self.lazy_text_ty.clone()))),
+            ("Data.Text.Lazy.toStrict", Scheme::mono(Ty::fun(self.lazy_text_ty.clone(), self.text_ty.clone()))),
+            ("Data.Text.Lazy.pack", Scheme::mono(Ty::fun(self.string_ty.clone(), self.lazy_text_ty.clone()))),
+            ("Data.Text.Lazy.unpack", Scheme::mono(Ty::fun(self.lazy_text_ty.clone(), self.string_ty.clone()))),
+            ("Data.Text.Lazy.null", Scheme::mono(Ty::fun(self.lazy_text_ty.clone(), self.bool_ty.clone()))),
+            ("Data.Text.Lazy.length", Scheme::mono(Ty::fun(self.lazy_text_ty.clone(), self.int_ty.clone()))),
+            ("Data.Text.Lazy.append", Scheme::mono(Ty::fun(self.lazy_text_ty.clone(), Ty::fun(self.lazy_text_ty.clone(), self.lazy_text_ty.clone())))),
+            ("Data.Text.Lazy.<>", Scheme::mono(Ty::fun(self.lazy_text_ty.clone(), Ty::fun(self.lazy_text_ty.clone(), self.lazy_text_ty.clone())))),
+            ("Data.Text.Lazy.fromChunks", Scheme::mono(Ty::fun(Ty::List(Box::new(self.text_ty.clone())), self.lazy_text_ty.clone()))),
+            ("Data.Text.Lazy.toChunks", Scheme::mono(Ty::fun(self.lazy_text_ty.clone(), Ty::List(Box::new(self.text_ty.clone()))))),
+            ("Data.Text.Lazy.head", Scheme::mono(Ty::fun(self.lazy_text_ty.clone(), self.char_ty.clone()))),
+            ("Data.Text.Lazy.tail", Scheme::mono(Ty::fun(self.lazy_text_ty.clone(), self.lazy_text_ty.clone()))),
+            ("Data.Text.Lazy.take", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.lazy_text_ty.clone(), self.lazy_text_ty.clone())))),
+            ("Data.Text.Lazy.drop", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.lazy_text_ty.clone(), self.lazy_text_ty.clone())))),
+            // Data.ByteString.Lazy PrimOps: chunked lazy bytestring
+            ("Data.ByteString.Lazy.empty", Scheme::mono(self.lazy_bs_ty.clone())),
+            ("Data.ByteString.Lazy.fromStrict", Scheme::mono(Ty::fun(self.bytestring_ty.clone(), self.lazy_bs_ty.clone()))),
+            ("Data.ByteString.Lazy.toStrict", Scheme::mono(Ty::fun(self.lazy_bs_ty.clone(), self.bytestring_ty.clone()))),
+            ("Data.ByteString.Lazy.fromChunks", Scheme::mono(Ty::fun(Ty::List(Box::new(self.bytestring_ty.clone())), self.lazy_bs_ty.clone()))),
+            ("Data.ByteString.Lazy.toChunks", Scheme::mono(Ty::fun(self.lazy_bs_ty.clone(), Ty::List(Box::new(self.bytestring_ty.clone()))))),
+            ("Data.ByteString.Lazy.null", Scheme::mono(Ty::fun(self.lazy_bs_ty.clone(), self.bool_ty.clone()))),
+            ("Data.ByteString.Lazy.length", Scheme::mono(Ty::fun(self.lazy_bs_ty.clone(), self.int_ty.clone()))),
+            ("Data.ByteString.Lazy.pack", Scheme::mono(Ty::fun(Ty::List(Box::new(self.int_ty.clone())), self.lazy_bs_ty.clone()))),
+            ("Data.ByteString.Lazy.append", Scheme::mono(Ty::fun(self.lazy_bs_ty.clone(), Ty::fun(self.lazy_bs_ty.clone(), self.lazy_bs_ty.clone())))),
+            ("Data.ByteString.Lazy.<>", Scheme::mono(Ty::fun(self.lazy_bs_ty.clone(), Ty::fun(self.lazy_bs_ty.clone(), self.lazy_bs_ty.clone())))),
+            ("Data.ByteString.Lazy.head", Scheme::mono(Ty::fun(self.lazy_bs_ty.clone(), self.int_ty.clone()))),
+            ("Data.ByteString.Lazy.tail", Scheme::mono(Ty::fun(self.lazy_bs_ty.clone(), self.lazy_bs_ty.clone()))),
+            ("Data.ByteString.Lazy.take", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.lazy_bs_ty.clone(), self.lazy_bs_ty.clone())))),
+            ("Data.ByteString.Lazy.drop", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.lazy_bs_ty.clone(), self.lazy_bs_ty.clone())))),
+            ("Data.ByteString.Lazy.isPrefixOf", Scheme::mono(Ty::fun(self.lazy_bs_ty.clone(), Ty::fun(self.lazy_bs_ty.clone(), self.bool_ty.clone())))),
+            ("Data.ByteString.Lazy.readFile", Scheme::mono(Ty::fun(self.string_ty.clone(), Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(self.lazy_bs_ty.clone()))))),
+            ("Data.ByteString.Lazy.writeFile", Scheme::mono(Ty::fun(self.string_ty.clone(), Ty::fun(self.lazy_bs_ty.clone(), Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(Ty::Tuple(vec![]))))))),
+            ("Data.ByteString.Lazy.filter", Scheme::mono(Ty::fun(Ty::fun(self.int_ty.clone(), self.bool_ty.clone()), Ty::fun(self.lazy_bs_ty.clone(), self.lazy_bs_ty.clone())))),
+            ("Data.ByteString.Lazy.putStr", Scheme::mono(Ty::fun(self.lazy_bs_ty.clone(), Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(Ty::Tuple(vec![])))))),
+            ("Data.ByteString.Lazy.hPutStr", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.lazy_bs_ty.clone(), Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(Ty::Tuple(vec![]))))))),
+            ("Data.ByteString.Lazy.hGetContents", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(self.lazy_bs_ty.clone()))))),
+            // Data.ByteString.Lazy.Char8 PrimOps
+            ("Data.ByteString.Lazy.Char8.unpack", Scheme::mono(Ty::fun(self.lazy_bs_ty.clone(), self.string_ty.clone()))),
+            ("Data.ByteString.Lazy.Char8.lines", Scheme::mono(Ty::fun(self.lazy_bs_ty.clone(), Ty::List(Box::new(self.lazy_bs_ty.clone()))))),
+            ("Data.ByteString.Lazy.Char8.unlines", Scheme::mono(Ty::fun(Ty::List(Box::new(self.lazy_bs_ty.clone())), self.lazy_bs_ty.clone()))),
+            ("Data.ByteString.Lazy.Char8.take", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.lazy_bs_ty.clone(), self.lazy_bs_ty.clone())))),
+            ("Data.ByteString.Lazy.Char8.cons", Scheme::mono(Ty::fun(self.char_ty.clone(), Ty::fun(self.lazy_bs_ty.clone(), self.lazy_bs_ty.clone())))),
+            ("Data.ByteString.Lazy.Char8.dropWhile", Scheme::mono(Ty::fun(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()), Ty::fun(self.lazy_bs_ty.clone(), self.lazy_bs_ty.clone())))),
+            // Data.Text.Lazy.Encoding PrimOps
+            ("Data.Text.Lazy.Encoding.encodeUtf8", Scheme::mono(Ty::fun(self.lazy_text_ty.clone(), self.lazy_bs_ty.clone()))),
+            ("Data.Text.Lazy.Encoding.decodeUtf8", Scheme::mono(Ty::fun(self.lazy_bs_ty.clone(), self.lazy_text_ty.clone()))),
             // ---- Phase 3: IO PrimOps (genuinely new) ----
             ("hGetChar", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),
             ("hPutChar", Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone()))),

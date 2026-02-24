@@ -303,6 +303,18 @@ fn test_tier3_text_io_native() {
     run_native_test("tier3_io/text_io", Profile::Default);
 }
 
+// Data.Text.Lazy - lazy text operations
+#[test]
+fn test_tier3_lazy_text_basic_native() {
+    run_native_test("tier3_io/lazy_text_basic", Profile::Default);
+}
+
+// Data.ByteString.Lazy - lazy bytestring operations
+#[test]
+fn test_tier3_lazy_bytestring_basic_native() {
+    run_native_test("tier3_io/lazy_bytestring_basic", Profile::Default);
+}
+
 // Show compound types
 #[test]
 fn test_tier3_show_string_native() {

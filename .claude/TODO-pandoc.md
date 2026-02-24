@@ -3,7 +3,7 @@
 **Document ID:** BHC-TODO-PANDOC
 **Status:** In Progress
 **Created:** 2026-01-30
-**Updated:** 2026-02-22
+**Updated:** 2026-02-24
 
 ---
 
@@ -18,8 +18,8 @@ north-star integration target for BHC's real-world Haskell compatibility.
 ## Current State
 
 BHC compiles real Haskell programs to native executables via LLVM:
-- **162 native E2E tests** passing (including monad transformers, file IO, markdown parser, JSON parser, GADTs, type extensions)
-- All intermediate milestones A–E.66 done
+- **173 native E2E tests** passing (including monad transformers, file IO, markdown parser, JSON parser, GADTs, type extensions)
+- All intermediate milestones A–E.70 done
 - **Separate compilation pipeline**: `-c` mode, `.bhi` interface generation and consumption, `--odir`/`--hidir`/`--numeric-version`/`--package-db` flags
 - **hx package manager integration** wired — hx has .cabal parsing, Hackage fetch, dependency solver, BHC backend crate with correct CLI flags, filesystem-based package DB, and BHC builtin package mapping
 
@@ -83,7 +83,7 @@ BHC compiles real Haskell programs to native executables via LLVM:
 2. **CPP preprocessing** — Pandoc and many deps use `#ifdef` for platform/version conditionals
 3. **Lazy Text/ByteString** — Only strict variants implemented
 4. **Template Haskell** — Required for aeson JSON deriving (alternative: full GHC.Generics)
-5. **Exception hierarchy** — `Exception` typeclass with `toException`/`fromException`
+5. ~~Exception hierarchy~~ — Done: `SomeException`/`IOException`/`ErrorCall` tags, `bhc_catch_typed`, `error` catchable
 6. **Full GHC.Generics** — E.63 added stubs; full `Rep` type family + `from`/`to` still needed
 7. **parsec/megaparsec** — Pandoc depends on parsec for some formats
 8. **aeson** — JSON serialization with ToJSON/FromJSON (requires TH or full Generics)
@@ -174,8 +174,8 @@ encodeUtf8/decodeUtf8 bridge.
 
 ### 1.3 Full IO and Exception Handling
 
-**Status:** ✅ Core exception handling complete (E.5), file IO working, directory ops complete (E.19)
-**Scope:** Medium
+**Status:** ✅ Core exception handling complete (E.5), exception hierarchy complete, file IO working, directory ops complete (E.19)
+**Scope:** Small (remaining: async exceptions stubs, temp files)
 
 Exception handling (catch, bracket, finally, onException) is working (E.5).
 File IO (readFile, writeFile, openFile, hClose) is working. System ops
@@ -190,7 +190,7 @@ File IO (readFile, writeFile, openFile, hClose) is working. System ops
 - [x] Exception types: `SomeException`, `IOException`, `ErrorCall`
 - [x] Exception primitives: `throw`, `throwIO`, `catch`, `try`
 - [x] Resource management: `bracket`, `bracket_`, `finally`, `onException`
-- [ ] Exception hierarchy: `Exception` typeclass with `toException`/`fromException`
+- [x] Exception hierarchy: `Exception` typeclass with `toException`/`fromException`
 - [ ] Asynchronous exceptions: `mask`, `uninterruptibleMask` (at least stubs)
 - [x] System operations: `getArgs`, `getProgName`, `getEnv`, `lookupEnv`
 - [x] Exit: `exitSuccess`, `exitFailure`, `exitWith`
@@ -916,6 +916,24 @@ Rather than jumping straight to Pandoc, build toward it incrementally:
 ---
 
 ## Recent Progress
+
+### 2026-02-24: Exception Hierarchy (SomeException / IOException / ErrorCall)
+
+Added tagged `SomeException` struct to the RTS enabling type-filtered `catch`. Three
+exception types: `SomeException` (tag 0, catch-all), `IOException` (tag 1), `ErrorCall`
+(tag 2). Key changes:
+
+1. **RTS** (`ffi.rs`): `bhc_make_some_exception`, `bhc_exc_get_tag`, `bhc_exc_get_payload`,
+   `bhc_show_exception`, `bhc_catch_typed` (5-arg with type_tag). `bhc_catch` delegates to
+   `bhc_catch_typed(tag=0)`. `bhc_readFile` wraps errors in `IOException`. 4 new unit tests.
+2. **Codegen** (`lower.rs`): `lower_builtin_error` now throws catchable `ErrorCall` instead of
+   `panic!`. `lower_builtin_throw` wraps in `SomeException`. `lower_builtin_catch` calls
+   `bhc_catch_typed` with inferred type tag from handler parameter type.
+3. **Type system**: `toException`, `fromException`, `displayException`, `userError`, `ioError`
+   registered in builtins + context + Control.Exception exports.
+4. **E2E test**: `exception_hierarchy` — catch-all, catchable `error`, IO error catch.
+
+173 total E2E tests pass (172 existing + 1 new, 0 failures). 53 RTS unit tests pass.
 
 ### 2026-02-22: hx Build Pipeline Wiring
 

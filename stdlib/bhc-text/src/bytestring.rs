@@ -40,7 +40,7 @@ unsafe fn bs_byte_len(bs: *const u8) -> usize {
 }
 
 /// Get a slice view of the ByteString's active bytes.
-unsafe fn bs_bytes(bs: *const u8) -> &'static [u8] {
+pub(crate) unsafe fn bs_bytes(bs: *const u8) -> &'static [u8] {
     let data = bs_data_ptr(bs);
     let off = bs_offset(bs);
     let len = bs_byte_len(bs);
@@ -48,7 +48,7 @@ unsafe fn bs_bytes(bs: *const u8) -> &'static [u8] {
 }
 
 /// Allocate a new self-contained ByteString from a byte slice.
-fn alloc_bs_from_bytes(bytes: &[u8]) -> *mut u8 {
+pub(crate) fn alloc_bs_from_bytes(bytes: &[u8]) -> *mut u8 {
     let total = HEADER_SIZE + bytes.len();
     let layout = Layout::from_size_align(total, 8).expect("invalid layout");
     unsafe {

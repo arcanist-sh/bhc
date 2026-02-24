@@ -482,6 +482,11 @@ fn test_tier3_intmap_intset_native() {
 }
 
 #[test]
+fn test_tier3_sequence_basic_native() {
+    run_native_test("tier3_io/sequence_basic", Profile::Default);
+}
+
+#[test]
 fn test_tier3_string_read_native() {
     run_native_test("tier3_io/string_read", Profile::Default);
 }

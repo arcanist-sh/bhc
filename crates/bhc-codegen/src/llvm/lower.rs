@@ -1920,6 +1920,56 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let intset_is_subset = self.module.llvm_module().add_function("bhc_intset_is_subset_of", i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
         self.functions.insert(VarId::new(1000159), intset_is_subset);
 
+        // Sequence operations (VarId 1000800-1000829)
+        let seq_empty = self.module.llvm_module().add_function("bhc_seq_empty", ptr_type.fn_type(&[], false), None);
+        self.functions.insert(VarId::new(1000800), seq_empty);
+        let seq_singleton = self.module.llvm_module().add_function("bhc_seq_singleton", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000801), seq_singleton);
+        let seq_null = self.module.llvm_module().add_function("bhc_seq_null", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000802), seq_null);
+        let seq_length = self.module.llvm_module().add_function("bhc_seq_length", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000803), seq_length);
+        let seq_index = self.module.llvm_module().add_function("bhc_seq_index", ptr_type.fn_type(&[ptr_type.into(), i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000804), seq_index);
+        let seq_lookup = self.module.llvm_module().add_function("bhc_seq_lookup", ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000805), seq_lookup);
+        let seq_cons = self.module.llvm_module().add_function("bhc_seq_cons", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000806), seq_cons);
+        let seq_snoc = self.module.llvm_module().add_function("bhc_seq_snoc", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000807), seq_snoc);
+        let seq_append = self.module.llvm_module().add_function("bhc_seq_append", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000808), seq_append);
+        let seq_take = self.module.llvm_module().add_function("bhc_seq_take", ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000809), seq_take);
+        let seq_drop = self.module.llvm_module().add_function("bhc_seq_drop", ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000810), seq_drop);
+        let seq_reverse = self.module.llvm_module().add_function("bhc_seq_reverse", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000811), seq_reverse);
+        let seq_update = self.module.llvm_module().add_function("bhc_seq_update", ptr_type.fn_type(&[i64_type.into(), ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000812), seq_update);
+        let seq_insert_at = self.module.llvm_module().add_function("bhc_seq_insert_at", ptr_type.fn_type(&[i64_type.into(), ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000813), seq_insert_at);
+        let seq_delete_at = self.module.llvm_module().add_function("bhc_seq_delete_at", ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000814), seq_delete_at);
+        let seq_elem_count = self.module.llvm_module().add_function("bhc_seq_elem_count", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000815), seq_elem_count);
+        let seq_elem_at = self.module.llvm_module().add_function("bhc_seq_elem_at", ptr_type.fn_type(&[ptr_type.into(), i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000816), seq_elem_at);
+        let seq_replicate = self.module.llvm_module().add_function("bhc_seq_replicate", ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000817), seq_replicate);
+        let seq_viewl_tag = self.module.llvm_module().add_function("bhc_seq_viewl_tag", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000818), seq_viewl_tag);
+        let seq_viewl_head = self.module.llvm_module().add_function("bhc_seq_viewl_head", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000819), seq_viewl_head);
+        let seq_viewl_tail = self.module.llvm_module().add_function("bhc_seq_viewl_tail", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000820), seq_viewl_tail);
+        let seq_viewr_tag = self.module.llvm_module().add_function("bhc_seq_viewr_tag", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000821), seq_viewr_tag);
+        let seq_viewr_last = self.module.llvm_module().add_function("bhc_seq_viewr_last", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000822), seq_viewr_last);
+        let seq_viewr_init = self.module.llvm_module().add_function("bhc_seq_viewr_init", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000823), seq_viewr_init);
+
         // Container iteration helpers (for toList/fromList)
         // bhc_map_keys_count(map_ptr) -> i64
         let map_keys_count = self.module.llvm_module().add_function("bhc_map_keys_count", i64_type.fn_type(&[ptr_type.into()], false), None);
@@ -3616,6 +3666,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.IntSet.foldr" => Some(3),
                 "Data.IntSet.toList" => Some(1),
                 "Data.IntSet.fromList" => Some(1),
+                // Data.Sequence operations
+                "Data.Sequence.empty" => Some(0),
+                "Data.Sequence.singleton" => Some(1),
+                "Data.Sequence.null" => Some(1),
+                "Data.Sequence.length" => Some(1),
+                "Data.Sequence.index" => Some(2),
+                "Data.Sequence.lookup" => Some(2),
+                "Data.Sequence.<|" => Some(2),
+                "Data.Sequence.|>" => Some(2),
+                "Data.Sequence.><" => Some(2),
+                "Data.Sequence.take" => Some(2),
+                "Data.Sequence.drop" => Some(2),
+                "Data.Sequence.reverse" => Some(1),
+                "Data.Sequence.update" => Some(3),
+                "Data.Sequence.insertAt" => Some(3),
+                "Data.Sequence.deleteAt" => Some(2),
+                "Data.Sequence.fromList" => Some(1),
+                "Data.Sequence.toList" => Some(1),
+                "Data.Sequence.replicate" => Some(2),
+                "Data.Sequence.viewl" => Some(1),
+                "Data.Sequence.viewr" => Some(1),
+                "Data.Sequence.filter" => Some(2),
                 // Data.Text operations
                 "Data.Text.empty" => Some(0),
                 "Data.Text.singleton" => Some(1),
@@ -4531,6 +4603,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.IntSet.foldr" => self.lower_builtin_set_foldr(args[0], args[1], args[2]),
                 "Data.IntSet.toList" => self.lower_builtin_set_to_list(args[0]),
                 "Data.IntSet.fromList" => self.lower_builtin_set_from_list(args[0]),
+
+                // Data.Sequence operations (VarIds 1000800-1000823)
+                "Data.Sequence.empty" => self.lower_builtin_seq_empty(),
+                "Data.Sequence.singleton" => self.lower_builtin_seq_singleton(args[0]),
+                "Data.Sequence.null" => self.lower_builtin_seq_null(args[0]),
+                "Data.Sequence.length" => self.lower_builtin_seq_length(args[0]),
+                "Data.Sequence.index" => self.lower_builtin_seq_index(args[0], args[1]),
+                "Data.Sequence.lookup" => self.lower_builtin_seq_lookup(args[0], args[1]),
+                "Data.Sequence.<|" => self.lower_builtin_seq_cons(args[0], args[1]),
+                "Data.Sequence.|>" => self.lower_builtin_seq_snoc(args[0], args[1]),
+                "Data.Sequence.><" => self.lower_builtin_seq_append(args[0], args[1]),
+                "Data.Sequence.take" => self.lower_builtin_seq_take(args[0], args[1]),
+                "Data.Sequence.drop" => self.lower_builtin_seq_drop(args[0], args[1]),
+                "Data.Sequence.reverse" => self.lower_builtin_seq_reverse(args[0]),
+                "Data.Sequence.update" => self.lower_builtin_seq_update(args[0], args[1], args[2]),
+                "Data.Sequence.insertAt" => self.lower_builtin_seq_insert_at(args[0], args[1], args[2]),
+                "Data.Sequence.deleteAt" => self.lower_builtin_seq_delete_at(args[0], args[1]),
+                "Data.Sequence.fromList" => self.lower_builtin_seq_from_list(args[0]),
+                "Data.Sequence.toList" => self.lower_builtin_seq_to_list(args[0]),
+                "Data.Sequence.replicate" => self.lower_builtin_seq_replicate(args[0], args[1]),
+                "Data.Sequence.viewl" => self.lower_builtin_seq_viewl(args[0]),
+                "Data.Sequence.viewr" => self.lower_builtin_seq_viewr(args[0]),
+                "Data.Sequence.filter" => self.lower_builtin_seq_filter(args[0], args[1]),
 
                 // Data.Text operations (VarIds 1000200-1000226)
                 "Data.Text.empty" => self.lower_builtin_text_nullary(1000200, "text_empty"),
@@ -11670,6 +11765,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         | "doesFileExist" | "doesDirectoryExist"
                         | "Data.Map.null" | "Data.Set.null"
                         | "Data.IntMap.null" | "Data.IntSet.null"
+                        | "Data.Sequence.null"
                 )
             }
             // Binary Bool-returning: fully applied comparison operators
@@ -11861,6 +11957,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         | "Data.Set.toAscList"
                         | "Data.Set.toDescList"
                         | "Data.Set.elems"
+                        | "Data.Sequence.toList"
                 )
             }
             _ => false,
@@ -11935,6 +12032,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         | "Data.Set.null"
                         | "Data.IntMap.null"
                         | "Data.IntSet.null"
+                        | "Data.Sequence.null"
                         | "Data.Map.member"
                         | "Data.Map.notMember"
                         | "Data.Map.isSubmapOf"
@@ -34357,8 +34455,173 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         return Ok(Some(field_val));
                     }
                 }
+                // Fallthrough: try container operations that are used as
+                // first-class values or with arity 0
+                if name.starts_with("Data.Sequence.") || name.starts_with("Data.Map.")
+                    || name.starts_with("Data.Set.") || name.starts_with("Data.IntMap.")
+                    || name.starts_with("Data.IntSet.")
+                {
+                    self.lower_builtin_container_direct(name, args)
+                } else {
+                    Err(CodegenError::Internal(format!(
+                        "lower_builtin_direct: unhandled builtin '{}'",
+                        name
+                    )))
+                }
+            }
+        }
+    }
+
+    /// Handle container builtins used as first-class values in lower_builtin_direct.
+    /// These have pre-evaluated BasicValueEnum args rather than &Expr args.
+    fn lower_builtin_container_direct(
+        &mut self,
+        name: &str,
+        args: &[BasicValueEnum<'ctx>],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+
+        match name {
+            // Data.Sequence
+            "Data.Sequence.empty" => self.lower_builtin_seq_empty(),
+            "Data.Sequence.singleton" => {
+                let rts_fn = self.functions.get(&VarId::new(1000801)).ok_or_else(|| CodegenError::Internal("bhc_seq_singleton not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "seq_sing")
+                    .map_err(|e| CodegenError::Internal(format!("seq_sing: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("seq_sing: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Sequence.null" => {
+                let rts_fn = self.functions.get(&VarId::new(1000802)).ok_or_else(|| CodegenError::Internal("bhc_seq_null not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "seq_null")
+                    .map_err(|e| CodegenError::Internal(format!("seq_null: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("seq_null: void".to_string()))?;
+                let int_val = result.into_int_value();
+                self.allocate_bool_adt(int_val, "seq_null")
+            }
+            "Data.Sequence.length" => {
+                let rts_fn = self.functions.get(&VarId::new(1000803)).ok_or_else(|| CodegenError::Internal("bhc_seq_length not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "seq_len")
+                    .map_err(|e| CodegenError::Internal(format!("seq_len: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("seq_len: void".to_string()))?;
+                let int_val = result.into_int_value();
+                Ok(Some(self.int_to_ptr(int_val)?.into()))
+            }
+            "Data.Sequence.index" => {
+                let seq_ptr = args[0];
+                let idx = self.coerce_to_int(args[1])?;
+                let rts_fn = self.functions.get(&VarId::new(1000804)).ok_or_else(|| CodegenError::Internal("bhc_seq_index not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[seq_ptr.into(), idx.into()], "seq_idx")
+                    .map_err(|e| CodegenError::Internal(format!("seq_idx: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("seq_idx: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Sequence.reverse" => {
+                let rts_fn = self.functions.get(&VarId::new(1000811)).ok_or_else(|| CodegenError::Internal("bhc_seq_reverse not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "seq_rev")
+                    .map_err(|e| CodegenError::Internal(format!("seq_rev: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("seq_rev: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Sequence.<|" => {
+                let rts_fn = self.functions.get(&VarId::new(1000806)).ok_or_else(|| CodegenError::Internal("bhc_seq_cons not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into(), args[1].into()], "seq_cons")
+                    .map_err(|e| CodegenError::Internal(format!("seq_cons: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("seq_cons: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Sequence.|>" => {
+                let rts_fn = self.functions.get(&VarId::new(1000807)).ok_or_else(|| CodegenError::Internal("bhc_seq_snoc not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into(), args[1].into()], "seq_snoc")
+                    .map_err(|e| CodegenError::Internal(format!("seq_snoc: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("seq_snoc: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Sequence.><" => {
+                let rts_fn = self.functions.get(&VarId::new(1000808)).ok_or_else(|| CodegenError::Internal("bhc_seq_append not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into(), args[1].into()], "seq_app")
+                    .map_err(|e| CodegenError::Internal(format!("seq_app: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("seq_app: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Sequence.take" => {
+                let n = self.coerce_to_int(args[0])?;
+                let rts_fn = self.functions.get(&VarId::new(1000809)).ok_or_else(|| CodegenError::Internal("bhc_seq_take not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[n.into(), args[1].into()], "seq_take")
+                    .map_err(|e| CodegenError::Internal(format!("seq_take: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("seq_take: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Sequence.drop" => {
+                let n = self.coerce_to_int(args[0])?;
+                let rts_fn = self.functions.get(&VarId::new(1000810)).ok_or_else(|| CodegenError::Internal("bhc_seq_drop not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[n.into(), args[1].into()], "seq_drop")
+                    .map_err(|e| CodegenError::Internal(format!("seq_drop: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("seq_drop: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Sequence.update" => {
+                let idx = self.coerce_to_int(args[0])?;
+                let rts_fn = self.functions.get(&VarId::new(1000812)).ok_or_else(|| CodegenError::Internal("bhc_seq_update not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[idx.into(), args[1].into(), args[2].into()], "seq_upd")
+                    .map_err(|e| CodegenError::Internal(format!("seq_upd: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("seq_upd: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Sequence.insertAt" => {
+                let idx = self.coerce_to_int(args[0])?;
+                let rts_fn = self.functions.get(&VarId::new(1000813)).ok_or_else(|| CodegenError::Internal("bhc_seq_insert_at not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[idx.into(), args[1].into(), args[2].into()], "seq_ins")
+                    .map_err(|e| CodegenError::Internal(format!("seq_ins: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("seq_ins: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Sequence.deleteAt" => {
+                let idx = self.coerce_to_int(args[0])?;
+                let rts_fn = self.functions.get(&VarId::new(1000814)).ok_or_else(|| CodegenError::Internal("bhc_seq_delete_at not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[idx.into(), args[1].into()], "seq_del")
+                    .map_err(|e| CodegenError::Internal(format!("seq_del: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("seq_del: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Sequence.replicate" => {
+                let n = self.coerce_to_int(args[0])?;
+                let rts_fn = self.functions.get(&VarId::new(1000817)).ok_or_else(|| CodegenError::Internal("bhc_seq_replicate not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[n.into(), args[1].into()], "seq_rep")
+                    .map_err(|e| CodegenError::Internal(format!("seq_rep: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("seq_rep: void".to_string()))?;
+                Ok(Some(result))
+            }
+            // Data.Map, Data.Set, etc. — delegate to existing impls
+            "Data.Map.empty" => self.lower_builtin_map_empty(),
+            "Data.Set.empty" => self.lower_builtin_set_empty(),
+            "Data.IntMap.empty" | "Data.IntSet.empty" => {
+                let rts_fn = self.functions.get(&VarId::new(if name == "Data.IntMap.empty" { 1000140 } else { 1000145 }))
+                    .ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let result = self.builder().build_call(*rts_fn, &[], &name.replace('.', "_"))
+                    .map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal(format!("{}: void", name)))?;
+                Ok(Some(result))
+            }
+            _ => {
                 Err(CodegenError::Internal(format!(
-                    "lower_builtin_direct: unhandled builtin '{}'",
+                    "lower_builtin_direct: unhandled container builtin '{}'",
                     name
                 )))
             }
@@ -38069,6 +38332,759 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.lower_basic_type(ty)?.ok_or_else(|| {
             CodegenError::TypeError("cannot lower void type to basic type".to_string())
         })
+    }
+
+    // ========================================================================
+    // Data.Sequence lowering helpers
+    // ========================================================================
+
+    fn lower_builtin_seq_empty(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let rts_fn = self.functions.get(&VarId::new(1000800))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_empty not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[], "seq_empty")
+            .map_err(|e| CodegenError::Internal(format!("seq_empty: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_empty: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    fn lower_builtin_seq_singleton(
+        &mut self,
+        elem_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let elem = self.lower_expr(elem_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_singleton: no elem".to_string()))?;
+        let elem_ptr = self.value_to_ptr(elem)?;
+        let rts_fn = self.functions.get(&VarId::new(1000801))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_singleton not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[elem_ptr.into()], "seq_singleton")
+            .map_err(|e| CodegenError::Internal(format!("seq_singleton: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_singleton: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    fn lower_builtin_seq_null(
+        &mut self,
+        seq_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_null: no seq".to_string()))?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let rts_fn = self.functions.get(&VarId::new(1000802))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_null not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[seq_ptr.into()], "seq_null")
+            .map_err(|e| CodegenError::Internal(format!("seq_null: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_null: void".to_string()))?;
+        self.allocate_bool_adt(result.into_int_value(), "seq_null_bool")
+    }
+
+    fn lower_builtin_seq_length(
+        &mut self,
+        seq_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_length: no seq".to_string()))?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let rts_fn = self.functions.get(&VarId::new(1000803))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_length not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[seq_ptr.into()], "seq_length")
+            .map_err(|e| CodegenError::Internal(format!("seq_length: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_length: void".to_string()))?;
+        // Return as int (will be converted to ptr by caller if needed)
+        let int_val = result.into_int_value();
+        Ok(Some(self.int_to_ptr(int_val)?.into()))
+    }
+
+    fn lower_builtin_seq_index(
+        &mut self,
+        seq_expr: &Expr,
+        idx_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_index: no seq".to_string()))?;
+        let idx = self.lower_expr(idx_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_index: no idx".to_string()))?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let idx_int = self.coerce_to_int(idx)?;
+        let rts_fn = self.functions.get(&VarId::new(1000804))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_index not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[seq_ptr.into(), idx_int.into()], "seq_index")
+            .map_err(|e| CodegenError::Internal(format!("seq_index: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_index: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    fn lower_builtin_seq_lookup(
+        &mut self,
+        idx_expr: &Expr,
+        seq_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let idx = self.lower_expr(idx_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_lookup: no idx".to_string()))?;
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_lookup: no seq".to_string()))?;
+        let idx_int = self.coerce_to_int(idx)?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let rts_fn = self.functions.get(&VarId::new(1000805))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_lookup not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[idx_int.into(), seq_ptr.into()], "seq_lookup")
+            .map_err(|e| CodegenError::Internal(format!("seq_lookup: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_lookup: void".to_string()))?;
+        // Wrap in Maybe: null → Nothing, non-null → Just
+        let result_ptr = result.into_pointer_value();
+        let is_null = self.builder()
+            .build_is_null(result_ptr, "seq_lookup_is_null")
+            .map_err(|e| CodegenError::Internal(format!("seq_lookup is_null: {:?}", e)))?;
+        let nothing = self.alloc_adt(0, 0)?;
+        let just = self.alloc_adt(1, 1)?;
+        self.store_adt_field(just, 1, 0, result_ptr.into())?;
+        let maybe = self.builder()
+            .build_select(is_null, nothing, just, "seq_lookup_maybe")
+            .map_err(|e| CodegenError::Internal(format!("seq_lookup select: {:?}", e)))?;
+        Ok(Some(maybe))
+    }
+
+    fn lower_builtin_seq_cons(
+        &mut self,
+        elem_expr: &Expr,
+        seq_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let elem = self.lower_expr(elem_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_cons: no elem".to_string()))?;
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_cons: no seq".to_string()))?;
+        let elem_ptr = self.value_to_ptr(elem)?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let rts_fn = self.functions.get(&VarId::new(1000806))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_cons not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[elem_ptr.into(), seq_ptr.into()], "seq_cons")
+            .map_err(|e| CodegenError::Internal(format!("seq_cons: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_cons: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    fn lower_builtin_seq_snoc(
+        &mut self,
+        seq_expr: &Expr,
+        elem_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_snoc: no seq".to_string()))?;
+        let elem = self.lower_expr(elem_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_snoc: no elem".to_string()))?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let elem_ptr = self.value_to_ptr(elem)?;
+        let rts_fn = self.functions.get(&VarId::new(1000807))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_snoc not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[seq_ptr.into(), elem_ptr.into()], "seq_snoc")
+            .map_err(|e| CodegenError::Internal(format!("seq_snoc: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_snoc: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    fn lower_builtin_seq_append(
+        &mut self,
+        s1_expr: &Expr,
+        s2_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let s1 = self.lower_expr(s1_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_append: no s1".to_string()))?;
+        let s2 = self.lower_expr(s2_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_append: no s2".to_string()))?;
+        let s1_ptr = self.value_to_ptr(s1)?;
+        let s2_ptr = self.value_to_ptr(s2)?;
+        let rts_fn = self.functions.get(&VarId::new(1000808))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_append not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[s1_ptr.into(), s2_ptr.into()], "seq_append")
+            .map_err(|e| CodegenError::Internal(format!("seq_append: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_append: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    fn lower_builtin_seq_take(
+        &mut self,
+        n_expr: &Expr,
+        seq_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let n = self.lower_expr(n_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_take: no n".to_string()))?;
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_take: no seq".to_string()))?;
+        let n_int = self.coerce_to_int(n)?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let rts_fn = self.functions.get(&VarId::new(1000809))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_take not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[n_int.into(), seq_ptr.into()], "seq_take")
+            .map_err(|e| CodegenError::Internal(format!("seq_take: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_take: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    fn lower_builtin_seq_drop(
+        &mut self,
+        n_expr: &Expr,
+        seq_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let n = self.lower_expr(n_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_drop: no n".to_string()))?;
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_drop: no seq".to_string()))?;
+        let n_int = self.coerce_to_int(n)?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let rts_fn = self.functions.get(&VarId::new(1000810))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_drop not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[n_int.into(), seq_ptr.into()], "seq_drop")
+            .map_err(|e| CodegenError::Internal(format!("seq_drop: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_drop: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    fn lower_builtin_seq_reverse(
+        &mut self,
+        seq_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_reverse: no seq".to_string()))?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let rts_fn = self.functions.get(&VarId::new(1000811))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_reverse not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[seq_ptr.into()], "seq_reverse")
+            .map_err(|e| CodegenError::Internal(format!("seq_reverse: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_reverse: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    fn lower_builtin_seq_update(
+        &mut self,
+        idx_expr: &Expr,
+        elem_expr: &Expr,
+        seq_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let idx = self.lower_expr(idx_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_update: no idx".to_string()))?;
+        let elem = self.lower_expr(elem_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_update: no elem".to_string()))?;
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_update: no seq".to_string()))?;
+        let idx_int = self.coerce_to_int(idx)?;
+        let elem_ptr = self.value_to_ptr(elem)?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let rts_fn = self.functions.get(&VarId::new(1000812))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_update not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[idx_int.into(), elem_ptr.into(), seq_ptr.into()], "seq_update")
+            .map_err(|e| CodegenError::Internal(format!("seq_update: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_update: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    fn lower_builtin_seq_insert_at(
+        &mut self,
+        idx_expr: &Expr,
+        elem_expr: &Expr,
+        seq_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let idx = self.lower_expr(idx_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_insert_at: no idx".to_string()))?;
+        let elem = self.lower_expr(elem_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_insert_at: no elem".to_string()))?;
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_insert_at: no seq".to_string()))?;
+        let idx_int = self.coerce_to_int(idx)?;
+        let elem_ptr = self.value_to_ptr(elem)?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let rts_fn = self.functions.get(&VarId::new(1000813))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_insert_at not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[idx_int.into(), elem_ptr.into(), seq_ptr.into()], "seq_insert_at")
+            .map_err(|e| CodegenError::Internal(format!("seq_insert_at: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_insert_at: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    fn lower_builtin_seq_delete_at(
+        &mut self,
+        idx_expr: &Expr,
+        seq_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let idx = self.lower_expr(idx_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_delete_at: no idx".to_string()))?;
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_delete_at: no seq".to_string()))?;
+        let idx_int = self.coerce_to_int(idx)?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let rts_fn = self.functions.get(&VarId::new(1000814))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_delete_at not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[idx_int.into(), seq_ptr.into()], "seq_delete_at")
+            .map_err(|e| CodegenError::Internal(format!("seq_delete_at: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_delete_at: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    fn lower_builtin_seq_replicate(
+        &mut self,
+        n_expr: &Expr,
+        elem_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let n = self.lower_expr(n_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_replicate: no n".to_string()))?;
+        let elem = self.lower_expr(elem_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_replicate: no elem".to_string()))?;
+        let n_int = self.coerce_to_int(n)?;
+        let elem_ptr = self.value_to_ptr(elem)?;
+        let rts_fn = self.functions.get(&VarId::new(1000817))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_replicate not declared".to_string()))?;
+        let result = self.builder()
+            .build_call(*rts_fn, &[n_int.into(), elem_ptr.into()], "seq_replicate")
+            .map_err(|e| CodegenError::Internal(format!("seq_replicate: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_replicate: void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Seq.toList: iterate backward from count-1 to 0, consing elements
+    fn lower_builtin_seq_to_list(
+        &mut self,
+        seq_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_to_list: no seq".to_string()))?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let tm = self.type_mapper().clone();
+
+        // Get element count
+        let count_fn = self.functions.get(&VarId::new(1000815))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_elem_count not declared".to_string()))?;
+        let count = self.builder()
+            .build_call(*count_fn, &[seq_ptr.into()], "seq_count")
+            .map_err(|e| CodegenError::Internal(format!("seq_count: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("seq_count: void".to_string()))?
+            .into_int_value();
+
+        let current_fn = self.builder().get_insert_block().and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("seq_to_list: no current function".to_string()))?;
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "stl_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "stl_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "stl_exit");
+
+        let nil = self.build_nil()?;
+        let one = tm.i64_type().const_int(1, false);
+        let start_idx = self.builder()
+            .build_int_sub(count, one, "stl_start_idx")
+            .map_err(|e| CodegenError::Internal(format!("stl start_idx: {:?}", e)))?;
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("stl br: {:?}", e)))?;
+
+        // Loop header
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(tm.ptr_type(), "stl_acc")
+            .map_err(|e| CodegenError::Internal(format!("stl acc phi: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "stl_idx")
+            .map_err(|e| CodegenError::Internal(format!("stl idx phi: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SLT, idx, tm.i64_type().const_zero(), "stl_done")
+            .map_err(|e| CodegenError::Internal(format!("stl cmp: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("stl cbr: {:?}", e)))?;
+
+        // Loop body
+        self.builder().position_at_end(loop_body);
+        let elem_fn = self.functions.get(&VarId::new(1000816))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_elem_at not declared".to_string()))?;
+        let elem = self.builder()
+            .build_call(*elem_fn, &[seq_ptr.into(), idx.into()], "stl_elem")
+            .map_err(|e| CodegenError::Internal(format!("stl elem: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("stl elem: void".to_string()))?;
+
+        let new_acc = self.build_cons(elem.into_pointer_value().into(), acc_phi.as_basic_value())?;
+        let new_idx = self.builder()
+            .build_int_sub(idx, one, "stl_new_idx")
+            .map_err(|e| CodegenError::Internal(format!("stl new_idx: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("stl loop br: {:?}", e)))?;
+
+        // Phi incoming
+        acc_phi.add_incoming(&[(&nil, entry_block), (&new_acc, loop_body)]);
+        idx_phi.add_incoming(&[(&start_idx, entry_block), (&new_idx, loop_body)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
+    /// Seq.fromList: walk cons-list, snoc each element
+    fn lower_builtin_seq_from_list(
+        &mut self,
+        list_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let list = self.lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_from_list: no list".to_string()))?;
+        let list_ptr = self.value_to_ptr(list)?;
+        let tm = self.type_mapper().clone();
+
+        // Start with empty seq
+        let empty_fn = self.functions.get(&VarId::new(1000800))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_empty not declared".to_string()))?;
+        let empty_seq = self.builder()
+            .build_call(*empty_fn, &[], "sfl_empty")
+            .map_err(|e| CodegenError::Internal(format!("sfl empty: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("sfl empty: void".to_string()))?;
+
+        let snoc_fn = self.functions.get(&VarId::new(1000807))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_snoc not declared".to_string()))?;
+
+        let current_fn = self.builder().get_insert_block().and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("seq_from_list: no current function".to_string()))?;
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "sfl_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "sfl_body");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "sfl_exit");
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("sfl br: {:?}", e)))?;
+
+        // Loop header
+        self.builder().position_at_end(loop_header);
+        let seq_phi = self.builder().build_phi(tm.ptr_type(), "sfl_seq")
+            .map_err(|e| CodegenError::Internal(format!("sfl seq phi: {:?}", e)))?;
+        let cur_phi = self.builder().build_phi(tm.ptr_type(), "sfl_cur")
+            .map_err(|e| CodegenError::Internal(format!("sfl cur phi: {:?}", e)))?;
+
+        // Check if current list is nil (tag == 0)
+        let cur_ptr = cur_phi.as_basic_value().into_pointer_value();
+        let tag = self.extract_adt_tag(cur_ptr)?;
+        let is_nil = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, tm.i64_type().const_zero(), "sfl_is_nil")
+            .map_err(|e| CodegenError::Internal(format!("sfl cmp: {:?}", e)))?;
+        self.builder().build_conditional_branch(is_nil, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("sfl cbr: {:?}", e)))?;
+
+        // Loop body: extract head, snoc onto seq, advance tail
+        self.builder().position_at_end(loop_body);
+        let head_ptr = self.extract_adt_field(cur_ptr, 2, 0)?;
+        let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
+        let seq_acc = seq_phi.as_basic_value().into_pointer_value();
+
+        let new_seq = self.builder()
+            .build_call(*snoc_fn, &[seq_acc.into(), head_ptr.into()], "sfl_snoc")
+            .map_err(|e| CodegenError::Internal(format!("sfl snoc: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("sfl snoc: void".to_string()))?;
+
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("sfl loop br: {:?}", e)))?;
+
+        // Phi incoming
+        seq_phi.add_incoming(&[(&empty_seq, entry_block), (&new_seq, loop_body)]);
+        let list_ptr_bv: inkwell::values::BasicValueEnum = list_ptr.into();
+        cur_phi.add_incoming(&[(&list_ptr_bv, entry_block), (&tail_ptr, loop_body)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(seq_phi.as_basic_value()))
+    }
+
+    fn lower_builtin_seq_viewl(
+        &mut self,
+        seq_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_viewl: no seq".to_string()))?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let tm = self.type_mapper().clone();
+
+        // Get tag (0=empty, 1=non-empty)
+        let tag_fn = self.functions.get(&VarId::new(1000818))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_viewl_tag not declared".to_string()))?;
+        let tag = self.builder()
+            .build_call(*tag_fn, &[seq_ptr.into()], "viewl_tag")
+            .map_err(|e| CodegenError::Internal(format!("viewl_tag: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("viewl_tag: void".to_string()))?
+            .into_int_value();
+
+        let is_empty = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, tm.i64_type().const_zero(), "viewl_is_empty")
+            .map_err(|e| CodegenError::Internal(format!("viewl cmp: {:?}", e)))?;
+
+        let current_fn = self.builder().get_insert_block().and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("seq_viewl: no current function".to_string()))?;
+
+        let empty_bb = self.llvm_context().append_basic_block(current_fn, "viewl_empty");
+        let nonempty_bb = self.llvm_context().append_basic_block(current_fn, "viewl_nonempty");
+        let merge_bb = self.llvm_context().append_basic_block(current_fn, "viewl_merge");
+
+        self.builder().build_conditional_branch(is_empty, empty_bb, nonempty_bb)
+            .map_err(|e| CodegenError::Internal(format!("viewl cbr: {:?}", e)))?;
+
+        // EmptyL: tag 0, 0 fields
+        self.builder().position_at_end(empty_bb);
+        let empty_l = self.alloc_adt(0, 0)?;
+        self.builder().build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Internal(format!("viewl empty br: {:?}", e)))?;
+
+        // (:<): tag 1, 2 fields (head, tail_seq)
+        self.builder().position_at_end(nonempty_bb);
+        let head_fn = self.functions.get(&VarId::new(1000819))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_viewl_head not declared".to_string()))?;
+        let head = self.builder()
+            .build_call(*head_fn, &[seq_ptr.into()], "viewl_head")
+            .map_err(|e| CodegenError::Internal(format!("viewl_head: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("viewl_head: void".to_string()))?;
+
+        let tail_fn = self.functions.get(&VarId::new(1000820))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_viewl_tail not declared".to_string()))?;
+        let tail = self.builder()
+            .build_call(*tail_fn, &[seq_ptr.into()], "viewl_tail")
+            .map_err(|e| CodegenError::Internal(format!("viewl_tail: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("viewl_tail: void".to_string()))?;
+
+        let cons_l = self.alloc_adt(1, 2)?;
+        self.store_adt_field(cons_l, 2, 0, head)?;
+        self.store_adt_field(cons_l, 2, 1, tail)?;
+        self.builder().build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Internal(format!("viewl nonempty br: {:?}", e)))?;
+
+        // Merge
+        self.builder().position_at_end(merge_bb);
+        let phi = self.builder().build_phi(tm.ptr_type(), "viewl_result")
+            .map_err(|e| CodegenError::Internal(format!("viewl phi: {:?}", e)))?;
+        let empty_l_bv: inkwell::values::BasicValueEnum = empty_l.into();
+        let cons_l_bv: inkwell::values::BasicValueEnum = cons_l.into();
+        phi.add_incoming(&[(&empty_l_bv, empty_bb), (&cons_l_bv, nonempty_bb)]);
+        Ok(Some(phi.as_basic_value()))
+    }
+
+    fn lower_builtin_seq_viewr(
+        &mut self,
+        seq_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_viewr: no seq".to_string()))?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let tm = self.type_mapper().clone();
+
+        let tag_fn = self.functions.get(&VarId::new(1000821))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_viewr_tag not declared".to_string()))?;
+        let tag = self.builder()
+            .build_call(*tag_fn, &[seq_ptr.into()], "viewr_tag")
+            .map_err(|e| CodegenError::Internal(format!("viewr_tag: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("viewr_tag: void".to_string()))?
+            .into_int_value();
+
+        let is_empty = self.builder()
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, tm.i64_type().const_zero(), "viewr_is_empty")
+            .map_err(|e| CodegenError::Internal(format!("viewr cmp: {:?}", e)))?;
+
+        let current_fn = self.builder().get_insert_block().and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("seq_viewr: no current function".to_string()))?;
+
+        let empty_bb = self.llvm_context().append_basic_block(current_fn, "viewr_empty");
+        let nonempty_bb = self.llvm_context().append_basic_block(current_fn, "viewr_nonempty");
+        let merge_bb = self.llvm_context().append_basic_block(current_fn, "viewr_merge");
+
+        self.builder().build_conditional_branch(is_empty, empty_bb, nonempty_bb)
+            .map_err(|e| CodegenError::Internal(format!("viewr cbr: {:?}", e)))?;
+
+        // EmptyR: tag 0, 0 fields
+        self.builder().position_at_end(empty_bb);
+        let empty_r = self.alloc_adt(0, 0)?;
+        self.builder().build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Internal(format!("viewr empty br: {:?}", e)))?;
+
+        // (:>): tag 1, 2 fields (init_seq, last)
+        self.builder().position_at_end(nonempty_bb);
+        let init_fn = self.functions.get(&VarId::new(1000823))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_viewr_init not declared".to_string()))?;
+        let init_val = self.builder()
+            .build_call(*init_fn, &[seq_ptr.into()], "viewr_init")
+            .map_err(|e| CodegenError::Internal(format!("viewr_init: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("viewr_init: void".to_string()))?;
+
+        let last_fn = self.functions.get(&VarId::new(1000822))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_viewr_last not declared".to_string()))?;
+        let last_val = self.builder()
+            .build_call(*last_fn, &[seq_ptr.into()], "viewr_last")
+            .map_err(|e| CodegenError::Internal(format!("viewr_last: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("viewr_last: void".to_string()))?;
+
+        let snoc_r = self.alloc_adt(1, 2)?;
+        self.store_adt_field(snoc_r, 2, 0, init_val)?;
+        self.store_adt_field(snoc_r, 2, 1, last_val)?;
+        self.builder().build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Internal(format!("viewr nonempty br: {:?}", e)))?;
+
+        // Merge
+        self.builder().position_at_end(merge_bb);
+        let phi = self.builder().build_phi(tm.ptr_type(), "viewr_result")
+            .map_err(|e| CodegenError::Internal(format!("viewr phi: {:?}", e)))?;
+        let empty_r_bv: inkwell::values::BasicValueEnum = empty_r.into();
+        let snoc_r_bv: inkwell::values::BasicValueEnum = snoc_r.into();
+        phi.add_incoming(&[(&empty_r_bv, empty_bb), (&snoc_r_bv, nonempty_bb)]);
+        Ok(Some(phi.as_basic_value()))
+    }
+
+    /// Seq.filter: walk seq, apply predicate closure, build new seq
+    fn lower_builtin_seq_filter(
+        &mut self,
+        pred_expr: &Expr,
+        seq_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let pred = self.lower_expr(pred_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_filter: no pred".to_string()))?;
+        let seq = self.lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_filter: no seq".to_string()))?;
+        let pred_ptr = self.value_to_ptr(pred)?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let tm = self.type_mapper().clone();
+
+        // Get count
+        let count_fn = self.functions.get(&VarId::new(1000815))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_elem_count not declared".to_string()))?;
+        let count = self.builder()
+            .build_call(*count_fn, &[seq_ptr.into()], "sf_count")
+            .map_err(|e| CodegenError::Internal(format!("sf count: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("sf count: void".to_string()))?
+            .into_int_value();
+
+        // Start with empty seq
+        let empty_fn = self.functions.get(&VarId::new(1000800))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_empty not declared".to_string()))?;
+        let empty_seq = self.builder()
+            .build_call(*empty_fn, &[], "sf_empty")
+            .map_err(|e| CodegenError::Internal(format!("sf empty: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("sf empty: void".to_string()))?;
+
+        let snoc_fn = self.functions.get(&VarId::new(1000807))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_snoc not declared".to_string()))?;
+        let elem_fn = self.functions.get(&VarId::new(1000816))
+            .ok_or_else(|| CodegenError::Internal("bhc_seq_elem_at not declared".to_string()))?;
+
+        let current_fn = self.builder().get_insert_block().and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("seq_filter: no current function".to_string()))?;
+
+        let loop_header = self.llvm_context().append_basic_block(current_fn, "sf_header");
+        let loop_body = self.llvm_context().append_basic_block(current_fn, "sf_body");
+        let loop_keep = self.llvm_context().append_basic_block(current_fn, "sf_keep");
+        let loop_next = self.llvm_context().append_basic_block(current_fn, "sf_next");
+        let loop_exit = self.llvm_context().append_basic_block(current_fn, "sf_exit");
+
+        let entry_block = self.builder().get_insert_block().unwrap();
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("sf br: {:?}", e)))?;
+
+        // Header
+        self.builder().position_at_end(loop_header);
+        let acc_phi = self.builder().build_phi(tm.ptr_type(), "sf_acc")
+            .map_err(|e| CodegenError::Internal(format!("sf acc phi: {:?}", e)))?;
+        let idx_phi = self.builder().build_phi(tm.i64_type(), "sf_idx")
+            .map_err(|e| CodegenError::Internal(format!("sf idx phi: {:?}", e)))?;
+
+        let idx = idx_phi.as_basic_value().into_int_value();
+        let done = self.builder()
+            .build_int_compare(inkwell::IntPredicate::SGE, idx, count, "sf_done")
+            .map_err(|e| CodegenError::Internal(format!("sf cmp: {:?}", e)))?;
+        self.builder().build_conditional_branch(done, loop_exit, loop_body)
+            .map_err(|e| CodegenError::Internal(format!("sf cbr: {:?}", e)))?;
+
+        // Body: get element, call predicate
+        self.builder().position_at_end(loop_body);
+        let elem = self.builder()
+            .build_call(*elem_fn, &[seq_ptr.into(), idx.into()], "sf_elem")
+            .map_err(|e| CodegenError::Internal(format!("sf elem: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("sf elem: void".to_string()))?;
+
+        // Call predicate closure: fn_ptr(closure_ptr, elem) -> Bool ADT
+        let fn_ptr_ptr = self.extract_adt_field(pred_ptr, 2, 1)?;
+        let fn_ty = tm.ptr_type().fn_type(&[tm.ptr_type().into(), tm.ptr_type().into()], false);
+        let fn_ptr = fn_ptr_ptr;
+        let pred_result = self.builder()
+            .build_indirect_call(fn_ty, fn_ptr, &[pred_ptr.into(), elem.into()], "sf_pred")
+            .map_err(|e| CodegenError::Internal(format!("sf pred call: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("sf pred: void".to_string()))?;
+
+        // Check Bool ADT tag
+        let bool_tag = self.extract_adt_tag(pred_result.into_pointer_value())?;
+        let is_true = self.builder()
+            .build_int_compare(inkwell::IntPredicate::NE, bool_tag, tm.i64_type().const_zero(), "sf_is_true")
+            .map_err(|e| CodegenError::Internal(format!("sf bool cmp: {:?}", e)))?;
+        self.builder().build_conditional_branch(is_true, loop_keep, loop_next)
+            .map_err(|e| CodegenError::Internal(format!("sf pred cbr: {:?}", e)))?;
+
+        // Keep: snoc element
+        self.builder().position_at_end(loop_keep);
+        let acc_val = acc_phi.as_basic_value().into_pointer_value();
+        let new_acc = self.builder()
+            .build_call(*snoc_fn, &[acc_val.into(), elem.into()], "sf_snoc")
+            .map_err(|e| CodegenError::Internal(format!("sf snoc: {:?}", e)))?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| CodegenError::Internal("sf snoc: void".to_string()))?;
+        self.builder().build_unconditional_branch(loop_next)
+            .map_err(|e| CodegenError::Internal(format!("sf keep br: {:?}", e)))?;
+
+        // Next: increment index
+        self.builder().position_at_end(loop_next);
+        let acc_next = self.builder().build_phi(tm.ptr_type(), "sf_acc_next")
+            .map_err(|e| CodegenError::Internal(format!("sf acc_next phi: {:?}", e)))?;
+        acc_next.add_incoming(&[(&acc_phi.as_basic_value(), loop_body), (&new_acc, loop_keep)]);
+        let one = tm.i64_type().const_int(1, false);
+        let new_idx = self.builder()
+            .build_int_add(idx, one, "sf_new_idx")
+            .map_err(|e| CodegenError::Internal(format!("sf new_idx: {:?}", e)))?;
+        self.builder().build_unconditional_branch(loop_header)
+            .map_err(|e| CodegenError::Internal(format!("sf next br: {:?}", e)))?;
+
+        // Phi incoming
+        acc_phi.add_incoming(&[(&empty_seq, entry_block), (&acc_next.as_basic_value(), loop_next)]);
+        let zero_bv: inkwell::values::BasicValueEnum = tm.i64_type().const_zero().into();
+        let new_idx_bv: inkwell::values::BasicValueEnum = new_idx.into();
+        idx_phi.add_incoming(&[(&zero_bv, entry_block), (&new_idx_bv, loop_next)]);
+
+        self.builder().position_at_end(loop_exit);
+        Ok(Some(acc_phi.as_basic_value()))
     }
 
     // Helper accessors

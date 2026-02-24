@@ -909,6 +909,7 @@ impl LowerContext {
             "Data.IntSet.foldr",
             "Data.IntSet.toList",
             "Data.IntSet.fromList",
+            // Container PrimOps: Data.Sequence — registered via fixed DefIds 12300-12320 below
             // Container PrimOps: Data.Text (packed UTF-8)
             "Data.Text.empty",
             "Data.Text.singleton",
@@ -1724,9 +1725,40 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
+        // Data.Sequence at fixed DefIds 12300-12320
+        let seq_fns: &[(usize, &str)] = &[
+            (12300, "Data.Sequence.empty"),
+            (12301, "Data.Sequence.singleton"),
+            (12302, "Data.Sequence.null"),
+            (12303, "Data.Sequence.length"),
+            (12304, "Data.Sequence.index"),
+            (12305, "Data.Sequence.lookup"),
+            (12306, "Data.Sequence.<|"),
+            (12307, "Data.Sequence.|>"),
+            (12308, "Data.Sequence.><"),
+            (12309, "Data.Sequence.take"),
+            (12310, "Data.Sequence.drop"),
+            (12311, "Data.Sequence.reverse"),
+            (12312, "Data.Sequence.update"),
+            (12313, "Data.Sequence.insertAt"),
+            (12314, "Data.Sequence.deleteAt"),
+            (12315, "Data.Sequence.fromList"),
+            (12316, "Data.Sequence.toList"),
+            (12317, "Data.Sequence.replicate"),
+            (12318, "Data.Sequence.viewl"),
+            (12319, "Data.Sequence.viewr"),
+            (12320, "Data.Sequence.filter"),
+        ];
+        for &(id, name) in seq_fns {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
         // Ensure next_def_id is past the fixed DefId ranges
-        if self.next_def_id <= 12213 {
-            self.next_def_id = 12213;
+        if self.next_def_id <= 12321 {
+            self.next_def_id = 12321;
         }
     }
 

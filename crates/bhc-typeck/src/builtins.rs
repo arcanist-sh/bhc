@@ -3709,6 +3709,7 @@ impl Builtins {
             ("Data.IntSet.foldr", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(self.int_ty.clone(), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))), Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())))))),
             ("Data.IntSet.toList", Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))),
             ("Data.IntSet.fromList", Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))),
+            // Container PrimOps: Data.Sequence — registered via fixed DefIds 12300-12320 below
             // Data.Text PrimOps: packed UTF-8 text
             ("Data.Text.empty", Scheme::mono(self.text_ty.clone())),
             ("Data.Text.singleton", Scheme::mono(Ty::fun(self.char_ty.clone(), self.text_ty.clone()))),
@@ -5766,6 +5767,139 @@ impl Builtins {
                     self.int_ty.clone(),
                     Ty::fun(self.builder_ty.clone(), io_unit),
                 )),
+            );
+        }
+
+        // Data.Sequence at fixed DefIds 12300-12320
+        {
+            let a = TyVar::new(BUILTIN_TYVAR_A, Kind::Star);
+            let b = TyVar::new(BUILTIN_TYVAR_B, Kind::Star);
+
+            // empty :: Seq a  (opaque)
+            env.register_value(
+                DefId::new(12300),
+                Symbol::intern("Data.Sequence.empty"),
+                Scheme::poly(vec![a.clone()], Ty::Var(a.clone())),
+            );
+            // singleton :: a -> Seq a
+            env.register_value(
+                DefId::new(12301),
+                Symbol::intern("Data.Sequence.singleton"),
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
+            );
+            // null :: Seq a -> Bool
+            env.register_value(
+                DefId::new(12302),
+                Symbol::intern("Data.Sequence.null"),
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), self.bool_ty.clone())),
+            );
+            // length :: Seq a -> Int
+            env.register_value(
+                DefId::new(12303),
+                Symbol::intern("Data.Sequence.length"),
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), self.int_ty.clone())),
+            );
+            // index :: Seq a -> Int -> a
+            env.register_value(
+                DefId::new(12304),
+                Symbol::intern("Data.Sequence.index"),
+                Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::fun(self.int_ty.clone(), Ty::Var(b.clone())))),
+            );
+            // lookup :: Int -> Seq a -> Maybe a
+            env.register_value(
+                DefId::new(12305),
+                Symbol::intern("Data.Sequence.lookup"),
+                Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(self.int_ty.clone(), Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())))),
+            );
+            // (<|) :: a -> Seq a -> Seq a
+            env.register_value(
+                DefId::new(12306),
+                Symbol::intern("Data.Sequence.<|"),
+                Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())))),
+            );
+            // (|>) :: Seq a -> a -> Seq a
+            env.register_value(
+                DefId::new(12307),
+                Symbol::intern("Data.Sequence.|>"),
+                Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(a.clone())))),
+            );
+            // (><) :: Seq a -> Seq a -> Seq a
+            env.register_value(
+                DefId::new(12308),
+                Symbol::intern("Data.Sequence.><"),
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))),
+            );
+            // take :: Int -> Seq a -> Seq a
+            env.register_value(
+                DefId::new(12309),
+                Symbol::intern("Data.Sequence.take"),
+                Scheme::poly(vec![a.clone()], Ty::fun(self.int_ty.clone(), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))),
+            );
+            // drop :: Int -> Seq a -> Seq a
+            env.register_value(
+                DefId::new(12310),
+                Symbol::intern("Data.Sequence.drop"),
+                Scheme::poly(vec![a.clone()], Ty::fun(self.int_ty.clone(), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))),
+            );
+            // reverse :: Seq a -> Seq a
+            env.register_value(
+                DefId::new(12311),
+                Symbol::intern("Data.Sequence.reverse"),
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
+            );
+            // update :: Int -> a -> Seq a -> Seq a
+            env.register_value(
+                DefId::new(12312),
+                Symbol::intern("Data.Sequence.update"),
+                Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(self.int_ty.clone(), Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))))),
+            );
+            // insertAt :: Int -> a -> Seq a -> Seq a
+            env.register_value(
+                DefId::new(12313),
+                Symbol::intern("Data.Sequence.insertAt"),
+                Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(self.int_ty.clone(), Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))))),
+            );
+            // deleteAt :: Int -> Seq a -> Seq a
+            env.register_value(
+                DefId::new(12314),
+                Symbol::intern("Data.Sequence.deleteAt"),
+                Scheme::poly(vec![a.clone()], Ty::fun(self.int_ty.clone(), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))),
+            );
+            // fromList :: [a] -> Seq a
+            env.register_value(
+                DefId::new(12315),
+                Symbol::intern("Data.Sequence.fromList"),
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
+            );
+            // toList :: Seq a -> [a]
+            env.register_value(
+                DefId::new(12316),
+                Symbol::intern("Data.Sequence.toList"),
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
+            );
+            // replicate :: Int -> a -> Seq a
+            env.register_value(
+                DefId::new(12317),
+                Symbol::intern("Data.Sequence.replicate"),
+                Scheme::poly(vec![a.clone()], Ty::fun(self.int_ty.clone(), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))),
+            );
+            // viewl :: Seq a -> ViewL a
+            env.register_value(
+                DefId::new(12318),
+                Symbol::intern("Data.Sequence.viewl"),
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
+            );
+            // viewr :: Seq a -> ViewR a
+            env.register_value(
+                DefId::new(12319),
+                Symbol::intern("Data.Sequence.viewr"),
+                Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
+            );
+            // filter :: (a -> Bool) -> Seq a -> Seq a
+            env.register_value(
+                DefId::new(12320),
+                Symbol::intern("Data.Sequence.filter"),
+                Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(a.clone()), self.bool_ty.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())))),
             );
         }
 

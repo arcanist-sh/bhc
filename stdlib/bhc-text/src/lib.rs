@@ -30,6 +30,7 @@
 #![warn(missing_docs)]
 #![allow(unsafe_code)] // SIMD requires unsafe
 
+pub mod builder;
 pub mod bytearray;
 pub mod bytestring;
 pub mod lazy_bytestring;

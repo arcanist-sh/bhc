@@ -1651,6 +1651,79 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
+        // Data.ByteString.Builder at fixed DefIds 11450-11510
+        // Note: 11500-11505 are taken by E.27 (succ/pred/&/swap/curry/uncurry)
+        // so we use 11450-11498 then skip to 11510+
+        let builder_fns: &[(usize, &str)] = &[
+            (11450, "Data.ByteString.Builder.singleton"),
+            (11451, "Data.ByteString.Builder.word8"),
+            (11452, "Data.ByteString.Builder.charUtf8"),
+            (11453, "Data.ByteString.Builder.intDec"),
+            (11454, "Data.ByteString.Builder.int8Dec"),
+            (11455, "Data.ByteString.Builder.int16Dec"),
+            (11456, "Data.ByteString.Builder.int32Dec"),
+            (11457, "Data.ByteString.Builder.int64Dec"),
+            (11458, "Data.ByteString.Builder.integerDec"),
+            (11459, "Data.ByteString.Builder.wordDec"),
+            (11460, "Data.ByteString.Builder.word8Dec"),
+            (11461, "Data.ByteString.Builder.word16Dec"),
+            (11462, "Data.ByteString.Builder.word32Dec"),
+            (11463, "Data.ByteString.Builder.word64Dec"),
+            (11464, "Data.ByteString.Builder.char7"),
+            (11465, "Data.ByteString.Builder.char8"),
+            (11466, "Data.ByteString.Builder.word16BE"),
+            (11467, "Data.ByteString.Builder.word32BE"),
+            (11468, "Data.ByteString.Builder.word64BE"),
+            (11469, "Data.ByteString.Builder.int16BE"),
+            (11470, "Data.ByteString.Builder.int32BE"),
+            (11471, "Data.ByteString.Builder.int64BE"),
+            (11472, "Data.ByteString.Builder.word16LE"),
+            (11473, "Data.ByteString.Builder.word32LE"),
+            (11474, "Data.ByteString.Builder.word64LE"),
+            (11475, "Data.ByteString.Builder.int16LE"),
+            (11476, "Data.ByteString.Builder.int32LE"),
+            (11477, "Data.ByteString.Builder.int64LE"),
+            (11478, "Data.ByteString.Builder.word16Host"),
+            (11479, "Data.ByteString.Builder.word32Host"),
+            (11480, "Data.ByteString.Builder.word64Host"),
+            (11481, "Data.ByteString.Builder.int16Host"),
+            (11482, "Data.ByteString.Builder.int32Host"),
+            (11483, "Data.ByteString.Builder.int64Host"),
+            (11484, "Data.ByteString.Builder.wordHex"),
+            (11485, "Data.ByteString.Builder.word8Hex"),
+            (11486, "Data.ByteString.Builder.word16Hex"),
+            (11487, "Data.ByteString.Builder.word32Hex"),
+            (11488, "Data.ByteString.Builder.word64Hex"),
+            (11489, "Data.ByteString.Builder.word8HexFixed"),
+            (11490, "Data.ByteString.Builder.word16HexFixed"),
+            (11491, "Data.ByteString.Builder.word32HexFixed"),
+            (11492, "Data.ByteString.Builder.word64HexFixed"),
+            (11493, "Data.ByteString.Builder.floatBE"),
+            (11494, "Data.ByteString.Builder.doubleBE"),
+            (11495, "Data.ByteString.Builder.floatLE"),
+            (11496, "Data.ByteString.Builder.doubleLE"),
+            (11497, "Data.ByteString.Builder.floatHost"),
+            (11498, "Data.ByteString.Builder.doubleHost"),
+            (11510, "Data.ByteString.Builder.stringUtf8"),
+            (11511, "Data.ByteString.Builder.string7"),
+            (11512, "Data.ByteString.Builder.string8"),
+            (11513, "Data.ByteString.Builder.empty"),
+            (11514, "Data.ByteString.Builder.byteString"),
+            (11515, "Data.ByteString.Builder.shortByteString"),
+            (11516, "Data.ByteString.Builder.lazyByteString"),
+            (11517, "Data.ByteString.Builder.toLazyByteString"),
+            (11518, "Data.ByteString.Builder.toStrictByteString"),
+            (11519, "Data.ByteString.Builder.append"),
+            (11520, "Data.ByteString.Builder.<>"),
+            (11521, "Data.ByteString.Builder.hPutBuilder"),
+        ];
+        for &(id, name) in builder_fns {
+            let sym = Symbol::intern(name);
+            let def_id = DefId::new(id);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
         // Ensure next_def_id is past the fixed DefId ranges
         if self.next_def_id <= 12213 {
             self.next_def_id = 12213;

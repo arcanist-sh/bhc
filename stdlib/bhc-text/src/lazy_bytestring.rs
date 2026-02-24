@@ -27,22 +27,22 @@ const LAZY_EMPTY_TAG: i64 = 0;
 const LAZY_CHUNK_TAG: i64 = 1;
 
 /// Read the tag from a lazy value.
-unsafe fn lazy_tag(ptr: *const u8) -> i64 {
+pub(crate) unsafe fn lazy_tag(ptr: *const u8) -> i64 {
     *(ptr as *const i64)
 }
 
 /// Read the strict chunk pointer from a Chunk node (at offset 8).
-unsafe fn lazy_chunk(ptr: *const u8) -> *const u8 {
+pub(crate) unsafe fn lazy_chunk(ptr: *const u8) -> *const u8 {
     *((ptr as *const *const u8).add(1))
 }
 
 /// Read the rest pointer from a Chunk node (at offset 16).
-unsafe fn lazy_rest(ptr: *const u8) -> *const u8 {
+pub(crate) unsafe fn lazy_rest(ptr: *const u8) -> *const u8 {
     *((ptr as *const *const u8).add(2))
 }
 
 /// Allocate an Empty lazy node (tag=0, 8 bytes).
-fn alloc_lazy_empty() -> *mut u8 {
+pub(crate) fn alloc_lazy_empty() -> *mut u8 {
     let layout = Layout::from_size_align(8, 8).expect("invalid layout");
     unsafe {
         let ptr = alloc::alloc(layout);
@@ -52,7 +52,7 @@ fn alloc_lazy_empty() -> *mut u8 {
 }
 
 /// Allocate a Chunk lazy node (tag=1, 24 bytes).
-fn alloc_lazy_chunk(chunk: *mut u8, rest: *mut u8) -> *mut u8 {
+pub(crate) fn alloc_lazy_chunk(chunk: *mut u8, rest: *mut u8) -> *mut u8 {
     let layout = Layout::from_size_align(24, 8).expect("invalid layout");
     unsafe {
         let ptr = alloc::alloc(layout);

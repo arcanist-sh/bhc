@@ -59,6 +59,8 @@ pub struct Builtins {
     pub lazy_text_con: TyCon,
     /// The `LazyByteString` type constructor (chunked bytes).
     pub lazy_bs_con: TyCon,
+    /// The `Builder` type constructor (ByteString builder, same repr as LazyByteString).
+    pub builder_con: TyCon,
     /// The `Ordering` type constructor.
     pub ordering_con: TyCon,
     /// The `[]` (list) type constructor.
@@ -102,6 +104,8 @@ pub struct Builtins {
     pub lazy_text_ty: Ty,
     /// The `LazyByteString` type (chunked bytes).
     pub lazy_bs_ty: Ty,
+    /// The `Builder` type (ByteString builder).
+    pub builder_ty: Ty,
     /// The `Ordering` type.
     pub ordering_ty: Ty,
     /// The `Integer` type constructor (arbitrary precision).
@@ -151,6 +155,7 @@ impl Builtins {
         let bytestring_con = TyCon::new(Symbol::intern("ByteString"), Kind::Star);
         let lazy_text_con = TyCon::new(Symbol::intern("LazyText"), Kind::Star);
         let lazy_bs_con = TyCon::new(Symbol::intern("LazyByteString"), Kind::Star);
+        let builder_con = TyCon::new(Symbol::intern("Builder"), Kind::Star);
         let ordering_con = TyCon::new(Symbol::intern("Ordering"), Kind::Star);
 
         // Arbitrary-precision Integer type constructor
@@ -208,6 +213,8 @@ impl Builtins {
         let lazy_text_ty = Ty::Con(lazy_text_con.clone());
         // LazyByteString is a chunked byte array type
         let lazy_bs_ty = Ty::Con(lazy_bs_con.clone());
+        // Builder is same representation as LazyByteString (chunk list)
+        let builder_ty = Ty::Con(builder_con.clone());
         // Ordering is an ADT: LT | EQ | GT
         let ordering_ty = Ty::Con(ordering_con.clone());
 
@@ -231,6 +238,7 @@ impl Builtins {
             bytestring_con,
             lazy_text_con,
             lazy_bs_con,
+            builder_con,
             ordering_con,
             list_con,
             maybe_con,
@@ -248,6 +256,7 @@ impl Builtins {
             bytestring_ty,
             lazy_text_ty,
             lazy_bs_ty,
+            builder_ty,
             ordering_ty,
             integer_con,
             integer_ty,
@@ -5614,6 +5623,149 @@ impl Builtins {
                 DefId::new(12212),
                 Symbol::intern("force"),
                 Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(a))),
+            );
+        }
+
+        // Data.ByteString.Builder at fixed DefIds 11450-11494
+        {
+            let io_unit = Ty::App(
+                Box::new(Ty::Con(self.io_con.clone())),
+                Box::new(Ty::unit()),
+            );
+
+            // Int -> Builder (singleton, word8, charUtf8, char7, char8, intDec, all *Dec, all BE/LE/Host, hex)
+            let int_to_builder = Scheme::mono(Ty::fun(self.int_ty.clone(), self.builder_ty.clone()));
+            for (id, name) in [
+                (11450, "Data.ByteString.Builder.singleton"),
+                (11451, "Data.ByteString.Builder.word8"),
+                (11452, "Data.ByteString.Builder.charUtf8"),
+                (11453, "Data.ByteString.Builder.intDec"),
+                (11454, "Data.ByteString.Builder.int8Dec"),
+                (11455, "Data.ByteString.Builder.int16Dec"),
+                (11456, "Data.ByteString.Builder.int32Dec"),
+                (11457, "Data.ByteString.Builder.int64Dec"),
+                (11458, "Data.ByteString.Builder.integerDec"),
+                (11459, "Data.ByteString.Builder.wordDec"),
+                (11460, "Data.ByteString.Builder.word8Dec"),
+                (11461, "Data.ByteString.Builder.word16Dec"),
+                (11462, "Data.ByteString.Builder.word32Dec"),
+                (11463, "Data.ByteString.Builder.word64Dec"),
+                (11464, "Data.ByteString.Builder.char7"),
+                (11465, "Data.ByteString.Builder.char8"),
+                (11466, "Data.ByteString.Builder.word16BE"),
+                (11467, "Data.ByteString.Builder.word32BE"),
+                (11468, "Data.ByteString.Builder.word64BE"),
+                (11469, "Data.ByteString.Builder.int16BE"),
+                (11470, "Data.ByteString.Builder.int32BE"),
+                (11471, "Data.ByteString.Builder.int64BE"),
+                (11472, "Data.ByteString.Builder.word16LE"),
+                (11473, "Data.ByteString.Builder.word32LE"),
+                (11474, "Data.ByteString.Builder.word64LE"),
+                (11475, "Data.ByteString.Builder.int16LE"),
+                (11476, "Data.ByteString.Builder.int32LE"),
+                (11477, "Data.ByteString.Builder.int64LE"),
+                (11478, "Data.ByteString.Builder.word16Host"),
+                (11479, "Data.ByteString.Builder.word32Host"),
+                (11480, "Data.ByteString.Builder.word64Host"),
+                (11481, "Data.ByteString.Builder.int16Host"),
+                (11482, "Data.ByteString.Builder.int32Host"),
+                (11483, "Data.ByteString.Builder.int64Host"),
+                (11484, "Data.ByteString.Builder.wordHex"),
+                (11485, "Data.ByteString.Builder.word8Hex"),
+                (11486, "Data.ByteString.Builder.word16Hex"),
+                (11487, "Data.ByteString.Builder.word32Hex"),
+                (11488, "Data.ByteString.Builder.word64Hex"),
+                (11489, "Data.ByteString.Builder.word8HexFixed"),
+                (11490, "Data.ByteString.Builder.word16HexFixed"),
+                (11491, "Data.ByteString.Builder.word32HexFixed"),
+                (11492, "Data.ByteString.Builder.word64HexFixed"),
+                (11493, "Data.ByteString.Builder.floatBE"),
+                (11494, "Data.ByteString.Builder.doubleBE"),
+            ] {
+                env.register_value(DefId::new(id), Symbol::intern(name), int_to_builder.clone());
+            }
+
+            // Float/Double -> Builder (floatLE/floatHost/doubleLE/doubleHost)
+            for (id, name) in [
+                (11495, "Data.ByteString.Builder.floatLE"),
+                (11496, "Data.ByteString.Builder.doubleLE"),
+                (11497, "Data.ByteString.Builder.floatHost"),
+                (11498, "Data.ByteString.Builder.doubleHost"),
+            ] {
+                env.register_value(DefId::new(id), Symbol::intern(name), int_to_builder.clone());
+            }
+
+            // String -> Builder (stringUtf8, string7, string8)
+            let string_to_builder = Scheme::mono(Ty::fun(self.string_ty.clone(), self.builder_ty.clone()));
+            for (id, name) in [
+                (11510, "Data.ByteString.Builder.stringUtf8"),
+                (11511, "Data.ByteString.Builder.string7"),
+                (11512, "Data.ByteString.Builder.string8"),
+            ] {
+                env.register_value(DefId::new(id), Symbol::intern(name), string_to_builder.clone());
+            }
+
+            // empty :: Builder
+            env.register_value(
+                DefId::new(11513),
+                Symbol::intern("Data.ByteString.Builder.empty"),
+                Scheme::mono(self.builder_ty.clone()),
+            );
+
+            // ByteString -> Builder
+            let bs_to_builder = Scheme::mono(Ty::fun(self.bytestring_ty.clone(), self.builder_ty.clone()));
+            for (id, name) in [
+                (11514, "Data.ByteString.Builder.byteString"),
+                (11515, "Data.ByteString.Builder.shortByteString"),
+            ] {
+                env.register_value(DefId::new(id), Symbol::intern(name), bs_to_builder.clone());
+            }
+
+            // LazyByteString -> Builder (lazyByteString)
+            env.register_value(
+                DefId::new(11516),
+                Symbol::intern("Data.ByteString.Builder.lazyByteString"),
+                Scheme::mono(Ty::fun(self.lazy_bs_ty.clone(), self.builder_ty.clone())),
+            );
+
+            // Builder -> LazyByteString (toLazyByteString)
+            env.register_value(
+                DefId::new(11517),
+                Symbol::intern("Data.ByteString.Builder.toLazyByteString"),
+                Scheme::mono(Ty::fun(self.builder_ty.clone(), self.lazy_bs_ty.clone())),
+            );
+
+            // Builder -> ByteString (toStrictByteString)
+            env.register_value(
+                DefId::new(11518),
+                Symbol::intern("Data.ByteString.Builder.toStrictByteString"),
+                Scheme::mono(Ty::fun(self.builder_ty.clone(), self.bytestring_ty.clone())),
+            );
+
+            // Builder -> Builder -> Builder (append, <>)
+            let builder_append = Scheme::mono(Ty::fun(
+                self.builder_ty.clone(),
+                Ty::fun(self.builder_ty.clone(), self.builder_ty.clone()),
+            ));
+            env.register_value(
+                DefId::new(11519),
+                Symbol::intern("Data.ByteString.Builder.append"),
+                builder_append.clone(),
+            );
+            env.register_value(
+                DefId::new(11520),
+                Symbol::intern("Data.ByteString.Builder.<>"),
+                builder_append,
+            );
+
+            // Handle -> Builder -> IO () (hPutBuilder)
+            env.register_value(
+                DefId::new(11521),
+                Symbol::intern("Data.ByteString.Builder.hPutBuilder"),
+                Scheme::mono(Ty::fun(
+                    self.int_ty.clone(),
+                    Ty::fun(self.builder_ty.clone(), io_unit),
+                )),
             );
         }
 

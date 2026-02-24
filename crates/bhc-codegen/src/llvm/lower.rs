@@ -2542,6 +2542,58 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let lt_decode_utf8 = self.module.llvm_module().add_function("bhc_lazy_text_decode_utf8", ptr_type.fn_type(&[ptr_type.into()], false), None);
         self.functions.insert(VarId::new(1000477), lt_decode_utf8);
 
+        // ---- ByteString Builder RTS functions (VarId 1000478-1000495) ----
+        // bhc_bsb_singleton(i64) -> ptr
+        let bsb_singleton = self.module.llvm_module().add_function("bhc_bsb_singleton", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000478), bsb_singleton);
+        // bhc_bsb_char_utf8(i64) -> ptr
+        let bsb_char_utf8 = self.module.llvm_module().add_function("bhc_bsb_char_utf8", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000479), bsb_char_utf8);
+        // bhc_bsb_string_utf8(ptr) -> ptr
+        let bsb_string_utf8 = self.module.llvm_module().add_function("bhc_bsb_string_utf8", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000480), bsb_string_utf8);
+        // bhc_bsb_int_dec(i64) -> ptr
+        let bsb_int_dec = self.module.llvm_module().add_function("bhc_bsb_int_dec", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000481), bsb_int_dec);
+        // bhc_bsb_char7(i64) -> ptr
+        let bsb_char7 = self.module.llvm_module().add_function("bhc_bsb_char7", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000482), bsb_char7);
+        // bhc_bsb_char8(i64) -> ptr
+        let bsb_char8 = self.module.llvm_module().add_function("bhc_bsb_char8", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000483), bsb_char8);
+        // bhc_bsb_string7(ptr) -> ptr
+        let bsb_string7 = self.module.llvm_module().add_function("bhc_bsb_string7", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000484), bsb_string7);
+        // bhc_bsb_string8(ptr) -> ptr
+        let bsb_string8 = self.module.llvm_module().add_function("bhc_bsb_string8", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000485), bsb_string8);
+        // bhc_bsb_word16_be(i64) -> ptr
+        let bsb_word16_be = self.module.llvm_module().add_function("bhc_bsb_word16_be", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000486), bsb_word16_be);
+        // bhc_bsb_word32_be(i64) -> ptr
+        let bsb_word32_be = self.module.llvm_module().add_function("bhc_bsb_word32_be", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000487), bsb_word32_be);
+        // bhc_bsb_word64_be(i64) -> ptr
+        let bsb_word64_be = self.module.llvm_module().add_function("bhc_bsb_word64_be", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000488), bsb_word64_be);
+        // bhc_bsb_word16_le(i64) -> ptr
+        let bsb_word16_le = self.module.llvm_module().add_function("bhc_bsb_word16_le", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000489), bsb_word16_le);
+        // bhc_bsb_word32_le(i64) -> ptr
+        let bsb_word32_le = self.module.llvm_module().add_function("bhc_bsb_word32_le", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000490), bsb_word32_le);
+        // bhc_bsb_word64_le(i64) -> ptr
+        let bsb_word64_le = self.module.llvm_module().add_function("bhc_bsb_word64_le", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000491), bsb_word64_le);
+        // bhc_bsb_word_hex(i64) -> ptr
+        let bsb_word_hex = self.module.llvm_module().add_function("bhc_bsb_word_hex", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000492), bsb_word_hex);
+        // bhc_bsb_word8_hex_fixed(i64) -> ptr
+        let bsb_word8_hex_fixed = self.module.llvm_module().add_function("bhc_bsb_word8_hex_fixed", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000493), bsb_word8_hex_fixed);
+        // Note: bhc_float_to_word32 and bhc_double_to_word64 are declared above
+        // at VarIds 1000258 and 1000259 (in bytearray section).
+
         // ---- Exception RTS functions (VarId 1080-1091) ----
         // bhc_throw(ptr) -> ptr (stores exception in TLS, returns sentinel null)
         let throw_fn = self.module.llvm_module().add_function("bhc_throw", ptr_type.fn_type(&[ptr_type.into()], false), None);
@@ -3692,6 +3744,44 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "Data.Text.Lazy.Encoding.encodeUtf8" => Some(1),
                 "Data.Text.Lazy.Encoding.decodeUtf8" => Some(1),
 
+                // Data.ByteString.Builder operations
+                "Data.ByteString.Builder.empty" => Some(0),
+                "Data.ByteString.Builder.singleton" | "Data.ByteString.Builder.word8" => Some(1),
+                "Data.ByteString.Builder.byteString" | "Data.ByteString.Builder.shortByteString" => Some(1),
+                "Data.ByteString.Builder.lazyByteString" | "Data.ByteString.Builder.toLazyByteString" => Some(1),
+                "Data.ByteString.Builder.append" | "Data.ByteString.Builder.<>" => Some(2),
+                "Data.ByteString.Builder.toStrictByteString" => Some(1),
+                "Data.ByteString.Builder.hPutBuilder" => Some(2),
+                "Data.ByteString.Builder.charUtf8" => Some(1),
+                "Data.ByteString.Builder.stringUtf8" => Some(1),
+                "Data.ByteString.Builder.intDec" | "Data.ByteString.Builder.int8Dec"
+                | "Data.ByteString.Builder.int16Dec" | "Data.ByteString.Builder.int32Dec"
+                | "Data.ByteString.Builder.int64Dec" | "Data.ByteString.Builder.integerDec"
+                | "Data.ByteString.Builder.wordDec" | "Data.ByteString.Builder.word8Dec"
+                | "Data.ByteString.Builder.word16Dec" | "Data.ByteString.Builder.word32Dec"
+                | "Data.ByteString.Builder.word64Dec" => Some(1),
+                "Data.ByteString.Builder.char7" => Some(1),
+                "Data.ByteString.Builder.char8" => Some(1),
+                "Data.ByteString.Builder.string7" | "Data.ByteString.Builder.string8" => Some(1),
+                "Data.ByteString.Builder.word16BE" | "Data.ByteString.Builder.int16BE"
+                | "Data.ByteString.Builder.word32BE" | "Data.ByteString.Builder.int32BE"
+                | "Data.ByteString.Builder.word64BE" | "Data.ByteString.Builder.int64BE" => Some(1),
+                "Data.ByteString.Builder.word16LE" | "Data.ByteString.Builder.int16LE"
+                | "Data.ByteString.Builder.word32LE" | "Data.ByteString.Builder.int32LE"
+                | "Data.ByteString.Builder.word64LE" | "Data.ByteString.Builder.int64LE"
+                | "Data.ByteString.Builder.word16Host" | "Data.ByteString.Builder.int16Host"
+                | "Data.ByteString.Builder.word32Host" | "Data.ByteString.Builder.int32Host"
+                | "Data.ByteString.Builder.word64Host" | "Data.ByteString.Builder.int64Host" => Some(1),
+                "Data.ByteString.Builder.wordHex" | "Data.ByteString.Builder.word8Hex"
+                | "Data.ByteString.Builder.word16Hex" | "Data.ByteString.Builder.word32Hex"
+                | "Data.ByteString.Builder.word64Hex" => Some(1),
+                "Data.ByteString.Builder.word8HexFixed" => Some(1),
+                "Data.ByteString.Builder.word16HexFixed" | "Data.ByteString.Builder.word32HexFixed"
+                | "Data.ByteString.Builder.word64HexFixed" => Some(1),
+                "Data.ByteString.Builder.floatBE" | "Data.ByteString.Builder.doubleBE"
+                | "Data.ByteString.Builder.floatLE" | "Data.ByteString.Builder.doubleLE"
+                | "Data.ByteString.Builder.floatHost" | "Data.ByteString.Builder.doubleHost" => Some(1),
+
             // Identity operations
             "Identity" => Some(1),
             "runIdentity" => Some(1),
@@ -4579,6 +4669,47 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // Data.Text.Lazy.Encoding operations (VarIds 1000476-1000477)
                 "Data.Text.Lazy.Encoding.encodeUtf8" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000476, "lt_encode_utf8"),
                 "Data.Text.Lazy.Encoding.decodeUtf8" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000477, "lt_decode_utf8"),
+
+                // Data.ByteString.Builder operations (VarIds 1000478-1000495 + reuse lazy BS)
+                "Data.ByteString.Builder.empty" => self.lower_builtin_text_nullary(1000440, "bsb_empty"),
+                "Data.ByteString.Builder.singleton" | "Data.ByteString.Builder.word8" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000478, "bsb_singleton"),
+                "Data.ByteString.Builder.byteString" | "Data.ByteString.Builder.shortByteString" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000441, "bsb_from_strict"),
+                "Data.ByteString.Builder.lazyByteString" | "Data.ByteString.Builder.toLazyByteString" => self.lower_expr(args[0]),
+                "Data.ByteString.Builder.append" | "Data.ByteString.Builder.<>" => self.lower_builtin_text_binary_ptr_to_ptr(args[0], args[1], 1000448, "bsb_append"),
+                "Data.ByteString.Builder.toStrictByteString" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000442, "bsb_to_strict"),
+                "Data.ByteString.Builder.hPutBuilder" => self.lower_builtin_text_io_handle_text_void(args[0], args[1], 1000458, "bsb_h_put"),
+                "Data.ByteString.Builder.charUtf8" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000479, "bsb_char_utf8"),
+                "Data.ByteString.Builder.stringUtf8" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000480, "bsb_string_utf8"),
+                "Data.ByteString.Builder.intDec" | "Data.ByteString.Builder.int8Dec"
+                | "Data.ByteString.Builder.int16Dec" | "Data.ByteString.Builder.int32Dec"
+                | "Data.ByteString.Builder.int64Dec" | "Data.ByteString.Builder.integerDec"
+                | "Data.ByteString.Builder.wordDec" | "Data.ByteString.Builder.word8Dec"
+                | "Data.ByteString.Builder.word16Dec" | "Data.ByteString.Builder.word32Dec"
+                | "Data.ByteString.Builder.word64Dec" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000481, "bsb_int_dec"),
+                "Data.ByteString.Builder.char7" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000482, "bsb_char7"),
+                "Data.ByteString.Builder.char8" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000483, "bsb_char8"),
+                "Data.ByteString.Builder.string7" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000484, "bsb_string7"),
+                "Data.ByteString.Builder.string8" => self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000485, "bsb_string8"),
+                "Data.ByteString.Builder.word16BE" | "Data.ByteString.Builder.int16BE" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000486, "bsb_word16_be"),
+                "Data.ByteString.Builder.word32BE" | "Data.ByteString.Builder.int32BE" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000487, "bsb_word32_be"),
+                "Data.ByteString.Builder.word64BE" | "Data.ByteString.Builder.int64BE" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000488, "bsb_word64_be"),
+                "Data.ByteString.Builder.word16LE" | "Data.ByteString.Builder.int16LE"
+                | "Data.ByteString.Builder.word16Host" | "Data.ByteString.Builder.int16Host" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000489, "bsb_word16_le"),
+                "Data.ByteString.Builder.word32LE" | "Data.ByteString.Builder.int32LE"
+                | "Data.ByteString.Builder.word32Host" | "Data.ByteString.Builder.int32Host" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000490, "bsb_word32_le"),
+                "Data.ByteString.Builder.word64LE" | "Data.ByteString.Builder.int64LE"
+                | "Data.ByteString.Builder.word64Host" | "Data.ByteString.Builder.int64Host" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000491, "bsb_word64_le"),
+                "Data.ByteString.Builder.wordHex" | "Data.ByteString.Builder.word8Hex"
+                | "Data.ByteString.Builder.word16Hex" | "Data.ByteString.Builder.word32Hex"
+                | "Data.ByteString.Builder.word64Hex" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000492, "bsb_word_hex"),
+                "Data.ByteString.Builder.word8HexFixed" => self.lower_builtin_text_unary_int_to_ptr(args[0], 1000493, "bsb_word8_hex_fixed"),
+                "Data.ByteString.Builder.word16HexFixed" => self.lower_builtin_bsb_word16_hex_fixed(args[0]),
+                "Data.ByteString.Builder.word32HexFixed" => self.lower_builtin_bsb_word32_hex_fixed(args[0]),
+                "Data.ByteString.Builder.word64HexFixed" => self.lower_builtin_bsb_word64_hex_fixed(args[0]),
+                "Data.ByteString.Builder.floatBE" => self.lower_builtin_bsb_float_be(args[0]),
+                "Data.ByteString.Builder.doubleBE" => self.lower_builtin_bsb_double_be(args[0]),
+                "Data.ByteString.Builder.floatLE" | "Data.ByteString.Builder.floatHost" => self.lower_builtin_bsb_float_le(args[0]),
+                "Data.ByteString.Builder.doubleLE" | "Data.ByteString.Builder.doubleHost" => self.lower_builtin_bsb_double_le(args[0]),
 
             // Identity operations (newtype = pass through)
             "Identity" | "runIdentity" => self.lower_expr(args[0]),
@@ -30025,6 +30156,254 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(unit.into()))
     }
 
+    // ============================================================
+    // ByteString.Builder composed helpers
+    // ============================================================
+
+    /// floatBE: fptrunc f64->f32, bitcast f32->i32, zext i32->i64, word32BE
+    fn lower_builtin_bsb_float_be(
+        &mut self,
+        arg_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let word = self.lower_bsb_float_to_word(arg_expr)?;
+        let enc_fn = self.functions.get(&VarId::new(1000487)).ok_or_else(|| {
+            CodegenError::Internal("bhc_bsb_word32_be not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*enc_fn, &[word.into()], "bsb_float_be")
+            .map_err(|e| CodegenError::Internal(format!("bsb_float_be failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("bsb_float_be: no return".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// doubleBE: bitcast f64->i64, word64BE
+    fn lower_builtin_bsb_double_be(
+        &mut self,
+        arg_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let word = self.lower_bsb_double_to_word(arg_expr)?;
+        let enc_fn = self.functions.get(&VarId::new(1000488)).ok_or_else(|| {
+            CodegenError::Internal("bhc_bsb_word64_be not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*enc_fn, &[word.into()], "bsb_double_be")
+            .map_err(|e| CodegenError::Internal(format!("bsb_double_be failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("bsb_double_be: no return".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// floatLE / floatHost: fptrunc f64->f32, bitcast f32->i32, zext i32->i64, word32LE
+    fn lower_builtin_bsb_float_le(
+        &mut self,
+        arg_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let word = self.lower_bsb_float_to_word(arg_expr)?;
+        let enc_fn = self.functions.get(&VarId::new(1000490)).ok_or_else(|| {
+            CodegenError::Internal("bhc_bsb_word32_le not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*enc_fn, &[word.into()], "bsb_float_le")
+            .map_err(|e| CodegenError::Internal(format!("bsb_float_le failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("bsb_float_le: no return".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// doubleLE / doubleHost: bitcast f64->i64, word64LE
+    fn lower_builtin_bsb_double_le(
+        &mut self,
+        arg_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let word = self.lower_bsb_double_to_word(arg_expr)?;
+        let enc_fn = self.functions.get(&VarId::new(1000491)).ok_or_else(|| {
+            CodegenError::Internal("bhc_bsb_word64_le not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(*enc_fn, &[word.into()], "bsb_double_le")
+            .map_err(|e| CodegenError::Internal(format!("bsb_double_le failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("bsb_double_le: no return".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Helper: convert float expr to i64 word representation (fptrunc->bitcast->zext)
+    fn lower_bsb_float_to_word(
+        &mut self,
+        arg_expr: &Expr,
+    ) -> CodegenResult<inkwell::values::IntValue<'ctx>> {
+        let arg = self.lower_expr(arg_expr)?
+            .ok_or_else(|| CodegenError::Internal("bsb_float: no arg".to_string()))?;
+        let f64_val = self.coerce_to_f64(arg)?;
+        let f32_type = self.llvm_ctx.f32_type();
+        let i32_type = self.llvm_ctx.i32_type();
+        let i64_type = self.llvm_ctx.i64_type();
+        let f32_val = self.builder().build_float_trunc(f64_val, f32_type, "ftrunc")
+            .map_err(|e| CodegenError::Internal(format!("ftrunc: {:?}", e)))?;
+        let i32_val = self.builder().build_bit_cast(f32_val, i32_type, "fbitcast")
+            .map_err(|e| CodegenError::Internal(format!("fbitcast: {:?}", e)))?
+            .into_int_value();
+        let word = self.builder().build_int_z_extend(i32_val, i64_type, "fzext")
+            .map_err(|e| CodegenError::Internal(format!("fzext: {:?}", e)))?;
+        Ok(word)
+    }
+
+    /// Helper: convert double expr to i64 word representation (bitcast)
+    fn lower_bsb_double_to_word(
+        &mut self,
+        arg_expr: &Expr,
+    ) -> CodegenResult<inkwell::values::IntValue<'ctx>> {
+        let arg = self.lower_expr(arg_expr)?
+            .ok_or_else(|| CodegenError::Internal("bsb_double: no arg".to_string()))?;
+        let f64_val = self.coerce_to_f64(arg)?;
+        let i64_type = self.llvm_ctx.i64_type();
+        let word = self.builder().build_bit_cast(f64_val, i64_type, "dbitcast")
+            .map_err(|e| CodegenError::Internal(format!("dbitcast: {:?}", e)))?
+            .into_int_value();
+        Ok(word)
+    }
+
+    /// word16HexFixed: append(word8HexFixed(hi), word8HexFixed(lo))
+    fn lower_builtin_bsb_word16_hex_fixed(
+        &mut self,
+        arg_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let arg = self.lower_expr(arg_expr)?
+            .ok_or_else(|| CodegenError::Internal("bsb_word16_hex_fixed: no arg".to_string()))?;
+        let i64_val = self.coerce_to_int(arg)?;
+        let i64_type = self.llvm_ctx.i64_type();
+        // hi = (value >> 8) & 0xff
+        let hi = self.builder().build_right_shift(i64_val, i64_type.const_int(8, false), false, "hi")
+            .map_err(|e| CodegenError::Internal(format!("hi shift: {:?}", e)))?;
+        let hi_masked = self.builder().build_and(hi, i64_type.const_int(0xff, false), "hi_masked")
+            .map_err(|e| CodegenError::Internal(format!("hi mask: {:?}", e)))?;
+        // lo = value & 0xff
+        let lo = self.builder().build_and(i64_val, i64_type.const_int(0xff, false), "lo")
+            .map_err(|e| CodegenError::Internal(format!("lo mask: {:?}", e)))?;
+        let hex_fn = self.functions.get(&VarId::new(1000493)).ok_or_else(|| {
+            CodegenError::Internal("bhc_bsb_word8_hex_fixed not declared".to_string())
+        })?;
+        let hi_bld = self.builder()
+            .build_call(*hex_fn, &[hi_masked.into()], "hi_hex")
+            .map_err(|e| CodegenError::Internal(format!("hi_hex failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("hi_hex: no return".to_string()))?;
+        let lo_bld = self.builder()
+            .build_call(*hex_fn, &[lo.into()], "lo_hex")
+            .map_err(|e| CodegenError::Internal(format!("lo_hex failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("lo_hex: no return".to_string()))?;
+        let append_fn = self.functions.get(&VarId::new(1000448)).ok_or_else(|| {
+            CodegenError::Internal("bhc_lazy_bs_append not declared".to_string())
+        })?;
+        let hi_ptr = self.value_to_ptr(hi_bld)?;
+        let lo_ptr = self.value_to_ptr(lo_bld)?;
+        let result = self.builder()
+            .build_call(*append_fn, &[hi_ptr.into(), lo_ptr.into()], "hex16_fixed")
+            .map_err(|e| CodegenError::Internal(format!("hex16_fixed failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("hex16_fixed: no return".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// word32HexFixed: append 4 word8HexFixed calls
+    fn lower_builtin_bsb_word32_hex_fixed(
+        &mut self,
+        arg_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let arg = self.lower_expr(arg_expr)?
+            .ok_or_else(|| CodegenError::Internal("bsb_word32_hex_fixed: no arg".to_string()))?;
+        let i64_val = self.coerce_to_int(arg)?;
+        let i64_type = self.llvm_ctx.i64_type();
+        let hex_fn = *self.functions.get(&VarId::new(1000493)).ok_or_else(|| {
+            CodegenError::Internal("bhc_bsb_word8_hex_fixed not declared".to_string())
+        })?;
+        let append_fn = *self.functions.get(&VarId::new(1000448)).ok_or_else(|| {
+            CodegenError::Internal("bhc_lazy_bs_append not declared".to_string())
+        })?;
+        // Extract 4 bytes: b3 b2 b1 b0
+        let mut byte_builders = Vec::new();
+        for shift in [24u64, 16, 8, 0] {
+            let shifted = self.builder().build_right_shift(i64_val, i64_type.const_int(shift, false), false, "byte_shift")
+                .map_err(|e| CodegenError::Internal(format!("shift: {:?}", e)))?;
+            let masked = self.builder().build_and(shifted, i64_type.const_int(0xff, false), "byte_mask")
+                .map_err(|e| CodegenError::Internal(format!("mask: {:?}", e)))?;
+            let bld = self.builder()
+                .build_call(hex_fn, &[masked.into()], "byte_hex")
+                .map_err(|e| CodegenError::Internal(format!("byte_hex failed: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("byte_hex: no return".to_string()))?;
+            byte_builders.push(bld);
+        }
+        // Chain appends: append(append(append(b3, b2), b1), b0)
+        let mut result = byte_builders[0];
+        for bld in &byte_builders[1..] {
+            let r_ptr = self.value_to_ptr(result)?;
+            let b_ptr = self.value_to_ptr(*bld)?;
+            result = self.builder()
+                .build_call(append_fn, &[r_ptr.into(), b_ptr.into()], "hex32_append")
+                .map_err(|e| CodegenError::Internal(format!("hex32 append: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("hex32 append: no return".to_string()))?;
+        }
+        Ok(Some(result))
+    }
+
+    /// word64HexFixed: append 8 word8HexFixed calls
+    fn lower_builtin_bsb_word64_hex_fixed(
+        &mut self,
+        arg_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let arg = self.lower_expr(arg_expr)?
+            .ok_or_else(|| CodegenError::Internal("bsb_word64_hex_fixed: no arg".to_string()))?;
+        let i64_val = self.coerce_to_int(arg)?;
+        let i64_type = self.llvm_ctx.i64_type();
+        let hex_fn = *self.functions.get(&VarId::new(1000493)).ok_or_else(|| {
+            CodegenError::Internal("bhc_bsb_word8_hex_fixed not declared".to_string())
+        })?;
+        let append_fn = *self.functions.get(&VarId::new(1000448)).ok_or_else(|| {
+            CodegenError::Internal("bhc_lazy_bs_append not declared".to_string())
+        })?;
+        // Extract 8 bytes: b7 b6 b5 b4 b3 b2 b1 b0
+        let mut byte_builders = Vec::new();
+        for shift in [56u64, 48, 40, 32, 24, 16, 8, 0] {
+            let shifted = self.builder().build_right_shift(i64_val, i64_type.const_int(shift, false), false, "byte_shift")
+                .map_err(|e| CodegenError::Internal(format!("shift: {:?}", e)))?;
+            let masked = self.builder().build_and(shifted, i64_type.const_int(0xff, false), "byte_mask")
+                .map_err(|e| CodegenError::Internal(format!("mask: {:?}", e)))?;
+            let bld = self.builder()
+                .build_call(hex_fn, &[masked.into()], "byte_hex")
+                .map_err(|e| CodegenError::Internal(format!("byte_hex failed: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("byte_hex: no return".to_string()))?;
+            byte_builders.push(bld);
+        }
+        // Chain appends
+        let mut result = byte_builders[0];
+        for bld in &byte_builders[1..] {
+            let r_ptr = self.value_to_ptr(result)?;
+            let b_ptr = self.value_to_ptr(*bld)?;
+            result = self.builder()
+                .build_call(append_fn, &[r_ptr.into(), b_ptr.into()], "hex64_append")
+                .map_err(|e| CodegenError::Internal(format!("hex64 append: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("hex64 append: no return".to_string()))?;
+        }
+        Ok(Some(result))
+    }
+
     /// Check if an expression is structurally a list (Cons applications or Nil).
     /// This is used when type information isn't available.
     fn is_list_expr(expr: &Expr) -> bool {
@@ -33585,6 +33964,100 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let rts_fn = self.functions.get(&VarId::new(1000477)).ok_or_else(|| CodegenError::Internal("bhc_lazy_text_decode_utf8 not declared".to_string()))?;
                 let result = self.builder().build_call(*rts_fn, &[args[0].into()], "lt_decode_utf8").map_err(|e| CodegenError::Internal(format!("lt_decode_utf8: {:?}", e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal("lt_decode_utf8: void".to_string()))?;
                 Ok(Some(result))
+            }
+
+            // Data.ByteString.Builder — direct RTS dispatch
+            "Data.ByteString.Builder.empty" => {
+                let rts_fn = self.functions.get(&VarId::new(1000440)).ok_or_else(|| CodegenError::Internal("bhc_lazy_bs_empty not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[], "bsb_empty").map_err(|e| CodegenError::Internal(format!("bsb_empty: {:?}", e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal("bsb_empty: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.ByteString.Builder.singleton" | "Data.ByteString.Builder.word8"
+            | "Data.ByteString.Builder.charUtf8" | "Data.ByteString.Builder.char7"
+            | "Data.ByteString.Builder.char8"
+            | "Data.ByteString.Builder.intDec" | "Data.ByteString.Builder.int8Dec"
+            | "Data.ByteString.Builder.int16Dec" | "Data.ByteString.Builder.int32Dec"
+            | "Data.ByteString.Builder.int64Dec" | "Data.ByteString.Builder.integerDec"
+            | "Data.ByteString.Builder.wordDec" | "Data.ByteString.Builder.word8Dec"
+            | "Data.ByteString.Builder.word16Dec" | "Data.ByteString.Builder.word32Dec"
+            | "Data.ByteString.Builder.word64Dec"
+            | "Data.ByteString.Builder.word16BE" | "Data.ByteString.Builder.int16BE"
+            | "Data.ByteString.Builder.word32BE" | "Data.ByteString.Builder.int32BE"
+            | "Data.ByteString.Builder.word64BE" | "Data.ByteString.Builder.int64BE"
+            | "Data.ByteString.Builder.word16LE" | "Data.ByteString.Builder.int16LE"
+            | "Data.ByteString.Builder.word32LE" | "Data.ByteString.Builder.int32LE"
+            | "Data.ByteString.Builder.word64LE" | "Data.ByteString.Builder.int64LE"
+            | "Data.ByteString.Builder.word16Host" | "Data.ByteString.Builder.int16Host"
+            | "Data.ByteString.Builder.word32Host" | "Data.ByteString.Builder.int32Host"
+            | "Data.ByteString.Builder.word64Host" | "Data.ByteString.Builder.int64Host"
+            | "Data.ByteString.Builder.wordHex" | "Data.ByteString.Builder.word8Hex"
+            | "Data.ByteString.Builder.word16Hex" | "Data.ByteString.Builder.word32Hex"
+            | "Data.ByteString.Builder.word64Hex"
+            | "Data.ByteString.Builder.word8HexFixed" => {
+                let var_id = match name {
+                    "Data.ByteString.Builder.singleton" | "Data.ByteString.Builder.word8" => 1000478,
+                    "Data.ByteString.Builder.charUtf8" => 1000479,
+                    "Data.ByteString.Builder.char7" => 1000482,
+                    "Data.ByteString.Builder.char8" => 1000483,
+                    "Data.ByteString.Builder.intDec" | "Data.ByteString.Builder.int8Dec"
+                    | "Data.ByteString.Builder.int16Dec" | "Data.ByteString.Builder.int32Dec"
+                    | "Data.ByteString.Builder.int64Dec" | "Data.ByteString.Builder.integerDec"
+                    | "Data.ByteString.Builder.wordDec" | "Data.ByteString.Builder.word8Dec"
+                    | "Data.ByteString.Builder.word16Dec" | "Data.ByteString.Builder.word32Dec"
+                    | "Data.ByteString.Builder.word64Dec" => 1000481,
+                    "Data.ByteString.Builder.word16BE" | "Data.ByteString.Builder.int16BE" => 1000486,
+                    "Data.ByteString.Builder.word32BE" | "Data.ByteString.Builder.int32BE" => 1000487,
+                    "Data.ByteString.Builder.word64BE" | "Data.ByteString.Builder.int64BE" => 1000488,
+                    "Data.ByteString.Builder.word16LE" | "Data.ByteString.Builder.int16LE"
+                    | "Data.ByteString.Builder.word16Host" | "Data.ByteString.Builder.int16Host" => 1000489,
+                    "Data.ByteString.Builder.word32LE" | "Data.ByteString.Builder.int32LE"
+                    | "Data.ByteString.Builder.word32Host" | "Data.ByteString.Builder.int32Host" => 1000490,
+                    "Data.ByteString.Builder.word64LE" | "Data.ByteString.Builder.int64LE"
+                    | "Data.ByteString.Builder.word64Host" | "Data.ByteString.Builder.int64Host" => 1000491,
+                    "Data.ByteString.Builder.wordHex" | "Data.ByteString.Builder.word8Hex"
+                    | "Data.ByteString.Builder.word16Hex" | "Data.ByteString.Builder.word32Hex"
+                    | "Data.ByteString.Builder.word64Hex" => 1000492,
+                    "Data.ByteString.Builder.word8HexFixed" => 1000493,
+                    _ => unreachable!(),
+                };
+                let rts_fn = self.functions.get(&VarId::new(var_id)).ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "bsb_direct").map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal(format!("{}: void", name)))?;
+                Ok(Some(result))
+            }
+            "Data.ByteString.Builder.stringUtf8" | "Data.ByteString.Builder.string7"
+            | "Data.ByteString.Builder.string8" => {
+                let var_id = match name {
+                    "Data.ByteString.Builder.stringUtf8" => 1000480,
+                    "Data.ByteString.Builder.string7" => 1000484,
+                    "Data.ByteString.Builder.string8" => 1000485,
+                    _ => unreachable!(),
+                };
+                let rts_fn = self.functions.get(&VarId::new(var_id)).ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "bsb_string_direct").map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal(format!("{}: void", name)))?;
+                Ok(Some(result))
+            }
+            "Data.ByteString.Builder.byteString" | "Data.ByteString.Builder.shortByteString" => {
+                let rts_fn = self.functions.get(&VarId::new(1000441)).ok_or_else(|| CodegenError::Internal("bhc_lazy_bs_from_strict not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "bsb_from_strict").map_err(|e| CodegenError::Internal(format!("bsb_from_strict: {:?}", e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal("bsb_from_strict: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.ByteString.Builder.lazyByteString" | "Data.ByteString.Builder.toLazyByteString" => {
+                Ok(Some(args[0]))
+            }
+            "Data.ByteString.Builder.toStrictByteString" => {
+                let rts_fn = self.functions.get(&VarId::new(1000442)).ok_or_else(|| CodegenError::Internal("bhc_lazy_bs_to_strict not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into()], "bsb_to_strict").map_err(|e| CodegenError::Internal(format!("bsb_to_strict: {:?}", e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal("bsb_to_strict: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.ByteString.Builder.append" | "Data.ByteString.Builder.<>" => {
+                let rts_fn = self.functions.get(&VarId::new(1000448)).ok_or_else(|| CodegenError::Internal("bhc_lazy_bs_append not declared".to_string()))?;
+                let result = self.builder().build_call(*rts_fn, &[args[0].into(), args[1].into()], "bsb_append").map_err(|e| CodegenError::Internal(format!("bsb_append: {:?}", e)))?.try_as_basic_value().basic().ok_or_else(|| CodegenError::Internal("bsb_append: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.ByteString.Builder.hPutBuilder" => {
+                let rts_fn = self.functions.get(&VarId::new(1000458)).ok_or_else(|| CodegenError::Internal("bhc_lazy_bs_h_put_str not declared".to_string()))?;
+                self.builder().build_call(*rts_fn, &[args[0].into(), args[1].into()], "bsb_h_put").map_err(|e| CodegenError::Internal(format!("bsb_h_put: {:?}", e)))?;
+                Ok(Some(self.type_mapper().ptr_type().const_null().into()))
             }
 
             "even" => {

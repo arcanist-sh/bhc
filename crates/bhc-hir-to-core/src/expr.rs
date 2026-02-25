@@ -515,15 +515,21 @@ fn lower_app(
         if let Some(var) = ctx.lookup_var(def_ref.def_id).cloned() {
             let method_name = var.name;
 
-            // Case 1: User-defined class method with no dict in scope
-            // Only apply dictionary resolution for user-defined classes.
-            // Builtin classes (Eq, Ord, Num, Show, etc.) are handled by codegen.
+            // Case 1: Class method with no dict in scope
+            // Apply dictionary resolution for:
+            // - User-defined classes (always)
+            // - Monad-family classes (Functor/Applicative/Monad) when the concrete
+            //   type is NOT a builtin monad (IO, StateT, etc.)
             if let Some(class_name) = ctx.is_class_method(method_name) {
-                if ctx.is_user_class(class_name) && ctx.lookup_dict(class_name).is_none() {
+                let is_user = ctx.is_user_class(class_name);
+                let is_monad_family = ctx.is_monad_family_class(class_name);
+                if (is_user || is_monad_family)
+                    && ctx.lookup_dict(class_name).is_none()
+                {
                     let param_count = ctx.class_param_count(class_name);
 
-                    if param_count > 1 {
-                        // Multi-param class with just one argument.
+                    if param_count > 1 && is_user {
+                        // Multi-param class with just one argument (user classes only).
                         // Try to infer the arg type and complete remaining
                         // types from matching instances (fundep-style).
                         if let Some(arg_ty) = try_infer_arg_type(ctx, x) {
@@ -573,37 +579,51 @@ fn lower_app(
                         // Single-param class: resolve at concrete type from argument
                         let inferred = try_infer_arg_type(ctx, x);
                         if let Some(concrete_ty) = inferred {
-                            let resolved = ctx.resolve_method_at_concrete_type(
-                                method_name,
-                                class_name,
-                                &concrete_ty,
-                                span,
-                            );
-                            if let Some(method_expr) = resolved {
-                                let x_core = lower_expr(ctx, x)?;
-                                return Ok(core::Expr::App(
-                                    Box::new(method_expr),
-                                    Box::new(x_core),
+                            // For monad-family builtin classes, skip if the concrete type
+                            // is a builtin monad — let codegen handle the fast path
+                            if is_monad_family
+                                && !is_user
+                                && LowerContext::is_builtin_monad_type(&concrete_ty)
+                            {
+                                // Fall through to codegen fast path
+                            } else {
+                                let resolved = ctx.resolve_method_at_concrete_type(
+                                    method_name,
+                                    class_name,
+                                    &concrete_ty,
                                     span,
-                                ));
-                            }
-                            // Fallback: bare type didn't match instance head.
-                            // Try applied type for parameterized instances.
-                            if let Some(applied_ty) = try_infer_applied_type(ctx, x) {
-                                if let Some(method_expr) =
-                                    ctx.resolve_method_at_concrete_type(
-                                        method_name,
-                                        class_name,
-                                        &applied_ty,
-                                        span,
-                                    )
-                                {
+                                );
+                                if let Some(method_expr) = resolved {
                                     let x_core = lower_expr(ctx, x)?;
                                     return Ok(core::Expr::App(
                                         Box::new(method_expr),
                                         Box::new(x_core),
                                         span,
                                     ));
+                                }
+                                // Fallback: bare type didn't match instance head.
+                                // Try applied type for parameterized instances.
+                                if let Some(applied_ty) = try_infer_applied_type(ctx, x) {
+                                    if !(is_monad_family
+                                        && !is_user
+                                        && LowerContext::is_builtin_monad_type(&applied_ty))
+                                    {
+                                        if let Some(method_expr) =
+                                            ctx.resolve_method_at_concrete_type(
+                                                method_name,
+                                                class_name,
+                                                &applied_ty,
+                                                span,
+                                            )
+                                        {
+                                            let x_core = lower_expr(ctx, x)?;
+                                            return Ok(core::Expr::App(
+                                                Box::new(method_expr),
+                                                Box::new(x_core),
+                                                span,
+                                            ));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -663,13 +683,17 @@ fn lower_app(
         if let Some(var) = ctx.lookup_var(head_def_ref.def_id).cloned() {
             let method_name = var.name;
 
-            // Case 3a: Head is a user-defined class method
+            // Case 3a: Head is a class method (user-defined or monad-family)
             if let Some(class_name) = ctx.is_class_method(method_name) {
-                if ctx.is_user_class(class_name) && ctx.lookup_dict(class_name).is_none() {
+                let is_user = ctx.is_user_class(class_name);
+                let is_monad_family = ctx.is_monad_family_class(class_name);
+                if (is_user || is_monad_family)
+                    && ctx.lookup_dict(class_name).is_none()
+                {
                     let param_count = ctx.class_param_count(class_name);
 
-                    if param_count > 1 {
-                        // Multi-param class: collect types from all arguments
+                    if param_count > 1 && is_user {
+                        // Multi-param class: collect types from all arguments (user classes only)
                         // For `combine Red Circle`, collected_args=[Red], x=Circle
                         // We need types from each arg: [Color, Shape]
                         let mut all_args: Vec<&hir::Expr> = collected_args.to_vec();
@@ -687,8 +711,6 @@ fn lower_app(
                         // E.g., for `class Extract a b | a -> b` with `extract :: a -> b`,
                         // calling `extract w` gives us only type `a` from the value arg.
                         // We search instances to find the matching `b`.
-                        // If we have fewer types than params, try completing
-                        // from instance declarations (fundep-style resolution).
                         let mut types_for_resolution = concrete_types.clone();
                         if types_for_resolution.len() < param_count
                             && !types_for_resolution.is_empty()
@@ -750,45 +772,21 @@ fn lower_app(
                                     .find_map(|arg| try_infer_arg_type(ctx, arg))
                             });
                         if let Some(concrete_ty) = inferred {
-                            let resolved = ctx.resolve_method_at_concrete_type(
-                                method_name,
-                                class_name,
-                                &concrete_ty,
-                                span,
-                            );
-                            if let Some(method_expr) = resolved {
-                                let mut result = method_expr;
-                                for arg in &collected_args {
-                                    let arg_core = lower_expr(ctx, arg)?;
-                                    result = core::Expr::App(
-                                        Box::new(result),
-                                        Box::new(arg_core),
-                                        span,
-                                    );
-                                }
-                                let x_core = lower_expr(ctx, x)?;
-                                return Ok(core::Expr::App(
-                                    Box::new(result),
-                                    Box::new(x_core),
+                            // For monad-family builtin classes, skip if the concrete type
+                            // is a builtin monad — let codegen handle the fast path
+                            if is_monad_family
+                                && !is_user
+                                && LowerContext::is_builtin_monad_type(&concrete_ty)
+                            {
+                                // Fall through to codegen fast path
+                            } else {
+                                let resolved = ctx.resolve_method_at_concrete_type(
+                                    method_name,
+                                    class_name,
+                                    &concrete_ty,
                                     span,
-                                ));
-                            }
-                            // Fallback: try applied type for parameterized instances
-                            let applied = try_infer_applied_type(ctx, x)
-                                .or_else(|| {
-                                    collected_args
-                                        .iter()
-                                        .find_map(|arg| try_infer_applied_type(ctx, arg))
-                                });
-                            if let Some(applied_ty) = applied {
-                                if let Some(method_expr) =
-                                    ctx.resolve_method_at_concrete_type(
-                                        method_name,
-                                        class_name,
-                                        &applied_ty,
-                                        span,
-                                    )
-                                {
+                                );
+                                if let Some(method_expr) = resolved {
                                     let mut result = method_expr;
                                     for arg in &collected_args {
                                         let arg_core = lower_expr(ctx, arg)?;
@@ -804,6 +802,44 @@ fn lower_app(
                                         Box::new(x_core),
                                         span,
                                     ));
+                                }
+                                // Fallback: try applied type for parameterized instances
+                                let applied = try_infer_applied_type(ctx, x)
+                                    .or_else(|| {
+                                        collected_args
+                                            .iter()
+                                            .find_map(|arg| try_infer_applied_type(ctx, arg))
+                                    });
+                                if let Some(applied_ty) = applied {
+                                    if !(is_monad_family
+                                        && !is_user
+                                        && LowerContext::is_builtin_monad_type(&applied_ty))
+                                    {
+                                        if let Some(method_expr) =
+                                            ctx.resolve_method_at_concrete_type(
+                                                method_name,
+                                                class_name,
+                                                &applied_ty,
+                                                span,
+                                            )
+                                        {
+                                            let mut result = method_expr;
+                                            for arg in &collected_args {
+                                                let arg_core = lower_expr(ctx, arg)?;
+                                                result = core::Expr::App(
+                                                    Box::new(result),
+                                                    Box::new(arg_core),
+                                                    span,
+                                                );
+                                            }
+                                            let x_core = lower_expr(ctx, x)?;
+                                            return Ok(core::Expr::App(
+                                                Box::new(result),
+                                                Box::new(x_core),
+                                                span,
+                                            ));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -890,13 +926,14 @@ fn lower_type_app(
         if let Some(var) = ctx.lookup_var(def_ref.def_id) {
             let method_name = var.name;
 
-            // Check if this is a user-defined class method
-            // Only apply dictionary resolution for user-defined classes.
-            // Builtin classes (Eq, Ord, Num, Show, etc.) are handled by codegen.
+            // Check if this is a class method that needs dictionary resolution.
+            // Applies to user-defined classes and monad-family classes at non-builtin types.
             if let Some(class_name) = ctx.is_class_method(method_name) {
-                if ctx.is_user_class(class_name) {
-                    // This is a user-defined class method being instantiated at a concrete type
-                    // Construct the dictionary and select the method from it
+                let is_user = ctx.is_user_class(class_name);
+                let is_monad_family = ctx.is_monad_family_class(class_name);
+                if is_user
+                    || (is_monad_family && !LowerContext::is_builtin_monad_type(ty))
+                {
                     if let Some(method_expr) =
                         ctx.resolve_method_at_concrete_type(method_name, class_name, ty, span)
                     {

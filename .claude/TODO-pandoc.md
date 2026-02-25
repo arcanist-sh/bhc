@@ -3,7 +3,7 @@
 **Document ID:** BHC-TODO-PANDOC
 **Status:** In Progress
 **Created:** 2026-01-30
-**Updated:** 2026-02-24
+**Updated:** 2026-02-25
 
 ---
 
@@ -18,8 +18,8 @@ north-star integration target for BHC's real-world Haskell compatibility.
 ## Current State
 
 BHC compiles real Haskell programs to native executables via LLVM:
-- **175 native E2E tests** passing (including monad transformers, file IO, markdown parser, JSON parser, GADTs, type extensions, lazy Text/ByteString)
-- All intermediate milestones A–E.70 done
+- **179 native E2E tests** passing (including monad transformers, file IO, markdown parser, JSON parser, GADTs, type extensions, lazy Text/ByteString, GHC.Generics from/to roundtrip, foreign import ccall)
+- All intermediate milestones A–E.70 done, plus full GHC.Generics and Data.Sequence
 - **Separate compilation pipeline**: `-c` mode, `.bhi` interface generation and consumption, `--odir`/`--hidir`/`--numeric-version`/`--package-db` flags
 - **hx package manager integration** wired — hx has .cabal parsing, Hackage fetch, dependency solver, BHC backend crate with correct CLI flags, filesystem-based package DB, and BHC builtin package mapping
 
@@ -65,7 +65,7 @@ BHC compiles real Haskell programs to native executables via LLVM:
 - GADTs with type refinement (E.60)
 - TypeOperators for infix type syntax (E.61)
 - StandaloneDeriving + PatternSynonyms + nested pattern fallthrough (E.62)
-- DeriveGeneric + NFData/DeepSeq stubs for Pandoc compatibility (E.63)
+- Full GHC.Generics: Rep type algebra (V1/U1/K1/M1/:+:/:*:), from/to, pattern matching + NFData/DeepSeq stubs (E.63)
 - EmptyCase, StrictData, DefaultSignatures, OverloadedLists (E.64)
 
 ### Gap to Pandoc
@@ -76,25 +76,282 @@ BHC compiles real Haskell programs to native executables via LLVM:
 3. ~~ViewPatterns codegen~~ — Done (E.34)
 4. ~~TupleSections + MultiWayIf~~ — Done (E.35)
 5. ~~GeneralizedNewtypeDeriving~~ — Done (E.47): newtype erasure lifting instances
-6. ~~GHC.Generics~~ — Partial (E.63): DeriveGeneric stubs for Pandoc compatibility
+6. ~~GHC.Generics~~ — Done: full Rep type algebra (V1/U1/K1/M1/:+:/:*:) + working from/to + pattern matching
+7. ~~CPP preprocessing~~ — Done (E.67)
+8. ~~Lazy Text/ByteString~~ — Done
+9. ~~Exception hierarchy~~ — Done
+10. ~~Data.Sequence~~ — Done: Vec-backed RTS with full codegen pipeline
+11. ~~`foreign import ccall`~~ — Done: parsing (safe/unsafe/interruptible), HIR-to-Core lowering with proper types, LLVM codegen with C function declaration + BHC wrapper (unbox args → call C → box result), E2E test with sin/cos/sqrt
 
-**Still missing for Pandoc (prioritized):**
-1. **Full package system** — BHC has `-c` mode, `.bhi` interface generation/consumption, and `--odir`/`--hidir`/`--package-db` flags (E.66). The hx package manager's BHC backend (`hx-bhc`) is now wired with correct CLI flags, filesystem-based package DB (no `bhc-pkg`), and BHC builtin package mapping (base→bhc-base, text→bhc-text, etc.). Remaining: end-to-end testing with real Hackage packages, conditional dependencies, `.hs-boot` mutual recursion
-2. ~~CPP preprocessing~~ — Done (E.67): Built-in Rust preprocessor with `#ifdef`/`#if`/`#elif`/`#else`/`#endif`/`#define`/`#undef`
-3. ~~Lazy Text/ByteString~~ — Done: Data.Text.Lazy (14 functions), Data.ByteString.Lazy (20 functions), Data.ByteString.Lazy.Char8 (6 functions), Data.Text.Lazy.Encoding (2 functions)
-4. **Template Haskell** — Required for aeson JSON deriving (alternative: full GHC.Generics)
-5. ~~Exception hierarchy~~ — Done: `SomeException`/`IOException`/`ErrorCall` tags, `bhc_catch_typed`, `error` catchable
-6. **Full GHC.Generics** — E.63 added stubs; full `Rep` type family + `from`/`to` still needed
-7. **parsec/megaparsec** — Pandoc depends on parsec for some formats
-8. **aeson** — JSON serialization with ToJSON/FromJSON (requires TH or full Generics)
-9. **Data.Sequence** — Finger tree (not started)
-10. **process/time/network-uri** — External dependency packages
+**Still missing — Compiler completeness (before libraries):**
+1. **General monadic `>>=`/`>>`/`return` via dictionary dispatch** — Currently hardcoded to IO/StateT/ReaderT/ExceptT/WriterT. Any user-defined monad or library monad (parsec, conduit) breaks.
+3. **Type Applications (`f @Int`)** — Parsed but type argument is discarded. Very common in modern Haskell.
+4. **`DerivingStrategies`/`DerivingVia`** — Parsed but strategy/via-type ignored. Ubiquitous in modern Hackage code.
+5. **`strict`/`lazy`/etc. reserved as keywords** — Lexer treats valid Haskell identifiers as keywords. Breaks any code using these as variable names.
+6. **Record field access type checking** — Field access returns fresh tyvar, record updates don't verify field existence or type compatibility.
+7. **`import Foo (pattern X)` syntax** — Pattern synonym imports not supported.
+8. **`deriving Read`** — Not implemented in deriving infrastructure.
+9. **`mask`/`uninterruptibleMask`** — RTS stubs execute action without masking. Correctness issue for async exception safety.
+10. **`Rational` type** — Faked as `(Int, Int)` tuple, wrong semantics.
+11. **Qualified record construction** — `Module.Con { field = val }` not parsed.
+12. **`.hs-boot` mutual module recursion** — Not supported.
+13. **Extensions silently ignored** — Many LANGUAGE pragmas accepted but have no semantic effect.
+
+**Still missing — Libraries (after compiler is complete):**
+1. **Full package system** — End-to-end testing with real Hackage packages, conditional deps
+2. **Template Haskell** — Required for aeson JSON deriving (alternative: GHC.Generics now works)
+3. **parsec/megaparsec** — Pandoc depends on parsec for some formats
+4. **aeson** — JSON serialization with ToJSON/FromJSON (now unblocked by full Generics)
+5. **process/time/network-uri** — External dependency packages
 
 ---
 
-## Tier 1 — Showstoppers
+## Tier 0 — Compiler Completeness
 
-These must be resolved before any real-world Haskell program can compile.
+These are compiler-level gaps that must be resolved before libraries can be compiled
+from Hackage source. No amount of stdlib work can compensate for these — they affect
+the compiler's ability to process valid Haskell code.
+
+### 0.1 `foreign import ccall` / `foreign export ccall`
+
+**Status:** ✅ `foreign import` complete (parsing, lowering, codegen, E2E test)
+**Scope:** Medium
+**Impact:** Blocker — nearly every real-world Haskell package uses C FFI
+
+- [x] Parse `foreign import ccall [safe|unsafe|interruptible] "c_name" hs_name :: Type`
+- [ ] Parse `foreign export ccall "c_name" hs_name :: Type`
+- [x] Lower foreign imports to Core IR with proper types (ForeignImport struct in CoreModule)
+- [x] Codegen: emit LLVM `declare` for the C function
+- [x] Codegen: generate BHC wrapper that unboxes args → calls C → boxes result
+- [x] Handle `safe` vs `unsafe` calling convention (parsed and stored, both generate same LLVM for now)
+- [x] Support Double (f64), Float (f32), Int (i64), Ptr (opaque pointer) marshalling
+- [x] E2E test: `sin`, `cos`, `sqrt` with correct Double show formatting
+- [ ] Support `CInt`, `CString`, `FunPtr` marshalling
+- [ ] `foreign export` codegen
+
+**Key files:**
+- `crates/bhc-parser/src/decl.rs` — `parse_foreign_decl_with_doc()`
+- `crates/bhc-hir-to-core/src/context.rs` — foreign import lowering with pre-registered vars
+- `crates/bhc-codegen/src/llvm/lower.rs` — `declare_foreign_imports()`, wrapper generation
+- `crates/bhc-core/src/lib.rs` — `ForeignImport` struct, `foreign_imports` field on `CoreModule`
+
+### 0.2 General Monadic `>>=`/`>>`/`return`/`pure` via Dictionary Dispatch
+
+**Status:** ❌ Hardcoded to builtin monads only
+**Scope:** Medium-Large
+**Impact:** Blocker — do-notation only works for IO/StateT/ReaderT/ExceptT/WriterT
+
+`do`-notation desugars to `>>=`/`>>` calls correctly, but codegen dispatches only to
+a fixed set of builtin monads. Any user-defined monad, or library monad like `ParsecT`,
+`Conduit`, `Free`, etc., will fail at codegen time.
+
+- [ ] Route `>>=`/`>>`/`return`/`pure` through dictionary-passing infrastructure
+- [ ] When the monad type is known and has a dictionary, select the method from the dict
+- [ ] When the monad type is a builtin, fall through to existing hardcoded fast paths
+- [ ] Handle `Applicative`'s `<*>` via dictionary dispatch (needed for `ApplicativeDo`)
+- [ ] E2E test: user-defined monad with `do`-notation (e.g., simple `Identity` or `Writer`)
+- [ ] E2E test: `Monad` instance for a custom newtype
+
+**Key files:**
+- `crates/bhc-lower/src/desugar.rs` — do-notation desugaring (correct)
+- `crates/bhc-codegen/src/llvm/lower.rs` — `>>=`/`>>` dispatch (hardcoded, ~line 4095)
+- `crates/bhc-hir-to-core/src/` — dictionary construction for Monad instances
+
+### 0.3 Type Applications (`f @Int x`)
+
+**Status:** 🟡 Parsed, type argument discarded
+**Scope:** Small
+**Impact:** High — very common in modern Haskell
+
+The parser correctly produces `TypeApp` AST nodes, but the type checker ignores
+the type argument entirely — `infer_expr` just recurses into the inner expression
+without instantiating the forall binder.
+
+- [ ] In `infer_expr`, when encountering `TypeApp(inner, ty_arg)`:
+  - Infer the type of `inner` (should be `forall a. ...`)
+  - Instantiate the outermost forall binder with `ty_arg`
+  - Return the instantiated type
+- [ ] Handle nested type applications: `f @Int @Bool`
+- [ ] E2E test: `show (read @Int "42")`, `Proxy @Bool`
+
+**Key files:**
+- `crates/bhc-typeck/src/infer.rs` — `Expr::TypeApp` case (~line 367)
+
+### 0.4 `DerivingStrategies` / `DerivingVia`
+
+**Status:** 🟡 Parsed, strategy and via-type silently ignored
+**Scope:** Medium
+**Impact:** High — ubiquitous in modern Hackage code
+
+The parser accepts `deriving stock`, `deriving newtype`, `deriving anyclass`, and
+`deriving via SomeType`, but the strategy keyword and via-type are discarded. All
+derivations fall back to the default heuristic.
+
+- [ ] Propagate `DerivingStrategy` (Stock/Newtype/Anyclass/Via) from parser to deriving.rs
+- [ ] `stock` → use stock deriving (Eq/Show/Ord/etc.)
+- [ ] `newtype` → use GeneralizedNewtypeDeriving (lift through newtype)
+- [ ] `anyclass` → use DeriveAnyClass (empty instance with defaults)
+- [ ] `via SomeType` → generate instance by coercing through the via-type
+- [ ] Add `DerivingStrategy` field to `DerivingClause` AST node
+- [ ] E2E test: explicit `deriving stock Show`, `deriving newtype Eq`
+- [ ] E2E test: `deriving via` with a simple wrapper type
+
+**Key files:**
+- `crates/bhc-parser/src/decl.rs` — deriving clause parsing (~line 1533)
+- `crates/bhc-hir-to-core/src/deriving.rs` — deriving dispatch
+- `crates/bhc-ast/src/lib.rs` — `DerivingClause` AST type
+
+### 0.5 Context-Sensitive Keywords (Lexer Fix)
+
+**Status:** ❌ `strict`/`lazy`/`linear`/`family`/`pattern`/`role`/`stock`/`anyclass`/`via` reserved as keywords
+**Scope:** Small
+**Impact:** Medium-high — breaks any code using these as identifiers
+
+The lexer unconditionally reserves these as keywords. In standard Haskell, they are
+context-sensitive (only special in certain syntactic positions) or not keywords at all.
+Code like `let strict = True` or `let family = "Smith"` will silently misbehave or
+fail to parse.
+
+- [ ] Remove `strict`, `lazy`, `linear`, `tensor` from keyword list
+- [ ] Make `family`, `role`, `stock`, `anyclass`, `via` context-sensitive
+- [ ] Keep `pattern` context-sensitive (only keyword after `import` or at top-level)
+- [ ] E2E test: `let strict = 42 in strict + 1`
+
+**Key files:**
+- `crates/bhc-lexer/src/token.rs` — keyword table (~line 628)
+- `crates/bhc-parser/src/decl.rs` — context-sensitive keyword consumption
+
+### 0.6 Record Field Type Checking
+
+**Status:** 🟡 Field access returns fresh tyvar, updates unchecked
+**Scope:** Medium
+**Impact:** Medium-high — incorrect types inferred for field access
+
+Field access (`r.field` or accessor function `field r`) returns a fresh type variable
+instead of the actual field type. Record updates don't verify that the field exists on
+the type or that the new value has the correct type.
+
+- [ ] Look up field type from the record's data declaration during type inference
+- [ ] Verify field exists on the record type in record updates
+- [ ] Verify new value type matches field type in record updates
+- [ ] Handle polymorphic record fields
+- [ ] E2E test: type error on wrong field type in record update
+
+**Key files:**
+- `crates/bhc-typeck/src/infer.rs` — `Expr::FieldAccess` (~line 330), `Expr::RecordUpdate` (~line 340)
+
+### 0.7 `import Foo (pattern X)` Syntax
+
+**Status:** ❌ Not supported
+**Scope:** Small
+**Impact:** Medium — needed for importing pattern synonyms
+
+- [ ] Parse `pattern` keyword prefix in import item lists
+- [ ] Route pattern imports to pattern synonym resolution
+- [ ] E2E test: export and import a pattern synonym across modules
+
+**Key files:**
+- `crates/bhc-parser/src/decl.rs` — import item parsing (~line 533)
+
+### 0.8 `deriving Read`
+
+**Status:** ❌ Not in deriving infrastructure
+**Scope:** Medium
+**Impact:** Medium — used in many packages for serialization/parsing
+
+- [ ] Implement `derive_read_data` in deriving.rs
+- [ ] Generate `readsPrec` method for each constructor
+- [ ] Handle field names, infix constructors, record syntax in parsing
+- [ ] E2E test: `read (show x) == x` roundtrip for a derived type
+
+**Key files:**
+- `crates/bhc-hir-to-core/src/deriving.rs` — add `"Read"` arm
+
+### 0.9 `mask` / `uninterruptibleMask` (Async Exception Safety)
+
+**Status:** 🟡 RTS stubs execute action without masking
+**Scope:** Medium
+**Impact:** Medium — correctness issue for `bracket` and resource-safe code
+
+The RTS stubs just run the action directly. For correctness, `mask` should set a
+thread-local flag that defers asynchronous exceptions until the next safe point.
+
+- [ ] Add `masked` flag to RTS thread state
+- [ ] `mask`: set flag, run action with `restore` callback, clear flag
+- [ ] `uninterruptibleMask`: stronger version, block even at safe points
+- [ ] Deferred exceptions delivered when mask is lifted
+- [ ] E2E test: `mask` prevents async exception during critical section
+
+**Key files:**
+- `rts/bhc-rts/src/ffi.rs` — `bhc_mask`, `bhc_unmask` stubs (~line 2409)
+
+### 0.10 `Rational` Type
+
+**Status:** ❌ Faked as `(Int, Int)` tuple
+**Scope:** Medium
+**Impact:** Medium — wrong semantics for numeric conversions
+
+- [ ] Implement proper `Rational` type as `Ratio Integer` (numerator/denominator pair)
+- [ ] `(%)` operator for construction with GCD normalization
+- [ ] `numerator`, `denominator` accessors
+- [ ] `fromRational` / `toRational` conversions
+- [ ] `Num`/`Fractional`/`Real` instances
+- [ ] E2E test: `1 % 3 + 1 % 6 == 1 % 2`
+
+**Key files:**
+- `crates/bhc-typeck/src/builtins.rs` — Rational type registration (~line 2428)
+
+### 0.11 Qualified Record Construction
+
+**Status:** ❌ TODO in parser
+**Scope:** Small
+**Impact:** Low-medium — used in multi-module code
+
+- [ ] Parse `Module.Constructor { field = val }` syntax
+- [ ] Resolve the constructor through the module qualifier
+- [ ] E2E test: qualified record construction across modules
+
+**Key files:**
+- `crates/bhc-parser/src/expr.rs` — record construction (~line 254)
+
+### 0.12 `.hs-boot` Mutual Module Recursion
+
+**Status:** ❌ Not supported
+**Scope:** Medium
+**Impact:** Medium — required for packages with circular module deps
+
+- [ ] Parse `.hs-boot` files (subset of `.hs`: type signatures, data declarations)
+- [ ] Generate preliminary `.bhi` from `.hs-boot`
+- [ ] Use boot interface to break circular dependency during compilation
+- [ ] Verify boot interface matches actual module after compilation
+
+**Key files:**
+- `crates/bhc-driver/src/lib.rs` — module dependency resolution
+
+### 0.13 Silently Ignored Extensions
+
+**Status:** 🟡 Many LANGUAGE pragmas accepted with no semantic effect
+**Scope:** Varies
+**Impact:** Variable — subtle silent correctness bugs
+
+Extensions that are accepted but ignored should either be implemented or produce a
+clear warning. Key extensions to audit:
+
+- [ ] `RankNTypes` — higher-rank polymorphism (may partially work via existing forall)
+- [ ] `ExistentialQuantification` — existential types in data constructors
+- [ ] `ConstraintKinds` — use constraints as types
+- [ ] `QuantifiedConstraints` — `forall a. C a => ...` in constraints
+- [ ] `AllowAmbiguousTypes` — suppress ambiguity errors (interacts with TypeApplications)
+- [ ] `UndecidableInstances` — relax instance termination check
+- [ ] `NumericUnderscores` — `1_000_000` literal syntax
+- [ ] `BinaryLiterals` — `0b1010` literal syntax
+- [ ] Emit warning for unimplemented but accepted extensions
+
+---
+
+## Tier 1 — Showstoppers (Libraries & Ecosystem)
+
+These must be resolved before real-world Haskell libraries can be compiled.
 
 ### 1.1 Package System Integration
 
@@ -226,10 +483,10 @@ instances, generating boilerplate, and compile-time code generation.
 - [ ] Cross-stage persistence for spliced values
 - [ ] `DeriveLift` and `Lift` class
 
-**Alternative approach:** Instead of full TH, implement `deriving via`
-`Generic` with a generics-sop or GHC.Generics infrastructure that covers
-the most common TH use cases (JSON instances, Show, Eq, Ord). This would
-unblock aeson/yaml without full TH.
+**Alternative approach:** Full GHC.Generics is now implemented (from/to with
+Rep type algebra). This unblocks aeson/yaml generic deriving without TH.
+Combined with DerivingVia (Tier 0.4), this covers the most common TH use
+cases. TH can be deferred until a package genuinely requires splice evaluation.
 
 ---
 
@@ -275,7 +532,7 @@ compiled from Hackage source.
 - [x] Data.Set — RTS-backed BTreeSet (full type support + unions/partition, E.22)
 - [x] Data.IntMap — shares Map RTS (full type support, E.22)
 - [x] Data.IntSet — shares Set RTS (full type support + filter/foldr, E.22)
-- [ ] Data.Sequence — finger tree (not started)
+- [x] Data.Sequence — Vec-backed RTS with full codegen pipeline
 - [x] Data.Map.update, Data.Map.alter, Data.Map.unions, Data.Map.keysSet (E.21)
 - [ ] Data.Graph, Data.Tree (used by some Pandoc deps)
 
@@ -320,25 +577,24 @@ compiled from Hackage source.
 
 ### 2.4 Deriving Infrastructure
 
-**Status:** ✅ Extensive — 8 stock derivable classes + DeriveAnyClass + GND + DeriveGeneric stubs
-**Scope:** Small (remaining: full GHC.Generics, DerivingVia, Read, Ix)
+**Status:** ✅ Extensive — 9 stock derivable classes + DeriveAnyClass + GND + full GHC.Generics
+**Scope:** Small (remaining: Read, Ix — DerivingStrategies/Via moved to Tier 0.4)
 
-- [x] `GHC.Generics` — DeriveGeneric stubs for Pandoc compatibility (E.63)
-- [ ] Generic representations: `V1`, `U1`, `K1`, `M1`, `:+:`, `:*:` (full Rep type family)
-- [ ] `from` / `to` methods for converting to/from generic rep
-- [x] Derive `Generic` for user-defined types (E.63, stub — needs full Rep)
+- [x] `GHC.Generics` — Full implementation: V1, U1, K1, M1, :+:, :*: rep types + working from/to + pattern matching
+- [x] Generic representations: `V1`, `U1`, `K1`, `M1`, `:+:`, `:*:` (DefIds 12400-12415)
+- [x] `from` / `to` methods with balanced binary tree sum/product encoding
+- [x] Derive `Generic` for user-defined types (enums, products, multi-constructor, newtypes)
 - [x] Stock deriving: `Eq`, `Show` for simple enums and ADTs with fields (E.23)
 - [x] Stock deriving: `Ord` for simple enums and ADTs with fields (E.24)
 - [x] Stock deriving: `Enum`, `Bounded` for enums (E.54)
 - [x] Stock deriving: `Functor` (E.51)
 - [x] Stock deriving: `Foldable` (E.52)
 - [x] Stock deriving: `Traversable` (E.53)
-- [ ] Stock deriving: `Read`, `Ix`
-- [ ] `DerivingStrategies`: stock, newtype, anyclass, via
+- [ ] Stock deriving: `Read`, `Ix` (Read moved to Tier 0.8)
 - [x] `DeriveAnyClass` for type classes with default method implementations (E.42)
-- [ ] `DerivingVia` for newtype-based instance delegation
 - [x] `GeneralizedNewtypeDeriving` for lifting instances through newtypes (E.47)
 - [x] `StandaloneDeriving` (E.62)
+- See Tier 0.4 for `DerivingStrategies`/`DerivingVia`
 
 ---
 

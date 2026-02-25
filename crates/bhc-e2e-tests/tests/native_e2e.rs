@@ -442,6 +442,11 @@ fn test_tier3_monadic_combinators_native() {
 }
 
 #[test]
+fn test_tier3_user_monad_native() {
+    run_native_test("tier3_io/user_monad", Profile::Default);
+}
+
+#[test]
 fn test_tier3_zipwithm_basic_native() {
     run_native_test("tier3_io/zipwithm_basic", Profile::Default);
 }

@@ -1418,6 +1418,44 @@ impl LowerContext {
         None
     }
 
+    /// Check if a class belongs to the monad family (Functor, Applicative, Monad).
+    ///
+    /// These classes use codegen fast paths for builtin monads (IO, StateT, etc.)
+    /// but need dictionary dispatch for user-defined monads. This is distinct from
+    /// `is_user_class` because these classes ARE builtin but their instances can be
+    /// user-defined.
+    #[must_use]
+    pub fn is_monad_family_class(&self, class_name: Symbol) -> bool {
+        static MONAD_FAMILY: &[&str] = &["Functor", "Applicative", "Monad"];
+        MONAD_FAMILY.contains(&class_name.as_str())
+    }
+
+    /// Check if a type is a builtin monad that uses codegen fast paths.
+    ///
+    /// Returns true for IO, StateT, ReaderT, ExceptT, WriterT, and Identity
+    /// (all of which have hardcoded codegen). Returns false for user-defined
+    /// monads that need dictionary dispatch.
+    #[must_use]
+    pub fn is_builtin_monad_type(ty: &Ty) -> bool {
+        let type_name = match ty {
+            Ty::Con(tc) => Some(tc.name.as_str()),
+            Ty::App(f, _) => match f.as_ref() {
+                Ty::Con(tc) => Some(tc.name.as_str()),
+                _ => None,
+            },
+            _ => None,
+        };
+        matches!(
+            type_name,
+            Some("IO")
+                | Some("StateT")
+                | Some("ReaderT")
+                | Some("ExceptT")
+                | Some("WriterT")
+                | Some("Identity")
+        )
+    }
+
     /// Check if a class name is a user-defined class (not a builtin like Eq, Ord, Show, etc.).
     ///
     /// This is used to determine whether dictionary-passing should be used for a class.

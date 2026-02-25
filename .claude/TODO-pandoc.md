@@ -85,7 +85,7 @@ BHC compiles real Haskell programs to native executables via LLVM:
 
 **Still missing — Compiler completeness (before libraries):**
 1. **General monadic `>>=`/`>>`/`return` via dictionary dispatch** — Currently hardcoded to IO/StateT/ReaderT/ExceptT/WriterT. Any user-defined monad or library monad (parsec, conduit) breaks.
-3. **Type Applications (`f @Int`)** — Parsed but type argument is discarded. Very common in modern Haskell.
+3. ~~**Type Applications (`f @Int`)**~~ ✅ Full pipeline: parser → AST → HIR → typeck (forall instantiation) → Core → codegen (TyApp erasure). E2E test passing.
 4. **`DerivingStrategies`/`DerivingVia`** — Parsed but strategy/via-type ignored. Ubiquitous in modern Hackage code.
 5. **`strict`/`lazy`/etc. reserved as keywords** — Lexer treats valid Haskell identifiers as keywords. Breaks any code using these as variable names.
 6. **Record field access type checking** — Field access returns fresh tyvar, record updates don't verify field existence or type compatibility.
@@ -157,25 +157,31 @@ a fixed set of builtin monads. Any user-defined monad, or library monad like `Pa
 - `crates/bhc-codegen/src/llvm/lower.rs` — `>>=`/`>>` dispatch (hardcoded, ~line 4095)
 - `crates/bhc-hir-to-core/src/` — dictionary construction for Monad instances
 
-### 0.3 Type Applications (`f @Int x`)
+### 0.3 Type Applications (`f @Int x`) ✅ COMPLETE
 
-**Status:** 🟡 Parsed, type argument discarded
+**Status:** 🟢 Full pipeline implemented
 **Scope:** Small
 **Impact:** High — very common in modern Haskell
 
-The parser correctly produces `TypeApp` AST nodes, but the type checker ignores
-the type argument entirely — `infer_expr` just recurses into the inner expression
-without instantiating the forall binder.
+Implemented: parser produces `TypeApp` AST nodes, lowering passes them to HIR,
+type checker instantiates forall binders with explicit type arguments (handles
+nested type apps like `f @Int @Bool`), codegen erases `TyApp` at runtime.
+Also fixed codegen builtin/primop/constructor detection to skip through `TyApp`.
 
-- [ ] In `infer_expr`, when encountering `TypeApp(inner, ty_arg)`:
-  - Infer the type of `inner` (should be `forall a. ...`)
-  - Instantiate the outermost forall binder with `ty_arg`
-  - Return the instantiated type
-- [ ] Handle nested type applications: `f @Int @Bool`
-- [ ] E2E test: `show (read @Int "42")`, `Proxy @Bool`
+- [x] `TypeApp` variant in AST `Expr` enum
+- [x] Parse `@Type` in application expressions
+- [x] Lower `TypeApp` from AST to HIR
+- [x] Type inference: instantiate forall binders with explicit type args
+- [x] Codegen: skip `TyApp` in `is_saturated_builtin`, `is_saturated_primop`,
+  `is_saturated_constructor`, and `lower_application` arg collection
+- [x] E2E test: `id @Int 42`, `const @Int @String 10 "hello"`
 
 **Key files:**
-- `crates/bhc-typeck/src/infer.rs` — `Expr::TypeApp` case (~line 367)
+- `crates/bhc-ast/src/lib.rs` — `TypeApp` variant
+- `crates/bhc-parser/src/expr.rs` — parse `@Type` in `parse_app_expr`
+- `crates/bhc-lower/src/lower.rs` — lower `TypeApp` to HIR
+- `crates/bhc-typeck/src/infer.rs` — forall instantiation with type args
+- `crates/bhc-codegen/src/llvm/lower.rs` — TyApp peeling in saturation checks
 
 ### 0.4 `DerivingStrategies` / `DerivingVia`
 

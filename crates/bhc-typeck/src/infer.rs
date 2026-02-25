@@ -16,9 +16,11 @@ use bhc_hir::{Binding, CaseAlt, Expr, Lit};
 use bhc_intern::Symbol;
 use bhc_span::Span;
 use bhc_types::{Scheme, Ty};
+use rustc_hash::FxHashMap;
 
 use crate::context::TyCtxt;
 use crate::diagnostics;
+use crate::instantiate::substitute;
 
 /// Infer the type of an expression.
 ///
@@ -364,12 +366,59 @@ pub fn infer_expr(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             resolved_ty
         }
 
-        Expr::TypeApp(inner, _ty_arg, _span) => {
+        Expr::TypeApp(inner, ty_arg, span) => {
             // Explicit type application: f @Int
-            // If inner has a forall type, instantiate with the argument
-            // For now, we just return the inner type
-            // TODO: Handle explicit type application properly
-            infer_expr(ctx, inner)
+            // Collect all nested type applications to handle f @A @B
+            let mut type_args = vec![ty_arg];
+            let mut base = inner.as_ref();
+            while let Expr::TypeApp(inner2, ty_arg2, _) = base {
+                type_args.push(ty_arg2);
+                base = inner2.as_ref();
+            }
+            type_args.reverse();
+
+            // Look up the scheme for the base expression
+            let scheme = match base {
+                Expr::Var(def_ref) => ctx.env.lookup_def_id(def_ref.def_id).cloned(),
+                Expr::Con(def_ref) => ctx
+                    .env
+                    .lookup_data_con_by_id(def_ref.def_id)
+                    .map(|i| i.scheme.clone()),
+                _ => None,
+            };
+
+            if let Some(scheme) = scheme {
+                // Instantiate the scheme, substituting the provided type args
+                // for the first N forall-bound vars, and fresh vars for the rest
+                let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
+                for (i, var) in scheme.vars.iter().enumerate() {
+                    if i < type_args.len() {
+                        subst.insert(var.id, type_args[i].clone());
+                    } else {
+                        let fresh = ctx.fresh_ty_var_with_kind(var.kind.clone());
+                        subst.insert(var.id, Ty::Var(fresh));
+                    }
+                }
+
+                // Emit constraints with substitution applied
+                for constraint in &scheme.constraints {
+                    let substituted_args: Vec<Ty> = constraint
+                        .args
+                        .iter()
+                        .map(|t| substitute(t, &subst))
+                        .collect();
+                    ctx.emit_constraint_multi(
+                        constraint.class,
+                        substituted_args,
+                        constraint.span,
+                    );
+                }
+
+                substitute(&scheme.ty, &subst)
+            } else {
+                // Not a simple var/con — fall back to inferring normally
+                infer_expr(ctx, inner)
+            }
         }
 
         Expr::Error(_) => Ty::Error,

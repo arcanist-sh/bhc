@@ -1074,6 +1074,11 @@ fn test_tier3_foreign_import_native() {
     run_native_test("tier3_io/foreign_import", Profile::Default);
 }
 
+#[test]
+fn test_tier3_type_applications_native() {
+    run_native_test("tier3_io/type_applications", Profile::Default);
+}
+
 // =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================

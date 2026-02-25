@@ -162,6 +162,15 @@ impl<'src> Parser<'src> {
                 continue;
             }
 
+            // Check for type application: `expr @Type`
+            if self.check(&TokenKind::At) {
+                self.advance(); // consume @
+                let ty = self.parse_atype()?;
+                let span = expr.span().to(ty.span());
+                expr = Expr::TypeApp(Box::new(expr), ty, span);
+                continue;
+            }
+
             // Check if this looks like an argument
             if let Some(tok) = self.current() {
                 if self.is_atom_start(&tok.node.kind) {

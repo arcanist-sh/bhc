@@ -2315,6 +2315,12 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
             hir::Expr::Ann(Box::new(e), t, *span)
         }
 
+        ast::Expr::TypeApp(expr, ty, span) => {
+            let e = lower_expr(ctx, expr);
+            let t = lower_type(ctx, ty);
+            hir::Expr::TypeApp(Box::new(e), t, *span)
+        }
+
         ast::Expr::Paren(inner, _) => lower_expr(ctx, inner),
 
         ast::Expr::Lazy(inner, _span) => {

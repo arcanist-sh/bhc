@@ -4304,6 +4304,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             current = func.as_ref();
         }
 
+        // Skip through type applications (erased at runtime)
+        while let Expr::TyApp(inner, _, _) = current {
+            current = inner.as_ref();
+        }
+
         // Check if the head is a builtin function
         if let Expr::Var(var, _) = current {
             let name = var.name.as_str();
@@ -31879,6 +31884,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             current = func.as_ref();
         }
 
+        // Skip through type applications (erased at runtime)
+        while let Expr::TyApp(inner, _, _) = current {
+            current = inner.as_ref();
+        }
+
         // Check if the head is a constructor
         if let Expr::Var(var, _) = current {
             if let Some((tag, arity)) = self.constructor_info(var.name.as_str()) {
@@ -35487,6 +35497,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             current = func.as_ref();
         }
 
+        // Skip through type applications (erased at runtime)
+        while let Expr::TyApp(inner, _, _) = current {
+            current = inner.as_ref();
+        }
+
         // Check if the head is a primitive operation
         if let Expr::Var(var, _) = current {
             if let Some((op, arity)) = self.primitive_op_info(var.name.as_str()) {
@@ -36477,9 +36492,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let mut args = vec![arg];
         let mut current = func;
 
-        while let Expr::App(inner_func, inner_arg, _) = current {
-            args.push(inner_arg);
-            current = inner_func;
+        loop {
+            match current {
+                Expr::App(inner_func, inner_arg, _) => {
+                    args.push(inner_arg);
+                    current = inner_func;
+                }
+                // Skip through type applications (erased at runtime)
+                Expr::TyApp(inner, _, _) => {
+                    current = inner;
+                }
+                _ => break,
+            }
         }
 
         args.reverse();

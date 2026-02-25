@@ -961,6 +961,8 @@ pub enum Expr {
     Paren(Box<Expr>, Span),
     /// Type annotation: `x :: Int`
     Ann(Box<Expr>, Type, Span),
+    /// Explicit type application: `f @Int`
+    TypeApp(Box<Expr>, Type, Span),
     /// Lazy block (H26): `lazy { ... }`
     Lazy(Box<Expr>, Span),
     /// Wildcard/hole: `_` (used in patterns parsed as expressions)
@@ -993,6 +995,7 @@ impl Expr {
             | Self::Neg(_, s)
             | Self::Paren(_, s)
             | Self::Ann(_, _, s)
+            | Self::TypeApp(_, _, s)
             | Self::Lazy(_, s)
             | Self::Wildcard(s) => *s,
         }

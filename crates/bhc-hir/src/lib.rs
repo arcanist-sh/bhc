@@ -736,6 +736,17 @@ pub enum Fixity {
     None,
 }
 
+/// Safety annotation for foreign declarations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForeignSafety {
+    /// Safe FFI call (default). May trigger GC, slower.
+    Safe,
+    /// Unsafe FFI call. Must be fast, no callbacks.
+    Unsafe,
+    /// Interruptible FFI call. Can be interrupted by async exceptions.
+    Interruptible,
+}
+
 /// A foreign import declaration.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ForeignDecl {
@@ -747,6 +758,8 @@ pub struct ForeignDecl {
     pub foreign_name: Symbol,
     /// The calling convention.
     pub convention: ForeignConvention,
+    /// Safety annotation.
+    pub safety: ForeignSafety,
     /// The type signature.
     pub ty: Scheme,
     /// Source span.

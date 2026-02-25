@@ -500,6 +500,8 @@ pub struct CoreModule {
     pub bindings: Vec<Bind>,
     /// Foreign exports.
     pub exports: Vec<ForeignExport>,
+    /// Foreign imports (C functions imported via FFI).
+    pub foreign_imports: Vec<ForeignImport>,
     /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
     pub overloaded_strings: bool,
     /// Constructor metadata for all data types defined in this module.
@@ -525,6 +527,32 @@ pub enum ForeignConv {
     CCall,
     /// Standard call (Windows).
     StdCall,
+}
+
+/// Safety annotation for foreign declarations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForeignSafety {
+    /// Safe FFI call (default).
+    Safe,
+    /// Unsafe FFI call.
+    Unsafe,
+    /// Interruptible FFI call.
+    Interruptible,
+}
+
+/// A foreign import declaration in Core.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ForeignImport {
+    /// The Haskell name of the imported function.
+    pub haskell_name: Symbol,
+    /// The C name of the foreign function.
+    pub c_name: Symbol,
+    /// The Core variable bound to this import.
+    pub var: Var,
+    /// The calling convention.
+    pub convention: ForeignConv,
+    /// Safety annotation.
+    pub safety: ForeignSafety,
 }
 
 /// Strictness information for bindings.

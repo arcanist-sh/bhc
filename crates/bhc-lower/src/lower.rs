@@ -3761,6 +3761,13 @@ fn lower_foreign_decl(
 
     let ty = bhc_types::Scheme::mono(lower_type(ctx, &foreign.ty));
 
+    // Map safety annotation from AST to HIR
+    let safety = match foreign.safety {
+        ast::ForeignSafety::Safe => hir::ForeignSafety::Safe,
+        ast::ForeignSafety::Unsafe => hir::ForeignSafety::Unsafe,
+        ast::ForeignSafety::Interruptible => hir::ForeignSafety::Interruptible,
+    };
+
     Ok(hir::ForeignDecl {
         id: def_id,
         name: foreign.name.name,
@@ -3769,6 +3776,7 @@ fn lower_foreign_decl(
             .as_ref()
             .map_or_else(|| foreign.name.name, |s| Symbol::intern(s)),
         convention,
+        safety,
         ty,
         span: foreign.span,
     })

@@ -2482,26 +2482,122 @@ impl<'src> Parser<'src> {
     }
 
     /// Parse a foreign declaration with optional documentation.
-    #[allow(unused_variables)]
+    ///
+    /// Grammar:
+    /// ```text
+    /// foreign_decl ::= 'foreign' 'import' calling_conv [safety] [c_name] hs_name '::' type
+    ///                | 'foreign' 'export' calling_conv [c_name] hs_name '::' type
+    /// calling_conv ::= 'ccall' | 'capi' | 'stdcall' | 'javascript'
+    /// safety       ::= 'safe' | 'unsafe' | 'interruptible'
+    /// ```
     fn parse_foreign_decl_with_doc(&mut self, doc: Option<DocComment>) -> ParseResult<Decl> {
         let start = self.current_span();
         self.expect(&TokenKind::Foreign)?;
 
-        // For now, just skip to end of declaration
-        // This is a placeholder implementation
-        while !self.at_eof() {
-            if self.check(&TokenKind::Semi) || self.check(&TokenKind::RBrace) {
-                break;
-            }
+        // Parse 'import' or 'export'
+        // 'import' is a keyword token, 'export' is an identifier
+        let kind = if self.check(&TokenKind::Import) {
             self.advance();
+            ForeignKind::Import
+        } else if let Some(tok) = self.current() {
+            if let TokenKind::Ident(sym) = &tok.node.kind {
+                if sym.as_str() == "export" {
+                    self.advance();
+                    ForeignKind::Export
+                } else {
+                    return Err(ParseError::Unexpected {
+                        found: tok.node.kind.description().to_string(),
+                        expected: "`import` or `export`".to_string(),
+                        span: tok.span,
+                    });
+                }
+            } else {
+                return Err(ParseError::Unexpected {
+                    found: tok.node.kind.description().to_string(),
+                    expected: "`import` or `export`".to_string(),
+                    span: tok.span,
+                });
+            }
+        } else {
+            return Err(ParseError::UnexpectedEof {
+                expected: "`import` or `export`".to_string(),
+            });
+        };
+
+        // Parse calling convention: ccall, capi, stdcall, javascript
+        let convention = if let Some(tok) = self.current() {
+            if let TokenKind::Ident(sym) = &tok.node.kind {
+                match sym.as_str() {
+                    "ccall" | "capi" | "stdcall" | "javascript" => {
+                        let conv = *sym;
+                        self.advance();
+                        conv
+                    }
+                    _ => {
+                        // Default to ccall if no convention specified
+                        Symbol::intern("ccall")
+                    }
+                }
+            } else {
+                Symbol::intern("ccall")
+            }
+        } else {
+            return Err(ParseError::UnexpectedEof {
+                expected: "calling convention".to_string(),
+            });
+        };
+
+        // Parse optional safety: safe, unsafe, interruptible
+        let mut safety = ForeignSafety::Safe;
+        if let Some(tok) = self.current() {
+            if let TokenKind::Ident(sym) = &tok.node.kind {
+                match sym.as_str() {
+                    "safe" => {
+                        safety = ForeignSafety::Safe;
+                        self.advance();
+                    }
+                    "unsafe" => {
+                        safety = ForeignSafety::Unsafe;
+                        self.advance();
+                    }
+                    "interruptible" => {
+                        safety = ForeignSafety::Interruptible;
+                        self.advance();
+                    }
+                    _ => {}
+                }
+            }
         }
 
+        // Now we need to parse: [c_name_string] haskell_name :: type
+        // If the next token is a string literal, it's the C name.
+        // Otherwise, the Haskell name doubles as the C name.
+        let mut external_name: Option<String> = None;
+        if let Some(tok) = self.current() {
+            if let TokenKind::StringLit(s) = &tok.node.kind {
+                external_name = Some(s.clone());
+                self.advance();
+            }
+        }
+
+        // Parse the Haskell name
+        let name = self.parse_ident()?;
+
+        // Parse '::' and type
+        self.expect(&TokenKind::DoubleColon)?;
+        let ty = self.parse_type()?;
+
         let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
-        Err(ParseError::Unexpected {
-            found: "foreign declaration".to_string(),
-            expected: "foreign declarations not yet supported".to_string(),
+        Ok(Decl::Foreign(ForeignDecl {
+            doc,
+            kind,
+            convention,
+            safety,
+            external_name,
+            name,
+            ty,
             span,
-        })
+        }))
     }
 
     /// Parse a fixity declaration.

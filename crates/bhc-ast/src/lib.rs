@@ -851,6 +851,17 @@ pub struct AssocTypeDef {
     pub span: Span,
 }
 
+/// Safety annotation for foreign declarations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForeignSafety {
+    /// Safe FFI call (default). May trigger GC, slower.
+    Safe,
+    /// Unsafe FFI call. Must be fast, no callbacks.
+    Unsafe,
+    /// Interruptible FFI call. Can be interrupted by async exceptions.
+    Interruptible,
+}
+
 /// A foreign declaration.
 #[derive(Clone, Debug)]
 pub struct ForeignDecl {
@@ -860,6 +871,8 @@ pub struct ForeignDecl {
     pub kind: ForeignKind,
     /// Calling convention.
     pub convention: Symbol,
+    /// Safety annotation.
+    pub safety: ForeignSafety,
     /// External name.
     pub external_name: Option<String>,
     /// Haskell name.

@@ -11,7 +11,7 @@
 //! - Case expressions: Compiled to switch/branch
 
 use crate::{CodegenError, CodegenResult};
-use bhc_core::{Alt, AltCon, Bind, CoreModule, DataCon, Expr, Literal, Var, VarId};
+use bhc_core::{Alt, AltCon, Bind, CoreModule, DataCon, Expr, ForeignImport, Literal, Var, VarId};
 use bhc_intern::Symbol;
 use rustc_hash::FxHashSet;
 
@@ -64,6 +64,25 @@ use rustc_hash::FxHashMap;
 use super::context::LlvmContext;
 use super::module::LlvmModule;
 use super::types::TypeMapper;
+
+/// FFI type representation for foreign import marshalling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FfiType {
+    /// 8-bit integer (CChar, Int8, Word8).
+    Int8,
+    /// 32-bit integer (CInt on some platforms, Int32).
+    Int32,
+    /// 64-bit integer (Int, CSize, Word64, etc.).
+    Int64,
+    /// 32-bit float (CFloat, Float).
+    Float,
+    /// 64-bit float (CDouble, Double).
+    Double,
+    /// Opaque pointer (Ptr a, FunPtr a, CString).
+    Ptr,
+    /// Void (unit return).
+    Void,
+}
 
 /// Metadata about a data constructor, used for code generation.
 #[derive(Clone, Debug)]
@@ -2813,6 +2832,313 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     // ========================================================================
+    // Foreign Import Support
+    // ========================================================================
+
+    /// Declare foreign imports: create C function declarations and BHC wrapper functions.
+    ///
+    /// For each foreign import:
+    /// 1. Declare the C function with its native signature
+    /// 2. Create a BHC wrapper that follows the uniform calling convention
+    ///    (env_ptr + ptr args, returns ptr)
+    /// 3. Register the wrapper in `self.functions` keyed by the foreign import's VarId
+    fn declare_foreign_imports(&mut self, foreign_imports: &[ForeignImport]) -> CodegenResult<()> {
+        for fi in foreign_imports {
+            self.declare_single_foreign_import(fi)?;
+        }
+        Ok(())
+    }
+
+    /// Walk a Haskell type to extract the C parameter types and return type.
+    ///
+    /// Unwraps `IO a` to get the return type `a`.
+    /// Collects function arrow parameter types.
+    fn extract_ffi_signature(&self, ty: &Ty) -> (Vec<FfiType>, FfiType) {
+        let mut params = Vec::new();
+        let mut current = ty;
+
+        // Unwrap foralls
+        while let Ty::Forall(_, body) = current {
+            current = body;
+        }
+
+        // Collect parameter types from function arrows
+        while let Ty::Fun(arg, ret) = current {
+            params.push(Self::haskell_type_to_ffi(arg));
+            current = ret;
+        }
+
+        // The return type: unwrap IO if present
+        let ret_type = Self::unwrap_io_type(current);
+
+        (params, ret_type)
+    }
+
+    /// Map a Haskell type to an FFI type for C interop.
+    fn haskell_type_to_ffi(ty: &Ty) -> FfiType {
+        match ty {
+            Ty::Con(con) => match con.name.as_str() {
+                "Int" | "CInt" | "CLong" | "Int64" | "CSize" | "CPtrdiff" => FfiType::Int64,
+                "Int32" | "CShort" => FfiType::Int32,
+                "Int8" | "CChar" | "CSChar" => FfiType::Int8,
+                "Word" | "CUInt" | "CULong" | "Word64" => FfiType::Int64,
+                "Word32" | "CUShort" => FfiType::Int32,
+                "Word8" | "CUChar" => FfiType::Int8,
+                "Double" | "CDouble" => FfiType::Double,
+                "Float" | "CFloat" => FfiType::Float,
+                "Char" => FfiType::Int64, // BHC boxes Char as i64
+                "Bool" => FfiType::Int64,
+                "()" => FfiType::Void,
+                _ => FfiType::Ptr, // Unknown types passed as pointers
+            },
+            Ty::Prim(prim) => {
+                use bhc_types::PrimTy;
+                match prim {
+                    PrimTy::I32 => FfiType::Int32,
+                    PrimTy::I64 => FfiType::Int64,
+                    PrimTy::U32 => FfiType::Int32,
+                    PrimTy::U64 => FfiType::Int64,
+                    PrimTy::F32 => FfiType::Float,
+                    PrimTy::F64 => FfiType::Double,
+                    PrimTy::Char => FfiType::Int64,
+                    PrimTy::Addr => FfiType::Ptr,
+                }
+            }
+            Ty::App(f, _arg) => {
+                // Check for Ptr a, FunPtr a, StablePtr a, etc.
+                if let Ty::Con(con) = f.as_ref() {
+                    match con.name.as_str() {
+                        "Ptr" | "FunPtr" | "StablePtr" | "ForeignPtr" => FfiType::Ptr,
+                        "IO" => {
+                            // IO a -> just use the inner type
+                            Self::haskell_type_to_ffi(_arg)
+                        }
+                        _ => FfiType::Ptr,
+                    }
+                } else {
+                    FfiType::Ptr
+                }
+            }
+            _ => FfiType::Ptr,
+        }
+    }
+
+    /// Unwrap IO type: `IO a` -> `a`, or just return the type unchanged.
+    fn unwrap_io_type(ty: &Ty) -> FfiType {
+        match ty {
+            Ty::App(f, arg) => {
+                if let Ty::Con(con) = f.as_ref() {
+                    if con.name.as_str() == "IO" {
+                        return Self::haskell_type_to_ffi(arg);
+                    }
+                }
+                Self::haskell_type_to_ffi(ty)
+            }
+            Ty::Con(con) if con.name.as_str() == "IO" => {
+                // bare IO without type arg — treat as IO ()
+                FfiType::Void
+            }
+            _ => Self::haskell_type_to_ffi(ty),
+        }
+    }
+
+    /// Convert an FfiType to an LLVM type.
+    fn ffi_type_to_llvm(&self, ffi_ty: &FfiType) -> Option<BasicTypeEnum<'ctx>> {
+        let tm = self.type_mapper();
+        match ffi_ty {
+            FfiType::Int8 => Some(self.llvm_ctx.i8_type().into()),
+            FfiType::Int32 => Some(tm.i32_type().into()),
+            FfiType::Int64 => Some(tm.i64_type().into()),
+            FfiType::Float => Some(tm.f32_type().into()),
+            FfiType::Double => Some(tm.f64_type().into()),
+            FfiType::Ptr => Some(tm.ptr_type().into()),
+            FfiType::Void => None,
+        }
+    }
+
+    /// Declare a single foreign import: C declaration + BHC wrapper.
+    fn declare_single_foreign_import(&mut self, fi: &ForeignImport) -> CodegenResult<()> {
+        let (param_types, ret_type) = self.extract_ffi_signature(&fi.var.ty);
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let i64_type = tm.i64_type();
+
+        // 1. Build the C function's LLVM type
+        let c_param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = param_types
+            .iter()
+            .filter_map(|t| self.ffi_type_to_llvm(t).map(|t| t.into()))
+            .collect();
+
+        let c_fn_type = match self.ffi_type_to_llvm(&ret_type) {
+            Some(ret_llvm) => ret_llvm.fn_type(&c_param_types, false),
+            None => self.llvm_ctx.void_type().fn_type(&c_param_types, false),
+        };
+
+        // Declare the C function
+        let c_fn = self.module.llvm_module().add_function(
+            fi.c_name.as_str(),
+            c_fn_type,
+            Some(inkwell::module::Linkage::External),
+        );
+
+        // 2. Create the BHC wrapper function
+        // Wrapper signature: (env_ptr, arg1, arg2, ...) -> ptr
+        // where all args are ptr (boxed values)
+        let wrapper_param_count = param_types.len();
+        let mut wrapper_param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
+        wrapper_param_types.push(ptr_type.into()); // env pointer (unused)
+        for _ in 0..wrapper_param_count {
+            wrapper_param_types.push(ptr_type.into());
+        }
+
+        let wrapper_fn_type = ptr_type.fn_type(&wrapper_param_types, false);
+        let wrapper_name = format!("$ffi_wrapper_{}", fi.haskell_name.as_str());
+        let wrapper_fn = self.module.llvm_module().add_function(
+            &wrapper_name,
+            wrapper_fn_type,
+            None,
+        );
+
+        // Build the wrapper body
+        let entry_bb = self.llvm_ctx.append_basic_block(wrapper_fn, "entry");
+        self.builder().position_at_end(entry_bb);
+
+        // Unbox each argument from ptr to native type and call C function
+        let mut c_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
+        for (i, param_ty) in param_types.iter().enumerate() {
+            // Parameter i+1 (0 is the env pointer)
+            let boxed_arg = wrapper_fn.get_nth_param((i + 1) as u32).unwrap().into_pointer_value();
+
+            let unboxed = match param_ty {
+                FfiType::Int64 | FfiType::Int32 | FfiType::Int8 => {
+                    // Unbox: ptr_to_int
+                    let int_val = self.builder()
+                        .build_ptr_to_int(boxed_arg, i64_type, &format!("unbox_arg_{i}"))
+                        .map_err(|e| CodegenError::Internal(format!("FFI unbox int failed: {e:?}")))?;
+                    match param_ty {
+                        FfiType::Int32 => {
+                            let truncated = self.builder()
+                                .build_int_truncate(int_val, self.type_mapper().i32_type(), &format!("trunc_arg_{i}"))
+                                .map_err(|e| CodegenError::Internal(format!("FFI trunc failed: {e:?}")))?;
+                            truncated.into()
+                        }
+                        FfiType::Int8 => {
+                            let truncated = self.builder()
+                                .build_int_truncate(int_val, self.llvm_ctx.i8_type(), &format!("trunc_arg_{i}"))
+                                .map_err(|e| CodegenError::Internal(format!("FFI trunc failed: {e:?}")))?;
+                            truncated.into()
+                        }
+                        _ => int_val.into(), // Int64
+                    }
+                }
+                FfiType::Double => {
+                    // Unbox: ptr -> i64 -> f64 (bitcast)
+                    let int_val = self.builder()
+                        .build_ptr_to_int(boxed_arg, i64_type, &format!("unbox_arg_{i}_bits"))
+                        .map_err(|e| CodegenError::Internal(format!("FFI unbox double failed: {e:?}")))?;
+                    let f64_val = self.builder()
+                        .build_bit_cast(int_val, self.type_mapper().f64_type(), &format!("unbox_arg_{i}_f64"))
+                        .map_err(|e| CodegenError::Internal(format!("FFI bitcast failed: {e:?}")))?;
+                    f64_val.into()
+                }
+                FfiType::Float => {
+                    // Unbox: ptr -> i64 -> f64 -> f32 (truncate)
+                    let int_val = self.builder()
+                        .build_ptr_to_int(boxed_arg, i64_type, &format!("unbox_arg_{i}_bits"))
+                        .map_err(|e| CodegenError::Internal(format!("FFI unbox float failed: {e:?}")))?;
+                    let f64_val = self.builder()
+                        .build_bit_cast(int_val, self.type_mapper().f64_type(), &format!("unbox_arg_{i}_f64"))
+                        .map_err(|e| CodegenError::Internal(format!("FFI bitcast failed: {e:?}")))?
+                        .into_float_value();
+                    let f32_val = self.builder()
+                        .build_float_trunc(f64_val, self.type_mapper().f32_type(), &format!("unbox_arg_{i}_f32"))
+                        .map_err(|e| CodegenError::Internal(format!("FFI ftrunc failed: {e:?}")))?;
+                    f32_val.into()
+                }
+                FfiType::Ptr => {
+                    // Pass pointer through as-is
+                    boxed_arg.into()
+                }
+                FfiType::Void => continue, // Shouldn't happen for a parameter
+            };
+            c_args.push(unboxed);
+        }
+
+        // Call the C function
+        let c_call = self.builder()
+            .build_call(c_fn, &c_args, &format!("ffi_call_{}", fi.c_name.as_str()))
+            .map_err(|e| CodegenError::Internal(format!("FFI call failed: {e:?}")))?;
+
+        // Box the return value
+        let boxed_result: PointerValue<'ctx> = match ret_type {
+            FfiType::Int64 | FfiType::Int32 | FfiType::Int8 => {
+                let ret_val = c_call.try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("FFI call returned void but expected int".to_string()))?
+                    .into_int_value();
+                // Extend to i64 if needed, then box
+                let i64_val = if ret_val.get_type().get_bit_width() < 64 {
+                    self.builder()
+                        .build_int_s_extend(ret_val, i64_type, "box_extend")
+                        .map_err(|e| CodegenError::Internal(format!("FFI sext failed: {e:?}")))?
+                } else {
+                    ret_val
+                };
+                self.builder()
+                    .build_int_to_ptr(i64_val, ptr_type, "box_ret")
+                    .map_err(|e| CodegenError::Internal(format!("FFI box int failed: {e:?}")))?
+            }
+            FfiType::Double => {
+                let ret_val = c_call.try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("FFI call returned void but expected double".to_string()))?
+                    .into_float_value();
+                // Box: f64 -> i64 bits -> ptr
+                let bits = self.builder()
+                    .build_bit_cast(ret_val, i64_type, "box_ret_bits")
+                    .map_err(|e| CodegenError::Internal(format!("FFI box double bitcast failed: {e:?}")))?
+                    .into_int_value();
+                self.builder()
+                    .build_int_to_ptr(bits, ptr_type, "box_ret")
+                    .map_err(|e| CodegenError::Internal(format!("FFI box double failed: {e:?}")))?
+            }
+            FfiType::Float => {
+                let ret_val = c_call.try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("FFI call returned void but expected float".to_string()))?
+                    .into_float_value();
+                // Extend to f64, then box
+                let f64_val = self.builder()
+                    .build_float_ext(ret_val, self.type_mapper().f64_type(), "box_ret_ext")
+                    .map_err(|e| CodegenError::Internal(format!("FFI box float ext failed: {e:?}")))?;
+                let bits = self.builder()
+                    .build_bit_cast(f64_val, i64_type, "box_ret_bits")
+                    .map_err(|e| CodegenError::Internal(format!("FFI box float bitcast failed: {e:?}")))?
+                    .into_int_value();
+                self.builder()
+                    .build_int_to_ptr(bits, ptr_type, "box_ret")
+                    .map_err(|e| CodegenError::Internal(format!("FFI box float failed: {e:?}")))?
+            }
+            FfiType::Ptr => {
+                let ret_val = c_call.try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("FFI call returned void but expected ptr".to_string()))?
+                    .into_pointer_value();
+                ret_val
+            }
+            FfiType::Void => {
+                // Return unit (null pointer)
+                ptr_type.const_null()
+            }
+        };
+
+        self.builder()
+            .build_return(Some(&boxed_result))
+            .map_err(|e| CodegenError::Internal(format!("FFI return failed: {e:?}")))?;
+
+        // 3. Register the wrapper in the functions map
+        self.functions.insert(fi.var.id, wrapper_fn);
+
+        Ok(())
+    }
+
+    // ========================================================================
     // ADT (Algebraic Data Type) Value Representation
     // ========================================================================
     //
@@ -2935,10 +3261,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .map_err(|e| CodegenError::Internal(format!("failed to box int: {:?}", e)))
             }
             BasicValueEnum::FloatValue(f) => {
-                // Box the float: cast bits to int, then to pointer
+                // Box the float: ensure f64, cast bits to i64, then to pointer
+                let f64_val = if f.get_type() == self.type_mapper().f32_type() {
+                    self.builder()
+                        .build_float_ext(f, self.type_mapper().f64_type(), "f32_to_f64")
+                        .map_err(|e| CodegenError::Internal(format!("failed to extend f32: {:?}", e)))?
+                } else {
+                    f
+                };
                 let bits = self
                     .builder()
-                    .build_bit_cast(f, self.type_mapper().i64_type(), "float_bits")
+                    .build_bit_cast(f64_val, self.type_mapper().i64_type(), "float_bits")
                     .map_err(|e| CodegenError::Internal(format!("failed to cast float: {:?}", e)))?
                     .into_int_value();
                 self.builder()
@@ -3037,11 +3370,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 };
                 Ok(float_val)
             }
-            // Float to pointer: box (bit_cast then int_to_ptr)
+            // Float to pointer: box (extend f32→f64 if needed, bit_cast then int_to_ptr)
             (BasicValueEnum::FloatValue(f), inkwell::types::BasicTypeEnum::PointerType(_)) => {
+                // Ensure f64 before bitcasting to i64 (f32 is only 32 bits)
+                let f64_val = if f.get_type() == tm.f32_type() {
+                    self.builder()
+                        .build_float_ext(f, tm.f64_type(), "coerce_f32_to_f64")
+                        .map_err(|e| {
+                            CodegenError::Internal(format!("failed to extend f32: {:?}", e))
+                        })?
+                } else {
+                    f
+                };
                 let bits = self
                     .builder()
-                    .build_bit_cast(f, tm.i64_type(), "float_to_bits")
+                    .build_bit_cast(f64_val, tm.i64_type(), "float_to_bits")
                     .map_err(|e| {
                         CodegenError::Internal(format!("failed to cast float to bits: {:?}", e))
                     })?
@@ -11867,17 +12210,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // Unary Double-returning functions
                     Expr::Var(var, _) => {
                         let n = var.name.as_str();
-                        matches!(n, "sqrt" | "sin" | "cos" | "tan" | "exp" | "log"
+                        if matches!(n, "sqrt" | "sin" | "cos" | "tan" | "exp" | "log"
                             | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh"
                             | "abs" | "negate" | "signum" | "recip"
-                            | "ceiling" | "floor" | "round" | "truncate")
+                            | "ceiling" | "floor" | "round" | "truncate") {
+                            return true;
+                        }
+                        // Type-based inference: check if function returns Double or IO Double
+                        self.fun_returns_double(&var.ty)
                     }
                     // Binary Double-returning: App(App(op, x), y) — f is App(op, x)
                     Expr::App(ff, _, _) => {
                         match ff.as_ref() {
                             Expr::Var(var, _) => {
                                 let n = var.name.as_str();
-                                matches!(n, "/" | "**")
+                                if matches!(n, "/" | "**") {
+                                    return true;
+                                }
+                                // Type-based: check if the partially-applied function returns Double
+                                // For a binary function A -> B -> C, after one application we have B -> C
+                                if let Ty::Fun(_, ret) = &var.ty {
+                                    self.fun_returns_double(ret)
+                                } else {
+                                    false
+                                }
                             }
                             _ => false,
                         }
@@ -11888,6 +12244,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Expr::TyApp(inner, _, _) => self.expr_returns_double(inner),
             _ => false,
         }
+    }
+
+    /// Check if a function type's return type is Double (unwrapping IO if needed).
+    fn fun_returns_double(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Fun(_, ret) => self.fun_returns_double(ret),
+            _ => self.is_double_or_io_double(ty),
+        }
+    }
+
+    /// Check if a type is Double or IO Double.
+    fn is_double_or_io_double(&self, ty: &Ty) -> bool {
+        if self.is_double_type(ty) {
+            return true;
+        }
+        // Check for IO Double: App(Con("IO"), Con("Double"))
+        if let Ty::App(f, a) = ty {
+            if let Ty::Con(con) = f.as_ref() {
+                if con.name.as_str() == "IO" {
+                    return self.is_double_type(a);
+                }
+            }
+        }
+        false
     }
 
     /// Check if a function expression returns Ordering (e.g., `compare`).
@@ -31548,6 +31928,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Pre-pass: detect derived instance methods (e.g., $derived_show_Color)
         // and populate dispatch tables + constructor-to-type mappings.
         self.detect_derived_instance_methods(&core_module.bindings);
+
+        // Declare foreign imports (creates C declarations and BHC wrappers)
+        self.declare_foreign_imports(&core_module.foreign_imports)?;
 
         // First pass: declare all top-level functions
         for bind in &core_module.bindings {

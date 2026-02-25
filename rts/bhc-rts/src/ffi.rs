@@ -1202,10 +1202,27 @@ pub extern "C" fn bhc_floor_double(a: f64) -> i64 {
     a.floor() as i64
 }
 
-/// Show Double
+/// Show Double — matches Haskell's `show` formatting for Double.
+/// Whole numbers include a trailing `.0` (e.g., `1.0` not `1`).
 #[no_mangle]
 pub extern "C" fn bhc_show_double(n: f64) -> *mut c_char {
-    let s = format!("{}", n);
+    let s = if n.is_infinite() {
+        if n.is_sign_positive() {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
+    } else if n.is_nan() {
+        "NaN".to_string()
+    } else {
+        let formatted = format!("{}", n);
+        // Ensure whole numbers have a decimal point (Haskell: show 1.0 = "1.0")
+        if !formatted.contains('.') && !formatted.contains('e') && !formatted.contains('E') {
+            format!("{}.0", formatted)
+        } else {
+            formatted
+        }
+    };
     let c_string = std::ffi::CString::new(s).unwrap();
     c_string.into_raw()
 }

@@ -100,6 +100,9 @@ pub struct LowerContext {
 
     /// Whether GeneralizedNewtypeDeriving is enabled for the current module.
     pub generalized_newtype_deriving: bool,
+
+    /// Collected foreign import declarations for the Core module.
+    foreign_imports: Vec<core::ForeignImport>,
 }
 
 impl LowerContext {
@@ -118,6 +121,7 @@ impl LowerContext {
             errors: Vec::new(),
             warnings: Vec::new(),
             generalized_newtype_deriving: false,
+            foreign_imports: Vec::new(),
         };
         ctx.register_builtins();
         ctx.register_builtin_constructors();
@@ -1666,6 +1670,13 @@ impl LowerContext {
                         self.register_var(method_def.id, var);
                     }
                 }
+                Item::Foreign(foreign) => {
+                    // Pre-register foreign import variables so they're available
+                    // when lowering expressions that reference them.
+                    let ty = foreign.ty.ty.clone();
+                    let var = self.named_var(foreign.name, ty);
+                    self.register_var(foreign.id, var);
+                }
                 _ => {}
             }
         }
@@ -1848,15 +1859,36 @@ impl LowerContext {
                     // Fixity declarations are only used during parsing
                 }
                 Item::Foreign(foreign) => {
-                    // Foreign imports become special Core bindings
-                    // Use named_var to preserve the original name
-                    let var = self.named_var(
-                        foreign.name,
-                        Ty::Error, // Type from signature
-                    );
-                    self.register_var(foreign.id, var.clone());
-                    // For now, we create a placeholder binding
-                    // TODO: Proper foreign binding representation
+                    // Use the var pre-registered in the first pass
+                    let var = self.lookup_var(foreign.id)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            let ty = foreign.ty.ty.clone();
+                            self.named_var(foreign.name, ty)
+                        });
+
+                    // Map calling convention
+                    let convention = match foreign.convention {
+                        bhc_hir::ForeignConvention::CCall => core::ForeignConv::CCall,
+                        bhc_hir::ForeignConvention::StdCall => core::ForeignConv::StdCall,
+                        bhc_hir::ForeignConvention::JavaScript => core::ForeignConv::CCall,
+                    };
+
+                    // Map safety
+                    let safety = match foreign.safety {
+                        bhc_hir::ForeignSafety::Safe => core::ForeignSafety::Safe,
+                        bhc_hir::ForeignSafety::Unsafe => core::ForeignSafety::Unsafe,
+                        bhc_hir::ForeignSafety::Interruptible => core::ForeignSafety::Interruptible,
+                    };
+
+                    // Collect the foreign import for codegen
+                    self.foreign_imports.push(core::ForeignImport {
+                        haskell_name: foreign.name,
+                        c_name: foreign.foreign_name,
+                        var,
+                        convention,
+                        safety,
+                    });
                 }
                 Item::StandaloneDeriving(sd) => {
                     // Look up the data type by name in the module items
@@ -1948,10 +1980,13 @@ impl LowerContext {
             })
             .collect();
 
+        let foreign_imports = std::mem::take(&mut self.foreign_imports);
+
         Ok(CoreModule {
             name: module.name,
             bindings,
             exports: vec![],
+            foreign_imports,
             overloaded_strings: module.overloaded_strings,
             constructors,
         })

@@ -679,7 +679,7 @@ impl DerivingContext {
     /// Derive an empty instance (no bindings) for classes like NFData.
     ///
     /// NFData is a no-op since BHC evaluates strictly by default.
-    fn derive_empty_instance(
+    pub fn derive_empty_instance(
         &mut self,
         type_name: Symbol,
         params: &[TyVar],

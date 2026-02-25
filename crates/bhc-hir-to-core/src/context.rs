@@ -1780,16 +1780,37 @@ impl LowerContext {
                         );
                     }
 
-                    // Process deriving clauses
+                    // Process deriving clauses with strategy dispatch
                     if !data_def.deriving.is_empty() {
                         let derived_instances: Vec<_> = data_def
                             .deriving
                             .iter()
-                            .filter_map(|class_name| {
-                                deriv_ctx.derive_for_data(data_def, *class_name)
-                                    .or_else(|| self.try_derive_any_class(
-                                        data_def.name, &data_def.params, *class_name, data_def.span,
-                                    ))
+                            .filter_map(|clause| {
+                                let class_name = clause.class;
+                                match &clause.strategy {
+                                    bhc_hir::DerivingStrategy::Stock
+                                    | bhc_hir::DerivingStrategy::Default => {
+                                        deriv_ctx.derive_for_data(data_def, class_name)
+                                            .or_else(|| self.try_derive_any_class(
+                                                data_def.name, &data_def.params, class_name, data_def.span,
+                                            ))
+                                    }
+                                    bhc_hir::DerivingStrategy::Anyclass
+                                    | bhc_hir::DerivingStrategy::Via(_) => {
+                                        self.try_derive_any_class(
+                                            data_def.name, &data_def.params, class_name, data_def.span,
+                                        ).or_else(|| deriv_ctx.derive_empty_instance(
+                                            data_def.name, &data_def.params, class_name,
+                                        ))
+                                    }
+                                    bhc_hir::DerivingStrategy::Newtype => {
+                                        // Newtype strategy on a data type: fall back to stock
+                                        deriv_ctx.derive_for_data(data_def, class_name)
+                                            .or_else(|| self.try_derive_any_class(
+                                                data_def.name, &data_def.params, class_name, data_def.span,
+                                            ))
+                                    }
+                                }
                             })
                             .collect();
                         for derived in derived_instances {
@@ -1826,16 +1847,46 @@ impl LowerContext {
                         },
                     );
 
-                    // Process deriving clauses
+                    // Process deriving clauses with strategy dispatch
                     if !newtype_def.deriving.is_empty() {
                         let derived_instances: Vec<_> = newtype_def
                             .deriving
                             .iter()
-                            .filter_map(|class_name| {
-                                deriv_ctx.derive_for_newtype(newtype_def, *class_name)
-                                    .or_else(|| self.try_derive_any_class(
-                                        newtype_def.name, &newtype_def.params, *class_name, newtype_def.span,
-                                    ))
+                            .filter_map(|clause| {
+                                let class_name = clause.class;
+                                match &clause.strategy {
+                                    bhc_hir::DerivingStrategy::Stock => {
+                                        // Stock: use built-in newtype derivation
+                                        deriv_ctx.derive_for_newtype(newtype_def, class_name)
+                                            .or_else(|| self.try_derive_any_class(
+                                                newtype_def.name, &newtype_def.params, class_name, newtype_def.span,
+                                            ))
+                                    }
+                                    bhc_hir::DerivingStrategy::Newtype
+                                    | bhc_hir::DerivingStrategy::Via(_) => {
+                                        // GND / DerivingVia: empty instance (inner type's
+                                        // dictionary works directly since newtypes are erased)
+                                        deriv_ctx.derive_empty_instance(
+                                            newtype_def.name, &newtype_def.params, class_name,
+                                        ).or_else(|| self.try_derive_any_class(
+                                            newtype_def.name, &newtype_def.params, class_name, newtype_def.span,
+                                        ))
+                                    }
+                                    bhc_hir::DerivingStrategy::Anyclass => {
+                                        self.try_derive_any_class(
+                                            newtype_def.name, &newtype_def.params, class_name, newtype_def.span,
+                                        ).or_else(|| deriv_ctx.derive_empty_instance(
+                                            newtype_def.name, &newtype_def.params, class_name,
+                                        ))
+                                    }
+                                    bhc_hir::DerivingStrategy::Default => {
+                                        // Default heuristic: try stock first, then anyclass
+                                        deriv_ctx.derive_for_newtype(newtype_def, class_name)
+                                            .or_else(|| self.try_derive_any_class(
+                                                newtype_def.name, &newtype_def.params, class_name, newtype_def.span,
+                                            ))
+                                    }
+                                }
                             })
                             .collect();
                         for derived in derived_instances {

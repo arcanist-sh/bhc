@@ -1079,6 +1079,11 @@ fn test_tier3_type_applications_native() {
     run_native_test("tier3_io/type_applications", Profile::Default);
 }
 
+#[test]
+fn test_tier3_deriving_strategies_native() {
+    run_native_test("tier3_io/deriving_strategies", Profile::Default);
+}
+
 // =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================

@@ -565,8 +565,8 @@ pub struct DataInstanceDecl {
     pub constrs: Vec<ConDecl>,
     /// GADT constructors.
     pub gadt_constrs: Vec<GadtConDecl>,
-    /// Deriving clause.
-    pub deriving: Vec<Ident>,
+    /// Deriving clauses.
+    pub deriving: Vec<DerivingClause>,
     /// The span.
     pub span: Span,
 }
@@ -658,6 +658,30 @@ impl Guard {
     }
 }
 
+/// A deriving strategy annotation.
+#[derive(Clone, Debug)]
+pub enum DerivingStrategy {
+    /// No explicit strategy; use heuristic.
+    Default,
+    /// `stock` — use built-in derivation (Eq, Ord, Show, etc.).
+    Stock,
+    /// `newtype` — GeneralizedNewtypeDeriving.
+    Newtype,
+    /// `anyclass` — DeriveAnyClass (empty instance with defaults).
+    Anyclass,
+    /// `via SomeType` — DerivingVia.
+    Via(Type),
+}
+
+/// A single deriving clause entry: a strategy paired with a class name.
+#[derive(Clone, Debug)]
+pub struct DerivingClause {
+    /// The deriving strategy.
+    pub strategy: DerivingStrategy,
+    /// The class to derive.
+    pub class: Ident,
+}
+
 /// A data type declaration.
 #[derive(Clone, Debug)]
 pub struct DataDecl {
@@ -671,8 +695,8 @@ pub struct DataDecl {
     pub constrs: Vec<ConDecl>,
     /// GADT constructors (where syntax).
     pub gadt_constrs: Vec<GadtConDecl>,
-    /// Deriving clause.
-    pub deriving: Vec<Ident>,
+    /// Deriving clauses.
+    pub deriving: Vec<DerivingClause>,
     /// The span.
     pub span: Span,
 }
@@ -751,8 +775,8 @@ pub struct NewtypeDecl {
     pub params: Vec<TyVar>,
     /// The constructor.
     pub constr: ConDecl,
-    /// Deriving clause.
-    pub deriving: Vec<Ident>,
+    /// Deriving clauses.
+    pub deriving: Vec<DerivingClause>,
     /// The span.
     pub span: Span,
 }

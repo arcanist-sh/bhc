@@ -201,7 +201,7 @@ fn extract_data_type(data: &DataDecl, path: &Path, source: &str) -> TypeDoc {
     let deriving = data
         .deriving
         .iter()
-        .map(|d| d.name.as_str().to_string())
+        .map(|d| d.class.name.as_str().to_string())
         .collect();
 
     TypeDoc {
@@ -263,7 +263,7 @@ fn extract_newtype(newtype: &NewtypeDecl, path: &Path, source: &str) -> NewtypeD
         deriving: newtype
             .deriving
             .iter()
-            .map(|d| d.name.as_str().to_string())
+            .map(|d| d.class.name.as_str().to_string())
             .collect(),
         source: Some(make_source_location(path, source, newtype.span)),
     }

@@ -1,0 +1,9 @@
+Red
+Green
+False
+True
+42
+True
+False
+Circle
+False

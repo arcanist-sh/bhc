@@ -3181,7 +3181,14 @@ fn lower_data_decl(ctx: &mut LowerContext, data: &ast::DataDecl) -> LowerResult<
         data.constrs.iter().map(|c| lower_con_def(ctx, c)).collect()
     };
 
-    let deriving: Vec<Symbol> = data.deriving.iter().map(|c| c.name).collect();
+    let deriving: Vec<hir::DerivingClause> = data
+        .deriving
+        .iter()
+        .map(|clause| hir::DerivingClause {
+            strategy: lower_deriving_strategy(ctx, &clause.strategy),
+            class: clause.class.name,
+        })
+        .collect();
 
     Ok(hir::DataDef {
         id: type_def_id,
@@ -3271,6 +3278,20 @@ fn lower_gadt_con_def(ctx: &mut LowerContext, con: &ast::GadtConDecl) -> hir::Co
     }
 }
 
+/// Lower a deriving strategy from AST to HIR.
+fn lower_deriving_strategy(
+    ctx: &mut LowerContext,
+    strategy: &ast::DerivingStrategy,
+) -> hir::DerivingStrategy {
+    match strategy {
+        ast::DerivingStrategy::Default => hir::DerivingStrategy::Default,
+        ast::DerivingStrategy::Stock => hir::DerivingStrategy::Stock,
+        ast::DerivingStrategy::Newtype => hir::DerivingStrategy::Newtype,
+        ast::DerivingStrategy::Anyclass => hir::DerivingStrategy::Anyclass,
+        ast::DerivingStrategy::Via(ty) => hir::DerivingStrategy::Via(lower_type(ctx, ty)),
+    }
+}
+
 /// Lower a newtype declaration.
 /// Lower a newtype declaration and generate field accessor functions for records.
 fn lower_newtype_decl_with_accessors(
@@ -3289,7 +3310,14 @@ fn lower_newtype_decl_with_accessors(
 
     let con = lower_con_def(ctx, &newtype.constr);
 
-    let deriving: Vec<Symbol> = newtype.deriving.iter().map(|c| c.name).collect();
+    let deriving: Vec<hir::DerivingClause> = newtype
+        .deriving
+        .iter()
+        .map(|clause| hir::DerivingClause {
+            strategy: lower_deriving_strategy(ctx, &clause.strategy),
+            class: clause.class.name,
+        })
+        .collect();
 
     // Generate field accessor functions for record constructors
     let mut accessors = Vec::new();
@@ -3442,7 +3470,14 @@ fn lower_data_instance_decl(
         di.constrs.iter().map(|c| lower_con_def(ctx, c)).collect()
     };
 
-    let deriving: Vec<Symbol> = di.deriving.iter().map(|c| c.name).collect();
+    let deriving: Vec<hir::DerivingClause> = di
+        .deriving
+        .iter()
+        .map(|clause| hir::DerivingClause {
+            strategy: lower_deriving_strategy(ctx, &clause.strategy),
+            class: clause.class.name,
+        })
+        .collect();
 
     hir::DataFamilyInstance {
         family_name: di.family_name.name,

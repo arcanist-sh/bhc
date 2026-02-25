@@ -173,11 +173,11 @@ pub fn type_check_module_with_defs(
     for item in &hir.items {
         match item {
             bhc_hir::Item::Data(data) => {
-                for class_name in &data.deriving {
+                for clause in &data.deriving {
                     let instance_type =
                         context::TyCtxt::build_applied_type(data.name, &data.params);
                     let info = env::InstanceInfo {
-                        class: *class_name,
+                        class: clause.class,
                         types: vec![instance_type],
                         context: vec![],
                         methods: rustc_hash::FxHashMap::default(),
@@ -187,11 +187,11 @@ pub fn type_check_module_with_defs(
                 }
             }
             bhc_hir::Item::Newtype(newtype) => {
-                for class_name in &newtype.deriving {
+                for clause in &newtype.deriving {
                     let instance_type =
                         context::TyCtxt::build_applied_type(newtype.name, &newtype.params);
                     let info = env::InstanceInfo {
-                        class: *class_name,
+                        class: clause.class,
                         types: vec![instance_type],
                         context: vec![],
                         methods: rustc_hash::FxHashMap::default(),

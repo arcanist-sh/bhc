@@ -437,6 +437,31 @@ pub struct Equation {
 }
 
 /// A data type definition.
+/// A deriving strategy annotation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum DerivingStrategy {
+    /// No explicit strategy; use heuristic.
+    Default,
+    /// `stock` — use built-in derivation (Eq, Ord, Show, etc.).
+    Stock,
+    /// `newtype` — GeneralizedNewtypeDeriving.
+    Newtype,
+    /// `anyclass` — DeriveAnyClass (empty instance with defaults).
+    Anyclass,
+    /// `via SomeType` — DerivingVia.
+    Via(Ty),
+}
+
+/// A single deriving clause entry: a strategy paired with a class name.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DerivingClause {
+    /// The deriving strategy.
+    pub strategy: DerivingStrategy,
+    /// The class to derive.
+    pub class: Symbol,
+}
+
+/// A data type definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DataDef {
     /// The unique ID of this definition.
@@ -450,7 +475,7 @@ pub struct DataDef {
     /// Whether this is a GADT (uses `where` syntax with explicit return types).
     pub is_gadt: bool,
     /// Derived instances.
-    pub deriving: Vec<Symbol>,
+    pub deriving: Vec<DerivingClause>,
     /// Source span.
     pub span: Span,
 }
@@ -504,7 +529,7 @@ pub struct NewtypeDef {
     /// The single constructor.
     pub con: ConDef,
     /// Derived instances.
-    pub deriving: Vec<Symbol>,
+    pub deriving: Vec<DerivingClause>,
     /// Source span.
     pub span: Span,
 }
@@ -605,7 +630,7 @@ pub struct DataFamilyInstance {
     /// The data constructors for this instance.
     pub cons: Vec<ConDef>,
     /// Derived instances.
-    pub deriving: Vec<Symbol>,
+    pub deriving: Vec<DerivingClause>,
     /// Source span.
     pub span: Span,
 }

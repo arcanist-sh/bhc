@@ -1497,8 +1497,8 @@ impl<'src> Parser<'src> {
     }
 
     /// Parse all deriving clauses (there may be multiple in a row).
-    fn parse_deriving(&mut self) -> ParseResult<Vec<Ident>> {
-        let mut all_classes = Vec::new();
+    fn parse_deriving(&mut self) -> ParseResult<Vec<DerivingClause>> {
+        let mut all_clauses = Vec::new();
 
         // Parse all consecutive deriving clauses
         loop {
@@ -1514,27 +1514,32 @@ impl<'src> Parser<'src> {
                 {
                     break;
                 }
-                let classes = self.parse_single_deriving()?;
-                all_classes.extend(classes);
+                let clauses = self.parse_single_deriving()?;
+                all_clauses.extend(clauses);
             } else {
                 break;
             }
         }
 
-        Ok(all_classes)
+        Ok(all_clauses)
     }
 
     /// Parse a single deriving clause.
-    fn parse_single_deriving(&mut self) -> ParseResult<Vec<Ident>> {
+    fn parse_single_deriving(&mut self) -> ParseResult<Vec<DerivingClause>> {
         if !self.eat(&TokenKind::Deriving) {
             return Ok(vec![]);
         }
 
-        // Handle deriving strategies (stock, newtype, anyclass) and via
-        // For now just skip them if present
-        if self.eat_ident("stock") || self.eat_ident("newtype") || self.eat_ident("anyclass") {
-            // Strategy specified
-        }
+        // Detect deriving strategy: stock, newtype, anyclass
+        let strategy = if self.eat(&TokenKind::Stock) {
+            DerivingStrategy::Stock
+        } else if self.eat(&TokenKind::Newtype) {
+            DerivingStrategy::Newtype
+        } else if self.eat(&TokenKind::Anyclass) {
+            DerivingStrategy::Anyclass
+        } else {
+            DerivingStrategy::Default
+        };
 
         if self.eat(&TokenKind::LParen) {
             let mut classes = Vec::new();
@@ -1554,16 +1559,25 @@ impl<'src> Parser<'src> {
             self.expect(&TokenKind::RParen)?;
 
             // Handle `via` clause (DerivingVia extension)
-            if self.eat(&TokenKind::Via) {
-                // Skip the via type
-                let _via_type = self.parse_type()?;
-            }
+            let strategy = if self.eat(&TokenKind::Via) {
+                let via_type = self.parse_type()?;
+                DerivingStrategy::Via(via_type)
+            } else {
+                strategy
+            };
 
-            Ok(classes)
+            Ok(classes
+                .into_iter()
+                .map(|class| DerivingClause {
+                    strategy: strategy.clone(),
+                    class,
+                })
+                .collect())
         } else {
             // Single class without parens
             let ty = self.parse_type()?;
-            Ok(vec![self.type_to_class_name(&ty)])
+            let class = self.type_to_class_name(&ty);
+            Ok(vec![DerivingClause { strategy, class }])
         }
     }
 
@@ -1644,16 +1658,6 @@ impl<'src> Parser<'src> {
         }))
     }
 
-    /// Eat an identifier with a specific name
-    fn eat_ident(&mut self, name: &str) -> bool {
-        if let Some(&TokenKind::Ident(sym)) = self.current_kind() {
-            if sym.as_str() == name {
-                self.advance();
-                return true;
-            }
-        }
-        false
-    }
 
     /// Parse a type alias.
     #[allow(dead_code)]

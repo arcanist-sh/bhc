@@ -210,25 +210,26 @@ newtypes has a pre-existing codegen issue (newtype erasure vs pattern match) —
 - `crates/bhc-hir-to-core/src/context.rs` — strategy-aware dispatch
 - `crates/bhc-hir-to-core/src/deriving.rs` — `derive_empty_instance` (pub)
 
-### 0.5 Context-Sensitive Keywords (Lexer Fix)
+### 0.5 Context-Sensitive Keywords (Lexer Fix) ✅
 
-**Status:** ❌ `strict`/`lazy`/`linear`/`family`/`pattern`/`role`/`stock`/`anyclass`/`via` reserved as keywords
+**Status:** ✅ Complete
 **Scope:** Small
 **Impact:** Medium-high — breaks any code using these as identifiers
 
-The lexer unconditionally reserves these as keywords. In standard Haskell, they are
-context-sensitive (only special in certain syntactic positions) or not keywords at all.
-Code like `let strict = True` or `let family = "Smith"` will silently misbehave or
-fail to parse.
+All 10 context-sensitive words now lex as normal `Ident` tokens. Parser call sites
+updated to use `check_ident_str`/`expect_ident_str`/`eat_ident_str` for context-aware
+matching. `lazy` only triggers H26 lazy-expression parsing when followed by `{`.
 
-- [ ] Remove `strict`, `lazy`, `linear`, `tensor` from keyword list
-- [ ] Make `family`, `role`, `stock`, `anyclass`, `via` context-sensitive
-- [ ] Keep `pattern` context-sensitive (only keyword after `import` or at top-level)
-- [ ] E2E test: `let strict = 42 in strict + 1`
+- [x] Remove `strict`, `lazy`, `linear`, `tensor` from keyword list
+- [x] Make `family`, `role`, `stock`, `anyclass`, `via` context-sensitive
+- [x] Keep `pattern` context-sensitive (only keyword at top-level before ConId)
+- [x] E2E test: `context_keywords` — all 8 words used as variable names
 
 **Key files:**
-- `crates/bhc-lexer/src/token.rs` — keyword table (~line 628)
-- `crates/bhc-parser/src/decl.rs` — context-sensitive keyword consumption
+- `crates/bhc-lexer/src/token.rs` — 10 `TokenKind` variants removed
+- `crates/bhc-parser/src/lib.rs` — `check_ident_str`, `expect_ident_str` added
+- `crates/bhc-parser/src/decl.rs` — 9 call sites updated (family×4, pattern×2, stock, anyclass, via)
+- `crates/bhc-parser/src/expr.rs` — 3 call sites updated (lazy)
 
 ### 0.6 Record Field Type Checking
 

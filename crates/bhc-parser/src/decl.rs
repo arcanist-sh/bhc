@@ -618,7 +618,9 @@ impl<'src> Parser<'src> {
             TokenKind::Foreign => self.parse_foreign_decl_with_doc(doc),
             TokenKind::Infix | TokenKind::Infixl | TokenKind::Infixr => self.parse_fixity_decl(),
             TokenKind::Deriving => self.parse_standalone_deriving(),
-            TokenKind::Pattern => self.parse_pattern_synonym(),
+            TokenKind::Ident(sym) if sym.as_str() == "pattern" => {
+                self.parse_pattern_synonym()
+            }
             TokenKind::Ident(_) => {
                 // Could be type signature or binding
                 self.parse_value_decl_with_doc(doc)
@@ -1124,7 +1126,7 @@ impl<'src> Parser<'src> {
         self.expect(&TokenKind::Data)?;
 
         // Check for data family / data instance
-        if self.check(&TokenKind::Family) {
+        if self.check_ident_str("family") {
             return self.parse_data_family_decl(start, doc);
         }
         if self.check(&TokenKind::Instance) {
@@ -1531,11 +1533,11 @@ impl<'src> Parser<'src> {
         }
 
         // Detect deriving strategy: stock, newtype, anyclass
-        let strategy = if self.eat(&TokenKind::Stock) {
+        let strategy = if self.eat_ident_str("stock") {
             DerivingStrategy::Stock
         } else if self.eat(&TokenKind::Newtype) {
             DerivingStrategy::Newtype
-        } else if self.eat(&TokenKind::Anyclass) {
+        } else if self.eat_ident_str("anyclass") {
             DerivingStrategy::Anyclass
         } else {
             DerivingStrategy::Default
@@ -1559,7 +1561,7 @@ impl<'src> Parser<'src> {
             self.expect(&TokenKind::RParen)?;
 
             // Handle `via` clause (DerivingVia extension)
-            let strategy = if self.eat(&TokenKind::Via) {
+            let strategy = if self.eat_ident_str("via") {
                 let via_type = self.parse_type()?;
                 DerivingStrategy::Via(via_type)
             } else {
@@ -1615,7 +1617,7 @@ impl<'src> Parser<'src> {
     /// Parse a pattern synonym: `pattern Zero = Lit 0`
     fn parse_pattern_synonym(&mut self) -> ParseResult<Decl> {
         let start = self.current_span();
-        self.expect(&TokenKind::Pattern)?;
+        self.expect_ident_str("pattern")?;
 
         // Parse the pattern synonym name (uppercase constructor-like)
         let name = self.parse_conid()?;
@@ -1671,7 +1673,7 @@ impl<'src> Parser<'src> {
         let start = self.current_span();
         self.expect(&TokenKind::Type)?;
 
-        if self.check(&TokenKind::Family) {
+        if self.check_ident_str("family") {
             return self.parse_type_family_decl(start, doc);
         }
         if self.check(&TokenKind::Instance) {
@@ -1712,7 +1714,7 @@ impl<'src> Parser<'src> {
         start: Span,
         doc: Option<DocComment>,
     ) -> ParseResult<Decl> {
-        self.expect(&TokenKind::Family)?;
+        self.expect_ident_str("family")?;
 
         let name = self.parse_conid()?;
         let params = self.parse_ty_var_list()?;
@@ -1845,7 +1847,7 @@ impl<'src> Parser<'src> {
         start: Span,
         doc: Option<DocComment>,
     ) -> ParseResult<Decl> {
-        self.expect(&TokenKind::Family)?;
+        self.expect_ident_str("family")?;
 
         let name = self.parse_conid()?;
         let params = self.parse_ty_var_list()?;

@@ -82,28 +82,6 @@ pub enum TokenKind {
     // GHC extension keywords
     /// `as` (import qualifier)
     As,
-    /// `family` (type families)
-    Family,
-    /// `pattern` (pattern synonyms)
-    Pattern,
-    /// `role` (role annotations)
-    Role,
-    /// `stock` (deriving strategy)
-    Stock,
-    /// `anyclass` (deriving strategy)
-    Anyclass,
-    /// `newtype` as deriving strategy (deriving via)
-    Via,
-
-    // H26 extension keywords
-    /// `lazy` (laziness annotation)
-    Lazy,
-    /// `strict` (strictness annotation)
-    Strict,
-    /// `linear` (linear types)
-    Linear,
-    /// `tensor` (tensor type annotation)
-    Tensor,
 
     // =========================================================================
     // Identifiers
@@ -393,16 +371,6 @@ impl TokenKind {
                 | Self::Type
                 | Self::Where
                 | Self::As
-                | Self::Family
-                | Self::Pattern
-                | Self::Role
-                | Self::Stock
-                | Self::Anyclass
-                | Self::Via
-                | Self::Lazy
-                | Self::Strict
-                | Self::Linear
-                | Self::Tensor
         )
     }
 
@@ -512,16 +480,6 @@ impl TokenKind {
             Self::Type => "`type`",
             Self::Where => "`where`",
             Self::As => "`as`",
-            Self::Family => "`family`",
-            Self::Pattern => "`pattern`",
-            Self::Role => "`role`",
-            Self::Stock => "`stock`",
-            Self::Anyclass => "`anyclass`",
-            Self::Via => "`via`",
-            Self::Lazy => "`lazy`",
-            Self::Strict => "`strict`",
-            Self::Linear => "`linear`",
-            Self::Tensor => "`tensor`",
 
             // Identifiers
             Self::Ident(_) => "identifier",
@@ -625,16 +583,6 @@ impl TokenKind {
             "type" => Self::Type,
             "where" => Self::Where,
             // "as" is context-sensitive - valid identifier outside imports
-            "family" => Self::Family,
-            "pattern" => Self::Pattern,
-            "role" => Self::Role,
-            "stock" => Self::Stock,
-            "anyclass" => Self::Anyclass,
-            "via" => Self::Via,
-            "lazy" => Self::Lazy,
-            "strict" => Self::Strict,
-            "linear" => Self::Linear,
-            "tensor" => Self::Tensor,
             "_" => Self::Underscore,
             _ => return None,
         })

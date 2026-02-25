@@ -206,7 +206,6 @@ impl<'src> Parser<'src> {
                 | TokenKind::If
                 | TokenKind::Case
                 | TokenKind::Do
-                | TokenKind::Lazy
                 | TokenKind::Underscore // For holes/wildcards in patterns that are parsed as expressions first
         )
     }
@@ -218,6 +217,12 @@ impl<'src> Parser<'src> {
         })?;
 
         match &tok.node.kind.clone() {
+            TokenKind::Ident(sym) if sym.as_str() == "lazy"
+                && self.pos + 1 < self.tokens.len()
+                && self.tokens[self.pos + 1].node.kind == TokenKind::LBrace =>
+            {
+                return self.parse_lazy_expr();
+            }
             TokenKind::Ident(sym) => {
                 let ident = Ident::new(*sym);
                 let span = tok.span;
@@ -308,8 +313,6 @@ impl<'src> Parser<'src> {
             TokenKind::Case => self.parse_case_expr(),
 
             TokenKind::Do => self.parse_do_expr(),
-
-            TokenKind::Lazy => self.parse_lazy_expr(),
 
             TokenKind::Underscore => {
                 // Wildcard/hole - used in patterns that are parsed as expressions first
@@ -1255,7 +1258,7 @@ impl<'src> Parser<'src> {
     /// Parse a lazy expression (H26 extension).
     fn parse_lazy_expr(&mut self) -> ParseResult<Expr> {
         let start = self.current_span();
-        self.expect(&TokenKind::Lazy)?;
+        self.expect_ident_str("lazy")?;
         self.expect(&TokenKind::LBrace)?;
         let expr = self.parse_expr()?;
         let end = self.expect(&TokenKind::RBrace)?;

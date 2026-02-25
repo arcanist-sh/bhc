@@ -1084,6 +1084,11 @@ fn test_tier3_deriving_strategies_native() {
     run_native_test("tier3_io/deriving_strategies", Profile::Default);
 }
 
+#[test]
+fn test_tier3_context_keywords_native() {
+    run_native_test("tier3_io/context_keywords", Profile::Default);
+}
+
 // =============================================================================
 // Numeric Profile Tests (when applicable)
 // =============================================================================

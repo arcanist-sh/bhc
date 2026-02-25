@@ -176,6 +176,35 @@ impl<'src> Parser<'src> {
         false
     }
 
+    /// Check if the current token is an identifier with the given string value.
+    /// Used for context-sensitive keywords like 'family', 'stock', 'pattern', etc.
+    fn check_ident_str(&self, s: &str) -> bool {
+        if let Some(TokenKind::Ident(sym)) = self.current_kind() {
+            sym.as_str() == s
+        } else {
+            false
+        }
+    }
+
+    /// Expect and consume an identifier with the given string value.
+    /// Used for context-sensitive keywords that must appear at a specific position.
+    fn expect_ident_str(&mut self, s: &str) -> ParseResult<Spanned<Token>> {
+        if self.check_ident_str(s) {
+            Ok(self.advance().unwrap())
+        } else if self.at_eof() {
+            Err(ParseError::UnexpectedEof {
+                expected: format!("`{}`", s),
+            })
+        } else {
+            let current = self.current().unwrap();
+            Err(ParseError::Unexpected {
+                found: current.node.kind.description().to_string(),
+                expected: format!("`{}`", s),
+                span: current.span,
+            })
+        }
+    }
+
     /// Skip any virtual tokens (VirtualLBrace, VirtualRBrace, VirtualSemi).
     /// These are inserted by the layout rule and need to be skipped in some contexts.
     fn skip_virtual_tokens(&mut self) {

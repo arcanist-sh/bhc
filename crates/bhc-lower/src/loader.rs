@@ -234,6 +234,7 @@ pub fn collect_exports(module: &ast::Module, ctx: &mut LowerContext) -> ModuleEx
                 .filter_map(|exp| match exp {
                     ast::Export::Var(ident, _) => Some(ident.name),
                     ast::Export::Type(ident, _, _) => Some(ident.name),
+                    ast::Export::Pattern(ident, _) => Some(ident.name),
                     ast::Export::Module(_, _) => None, // Module re-exports handled separately
                 })
                 .collect()
@@ -588,6 +589,16 @@ pub fn apply_import_spec(exports: &ModuleExports, spec: &Option<ast::ImportSpec>
                             }
                         }
                     }
+                    ast::Import::Pattern(ident, _) => {
+                        // Pattern synonyms are imported as values
+                        if let Some(&def_id) = exports.values.get(&ident.name) {
+                            filtered.values.insert(ident.name, def_id);
+                        }
+                        // Also check constructors (pattern synonyms may be registered there)
+                        if let Some(info) = exports.constructors.get(&ident.name) {
+                            filtered.constructors.insert(ident.name, info.clone());
+                        }
+                    }
                 }
             }
             filtered
@@ -611,6 +622,11 @@ pub fn apply_import_spec(exports: &ModuleExports, spec: &Option<ast::ImportSpec>
                             // For now, we'd need to track which constructors belong to which type
                             // This is a simplification
                         }
+                    }
+                    ast::Import::Pattern(ident, _) => {
+                        // Pattern synonyms are removed as values/constructors
+                        filtered.values.remove(&ident.name);
+                        filtered.constructors.remove(&ident.name);
                     }
                 }
             }

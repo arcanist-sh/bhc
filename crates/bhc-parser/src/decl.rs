@@ -338,6 +338,26 @@ impl<'src> Parser<'src> {
             return Ok(Export::Module(name, span));
         }
 
+        // Check for `pattern` prefix (context-sensitive keyword for pattern synonym exports)
+        if self.check_ident_str("pattern") {
+            let pat_start = self.current_span();
+            self.advance(); // consume `pattern`
+            let tok = self.current().ok_or(ParseError::UnexpectedEof {
+                expected: "pattern synonym name".to_string(),
+            })?;
+            if let TokenKind::ConId(sym) = &tok.node.kind {
+                let ident = Ident::new(*sym);
+                let span = pat_start.to(tok.span);
+                self.advance();
+                return Ok(Export::Pattern(ident, span));
+            }
+            return Err(ParseError::Unexpected {
+                found: tok.node.kind.description().to_string(),
+                expected: "pattern synonym name (constructor)".to_string(),
+                span: tok.span,
+            });
+        }
+
         let tok = self.current().ok_or(ParseError::UnexpectedEof {
             expected: "export item".to_string(),
         })?;
@@ -531,6 +551,26 @@ impl<'src> Parser<'src> {
 
     /// Parse a single import item.
     fn parse_import_item(&mut self) -> ParseResult<Import> {
+        // Check for `pattern` prefix (context-sensitive keyword for pattern synonym imports)
+        if self.check_ident_str("pattern") {
+            let start = self.current_span();
+            self.advance(); // consume `pattern`
+            let tok = self.current().ok_or(ParseError::UnexpectedEof {
+                expected: "pattern synonym name".to_string(),
+            })?;
+            if let TokenKind::ConId(sym) = &tok.node.kind {
+                let ident = Ident::new(*sym);
+                let span = start.to(tok.span);
+                self.advance();
+                return Ok(Import::Pattern(ident, span));
+            }
+            return Err(ParseError::Unexpected {
+                found: tok.node.kind.description().to_string(),
+                expected: "pattern synonym name (constructor)".to_string(),
+                span: tok.span,
+            });
+        }
+
         let tok = self.current().ok_or(ParseError::UnexpectedEof {
             expected: "import item".to_string(),
         })?;

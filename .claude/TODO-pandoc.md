@@ -89,7 +89,7 @@ BHC compiles real Haskell programs to native executables via LLVM:
 4. ~~**`DerivingStrategies`/`DerivingVia`**~~ ✅ Full pipeline: parser matches keyword tokens (stock/newtype/anyclass/via) → DerivingClause AST → HIR → strategy-aware dispatch. E2E test passing.
 5. **`strict`/`lazy`/etc. reserved as keywords** — Lexer treats valid Haskell identifiers as keywords. Breaks any code using these as variable names.
 6. ~~**Record field access type checking**~~ ✅ FieldAccess resolves accessor type; RecordUpdate verifies field existence and type compatibility via constructor scheme instantiation.
-7. **`import Foo (pattern X)` syntax** — Pattern synonym imports not supported.
+7. ~~**`import Foo (pattern X)` syntax**~~ ✅ Pattern synonym imports and exports now parsed and lowered.
 8. **`deriving Read`** — Not implemented in deriving infrastructure.
 9. **`mask`/`uninterruptibleMask`** — RTS stubs execute action without masking. Correctness issue for async exception safety.
 10. **`Rational` type** — Faked as `(Int, Int)` tuple, wrong semantics.
@@ -254,18 +254,23 @@ matching. `lazy` only triggers H26 lazy-expression parsing when followed by `{`.
 - `crates/bhc-typeck/src/context.rs` — new maps + population during registration
 - `crates/bhc-typeck/src/infer.rs` — `FieldAccess` (~line 331), `RecordUpdate` (~line 341), `extract_type_con_name` helper
 
-### 0.7 `import Foo (pattern X)` Syntax
+### 0.7 `import Foo (pattern X)` Syntax ✅
 
-**Status:** ❌ Not supported
+**Status:** 🟢 Complete
 **Scope:** Small
 **Impact:** Medium — needed for importing pattern synonyms
 
-- [ ] Parse `pattern` keyword prefix in import item lists
-- [ ] Route pattern imports to pattern synonym resolution
-- [ ] E2E test: export and import a pattern synonym across modules
+- [x] Parse `pattern` keyword prefix in import item lists
+- [x] Parse `pattern` keyword prefix in export item lists
+- [x] Route pattern imports/exports through AST → HIR lowering
+- [x] Handle pattern imports in module loader (Only and Hiding specs)
+- [x] E2E test: pattern_import (export + use pattern synonyms with `pattern` prefix in export list)
 
 **Key files:**
-- `crates/bhc-parser/src/decl.rs` — import item parsing (~line 533)
+- `crates/bhc-ast/src/lib.rs` — `Import::Pattern` and `Export::Pattern` variants
+- `crates/bhc-parser/src/decl.rs` — `parse_import_item` and `parse_export` with `check_ident_str("pattern")`
+- `crates/bhc-lower/src/lower.rs` — `lower_import` and `lower_export` pattern arms
+- `crates/bhc-lower/src/loader.rs` — `filter_imports` pattern arms (Only + Hiding)
 
 ### 0.8 `deriving Read`
 

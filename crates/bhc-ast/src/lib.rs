@@ -380,6 +380,8 @@ pub enum Export {
     Type(Ident, Option<Vec<Ident>>, Span),
     /// Export a module: `module Data.List`
     Module(ModuleName, Span),
+    /// Export a pattern synonym: `pattern Foo`
+    Pattern(Ident, Span),
 }
 
 /// An import declaration.
@@ -413,6 +415,8 @@ pub enum Import {
     Var(Ident, Span),
     /// Import a type with optional constructors.
     Type(Ident, Option<Vec<Ident>>, Span),
+    /// Import a pattern synonym: `pattern Foo`
+    Pattern(Ident, Span),
 }
 
 /// A top-level declaration.

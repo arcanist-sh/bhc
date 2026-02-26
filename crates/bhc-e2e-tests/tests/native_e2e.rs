@@ -976,6 +976,11 @@ fn test_tier3_pattern_synonyms_native() {
     run_native_test("tier3_io/pattern_synonyms", Profile::Default);
 }
 
+#[test]
+fn test_tier3_pattern_import_native() {
+    run_native_test("tier3_io/pattern_import", Profile::Default);
+}
+
 // =============================================================================
 // E.61: TypeOperators
 // =============================================================================

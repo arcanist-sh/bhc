@@ -2936,6 +2936,11 @@ fn lower_import(imp: &ast::ImportDecl) -> hir::Import {
                         }),
                         span: *span,
                     },
+                    ast::Import::Pattern(ident, span) => hir::ImportItem {
+                        name: ident.name,
+                        children: hir::ExportChildren::None,
+                        span: *span,
+                    },
                 })
                 .collect(),
         }),
@@ -2972,6 +2977,11 @@ fn lower_export(exp: &ast::Export) -> hir::Export {
                 span: *span,
             }
         }
+        ast::Export::Pattern(ident, span) => hir::Export {
+            name: ident.name,
+            children: hir::ExportChildren::None,
+            span: *span,
+        },
     }
 }
 

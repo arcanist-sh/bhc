@@ -133,6 +133,10 @@ pub struct Builtins {
     pub word32_ty: Ty,
     /// The `Word64` type.
     pub word64_ty: Ty,
+    /// The `Rational` type constructor.
+    pub rational_con: TyCon,
+    /// The `Rational` type.
+    pub rational_ty: Ty,
 }
 
 impl Default for Builtins {
@@ -228,6 +232,10 @@ impl Builtins {
         let word32_ty = Ty::Con(word32_con.clone());
         let word64_ty = Ty::Con(word64_con.clone());
 
+        // Rational type constructor
+        let rational_con = TyCon::new(Symbol::intern("Rational"), Kind::Star);
+        let rational_ty = Ty::Con(rational_con.clone());
+
         Self {
             int_con,
             float_con,
@@ -270,6 +278,8 @@ impl Builtins {
             word16_ty,
             word32_ty,
             word64_ty,
+            rational_con,
+            rational_ty,
         }
     }
 
@@ -2434,10 +2444,11 @@ impl Builtins {
                 Scheme::mono(Ty::fun(self.int_ty.clone(), self.int_ty.clone())),
             ),
             ("fromRational", {
-                // fromRational :: Rational -> Float (simplified)
-                // Rational approximated as (Int, Int) tuple
-                let rational = Ty::Tuple(vec![self.int_ty.clone(), self.int_ty.clone()]);
-                Scheme::mono(Ty::fun(rational, self.float_ty.clone()))
+                // fromRational :: Fractional a => Rational -> a
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(self.rational_ty.clone(), Ty::Var(a.clone())),
+                )
             }),
             (
                 "negate",
@@ -2760,9 +2771,11 @@ impl Builtins {
                 Scheme::mono(Ty::fun(self.int_ty.clone(), self.int_ty.clone()))
             }),
             ("toRational", {
-                // toRational :: Int -> (Int, Int) (as numerator/denominator pair)
-                let rational = Ty::Tuple(vec![self.int_ty.clone(), self.int_ty.clone()]);
-                Scheme::mono(Ty::fun(self.int_ty.clone(), rational))
+                // toRational :: Real a => a -> Rational
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), self.rational_ty.clone()),
+                )
             }),
             ("realToFrac", {
                 // realToFrac :: Float -> Float (simplified, could be polymorphic)
@@ -3343,7 +3356,10 @@ impl Builtins {
                 Scheme::mono(self.string_ty.clone())
             }),
             // Data.Ratio
-            ("%", num_binop()),
+            ("%", Scheme::mono(Ty::fun(self.int_ty.clone(), Ty::fun(self.int_ty.clone(), self.rational_ty.clone())))),
+            // Data.Ratio accessors
+            ("numerator", Scheme::mono(Ty::fun(self.rational_ty.clone(), self.int_ty.clone()))),
+            ("denominator", Scheme::mono(Ty::fun(self.rational_ty.clone(), self.int_ty.clone()))),
             // Data.Function (additional)
             ("$!", {
                 Scheme::poly(

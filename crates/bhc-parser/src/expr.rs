@@ -22,8 +22,12 @@ impl<'src> Parser<'src> {
 
     /// Parse an infix expression with precedence climbing.
     fn parse_infix_expr(&mut self, min_prec: u8) -> ParseResult<Expr> {
-        let mut lhs = self.parse_prefix_expr()?;
+        let lhs = self.parse_prefix_expr()?;
+        self.continue_infix_expr(lhs, min_prec)
+    }
 
+    /// Continue parsing an infix expression from a pre-parsed LHS.
+    fn continue_infix_expr(&mut self, mut lhs: Expr, min_prec: u8) -> ParseResult<Expr> {
         while let Some(tok) = self.current() {
             // Track whether the operator was already consumed (for backtick case)
             let mut op_consumed = false;
@@ -489,9 +493,19 @@ impl<'src> Parser<'src> {
             }
 
             // Otherwise, this is an infix expression - could be in parens or part of a tuple
-            let rhs = self.parse_infix_expr(0)?;
+            // Use proper precedence for the consumed operator so that lower-precedence
+            // operators don't get absorbed into the RHS.
+            let (op_prec, op_assoc) = self.get_operator_info(op.name.as_str());
+            let next_min_prec = match op_assoc {
+                Assoc::Left => op_prec + 1,
+                Assoc::Right => op_prec,
+                Assoc::None => op_prec + 1,
+            };
+            let rhs = self.parse_infix_expr(next_min_prec)?;
             let infix_span = first.span().merge(rhs.span());
-            let infix_expr = Expr::Infix(Box::new(first), op, Box::new(rhs), infix_span);
+            let first_infix = Expr::Infix(Box::new(first), op, Box::new(rhs), infix_span);
+            // Continue parsing any remaining infix operators (e.g., `1 % 3 + 1 % 6`)
+            let infix_expr = self.continue_infix_expr(first_infix, 0)?;
 
             // Check if this is a tuple: (a .|. b, c, ...)
             if self.eat(&TokenKind::Comma) {
@@ -549,10 +563,17 @@ impl<'src> Parser<'src> {
                 return Ok(Expr::Lam(vec![y_pat], Box::new(body), span));
             }
 
-            // Parse RHS for full infix expression
-            let rhs = self.parse_infix_expr(0)?;
+            // Parse RHS for full infix expression with proper precedence
+            let (bt_prec, bt_assoc) = self.get_operator_info(func.name.as_str());
+            let bt_next_min = match bt_assoc {
+                Assoc::Left => bt_prec + 1,
+                Assoc::Right => bt_prec,
+                Assoc::None => bt_prec + 1,
+            };
+            let rhs = self.parse_infix_expr(bt_next_min)?;
             let infix_span = first.span().merge(rhs.span());
-            let infix_expr = Expr::Infix(Box::new(first), func, Box::new(rhs), infix_span);
+            let first_infix = Expr::Infix(Box::new(first), func, Box::new(rhs), infix_span);
+            let infix_expr = self.continue_infix_expr(first_infix, 0)?;
 
             // Check for tuple
             if self.eat(&TokenKind::Comma) {

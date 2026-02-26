@@ -92,7 +92,7 @@ BHC compiles real Haskell programs to native executables via LLVM:
 7. ~~**`import Foo (pattern X)` syntax**~~ ✅ Pattern synonym imports and exports now parsed and lowered.
 8. ~~**`deriving Read`**~~ ✅ Core IR deriving infrastructure + inline LLVM codegen for read dispatch. E2E test: show/read roundtrip for nullary ADT constructors.
 9. ~~**`mask`/`uninterruptibleMask`**~~ ✅ Thread-local masking state in RTS, full codegen dispatch for `mask`/`mask_`/`uninterruptibleMask`/`uninterruptibleMask_`/`getMaskingState`. E2E test passing.
-10. **`Rational` type** — Faked as `(Int, Int)` tuple, wrong semantics.
+10. ~~**`Rational` type**~~ ✅ Proper heap-allocated Rational with GCD normalization, 16 RTS functions, full arithmetic/comparison/show. E2E: `1 % 3 + 1 % 6 == 1 % 2` passes.
 11. **Qualified record construction** — `Module.Con { field = val }` not parsed.
 12. **`.hs-boot` mutual module recursion** — Not supported.
 13. **Extensions silently ignored** — Many LANGUAGE pragmas accepted but have no semantic effect.
@@ -315,21 +315,23 @@ dispatch for all five functions: `mask`, `mask_`, `uninterruptibleMask`,
 - `crates/bhc-typeck/src/context.rs` — type schemes in `register_lowered_builtins`
 - `crates/bhc-typeck/src/builtins.rs` — `register_primitive_ops` entries
 
-### 0.10 `Rational` Type
+### 0.10 `Rational` Type ✅
 
-**Status:** ❌ Faked as `(Int, Int)` tuple
+**Status:** ✅ Complete — proper heap-allocated type with GCD normalization
 **Scope:** Medium
-**Impact:** Medium — wrong semantics for numeric conversions
+**Impact:** Medium — correct semantics for numeric conversions
 
-- [ ] Implement proper `Rational` type as `Ratio Integer` (numerator/denominator pair)
-- [ ] `(%)` operator for construction with GCD normalization
-- [ ] `numerator`, `denominator` accessors
-- [ ] `fromRational` / `toRational` conversions
-- [ ] `Num`/`Fractional`/`Real` instances
-- [ ] E2E test: `1 % 3 + 1 % 6 == 1 % 2`
+- [x] Implement proper `Rational` type as heap-allocated ADT (24 bytes: tag + numerator + denominator)
+- [x] `(%)` operator for construction with GCD normalization
+- [x] `numerator`, `denominator` accessors
+- [x] `fromRational` / `toRational` conversions
+- [x] `Num`/`Fractional`/`Real` instances (16 RTS functions)
+- [x] E2E test: `1 % 3 + 1 % 6 == 1 % 2` ✅
 
 **Key files:**
-- `crates/bhc-typeck/src/builtins.rs` — Rational type registration (~line 2428)
+- `rts/bhc-rts/src/ffi.rs` — 16 `bhc_rational_*` RTS functions
+- `crates/bhc-typeck/src/builtins.rs` — Rational type registration
+- `crates/bhc-codegen/src/llvm/lower.rs` — Codegen dispatch (builtin + primop paths)
 
 ### 0.11 Qualified Record Construction
 
@@ -673,7 +675,7 @@ compiled from Hackage source.
 - [x] `divMod`, `quotRem` (floor-division / truncation, returns tuple, E.12)
 - [x] `IORef`: newIORef, readIORef, writeIORef, modifyIORef (E.12)
 - [ ] `realToFrac`
-- [ ] `Rational` type and operations
+- [x] `Rational` type and operations (heap-allocated, GCD normalization, full arithmetic/comparison/show, E2E passing)
 - [x] `Data.Char` predicates: isAlpha, isDigit, isUpper, isLower, isAlphaNum, isSpace, isPunctuation, toUpper, toLower, ord, chr, digitToInt, intToDigit (E.9)
 - [ ] `Data.Char` full Unicode categories (currently ASCII-only)
 

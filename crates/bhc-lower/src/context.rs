@@ -244,6 +244,7 @@ impl LowerContext {
             "SomeException",
             "Permissions",
             "Text", // Data.Text (packed UTF-8)
+            "Rational",
         ];
 
         for name in builtin_types {
@@ -757,6 +758,8 @@ impl LowerContext {
             "os",
             // Data.Ratio
             "%",
+            "numerator",
+            "denominator",
             // Data.Function (additional)
             "$!",
             // Control.Exception

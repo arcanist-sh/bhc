@@ -85,6 +85,11 @@ fn test_tier2_where_bindings_native() {
 }
 
 #[test]
+fn test_tier2_rational_native() {
+    run_native_test("tier2_functions/rational", Profile::Default);
+}
+
+#[test]
 fn test_tier2_mutual_recursion_native() {
     run_native_test("tier2_functions/mutual_recursion", Profile::Default);
 }

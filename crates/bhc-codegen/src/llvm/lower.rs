@@ -2846,6 +2846,56 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // bhc_try_read_int(ptr) -> ptr  (readMaybe :: String -> Maybe Int)
         let try_read_int = self.module.llvm_module().add_function("bhc_try_read_int", ptr_to_ptr, None);
         self.functions.insert(VarId::new(1000541), try_read_int);
+
+        // ---- Rational RTS functions (VarId 1000900-1000915) ----
+        // bhc_rational_make(i64, i64) -> ptr
+        let rat_make = self.module.llvm_module().add_function("bhc_rational_make", ptr_type.fn_type(&[i64_type.into(), i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000900), rat_make);
+        // bhc_rational_numerator(ptr) -> i64
+        let rat_num = self.module.llvm_module().add_function("bhc_rational_numerator", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000901), rat_num);
+        // bhc_rational_denominator(ptr) -> i64
+        let rat_den = self.module.llvm_module().add_function("bhc_rational_denominator", i64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000902), rat_den);
+        // bhc_rational_add(ptr, ptr) -> ptr
+        let rat_add = self.module.llvm_module().add_function("bhc_rational_add", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000903), rat_add);
+        // bhc_rational_sub(ptr, ptr) -> ptr
+        let rat_sub = self.module.llvm_module().add_function("bhc_rational_sub", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000904), rat_sub);
+        // bhc_rational_mul(ptr, ptr) -> ptr
+        let rat_mul = self.module.llvm_module().add_function("bhc_rational_mul", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000905), rat_mul);
+        // bhc_rational_div(ptr, ptr) -> ptr
+        let rat_div = self.module.llvm_module().add_function("bhc_rational_div", ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000906), rat_div);
+        // bhc_rational_negate(ptr) -> ptr
+        let rat_neg = self.module.llvm_module().add_function("bhc_rational_negate", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000907), rat_neg);
+        // bhc_rational_abs(ptr) -> ptr
+        let rat_abs = self.module.llvm_module().add_function("bhc_rational_abs", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000908), rat_abs);
+        // bhc_rational_signum(ptr) -> ptr
+        let rat_signum = self.module.llvm_module().add_function("bhc_rational_signum", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000909), rat_signum);
+        // bhc_rational_eq(ptr, ptr) -> i64
+        let rat_eq = self.module.llvm_module().add_function("bhc_rational_eq", i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000910), rat_eq);
+        // bhc_rational_compare(ptr, ptr) -> i32
+        let rat_cmp = self.module.llvm_module().add_function("bhc_rational_compare", i32_type.fn_type(&[ptr_type.into(), ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000911), rat_cmp);
+        // bhc_rational_from_int(i64) -> ptr
+        let rat_from_int = self.module.llvm_module().add_function("bhc_rational_from_int", ptr_type.fn_type(&[i64_type.into()], false), None);
+        self.functions.insert(VarId::new(1000912), rat_from_int);
+        // bhc_rational_to_double(ptr) -> f64
+        let rat_to_dbl = self.module.llvm_module().add_function("bhc_rational_to_double", f64_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000913), rat_to_dbl);
+        // bhc_rational_recip(ptr) -> ptr
+        let rat_recip = self.module.llvm_module().add_function("bhc_rational_recip", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000914), rat_recip);
+        // bhc_rational_show(ptr) -> ptr
+        let rat_show = self.module.llvm_module().add_function("bhc_rational_show", ptr_type.fn_type(&[ptr_type.into()], false), None);
+        self.functions.insert(VarId::new(1000915), rat_show);
     }
 
     // ========================================================================
@@ -3700,6 +3750,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "lcm" => Some(2),
             "divMod" => Some(2),
             "quotRem" => Some(2),
+            "%" => Some(2),
+            "numerator" => Some(1),
+            "denominator" => Some(1),
+            "toRational" => Some(1),
+            "fromRational" => Some(1),
+            "recip" => Some(1),
             "newIORef" => Some(1),
             "readIORef" => Some(1),
             "writeIORef" => Some(2),
@@ -4598,8 +4654,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "round" => self.lower_builtin_float_to_int(args[0], 1025, "round"),
             "truncate" => self.lower_builtin_float_to_int(args[0], 1026, "truncate"),
 
+            // Rational operations
+            "%" => self.lower_builtin_rational_make(args[0], args[1]),
+            "numerator" => self.lower_builtin_rational_unary(args[0], 1000901, "numerator"),
+            "denominator" => self.lower_builtin_rational_unary(args[0], 1000902, "denominator"),
+            "toRational" => self.lower_builtin_to_rational(args[0]),
+            "fromRational" => self.lower_builtin_from_rational(args[0]),
+            "recip" => self.lower_builtin_rational_unary(args[0], 1000914, "recip"),
+
             // Numeric conversions (identity for BHC's single Int type)
-            "fromIntegral" | "toInteger" | "fromInteger" => self.lower_expr(args[0]),
+            "fromIntegral" | "toInteger" => self.lower_expr(args[0]),
+            "fromInteger" => {
+                // Check if the context expects Rational
+                // We detect this by examining the expression's type annotation
+                let expr_ty = args[0].ty();
+                if self.is_rational_type(&expr_ty) {
+                    // Already Rational - identity
+                    self.lower_expr(args[0])
+                } else {
+                    // Default: identity (Int -> Int)
+                    self.lower_expr(args[0])
+                }
+            }
 
             // String type class methods (E.25)
             "fromString" => self.lower_expr(args[0]), // identity: String = [Char]
@@ -12197,6 +12273,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Check if a type is the Rational type.
+    fn is_rational_type(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Con(con) => con.name.as_str() == "Rational",
+            Ty::App(f, _) => self.is_rational_type(f),
+            Ty::Forall(_, body) => self.is_rational_type(body),
+            _ => false,
+        }
+    }
+
     /// Check if a type is Maybe a, returning the inner type.
     fn is_maybe_type<'t>(&self, ty: &'t Ty) -> Option<&'t Ty> {
         match ty {
@@ -17274,6 +17360,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Rational dispatch
+        if self.is_rational_expr(expr) {
+            return self.lower_builtin_rational_unary(expr, 1000907, "negate");
+        }
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("negate: no value".to_string()))?;
@@ -17291,6 +17381,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Rational dispatch
+        if self.is_rational_expr(expr) {
+            return self.lower_builtin_rational_unary(expr, 1000908, "abs");
+        }
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("abs: no value".to_string()))?;
@@ -17317,6 +17411,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Rational dispatch
+        if self.is_rational_expr(expr) {
+            return self.lower_builtin_rational_unary(expr, 1000909, "signum");
+        }
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("signum: no value".to_string()))?;
@@ -17415,6 +17513,79 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", name)))?;
         Ok(Some(self.int_to_ptr(result.into_int_value())?.into()))
+    }
+
+    /// Lower `%` operator — construct a Rational from two Int args.
+    fn lower_builtin_rational_make(
+        &mut self,
+        num_expr: &Expr,
+        denom_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let num = self.lower_expr(num_expr)?
+            .ok_or_else(|| CodegenError::Internal("%: no numerator".to_string()))?;
+        let denom = self.lower_expr(denom_expr)?
+            .ok_or_else(|| CodegenError::Internal("%: no denominator".to_string()))?;
+        let num_int = self.coerce_to_int(num)?;
+        let denom_int = self.coerce_to_int(denom)?;
+        let rts_fn = *self.functions.get(&VarId::new(1000900)).ok_or_else(|| {
+            CodegenError::Internal("bhc_rational_make not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(rts_fn, &[num_int.into(), denom_int.into()], "rational_make")
+            .map_err(|e| CodegenError::Internal(format!("rational_make call: {:?}", e)))?;
+        Ok(result.try_as_basic_value().basic())
+    }
+
+    /// Lower a unary Rational RTS operation (numerator, denominator, negate, abs, signum, recip).
+    fn lower_builtin_rational_unary(
+        &mut self,
+        expr: &Expr,
+        rts_id: usize,
+        name: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let val = self.lower_expr(expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no value", name)))?;
+        let val_ptr = self.value_to_ptr(val)?;
+        let rts_fn = *self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
+            CodegenError::Internal(format!("RTS function {} (VarId {}) not declared", name, rts_id))
+        })?;
+        let result = self.builder()
+            .build_call(rts_fn, &[val_ptr.into()], name)
+            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", name, e)))?;
+        Ok(result.try_as_basic_value().basic())
+    }
+
+    /// Lower `toRational` — convert Int to Rational via bhc_rational_from_int.
+    fn lower_builtin_to_rational(
+        &mut self,
+        expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // If the argument is already Rational, it's identity
+        if self.is_rational_expr(expr) {
+            return self.lower_expr(expr);
+        }
+        let val = self.lower_expr(expr)?
+            .ok_or_else(|| CodegenError::Internal("toRational: no value".to_string()))?;
+        let int_val = self.coerce_to_int(val)?;
+        let rts_fn = *self.functions.get(&VarId::new(1000912)).ok_or_else(|| {
+            CodegenError::Internal("bhc_rational_from_int not declared".to_string())
+        })?;
+        let result = self.builder()
+            .build_call(rts_fn, &[int_val.into()], "to_rational")
+            .map_err(|e| CodegenError::Internal(format!("toRational call: {:?}", e)))?;
+        Ok(result.try_as_basic_value().basic())
+    }
+
+    /// Lower `fromRational` — convert Rational to target type.
+    /// For Rational -> Rational: identity. For Rational -> Float/Double: call bhc_rational_to_double.
+    fn lower_builtin_from_rational(
+        &mut self,
+        expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let val = self.lower_expr(expr)?
+            .ok_or_else(|| CodegenError::Internal("fromRational: no value".to_string()))?;
+        // Default: identity (Rational -> Rational)
+        Ok(Some(val))
     }
 
     /// Lower `ord` - character to integer (identity in our representation).
@@ -17680,6 +17851,45 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     return Ok(Some(ordering_ptr));
                 }
             }
+        }
+
+        // Rational comparison
+        if self.is_rational_expr(a_expr) || self.is_rational_expr(b_expr) {
+            let a_val = self.lower_expr(a_expr)?.ok_or_else(|| CodegenError::Internal("compare: no lhs".to_string()))?;
+            let b_val = self.lower_expr(b_expr)?.ok_or_else(|| CodegenError::Internal("compare: no rhs".to_string()))?;
+            let a_ptr = self.value_to_ptr(a_val)?;
+            let b_ptr = self.value_to_ptr(b_val)?;
+            let rts_fn = *self.functions.get(&VarId::new(1000911)).ok_or_else(|| {
+                CodegenError::Internal("bhc_rational_compare not declared".to_string())
+            })?;
+            let cmp_result = self.builder()
+                .build_call(rts_fn, &[a_ptr.into(), b_ptr.into()], "rational_compare")
+                .map_err(|e| CodegenError::Internal(format!("rational compare: {:?}", e)))?;
+            let cmp_val = cmp_result.try_as_basic_value().basic().ok_or_else(|| {
+                CodegenError::Internal("rational compare returned void".to_string())
+            })?;
+            // bhc_rational_compare returns i32 (-1, 0, 1). Convert to Ordering ADT (tag 0=LT, 1=EQ, 2=GT).
+            let cmp_int = if cmp_val.is_int_value() {
+                cmp_val.into_int_value()
+            } else {
+                self.ptr_to_int(cmp_val.into_pointer_value())?
+            };
+            let i64_type = self.type_mapper().i64_type();
+            let zero = i64_type.const_zero();
+            let is_lt = self.builder()
+                .build_int_compare(inkwell::IntPredicate::SLT, cmp_int, zero, "rat_cmp_lt")
+                .map_err(|e| CodegenError::Internal(format!("rat cmp lt: {:?}", e)))?;
+            let is_gt = self.builder()
+                .build_int_compare(inkwell::IntPredicate::SGT, cmp_int, zero, "rat_cmp_gt")
+                .map_err(|e| CodegenError::Internal(format!("rat cmp gt: {:?}", e)))?;
+            let tag_gt_or_eq = self.builder()
+                .build_select(is_gt, i64_type.const_int(2, false), i64_type.const_int(1, false), "gt_or_eq")
+                .map_err(|e| CodegenError::Internal(format!("rat compare select1: {:?}", e)))?
+                .into_int_value();
+            let tag = self.builder()
+                .build_select(is_lt, i64_type.const_int(0, false), tag_gt_or_eq, "rat_cmp_tag")
+                .map_err(|e| CodegenError::Internal(format!("rat compare select2: {:?}", e)))?;
+            return self.allocate_ordering_adt(tag.into_int_value(), "rational_compare");
         }
 
         // Integer comparison fallback
@@ -18640,12 +18850,48 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             if self.is_unit_type(&ty) {
                 return self.lower_builtin_show_typed(expr, 1000097, "show_unit", ShowCoerce::Unit);
             }
+            if self.is_rational_type(&ty) {
+                // Call bhc_rational_show (VarId 1000915) which returns a C string,
+                // then convert to BHC char list for putStrLn
+                let val = self.lower_expr(expr)?.ok_or_else(|| {
+                    CodegenError::Internal("show rational: no value".to_string())
+                })?;
+                let val_ptr = self.value_to_ptr(val)?;
+                let rts_fn = *self.functions.get(&VarId::new(1000915)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_rational_show not declared".to_string())
+                })?;
+                let cstr_result = self.builder()
+                    .build_call(rts_fn, &[val_ptr.into()], "show_rational")
+                    .map_err(|e| CodegenError::Internal(format!("show_rational call: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("show_rational: returned void".to_string()))?;
+                let char_list = self.cstring_to_char_list(cstr_result.into_pointer_value())?;
+                return Ok(Some(char_list.into()));
+            }
             if self.is_integer_type(&ty) {
                 return self.lower_builtin_show_typed(expr, 1000618, "show_integer", ShowCoerce::Integer);
             }
             if self.is_int_type(&ty) {
                 return self.lower_builtin_show_typed(expr, 1000072, "show_int", ShowCoerce::Int);
             }
+        }
+
+        // Check if the expression is Rational (when type info unavailable)
+        if self.is_rational_expr(expr) {
+            let val = self.lower_expr(expr)?.ok_or_else(|| {
+                CodegenError::Internal("show rational: no value".to_string())
+            })?;
+            let val_ptr = self.value_to_ptr(val)?;
+            let rts_fn = *self.functions.get(&VarId::new(1000915)).ok_or_else(|| {
+                CodegenError::Internal("bhc_rational_show not declared".to_string())
+            })?;
+            let cstr_result = self.builder()
+                .build_call(rts_fn, &[val_ptr.into()], "show_rational")
+                .map_err(|e| CodegenError::Internal(format!("show_rational call: {:?}", e)))?
+                .try_as_basic_value().basic()
+                .ok_or_else(|| CodegenError::Internal("show_rational: returned void".to_string()))?;
+            let char_list = self.cstring_to_char_list(cstr_result.into_pointer_value())?;
+            return Ok(Some(char_list.into()));
         }
 
         // Fall back to expression structure analysis when type is Error/Var
@@ -31598,6 +31844,194 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(ptr)
     }
 
+    /// Check if an expression is of Rational type.
+    fn is_rational_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Var(var, _) => self.is_rational_type(&var.ty),
+            Expr::TyApp(inner, _, _) => self.is_rational_expr(inner),
+            Expr::App(f, arg, _) => {
+                // Check if function returns Rational
+                match f.as_ref() {
+                    Expr::Var(var, _) => {
+                        let name = var.name.as_str();
+                        // % always returns Rational
+                        if name == "%" { return true; }
+                        // fromInteger on Rational returns Rational
+                        if name == "fromInteger" && self.is_rational_type(&var.ty) {
+                            return true;
+                        }
+                        // Unary ops that preserve Rational type
+                        if matches!(name, "negate" | "abs" | "signum" | "recip") {
+                            if self.is_rational_expr(arg) {
+                                return true;
+                            }
+                        }
+                        // Check return type
+                        if let Ty::Fun(_, result) = &var.ty {
+                            if self.is_rational_type(result) { return true; }
+                        }
+                        false
+                    }
+                    // Binary ops: App(App(op, x), y) — f is App(op, x)
+                    Expr::App(ff, inner_arg, _) => {
+                        if let Expr::Var(var, _) = ff.as_ref() {
+                            let name = var.name.as_str();
+                            if name == "%" { return true; }
+                            if matches!(name, "+" | "-" | "*" | "/" | "negate" | "abs" | "signum") {
+                                if self.is_rational_expr(inner_arg) || self.is_rational_expr(arg) {
+                                    return true;
+                                }
+                            }
+                        }
+                        false
+                    }
+                    _ => false,
+                }
+            }
+            _ => {
+                let ty = expr.ty();
+                self.is_rational_type(&ty)
+            }
+        }
+    }
+
+    /// Lower a PrimOp on Rational operands.
+    /// Dispatches to RTS functions (bhc_rational_add, bhc_rational_sub, etc.)
+    fn lower_rational_primop(
+        &mut self,
+        op: PrimOp,
+        args: &[&Expr],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Map PrimOp to RTS VarId
+        let (rts_var_id, rts_name): (usize, &str) = match op {
+            PrimOp::Add => (1000903, "bhc_rational_add"),
+            PrimOp::Sub => (1000904, "bhc_rational_sub"),
+            PrimOp::Mul => (1000905, "bhc_rational_mul"),
+            PrimOp::Div => (1000906, "bhc_rational_div"),
+            PrimOp::Negate => (1000907, "bhc_rational_negate"),
+            PrimOp::Abs => (1000908, "bhc_rational_abs"),
+            PrimOp::Signum => (1000909, "bhc_rational_signum"),
+            PrimOp::Eq => (1000910, "bhc_rational_eq"),
+            PrimOp::Ne => (1000910, "bhc_rational_eq"), // negate result
+            PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge => (1000911, "bhc_rational_compare"),
+            _ => return Err(CodegenError::Internal(format!("unsupported Rational PrimOp: {:?}", op))),
+        };
+
+        if matches!(op, PrimOp::Negate | PrimOp::Abs | PrimOp::Signum) {
+            // Unary operations
+            let arg = self.lower_expr(args[0])?
+                .ok_or_else(|| CodegenError::Internal("rational unary: no arg".to_string()))?;
+            let arg_ptr = self.value_to_ptr(arg)?;
+            let rts_fn = *self.functions.get(&VarId::new(rts_var_id)).ok_or_else(|| {
+                CodegenError::Internal(format!("{} not declared", rts_name))
+            })?;
+            let result = self.builder()
+                .build_call(rts_fn, &[arg_ptr.into()], &format!("rational_{:?}", op))
+                .map_err(|e| CodegenError::Internal(format!("rational {:?} call: {:?}", op, e)))?;
+            let val = result.try_as_basic_value().basic().ok_or_else(|| {
+                CodegenError::Internal(format!("rational {:?} returned void", op))
+            })?;
+            return Ok(Some(val));
+        }
+
+        // Binary operations
+        let lhs = self.lower_expr(args[0])?
+            .ok_or_else(|| CodegenError::Internal("rational primop: no lhs".to_string()))?;
+        let rhs = self.lower_expr(args[1])?
+            .ok_or_else(|| CodegenError::Internal("rational primop: no rhs".to_string()))?;
+
+        // Convert non-Rational operands (Int) to Rational via bhc_rational_from_int
+        let lhs_ptr = if self.is_rational_expr(args[0]) {
+            self.value_to_ptr(lhs)?
+        } else {
+            // Int value -> convert to Rational
+            let from_int_fn = *self.functions.get(&VarId::new(1000912)).ok_or_else(|| {
+                CodegenError::Internal("bhc_rational_from_int not declared".to_string())
+            })?;
+            let int_val = self.coerce_to_int(lhs)?;
+            let result = self.builder()
+                .build_call(from_int_fn, &[int_val.into()], "int_to_rational_lhs")
+                .map_err(|e| CodegenError::Internal(format!("int_to_rational: {:?}", e)))?;
+            result.try_as_basic_value().basic().ok_or_else(|| {
+                CodegenError::Internal("int_to_rational returned void".to_string())
+            })?.into_pointer_value()
+        };
+        let rhs_ptr = if self.is_rational_expr(args[1]) {
+            self.value_to_ptr(rhs)?
+        } else {
+            let from_int_fn = *self.functions.get(&VarId::new(1000912)).ok_or_else(|| {
+                CodegenError::Internal("bhc_rational_from_int not declared".to_string())
+            })?;
+            let int_val = self.coerce_to_int(rhs)?;
+            let result = self.builder()
+                .build_call(from_int_fn, &[int_val.into()], "int_to_rational_rhs")
+                .map_err(|e| CodegenError::Internal(format!("int_to_rational: {:?}", e)))?;
+            result.try_as_basic_value().basic().ok_or_else(|| {
+                CodegenError::Internal("int_to_rational returned void".to_string())
+            })?.into_pointer_value()
+        };
+
+        let rts_fn = *self.functions.get(&VarId::new(rts_var_id)).ok_or_else(|| {
+            CodegenError::Internal(format!("{} not declared", rts_name))
+        })?;
+
+        let result = self.builder()
+            .build_call(rts_fn, &[lhs_ptr.into(), rhs_ptr.into()], &format!("rational_{:?}", op))
+            .map_err(|e| CodegenError::Internal(format!("rational {:?} call: {:?}", op, e)))?;
+        let val = result.try_as_basic_value().basic().ok_or_else(|| {
+            CodegenError::Internal(format!("rational {:?} returned void", op))
+        })?;
+
+        // For comparison operations
+        if matches!(op, PrimOp::Eq | PrimOp::Ne | PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge) {
+            if matches!(op, PrimOp::Eq | PrimOp::Ne) {
+                // bhc_rational_eq returns i64 (0 or 1)
+                let int_result = if val.is_int_value() {
+                    val.into_int_value()
+                } else {
+                    self.ptr_to_int(val.into_pointer_value())?
+                };
+                if matches!(op, PrimOp::Ne) {
+                    let one = self.type_mapper().i64_type().const_int(1, false);
+                    let inverted = self.builder()
+                        .build_int_sub(one, int_result, "rational_ne")
+                        .map_err(|e| CodegenError::Internal(format!("rational ne: {:?}", e)))?;
+                    return Ok(Some(inverted.into()));
+                }
+                return Ok(Some(int_result.into()));
+            }
+            // bhc_rational_compare returns i32 (-1, 0, 1)
+            let cmp_result = if val.is_int_value() {
+                val.into_int_value()
+            } else {
+                self.ptr_to_int(val.into_pointer_value())?
+            };
+            let i64_ty = self.type_mapper().i64_type();
+            let zero = i64_ty.const_zero();
+            let bool_result = match op {
+                PrimOp::Lt => self.builder()
+                    .build_int_compare(inkwell::IntPredicate::SLT, cmp_result, zero, "rat_lt")
+                    .map_err(|e| CodegenError::Internal(format!("rat lt: {:?}", e)))?,
+                PrimOp::Le => self.builder()
+                    .build_int_compare(inkwell::IntPredicate::SLE, cmp_result, zero, "rat_le")
+                    .map_err(|e| CodegenError::Internal(format!("rat le: {:?}", e)))?,
+                PrimOp::Gt => self.builder()
+                    .build_int_compare(inkwell::IntPredicate::SGT, cmp_result, zero, "rat_gt")
+                    .map_err(|e| CodegenError::Internal(format!("rat gt: {:?}", e)))?,
+                PrimOp::Ge => self.builder()
+                    .build_int_compare(inkwell::IntPredicate::SGE, cmp_result, zero, "rat_ge")
+                    .map_err(|e| CodegenError::Internal(format!("rat ge: {:?}", e)))?,
+                _ => unreachable!(),
+            };
+            let result_i64 = self.builder()
+                .build_int_z_extend(bool_result, i64_ty, "rat_cmp_ext")
+                .map_err(|e| CodegenError::Internal(format!("rat cmp ext: {:?}", e)))?;
+            return Ok(Some(result_i64.into()));
+        }
+
+        Ok(Some(val))
+    }
+
     /// Check if a name is a data constructor and return (tag, arity).
     ///
     /// This function checks:
@@ -35928,6 +36362,27 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         op: PrimOp,
         args: &[&Expr],
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Check if operands are Rational — dispatch to RTS
+        if !args.is_empty() && self.is_rational_expr(args[0]) {
+            match op {
+                PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div
+                | PrimOp::Negate | PrimOp::Abs | PrimOp::Signum
+                | PrimOp::Eq | PrimOp::Ne | PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge => {
+                    return self.lower_rational_primop(op, args);
+                }
+                _ => {}
+            }
+        }
+        if args.len() >= 2 && self.is_rational_expr(args[1]) {
+            match op {
+                PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div
+                | PrimOp::Eq | PrimOp::Ne | PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge => {
+                    return self.lower_rational_primop(op, args);
+                }
+                _ => {}
+            }
+        }
+
         // E.45: Check if operands are Integer (arbitrary precision) — dispatch to RTS
         if !args.is_empty() && self.is_integer_expr(args[0]) {
             match op {

@@ -869,6 +869,10 @@ impl TyCtxt {
         self.env.register_type_con(self.builtins.word32_con.clone());
         self.env.register_type_con(self.builtins.word64_con.clone());
 
+        // Register Rational type constructor
+        self.env
+            .register_type_con(self.builtins.rational_con.clone());
+
         // Register shape-indexed tensor type constructors
         self.env.register_type_con(self.builtins.tensor_con.clone());
         self.env

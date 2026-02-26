@@ -718,6 +718,159 @@ pub extern "C" fn bhc_lcm(a: i64, b: i64) -> i64 {
     }
 }
 
+// ============================================================
+// Rational arithmetic (heap-allocated: tag(i64) + numerator(i64) + denominator(i64) = 24 bytes)
+// ============================================================
+
+/// Allocate a normalized Rational value on the heap.
+/// Ensures denominator > 0 and gcd(|num|, denom) == 1.
+fn rational_make_normalized(num: i64, denom: i64) -> *mut u8 {
+    if denom == 0 {
+        panic!("Rational: zero denominator");
+    }
+    let (n, d) = if denom < 0 { (-num, -denom) } else { (num, denom) };
+    let g = bhc_gcd(n.abs(), d);
+    let n = n / g;
+    let d = d / g;
+    unsafe {
+        let ptr = std::alloc::alloc(std::alloc::Layout::from_size_align(24, 8).unwrap());
+        *(ptr as *mut i64) = 0; // tag
+        *(ptr.add(8) as *mut i64) = n;
+        *(ptr.add(16) as *mut i64) = d;
+        ptr
+    }
+}
+
+/// Construct a Rational from numerator and denominator, normalizing via GCD.
+#[no_mangle]
+pub extern "C" fn bhc_rational_make(num: i64, denom: i64) -> *mut u8 {
+    let result = rational_make_normalized(num, denom);
+    result
+}
+
+/// Extract numerator from a Rational.
+#[no_mangle]
+pub extern "C" fn bhc_rational_numerator(r: *mut u8) -> i64 {
+    unsafe { *(r.add(8) as *const i64) }
+}
+
+/// Extract denominator from a Rational.
+#[no_mangle]
+pub extern "C" fn bhc_rational_denominator(r: *mut u8) -> i64 {
+    unsafe { *(r.add(16) as *const i64) }
+}
+
+/// Rational addition: a/b + c/d = (a*d + b*c) / (b*d)
+#[no_mangle]
+pub extern "C" fn bhc_rational_add(a: *mut u8, b: *mut u8) -> *mut u8 {
+    let (an, ad) = (bhc_rational_numerator(a), bhc_rational_denominator(a));
+    let (bn, bd) = (bhc_rational_numerator(b), bhc_rational_denominator(b));
+    rational_make_normalized(an * bd + bn * ad, ad * bd)
+}
+
+/// Rational subtraction: a/b - c/d = (a*d - b*c) / (b*d)
+#[no_mangle]
+pub extern "C" fn bhc_rational_sub(a: *mut u8, b: *mut u8) -> *mut u8 {
+    let (an, ad) = (bhc_rational_numerator(a), bhc_rational_denominator(a));
+    let (bn, bd) = (bhc_rational_numerator(b), bhc_rational_denominator(b));
+    rational_make_normalized(an * bd - bn * ad, ad * bd)
+}
+
+/// Rational multiplication: (a/b) * (c/d) = (a*c) / (b*d)
+#[no_mangle]
+pub extern "C" fn bhc_rational_mul(a: *mut u8, b: *mut u8) -> *mut u8 {
+    let (an, ad) = (bhc_rational_numerator(a), bhc_rational_denominator(a));
+    let (bn, bd) = (bhc_rational_numerator(b), bhc_rational_denominator(b));
+    rational_make_normalized(an * bn, ad * bd)
+}
+
+/// Rational division: (a/b) / (c/d) = (a*d) / (b*c)
+#[no_mangle]
+pub extern "C" fn bhc_rational_div(a: *mut u8, b: *mut u8) -> *mut u8 {
+    let (an, ad) = (bhc_rational_numerator(a), bhc_rational_denominator(a));
+    let (bn, bd) = (bhc_rational_numerator(b), bhc_rational_denominator(b));
+    if bn == 0 {
+        panic!("Rational: division by zero");
+    }
+    rational_make_normalized(an * bd, ad * bn)
+}
+
+/// Rational negation: -(a/b)
+#[no_mangle]
+pub extern "C" fn bhc_rational_negate(r: *mut u8) -> *mut u8 {
+    let (n, d) = (bhc_rational_numerator(r), bhc_rational_denominator(r));
+    rational_make_normalized(-n, d)
+}
+
+/// Rational absolute value: |a/b|
+#[no_mangle]
+pub extern "C" fn bhc_rational_abs(r: *mut u8) -> *mut u8 {
+    let (n, d) = (bhc_rational_numerator(r), bhc_rational_denominator(r));
+    rational_make_normalized(n.abs(), d)
+}
+
+/// Rational signum: sign(a)/1
+#[no_mangle]
+pub extern "C" fn bhc_rational_signum(r: *mut u8) -> *mut u8 {
+    let n = bhc_rational_numerator(r);
+    let s = if n > 0 { 1 } else if n < 0 { -1 } else { 0 };
+    rational_make_normalized(s, 1)
+}
+
+/// Rational equality: 1 if equal (both already normalized)
+#[no_mangle]
+pub extern "C" fn bhc_rational_eq(a: *mut u8, b: *mut u8) -> i64 {
+    let (an, ad) = (bhc_rational_numerator(a), bhc_rational_denominator(a));
+    let (bn, bd) = (bhc_rational_numerator(b), bhc_rational_denominator(b));
+    if an == bn && ad == bd { 1 } else { 0 }
+}
+
+/// Rational comparison: -1/0/1 via cross-multiplication
+#[no_mangle]
+pub extern "C" fn bhc_rational_compare(a: *mut u8, b: *mut u8) -> i32 {
+    let (an, ad) = (bhc_rational_numerator(a), bhc_rational_denominator(a));
+    let (bn, bd) = (bhc_rational_numerator(b), bhc_rational_denominator(b));
+    let left = an * bd;
+    let right = bn * ad;
+    match left.cmp(&right) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+/// Convert Int to Rational: n -> n/1
+#[no_mangle]
+pub extern "C" fn bhc_rational_from_int(n: i64) -> *mut u8 {
+    rational_make_normalized(n, 1)
+}
+
+/// Convert Rational to Double: num / denom as f64
+#[no_mangle]
+pub extern "C" fn bhc_rational_to_double(r: *mut u8) -> f64 {
+    let (n, d) = (bhc_rational_numerator(r), bhc_rational_denominator(r));
+    n as f64 / d as f64
+}
+
+/// Rational reciprocal: (a/b) -> (b/a)
+#[no_mangle]
+pub extern "C" fn bhc_rational_recip(r: *mut u8) -> *mut u8 {
+    let (n, d) = (bhc_rational_numerator(r), bhc_rational_denominator(r));
+    if n == 0 {
+        panic!("Rational: reciprocal of zero");
+    }
+    rational_make_normalized(d, n)
+}
+
+/// Show Rational: "num % denom" format, heap-allocated string
+#[no_mangle]
+pub extern "C" fn bhc_rational_show(r: *mut u8) -> *mut c_char {
+    let (n, d) = (bhc_rational_numerator(r), bhc_rational_denominator(r));
+    let s = format!("{} % {}", n, d);
+    let c_string = std::ffi::CString::new(s).unwrap();
+    c_string.into_raw()
+}
+
 /// Create a new IORef (mutable reference cell)
 #[no_mangle]
 pub extern "C" fn bhc_new_ioref(val: *const u8) -> *mut u8 {

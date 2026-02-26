@@ -806,6 +806,38 @@ impl LowerContext {
         );
         self.register_builtin_instance("Show", &char_ty, &[(92, "show")]);
 
+        // === Register instances for Rational ===
+        let rational_ty = make_ty("Rational");
+        self.register_builtin_instance("Eq", &rational_ty, &[(27, "=="), (28, "/=")]);
+        self.register_builtin_instance(
+            "Ord",
+            &rational_ty,
+            &[
+                (89, "compare"),
+                (29, "<"),
+                (30, "<="),
+                (31, ">"),
+                (32, ">="),
+                (90, "min"),
+                (91, "max"),
+            ],
+        );
+        self.register_builtin_instance(
+            "Num",
+            &rational_ty,
+            &[
+                (18, "+"),
+                (19, "-"),
+                (20, "*"),
+                (82, "negate"),
+                (83, "abs"),
+                (84, "signum"),
+                (80, "fromInteger"),
+            ],
+        );
+        self.register_builtin_instance("Fractional", &rational_ty, &[(21, "/"), (81, "fromRational")]);
+        self.register_builtin_instance("Show", &rational_ty, &[(92, "show")]);
+
         // === Register Functor class ===
         // Methods: fmap
         // fmap is also known as <$> (DefId 43)

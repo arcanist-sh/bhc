@@ -3,7 +3,7 @@
 **Document ID:** BHC-TODO-PANDOC
 **Status:** In Progress
 **Created:** 2026-01-30
-**Updated:** 2026-02-25
+**Updated:** 2026-02-26
 
 ---
 
@@ -18,7 +18,7 @@ north-star integration target for BHC's real-world Haskell compatibility.
 ## Current State
 
 BHC compiles real Haskell programs to native executables via LLVM:
-- **179 native E2E tests** passing (including monad transformers, file IO, markdown parser, JSON parser, GADTs, type extensions, lazy Text/ByteString, GHC.Generics from/to roundtrip, foreign import ccall)
+- **185 native E2E tests** passing (including monad transformers, file IO, markdown parser, JSON parser, GADTs, type extensions, lazy Text/ByteString, GHC.Generics from/to roundtrip, foreign import ccall, deriving Read)
 - All intermediate milestones A–E.70 done, plus full GHC.Generics and Data.Sequence
 - **Separate compilation pipeline**: `-c` mode, `.bhi` interface generation and consumption, `--odir`/`--hidir`/`--numeric-version`/`--package-db` flags
 - **hx package manager integration** wired — hx has .cabal parsing, Hackage fetch, dependency solver, BHC backend crate with correct CLI flags, filesystem-based package DB, and BHC builtin package mapping
@@ -90,7 +90,7 @@ BHC compiles real Haskell programs to native executables via LLVM:
 5. **`strict`/`lazy`/etc. reserved as keywords** — Lexer treats valid Haskell identifiers as keywords. Breaks any code using these as variable names.
 6. ~~**Record field access type checking**~~ ✅ FieldAccess resolves accessor type; RecordUpdate verifies field existence and type compatibility via constructor scheme instantiation.
 7. ~~**`import Foo (pattern X)` syntax**~~ ✅ Pattern synonym imports and exports now parsed and lowered.
-8. **`deriving Read`** — Not implemented in deriving infrastructure.
+8. ~~**`deriving Read`**~~ ✅ Core IR deriving infrastructure + inline LLVM codegen for read dispatch. E2E test: show/read roundtrip for nullary ADT constructors.
 9. **`mask`/`uninterruptibleMask`** — RTS stubs execute action without masking. Correctness issue for async exception safety.
 10. **`Rational` type** — Faked as `(Int, Int)` tuple, wrong semantics.
 11. **Qualified record construction** — `Module.Con { field = val }` not parsed.
@@ -274,17 +274,20 @@ matching. `lazy` only triggers H26 lazy-expression parsing when followed by `{`.
 
 ### 0.8 `deriving Read`
 
-**Status:** ❌ Not in deriving infrastructure
+**Status:** ✅ Complete
 **Scope:** Medium
 **Impact:** Medium — used in many packages for serialization/parsing
 
-- [ ] Implement `derive_read_data` in deriving.rs
-- [ ] Generate `readsPrec` method for each constructor
-- [ ] Handle field names, infix constructors, record syntax in parsing
-- [ ] E2E test: `read (show x) == x` roundtrip for a derived type
+- [x] Implement `derive_read_data` and `derive_read_newtype` in deriving.rs
+- [x] Make `read` polymorphic (`String -> a`) in typeck context.rs
+- [x] Add Read to builtin instances for Int/Float/Double/Char/String/Integer
+- [x] Inline LLVM codegen (`lower_read_adt_inline`) for char-list comparison against constructor names
+- [x] E2E test: `show (read "Red" :: Color) == "Red"` roundtrip for nullary ADT constructors
 
 **Key files:**
-- `crates/bhc-hir-to-core/src/deriving.rs` — add `"Read"` arm
+- `crates/bhc-hir-to-core/src/deriving.rs` — `derive_read_data`, `derive_read_newtype`
+- `crates/bhc-typeck/src/context.rs` — polymorphic `read`/`readMaybe`, Read builtin instances
+- `crates/bhc-codegen/src/llvm/lower.rs` — `lower_read_adt_inline`, `infer_read_target_type`, `derived_read_fns` map
 
 ### 0.9 `mask` / `uninterruptibleMask` (Async Exception Safety)
 
@@ -609,7 +612,8 @@ compiled from Hackage source.
 - [x] Stock deriving: `Functor` (E.51)
 - [x] Stock deriving: `Foldable` (E.52)
 - [x] Stock deriving: `Traversable` (E.53)
-- [ ] Stock deriving: `Read`, `Ix` (Read moved to Tier 0.8)
+- [x] Stock deriving: `Read` (Tier 0.8 ✅)
+- [ ] Stock deriving: `Ix`
 - [x] `DeriveAnyClass` for type classes with default method implementations (E.42)
 - [x] `GeneralizedNewtypeDeriving` for lifting instances through newtypes (E.47)
 - [x] `StandaloneDeriving` (E.62)

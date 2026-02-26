@@ -593,6 +593,9 @@ impl TyCtxt {
                     ("Show", "Int") | ("Show", "Float") | ("Show", "Double") | ("Show", "Bool") |
                     ("Show", "Char") | ("Show", "String") | ("Show", "Integer") |
                     ("Show", "Word") | ("Show", "Word8") | ("Show", "Word16") | ("Show", "Word32") | ("Show", "Word64") |
+                    // Read instances
+                    ("Read", "Int") | ("Read", "Float") | ("Read", "Double") |
+                    ("Read", "Char") | ("Read", "String") | ("Read", "Integer") |
                     // Fractional instances
                     ("Fractional", "Float") | ("Fractional", "Double") |
                     // IsString instances
@@ -616,12 +619,12 @@ impl TyCtxt {
                 } else if class_name == "IsList" {
                     true // [a] is always an IsList instance
                 } else {
-                    matches!(class_name, "Eq" | "Ord" | "Show") && self.is_builtin_instance(class, elem)
+                    matches!(class_name, "Eq" | "Ord" | "Show" | "Read") && self.is_builtin_instance(class, elem)
                 }
             }
-            // Tuple instances: Eq (a, b), Ord (a, b), Show (a, b) if all elements have the instance
+            // Tuple instances: Eq (a, b), Ord (a, b), Show (a, b), Read (a, b) if all elements have the instance
             Ty::Tuple(elems) => {
-                matches!(class_name, "Eq" | "Ord" | "Show")
+                matches!(class_name, "Eq" | "Ord" | "Show" | "Read")
                     && elems
                         .iter()
                         .all(|elem| self.is_builtin_instance(class, elem))
@@ -633,8 +636,8 @@ impl TyCtxt {
                 if let Ty::Con(tycon) = con.as_ref() {
                     let type_name = tycon.name.as_str();
                     match (class_name, type_name) {
-                        // Maybe a has Eq, Ord, Show if a does
-                        ("Eq", "Maybe") | ("Ord", "Maybe") | ("Show", "Maybe") => {
+                        // Maybe a has Eq, Ord, Show, Read if a does
+                        ("Eq", "Maybe") | ("Ord", "Maybe") | ("Show", "Maybe") | ("Read", "Maybe") => {
                             self.is_builtin_instance(class, arg)
                         }
                         // IO a has Show (for debugging)
@@ -2919,18 +2922,18 @@ impl TyCtxt {
                     let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                     Scheme::poly(vec![a.clone()], Ty::fun(list_a.clone(), list_a))
                 }
-                "read" => Scheme::mono(Ty::fun(
+                "read" => Scheme::poly(vec![a.clone()], Ty::fun(
                     self.builtins.string_ty.clone(),
-                    self.builtins.int_ty.clone(),
+                    Ty::Var(a.clone()),
                 )),
                 "readMaybe" => {
-                    let maybe_int = Ty::App(
+                    let maybe_a = Ty::App(
                         Box::new(Ty::Con(self.builtins.maybe_con.clone())),
-                        Box::new(self.builtins.int_ty.clone()),
+                        Box::new(Ty::Var(a.clone())),
                     );
-                    Scheme::mono(Ty::fun(
+                    Scheme::poly(vec![a.clone()], Ty::fun(
                         self.builtins.string_ty.clone(),
-                        maybe_int,
+                        maybe_a,
                     ))
                 }
 

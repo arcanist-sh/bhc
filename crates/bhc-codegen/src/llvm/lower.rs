@@ -321,6 +321,8 @@ pub struct Lowering<'ctx, 'm> {
     writer_t_functions: FxHashSet<String>,
     /// Map from type name → VarId of the $derived_show_TypeName function.
     derived_show_fns: FxHashMap<String, VarId>,
+    /// Map from type name → VarId of the $derived_read_TypeName function.
+    derived_read_fns: FxHashMap<String, VarId>,
     /// Map from type name → VarId of the $derived_eq_TypeName function.
     derived_eq_fns: FxHashMap<String, VarId>,
     /// Map from type name → VarId of the $derived_compare_TypeName function.
@@ -374,6 +376,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             except_t_functions: FxHashSet::default(),
             writer_t_functions: FxHashSet::default(),
             derived_show_fns: FxHashMap::default(),
+            derived_read_fns: FxHashMap::default(),
             derived_eq_fns: FxHashMap::default(),
             derived_compare_fns: FxHashMap::default(),
             derived_functor_fns: FxHashMap::default(),
@@ -420,6 +423,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             except_t_functions: FxHashSet::default(),
             writer_t_functions: FxHashSet::default(),
             derived_show_fns: FxHashMap::default(),
+            derived_read_fns: FxHashMap::default(),
             derived_eq_fns: FxHashMap::default(),
             derived_compare_fns: FxHashMap::default(),
             derived_functor_fns: FxHashMap::default(),
@@ -12190,6 +12194,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             if let Expr::App(_, arg, _) = expr {
                                 return self.infer_adt_type_from_expr(arg).is_none();
                             }
+                        }
+                        if name == "read" && !self.derived_read_fns.is_empty() {
+                            return false; // read returns ADT, not Int
                         }
                         matches!(
                             name,
@@ -25243,11 +25250,32 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(char_list.into()))
     }
 
-    /// Lower `read :: String -> Int` (monomorphic).
+    /// Lower `read :: String -> a`.
     ///
-    /// Passes the char list to the RTS `bhc_read_int` which returns an i64.
-    /// The result is converted to int-as-pointer (BHC convention for Int values).
+    /// For user-defined ADTs with derived Read, generates inline char-list
+    /// comparison against constructor names. For Int, falls back to RTS.
     fn lower_builtin_read(&mut self, str_expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Check for derived Read instance on the result type
+        if let Some(type_name) = self.infer_read_target_type(str_expr) {
+            if self.derived_read_fns.contains_key(&type_name) {
+                // Collect constructor names and tags for this type
+                let constructors: Vec<(String, u32)> = self.constructor_metadata.iter()
+                    .filter_map(|(name, meta)| {
+                        if meta.type_name.as_deref() == Some(&type_name) {
+                            Some((name.clone(), meta.tag))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if !constructors.is_empty() {
+                    return self.lower_read_adt_inline(str_expr, &constructors);
+                }
+            }
+        }
+
+        // Default: read as Int via RTS
         let str_val = self.lower_expr(str_expr)?
             .ok_or_else(|| CodegenError::Internal("read: no string".to_string()))?;
         let str_ptr = self.value_to_ptr(str_val)?;
@@ -25265,6 +25293,130 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_to_ptr(i64_val, self.type_mapper().ptr_type(), "read_as_ptr")
             .map_err(|e| CodegenError::Internal(format!("read int_to_ptr: {:?}", e)))?;
         Ok(Some(ptr_val.into()))
+    }
+
+    /// Generate inline ADT read: compare char list against constructor names
+    /// character by character, return matching tag-as-pointer.
+    fn lower_read_adt_inline(
+        &mut self,
+        str_expr: &Expr,
+        constructors: &[(String, u32)],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let str_val = self.lower_expr(str_expr)?
+            .ok_or_else(|| CodegenError::Internal("read: no string".to_string()))?;
+        let list_ptr = self.value_to_ptr(str_val)?;
+
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+        let i64_type = tm.i64_type();
+        let current_fn = self.builder().get_insert_block().and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        // Create merge block where the result will be collected
+        let merge_block = self.llvm_context().append_basic_block(current_fn, "read_merge");
+
+        // Build phi in merge block to collect results
+        let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+
+        for (con_name, tag) in constructors {
+            // For each constructor, generate a comparison chain:
+            // Walk the char list and compare each character against the constructor name.
+            // If all chars match and list ends, this is a match.
+
+            let check_block = self.llvm_context()
+                .append_basic_block(current_fn, &format!("read_check_{}", con_name));
+            let match_block = self.llvm_context()
+                .append_basic_block(current_fn, &format!("read_match_{}", con_name));
+            let next_block = self.llvm_context()
+                .append_basic_block(current_fn, &format!("read_next_{}", con_name));
+
+            // Branch to check block
+            self.builder().build_unconditional_branch(check_block)
+                .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+
+            self.builder().position_at_end(check_block);
+
+            // Walk the list, comparing each char
+            let mut current_list = list_ptr;
+            let mut all_matched = true;
+            let chars: Vec<char> = con_name.chars().collect();
+
+            for (i, ch) in chars.iter().enumerate() {
+                let char_check = self.llvm_context()
+                    .append_basic_block(current_fn, &format!("read_{}_ch{}", con_name, i));
+                let char_mismatch = self.llvm_context()
+                    .append_basic_block(current_fn, &format!("read_{}_miss{}", con_name, i));
+
+                // Check if list is non-empty (tag != 0)
+                let tag_val = self.extract_adt_tag(current_list)?;
+                let is_cons = self.builder().build_int_compare(
+                    inkwell::IntPredicate::NE, tag_val, i64_type.const_zero(), "is_cons"
+                ).map_err(|e| CodegenError::Internal(format!("cmp: {:?}", e)))?;
+                self.builder().build_conditional_branch(is_cons, char_check, char_mismatch)
+                    .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+
+                // char_mismatch: list too short, go to next constructor
+                self.builder().position_at_end(char_mismatch);
+                self.builder().build_unconditional_branch(next_block)
+                    .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+
+                // char_check: extract head char and compare
+                self.builder().position_at_end(char_check);
+                let head_ptr = self.extract_adt_field(current_list, 2, 0)?;
+                let char_val = self.builder().build_ptr_to_int(head_ptr, i64_type, "char_val")
+                    .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+                let expected = i64_type.const_int(*ch as u64, false);
+                let chars_eq = self.builder().build_int_compare(
+                    inkwell::IntPredicate::EQ, char_val, expected, "char_eq"
+                ).map_err(|e| CodegenError::Internal(format!("cmp: {:?}", e)))?;
+
+                let next_char = self.llvm_context()
+                    .append_basic_block(current_fn, &format!("read_{}_next{}", con_name, i));
+
+                self.builder().build_conditional_branch(chars_eq, next_char, next_block)
+                    .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+
+                // next_char: advance to tail
+                self.builder().position_at_end(next_char);
+                let tail = self.extract_adt_field(current_list, 2, 1)?;
+                current_list = tail;
+            }
+
+            // After all chars matched, check that list is empty (tag == 0)
+            let end_tag = self.extract_adt_tag(current_list)?;
+            let is_nil = self.builder().build_int_compare(
+                inkwell::IntPredicate::EQ, end_tag, i64_type.const_zero(), "is_nil"
+            ).map_err(|e| CodegenError::Internal(format!("cmp: {:?}", e)))?;
+            self.builder().build_conditional_branch(is_nil, match_block, next_block)
+                .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+
+            // match_block: construct the ADT value (heap-allocated with tag)
+            self.builder().position_at_end(match_block);
+            let result_ptr = self.alloc_adt(*tag, 0)?;
+            incoming.push((result_ptr.into(), match_block));
+            self.builder().build_unconditional_branch(merge_block)
+                .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+
+            // next_block: continue to next constructor
+            self.builder().position_at_end(next_block);
+        }
+
+        // After all constructors checked without match: return null (error)
+        let null_ptr = ptr_type.const_null();
+        let final_block = self.builder().get_insert_block().unwrap();
+        incoming.push((null_ptr.into(), final_block));
+        self.builder().build_unconditional_branch(merge_block)
+            .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+
+        // Merge block: phi to select the result
+        self.builder().position_at_end(merge_block);
+        let phi = self.builder().build_phi(ptr_type, "read_result")
+            .map_err(|e| CodegenError::Internal(format!("phi: {:?}", e)))?;
+        for (val, block) in &incoming {
+            phi.add_incoming(&[(&val.into_pointer_value(), *block)]);
+        }
+
+        Ok(Some(phi.as_basic_value()))
     }
 
     /// Lower `readMaybe :: String -> Maybe Int` (monomorphic).
@@ -32119,6 +32271,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     self.derived_show_fns.insert(type_name.clone(), var.id);
                     // Tag constructors found in this binding with their type_name
                     self.tag_constructors_with_type(expr, &type_name);
+                } else if let Some(remainder) = name.strip_prefix("$derived_read_") {
+                    let type_name = Self::strip_deriving_counter_suffix(remainder);
+                    self.derived_read_fns.insert(type_name.clone(), var.id);
+                    self.tag_constructors_with_type(expr, &type_name);
                 } else if let Some(remainder) = name.strip_prefix("$derived_eq_") {
                     let type_name = Self::strip_deriving_counter_suffix(remainder);
                     self.derived_eq_fns.insert(type_name.clone(), var.id);
@@ -32306,6 +32462,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                                 .clone(),
                         );
                     }
+                    // read — use single-derived-read heuristic
+                    if fname == "read" && self.derived_read_fns.len() == 1 {
+                        return Some(
+                            self.derived_read_fns
+                                .keys()
+                                .next()
+                                .unwrap()
+                                .clone(),
+                        );
+                    }
                 }
                 self.infer_adt_type_from_expr(f)
             }
@@ -32329,6 +32495,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             _ => None,
         }
+    }
+
+    /// Infer the target ADT type for a `read` call.
+    ///
+    /// When `read` is called on a string expression, we need to determine which
+    /// derived Read instance to use. We use a heuristic: if there is exactly one
+    /// derived Read instance, use it. This covers the common case where a module
+    /// has a single ADT with `deriving Read`.
+    fn infer_read_target_type(&self, _str_expr: &Expr) -> Option<String> {
+        if self.derived_read_fns.len() == 1 {
+            return Some(self.derived_read_fns.keys().next().unwrap().clone());
+        }
+        None
     }
 
     /// Check if an expression is a user ADT value (for Eq dispatch).

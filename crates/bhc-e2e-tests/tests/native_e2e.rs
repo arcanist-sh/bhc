@@ -569,6 +569,11 @@ fn test_tier3_derive_show() {
 }
 
 #[test]
+fn test_tier3_derive_read() {
+    run_native_test("tier3_io/derive_read", Profile::Default);
+}
+
+#[test]
 fn test_tier2_derive_eq() {
     run_native_test("tier2_functions/derive_eq", Profile::Default);
 }

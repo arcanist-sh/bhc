@@ -106,6 +106,14 @@ impl<'ctx> LlvmModule<'ctx> {
         &self,
         haskell_main: FunctionValue<'ctx>,
     ) -> CodegenResult<FunctionValue<'ctx>> {
+        // Rename the Haskell main to avoid collision with the C "main" entry point.
+        // Without this, LLVM auto-renames the C wrapper to "main.1" and the linker
+        // uses the Haskell "main" as the entry point, bypassing RTS init/shutdown.
+        let hs_name = haskell_main.get_name().to_str().unwrap_or("");
+        if hs_name == "main" {
+            haskell_main.as_global_value().set_name("__bhc_haskell_main");
+        }
+
         let i32_type = self.type_mapper.i32_type();
         let void_type = self.type_mapper.context().void_type();
         // Use opaque pointer type (LLVM 15+)

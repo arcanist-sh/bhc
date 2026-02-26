@@ -91,7 +91,7 @@ BHC compiles real Haskell programs to native executables via LLVM:
 6. ~~**Record field access type checking**~~ ✅ FieldAccess resolves accessor type; RecordUpdate verifies field existence and type compatibility via constructor scheme instantiation.
 7. ~~**`import Foo (pattern X)` syntax**~~ ✅ Pattern synonym imports and exports now parsed and lowered.
 8. ~~**`deriving Read`**~~ ✅ Core IR deriving infrastructure + inline LLVM codegen for read dispatch. E2E test: show/read roundtrip for nullary ADT constructors.
-9. **`mask`/`uninterruptibleMask`** — RTS stubs execute action without masking. Correctness issue for async exception safety.
+9. ~~**`mask`/`uninterruptibleMask`**~~ ✅ Thread-local masking state in RTS, full codegen dispatch for `mask`/`mask_`/`uninterruptibleMask`/`uninterruptibleMask_`/`getMaskingState`. E2E test passing.
 10. **`Rational` type** — Faked as `(Int, Int)` tuple, wrong semantics.
 11. **Qualified record construction** — `Module.Con { field = val }` not parsed.
 12. **`.hs-boot` mutual module recursion** — Not supported.
@@ -289,23 +289,31 @@ matching. `lazy` only triggers H26 lazy-expression parsing when followed by `{`.
 - `crates/bhc-typeck/src/context.rs` — polymorphic `read`/`readMaybe`, Read builtin instances
 - `crates/bhc-codegen/src/llvm/lower.rs` — `lower_read_adt_inline`, `infer_read_target_type`, `derived_read_fns` map
 
-### 0.9 `mask` / `uninterruptibleMask` (Async Exception Safety)
+### ~~0.9 `mask` / `uninterruptibleMask` (Async Exception Safety)~~ ✅
 
-**Status:** 🟡 RTS stubs execute action without masking
+**Status:** ✅ Complete
 **Scope:** Medium
 **Impact:** Medium — correctness issue for `bracket` and resource-safe code
 
-The RTS stubs just run the action directly. For correctness, `mask` should set a
-thread-local flag that defers asynchronous exceptions until the next safe point.
+Thread-local masking state (`BHC_MASK_STATE: Cell<i64>`) with three states:
+Unmasked (0), MaskedInterruptible (1), MaskedUninterruptible (2). Full codegen
+dispatch for all five functions: `mask`, `mask_`, `uninterruptibleMask`,
+`uninterruptibleMask_`, `getMaskingState`.
 
-- [ ] Add `masked` flag to RTS thread state
-- [ ] `mask`: set flag, run action with `restore` callback, clear flag
-- [ ] `uninterruptibleMask`: stronger version, block even at safe points
-- [ ] Deferred exceptions delivered when mask is lifted
-- [ ] E2E test: `mask` prevents async exception during critical section
+- [x] Add `masked` flag to RTS thread state (thread-local `Cell<i64>`)
+- [x] `mask`: set to MaskedInterruptible, run action with `restore` callback, restore old state
+- [x] `mask_`: simplified form without restore callback
+- [x] `uninterruptibleMask` / `uninterruptibleMask_`: set to MaskedUninterruptible
+- [x] `getMaskingState`: return current masking state as ADT
+- [x] Type checker: `register_lowered_builtins` + `register_primitive_ops` entries
+- [x] Codegen: `lower_builtin_mask_simple`, `lower_builtin_mask`, etc.
+- [x] E2E test: `mask_ (putStrLn "hello")` compiles and runs correctly
 
 **Key files:**
-- `rts/bhc-rts/src/ffi.rs` — `bhc_mask`, `bhc_unmask` stubs (~line 2409)
+- `rts/bhc-rts/src/ffi.rs` — `bhc_mask`, `bhc_unmask`, `bhc_uninterruptible_mask`, etc.
+- `crates/bhc-codegen/src/llvm/lower.rs` — builtin dispatch + lowering functions
+- `crates/bhc-typeck/src/context.rs` — type schemes in `register_lowered_builtins`
+- `crates/bhc-typeck/src/builtins.rs` — `register_primitive_ops` entries
 
 ### 0.10 `Rational` Type
 
@@ -475,7 +483,7 @@ File IO (readFile, writeFile, openFile, hClose) is working. System ops
 - [x] Exception primitives: `throw`, `throwIO`, `catch`, `try`
 - [x] Resource management: `bracket`, `bracket_`, `finally`, `onException`
 - [x] Exception hierarchy: `Exception` typeclass with `toException`/`fromException`
-- [ ] Asynchronous exceptions: `mask`, `uninterruptibleMask` (at least stubs)
+- [x] Asynchronous exceptions: `mask`, `mask_`, `uninterruptibleMask`, `uninterruptibleMask_`, `getMaskingState`
 - [x] System operations: `getArgs`, `getProgName`, `getEnv`, `lookupEnv`
 - [x] Exit: `exitSuccess`, `exitFailure`, `exitWith`
 - [x] Directory: `doesFileExist`, `doesDirectoryExist`, `createDirectory`,

@@ -1996,6 +1996,10 @@ thread_local! {
     /// Thread-local exception state. `None` means no exception is pending.
     /// `Some(ptr)` means bhc_throw was called with the given exception pointer.
     static BHC_EXCEPTION: Cell<Option<*mut u8>> = const { Cell::new(None) };
+
+    /// Thread-local async exception masking state.
+    /// 0 = Unmasked, 1 = MaskedInterruptible, 2 = MaskedUninterruptible.
+    static BHC_MASK_STATE: Cell<i64> = const { Cell::new(0) };
 }
 
 /// Sentinel return value used by bhc_throw to indicate an exception was thrown.
@@ -2409,46 +2413,153 @@ pub extern "C" fn bhc_bracket(
     }
 }
 
-/// Mask asynchronous exceptions (stub).
+/// Masking state constants matching Haskell's MaskingState constructors.
+const MASK_UNMASKED: i64 = 0;
+const MASK_INTERRUPTIBLE: i64 = 1;
+const MASK_UNINTERRUPTIBLE: i64 = 2;
+
+/// Get the current async exception masking state.
 ///
-/// Currently just runs the action without masking, since BHC
-/// does not yet support asynchronous exceptions.
+/// Returns 0 (Unmasked), 1 (MaskedInterruptible), or 2 (MaskedUninterruptible).
+#[no_mangle]
+pub extern "C" fn bhc_get_masking_state() -> i64 {
+    BHC_MASK_STATE.with(|cell| cell.get())
+}
+
+/// Set the async exception masking state.
+#[no_mangle]
+pub extern "C" fn bhc_set_masking_state(state: i64) {
+    BHC_MASK_STATE.with(|cell| cell.set(state));
+}
+
+/// Mask asynchronous exceptions (simple form, for `mask_`).
 ///
-/// # Arguments
-///
-/// * `action_fn` - Function pointer for the IO action.
-/// * `action_env` - Environment/closure pointer.
-///
-/// # Returns
-///
-/// The result of the action.
+/// Saves the current masking state, sets it to MaskedInterruptible,
+/// runs the action, then restores the previous state.
 #[no_mangle]
 pub extern "C" fn bhc_mask(
     action_fn: extern "C" fn(*mut u8) -> *mut u8,
     action_env: *mut u8,
 ) -> *mut u8 {
-    action_fn(action_env)
+    let old_state = BHC_MASK_STATE.with(|cell| cell.get());
+    BHC_MASK_STATE.with(|cell| cell.set(MASK_INTERRUPTIBLE));
+    let result = action_fn(action_env);
+    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    result
 }
 
-/// Unmask asynchronous exceptions (stub).
+/// Unmask asynchronous exceptions (restore function for `mask`).
 ///
-/// Currently just runs the action, since BHC does not yet
-/// support asynchronous exceptions.
-///
-/// # Arguments
-///
-/// * `action_fn` - Function pointer for the IO action.
-/// * `action_env` - Environment/closure pointer.
-///
-/// # Returns
-///
-/// The result of the action.
+/// Saves the current masking state, sets it to the given state,
+/// runs the action, then restores the previous state.
 #[no_mangle]
 pub extern "C" fn bhc_unmask(
     action_fn: extern "C" fn(*mut u8) -> *mut u8,
     action_env: *mut u8,
 ) -> *mut u8 {
-    action_fn(action_env)
+    let old_state = BHC_MASK_STATE.with(|cell| cell.get());
+    BHC_MASK_STATE.with(|cell| cell.set(MASK_UNMASKED));
+    let result = action_fn(action_env);
+    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    result
+}
+
+/// Mask with uninterruptible state (simple form, for `uninterruptibleMask_`).
+#[no_mangle]
+pub extern "C" fn bhc_uninterruptible_mask(
+    action_fn: extern "C" fn(*mut u8) -> *mut u8,
+    action_env: *mut u8,
+) -> *mut u8 {
+    let old_state = BHC_MASK_STATE.with(|cell| cell.get());
+    BHC_MASK_STATE.with(|cell| cell.set(MASK_UNINTERRUPTIBLE));
+    let result = action_fn(action_env);
+    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    result
+}
+
+/// Mask with restore function (for `mask`).
+///
+/// Sets masking state to MaskedInterruptible, creates a restore closure
+/// that temporarily restores the previous state, calls the action with
+/// the restore closure, then restores the original state.
+///
+/// The action is `(IO a -> IO a) -> IO b` — it takes the restore function
+/// as its first argument.
+#[no_mangle]
+pub extern "C" fn bhc_mask_with_restore(
+    action_fn: extern "C" fn(*mut u8, *mut u8) -> *mut u8,
+    action_env: *mut u8,
+) -> *mut u8 {
+    let old_state = BHC_MASK_STATE.with(|cell| cell.get());
+    BHC_MASK_STATE.with(|cell| cell.set(MASK_INTERRUPTIBLE));
+
+    // Create a restore closure: [fn_ptr, saved_state]
+    // The restore function temporarily sets masking state to old_state,
+    // runs the inner IO action, then re-sets to current state.
+    let restore_closure = unsafe {
+        let size = 2 * std::mem::size_of::<*mut u8>();
+        let closure = bhc_alloc(size) as *mut *mut u8;
+        // fn_ptr at offset 0
+        *closure = bhc_restore_fn as *mut u8;
+        // saved state at offset 1 (env[0])
+        *closure.add(1) = old_state as *mut u8;
+        closure as *mut u8
+    };
+
+    let result = action_fn(restore_closure, action_env);
+    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    result
+}
+
+/// Uninterruptible mask with restore function (for `uninterruptibleMask`).
+#[no_mangle]
+pub extern "C" fn bhc_uninterruptible_mask_with_restore(
+    action_fn: extern "C" fn(*mut u8, *mut u8) -> *mut u8,
+    action_env: *mut u8,
+) -> *mut u8 {
+    let old_state = BHC_MASK_STATE.with(|cell| cell.get());
+    BHC_MASK_STATE.with(|cell| cell.set(MASK_UNINTERRUPTIBLE));
+
+    let restore_closure = unsafe {
+        let size = 2 * std::mem::size_of::<*mut u8>();
+        let closure = bhc_alloc(size) as *mut *mut u8;
+        *closure = bhc_restore_fn as *mut u8;
+        *closure.add(1) = old_state as *mut u8;
+        closure as *mut u8
+    };
+
+    let result = action_fn(restore_closure, action_env);
+    BHC_MASK_STATE.with(|cell| cell.set(old_state));
+    result
+}
+
+/// The restore function used inside `mask`/`uninterruptibleMask`.
+///
+/// Called as a BHC closure: `restore_fn(inner_io_closure, self_closure)`.
+/// Temporarily restores the masking state to the saved value, runs the
+/// inner IO action, then re-sets the masking state.
+extern "C" fn bhc_restore_fn(
+    inner_io: *mut u8,
+    restore_closure: *mut u8,
+) -> *mut u8 {
+    // Extract saved state from restore closure env[0]
+    let saved_state = unsafe {
+        let closure = restore_closure as *const *mut u8;
+        *closure.add(1) as i64
+    };
+
+    let current_state = BHC_MASK_STATE.with(|cell| cell.get());
+    BHC_MASK_STATE.with(|cell| cell.set(saved_state));
+
+    // inner_io is a closure: extract fn_ptr and call fn_ptr(inner_io)
+    let result = unsafe {
+        let closure = inner_io as *const *mut u8;
+        let fn_ptr: extern "C" fn(*mut u8) -> *mut u8 = std::mem::transmute(*closure);
+        fn_ptr(inner_io)
+    };
+
+    BHC_MASK_STATE.with(|cell| cell.set(current_state));
+    result
 }
 
 // ============================================================================

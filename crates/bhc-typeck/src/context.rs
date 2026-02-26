@@ -2083,6 +2083,54 @@ impl TyCtxt {
                         Ty::fun(Ty::Var(a.clone()), io_a),
                     )
                 }
+                // mask :: ((IO a -> IO a) -> IO b) -> IO b
+                "mask" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    let io_b = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(b.clone())),
+                    );
+                    let restore = Ty::fun(io_a.clone(), io_a);
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(Ty::fun(restore, io_b.clone()), io_b),
+                    )
+                }
+                // mask_ :: IO a -> IO a
+                "mask_" | "uninterruptibleMask_" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    Scheme::poly(vec![a.clone()], Ty::fun(io_a.clone(), io_a))
+                }
+                // uninterruptibleMask :: ((IO a -> IO a) -> IO b) -> IO b
+                "uninterruptibleMask" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    let io_b = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(b.clone())),
+                    );
+                    let restore = Ty::fun(io_a.clone(), io_a);
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(Ty::fun(restore, io_b.clone()), io_b),
+                    )
+                }
+                // getMaskingState :: IO a (polymorphic, returns MaskingState at runtime)
+                "getMaskingState" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    Scheme::poly(vec![a.clone()], io_a)
+                }
                 // openFile :: FilePath -> IOMode -> IO Handle
                 // Simplified: String -> a -> IO b (IOMode and Handle are opaque)
                 "openFile" => {

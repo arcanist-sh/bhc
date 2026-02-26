@@ -1587,6 +1587,14 @@ impl Builtins {
                 );
                 Scheme::poly(vec![a.clone()], Ty::fun(io_a.clone(), io_a))
             }),
+            ("getMaskingState", {
+                // getMaskingState :: IO a (returns MaskingState ADT at runtime)
+                let io_a = Ty::App(
+                    Box::new(Ty::Con(self.io_con.clone())),
+                    Box::new(Ty::Var(a.clone())),
+                );
+                Scheme::poly(vec![a.clone()], io_a)
+            }),
             // IO operations (Handle abstracted as Int for now)
             ("hPutStr", {
                 // hPutStr :: Handle -> String -> IO ()

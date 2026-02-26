@@ -741,6 +741,7 @@ fn register_standard_module_exports(ctx: &mut LowerContext, module_name: &str) {
             "mask_",
             "uninterruptibleMask",
             "uninterruptibleMask_",
+            "getMaskingState",
             "throwTo",
             "toException",
             "fromException",

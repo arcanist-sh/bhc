@@ -574,6 +574,11 @@ fn test_tier3_derive_read() {
 }
 
 #[test]
+fn test_tier3_async_mask() {
+    run_native_test("tier3_io/async_mask", Profile::Default);
+}
+
+#[test]
 fn test_tier2_derive_eq() {
     run_native_test("tier2_functions/derive_eq", Profile::Default);
 }

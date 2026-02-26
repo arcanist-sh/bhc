@@ -2686,13 +2686,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // bhc_evaluate(ptr) -> ptr
         let evaluate_fn = self.module.llvm_module().add_function("bhc_evaluate", ptr_type.fn_type(&[ptr_type.into()], false), None);
         self.functions.insert(VarId::new(1000082), evaluate_fn);
-        // bhc_mask(fn_ptr, env_ptr) -> ptr
+        // bhc_mask(fn_ptr, env_ptr) -> ptr (simple mask for mask_)
         let mask_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
         let mask_fn = self.module.llvm_module().add_function("bhc_mask", mask_type, None);
         self.functions.insert(VarId::new(1000083), mask_fn);
         // bhc_unmask(fn_ptr, env_ptr) -> ptr
         let unmask_fn = self.module.llvm_module().add_function("bhc_unmask", mask_type, None);
         self.functions.insert(VarId::new(1000084), unmask_fn);
+        // bhc_mask_with_restore(action_fn, action_env) -> ptr (mask with restore closure)
+        let mask_restore_fn = self.module.llvm_module().add_function("bhc_mask_with_restore", mask_type, None);
+        self.functions.insert(VarId::new(1000085), mask_restore_fn);
+        // bhc_uninterruptible_mask(fn_ptr, env_ptr) -> ptr (simple uninterruptible mask)
+        let uninterruptible_mask_fn = self.module.llvm_module().add_function("bhc_uninterruptible_mask", mask_type, None);
+        self.functions.insert(VarId::new(1000086), uninterruptible_mask_fn);
+        // bhc_uninterruptible_mask_with_restore(action_fn, action_env) -> ptr
+        let uninterruptible_mask_restore_fn = self.module.llvm_module().add_function("bhc_uninterruptible_mask_with_restore", mask_type, None);
+        self.functions.insert(VarId::new(1000087), uninterruptible_mask_restore_fn);
+        // bhc_get_masking_state() -> i64
+        let get_mask_type = i64_type.fn_type(&[], false);
+        let get_mask_fn = self.module.llvm_module().add_function("bhc_get_masking_state", get_mask_type, None);
+        self.functions.insert(VarId::new(1000824), get_mask_fn);
         // bhc_finally(action_fn, action_env, cleanup_fn, cleanup_env) -> ptr
         let finally_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
         let finally_fn = self.module.llvm_module().add_function("bhc_finally", finally_type, None);
@@ -2704,7 +2717,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // bhc_bracket(acquire_fn, acquire_env, release_fn, release_env, use_fn, use_env) -> ptr
         let bracket_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
         let bracket_fn = self.module.llvm_module().add_function("bhc_bracket", bracket_type, None);
-        self.functions.insert(VarId::new(1000090), bracket_fn);
+        self.functions.insert(VarId::new(1000825), bracket_fn);
 
         // ---- SomeException / typed catch RTS functions (VarId 1000700-1000704) ----
         // bhc_make_some_exception(i64, ptr) -> ptr
@@ -3624,6 +3637,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "try" => Some(1),
             "bracket" => Some(3),
             "finally" | "onException" => Some(2),
+            "mask" | "mask_" | "uninterruptibleMask" | "uninterruptibleMask_" => Some(1),
+            "getMaskingState" => Some(0),
             "toException" => Some(1),
             "fromException" => Some(1),
             "displayException" => Some(1),
@@ -4398,6 +4413,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "bracket" => self.lower_builtin_bracket(args[0], args[1], args[2]),
             "finally" => self.lower_builtin_finally(args[0], args[1]),
             "onException" => self.lower_builtin_on_exception(args[0], args[1]),
+            "mask" if args.len() == 1 => self.lower_builtin_mask(args[0]),
+            "mask_" if args.len() == 1 => self.lower_builtin_mask_simple(args[0], false),
+            "uninterruptibleMask" if args.len() == 1 => self.lower_builtin_uninterruptible_mask(args[0]),
+            "uninterruptibleMask_" if args.len() == 1 => self.lower_builtin_mask_simple(args[0], true),
+            "getMaskingState" => self.lower_builtin_get_masking_state(),
             "toException" => self.lower_builtin_to_exception(args[0]),
             "fromException" => self.lower_builtin_from_exception(args[0]),
             "displayException" => self.lower_builtin_display_exception(args[0]),
@@ -11335,7 +11355,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         let bracket_rts = self
             .functions
-            .get(&VarId::new(1000090))
+            .get(&VarId::new(1000825))
             .ok_or_else(|| CodegenError::Internal("bhc_bracket not declared".to_string()))?;
 
         let result = self
@@ -11448,6 +11468,162 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             })?;
 
         Ok(Some(result))
+    }
+
+    /// Lower `mask_` / `uninterruptibleMask_` — simple masking without restore.
+    ///
+    /// mask_ :: IO a -> IO a
+    /// Wraps the action as a thunk and calls bhc_mask / bhc_uninterruptible_mask.
+    fn lower_builtin_mask_simple(
+        &mut self,
+        action_expr: &Expr,
+        uninterruptible: bool,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let action_closure = self.wrap_io_as_thunk(action_expr)?;
+        let action_fn = self.extract_closure_fn_ptr(action_closure)?;
+
+        let rts_id = if uninterruptible {
+            VarId::new(1000086) // bhc_uninterruptible_mask
+        } else {
+            VarId::new(1000083) // bhc_mask
+        };
+        let rts_fn = self.functions.get(&rts_id).ok_or_else(|| {
+            CodegenError::Internal("bhc_mask/bhc_uninterruptible_mask not declared".to_string())
+        })?;
+
+        let result = self
+            .builder()
+            .build_call(
+                *rts_fn,
+                &[action_fn.into(), action_closure.into()],
+                "mask_result",
+            )
+            .map_err(|e| CodegenError::Internal(format!("mask call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("mask: returned void".to_string()))?;
+
+        Ok(Some(result))
+    }
+
+    /// Lower `mask` — masking with restore function.
+    ///
+    /// mask :: ((IO a -> IO a) -> IO b) -> IO b
+    /// The action receives a restore closure created by the RTS.
+    fn lower_builtin_mask(
+        &mut self,
+        action_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let action_val = self
+            .lower_expr(action_expr)?
+            .ok_or_else(|| CodegenError::Internal("mask: action has no value".to_string()))?;
+        let action_closure = self.value_to_ptr(action_val)?;
+        let action_fn = self.extract_closure_fn_ptr(action_closure)?;
+
+        let rts_fn = self
+            .functions
+            .get(&VarId::new(1000085)) // bhc_mask_with_restore
+            .ok_or_else(|| {
+                CodegenError::Internal("bhc_mask_with_restore not declared".to_string())
+            })?;
+
+        let result = self
+            .builder()
+            .build_call(
+                *rts_fn,
+                &[action_fn.into(), action_closure.into()],
+                "mask_restore_result",
+            )
+            .map_err(|e| CodegenError::Internal(format!("mask_with_restore call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("mask_with_restore: returned void".to_string()))?;
+
+        Ok(Some(result))
+    }
+
+    /// Lower `uninterruptibleMask` — uninterruptible masking with restore function.
+    fn lower_builtin_uninterruptible_mask(
+        &mut self,
+        action_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let action_val = self
+            .lower_expr(action_expr)?
+            .ok_or_else(|| CodegenError::Internal("uninterruptibleMask: action has no value".to_string()))?;
+        let action_closure = self.value_to_ptr(action_val)?;
+        let action_fn = self.extract_closure_fn_ptr(action_closure)?;
+
+        let rts_fn = self
+            .functions
+            .get(&VarId::new(1000087)) // bhc_uninterruptible_mask_with_restore
+            .ok_or_else(|| {
+                CodegenError::Internal("bhc_uninterruptible_mask_with_restore not declared".to_string())
+            })?;
+
+        let result = self
+            .builder()
+            .build_call(
+                *rts_fn,
+                &[action_fn.into(), action_closure.into()],
+                "uninterruptible_mask_result",
+            )
+            .map_err(|e| CodegenError::Internal(format!("uninterruptible_mask_with_restore failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("uninterruptible_mask_with_restore: returned void".to_string()))?;
+
+        Ok(Some(result))
+    }
+
+    /// Lower `getMaskingState` — returns a MaskingState ADT.
+    ///
+    /// Calls bhc_get_masking_state() to get i64 (0/1/2), then allocates
+    /// a MaskingState ADT with that tag.
+    fn lower_builtin_get_masking_state(
+        &mut self,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let rts_fn = self
+            .functions
+            .get(&VarId::new(1000824)) // bhc_get_masking_state
+            .ok_or_else(|| {
+                CodegenError::Internal("bhc_get_masking_state not declared".to_string())
+            })?;
+
+        let state_val = self
+            .builder()
+            .build_call(*rts_fn, &[], "masking_state")
+            .map_err(|e| CodegenError::Internal(format!("get_masking_state failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("get_masking_state: returned void".to_string()))?;
+
+        // Allocate a MaskingState ADT with tag = state_val, 0 fields
+        let tm = self.type_mapper();
+        let adt_ty = self.adt_type(0);
+        let size = 8u64; // Just the tag, no fields
+        let alloc_fn = self
+            .functions
+            .get(&VarId::new(1000005))
+            .ok_or_else(|| CodegenError::Internal("bhc_alloc not declared".to_string()))?;
+        let size_val = tm.i64_type().const_int(size, false);
+        let raw_ptr = self
+            .builder()
+            .build_call(*alloc_fn, &[size_val.into()], "masking_state_alloc")
+            .map_err(|e| CodegenError::Internal(format!("alloc failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("alloc returned void".to_string()))?;
+
+        // Store the tag
+        let tag_ptr = self
+            .builder()
+            .build_struct_gep(adt_ty, raw_ptr.into_pointer_value(), 0, "tag_slot")
+            .map_err(|e| CodegenError::Internal(format!("gep failed: {:?}", e)))?;
+        self.builder()
+            .build_store(tag_ptr, state_val.into_int_value())
+            .map_err(|e| CodegenError::Internal(format!("store failed: {:?}", e)))?;
+
+        Ok(Some(raw_ptr.into_pointer_value().into()))
     }
 
     /// Lower `seq` - force evaluation of first argument, return second.
@@ -35159,6 +35335,58 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .build_int_z_extend(u32_val, self.type_mapper().i64_type(), "digit_char_ext")
                     .map_err(|e| CodegenError::Internal(format!("intToDigit: extend failed: {:?}", e)))?;
                 Ok(Some(self.int_to_ptr(extended)?.into()))
+            }
+
+            // Async exception masking
+            "getMaskingState" => self.lower_builtin_get_masking_state(),
+            "mask_" => {
+                // mask_ with pre-lowered action arg
+                let action_closure = args[0].into_pointer_value();
+                let action_fn = self.extract_closure_fn_ptr(action_closure)?;
+                let rts_fn = self.functions.get(&VarId::new(1000083))
+                    .ok_or_else(|| CodegenError::Internal("bhc_mask not declared".to_string()))?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[action_fn.into(), action_closure.into()], "mask_result")
+                    .map_err(|e| CodegenError::Internal(format!("mask_ call: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("mask_: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "uninterruptibleMask_" => {
+                let action_closure = args[0].into_pointer_value();
+                let action_fn = self.extract_closure_fn_ptr(action_closure)?;
+                let rts_fn = self.functions.get(&VarId::new(1000086))
+                    .ok_or_else(|| CodegenError::Internal("bhc_uninterruptible_mask not declared".to_string()))?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[action_fn.into(), action_closure.into()], "uninterruptible_mask_result")
+                    .map_err(|e| CodegenError::Internal(format!("uninterruptibleMask_ call: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("uninterruptibleMask_: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "mask" => {
+                let action_closure = args[0].into_pointer_value();
+                let action_fn = self.extract_closure_fn_ptr(action_closure)?;
+                let rts_fn = self.functions.get(&VarId::new(1000085))
+                    .ok_or_else(|| CodegenError::Internal("bhc_mask_with_restore not declared".to_string()))?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[action_fn.into(), action_closure.into()], "mask_restore_result")
+                    .map_err(|e| CodegenError::Internal(format!("mask call: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("mask: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "uninterruptibleMask" => {
+                let action_closure = args[0].into_pointer_value();
+                let action_fn = self.extract_closure_fn_ptr(action_closure)?;
+                let rts_fn = self.functions.get(&VarId::new(1000087))
+                    .ok_or_else(|| CodegenError::Internal("bhc_uninterruptible_mask_with_restore not declared".to_string()))?;
+                let result = self.builder()
+                    .build_call(*rts_fn, &[action_fn.into(), action_closure.into()], "uninterruptible_mask_result")
+                    .map_err(|e| CodegenError::Internal(format!("uninterruptibleMask call: {:?}", e)))?
+                    .try_as_basic_value().basic()
+                    .ok_or_else(|| CodegenError::Internal("uninterruptibleMask: void".to_string()))?;
+                Ok(Some(result))
             }
 
             _ => {

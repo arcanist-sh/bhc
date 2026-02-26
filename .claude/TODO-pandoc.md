@@ -88,7 +88,7 @@ BHC compiles real Haskell programs to native executables via LLVM:
 3. ~~**Type Applications (`f @Int`)**~~ ✅ Full pipeline: parser → AST → HIR → typeck (forall instantiation) → Core → codegen (TyApp erasure). E2E test passing.
 4. ~~**`DerivingStrategies`/`DerivingVia`**~~ ✅ Full pipeline: parser matches keyword tokens (stock/newtype/anyclass/via) → DerivingClause AST → HIR → strategy-aware dispatch. E2E test passing.
 5. **`strict`/`lazy`/etc. reserved as keywords** — Lexer treats valid Haskell identifiers as keywords. Breaks any code using these as variable names.
-6. **Record field access type checking** — Field access returns fresh tyvar, record updates don't verify field existence or type compatibility.
+6. ~~**Record field access type checking**~~ ✅ FieldAccess resolves accessor type; RecordUpdate verifies field existence and type compatibility via constructor scheme instantiation.
 7. **`import Foo (pattern X)` syntax** — Pattern synonym imports not supported.
 8. **`deriving Read`** — Not implemented in deriving infrastructure.
 9. **`mask`/`uninterruptibleMask`** — RTS stubs execute action without masking. Correctness issue for async exception safety.
@@ -231,24 +231,28 @@ matching. `lazy` only triggers H26 lazy-expression parsing when followed by `{`.
 - `crates/bhc-parser/src/decl.rs` — 9 call sites updated (family×4, pattern×2, stock, anyclass, via)
 - `crates/bhc-parser/src/expr.rs` — 3 call sites updated (lazy)
 
-### 0.6 Record Field Type Checking
+### 0.6 Record Field Type Checking ✅
 
-**Status:** 🟡 Field access returns fresh tyvar, updates unchecked
+**Status:** 🟢 Complete
 **Scope:** Medium
 **Impact:** Medium-high — incorrect types inferred for field access
 
-Field access (`r.field` or accessor function `field r`) returns a fresh type variable
-instead of the actual field type. Record updates don't verify that the field exists on
-the type or that the new value has the correct type.
+- [x] Look up field type from the record's data declaration during type inference
+- [x] Verify field exists on the record type in record updates
+- [x] Verify new value type matches field type in record updates
+- [x] Handle polymorphic record fields
+- [x] E2E test: record_field_types (Person + Box a with updates)
 
-- [ ] Look up field type from the record's data declaration during type inference
-- [ ] Verify field exists on the record type in record updates
-- [ ] Verify new value type matches field type in record updates
-- [ ] Handle polymorphic record fields
-- [ ] E2E test: type error on wrong field type in record update
+**Implementation:**
+- Added `field_name_to_con: FxHashMap<Symbol, Vec<(DefId, DefId)>>` to `TyCtxt` — maps field name to (constructor DefId, accessor DefId) for FieldAccess resolution
+- Added `type_to_data_cons: FxHashMap<Symbol, Vec<DefId>>` to `TyCtxt` — maps type constructor name to its data constructor DefIds for RecordUpdate lookup
+- `FieldAccess`: instantiates accessor function type, unifies with record type to extract field type
+- `RecordUpdate`: resolves record type constructor, finds constructors, instantiates constructor scheme, unifies field values against expected types
+- Maps populated in `register_data_type`, `register_newtype`, and early imported-constructor registration
 
 **Key files:**
-- `crates/bhc-typeck/src/infer.rs` — `Expr::FieldAccess` (~line 330), `Expr::RecordUpdate` (~line 340)
+- `crates/bhc-typeck/src/context.rs` — new maps + population during registration
+- `crates/bhc-typeck/src/infer.rs` — `FieldAccess` (~line 331), `RecordUpdate` (~line 341), `extract_type_con_name` helper
 
 ### 0.7 `import Foo (pattern X)` Syntax
 

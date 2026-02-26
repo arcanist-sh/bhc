@@ -122,6 +122,15 @@ pub struct TyCtxt {
     /// Type names that are GADTs (have constructors with explicit return types).
     /// Used to enable save/restore of substitution in case expressions.
     pub(crate) gadt_types: rustc_hash::FxHashSet<Symbol>,
+
+    /// Maps field name → Vec<(constructor DefId, accessor DefId)>.
+    /// Used for FieldAccess to find which constructor a field belongs to
+    /// and look up the accessor function's type scheme.
+    pub(crate) field_name_to_con: FxHashMap<Symbol, Vec<(DefId, DefId)>>,
+
+    /// Maps type constructor name → Vec<DefId> (constructor DefIds).
+    /// Used for RecordUpdate to find constructors of the record type.
+    pub(crate) type_to_data_cons: FxHashMap<Symbol, Vec<DefId>>,
 }
 
 impl TyCtxt {
@@ -146,6 +155,8 @@ impl TyCtxt {
             scoped_type_vars: FxHashMap::default(),
             user_defined_classes: rustc_hash::FxHashSet::default(),
             gadt_types: rustc_hash::FxHashSet::default(),
+            field_name_to_con: FxHashMap::default(),
+            type_to_data_cons: FxHashMap::default(),
         }
     }
 
@@ -1055,6 +1066,12 @@ impl TyCtxt {
                         for field_ty in field_types.iter().rev() {
                             con_ty = Ty::fun(field_ty.clone(), con_ty);
                         }
+
+                        // Track constructor → type mapping for RecordUpdate
+                        self.type_to_data_cons
+                            .entry(type_con_name)
+                            .or_default()
+                            .push(def_info.id);
 
                         // If we have field names, register field definitions for record construction
                         // Note: we don't store the field types here since they're quantified
@@ -3051,6 +3068,12 @@ impl TyCtxt {
             let scheme = self.compute_data_con_scheme(data, con);
             self.env.register_data_con(con.id, con.name, scheme);
 
+            // Track constructor → type mapping for RecordUpdate
+            self.type_to_data_cons
+                .entry(data.name)
+                .or_default()
+                .push(con.id);
+
             // Register field accessor functions for record constructors
             if let ConFields::Named(fields) = &con.fields {
                 // Build the data type: T a1 a2 ... an
@@ -3067,6 +3090,12 @@ impl TyCtxt {
                     let accessor_scheme = Scheme::poly(data.params.clone(), accessor_ty);
                     // Register the field accessor as a global value
                     self.env.insert_global(field.id, accessor_scheme);
+
+                    // Track field name → (constructor, accessor) for FieldAccess
+                    self.field_name_to_con
+                        .entry(field.name)
+                        .or_default()
+                        .push((con.id, field.id));
                 }
             }
         }
@@ -3084,6 +3113,12 @@ impl TyCtxt {
         self.env
             .register_data_con(newtype.con.id, newtype.con.name, scheme);
 
+        // Track constructor → type mapping for RecordUpdate
+        self.type_to_data_cons
+            .entry(newtype.name)
+            .or_default()
+            .push(newtype.con.id);
+
         // Register field accessor if this is a record-style newtype
         if let ConFields::Named(fields) = &newtype.con.fields {
             // Store field definitions for record construction type checking
@@ -3100,6 +3135,12 @@ impl TyCtxt {
                 let accessor_scheme = Scheme::poly(newtype.params.clone(), accessor_ty);
                 // Register the field accessor as a global value
                 self.env.insert_global(field.id, accessor_scheme);
+
+                // Track field name → (constructor, accessor) for FieldAccess
+                self.field_name_to_con
+                    .entry(field.name)
+                    .or_default()
+                    .push((newtype.con.id, field.id));
             }
         }
     }

@@ -328,24 +328,90 @@ pub fn infer_expr(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             }
         }
 
-        Expr::FieldAccess(record, _field_name, _span) => {
-            // Infer record type
-            let _record_ty = infer_expr(ctx, record);
+        Expr::FieldAccess(record, field_name, span) => {
+            let record_ty = infer_expr(ctx, record);
 
-            // Field access requires knowing the record type
-            // For now, return a fresh variable (full implementation would resolve field)
-            // TODO: Resolve field type from record type
-            ctx.fresh_ty()
+            // Look up which constructor(s) this field belongs to
+            if let Some(infos) = ctx.field_name_to_con.get(field_name).cloned() {
+                let (_, field_def_id) = infos[0]; // Take first match
+                // Look up the accessor function's type scheme
+                if let Some(scheme) = ctx.env.lookup_def_id(field_def_id).cloned() {
+                    let accessor_ty = ctx.instantiate(&scheme);
+                    // accessor_ty is: RecordType -> FieldType
+                    let result_ty = ctx.fresh_ty();
+                    let expected_fn = Ty::fun(record_ty, result_ty.clone());
+                    ctx.unify(&accessor_ty, &expected_fn, *span);
+                    result_ty
+                } else {
+                    ctx.fresh_ty()
+                }
+            } else {
+                // Unknown field name — return fresh type for error recovery
+                ctx.fresh_ty()
+            }
         }
 
-        Expr::RecordUpdate(record, fields, _span) => {
+        Expr::RecordUpdate(record, fields, span) => {
             // Record update produces same type as input record
             let record_ty = infer_expr(ctx, record);
 
-            // Check field types (simplified)
-            for field in fields {
-                let _field_ty = infer_expr(ctx, &field.value);
-                // TODO: Verify field exists and types match
+            // Resolve the record type to find its type constructor name
+            let resolved = ctx.apply_subst(&record_ty);
+            let type_name = extract_type_con_name(&resolved);
+
+            if let Some(name) = type_name {
+                if let Some(con_ids) = ctx.type_to_data_cons.get(&name).cloned() {
+                    // Collect field type expectations from constructors
+                    let mut all_field_types: std::collections::HashMap<Symbol, Ty> =
+                        std::collections::HashMap::new();
+
+                    for con_id in &con_ids {
+                        if let Some(field_defs) =
+                            ctx.get_con_fields(*con_id).map(|f| f.to_vec())
+                        {
+                            // Instantiate the constructor type to get fresh types
+                            if let Some(info) =
+                                ctx.env.lookup_data_con_by_id(*con_id).cloned()
+                            {
+                                let con_ty = ctx.instantiate(&info.scheme);
+
+                                // Extract field types from instantiated constructor
+                                let mut field_types = Vec::new();
+                                let mut current = &con_ty;
+                                while let Ty::Fun(arg, ret) = current {
+                                    field_types.push(arg.as_ref().clone());
+                                    current = ret.as_ref();
+                                }
+                                // Unify result type with record_ty to propagate type args
+                                ctx.unify(current, &record_ty, *span);
+
+                                for ((name, _), ty) in
+                                    field_defs.iter().zip(field_types.iter())
+                                {
+                                    all_field_types.insert(*name, ty.clone());
+                                }
+                            }
+                        }
+                    }
+
+                    // Type-check each updated field
+                    for field in fields {
+                        let field_val_ty = infer_expr(ctx, &field.value);
+                        if let Some(expected) = all_field_types.get(&field.name) {
+                            ctx.unify(&field_val_ty, expected, field.span);
+                        }
+                    }
+                } else {
+                    // Type has no registered constructors — just infer field values
+                    for field in fields {
+                        let _field_ty = infer_expr(ctx, &field.value);
+                    }
+                }
+            } else {
+                // Can't resolve record type — fall back to just inferring field values
+                for field in fields {
+                    let _field_ty = infer_expr(ctx, &field.value);
+                }
             }
 
             record_ty
@@ -543,6 +609,17 @@ fn extract_result_type(ty: &Ty) -> Ty {
     match ty {
         Ty::Fun(_, result) => extract_result_type(result),
         _ => ty.clone(),
+    }
+}
+
+/// Extract the head type constructor name from a type.
+///
+/// For example: `Person` → `Some("Person")`, `Maybe Int` → `Some("Maybe")`, `t0` → `None`
+fn extract_type_con_name(ty: &Ty) -> Option<Symbol> {
+    match ty {
+        Ty::Con(tc) => Some(tc.name),
+        Ty::App(f, _) => extract_type_con_name(f),
+        _ => None,
     }
 }
 

@@ -664,6 +664,11 @@ fn test_tier3_record_wildcards_native() {
 }
 
 #[test]
+fn test_tier3_record_field_types_native() {
+    run_native_test("tier3_io/record_field_types", Profile::Default);
+}
+
+#[test]
 fn test_tier3_view_patterns_native() {
     run_native_test("tier3_io/view_patterns", Profile::Default);
 }

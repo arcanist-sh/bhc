@@ -269,7 +269,98 @@ pub enum Extension {
     Unknown(Symbol),
 }
 
+/// Classification of extension support status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtensionStatus {
+    /// Fully implemented or always-on in BHC.
+    Supported,
+    /// Recognized but not yet implemented — emits a warning.
+    Unimplemented,
+    /// Unknown extension name.
+    Unknown,
+}
+
 impl Extension {
+    /// Classify this extension's support status in BHC.
+    #[must_use]
+    pub fn status(&self) -> ExtensionStatus {
+        match self {
+            // Type system — implemented or always-on
+            Self::GADTs
+            | Self::TypeFamilies
+            | Self::DataKinds
+            | Self::KindSignatures
+            | Self::ScopedTypeVariables
+            | Self::TypeApplications
+            | Self::FlexibleInstances
+            | Self::FlexibleContexts
+            | Self::MultiParamTypeClasses
+            | Self::FunctionalDependencies
+            | Self::TypeOperators
+            | Self::ExplicitForAll => ExtensionStatus::Supported,
+
+            // Syntax — always-on in BHC
+            Self::LambdaCase
+            | Self::MultiWayIf
+            | Self::BlockArguments
+            | Self::PatternGuards
+            | Self::ViewPatterns
+            | Self::PatternSynonyms
+            | Self::RecordWildCards
+            | Self::NamedFieldPuns
+            | Self::OverloadedStrings
+            | Self::OverloadedLists
+            | Self::NumericUnderscores
+            | Self::BinaryLiterals
+            | Self::NegativeLiterals => ExtensionStatus::Supported,
+
+            // Strictness — always-on or handled
+            Self::BangPatterns | Self::StrictData | Self::Strict => ExtensionStatus::Supported,
+
+            // Deriving — implemented
+            Self::DeriveFunctor
+            | Self::DeriveFoldable
+            | Self::DeriveTraversable
+            | Self::DeriveGeneric
+            | Self::DerivingVia
+            | Self::DerivingStrategies
+            | Self::GeneralizedNewtypeDeriving
+            | Self::StandaloneDeriving
+            | Self::DeriveDataTypeable => ExtensionStatus::Supported,
+
+            // FFI — implemented
+            Self::ForeignFunctionInterface => ExtensionStatus::Supported,
+
+            // Other — implemented
+            Self::EmptyDataDecls
+            | Self::EmptyCase
+            | Self::InstanceSigs
+            | Self::DefaultSignatures
+            | Self::ExplicitNamespaces
+            | Self::CPP => ExtensionStatus::Supported,
+
+            // Extensions that are accepted for compatibility but silently
+            // relaxed (BHC doesn't enforce the restriction they lift)
+            Self::UndecidableInstances | Self::OverlappingInstances => ExtensionStatus::Supported,
+
+            // Recognized but not yet implemented
+            Self::RankNTypes
+            | Self::ExistentialQuantification
+            | Self::ConstraintKinds
+            | Self::HexFloatLiterals
+            | Self::DeriveLift
+            | Self::CApiFFI
+            | Self::UnliftedFFITypes
+            | Self::TemplateHaskell
+            | Self::TemplateHaskellQuotes
+            | Self::QuasiQuotes
+            | Self::NamedDefaults => ExtensionStatus::Unimplemented,
+
+            // Unknown
+            Self::Unknown(_) => ExtensionStatus::Unknown,
+        }
+    }
+
     /// Parse an extension name.
     #[must_use]
     pub fn from_name(name: &str) -> Self {
@@ -979,6 +1070,8 @@ pub enum Expr {
     ListComp(Box<Expr>, Vec<Stmt>, Span),
     /// Record construction: `Foo { bar = 1 }` or `Foo { bar = 1, .. }` (RecordWildCards)
     RecordCon(Ident, Vec<FieldBind>, bool, Span),
+    /// Qualified record construction: `M.Foo { bar = 1 }`
+    QualRecordCon(ModuleName, Ident, Vec<FieldBind>, bool, Span),
     /// Record update: `foo { bar = 1 }`
     RecordUpd(Box<Expr>, Vec<FieldBind>, Span),
     /// Infix operator: `a + b`
@@ -1018,6 +1111,7 @@ impl Expr {
             | Self::ArithSeq(_, s)
             | Self::ListComp(_, _, s)
             | Self::RecordCon(_, _, _, s)
+            | Self::QualRecordCon(_, _, _, _, s)
             | Self::RecordUpd(_, _, s)
             | Self::Infix(_, _, _, s)
             | Self::Neg(_, s)

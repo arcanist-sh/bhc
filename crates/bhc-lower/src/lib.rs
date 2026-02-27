@@ -147,6 +147,20 @@ pub enum LowerWarning {
         /// What kind of stub (value, type, or constructor).
         kind: &'static str,
     },
+    /// A LANGUAGE pragma extension is not yet implemented.
+    UnimplementedExtension {
+        /// The extension name.
+        name: String,
+        /// Source location of the pragma.
+        span: Span,
+    },
+    /// A LANGUAGE pragma extension is not recognized.
+    UnknownExtension {
+        /// The extension name.
+        name: String,
+        /// Source location of the pragma.
+        span: Span,
+    },
 }
 
 impl std::fmt::Display for LowerWarning {
@@ -157,6 +171,15 @@ impl std::fmt::Display for LowerWarning {
                     f,
                     "stub {kind} `{name}` used (external package not implemented)"
                 )
+            }
+            LowerWarning::UnimplementedExtension { name, .. } => {
+                write!(
+                    f,
+                    "extension `{name}` is not yet implemented and will be ignored"
+                )
+            }
+            LowerWarning::UnknownExtension { name, .. } => {
+                write!(f, "unknown extension `{name}`")
             }
         }
     }

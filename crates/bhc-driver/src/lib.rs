@@ -923,6 +923,11 @@ impl Compiler {
             return Err(bhc_lower::LowerError::Multiple(errors).into());
         }
 
+        // Display lowering warnings
+        for warning in &ctx.warnings {
+            eprintln!("warning: {warning}");
+        }
+
         Ok((hir, ctx))
     }
 
@@ -1676,6 +1681,11 @@ impl Compiler {
         if ctx.has_errors() {
             let errors = ctx.take_errors();
             return Err(bhc_lower::LowerError::Multiple(errors).into());
+        }
+
+        // Display lowering warnings
+        for warning in &ctx.warnings {
+            eprintln!("warning: {warning}");
         }
 
         Ok((hir, ctx))

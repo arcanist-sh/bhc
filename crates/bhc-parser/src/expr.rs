@@ -269,8 +269,7 @@ impl<'src> Parser<'src> {
 
                 // Check for record construction: M.Con { field = value }
                 if self.check(&TokenKind::LBrace) {
-                    // TODO: handle qualified record construction
-                    // For now, just return as QualCon
+                    return self.parse_qual_record_con(module_name, ident, span);
                 }
 
                 Ok(Expr::QualCon(module_name, ident, span))
@@ -932,6 +931,24 @@ impl<'src> Parser<'src> {
                 }
                 Ok(Pat::Record(con, field_pats, has_wildcard, span))
             }
+            Expr::QualRecordCon(module_name, con, field_binds, has_wildcard, span) => {
+                // Qualified record pattern: M.Con { field = pat, ... }
+                use bhc_ast::FieldPat;
+                let mut field_pats = Vec::new();
+                for fb in field_binds {
+                    let pat = match fb.value {
+                        Some(expr) => Some(self.expr_to_pat(expr)?),
+                        None => None,
+                    };
+                    field_pats.push(FieldPat {
+                        qualifier: fb.qualifier,
+                        name: fb.name,
+                        pat,
+                        span: fb.span,
+                    });
+                }
+                Ok(Pat::QualRecord(module_name, con, field_pats, has_wildcard, span))
+            }
             _ => Err(ParseError::Unexpected {
                 found: "expression".to_string(),
                 expected: "pattern".to_string(),
@@ -1317,6 +1334,46 @@ impl<'src> Parser<'src> {
         let end = self.expect(&TokenKind::RBrace)?;
         let span = start.to(end.span);
         Ok(Expr::RecordCon(con, fields, has_wildcard, span))
+    }
+
+    /// Parse qualified record construction: `M.Con { field = value, ... }`
+    fn parse_qual_record_con(
+        &mut self,
+        module_name: ModuleName,
+        con: Ident,
+        start: Span,
+    ) -> ParseResult<Expr> {
+        self.expect(&TokenKind::LBrace)?;
+
+        let mut fields = Vec::new();
+        let mut has_wildcard = false;
+        if !self.check(&TokenKind::RBrace) {
+            if self.eat(&TokenKind::DotDot) {
+                has_wildcard = true;
+            } else {
+                fields.push(self.parse_field_bind()?);
+                while self.eat(&TokenKind::Comma) {
+                    if self.check(&TokenKind::RBrace) {
+                        break;
+                    }
+                    if self.eat(&TokenKind::DotDot) {
+                        has_wildcard = true;
+                        break;
+                    }
+                    fields.push(self.parse_field_bind()?);
+                }
+            }
+        }
+
+        let end = self.expect(&TokenKind::RBrace)?;
+        let span = start.to(end.span);
+        Ok(Expr::QualRecordCon(
+            module_name,
+            con,
+            fields,
+            has_wildcard,
+            span,
+        ))
     }
 
     /// Parse record update: `expr { field = value, ... }`

@@ -119,6 +119,11 @@ fn test_tier2_user_monad_native() {
     run_native_test("tier2_functions/user_monad", Profile::Default);
 }
 
+#[test]
+fn test_tier2_numeric_literals_native() {
+    run_native_test("tier2_functions/numeric_literals", Profile::Default);
+}
+
 // =============================================================================
 // Tier 2: Multi-Module Tests
 // =============================================================================

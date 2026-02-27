@@ -141,6 +141,30 @@ pub fn lower_module_with_cache(
         }
     });
 
+    // Validate LANGUAGE pragmas — warn about unknown or unimplemented extensions
+    for pragma in &module.pragmas {
+        if let ast::PragmaKind::Language(exts) = &pragma.kind {
+            for ext_sym in exts {
+                let ext = ast::Extension::from_name(ext_sym.as_str());
+                match ext.status() {
+                    ast::ExtensionStatus::Supported => {}
+                    ast::ExtensionStatus::Unimplemented => {
+                        ctx.warnings.push(crate::LowerWarning::UnimplementedExtension {
+                            name: ext_sym.as_str().to_string(),
+                            span: pragma.span,
+                        });
+                    }
+                    ast::ExtensionStatus::Unknown => {
+                        ctx.warnings.push(crate::LowerWarning::UnknownExtension {
+                            name: ext_sym.as_str().to_string(),
+                            span: pragma.span,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     let already_imports_prelude = module.imports.iter().any(|imp| {
         let name = imp
             .module
@@ -2289,6 +2313,59 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                 }
                 hir::Expr::Record(con_ref, hir_fields, *span)
             } else {
+                hir::Expr::Error(*span)
+            }
+        }
+
+        ast::Expr::QualRecordCon(module_name, con, fields, has_wildcard, span) => {
+            let qualifier = Symbol::intern(&module_name.to_string());
+            let con_name = con.name;
+            if let Some(def_id) = ctx.resolve_qualified_constructor(qualifier, con_name) {
+                let con_ref = ctx.def_ref(def_id, *span);
+                let mut hir_fields = Vec::with_capacity(fields.len());
+                for f in fields {
+                    let value = match &f.value {
+                        Some(e) => lower_expr(ctx, e),
+                        None => {
+                            // Punning: Foo { x } means Foo { x = x }
+                            let name = f.name.name;
+                            if let Some(def_id) = ctx.lookup_value(name) {
+                                hir::Expr::Var(ctx.def_ref(def_id, f.span))
+                            } else {
+                                hir::Expr::Error(f.span)
+                            }
+                        }
+                    };
+                    hir_fields.push(hir::FieldExpr {
+                        name: f.name.name,
+                        value,
+                        span: f.span,
+                    });
+                }
+                if *has_wildcard {
+                    if let Some(field_names) = ctx.get_constructor_field_names(def_id) {
+                        let existing: rustc_hash::FxHashSet<_> =
+                            hir_fields.iter().map(|f| f.name).collect();
+                        for field_name in field_names {
+                            if !existing.contains(&field_name) {
+                                if let Some(val_id) = ctx.lookup_value(field_name) {
+                                    hir_fields.push(hir::FieldExpr {
+                                        name: field_name,
+                                        value: hir::Expr::Var(ctx.def_ref(val_id, *span)),
+                                        span: *span,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                hir::Expr::Record(con_ref, hir_fields, *span)
+            } else {
+                let qual_name = format!("{}.{}", module_name.to_string(), con_name.as_str());
+                ctx.error(crate::LowerError::UnboundCon {
+                    name: qual_name,
+                    span: *span,
+                });
                 hir::Expr::Error(*span)
             }
         }

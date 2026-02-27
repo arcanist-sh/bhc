@@ -569,6 +569,12 @@ mod tests {
     }
 
     #[test]
+    fn test_qualified_record_construction() {
+        let expr = parse_expr_ok("M.Foo { bar = 1, baz = 2 }");
+        assert!(matches!(expr, Expr::QualRecordCon(_, _, _, _, _)));
+    }
+
+    #[test]
     fn test_record_update() {
         let expr = parse_expr_ok("foo { bar = 1 }");
         assert!(matches!(expr, Expr::RecordUpd(_, _, _)));

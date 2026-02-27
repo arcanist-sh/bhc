@@ -103,6 +103,10 @@ pub struct LowerContext {
 
     /// Collected foreign import declarations for the Core module.
     foreign_imports: Vec<core::ForeignImport>,
+
+    /// Stack of monad types for resolving return/pure in do-notation lambdas.
+    /// Pushed when lowering >>=/>>'s lambda argument for non-builtin monads.
+    monad_type_stack: Vec<Ty>,
 }
 
 impl LowerContext {
@@ -122,6 +126,7 @@ impl LowerContext {
             warnings: Vec::new(),
             generalized_newtype_deriving: false,
             foreign_imports: Vec::new(),
+            monad_type_stack: Vec::new(),
         };
         ctx.register_builtins();
         ctx.register_builtin_constructors();
@@ -1486,6 +1491,25 @@ impl LowerContext {
                 | Some("WriterT")
                 | Some("Identity")
         )
+    }
+
+    /// Push a monad type onto the context stack.
+    ///
+    /// Used when lowering the lambda argument of `>>=`/`>>` for a non-builtin monad,
+    /// so that `return`/`pure` inside the lambda body can resolve via dictionary dispatch.
+    pub fn push_monad_type(&mut self, ty: Ty) {
+        self.monad_type_stack.push(ty);
+    }
+
+    /// Pop the most recent monad type from the context stack.
+    pub fn pop_monad_type(&mut self) {
+        self.monad_type_stack.pop();
+    }
+
+    /// Get the current monad type from the context stack, if any.
+    #[must_use]
+    pub fn current_monad_type(&self) -> Option<&Ty> {
+        self.monad_type_stack.last()
     }
 
     /// Check if a class name is a user-defined class (not a builtin like Eq, Ord, Show, etc.).

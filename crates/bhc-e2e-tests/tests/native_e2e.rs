@@ -114,6 +114,11 @@ fn test_tier2_higher_order_native() {
     run_native_test("tier2_functions/higher_order", Profile::Default);
 }
 
+#[test]
+fn test_tier2_user_monad_native() {
+    run_native_test("tier2_functions/user_monad", Profile::Default);
+}
+
 // =============================================================================
 // Tier 2: Multi-Module Tests
 // =============================================================================

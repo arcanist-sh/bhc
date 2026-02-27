@@ -787,6 +787,85 @@ impl<'src> Parser<'src> {
             return self.parse_pattern_binding(start);
         }
 
+        // Handle declarations starting with a constructor (ConId):
+        // This could be an infix operator definition like `Box f <*> Box x = Box (f x)`
+        // (i.e., `pat varop pat = rhs`) or a pattern binding like `Box x = expr`.
+        if matches!(self.current_kind(), Some(TokenKind::ConId(_))) {
+            let saved_pos = self.pos;
+            // Try parsing a pattern (e.g., `Box f`)
+            if let Ok(left_pat) = self.parse_pattern() {
+                if self.is_infix_var_op_start() {
+                    // This is an infix operator definition: pat varop pat = rhs
+                    let op_name = self.parse_infix_op()?;
+                    let right_pat = self.parse_pattern()?;
+
+                    let mut extra_pats = Vec::new();
+                    while self.is_apat_start() {
+                        extra_pats.push(self.parse_atom_pattern()?);
+                    }
+
+                    let rhs = self.parse_binding_rhs()?;
+
+                    let wheres = if self.eat(&TokenKind::Where) {
+                        self.parse_local_decls()?
+                    } else {
+                        vec![]
+                    };
+
+                    let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+
+                    let mut pats = vec![left_pat, right_pat];
+                    pats.extend(extra_pats);
+
+                    let clause = Clause {
+                        pats,
+                        rhs,
+                        wheres,
+                        span,
+                    };
+
+                    return Ok(Decl::FunBind(FunBind {
+                        doc: doc.clone(),
+                        name: op_name,
+                        clauses: vec![clause],
+                        span,
+                    }));
+                } else if self.check(&TokenKind::Eq) {
+                    // Pattern binding: `ConPat = expr`
+                    self.expect(&TokenKind::Eq)?;
+                    let expr = self.parse_expr()?;
+
+                    let wheres = if self.eat(&TokenKind::Where) {
+                        self.parse_local_decls()?
+                    } else {
+                        vec![]
+                    };
+
+                    let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+
+                    let clause = Clause {
+                        pats: vec![left_pat],
+                        rhs: Rhs::Simple(expr, span),
+                        wheres,
+                        span,
+                    };
+
+                    return Ok(Decl::FunBind(FunBind {
+                        doc: doc.clone(),
+                        name: Ident::from_str("$patbind"),
+                        clauses: vec![clause],
+                        span,
+                    }));
+                } else {
+                    // Not an infix definition or pattern binding, backtrack
+                    self.pos = saved_pos;
+                }
+            } else {
+                // Pattern parse failed, backtrack
+                self.pos = saved_pos;
+            }
+        }
+
         // Parse either a regular identifier or a parenthesized operator like (<+>)
         let name = self.parse_var_or_op()?;
 

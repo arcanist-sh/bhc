@@ -577,7 +577,15 @@ fn lower_app(
                         // Fall through to Case 3 if we couldn't resolve
                     } else {
                         // Single-param class: resolve at concrete type from argument
-                        let inferred = try_infer_arg_type(ctx, x);
+                        let inferred = try_infer_arg_type(ctx, x)
+                            .or_else(|| {
+                                // Fallback: use monad context stack for >>=/>>/return/pure
+                                if is_monad_family {
+                                    ctx.current_monad_type().cloned()
+                                } else {
+                                    None
+                                }
+                            });
                         if let Some(concrete_ty) = inferred {
                             // For monad-family builtin classes, skip if the concrete type
                             // is a builtin monad — let codegen handle the fast path
@@ -625,6 +633,36 @@ fn lower_app(
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Case 1.5: return/pure with monad type context
+            // `return` is a standalone builtin (not a class method), so it bypasses
+            // dictionary dispatch. When inside a do-block for a user-defined monad,
+            // resolve it via the Applicative dictionary using the monad context stack.
+            {
+                let is_return_or_pure = method_name.as_str() == "return"
+                    || method_name.as_str() == "pure";
+                if is_return_or_pure {
+                    if let Some(monad_ty) = ctx.current_monad_type().cloned() {
+                        if !LowerContext::is_builtin_monad_type(&monad_ty) {
+                            let pure_sym = Symbol::intern("pure");
+                            let applicative_sym = Symbol::intern("Applicative");
+                            if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
+                                pure_sym,
+                                applicative_sym,
+                                &monad_ty,
+                                span,
+                            ) {
+                                let x_core = lower_expr(ctx, x)?;
+                                return Ok(core::Expr::App(
+                                    Box::new(method_expr),
+                                    Box::new(x_core),
+                                    span,
+                                ));
                             }
                         }
                     }
@@ -765,18 +803,27 @@ fn lower_app(
                         }
                     } else {
                         // Single-param class: original logic
-                        let inferred = try_infer_arg_type(ctx, x)
+                        let inferred_x = try_infer_arg_type(ctx, x);
+                        let inferred_args = collected_args
+                            .iter()
+                            .find_map(|arg| try_infer_arg_type(ctx, arg));
+                        let inferred = inferred_x
+                            .or(inferred_args)
                             .or_else(|| {
-                                collected_args
-                                    .iter()
-                                    .find_map(|arg| try_infer_arg_type(ctx, arg))
+                                // Fallback: use monad context stack for nested >>=/>>/return
+                                if is_monad_family {
+                                    ctx.current_monad_type().cloned()
+                                } else {
+                                    None
+                                }
                             });
                         if let Some(concrete_ty) = inferred {
                             // For monad-family builtin classes, skip if the concrete type
                             // is a builtin monad — let codegen handle the fast path
+                            let is_builtin_m = LowerContext::is_builtin_monad_type(&concrete_ty);
                             if is_monad_family
                                 && !is_user
-                                && LowerContext::is_builtin_monad_type(&concrete_ty)
+                                && is_builtin_m
                             {
                                 // Fall through to codegen fast path
                             } else {
@@ -787,6 +834,13 @@ fn lower_app(
                                     span,
                                 );
                                 if let Some(method_expr) = resolved {
+                                    // Push monad context for >>=/>>) so return/pure
+                                    // inside lambda bodies resolve via dictionary dispatch
+                                    let is_bind_op = method_name.as_str() == ">>="
+                                        || method_name.as_str() == ">>";
+                                    if is_bind_op {
+                                        ctx.push_monad_type(concrete_ty.clone());
+                                    }
                                     let mut result = method_expr;
                                     for arg in &collected_args {
                                         let arg_core = lower_expr(ctx, arg)?;
@@ -797,6 +851,9 @@ fn lower_app(
                                         );
                                     }
                                     let x_core = lower_expr(ctx, x)?;
+                                    if is_bind_op {
+                                        ctx.pop_monad_type();
+                                    }
                                     return Ok(core::Expr::App(
                                         Box::new(result),
                                         Box::new(x_core),
@@ -823,6 +880,12 @@ fn lower_app(
                                                 span,
                                             )
                                         {
+                                            // Push monad context for applied type too
+                                            let is_bind_op = method_name.as_str() == ">>="
+                                                || method_name.as_str() == ">>";
+                                            if is_bind_op {
+                                                ctx.push_monad_type(applied_ty.clone());
+                                            }
                                             let mut result = method_expr;
                                             for arg in &collected_args {
                                                 let arg_core = lower_expr(ctx, arg)?;
@@ -833,6 +896,9 @@ fn lower_app(
                                                 );
                                             }
                                             let x_core = lower_expr(ctx, x)?;
+                                            if is_bind_op {
+                                                ctx.pop_monad_type();
+                                            }
                                             return Ok(core::Expr::App(
                                                 Box::new(result),
                                                 Box::new(x_core),

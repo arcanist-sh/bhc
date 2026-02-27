@@ -206,10 +206,12 @@ impl ClassRegistry {
         class: Symbol,
         types: &[Ty],
     ) -> Option<(&InstanceInfo, Subst)> {
-        let instances = self.instances.get(&class)?;
+        let instances = self.instances.get(&class);
+        let instances = instances?;
 
         for inst in instances {
-            if let Some(subst) = types_match_multi(&inst.instance_types, types) {
+            let result = types_match_multi(&inst.instance_types, types);
+            if let Some(subst) = result {
                 return Some((inst, subst));
             }
         }

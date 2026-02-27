@@ -26,6 +26,11 @@ impl<'src> Parser<'src> {
             } else {
                 None
             };
+            // Skip virtual tokens that the layout rule may insert between
+            // the export list `)` and `where` when they are on separate lines:
+            //   module Foo ( bar )
+            //   where          -- `where` on its own line
+            self.skip_virtual_tokens();
             self.expect(&TokenKind::Where)?;
             (Some(name), exports)
         } else {

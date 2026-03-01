@@ -2885,6 +2885,23 @@ impl Compiler {
             "Debug.Trace",
             // Unsafe
             "Unsafe.Coerce",
+            // Additional Data.*
+            "Data.Aeson",
+            "Data.Aeson.Types",
+            "Data.Default",
+            "Data.Default.Class",
+            "Data.Coerce",
+            "Data.Text.Read",
+            "Data.Text.Encoding.Error",
+            "Data.Text.Lazy.Encoding",
+            "Data.List.NonEmpty",
+            "Data.Map.Strict.Internal",
+            "Data.Set.Internal",
+            // Additional Control.*
+            "Control.Monad.ST",
+            "Control.Monad.STM",
+            // Network.*
+            "Network.URI",
         ]
         .into_iter()
         .collect()

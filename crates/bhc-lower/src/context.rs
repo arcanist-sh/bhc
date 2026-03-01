@@ -272,6 +272,18 @@ impl LowerContext {
             ("()", "Unit", 0),       // DefId 17 - unit
             ("(,)", "Tuple2", 2),    // DefId 18 - pair constructor
             ("(,,)", "Tuple3", 3),   // DefId 19 - triple constructor
+            ("(,,,)", "Tuple4", 4),
+            ("(,,,,)", "Tuple5", 5),
+            ("(,,,,,)", "Tuple6", 6),
+            ("(,,,,,,)", "Tuple7", 7),
+            ("(,,,,,,,)", "Tuple8", 8),
+            ("(,,,,,,,,)", "Tuple9", 9),
+            ("(,,,,,,,,,)", "Tuple10", 10),
+            ("(,,,,,,,,,,)", "Tuple11", 11),
+            ("(,,,,,,,,,,,)", "Tuple12", 12),
+            ("(,,,,,,,,,,,,)", "Tuple13", 13),
+            ("(,,,,,,,,,,,,,)", "Tuple14", 14),
+            ("(,,,,,,,,,,,,,,)", "Tuple15", 15),
             // NonEmpty constructor
             (":|", "NonEmpty", 2), // DefId 20 - NonEmpty cons (head :| tail)
             // Control.Applicative.Backwards

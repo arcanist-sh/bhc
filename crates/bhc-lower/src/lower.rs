@@ -1358,6 +1358,22 @@ fn subst_pat(pat: &ast::Pat, subst: &FxHashMap<Symbol, &ast::Pat>, span: Span) -
 
 /// Lower a top-level pattern binding to multiple value definitions.
 ///
+/// Look up (or dynamically register) a tuple constructor of the given arity.
+fn ensure_tuple_constructor(ctx: &mut LowerContext, arity: usize, span: Span) -> hir::DefId {
+    let tuple_sym = Symbol::intern(&format!(
+        "({})",
+        ",".repeat(arity.saturating_sub(1))
+    ));
+    if let Some(id) = ctx.lookup_constructor(tuple_sym) {
+        return id;
+    }
+    // Register on-the-fly for large tuples beyond the builtins
+    let type_name = Symbol::intern(&format!("Tuple{}", arity));
+    let id = ctx.fresh_def_id();
+    ctx.define_constructor_with_type(id, tuple_sym, span, arity, type_name, arity, None);
+    id
+}
+
 /// For `(x, y) = (1, 2)`, generates:
 /// - `x = let (x, y) = (1, 2) in x`
 /// - `y = let (x, y) = (1, 2) in y`
@@ -1792,14 +1808,7 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                     lower_pat(ctx, &clause.pats[0])
                                 } else {
                                     // Create a tuple pattern for multi-argument case
-                                    // Look up the existing tuple constructor from builtins
-                                    let tuple_sym = Symbol::intern(&format!(
-                                        "({})",
-                                        ",".repeat(clause.pats.len().saturating_sub(1))
-                                    ));
-                                    let tuple_def_id = ctx
-                                        .lookup_constructor(tuple_sym)
-                                        .expect("tuple constructor should be in builtins");
+                                    let tuple_def_id = ensure_tuple_constructor(ctx, clause.pats.len(), fb.span);
                                     let tuple_ref = ctx.def_ref(tuple_def_id, fb.span);
                                     hir::Pat::Con(
                                         tuple_ref,
@@ -2162,14 +2171,7 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                                 let pat = if clause.pats.len() == 1 {
                                     lower_pat(ctx, &clause.pats[0])
                                 } else {
-                                    // Look up the existing tuple constructor from builtins
-                                    let tuple_sym = Symbol::intern(&format!(
-                                        "({})",
-                                        ",".repeat(clause.pats.len().saturating_sub(1))
-                                    ));
-                                    let tuple_def_id = ctx
-                                        .lookup_constructor(tuple_sym)
-                                        .expect("tuple constructor should be in builtins");
+                                    let tuple_def_id = ensure_tuple_constructor(ctx, clause.pats.len(), fb.span);
                                     let tuple_ref = ctx.def_ref(tuple_def_id, fb.span);
                                     hir::Pat::Con(
                                         tuple_ref,

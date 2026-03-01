@@ -388,24 +388,76 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
         Profile::Edge => bhc_session::Profile::Edge,
     };
 
-    let compiler = CompilerBuilder::new().profile(profile).build()?;
+    // Build compiler with import paths and CPP defines
+    let mut builder = CompilerBuilder::new().profile(profile);
 
-    let mut has_errors = false;
-    for file in files {
-        let path = Utf8PathBuf::from_path_buf(file.clone())
-            .map_err(|p| anyhow::anyhow!("Invalid UTF-8 path: {}", p.display()))?;
-
-        match compiler.check_file(&path) {
-            Ok(()) => println!("  {} OK", path),
-            Err(e) => {
-                eprintln!("  {} FAILED: {}", path, e);
-                has_errors = true;
-            }
-        }
+    for path in &cli.import_paths {
+        builder = builder.import_path(
+            Utf8PathBuf::from_path_buf(path.clone())
+                .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in import path"))?,
+        );
     }
 
-    if has_errors {
-        anyhow::bail!("Type checking failed");
+    for def in &cli.defines {
+        builder = builder.define(def);
+    }
+
+    let compiler = builder.build()?;
+
+    // Convert all paths to Utf8PathBuf
+    let utf8_paths: Vec<Utf8PathBuf> = files
+        .iter()
+        .map(|p| {
+            Utf8PathBuf::from_path_buf(p.clone())
+                .map_err(|p| anyhow::anyhow!("Invalid UTF-8 path: {}", p.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Check if any argument is a directory or we have multiple files
+    let has_directory = utf8_paths.iter().any(|p| p.as_std_path().is_dir());
+
+    if has_directory || utf8_paths.len() > 1 {
+        // Multi-module check with directory expansion
+        let results = compiler.check_with_discovery(&utf8_paths)?;
+
+        let mut passed = 0usize;
+        let mut failed = 0usize;
+        let mut skipped = 0usize;
+
+        for (mod_name, result) in &results {
+            match result {
+                Ok(()) => {
+                    println!("  {} OK", mod_name);
+                    passed += 1;
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.starts_with("skipped:") {
+                        eprintln!("  {} SKIPPED: {}", mod_name, msg);
+                        skipped += 1;
+                    } else {
+                        eprintln!("  {} FAILED: {}", mod_name, e);
+                        failed += 1;
+                    }
+                }
+            }
+        }
+
+        let total = passed + failed + skipped;
+        println!("\n{} passed, {} failed, {} skipped (of {} modules)", passed, failed, skipped, total);
+
+        if failed > 0 {
+            anyhow::bail!("Type checking failed");
+        }
+    } else if utf8_paths.len() == 1 {
+        // Single file — use existing check_file
+        match compiler.check_file(&utf8_paths[0]) {
+            Ok(()) => println!("  {} OK", utf8_paths[0]),
+            Err(e) => {
+                eprintln!("  {} FAILED: {}", utf8_paths[0], e);
+                anyhow::bail!("Type checking failed");
+            }
+        }
     }
 
     Ok(())

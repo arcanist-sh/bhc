@@ -1380,27 +1380,33 @@ impl Compiler {
             }
         }
 
-        // Build ModuleExports for later modules' lowering
+        let exports = Self::build_module_exports_from_hir(module_name, &hir, &lower_ctx);
+
+        debug!(module = %unit.module_name, object = %object_path.display(), "code generation complete");
+        self.callbacks
+            .on_phase_complete(CompilePhase::Codegen, &unit.module_name);
+
+        let compiled_info = CompiledModuleInfo {
+            module_name: module_name.to_string(),
+            symbols: compiled_symbols,
+            exports,
+        };
+
+        Ok((object_path, compiled_info))
+    }
+
+    /// Build `ModuleExports` from HIR items and lowering context.
+    ///
+    /// This extracts values, types, and constructors from the lowering context,
+    /// enriched with constructor metadata (tag, arity, field names, newtype flag)
+    /// from HIR data definitions. Does NOT require Core IR — values are taken
+    /// directly from `lower_ctx.defs` with `DefKind::Value`.
+    fn build_module_exports_from_hir(
+        module_name: &str,
+        hir: &HirModule,
+        lower_ctx: &LowerContext,
+    ) -> ModuleExports {
         let mut exports = ModuleExports::new(Symbol::intern(module_name));
-        for bind in &core.bindings {
-            match bind {
-                bhc_core::Bind::NonRec(var, _) => {
-                    // Register the value in exports so later modules can resolve the import
-                    if let Some(def_info) = lower_ctx.defs.values().find(|d| d.name == var.name) {
-                        exports.values.insert(var.name, def_info.id);
-                    }
-                }
-                bhc_core::Bind::Rec(bindings) => {
-                    for (var, _) in bindings {
-                        if let Some(def_info) =
-                            lower_ctx.defs.values().find(|d| d.name == var.name)
-                        {
-                            exports.values.insert(var.name, def_info.id);
-                        }
-                    }
-                }
-            }
-        }
 
         // Build a mapping from constructor DefId to (type_con_name, type_param_count, tag)
         // using HIR data definitions, since the lowering context's DefInfo may not have
@@ -1432,9 +1438,12 @@ impl Compiler {
             }
         }
 
-        // Also export types and constructors defined in this module
+        // Export values, types, and constructors from the lowering context
         for def_info in lower_ctx.defs.values() {
             match def_info.kind {
+                bhc_lower::DefKind::Value => {
+                    exports.values.insert(def_info.name, def_info.id);
+                }
                 bhc_lower::DefKind::Type => {
                     exports.types.insert(def_info.name, def_info.id);
                 }
@@ -1512,17 +1521,39 @@ impl Compiler {
             }
         }
 
-        debug!(module = %unit.module_name, object = %object_path.display(), "code generation complete");
-        self.callbacks
-            .on_phase_complete(CompilePhase::Codegen, &unit.module_name);
+        exports
+    }
 
-        let compiled_info = CompiledModuleInfo {
+    /// Type-check a single module in multi-module context.
+    ///
+    /// Runs parse → lower (with registry) → type check → build exports.
+    /// No Core IR, codegen, or linking. Returns `CompiledModuleInfo` with
+    /// empty `symbols` (no codegen) so the registry can propagate exports.
+    fn check_unit_for_multimodule(
+        &self,
+        unit: CompilationUnit,
+        module_name: &str,
+        registry: &ModuleRegistry,
+    ) -> CompileResult<CompiledModuleInfo> {
+        let file_id = FileId::new(0);
+
+        // Phase 1: Parse
+        let ast = self.parse(&unit, file_id)?;
+
+        // Phase 2: Lower AST to HIR with registry context
+        let (hir, lower_ctx) = self.lower_with_registry(&ast, registry)?;
+
+        // Phase 3: Type check HIR
+        let _typed = self.type_check(&hir, file_id, &lower_ctx)?;
+
+        // Build exports for downstream modules (no Core IR needed)
+        let exports = Self::build_module_exports_from_hir(module_name, &hir, &lower_ctx);
+
+        Ok(CompiledModuleInfo {
             module_name: module_name.to_string(),
-            symbols: compiled_symbols,
+            symbols: Vec::new(),
             exports,
-        };
-
-        Ok((object_path, compiled_info))
+        })
     }
 
     /// Build a map of imported constructor metadata for cross-module ADT pattern matching.
@@ -2604,36 +2635,7 @@ impl Compiler {
 
         let file_id = FileId::new(0);
 
-        // Known stdlib/builtin modules to skip
-        let builtin_modules: FxHashSet<&str> = [
-            "Prelude",
-            "Data.List",
-            "Data.Map",
-            "Data.Map.Strict",
-            "Data.Set",
-            "Data.Maybe",
-            "Data.Either",
-            "Data.Char",
-            "Data.String",
-            "Data.Int",
-            "Data.Word",
-            "Data.IORef",
-            "Data.IntMap",
-            "Data.IntSet",
-            "Data.Tuple",
-            "Data.Bool",
-            "Data.Ord",
-            "Data.Eq",
-            "Control.Monad",
-            "Control.Applicative",
-            "Control.Exception",
-            "System.IO",
-            "System.Environment",
-            "System.Exit",
-            "System.Directory",
-        ]
-        .into_iter()
-        .collect();
+        let builtin_modules = Self::builtin_module_set();
 
         while let Some(path) = queue.pop_front() {
             let unit = CompilationUnit::from_path(path.clone())?;
@@ -2728,6 +2730,355 @@ impl Compiler {
         }
 
         Ok(result)
+    }
+
+    /// Set of module names treated as builtins (stdlib / Prelude).
+    ///
+    /// Modules in this set are not expected to have on-disk source files;
+    /// they are provided by the BHC runtime or mapped to built-in primitives.
+    fn builtin_module_set() -> rustc_hash::FxHashSet<&'static str> {
+        [
+            "Prelude",
+            // Data.*
+            "Data.List",
+            "Data.Map",
+            "Data.Map.Strict",
+            "Data.Map.Lazy",
+            "Data.Set",
+            "Data.Maybe",
+            "Data.Either",
+            "Data.Char",
+            "Data.String",
+            "Data.Int",
+            "Data.Word",
+            "Data.IORef",
+            "Data.IntMap",
+            "Data.IntMap.Strict",
+            "Data.IntSet",
+            "Data.Tuple",
+            "Data.Bool",
+            "Data.Ord",
+            "Data.Eq",
+            "Data.Text",
+            "Data.Text.Encoding",
+            "Data.Text.IO",
+            "Data.Text.Lazy",
+            "Data.ByteString",
+            "Data.ByteString.Char8",
+            "Data.ByteString.Lazy",
+            "Data.ByteString.Lazy.Char8",
+            "Data.ByteString.Builder",
+            "Data.Sequence",
+            "Data.Typeable",
+            "Data.Data",
+            "Data.Monoid",
+            "Data.Semigroup",
+            "Data.Function",
+            "Data.Foldable",
+            "Data.Traversable",
+            "Data.Void",
+            "Data.Proxy",
+            "Data.Functor",
+            "Data.Functor.Identity",
+            "Data.Bits",
+            "Data.Complex",
+            "Data.Dynamic",
+            "Data.Fixed",
+            "Data.Ratio",
+            "Data.Unique",
+            "Data.Version",
+            "Data.STRef",
+            "Data.Map.Internal",
+            // Control.*
+            "Control.Monad",
+            "Control.Monad.State",
+            "Control.Monad.State.Strict",
+            "Control.Monad.State.Lazy",
+            "Control.Monad.State.Class",
+            "Control.Monad.Reader",
+            "Control.Monad.Reader.Class",
+            "Control.Monad.Writer",
+            "Control.Monad.Writer.Strict",
+            "Control.Monad.Writer.Lazy",
+            "Control.Monad.Writer.Class",
+            "Control.Monad.Except",
+            "Control.Monad.Trans",
+            "Control.Monad.Trans.Class",
+            "Control.Monad.Trans.State",
+            "Control.Monad.Trans.State.Strict",
+            "Control.Monad.Trans.State.Lazy",
+            "Control.Monad.Trans.Reader",
+            "Control.Monad.Trans.Writer",
+            "Control.Monad.Trans.Writer.Strict",
+            "Control.Monad.Trans.Writer.Lazy",
+            "Control.Monad.Trans.Except",
+            "Control.Monad.IO.Class",
+            "Control.Monad.Identity",
+            "Control.Monad.Fail",
+            "Control.Applicative",
+            "Control.Exception",
+            "Control.Concurrent",
+            "Control.Concurrent.MVar",
+            "Control.Concurrent.STM",
+            "Control.DeepSeq",
+            "Control.Arrow",
+            "Control.Category",
+            // System.*
+            "System.IO",
+            "System.IO.Error",
+            "System.IO.Unsafe",
+            "System.Environment",
+            "System.Exit",
+            "System.Directory",
+            "System.FilePath",
+            "System.FilePath.Posix",
+            "System.Posix",
+            "System.Process",
+            "System.Info",
+            "System.Mem",
+            "System.Timeout",
+            // GHC.*
+            "GHC.Generics",
+            "GHC.IO",
+            "GHC.IO.Handle",
+            "GHC.Base",
+            "GHC.Show",
+            "GHC.Read",
+            "GHC.Num",
+            "GHC.Real",
+            "GHC.Enum",
+            "GHC.Float",
+            "GHC.Err",
+            "GHC.List",
+            "GHC.Stack",
+            "GHC.Exts",
+            "GHC.TypeLits",
+            "GHC.TypeNats",
+            "GHC.Types",
+            "GHC.Prim",
+            "GHC.Word",
+            "GHC.Int",
+            "GHC.Ptr",
+            "GHC.ForeignPtr",
+            "GHC.Conc",
+            "GHC.STRef",
+            "GHC.IORef",
+            // Text.*
+            "Text.Read",
+            "Text.Show",
+            "Text.Printf",
+            "Text.ParserCombinators.ReadP",
+            "Text.ParserCombinators.ReadPrec",
+            // Foreign.*
+            "Foreign",
+            "Foreign.Ptr",
+            "Foreign.C",
+            "Foreign.C.Types",
+            "Foreign.C.String",
+            "Foreign.Storable",
+            "Foreign.Marshal",
+            "Foreign.Marshal.Alloc",
+            "Foreign.ForeignPtr",
+            // Numeric
+            "Numeric",
+            // Debug
+            "Debug.Trace",
+            // Unsafe
+            "Unsafe.Coerce",
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    /// Type-check multiple files in dependency order with cross-module propagation.
+    ///
+    /// Mirrors `compile_files_ordered()` but stops at type checking — no Core IR,
+    /// codegen, or linking. On single-module failure, continues checking other
+    /// modules whose dependencies succeeded.
+    ///
+    /// Returns per-module results: `(module_name, Ok(()) | Err(..))`.
+    pub fn check_files_ordered(
+        &self,
+        paths: &[Utf8PathBuf],
+    ) -> CompileResult<Vec<(String, Result<(), CompileError>)>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if paths.len() == 1 {
+            let unit = CompilationUnit::from_path(paths[0].clone())?;
+            let name = unit.module_name.clone();
+            let result = self.check_file(&paths[0]);
+            return Ok(vec![(name, result)]);
+        }
+
+        // Phase 1: Parse all files to extract module names and imports
+        let mut module_info: Vec<(Utf8PathBuf, String, Vec<String>)> = Vec::new();
+        let file_id = FileId::new(0);
+
+        for path in paths {
+            let unit = CompilationUnit::from_path(path.clone())?;
+            let ast = self.parse(&unit, file_id)?;
+
+            let module_name = ast.name.as_ref().map_or_else(
+                || unit.module_name.clone(),
+                |n| {
+                    n.parts
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                },
+            );
+
+            let imports: Vec<String> = ast
+                .imports
+                .iter()
+                .map(|imp| {
+                    imp.module
+                        .parts
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                })
+                .collect();
+
+            module_info.push((path.clone(), module_name, imports));
+        }
+
+        // Phase 2: Build name set for filtering and topological sort
+        let builtins = Self::builtin_module_set();
+        let local_names: rustc_hash::FxHashSet<&str> = module_info
+            .iter()
+            .map(|(_, name, _)| name.as_str())
+            .collect();
+
+        // Filter: skip modules whose imports can't be satisfied
+        // (not in local set and not a builtin)
+        let satisfiable: Vec<bool> = module_info
+            .iter()
+            .map(|(_, _, imports)| {
+                imports.iter().all(|imp| {
+                    local_names.contains(imp.as_str()) || builtins.contains(imp.as_str())
+                })
+            })
+            .collect();
+
+        // Topological sort (only satisfiable modules)
+        let ordered = Self::topological_sort(&module_info)?;
+
+        // Phase 3: Check each module in order, tracking which succeeded
+        let mut registry = ModuleRegistry::default();
+        let mut failed_modules: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+        let mut results: Vec<(String, Result<(), CompileError>)> = Vec::new();
+
+        for idx in &ordered {
+            let (ref path, ref mod_name, ref imports) = module_info[*idx];
+
+            // Skip if unsatisfiable imports
+            if !satisfiable[*idx] {
+                let missing: Vec<&str> = imports
+                    .iter()
+                    .filter(|imp| {
+                        !local_names.contains(imp.as_str())
+                            && !builtins.contains(imp.as_str())
+                    })
+                    .map(|s| s.as_str())
+                    .collect();
+                results.push((
+                    mod_name.clone(),
+                    Err(CompileError::Other(format!(
+                        "skipped: unresolved imports: {}",
+                        missing.join(", ")
+                    ))),
+                ));
+                failed_modules.insert(mod_name.clone());
+                continue;
+            }
+
+            // Skip if any local dependency failed
+            let dep_failed = imports
+                .iter()
+                .any(|imp| failed_modules.contains(imp.as_str()));
+            if dep_failed {
+                results.push((
+                    mod_name.clone(),
+                    Err(CompileError::Other(
+                        "skipped: dependency failed".to_string(),
+                    )),
+                ));
+                failed_modules.insert(mod_name.clone());
+                continue;
+            }
+
+            let unit = CompilationUnit::from_path(path.clone())?;
+            match self.check_unit_for_multimodule(unit, mod_name, &registry) {
+                Ok(compiled_info) => {
+                    registry.modules.insert(mod_name.clone(), compiled_info);
+                    results.push((mod_name.clone(), Ok(())));
+                }
+                Err(e) => {
+                    failed_modules.insert(mod_name.clone());
+                    results.push((mod_name.clone(), Err(e)));
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Type-check files, expanding directories to discover all `.hs` files.
+    ///
+    /// If any path is a directory, recursively finds all `.hs` files within it.
+    /// Then calls `check_files_ordered()` for multi-module type checking.
+    pub fn check_with_discovery(
+        &self,
+        paths: &[Utf8PathBuf],
+    ) -> CompileResult<Vec<(String, Result<(), CompileError>)>> {
+        let mut all_files: Vec<Utf8PathBuf> = Vec::new();
+
+        for path in paths {
+            if path.as_std_path().is_dir() {
+                Self::collect_hs_files(path.as_std_path(), &mut all_files)?;
+            } else {
+                all_files.push(path.clone());
+            }
+        }
+
+        if all_files.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.check_files_ordered(&all_files)
+    }
+
+    /// Recursively collect all `.hs` files under a directory.
+    fn collect_hs_files(
+        dir: &std::path::Path,
+        out: &mut Vec<Utf8PathBuf>,
+    ) -> CompileResult<()> {
+        let entries = std::fs::read_dir(dir).map_err(|e| CompileError::SourceReadError {
+            path: Utf8PathBuf::from(dir.to_string_lossy().as_ref()),
+            source: e,
+        })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| CompileError::SourceReadError {
+                path: Utf8PathBuf::from(dir.to_string_lossy().as_ref()),
+                source: e,
+            })?;
+            let path = entry.path();
+            if path.is_dir() {
+                Self::collect_hs_files(&path, out)?;
+            } else if path.extension().and_then(|e| e.to_str()) == Some("hs") {
+                if let Ok(utf8) = Utf8PathBuf::from_path_buf(path) {
+                    out.push(utf8);
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

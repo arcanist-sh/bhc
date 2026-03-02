@@ -1,405 +1,394 @@
 # BHC Roadmap
 
-**Document ID:** BHC-ROAD-0001
+**Document ID:** BHC-ROAD-0002
 **Status:** Active
-**Last Updated:** 2026-02-22
+**Last Updated:** 2026-02-27
 
 ---
 
-## Overview
+## Where We Are
 
-This roadmap tracks the implementation of the Basel Haskell Compiler (BHC) from proof-of-concept to H26-Numeric conformance. Each milestone has concrete exit criteria that must be met before proceeding.
+BHC parses 100% of Pandoc's 221 source files. The parser, layout rule, type
+checker, Core IR optimizer, and LLVM codegen pipeline are battle-tested across
+199 E2E tests and 70 implementation milestones. Separate compilation (`.bhi`
+interfaces, `-c` mode, `--package-db`) is wired. The hx package manager
+integration compiles.
+
+What remains between here and compiling real Hackage packages — and ultimately
+Pandoc — is connecting modules together: import resolution across packages,
+compiling dependency trees, and filling library API gaps.
+
+This roadmap replaces the previous M0–M11 milestone structure with a
+forward-looking plan organized around concrete deliverables.
 
 ---
 
 ## Milestone Summary
 
-| Milestone | Name | Status |
-|-----------|------|--------|
-| M0 | Proof of Life | ✅ Complete |
-| M1 | Numeric Profile Skeleton | ✅ Complete |
-| M2 | Tensor IR v1 | ✅ Complete |
-| M3 | Vectorization + Parallel Loops | ✅ Complete |
-| M4 | Pinned Arrays + FFI | ✅ Complete |
-| M5 | Server Runtime Contract | ✅ Complete |
-| M6 | Platform Standardization | ✅ Complete |
-| M7 | GPU Backend | ✅ Complete |
-| M8 | WASM Target | ✅ Complete |
-| M9 | Dependent Types Preview | ✅ Complete |
-| M10 | Cargo-Quality Diagnostics | ✅ Complete |
-| M11 | Real-World Haskell Compatibility | 🔄 In Progress |
+| Milestone | Name | Status | Target |
+|-----------|------|--------|--------|
+| P1 | Multi-Module Pandoc Check | 🔴 Not started | Next |
+| P2 | Hackage Package Compilation | 🔴 Not started | — |
+| P3 | Pandoc `bhc check` | 🔴 Not started | — |
+| P4 | Pandoc Native Binary | 🔴 Not started | — |
+| W1 | WASM Backend Validation | 🟡 Blocked | — |
+| T1 | Tooling Polish | 🟡 Partial | — |
 
 ---
 
-## Completed Milestones
+## P1 — Multi-Module Pandoc Check
 
-### M0 — Proof of Life ✅
+**Goal:** `bhc check` succeeds on 50+ Pandoc modules by resolving cross-module
+imports within Pandoc's own source tree.
 
-**Goal:** Demonstrate basic compiler pipeline works end-to-end.
-
-- [x] Lexer and parser for core Haskell subset
-- [x] Minimal type checker (Hindley-Milner + basic typeclasses)
-- [x] Core IR representation
-- [x] Tree-walking interpreter for Core IR
-- [x] Default Profile only (lazy semantics)
-- [x] `UArray` prototype with `map`/`fold` semantics
-
----
-
-### M1 — Numeric Profile Skeleton ✅
-
-**Goal:** Implement strict-by-default evaluation and unboxed primitives.
-
-- [x] Numeric Profile strict-by-default semantics
-- [x] Unboxed primitive types: `I32`, `I64`, `F32`, `F64`
-- [x] Unboxed `UArray` representation (flat contiguous)
-- [x] Hot Arena allocator in RTS
-- [x] `lazy { }` escape hatch syntax
-- [x] Basic strictness analysis pass
-
----
-
-### M2 — Tensor IR v1 ✅
-
-**Goal:** Introduce Tensor type and guaranteed fusion.
-
-- [x] `Tensor` type with shape/stride metadata
-- [x] View operations: `reshape`, `slice`, `transpose`
-- [x] Tensor IR representation
-- [x] Lowering pass: recognized patterns → Tensor IR
-- [x] Fusion pass for guaranteed patterns
-- [x] Kernel report mode (`-fkernel-report`)
-
----
-
-### M3 — Vectorization + Parallel Loops ✅
-
-**Goal:** Auto-vectorization and parallel execution.
-
-- [x] Loop IR representation (post-Tensor IR)
-- [x] SIMD primitive types: `Vec4F32`, `Vec8F32`, `Vec2F64`, `Vec4F64`
-- [x] Auto-vectorization pass
-- [x] SIMD intrinsics: `add`, `mul`, `fmadd`, `hadd`
-- [x] `parFor`, `parMap`, `parReduce` primitives
-- [x] Work-stealing scheduler in RTS
-- [x] Deterministic chunking mode
-
----
-
-### M4 — Pinned Arrays + FFI ✅
-
-**Goal:** Enable zero-copy FFI and external BLAS integration.
-
-- [x] Pinned heap region in RTS
-- [x] `PinnedUArray` type
-- [x] Tensor buffers optionally pinned
-- [x] Safe FFI boundary with pinned buffer support
-- [x] BLAS provider interface
-- [x] Reference OpenBLAS integration
-
----
-
-### M5 — Server Runtime Contract ✅
-
-**Goal:** Production-ready concurrent runtime.
-
-- [x] Structured concurrency primitives
-- [x] Cancellation propagation (cooperative)
-- [x] Deadline/timeout support
-- [x] Per-core scheduling
-- [x] Incremental/concurrent GC
-- [x] Event tracing hooks (GC, tasks, allocations)
-
----
-
-### M6 — Platform Standardization ✅
-
-**Goal:** Ship complete H26-Platform and conformance suite.
-
-- [x] All H26 Platform modules implemented
-- [x] Conformance test suite (semantic + runtime + benchmarks)
-- [x] Package manifest schema
-- [x] Lockfile format
-- [x] Reproducible build verification
-- [x] Published benchmark results
-
----
-
-### M7 — GPU Backend ✅
-
-**Goal:** GPU compute support for numeric workloads.
-
-- [x] CUDA/ROCm code generation
-- [x] Device memory management
-- [x] Kernel fusion across host/device boundary
-
----
-
-### M8 — WASM Target ✅
-
-**Goal:** WebAssembly compilation for edge deployment.
-
-- [x] WebAssembly code generation
-- [x] Browser runtime
-- [x] Edge profile optimization
-
----
-
-### M9 — Dependent Types Preview ✅
-
-**Goal:** Shape-indexed tensors with compile-time dimension checking.
-
-- [x] Type-level naturals (`TyNat`) and lists (`TyList`)
-- [x] Kind system extensions (`Kind::Nat`, `Kind::List`)
-- [x] Promoted list syntax `'[1024, 768]`
-- [x] Type families: `MatMulShape`, `Broadcast`, `Transpose`, `Concat`
-- [x] Dynamic escape hatch: `DynTensor`, `toDynamic`, `fromDynamic`
-- [x] Tensor IR bridge with shape verification
-- [x] Comprehensive shape error messages
-
----
-
-### M10 — Cargo-Quality Diagnostics ✅
-
-**Goal:** World-class compiler error messages on par with Rust/Cargo.
-
-- [x] Phase 1: Diagnostic Infrastructure (Cargo-style rendering, JSON output, error codes)
-- [x] Phase 2: Type Error Overhaul ("Did you mean?" suggestions, type alignment)
-- [x] Phase 3: Shape Error Excellence (Visual ASCII diagrams for tensor shape errors)
-- [x] Phase 4: Contextual Help (Doc links, related codes, common mistakes)
-- [x] Phase 5: IDE Integration (LSP diagnostics, code actions, hover info)
-
----
-
-## Current Milestone
-
-### M11 — Real-World Haskell Compatibility 🔄
-
-**Goal:** Enable BHC to compile real-world Haskell projects like xmonad, pandoc, and lens.
-
-**Progress:** 175 E2E tests, 70 milestones (E.1–E.70), 30+ GHC extensions implemented.
-BHC now compiles non-trivial Haskell programs with records, GADTs, typeclasses,
-deriving, monad transformers, and most common GHC extensions. The full standard
-library includes Data.Text, Data.ByteString (strict + lazy + Builder), containers,
-monad transformers, exception handling with typed catch, and 500+ builtin functions.
-The Core IR optimizer includes a simplifier (E.68-E.69), pattern match compilation
-with decision trees (E.70), demand analysis + worker/wrapper (O.3), and dictionary
-specialization (O.4). Type families (open, closed, associated) and data families
-are complete. CPP preprocessing is built-in. The hx build pipeline is wired:
-`hx-bhc` generates correct BHC CLI flags, uses filesystem-based package DB, and
-maps 12 standard Haskell packages to BHC builtins. Focus is shifting to end-to-end
-testing with real Hackage packages and remaining Pandoc dependencies.
-
-See `TODO-pandoc.md` for the detailed Pandoc compilation roadmap.
-
-### Principles
-
-1. **Compatibility** — Parse and compile code written for GHC
-2. **Gradual adoption** — Existing code should "just work"
-3. **Standards-first** — Follow Haskell 2010/GHC extensions where sensible
-4. **Clear errors** — When features aren't supported, say so clearly
+**Why this is next:** Today 10/221 Pandoc modules pass `bhc check`. The other
+211 fail exclusively on unresolved imports — not parse errors, not type errors.
+This milestone connects Pandoc's modules to each other.
 
 ### Deliverables
 
-#### Phase 1: LANGUAGE Pragmas ✅
-- [x] Parse `{-# LANGUAGE ExtensionName #-}` at module level
-- [x] Parse `{-# OPTIONS_GHC ... #-}`
-- [x] Track enabled extensions per module
-- [x] 30+ extensions supported: OverloadedStrings, LambdaCase, BangPatterns, GADTs, ScopedTypeVariables, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, FunctionalDependencies, GeneralizedNewtypeDeriving, DeriveGeneric, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveAnyClass, StandaloneDeriving, TypeOperators, PatternSynonyms, ViewPatterns, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, EmptyDataDecls, EmptyCase, StrictData, DefaultSignatures, OverloadedLists, InstanceSigs, etc.
-- [ ] Parse `{-# INLINE/NOINLINE/SPECIALIZE #-}` pragmas (parsed but not used by optimizer)
+- [ ] **Import resolution from source tree** — When `Text.Pandoc.Slides`
+  imports `Text.Pandoc.Definition`, BHC finds and loads the module from the
+  same source directory. This requires wiring the `-I` flag or an equivalent
+  source search path into the `bhc check` pipeline.
 
-#### Phase 2: Layout Rule ✅
-- [x] Implement Haskell 2010 layout rule (Section 10.3)
-- [x] Implicit `{`, `}`, `;` insertion based on indentation
-- [x] Handle `where`, `let`, `do`, `of`, `case` layout contexts
-- [x] Mixed explicit/implicit layout support
-- [x] Multi-line type signatures (continuation tokens prevent spurious VirtualSemi)
-- [x] Guard syntax (`|`) handled as continuation
-- [x] Multi-level dedent generates correct VirtualRBrace sequence
-- [x] Nested layout blocks (where inside where, do inside do, let inside do)
-- [x] `\case` (LambdaCase) layout detection
-- [x] EOF cleanup closes remaining implicit blocks
-- [ ] Error recovery for layout mistakes
+- [ ] **Dependency-ordered batch check** — `bhc check` on a directory compiles
+  modules in topological order (already implemented for multi-file compilation;
+  extend to `check` mode).
 
-**Note:** The layout rule is fully implemented in the lexer (~300 lines in `bhc-lexer/src/lib.rs`)
-with VirtualLBrace/VirtualRBrace/VirtualSemi token insertion. All 163 E2E tests use
-indentation-based layout (only 3 of 163 use explicit braces). Verified with 39 lexer unit
-tests including edge cases and a comprehensive layout-focused E2E test (E.65).
+- [ ] **Cross-module type propagation in check mode** — Types, constructors,
+  and class instances from compiled modules must be visible when checking
+  downstream modules. The `.bhi` pipeline handles this for separate compilation;
+  verify it works in batch-check mode.
 
-#### Phase 3: Module System — Mostly Complete
-- [x] Import declarations with common forms (import, qualified, as, hiding)
-- [x] Qualified names: `Data.Map.lookup`
-- [x] Hierarchical module names
-- [x] Multi-module compilation with dependency ordering (E.6)
-- [ ] Full export list syntax: `module Foo (bar, Baz(..), module X) where`
-- [ ] `import Foo (Type(..), pattern Pat)` — pattern import syntax
-
-#### Phase 4: Declarations ✅
-- [x] Type class declarations with methods and default implementations (E.39–E.41)
-- [x] Instance declarations with method implementations (E.38)
-- [x] `deriving` clauses: Eq, Ord, Show, Enum, Bounded, Functor, Foldable, Traversable, Generic (E.23–E.24, E.51–E.54, E.63)
-- [x] Standalone deriving: `deriving instance Eq Foo` (E.62)
-- [x] GADT syntax for data declarations (E.60)
-- [x] Pattern synonyms: `pattern P x = ...` (E.62)
-- [ ] Foreign declarations: `foreign import/export`
-
-#### Phase 5: Patterns & Expressions ✅
-- [x] Pattern guards: `f x | Just y <- g x = ...`
-- [x] View patterns: `f (view -> pat) = ...` (E.34)
-- [x] As-patterns: `f xs@(x:_) = ...`
-- [x] Record patterns: `f Foo{bar=x} = ...` (E.33)
-- [x] Infix constructor patterns: `f (x:xs) = ...`
-- [x] Where clauses in function definitions
-- [x] Multi-way if: `if | cond1 -> e1 | cond2 -> e2` (E.35)
-- [x] Lambda-case: `\case Pat1 -> e1; Pat2 -> e2`
-- [ ] Typed holes: `_ :: Type`
-
-#### Phase 6: Types — Mostly Complete
-- [x] `forall` quantification: `forall a. a -> a`
-- [x] Scoped type variables (E.46)
-- [x] Kind signatures
-- [x] Constraint kinds: `(Show a, Eq a) => ...`
-- [x] MultiParamTypeClasses (E.49)
-- [x] FunctionalDependencies (E.50)
-- [x] FlexibleInstances, FlexibleContexts (E.48)
-- [x] TypeOperators (E.61)
-- [ ] Type applications: `f @Int x`
-- [x] Type families: open (`type family F a` + `type instance`), closed (`type family F a where ...`)
-- [x] Associated type families in classes
-
-#### Phase 7: Core IR Optimization Pipeline
-
-Design informed by HBC's (Lennart Augustsson) proven simplifier and analysis passes.
-
-- [x] **Core Simplifier** (E.68) — iterate-to-fixpoint pass with:
-  - [x] Constant folding (Int/Double arithmetic, negate, String `++`)
-  - [x] Beta reduction (cheap args only — variables, literals)
-  - [x] Case-of-known-constructor
-  - [x] Local dead binding elimination (cheap RHS only)
-  - [x] Local let inlining (cheap RHS only)
-  - [x] Occurrence analysis (Dead/Once/OnceInLam/Many)
-  - [x] Capture-avoiding substitution with alpha-renaming
-  - [x] Top-level inlining (cheap-only: Var aliases, Lit constants; protected names skipped)
-  - [x] Top-level dead binding elimination (export-aware; cheap RHS only)
-  - [x] Case-of-case (with size budget)
-- [x] **Pattern Match Compilation** (E.70) — replaced equation-by-equation with:
-  - Column-based decision tree generation (Augustsson/Sestoft algorithm)
-  - Exhaustiveness checking and warnings
-  - Overlap/redundancy detection and warnings
-- [x] **Demand Analysis + Worker/Wrapper** (O.3) — per-function strictness (Default profile):
-  - Boolean-tree abstract interpretation
-  - Fixpoint iteration for recursive binding groups
-  - Worker/wrapper transformation for strict arguments
-  - Wired into driver pipeline after first simplifier pass, gated on lazy profiles
-- [x] **Dictionary Specialization** (O.4) — monomorphize typeclass-polymorphic code:
-  - Direct method selection on known dictionaries
-  - Cleanup simplifier pass after specialization
-
-See `rules/013-optimization.md` for detailed design.
-
-### Test Strategy
-
-Each phase will be validated against real codebases:
-
-| Phase | Test Target | Status |
-|-------|-------------|--------|
-| 1 | Parse `{-# LANGUAGE ... #-}` pragmas | ✅ 30+ extensions |
-| 2 | Parse xmonad's StackSet.hs without errors | Layout rule ✅, needs package system |
-| 3 | Resolve imports in a multi-module project | ✅ Working (E.6) |
-| 4 | Compile programs with classes, instances, GADTs | ✅ Working (E.38–E.64) |
-| 5 | Parse lens library type signatures | ✅ Type families implemented |
-| 6 | Full type system coverage | ✅ Type families + data families done |
-| 7 | Compiled programs run measurably faster | 🟡 Core simplifier (E.68-E.69): local + top-level transforms, case-of-case; demand analysis + worker/wrapper (O.3) |
+- [ ] **Re-export resolution** — `module Text.Pandoc.Class` re-exports names
+  from `Text.Pandoc.Class.PandocMonad`. BHC must follow `module Foo` re-exports
+  in export lists.
 
 ### Exit Criteria
 
-- [ ] `bhc check` succeeds on xmonad source files (needs package system)
-- [ ] `bhc check` succeeds on pandoc source files (needs package system, CPP)
-- [x] Common GHC extensions parsed and implemented (30+ extensions)
-- [ ] All Haskell 2010 Report features supported (layout rule ✅, foreign decls remaining)
-- [ ] Clear error messages for unsupported extensions
-- [ ] Core simplifier reduces code size by ≥20% on test programs
-- [ ] Non-exhaustive pattern matches produce compiler warnings
+- `bhc check` on the Pandoc source tree (221 files) passes for all modules
+  whose imports are satisfiable within the Pandoc source tree itself (estimated
+  50–80 modules, depending on how many reference only internal modules)
+- Zero regressions in existing 199 E2E tests
 
-### Key Files to Modify
+### Key Files
 
 ```
-crates/bhc-lexer/src/
-├── lib.rs              # Layout token insertion
-├── layout.rs           # NEW: Layout rule implementation
-
-crates/bhc-parser/src/
-├── lib.rs              # Module-level pragma parsing
-├── decl.rs             # Class/instance/GADT declarations
-├── expr.rs             # Pattern guards, lambda-case
-├── pattern.rs          # As-patterns, view patterns
-├── types.rs            # forall, type applications
-├── pragma.rs           # NEW: Pragma parsing
-├── module.rs           # NEW: Import/export parsing
-
-crates/bhc-ast/src/
-├── lib.rs              # New AST nodes for extensions
-├── extension.rs        # NEW: Extension flag tracking
+crates/bhc-driver/src/lib.rs      — batch check mode, source search paths
+crates/bhc-lower/src/loader.rs    — module loading and re-export following
+crates/bhc-interface/src/         — .bhi generation/consumption
 ```
 
 ---
 
-## Known Issues
+## P2 — Hackage Package Compilation
 
-### Phase 2: Closure Hardening — RESOLVED
+**Goal:** Compile Pandoc's leaf dependencies from Hackage source using `hx build`.
 
-**Found:** 2026-01-30 during blog post compiler testing
-**Resolved:** 2026-01-30
+**Why:** Pandoc imports ~80 packages. We can't stub them all. The fastest path
+is compiling the simple leaf packages (no C FFI, no TH) from source.
 
-The reported nested closure invocation segfault (exit code 139) has been resolved. All previously crashing programs now compile and run correctly:
+### Deliverables
 
-```haskell
--- Previously crashed, now works correctly (output: 20)
-twice f x = f (f x)
-fib 0 = 0
-fib 1 = 1
-fib n = fib (n - 1) + fib (n - 2)
-main = print (twice (\x -> x * 2) (fib 5))
+- [ ] **End-to-end `hx build` test** — Pick a trivial Hackage package (e.g.,
+  `data-default-class`, `tagged`, `void`) and compile it from source using the
+  full hx pipeline: fetch → solve → build with BHC.
+
+- [ ] **`base` package stub** — BHC's 500+ builtins must be exposed as a
+  proper `base` package in the package DB so that Hackage packages can
+  `import Data.List`, `import Control.Monad`, etc. and resolve against BHC's
+  built-in implementations.
+
+- [ ] **`text` / `bytestring` / `containers` package stubs** — Same treatment.
+  BHC already has RTS implementations; they need package DB entries with correct
+  module maps so downstream packages can import them.
+
+- [ ] **Conditional dependencies** — Many `.cabal` files use `if impl(ghc)`
+  guards. hx-solver needs to handle BHC as a known implementation, or fall
+  through to a default branch.
+
+- [ ] **Compile 10 leaf packages** — Target list (all zero-TH, minimal deps):
+  `data-default-class`, `tagged`, `void`, `nats`, `semigroups`,
+  `hashable`, `unordered-containers`, `scientific`, `attoparsec`,
+  `case-insensitive`.
+
+### Exit Criteria
+
+- `hx build` compiles at least 10 Hackage packages from source to `.bhi` + `.o`
+- Packages are usable as dependencies by downstream packages
+- No manual patching of package source required (or patches are minimal and
+  documented)
+
+### Key Files
+
+```
+crates/bhc-package/src/           — package DB, package resolution
+crates/bhc-interface/src/         — .bhi generation for compiled packages
+hx repo: hx-bhc/                  — BHC backend for hx package manager
 ```
 
-**Root cause:** The issue was fixed in prior codegen/parser work. Diagnostic testing confirmed all three features work both in isolation and combined:
-- Closure argument used multiple times (`twice f x = f (f x)`) — works
-- Multi-clause function definitions with pattern matching (`fib 0 = 0; fib 1 = 1; fib n = ...`) — works
-- Combined program with both features — works
+---
 
-**Regression tests added:**
-- `examples/twice.hs` — Higher-order function calling closure argument twice
-- `examples/pattern-match-fib.hs` — Multi-clause function definition with literal patterns
+## P3 — Pandoc `bhc check`
+
+**Goal:** `bhc check` succeeds on 100% of Pandoc's 221 source files.
+
+**Why:** This is the exit criterion from the blog post promise. It proves BHC
+can type-check a real 60k LOC Haskell project.
+
+### Deliverables
+
+- [ ] **pandoc-types package** — Compile or stub `Text.Pandoc.Definition`
+  (defines `Block`, `Inline`, `Meta`, etc.). This is Pandoc's core type
+  package and is imported by nearly every module.
+
+- [ ] **parsec compatibility** — Pandoc uses parsec combinators extensively.
+  Either compile parsec from source (preferred) or provide a compatible API
+  stub. Key types: `ParsecT`, `SourcePos`. Key combinators: `parse`, `try`,
+  `many`, `many1`, `char`, `string`, `noneOf`, `oneOf`, `<|>`, `option`,
+  `optional`, `sepBy`, `endBy`, `between`, `choice`.
+
+- [ ] **aeson compatibility** — Pandoc uses aeson for metadata. With
+  GHC.Generics working, generic deriving should cover `ToJSON`/`FromJSON`.
+  Compile aeson from source or provide the core `Value` type + `encode`/`decode`.
+
+- [ ] **Remaining Pandoc deps** — Compile or stub: `skylighting-core`,
+  `doctemplates`, `texmath`, `xml-conduit`, `network-uri`, `http-types`,
+  `zip-archive`, `citeproc`, `commonmark`.
+
+- [ ] **RankNTypes / ExistentialQuantification** — Some Pandoc modules use
+  rank-2 types. Implement at least rank-2 (forall in argument position) to
+  unblock these.
+
+### Exit Criteria
+
+- `bhc check` on all 221 Pandoc 3.6.4 source files: 221/221 pass
+- Automated CI job runs this check on every commit
+
+### Key Files
+
+```
+crates/bhc-typeck/src/            — RankNTypes support
+crates/bhc-parser/src/            — any remaining parse gaps
+```
 
 ---
 
-## Risk Register
+## P4 — Pandoc Native Binary
 
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| Fusion complexity | High | Start with simple patterns, iterate |
-| GC latency in Server | Medium | Incremental GC from M5 |
-| SIMD portability | Medium | Abstract over target widths |
-| FFI safety | High | Conservative defaults, unsafe escape hatch |
-| Scope creep | High | Strict exit criteria per milestone |
-| Error message quality | Medium | User testing, iterate based on feedback |
+**Goal:** `bhc build pandoc` produces a working native executable.
+
+**Why:** This is the ultimate proof that BHC compiles real-world Haskell.
+
+### Deliverables
+
+- [ ] **Full codegen for Pandoc modules** — Move from `check` to `build`.
+  Every Core IR construct used by Pandoc must lower to LLVM.
+
+- [ ] **Link 221 modules** — Produce a single native binary from all compiled
+  object files plus BHC's RTS.
+
+- [ ] **Functional smoke test** — `echo "# Hello" | ./pandoc -f markdown -t html`
+  produces `<h1>Hello</h1>`.
+
+- [ ] **Correctness test suite** — Run Pandoc's own test suite against the
+  BHC-compiled binary. Track pass rate.
+
+### Exit Criteria
+
+- `bhc build` on Pandoc source tree produces a native binary
+- Binary converts Markdown to HTML correctly for basic documents
+- Pandoc's test suite pass rate documented (target: >80%)
 
 ---
 
-## Decision Log
+## W1 — WASM Backend Validation
 
-| Date | Decision | Rationale |
-|------|----------|-----------|
-| 2026-01 | Implementation language: Rust | Performance, safety, excellent tooling |
-| 2026-01 | Diagnostic model: Rust-inspired | Best-in-class error UX |
+**Goal:** `bhc --target=wasi Main.hs -o app.wasm && wasmtime app.wasm` works
+for hello world.
+
+**Status:** WASM emitter exists (bhc-wasm) but output fails wasmtime validation.
+All 6 WASM E2E tests fail with "WebAssembly translation error".
+
+### Deliverables
+
+- [ ] **Fix binary format** — Debug wasmtime validation errors. The emitter
+  produces output but the WASM module structure is malformed.
+- [ ] **Hello world E2E** — `putStrLn "Hello"` compiles to WASM and runs under
+  wasmtime.
+- [ ] **Numeric kernels in WASM** — Verify Tensor IR → Loop IR → WASM pipeline
+  produces correct results.
+
+### Exit Criteria
+
+- `wasmtime app.wasm` prints "Hello, World!" for a BHC-compiled WASM binary
+- At least 3 of 6 WASM E2E tests pass
+
+---
+
+## T1 — Tooling Polish
+
+**Goal:** REPL, IR inspector, and LSP provide usable developer experience.
+
+### Deliverables
+
+- [ ] **REPL evaluation** — `bhci` evaluates expressions (currently stubbed).
+  At minimum: literals, function application, let-bindings, `:type` command.
+- [ ] **IR inspector** — `bhi` displays Core IR and Tensor IR for compiled
+  modules. Useful for debugging optimization passes.
+- [ ] **LSP basics** — Go-to-definition, hover-for-type, diagnostics on save.
+  The LSP server compiles but needs integration testing.
+- [ ] **`-ddump-*` flags** — Wire `dump-core-after-simpl`, `dump-core-after-demand`,
+  `dump-core-final` into the driver for optimization debugging.
+
+### Exit Criteria
+
+- `bhci` evaluates `1 + 1` and prints `2`
+- `bhi` displays Core IR for a compiled module
+- LSP provides hover types in VS Code
+
+---
+
+## Remaining Work (Carried Forward)
+
+Items from the previous roadmap that are not yet complete but don't warrant
+their own milestone. These will be addressed opportunistically or as blockers
+surface.
+
+### Language Features
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| RankNTypes (rank-2) | 🔴 | Needed for some Pandoc modules |
+| ExistentialQuantification | 🔴 | Used in Pandoc's PandocMonad |
+| ConstraintKinds | 🔴 | Used in some Pandoc deps |
+| TemplateHaskell | 🔴 | Deferred — GHC.Generics covers most TH use cases |
+| `.hs-boot` files | 🔴 | Mutual module recursion |
+| `foreign export` codegen | 🔴 | `foreign import` works; export not yet |
+| Typed holes (`_ :: Type`) | 🔴 | Nice for IDE experience |
+| Error recovery in layout | 🔴 | Better error messages |
+| `INLINE`/`SPECIALIZE` pragmas | 🟡 | Parsed but not used by optimizer |
+| Incremental recompilation | 🔴 | Check timestamps/hashes |
+
+### Standard Library Gaps
+
+| Library | Status | Notes |
+|---------|--------|-------|
+| Data.Graph / Data.Tree | 🔴 | Used by some Pandoc deps |
+| process (spawn subprocesses) | 🔴 | `System.Process` |
+| time (date/time types) | 🔴 | `Data.Time` |
+| network-uri (URI parsing) | 🔴 | Small, pure Haskell |
+| Data.Char full Unicode | 🟡 | Currently ASCII-only predicates |
+| `realToFrac` | 🔴 | Numeric conversion |
+| `reads` (general parsing) | 🔴 | Used by Read instances |
+| Temporary files | 🔴 | `withTempFile`, `withTempDirectory` |
+
+### Backend/Runtime
+
+| Item | Status | Notes |
+|------|--------|-------|
+| WASM binary validation | 🔴 | See W1 |
+| GPU end-to-end testing | 🟡 | Requires CUDA hardware |
+| Bare metal codegen | 🟡 | LLVM target work needed |
+| REPL evaluation | 🔴 | See T1 |
+
+---
+
+## Completed Work
+
+Everything below is done. Kept for reference.
+
+### Compiler Pipeline (M0–M3)
+
+- Lexer, parser, type checker, HIR, Core IR, LLVM codegen — all working
+- 199 E2E tests across 70 milestones (E.1–E.70)
+- Native executables via LLVM (hello world through GADTs + monad transformers)
+- Closures, thunks, lazy evaluation, pattern matching, ADTs
+- Generational GC, work-stealing scheduler, STM
+
+### Language Features (M11 / Phase 9)
+
+- 30+ GHC extensions implemented
+- Full typeclass system: dictionary passing, superclasses, default methods,
+  DeriveAnyClass, GND, DerivingStrategies
+- 9 stock derivable classes: Eq, Show, Ord, Enum, Bounded, Functor, Foldable,
+  Traversable, Read + Generic stubs
+- Record syntax: named fields, accessors, construction, update, wildcards, puns
+- GADTs with type refinement
+- Type families (open, closed, associated) + data families
+- CPP preprocessing (built-in Rust preprocessor)
+- Layout rule (full Haskell 2010 Section 10.3)
+- Type applications (`f @Int x`)
+- Pattern synonyms, view patterns, multi-way if, lambda-case
+- Standalone deriving, empty data decls, strict data, default signatures
+
+### Core IR Optimizer (O.1–O.4)
+
+- Simplifier: constant folding, beta reduction, case-of-known-constructor,
+  case-of-case, dead binding elimination, inlining, occurrence analysis
+- Pattern match compilation: Augustsson/Sestoft decision trees, exhaustiveness
+  and overlap checking
+- Demand analysis + worker/wrapper: boolean-tree strictness, fixpoint iteration
+- Dictionary specialization: direct method selection on known dictionaries
+
+### Standard Library
+
+- 500+ builtins: Prelude, Data.List (70+), Data.Map/Set/IntMap/IntSet,
+  Data.Maybe, Data.Either, Control.Monad, Data.Char, Data.Text (25+),
+  Data.ByteString (24), monad transformers (StateT/ReaderT/ExceptT/WriterT),
+  Data.Sequence, GHC.Generics, IORef, Rational
+- Lazy Text, Lazy ByteString, ByteString.Builder
+- File IO, directory operations, exception handling with typed catch
+- Text.Encoding: encodeUtf8/decodeUtf8
+
+### Separate Compilation (E.66)
+
+- `-c` mode: compile to `.o` + `.bhi` without linking
+- `--odir`/`--hidir`/`--package-db` flags
+- `.bhi` interface generation and consumption
+- TypeConverter bridge for cross-module type checking
+- hx package manager integration wired (hx-bhc crate)
+
+### Runtime System (M5, M7)
+
+- Structured concurrency: withScope, spawn, await, cancel, deadlines
+- STM: TVar, atomically, retry, orElse, TMVar, TQueue
+- Work-stealing scheduler with crossbeam deques
+- Incremental GC with tri-color marking, SATB barriers
+- Realtime profile: bounded GC pauses, frame arenas
+- Embedded profile: no-GC static allocation
+
+### Numeric Pipeline (M1–M3)
+
+- Tensor IR with shape/stride metadata and fusion passes
+- Loop IR with auto-vectorization (SIMD) and parallel loops
+- Hot arena allocator, pinned buffers
+- GPU backend: PTX codegen, device memory, kernel launch (mock-tested)
+
+### Pandoc Smoke Test (2026-02-27)
+
+- 221/221 Pandoc source files parse successfully (0 parse errors)
+- 10 modules pass full `bhc check` (parse + typecheck + Core IR lowering)
+- 211 modules fail only on unresolved external package imports
+- Parser bug fixed: `where` on its own line after module export list
+
+---
+
+## Principles
+
+1. **Real code drives the roadmap** — Every milestone is validated against
+   Pandoc or Hackage packages, not synthetic tests
+2. **Bottom-up** — Compile leaf packages first, work up the dependency tree
+3. **No stubs where compilation works** — Prefer compiling from source over
+   hand-written stubs
+4. **One blocker at a time** — Fix the highest-impact blocker, re-test, repeat
 
 ---
 
 ## References
 
-- [H26-SPEC-0001] Haskell 2026 Platform & Runtime Specification
-- [BHC-SPEC-0001] Basel Haskell Compiler Specification
-- [Rust Error Index](https://doc.rust-lang.org/error_codes/error-index.html) — Reference for error code system
-- [Rust Diagnostic Guidelines](https://rustc-dev-guide.rust-lang.org/diagnostics.html) — Design principles
-- See `CLAUDE.md` for project overview
-- See `rules/` for coding guidelines
+- [Pandoc Smoke Test Results](TODO-pandoc.md) — Detailed error catalog
+- [BHC Specification](../CLAUDE.md) — Project overview and architecture
+- [Coding Rules](rules/) — Style, testing, optimization, IR design
+- [Blog: BHC Parses All of Pandoc](https://arcanist.sh/bhc/blog/bhc-parses-all-of-pandoc/)

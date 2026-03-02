@@ -18,9 +18,18 @@ impl<'src> Parser<'src> {
         // Collect doc comments that may appear before the module declaration (Haddock)
         let doc = self.collect_doc_comments();
 
+        // Skip virtual tokens (VirtualSemi) that the layout rule may insert
+        // between a doc comment and the `module` keyword. The doc comment is
+        // the first real token, so the layout rule's `first_token` guard is
+        // already cleared and a VirtualSemi gets emitted before `module`.
+        self.skip_virtual_tokens();
+
         // Optional module header
         let (name, exports) = if self.eat(&TokenKind::Module) {
             let name = self.parse_module_name()?;
+            // Skip virtual tokens between module name and export list `(` —
+            // when the `(` starts at column 1 the layout rule emits VirtualSemi.
+            self.skip_virtual_tokens();
             let exports = if self.check(&TokenKind::LParen) {
                 Some(self.parse_export_list()?)
             } else {

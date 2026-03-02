@@ -327,7 +327,7 @@ fn process_imports(
                     module = %module_name,
                     "module not found in search paths, using standard library fallback"
                 );
-                register_standard_module_exports(ctx, &module_name);
+                register_standard_module_exports(ctx, &module_name, Some(import));
             }
             Err(LoadError::CircularImport(ref cycle_module)) => {
                 // Log circular import but don't fail - allow compilation to continue
@@ -337,7 +337,7 @@ fn process_imports(
                     "circular import detected"
                 );
                 // Still register standard exports as fallback
-                register_standard_module_exports(ctx, &module_name);
+                register_standard_module_exports(ctx, &module_name, Some(import));
             }
             Err(e) => {
                 // Other errors (IO, parse) - log and fall back
@@ -346,7 +346,7 @@ fn process_imports(
                     error = %e,
                     "failed to load module, using standard library fallback"
                 );
-                register_standard_module_exports(ctx, &module_name);
+                register_standard_module_exports(ctx, &module_name, Some(import));
             }
         }
     }
@@ -356,7 +356,13 @@ fn process_imports(
 ///
 /// This is a temporary solution until we have proper module loading.
 /// It registers common functions from well-known modules.
-fn register_standard_module_exports(ctx: &mut LowerContext, module_name: &str) {
+/// When `import_decl` is provided, qualified names are also registered under the
+/// import alias (e.g., `T.pack` for `import qualified Data.Text as T`).
+fn register_standard_module_exports(
+    ctx: &mut LowerContext,
+    module_name: &str,
+    import_decl: Option<&ast::ImportDecl>,
+) {
     let exports: &[&str] = match module_name {
         "Prelude" => &[
             // Numeric
@@ -1964,19 +1970,43 @@ fn register_standard_module_exports(ctx: &mut LowerContext, module_name: &str) {
         _ => &[],
     };
 
-    let module_sym = Symbol::intern(module_name);
+    // Determine the qualifier to use for qualified access
+    let qualifier = if let Some(import) = import_decl {
+        if let Some(alias) = &import.alias {
+            alias
+                .parts
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(".")
+        } else {
+            module_name.to_string()
+        }
+    } else {
+        module_name.to_string()
+    };
+
     for &export in exports {
-        let qualified_name = Symbol::intern(&format!("{}.{}", module_name, export));
         let unqualified = Symbol::intern(export);
 
-        // If the qualified name is already directly bound (e.g. as a builtin
-        // with its own DefId), don't register a qualified-to-unqualified mapping
-        // that would redirect to a different Prelude function.
-        if ctx.lookup_value(qualified_name).is_none() {
-            ctx.register_qualified_name(qualified_name, unqualified);
+        // Register qualified name under the alias: e.g. T.pack -> pack
+        let aliased_qualified = Symbol::intern(&format!("{}.{}", qualifier, export));
+        if ctx.lookup_value(aliased_qualified).is_none() {
+            ctx.register_qualified_name(aliased_qualified, unqualified);
         }
 
-        // Also ensure the unqualified name is defined (if not already)
+        // Also register under the full module name: e.g. Data.Text.pack -> pack
+        if qualifier != module_name {
+            let full_qualified = Symbol::intern(&format!("{}.{}", module_name, export));
+            if ctx.lookup_value(full_qualified).is_none() {
+                ctx.register_qualified_name(full_qualified, unqualified);
+            }
+        }
+
+        // Ensure the unqualified name is defined (if not already).
+        // For qualified-only imports, still define it internally so the
+        // qualified -> unqualified mapping has a target, but the user can
+        // only access it via the qualifier.
         if ctx.lookup_value(unqualified).is_none() {
             let def_id = ctx.fresh_def_id();
             ctx.define(def_id, unqualified, DefKind::Value, Span::default());

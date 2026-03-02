@@ -880,7 +880,9 @@ impl Compiler {
         }
 
         match maybe_module {
-            Some(module) => Ok(module),
+            Some(module) => {
+                Ok(module)
+            },
             None => Err(CompileError::ParseError(diagnostics.len())),
         }
     }
@@ -2930,12 +2932,27 @@ impl Compiler {
         }
 
         // Phase 1: Parse all files to extract module names and imports
+        // Parse errors are recorded but don't abort the entire check.
         let mut module_info: Vec<(Utf8PathBuf, String, Vec<String>)> = Vec::new();
+        let mut parse_failures: Vec<(String, CompileError)> = Vec::new();
         let file_id = FileId::new(0);
 
         for path in paths {
-            let unit = CompilationUnit::from_path(path.clone())?;
-            let ast = self.parse(&unit, file_id)?;
+            let unit = match CompilationUnit::from_path(path.clone()) {
+                Ok(u) => u,
+                Err(e) => {
+                    let name = path.file_stem().unwrap_or("unknown").to_string();
+                    parse_failures.push((name, e));
+                    continue;
+                }
+            };
+            let ast = match self.parse(&unit, file_id) {
+                Ok(a) => a,
+                Err(e) => {
+                    parse_failures.push((unit.module_name.clone(), e));
+                    continue;
+                }
+            };
 
             let module_name = ast.name.as_ref().map_or_else(
                 || unit.module_name.clone(),
@@ -3040,6 +3057,11 @@ impl Compiler {
                     results.push((mod_name.clone(), Err(e)));
                 }
             }
+        }
+
+        // Append parse failures to results
+        for (name, err) in parse_failures {
+            results.push((name, Err(err)));
         }
 
         Ok(results)

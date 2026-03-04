@@ -68,15 +68,20 @@ pub struct Lexer<'src> {
 
     // Layout rule state
     /// Stack of indentation levels for layout blocks.
-    /// Each entry is (column, is_explicit) where is_explicit means
-    /// the block was opened with an explicit '{'.
-    layout_stack: Vec<(u32, bool)>,
+    /// Each entry is (column, is_explicit, is_let) where:
+    /// - `is_explicit` means the block was opened with an explicit '{'
+    /// - `is_let` means the block was opened by the `let` keyword (and is
+    ///   therefore closeable by the `in` keyword)
+    layout_stack: Vec<(u32, bool, bool)>,
     /// Pending tokens to emit (from layout rule).
     pending: Vec<Spanned<Token>>,
     /// Column of the first token on the current line (1-indexed).
     line_start_column: u32,
     /// Whether we just saw a layout keyword and expect a block.
     expect_layout_block: bool,
+    /// Whether the pending layout block was triggered by `let` (vs. `where`, `do`, `of`).
+    /// Only meaningful when `expect_layout_block` is true.
+    pending_layout_is_let: bool,
     /// Whether we're at the start of a logical line.
     at_line_start: bool,
     /// Current line number (1-indexed).
@@ -105,10 +110,11 @@ impl<'src> Lexer<'src> {
             src,
             pos: 0,
             config,
-            layout_stack: vec![(1, false)], // Implicit module-level context at column 1
+            layout_stack: vec![(1, false, false)], // Implicit module-level context at column 1
             pending: Vec::new(),
             line_start_column: 1,
             expect_layout_block: false,
+            pending_layout_is_let: false,
             at_line_start: true,
             first_token: true, // Track if we've emitted any tokens yet
             line: 1,
@@ -894,7 +900,8 @@ impl<'src> Lexer<'src> {
             }
             Some('x') => {
                 self.advance();
-                self.lex_hex_escape(2)
+                // Haskell allows arbitrary-length hex escapes: \xD7FF, \x10FFFF, etc.
+                self.lex_hex_escape(8)
             }
             Some('u') => {
                 self.advance();
@@ -1227,7 +1234,7 @@ impl<'src> Lexer<'src> {
             self.at_line_start = false;
 
             // Compare with current layout context
-            while let Some(&(ctx_col, is_explicit)) = self.layout_stack.last() {
+            while let Some(&(ctx_col, is_explicit, _is_let)) = self.layout_stack.last() {
                 if is_explicit {
                     break; // Don't close explicit braces
                 }
@@ -1258,24 +1265,54 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        // Check for layout keywords that start a new block
+        // Check for layout keywords that start a new block.
         // This is done AFTER indentation handling so VirtualSemi is inserted before 'let' etc.
+        // Record whether the pending layout block is for `let`, so that the `in`
+        // handler below knows which blocks it is allowed to close.
         if token.kind.starts_layout() {
             self.expect_layout_block = true;
+            self.pending_layout_is_let = token.kind == TokenKind::Let;
         }
 
         // Handle \case (LambdaCase) - case after backslash triggers layout
         if token.kind == TokenKind::Case && self.prev_token_kind == Some(TokenKind::Backslash) {
             self.expect_layout_block = true;
+            self.pending_layout_is_let = false;
         }
 
-        // Handle explicit open brace/paren/bracket - push explicit context
-        // Layout is suspended inside (), [], and {}
+        // `in` closes the innermost implicit `let` layout block.
+        //
+        // Per Haskell 2010 §10.3: when `in` is encountered, the implicit layout
+        // block opened by the matching `let` is closed (a virtual `}` is inserted
+        // before `in`).  This is necessary when `in` appears on the *same line*
+        // as the last `let`-binding, because in that case `at_line_start` is false
+        // and the indentation-based handler did not fire.
+        //
+        // We only close the block if the top of the stack was opened by `let`
+        // (tracked via the `is_let` flag in the layout stack entry).  This
+        // prevents `in` from accidentally closing `where`, `do`, or `case of`
+        // layout blocks — e.g. `let { x = 1 } in x` uses explicit braces so no
+        // implicit `let` block is ever pushed, and we must not close the
+        // surrounding module or `where` block.
+        if token.kind == TokenKind::In {
+            if let Some(&(_, is_explicit, is_let)) = self.layout_stack.last() {
+                if !is_explicit && is_let {
+                    self.layout_stack.pop();
+                    self.pending.push(Spanned::new(
+                        Token::new(TokenKind::VirtualRBrace),
+                        Span::from_raw(self.pos as u32, self.pos as u32),
+                    ));
+                }
+            }
+        }
+
+        // Handle explicit open brace/paren/bracket - push explicit context.
+        // Layout is suspended inside (), [], and {}.
         if matches!(
             token.kind,
             TokenKind::LBrace | TokenKind::LParen | TokenKind::LBracket
         ) {
-            self.layout_stack.push((0, true)); // Explicit context
+            self.layout_stack.push((0, true, false)); // Explicit context
         }
 
         // Handle explicit close brace/paren/bracket
@@ -1284,7 +1321,7 @@ impl<'src> Lexer<'src> {
             TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket
         ) {
             // Close any implicit contexts until we find explicit one
-            while let Some(&(_, is_explicit)) = self.layout_stack.last() {
+            while let Some(&(_, is_explicit, _)) = self.layout_stack.last() {
                 if is_explicit {
                     self.layout_stack.pop();
                     break;
@@ -1470,9 +1507,13 @@ impl<'src> Iterator for Lexer<'src> {
                 // Explicit brace - handle_layout will push the explicit context
                 // when it sees the LBrace token, so we don't need to do anything here
             } else if self.peek().is_some() {
-                // Implicit layout - insert virtual brace BEFORE the next token
+                // Implicit layout - insert virtual brace BEFORE the next token.
+                // Record whether this block was opened by `let` so that the `in`
+                // keyword handler can selectively close it.
                 let column = self.column;
-                self.layout_stack.push((column, false));
+                let is_let = self.pending_layout_is_let;
+                self.pending_layout_is_let = false;
+                self.layout_stack.push((column, false, is_let));
 
                 // Clear at_line_start so the first token in the block
                 // doesn't get a VirtualSemi before it
@@ -1499,7 +1540,7 @@ impl<'src> Iterator for Lexer<'src> {
 
         // At EOF: close any remaining implicit layout blocks (except module-level)
         while self.layout_stack.len() > 1 {
-            if let Some(&(_, is_explicit)) = self.layout_stack.last() {
+            if let Some(&(_, is_explicit, _is_let)) = self.layout_stack.last() {
                 if is_explicit {
                     break; // Don't auto-close explicit braces
                 }

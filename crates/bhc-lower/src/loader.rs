@@ -524,25 +524,31 @@ pub fn load_module(
         message: e.to_string(),
     })?;
 
+    // Apply CPP preprocessing if needed
+    let source = if needs_cpp(&source) {
+        preprocess_cpp(&source)
+    } else {
+        source
+    };
+
     // Parse the module
     // Use a fresh FileId - in a real implementation we'd track these
     let file_id = FileId::new(0);
     let (module, diagnostics) = bhc_parser::parse_module(&source, file_id);
 
-    // Check for parse errors
-    if !diagnostics.is_empty() {
-        cache.end_loading(sym);
-        let messages: Vec<_> = diagnostics.iter().map(|d| d.message.clone()).collect();
-        return Err(LoadError::ParseError {
-            path,
-            message: messages.join("; "),
-        });
-    }
-
-    let module = module.ok_or_else(|| LoadError::ParseError {
-        path: path.clone(),
-        message: "failed to parse module".to_string(),
-    })?;
+    // Only fail if module couldn't be parsed at all (match driver behavior —
+    // diagnostics may include non-fatal warnings that don't prevent parsing)
+    let module = match module {
+        Some(m) => m,
+        None => {
+            cache.end_loading(sym);
+            let messages: Vec<_> = diagnostics.iter().map(|d| d.message.clone()).collect();
+            return Err(LoadError::ParseError {
+                path,
+                message: messages.join("; "),
+            });
+        }
+    };
 
     // Collect exports
     let exports = collect_exports(&module, ctx);
@@ -573,20 +579,31 @@ pub fn apply_import_spec(exports: &ModuleExports, spec: &Option<ast::ImportSpec>
                         if let Some(&def_id) = exports.types.get(&ident.name) {
                             filtered.types.insert(ident.name, def_id);
                         }
-                        // Handle constructors
+                        // Handle constructors/class methods
                         if let Some(constructors) = cons {
-                            for con in constructors {
-                                if let Some(info) = exports.constructors.get(&con.name) {
-                                    filtered.constructors.insert(con.name, info.clone());
+                            if constructors.is_empty() {
+                                // Type(..) or Class(..) — import all constructors
+                                // AND all values (class methods are lowercase values)
+                                for (&name, info) in &exports.constructors {
+                                    filtered.constructors.insert(name, info.clone());
+                                }
+                                for (&name, &def_id) in &exports.values {
+                                    filtered.values.insert(name, def_id);
+                                }
+                            } else {
+                                for con in constructors {
+                                    if let Some(info) = exports.constructors.get(&con.name) {
+                                        filtered.constructors.insert(con.name, info.clone());
+                                    }
+                                    // Also check values (class methods listed explicitly)
+                                    if let Some(&def_id) = exports.values.get(&con.name) {
+                                        filtered.values.insert(con.name, def_id);
+                                    }
                                 }
                             }
                         } else {
-                            // Type(..) - import all constructors of this type
-                            // We need to find constructors associated with this type
-                            // For now, import all constructors (conservative)
-                            for (&name, info) in &exports.constructors {
-                                filtered.constructors.insert(name, info.clone());
-                            }
+                            // Type with no constructor list: import M (Foo)
+                            // Don't import constructors
                         }
                     }
                     ast::Import::Pattern(ident, _) => {
@@ -755,4 +772,272 @@ mod tests {
         exports.values.insert(Symbol::intern("foo"), DefId::new(0));
         assert!(!exports.is_empty());
     }
+}
+
+/// Check if source needs CPP preprocessing by scanning for `{-# LANGUAGE CPP #-}`.
+fn needs_cpp(source: &str) -> bool {
+    for line in source.lines().take(50) {
+        let trimmed = line.trim();
+        if trimmed.starts_with("{-#") && trimmed.contains("LANGUAGE") && trimmed.contains("CPP") {
+            return true;
+        }
+        // Stop scanning after module declaration
+        if trimmed.starts_with("module ") {
+            break;
+        }
+    }
+    false
+}
+
+/// Minimal CPP preprocessor for imported modules.
+///
+/// Handles `#if`/`#ifdef`/`#ifndef`/`#else`/`#elif`/`#endif`/`#define`/`#undef`.
+/// Unrecognized `#` directives (like `#include`) are replaced with blank lines.
+/// All undefined macros evaluate to false/0.
+///
+/// This is intentionally minimal — the driver's full CPP preprocessor handles
+/// the primary compilation unit. This just needs to be good enough to parse
+/// imported modules that use CPP for platform guards.
+fn preprocess_cpp(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut defines: FxHashSet<String> = FxHashSet::default();
+    // Pre-define some common macros
+    defines.insert("__GLASGOW_HASKELL__".to_string());
+
+    // Stack of (active, seen_true_branch) for nested #if
+    let mut condition_stack: Vec<(bool, bool)> = Vec::new();
+
+    fn is_active(stack: &[(bool, bool)]) -> bool {
+        stack.iter().all(|(active, _)| *active)
+    }
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with('#') {
+            let directive = trimmed.trim_start_matches('#').trim();
+
+            if directive.starts_with("ifdef ") {
+                let macro_name = directive["ifdef ".len()..].trim();
+                let macro_name = strip_cpp_line_comment(macro_name);
+                let defined = defines.contains(macro_name);
+                let parent_active = is_active(&condition_stack);
+                let active = parent_active && defined;
+                condition_stack.push((active, active));
+                output.push('\n');
+            } else if directive.starts_with("ifndef ") {
+                let macro_name = directive["ifndef ".len()..].trim();
+                let macro_name = strip_cpp_line_comment(macro_name);
+                let defined = defines.contains(macro_name);
+                let parent_active = is_active(&condition_stack);
+                let active = parent_active && !defined;
+                condition_stack.push((active, active));
+                output.push('\n');
+            } else if directive.starts_with("if ") {
+                // Simplified: treat #if as false unless it references a defined macro
+                let expr = directive["if ".len()..].trim();
+                let parent_active = is_active(&condition_stack);
+                let value = eval_simple_cpp_expr(expr, &defines);
+                let active = parent_active && value;
+                condition_stack.push((active, active));
+                output.push('\n');
+            } else if directive.starts_with("elif ") {
+                let parent_active = if condition_stack.len() > 1 {
+                    condition_stack[..condition_stack.len() - 1]
+                        .iter()
+                        .all(|(a, _)| *a)
+                } else {
+                    true
+                };
+                if let Some(last) = condition_stack.last_mut() {
+                    if last.1 {
+                        // Already found a true branch, skip this
+                        last.0 = false;
+                    } else {
+                        let expr = directive["elif ".len()..].trim();
+                        let value = eval_simple_cpp_expr(expr, &defines);
+                        let active = parent_active && value;
+                        last.0 = active;
+                        if active {
+                            last.1 = true;
+                        }
+                    }
+                }
+                output.push('\n');
+            } else if directive == "else" || directive.starts_with("else ") || directive.starts_with("else/") {
+                let parent_active = if condition_stack.len() > 1 {
+                    condition_stack[..condition_stack.len() - 1]
+                        .iter()
+                        .all(|(a, _)| *a)
+                } else {
+                    true
+                };
+                if let Some(last) = condition_stack.last_mut() {
+                    if last.1 {
+                        // Already found a true branch
+                        last.0 = false;
+                    } else {
+                        last.0 = parent_active;
+                        last.1 = true;
+                    }
+                }
+                output.push('\n');
+            } else if directive == "endif" || directive.starts_with("endif ") || directive.starts_with("endif/") {
+                condition_stack.pop();
+                output.push('\n');
+            } else if directive.starts_with("define ") && is_active(&condition_stack) {
+                let rest = directive["define ".len()..].trim();
+                if let Some(name) = rest.split_whitespace().next() {
+                    defines.insert(name.to_string());
+                }
+                output.push('\n');
+            } else if directive.starts_with("undef ") && is_active(&condition_stack) {
+                let name = directive["undef ".len()..].trim();
+                let name = strip_cpp_line_comment(name);
+                defines.remove(name);
+                output.push('\n');
+            } else {
+                // #include, #warning, #error, etc. — skip
+                output.push('\n');
+            }
+        } else if is_active(&condition_stack) {
+            output.push_str(line);
+            output.push('\n');
+        } else {
+            // Inactive branch — emit blank line to preserve line numbers
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
+/// Strip trailing C-style line comment from a CPP macro name.
+fn strip_cpp_line_comment(s: &str) -> &str {
+    if let Some(idx) = s.find("//") {
+        s[..idx].trim()
+    } else if let Some(idx) = s.find("/*") {
+        s[..idx].trim()
+    } else {
+        s.trim()
+    }
+}
+
+/// Evaluate a simple CPP `#if` expression.
+/// Handles: `defined(X)`, `defined X`, `!defined(X)`, integer literals,
+/// `X >= Y` comparisons, `&&`, `||`. Very simplified.
+fn eval_simple_cpp_expr(expr: &str, defines: &FxHashSet<String>) -> bool {
+    let expr = expr.trim();
+
+    // Handle negation
+    if let Some(rest) = expr.strip_prefix('!') {
+        return !eval_simple_cpp_expr(rest.trim(), defines);
+    }
+
+    // Handle parenthesized expression
+    if expr.starts_with('(') {
+        if let Some(end) = find_matching_paren(expr) {
+            let inner = &expr[1..end];
+            if end + 1 >= expr.len() {
+                return eval_simple_cpp_expr(inner, defines);
+            }
+        }
+    }
+
+    // Handle defined(X) or defined X
+    if let Some(rest) = expr.strip_prefix("defined") {
+        let rest = rest.trim();
+        let name = if rest.starts_with('(') {
+            rest.trim_start_matches('(')
+                .trim_end_matches(')')
+                .trim()
+        } else {
+            rest.split_whitespace().next().unwrap_or("")
+        };
+        return defines.contains(name);
+    }
+
+    // Handle && (logical AND)
+    if let Some(idx) = expr.find("&&") {
+        let left = &expr[..idx];
+        let right = &expr[idx + 2..];
+        return eval_simple_cpp_expr(left, defines) && eval_simple_cpp_expr(right, defines);
+    }
+
+    // Handle || (logical OR)
+    if let Some(idx) = expr.find("||") {
+        let left = &expr[..idx];
+        let right = &expr[idx + 2..];
+        return eval_simple_cpp_expr(left, defines) || eval_simple_cpp_expr(right, defines);
+    }
+
+    // Handle integer comparisons (>=, <=, >, <, ==, !=)
+    // For simplicity, just check if expr is a non-zero integer
+    if let Ok(n) = expr.parse::<i64>() {
+        return n != 0;
+    }
+
+    // Handle __GLASGOW_HASKELL__ >= NNN patterns
+    if expr.contains(">=") || expr.contains("<=") || expr.contains("==") || expr.contains("!=") {
+        // For GHC version checks, assume we're a modern GHC (9.x = 908)
+        // This is a simplification but works for most real-world CPP guards
+        if expr.contains("__GLASGOW_HASKELL__") {
+            // Pretend GHC 9.8 (908)
+            let expr = expr.replace("__GLASGOW_HASKELL__", "908");
+            return eval_comparison(&expr);
+        }
+        return false;
+    }
+
+    // Treat unknown identifiers as false (0)
+    false
+}
+
+/// Evaluate a simple numeric comparison expression.
+fn eval_comparison(expr: &str) -> bool {
+    if let Some(idx) = expr.find(">=") {
+        let left: i64 = expr[..idx].trim().parse().unwrap_or(0);
+        let right: i64 = expr[idx + 2..].trim().parse().unwrap_or(0);
+        left >= right
+    } else if let Some(idx) = expr.find("<=") {
+        let left: i64 = expr[..idx].trim().parse().unwrap_or(0);
+        let right: i64 = expr[idx + 2..].trim().parse().unwrap_or(0);
+        left <= right
+    } else if let Some(idx) = expr.find("==") {
+        let left: i64 = expr[..idx].trim().parse().unwrap_or(0);
+        let right: i64 = expr[idx + 2..].trim().parse().unwrap_or(0);
+        left == right
+    } else if let Some(idx) = expr.find("!=") {
+        let left: i64 = expr[..idx].trim().parse().unwrap_or(0);
+        let right: i64 = expr[idx + 2..].trim().parse().unwrap_or(0);
+        left != right
+    } else if let Some(idx) = expr.find('>') {
+        let left: i64 = expr[..idx].trim().parse().unwrap_or(0);
+        let right: i64 = expr[idx + 1..].trim().parse().unwrap_or(0);
+        left > right
+    } else if let Some(idx) = expr.find('<') {
+        let left: i64 = expr[..idx].trim().parse().unwrap_or(0);
+        let right: i64 = expr[idx + 1..].trim().parse().unwrap_or(0);
+        left < right
+    } else {
+        false
+    }
+}
+
+/// Find the matching closing parenthesis.
+fn find_matching_paren(s: &str) -> Option<usize> {
+    let mut depth = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }

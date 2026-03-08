@@ -35,7 +35,8 @@ pub fn infer_expr(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             // Look up variable and instantiate its type scheme
             let scheme = ctx.env.lookup_def_id(def_ref.def_id).cloned();
             if let Some(s) = scheme {
-                ctx.instantiate(&s)
+                let result = ctx.instantiate(&s);
+                result
             } else {
                 diagnostics::emit_unbound_var(ctx, def_ref.def_id, def_ref.span);
                 Ty::Error

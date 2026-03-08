@@ -733,6 +733,10 @@ fn register_standard_module_exports(
         ],
         "Data.Semigroup" => &[
             "(<>)", "sconcat", "stimes",
+            // Min/Max wrappers
+            "Min", "getMin", "Max", "getMax",
+            // Arg
+            "Arg", "First", "Last",
         ],
         "Control.Monad" => &[
             "when",
@@ -802,10 +806,30 @@ fn register_standard_module_exports(
         ],
         "Control.Concurrent" => &[
             "forkIO",
+            "forkOS",
             "killThread",
             "threadDelay",
             "myThreadId",
             "throwTo",
+            "ThreadId",
+            // Re-exports from Control.Concurrent.MVar
+            "MVar",
+            "newMVar",
+            "newEmptyMVar",
+            "readMVar",
+            "putMVar",
+            "takeMVar",
+            "tryPutMVar",
+            "tryTakeMVar",
+            "modifyMVar",
+            "modifyMVar_",
+            "swapMVar",
+            "withMVar",
+            // Re-exports from Control.Concurrent.Chan
+            "Chan",
+            "newChan",
+            "readChan",
+            "writeChan",
         ],
         "Control.Concurrent.MVar" => &[
             "MVar",
@@ -867,6 +891,9 @@ fn register_standard_module_exports(
         "Data.Monoid" => &[
             "mempty", "mappend", "mconcat", "(<>)", "Sum", "Product", "Any", "All", "First",
             "Last", "Endo", "Dual",
+            // Accessor/unwrapper functions for newtypes
+            "getSum", "getProduct", "getAny", "getAll", "getFirst", "getLast",
+            "getDual", "appEndo",
         ],
         "Data.Bits" => &[
             "(.&.)",
@@ -914,6 +941,62 @@ fn register_standard_module_exports(
             "isLatin1",
             "isAsciiLower",
             "isAsciiUpper",
+            // Unicode category predicates
+            "isMark",
+            "isSeparator",
+            "isOtherLetter",
+            "isTitleCase",
+            "isModifierLetter",
+            "isNonSpacingMark",
+            "isSpacingCombiningMark",
+            "isEnclosingMark",
+            "isDecimalNumber",
+            "isLetterNumber",
+            "isOtherNumber",
+            "isConnectorPunctuation",
+            "isDashPunctuation",
+            "isOpenPunctuation",
+            "isClosePunctuation",
+            "isInitialQuote",
+            "isFinalQuote",
+            "isOtherPunctuation",
+            "isMathSymbol",
+            "isCurrencySymbol",
+            "isModifierSymbol",
+            "isOtherSymbol",
+            // Conversion
+            "generalCategory",
+            "GeneralCategory",
+            "UppercaseLetter",
+            "LowercaseLetter",
+            "TitlecaseLetter",
+            "ModifierLetter",
+            "OtherLetter",
+            "NonSpacingMark",
+            "SpacingCombiningMark",
+            "EnclosingMark",
+            "DecimalNumber",
+            "LetterNumber",
+            "OtherNumber",
+            "ConnectorPunctuation",
+            "DashPunctuation",
+            "OpenPunctuation",
+            "ClosePunctuation",
+            "InitialQuote",
+            "FinalQuote",
+            "OtherPunctuation",
+            "MathSymbol",
+            "CurrencySymbol",
+            "ModifierSymbol",
+            "OtherSymbol",
+            "Space",
+            "LineSeparator",
+            "ParagraphSeparator",
+            "Control",
+            "Format",
+            "Surrogate",
+            "PrivateUse",
+            "NotAssigned",
         ],
         "Data.Function" => &["id", "const", "flip", "($)", "(&)", "on", "fix"],
         "Data.Tuple" => &["fst", "snd", "curry", "uncurry", "swap"],
@@ -1095,6 +1178,7 @@ fn register_standard_module_exports(
             "force",
         ],
         "Data.Text.Lazy" => &[
+            "Text",
             "empty",
             "fromStrict",
             "toStrict",
@@ -1136,13 +1220,58 @@ fn register_standard_module_exports(
         ],
         "Data.ByteString.Lazy.Char8" => &[
             "ByteString",
+            "empty",
+            "pack",
             "unpack",
+            "singleton",
+            "null",
+            "length",
+            "head",
+            "tail",
+            "take",
+            "drop",
+            "dropWhile",
+            "takeWhile",
+            "cons",
+            "snoc",
+            "append",
+            "filter",
+            "map",
+            "reverse",
+            "concat",
+            "concatMap",
+            "intercalate",
             "lines",
             "unlines",
-            "take",
-            "dropWhile",
-            "cons",
+            "words",
+            "unwords",
             "isPrefixOf",
+            "isSuffixOf",
+            "readFile",
+            "writeFile",
+            "putStr",
+            "putStrLn",
+            "hGetContents",
+            "hGet",
+            "hPut",
+            "hPutStr",
+            "hPutStrLn",
+            "fromStrict",
+            "toStrict",
+            "fromChunks",
+            "toChunks",
+            "foldr",
+            "foldl",
+            "foldl'",
+            "any",
+            "all",
+            "elem",
+            "index",
+            "splitAt",
+            "break",
+            "span",
+            "zip",
+            "zipWith",
         ],
         "Data.ByteString.Builder" => &[
             "empty", "singleton", "word8",
@@ -1236,6 +1365,13 @@ fn register_standard_module_exports(
             "transpose",
             "chunksOf",
             "compareLength",
+            "groupBy",
+            "group",
+            "breakOnAll",
+            "tails",
+            "inits",
+            "scanl",
+            "scanr",
         ],
         "Data.Text.Encoding" => &[
             "encodeUtf8",
@@ -1256,6 +1392,7 @@ fn register_standard_module_exports(
             "UnicodeException",
             "OnDecodeError",
             "OnError",
+            "DecodeError",
         ],
         "Data.Text.Read" => &[
             "decimal",
@@ -1463,6 +1600,9 @@ fn register_standard_module_exports(
             "pathSeparator",
             "searchPathSeparator",
             "extSeparator",
+            "isPathSeparator",
+            "isExtSeparator",
+            "dropTrailingPathSeparator",
         ],
         "System.IO.Error" => &[
             "isDoesNotExistError",
@@ -1482,16 +1622,37 @@ fn register_standard_module_exports(
         ],
         "System.Process" => &[
             "readProcess",
+            "readProcessWithExitCode",
             "readCreateProcess",
+            "readCreateProcessWithExitCode",
             "callProcess",
             "callCommand",
             "createProcess",
+            "createProcess_",
             "proc",
             "shell",
             "CreateProcess",
+            "ProcessHandle",
+            // CreateProcess record fields
+            "cmdspec", "cwd", "env",
+            "std_in", "std_out", "std_err",
+            "close_fds", "create_group",
+            "delegate_ctlc", "detach_console",
+            "create_new_console", "new_session",
+            "child_group", "child_user",
+            "use_process_jobs",
+            // StdStream type and constructors
             "StdStream",
+            "Inherit", "UseHandle", "CreatePipe", "NoStream",
+            // CmdSpec type and constructors
+            "CmdSpec", "ShellCommand", "RawCommand",
             "waitForProcess",
+            "terminateProcess",
+            "interruptProcessGroupOf",
             "withCreateProcess",
+            "cleanupProcess",
+            "getProcessExitCode",
+            "getPid",
         ],
         "System.Info" => &[
             "os",
@@ -1675,6 +1836,14 @@ fn register_standard_module_exports(
             "nullURI",
             "relativeTo",
             "nonStrictRelativeTo",
+            "isURI",
+            "isAbsoluteURI",
+            "isRelativeReference",
+            "isURIReference",
+            "uriRegName",
+            "URIAuth",
+            "uriUserInfo",
+            "uriPort",
         ],
         // === Text modules ===
         "Text.Printf" => &[
@@ -1716,14 +1885,22 @@ fn register_standard_module_exports(
             "stToIO",
         ],
         "Control.Arrow" => &[
-            "Arrow",
+            "Arrow", "ArrowChoice", "ArrowApply", "ArrowZero", "ArrowPlus",
             "arr",
             "first",
             "second",
+            "left",
+            "right",
             "(***)",
             "(&&&)",
             "(>>>)",
             "(<<<)",
+            "|||",
+            "+++",
+            ">>^",
+            "^>>",
+            "<<^",
+            "^<<",
             "returnA",
         ],
         "Control.Category" => &[
@@ -1983,6 +2160,8 @@ fn register_standard_module_exports(
             "CUInt",
             "CLong",
             "CULong",
+            "CLLong",
+            "CULLong",
             "CFloat",
             "CDouble",
             "CSize",
@@ -1991,6 +2170,32 @@ fn register_standard_module_exports(
             "CSChar",
             "CShort",
             "CUShort",
+            "CWchar",
+            "CIntPtr",
+            "CUIntPtr",
+            "CBool",
+            // Re-exports from Foreign.C.String
+            "CString", "CStringLen",
+            "withCString", "peekCString", "newCString",
+            // Re-exports from Foreign.C.Error
+            "Errno",
+            "getErrno", "resetErrno", "throwErrno",
+            "throwErrnoIf", "throwErrnoIfMinus1",
+            "throwErrnoIfNull", "throwErrnoPath",
+            "errnoToIOError", "isValidErrno",
+            "eOK", "e2BIG", "eACCES", "eADDRINUSE", "eAGAIN",
+            "eALREADY", "eBADF", "eBUSY", "eCHILD",
+            "eCONNABORTED", "eCONNREFUSED", "eCONNRESET",
+            "eDEADLK", "eEXIST", "eFAULT", "eFBIG",
+            "eHOSTUNREACH", "eINPROGRESS", "eINTR", "eINVAL",
+            "eIO", "eISCONN", "eISDIR", "eMFILE", "eMLINK",
+            "eMSGSIZE", "eNAMETOOLONG", "eNETDOWN", "eNETUNREACH",
+            "eNFILE", "eNOBUFS", "eNODEV", "eNOENT", "eNOEXEC",
+            "eNOLCK", "eNOMEM", "eNOMSG", "eNOSPC", "eNOSYS",
+            "eNOTCONN", "eNOTDIR", "eNOTEMPTY", "eNOTSOCK",
+            "eNOTTY", "eNXIO", "ePERM", "ePIPE", "eRANGE",
+            "eROFS", "eSPIPE", "eSRCH", "eTIMEDOUT",
+            "eWOULDBLOCK", "eXDEV",
         ],
         "Foreign.C.String" => &[
             "CString",
@@ -2000,6 +2205,46 @@ fn register_standard_module_exports(
             "newCString",
             "withCStringLen",
             "peekCStringLen",
+        ],
+        "Foreign.C.Error" => &[
+            "Errno",
+            "getErrno",
+            "resetErrno",
+            "throwErrno",
+            "throwErrnoIf",
+            "throwErrnoIf_",
+            "throwErrnoIfRetry",
+            "throwErrnoIfMinus1",
+            "throwErrnoIfMinus1_",
+            "throwErrnoIfNull",
+            "throwErrnoIfRetryMayBlock",
+            "throwErrnoPath",
+            "throwErrnoPathIf",
+            "throwErrnoPathIfNull",
+            "throwErrnoPathIfMinus1",
+            "errnoToIOError",
+            "eOK", "e2BIG", "eACCES", "eADDRINUSE", "eADDRNOTAVAIL",
+            "eADV", "eAFNOSUPPORT", "eAGAIN", "eALREADY", "eBADF",
+            "eBADMSG", "eBADRPC", "eBUSY", "eCHILD", "eCOMM",
+            "eCONNABORTED", "eCONNREFUSED", "eCONNRESET", "eDEADLK",
+            "eDESTADDRREQ", "eDIRTY", "eDOM", "eDQUOT", "eEXIST",
+            "eFAULT", "eFBIG", "eFTYPE", "eHOSTDOWN", "eHOSTUNREACH",
+            "eIDRM", "eILSEQ", "eINPROGRESS", "eINTR", "eINVAL",
+            "eIO", "eISCONN", "eISDIR", "eLOOP", "eMFILE", "eMLINK",
+            "eMSGSIZE", "eMULTIHOP", "eNAMETOOLONG", "eNETDOWN",
+            "eNETRESET", "eNETUNREACH", "eNFILE", "eNOBUFS", "eNODATA",
+            "eNODEV", "eNOENT", "eNOEXEC", "eNOLCK", "eNOLINK",
+            "eNOMEM", "eNOMSG", "eNONET", "eNOPROTOOPT", "eNOSPC",
+            "eNOSR", "eNOSTR", "eNOSYS", "eNOTBLK", "eNOTCONN",
+            "eNOTDIR", "eNOTEMPTY", "eNOTSOCK", "eNOTSUP", "eNOTTY",
+            "eNXIO", "eOPNOTSUPP", "ePERM", "ePFNOSUPPORT", "ePIPE",
+            "ePROCLIM", "ePROCUNAVAIL", "ePROGMISMATCH", "ePROGUNAVAIL",
+            "ePROTO", "ePROTONOSUPPORT", "ePROTOTYPE", "eRANGE",
+            "eREMCHG", "eREMOTE", "eROFS", "eRPCMISMATCH", "eRRPCERR",
+            "eSHUTDOWN", "eSOCKTNOSUPPORT", "eSPIPE", "eSRCH",
+            "eSTALE", "eTIME", "eTIMEDOUT", "eTOOMANYREFS",
+            "eTXTBSY", "eUSERS", "eWOULDBLOCK", "eXDEV",
+            "isValidErrno",
         ],
         "Foreign.Storable" => &[
             "Storable",
@@ -2073,7 +2318,8 @@ fn register_standard_module_exports(
             "realLength", "prefixed", "flush", "afterBreak", "beforeNonBlank",
             "nowrap", "lblock", "cblock", "rblock", "isEmpty",
             "braces", "brackets", "parens", "quotes", "doubleQuotes",
-            "$$", "$+$", "<+>",
+            "$$", "$+$", "<+>", "<>", "</>", "inside",
+            "charWidth", "updateColumn", "blanklines",
         ],
         "Text.Pandoc.Definition" => &[
             // Core types
@@ -2121,6 +2367,10 @@ fn register_standard_module_exports(
             "Blocks", "Inlines", "Many", "toList", "fromList",
             "singleton", "isNull", "<>",
             "unMany",
+            // Table utilities (from pandoc-types Text.Pandoc.Builder)
+            "emptyCell", "simpleCell", "emptyCaption", "simpleFigureWith",
+            "clipRows", "clipColumns",
+            "cell", "simpleRow", "toRow", "toColSpec",
             // Re-exports from Text.Pandoc.Definition
             "Pandoc", "Meta", "MetaValue", "Block", "Inline", "Alignment",
             "ListAttributes", "ListNumberStyle", "ListNumberDelim",
@@ -2145,6 +2395,8 @@ fn register_standard_module_exports(
             "ColWidthDefault",
             "nullAttr", "nullMeta",
             "lookupMeta", "docTitle", "docAuthors", "docDate",
+            // ToMetaValue class
+            "ToMetaValue", "toMetaValue",
         ],
         "Text.Pandoc.Walk" => &[
             "Walkable", "walk", "walkM", "query", "queryM",
@@ -2220,6 +2472,9 @@ fn register_standard_module_exports(
             "isTagComment", "isTagWarning", "isTagPosition", "fromAttrib",
             "fromTagText", "innerText", "sections", "partitions",
             "~==", "~/=",
+            // RenderOptions
+            "RenderOptions", "renderOptions", "optMinimize", "optRawTag",
+            "optEscape",
         ],
         "Text.HTML.TagSoup.Tree" => &[
             "TagTree", "tagTree", "flattenTree", "universeTree",
@@ -2239,6 +2494,8 @@ fn register_standard_module_exports(
             "lookupEntity", "pEntity", "unEntity",
             "commonmark", "defaultSyntaxSpec", "SyntaxSpec",
             "gfmExtensions",
+            // HasAttributes class
+            "HasAttributes", "addAttributes",
         ],
         // =====================================================================
         // Pandoc XML.Light stubs
@@ -2246,7 +2503,7 @@ fn register_standard_module_exports(
         "Text.Pandoc.XML.Light" | "Text.Pandoc.XML.Light.Types"
         | "Text.Pandoc.XML.Light.Proc" | "Text.Pandoc.XML.Light.Output" => &[
             "Element", "Content", "CData", "CDataKind", "QName", "Attr",
-            "Line", "Node",
+            "Line", "Node", "node",
             "elName", "elAttribs", "elContent", "elChildren", "elLine",
             "qName", "qURI", "qPrefix",
             "cdVerbatim", "cdData", "cdLine",
@@ -2256,7 +2513,7 @@ fn register_standard_module_exports(
             "findElement", "findChild", "findChildren", "filterChildren", "filterChildrenName",
             "strContent", "showElement", "showContent", "ppElement", "ppTopElement", "ppContent",
             "showTopElement", "showQName",
-            "parseXML", "onlyElems", "elsByTag",
+            "parseXML", "parseXMLElement", "onlyElems", "elsByTag",
             "Elem", "Text", "CRef",
             "CDataText", "CDataVerbatim", "CDataRaw",
         ],
@@ -2316,12 +2573,34 @@ fn register_standard_module_exports(
         "Skylighting" | "Skylighting.Types" => &[
             "Syntax", "SyntaxMap", "Token", "TokenType", "SourceLine",
             "TokenStyle", "Style", "Color",
-            "defaultSyntaxMap", "lookupSyntax",
+            "defaultSyntaxMap", "lookupSyntax", "parseTheme",
+            // Syntax record fields
+            "sName", "sShortname", "sAuthor", "sVersion", "sLicense",
+            "sExtensions", "sContexts",
             "defaultStyle", "pygments", "kate", "espresso", "tango",
             "haddock", "monochrome", "breezeDark", "zenburn",
             "formatHtmlBlock", "formatHtmlInline", "formatLaTeXBlock",
             "tokenize", "TokenizerConfig", "defaultTokenizerConfig",
             "syntaxesByExtension", "syntaxesByFilename",
+            // FormatOptions and record fields
+            "FormatOptions", "defaultFormatOpts",
+            "startNumber", "lineAnchors", "numberLines", "lineIdPrefix",
+            "codeClasses", "containerClasses",
+            // Token type constructors
+            "NormalTok", "KeywordTok", "DataTypeTok", "DecValTok",
+            "BaseNTok", "FloatTok", "CharTok", "StringTok",
+            "CommentTok", "OtherTok", "AlertTok", "FunctionTok",
+            "RegionMarkerTok", "ErrorTok", "AnnotationTok",
+            "AttributeTok", "InformationTok", "WarningTok",
+            "ConstantTok", "SpecialCharTok", "VerbatimStringTok",
+            "SpecialStringTok", "ImportTok", "DocumentationTok",
+            "PreprocessorTok", "ExtensionTok", "OperatorTok",
+            "BuiltInTok", "VariableTok", "ControlFlowTok",
+            "CommentVarTok",
+            // Style fields
+            "backgroundColor", "defaultColor",
+            "lineNumberColor", "lineNumberBackgroundColor",
+            "tokenStyles",
         ],
         "Skylighting.Parser" => &[
             "addSyntaxDefinition", "parseSyntaxDefinition",
@@ -2334,6 +2613,17 @@ fn register_standard_module_exports(
             "UTCTime", "NominalDiffTime", "DiffTime",
             "getCurrentTime", "addUTCTime", "diffUTCTime",
             "secondsToNominalDiffTime", "nominalDiffTimeToSeconds",
+            // Re-exports from Data.Time.Calendar
+            "Day", "fromGregorian", "toGregorian", "addDays", "diffDays",
+            // Re-exports from Data.Time.Format
+            "formatTime", "parseTimeM", "defaultTimeLocale",
+            "iso8601DateFormat", "rfc822DateFormat",
+            "FormatTime", "ParseTime", "TimeLocale",
+            // Re-exports from Data.Time.LocalTime
+            "LocalTime", "ZonedTime", "TimeZone", "TimeOfDay",
+            "utcToLocalTime", "localTimeToUTC",
+            "getCurrentTimeZone", "utc",
+            "zonedTimeToUTC", "utcToZonedTime",
         ],
         "Data.Time.Clock.POSIX" => &[
             "POSIXTime", "posixSecondsToUTCTime", "utcTimeToPOSIXSeconds",
@@ -2390,6 +2680,9 @@ fn register_standard_module_exports(
         // =====================================================================
         "Text.Collate" | "Text.Collate.Lang" => &[
             "Lang", "parseLang", "renderLang",
+            // Lang record fields
+            "langLanguage", "langScript", "langRegion", "langVariants",
+            "langExtensions", "langPrivateUse",
             "Collator", "collate", "sortBy",
             "rootCollator", "collatorFor",
         ],
@@ -2424,6 +2717,7 @@ fn register_standard_module_exports(
             "randomRIO", "randomIO", "randomR", "random",
             "mkStdGen", "newStdGen", "getStdGen", "setStdGen",
             "randoms", "randomRs",
+            "split", "next", "genRange",
         ],
         "System.Console.GetOpt" => &[
             "OptDescr", "ArgDescr", "ArgOrder",
@@ -2480,7 +2774,7 @@ fn register_standard_module_exports(
             "dropInnerBlanks", "dropBlanks",
         ],
         "Data.Aeson.Encode.Pretty" => &[
-            "encodePretty", "encodePrettyToTextBuilder",
+            "encodePretty", "encodePretty'", "encodePrettyToTextBuilder",
             "Config", "defConfig", "confIndent", "confCompare",
             "keyOrder", "Indent", "Spaces", "Tab",
         ],
@@ -2490,10 +2784,12 @@ fn register_standard_module_exports(
             "omitNothingFields", "allNullaryToStringTag",
             "Options", "SumEncoding", "TaggedObject",
             "UntaggedValue", "ObjectWithSingleField", "TwoElemArray",
+            "camelTo2",
         ],
         "Data.Yaml" => &[
             "encode", "decode", "decodeEither", "decodeFileEither",
             "decodeThrow", "decodeFileThrow",
+            "decodeEither'", "decodeAllEither'",
             "ParseException", "prettyPrintParseException",
             "ToJSON", "FromJSON",
         ],
@@ -2521,6 +2817,7 @@ fn register_standard_module_exports(
             "many1", "manyTill", "option", "choice",
             "skipWhile", "skipSpace",
             "IResult", "Done", "Fail", "Partial",
+            "inClass", "notInClass",
         ],
         "Data.FileEmbed" => &[
             "embedFile", "embedDir", "embedStringFile",
@@ -2562,14 +2859,33 @@ fn register_standard_module_exports(
             "Citation", "CitationItem", "Reference",
             "Style", "Locale",
             "Result", "resultBibliography", "resultCitations",
+            "CiteprocError", "prettyCiteprocError",
         ],
         "Citeproc.Types" => &[
             "Reference", "Val", "ItemId", "CiteprocOutput",
-            "Name", "Date", "DateParts",
+            "Name", "Date", "DateParts", "Variable",
             "Lang", "Locale", "Style",
             "Citation", "CitationItem",
             "NormalCitation", "AuthorOnly", "SuppressAuthor",
             "Formatted", "unFormatted",
+            // Reference field accessors
+            "referenceId", "referenceType", "referenceVariables",
+            // Name field accessors
+            "nameFamily", "nameGiven", "nameDroppingParticle",
+            "nameNonDroppingParticle", "nameSuffix", "nameLiteral",
+            "nameCommaSuffix", "nameStaticOrdering",
+            // Date field accessors
+            "dateLiteral", "dateParts", "dateCirca",
+            // Val constructors
+            "TextVal", "FancyVal", "NumVal", "NamesVal", "DateVal",
+            // Conversion functions
+            "toVariable", "fromVariable",
+            // Date utilities
+            "rawDateEDTF", "emptyDate",
+            // Variable sets
+            "dateVariables", "nameVariables",
+            // extractParticles helper
+            "extractParticles",
         ],
         "Citeproc.Pandoc" => &[
             "citeproc", "getReferences", "getStyle",
@@ -2609,6 +2925,7 @@ fn register_standard_module_exports(
         ],
         "Text.Emoji" => &[
             "emojis", "emojiFromAlias", "aliasesFromEmoji",
+            "replaceEmojis", "emojisToAliases",
         ],
         // =====================================================================
         // Data.Array stubs
@@ -2662,6 +2979,11 @@ fn register_standard_module_exports(
             "setRequestBodyLBS", "setRequestBodyBS",
             "responseTimeoutNone", "responseTimeoutMicro",
             "managerResponseTimeout", "managerConnCount",
+            // Request record field accessors
+            "host", "port", "secure", "path", "queryString",
+            "proxy", "redirectCount", "checkResponse",
+            // Internal functions
+            "addProxy",
         ],
         "Network.HTTP.Client.TLS" => &[
             "tlsManagerSettings", "newTlsManager", "newTlsManagerWith",
@@ -2674,6 +2996,7 @@ fn register_standard_module_exports(
             "hContentType", "hAccept", "hAuthorization",
             "methodGet", "methodPost", "methodPut", "methodDelete",
             "renderQuery", "parseQuery",
+            "urlEncode", "urlDecode",
         ],
         "Network.Mime" => &[
             "defaultMimeLookup", "defaultMimeMap", "defaultMimeType",
@@ -2682,6 +3005,7 @@ fn register_standard_module_exports(
         "Network.Socket" => &[
             "Socket", "SockAddr", "SocketType", "Family",
             "socket", "connect", "bind", "listen", "accept", "close",
+            "withSocketsDo",
         ],
         "Network.Connection" => &[
             "TLSSettings", "initConnectionContext", "ConnectionParams",
@@ -2689,18 +3013,34 @@ fn register_standard_module_exports(
         "Network.TLS" | "Network.TLS.Extra" => &[
             "ClientParams", "Supported", "Shared",
             "defaultParamsClient", "supportedCiphers", "ciphersuite_default",
+            // Record field accessors
+            "clientSupported", "clientShared",
+            "supportedExtendedMainSecret",
+            "sharedCAStore", "sharedValidationCache",
+            // Data constructors
+            "AllowEMS", "RequireEMS", "NoEMS",
+            "ValidationCache", "ValidationCachePass", "ValidationCacheDeny",
         ],
         // =====================================================================
         // Text.Blaze stubs
         // =====================================================================
         "Text.Blaze" | "Text.Blaze.Internal" => &[
             "Markup", "MarkupM", "Tag", "Attribute", "AttributeValue",
+            "ChoiceString", "StaticString",
+            // MarkupM constructors
+            "Parent", "CustomParent", "Leaf", "CustomLeaf",
+            "AddAttribute", "AddCustomAttribute",
+            "Content", "Comment", "Append", "Empty",
+            // ChoiceString constructors
+            "Static", "String", "PreEscaped", "External",
+            "AppendChoiceString", "EmptyChoiceString",
+            // Functions
             "toMarkup", "toValue", "preEscapedToMarkup",
             "string", "text", "lazyText",
             "textTag", "textValue",
             "customAttribute", "customParent", "customLeaf",
             "(!)", "(!?)",
-            "contents",
+            "contents", "getText",
             "ToMarkup", "ToValue",
         ],
         "Text.Blaze.Html" => &[
@@ -2856,9 +3196,18 @@ fn register_standard_module_exports(
             "compile", "match", "Pattern",
         ],
         "GHC.IO.Exception" => &[
-            "IOException", "IOErrorType",
+            "IOException", "IOError", "IOErrorType",
+            // IOException record fields
             "ioe_handle", "ioe_type", "ioe_location",
             "ioe_description", "ioe_errno", "ioe_filename",
+            // IOErrorType constructors
+            "AlreadyExists", "NoSuchThing", "ResourceBusy",
+            "ResourceExhausted", "EOF", "IllegalOperation",
+            "PermissionDenied", "UserError", "UnsatisfiedConstraints",
+            "SystemError", "ProtocolError", "OtherError",
+            "InvalidArgument", "InappropriateType",
+            "HardwareFault", "UnsupportedOperation",
+            "TimeExpired", "ResourceVanished", "Interrupted",
         ],
         // =====================================================================
         // Text extras
@@ -2915,6 +3264,10 @@ fn register_standard_module_exports(
             "VString", "VInteger", "VFloat", "VBool",
             "VContent", "VArray", "VDict", "VNone", "VAuto",
             "Identifier", "fromVal", "toVal",
+            // Content constructors
+            "Elt", "Txt", "Lab", "Seq",
+            // FromVal typeclass
+            "FromVal",
         ],
         "Typst.Methods" => &[
             "applyPureFunction", "lookupMethod",
@@ -3020,6 +3373,57 @@ fn register_standard_module_exports(
         module_name.to_string()
     };
 
+    // For non-qualified imports, we should override existing bindings
+    // (e.g., `import Data.Set (fromList)` should override OverloadedLists' fromList).
+    let is_unqualified_import = import_decl.map_or(false, |imp| !imp.qualified);
+
+    // Build a set of explicitly imported names, if the import has an explicit list.
+    // This prevents `import Data.Text (Text)` from overriding Prelude's `foldr` etc.
+    let explicit_imports: Option<rustc_hash::FxHashSet<&str>> = import_decl.and_then(|imp| {
+        if let Some(ast::ImportSpec::Only(items)) = &imp.spec {
+            let mut names = rustc_hash::FxHashSet::default();
+            let mut has_dotdot_import = false;
+            for item in items {
+                match item {
+                    ast::Import::Var(ident, _) => { names.insert(ident.name.as_str()); }
+                    ast::Import::Type(ident, ctors, _) => {
+                        names.insert(ident.name.as_str());
+                        match ctors {
+                            Some(cs) if !cs.is_empty() => {
+                                for c in cs {
+                                    names.insert(c.name.as_str());
+                                }
+                            }
+                            Some(_) => {
+                                // Type(..) — all constructors of this type are imported.
+                                // The parser returns Some(vec![]) for (..).
+                                // We don't know which constructors belong to this type,
+                                // so mark that we have a wildcard constructor import.
+                                has_dotdot_import = true;
+                            }
+                            None => {
+                                // Just the type name, no constructors (e.g., `import Foo (Bar)`)
+                            }
+                        }
+                    }
+                    ast::Import::Pattern(ident, _) => { names.insert(ident.name.as_str()); }
+                }
+            }
+            // If any type/class uses (..) import, allow all exports through the
+            // filter. We can't distinguish Type(..) (constructors) from Class(..)
+            // (methods) at import time, and class methods are lowercase (e.g.,
+            // `walkM`, `query`), so we must allow all names, not just uppercase.
+            if has_dotdot_import {
+                for export in exports {
+                    names.insert(export);
+                }
+            }
+            Some(names)
+        } else {
+            None // No explicit list (import everything) or hiding list
+        }
+    });
+
     for &export in exports {
         let unqualified = Symbol::intern(export);
 
@@ -3029,30 +3433,103 @@ fn register_standard_module_exports(
             .next()
             .map_or(false, |c| c.is_uppercase() || c == ':');
 
+        // Only use fully-qualified names for modules that have explicit type
+        // signatures in the type checker's register_lowered_builtins.
+        // Other modules get unqualified names (→ fresh type variables).
+        let has_typed_sigs = matches!(
+            module_name,
+            "Data.Map" | "Data.Map.Strict" | "Data.Map.Lazy"
+                | "Data.IntMap" | "Data.IntMap.Strict" | "Data.IntMap.Lazy"
+                | "Data.IntSet"
+                | "Data.Set"
+                | "Data.Text"
+                | "Data.Text.IO"
+                | "Data.Text.Encoding"
+                | "Data.Text.Lazy"
+                | "Data.Text.Lazy.Encoding"
+                | "Data.ByteString"
+                | "Data.ByteString.Char8"
+                | "Data.ByteString.Lazy"
+                | "Data.ByteString.Lazy.Char8"
+                | "Data.Sequence"
+                | "Data.Foldable"
+                | "Control.Category"
+                | "Text.DocLayout"
+                | "Text.Emoji"
+                | "Network.Mime"
+                | "Network.URI"
+                | "Network.HTTP.Types"
+                | "Data.Attoparsec.Text"
+                | "Data.ByteString.Base64"
+                | "Text.Parsec"
+                | "Text.Parsec.Prim"
+                | "Text.Parsec.Pos"
+                | "Text.Parsec.Char"
+                | "Text.Parsec.Combinator"
+        );
+
         // Register qualified name under the alias: e.g. T.pack -> pack
         let aliased_qualified = Symbol::intern(&format!("{}.{}", qualifier, export));
-        if ctx.lookup_value(aliased_qualified).is_none() {
-            ctx.register_qualified_name(aliased_qualified, unqualified);
-        }
-
-        // Also register under the full module name: e.g. Data.Text.pack -> pack
-        if qualifier != module_name {
-            let full_qualified = Symbol::intern(&format!("{}.{}", module_name, export));
-            if ctx.lookup_value(full_qualified).is_none() {
-                ctx.register_qualified_name(full_qualified, unqualified);
+        if has_typed_sigs {
+            // For modules with typed sigs, create a direct value binding for
+            // qualified names (e.g., T.groupBy -> DefId named "Data.Text.groupBy").
+            // This prevents T.groupBy from resolving to the Prelude's groupBy.
+            if ctx.lookup_value(aliased_qualified).is_none() {
+                let qual_def_id = ctx.fresh_def_id();
+                let qual_def_name = Symbol::intern(&format!("{}.{}", module_name, export));
+                if is_constructor {
+                    ctx.define(qual_def_id, qual_def_name, DefKind::StubConstructor, Span::default());
+                } else {
+                    ctx.define(qual_def_id, qual_def_name, DefKind::Value, Span::default());
+                }
+                ctx.bind_value(aliased_qualified, qual_def_id);
+            }
+            // Also register under the full module name if different from alias
+            if qualifier != module_name {
+                let full_qualified = Symbol::intern(&format!("{}.{}", module_name, export));
+                if ctx.lookup_value(full_qualified).is_none() {
+                    // Re-use the aliased DefId
+                    if let Some(def_id) = ctx.lookup_value(aliased_qualified) {
+                        ctx.bind_value(full_qualified, def_id);
+                    }
+                }
+            }
+        } else {
+            // For modules without typed sigs, use indirect mapping
+            if ctx.lookup_value(aliased_qualified).is_none() {
+                ctx.register_qualified_name(aliased_qualified, unqualified);
+            }
+            if qualifier != module_name {
+                let full_qualified = Symbol::intern(&format!("{}.{}", module_name, export));
+                if ctx.lookup_value(full_qualified).is_none() {
+                    ctx.register_qualified_name(full_qualified, unqualified);
+                }
             }
         }
 
-        // Ensure the unqualified name is defined (if not already).
-        // For qualified-only imports, still define it internally so the
-        // qualified -> unqualified mapping has a target, but the user can
-        // only access it via the qualifier.
-        if ctx.lookup_value(unqualified).is_none() {
+        // Ensure the unqualified name is defined.
+        // Non-qualified imports override existing bindings (e.g., `import Data.Set
+        // (fromList)` overrides OverloadedLists). Exception: GHC.Generics, whose
+        // `from`/`to` exports would clash with well-typed builtins.
+        //
+        // IMPORTANT: If the import has an explicit import list (e.g., `import Data.Text (Text)`),
+        // only register unqualified names that are actually imported. Otherwise, importing
+        // Data.Text (Text) would override Prelude's foldr/map/etc. with Data.Text's versions.
+        let is_explicitly_imported = explicit_imports.as_ref().map_or(true, |names| names.contains(export));
+        if !is_explicitly_imported {
+            // Skip unqualified registration — this name wasn't in the explicit import list.
+            // Qualified names (e.g., T.foldr) are still registered above.
+        } else if (is_unqualified_import && module_name != "GHC.Generics") || ctx.lookup_value(unqualified).is_none() {
             let def_id = ctx.fresh_def_id();
-            if is_constructor {
-                ctx.define(def_id, unqualified, DefKind::Constructor, Span::default());
+            let def_name = if has_typed_sigs {
+                Symbol::intern(&format!("{}.{}", module_name, export))
             } else {
-                ctx.define(def_id, unqualified, DefKind::Value, Span::default());
+                unqualified
+            };
+            if is_constructor {
+                ctx.define(def_id, def_name, DefKind::StubConstructor, Span::default());
+            } else {
+                ctx.define(def_id, def_name, DefKind::Value, Span::default());
             }
             ctx.bind_value(unqualified, def_id);
         }
@@ -3590,14 +4067,22 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                 ctx.enter_scope();
                                 for nested_decl in &inner_clause.wheres {
                                     if let ast::Decl::FunBind(nested_fb) = nested_decl {
-                                        let nested_def_id = ctx.fresh_def_id();
-                                        ctx.define(
-                                            nested_def_id,
-                                            nested_fb.name.name,
-                                            DefKind::Value,
-                                            nested_fb.span,
-                                        );
-                                        ctx.bind_value(nested_fb.name.name, nested_def_id);
+                                        // Check for pattern binding ($patbind)
+                                        if nested_fb.name.name.as_str() == "$patbind"
+                                            && nested_fb.clauses.len() == 1
+                                            && nested_fb.clauses[0].pats.len() == 1
+                                        {
+                                            bind_pattern(ctx, &nested_fb.clauses[0].pats[0]);
+                                        } else {
+                                            let nested_def_id = ctx.fresh_def_id();
+                                            ctx.define(
+                                                nested_def_id,
+                                                nested_fb.name.name,
+                                                DefKind::Value,
+                                                nested_fb.span,
+                                            );
+                                            ctx.bind_value(nested_fb.name.name, nested_def_id);
+                                        }
                                     }
                                 }
                                 let body = lower_rhs(ctx, &inner_clause.rhs);
@@ -3606,6 +4091,20 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                     .iter()
                                     .filter_map(|d| {
                                         if let ast::Decl::FunBind(nested_fb) = d {
+                                            // Handle pattern bindings ($patbind)
+                                            if nested_fb.name.name.as_str() == "$patbind"
+                                                && nested_fb.clauses.len() == 1
+                                                && nested_fb.clauses[0].pats.len() == 1
+                                            {
+                                                let pat = lower_pat(ctx, &nested_fb.clauses[0].pats[0]);
+                                                let rhs_expr = lower_rhs(ctx, &nested_fb.clauses[0].rhs);
+                                                return Some(hir::Binding {
+                                                    pat,
+                                                    sig: None,
+                                                    rhs: rhs_expr,
+                                                    span: nested_fb.span,
+                                                });
+                                            }
                                             let nested_def_id = ctx
                                                 .lookup_value(nested_fb.name.name)
                                                 .expect("nested where binding should be bound");
@@ -3662,14 +4161,22 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                 // Pre-bind nested where names
                                 for nested_decl in &clause.wheres {
                                     if let ast::Decl::FunBind(nested_fb) = nested_decl {
-                                        let nested_def_id = ctx.fresh_def_id();
-                                        ctx.define(
-                                            nested_def_id,
-                                            nested_fb.name.name,
-                                            DefKind::Value,
-                                            nested_fb.span,
-                                        );
-                                        ctx.bind_value(nested_fb.name.name, nested_def_id);
+                                        // Check for pattern binding ($patbind)
+                                        if nested_fb.name.name.as_str() == "$patbind"
+                                            && nested_fb.clauses.len() == 1
+                                            && nested_fb.clauses[0].pats.len() == 1
+                                        {
+                                            bind_pattern(ctx, &nested_fb.clauses[0].pats[0]);
+                                        } else {
+                                            let nested_def_id = ctx.fresh_def_id();
+                                            ctx.define(
+                                                nested_def_id,
+                                                nested_fb.name.name,
+                                                DefKind::Value,
+                                                nested_fb.span,
+                                            );
+                                            ctx.bind_value(nested_fb.name.name, nested_def_id);
+                                        }
                                     }
                                 }
                                 let rhs_expr = lower_rhs(ctx, &clause.rhs);
@@ -3679,6 +4186,20 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                     .iter()
                                     .filter_map(|d| {
                                         if let ast::Decl::FunBind(nested_fb) = d {
+                                            // Handle pattern bindings ($patbind)
+                                            if nested_fb.name.name.as_str() == "$patbind"
+                                                && nested_fb.clauses.len() == 1
+                                                && nested_fb.clauses[0].pats.len() == 1
+                                            {
+                                                let pat = lower_pat(ctx, &nested_fb.clauses[0].pats[0]);
+                                                let rhs_expr = lower_rhs(ctx, &nested_fb.clauses[0].rhs);
+                                                return Some(hir::Binding {
+                                                    pat,
+                                                    sig: None,
+                                                    rhs: rhs_expr,
+                                                    span: nested_fb.span,
+                                                });
+                                            }
                                             let nested_def_id = ctx
                                                 .lookup_value(nested_fb.name.name)
                                                 .expect("nested where binding should be bound");
@@ -3759,7 +4280,68 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                         fb.span,
                                     )
                                 };
-                                let body = lower_rhs(ctx, &clause.rhs);
+
+                                // Handle per-clause where bindings
+                                let body = if !clause.wheres.is_empty() {
+                                    ctx.enter_scope();
+                                    // Pre-bind where names
+                                    for wd in &clause.wheres {
+                                        if let ast::Decl::FunBind(wfb) = wd {
+                                            if wfb.name.name.as_str() == "$patbind"
+                                                && wfb.clauses.len() == 1
+                                                && wfb.clauses[0].pats.len() == 1
+                                            {
+                                                bind_pattern(ctx, &wfb.clauses[0].pats[0]);
+                                            } else {
+                                                let wd_id = ctx.fresh_def_id();
+                                                ctx.define(wd_id, wfb.name.name, DefKind::Value, wfb.span);
+                                                ctx.bind_value(wfb.name.name, wd_id);
+                                            }
+                                        }
+                                    }
+                                    let rhs_expr = lower_rhs(ctx, &clause.rhs);
+                                    // Lower where bindings
+                                    let wbs: Vec<hir::Binding> = clause.wheres.iter().filter_map(|wd| {
+                                        if let ast::Decl::FunBind(wfb) = wd {
+                                            if wfb.name.name.as_str() == "$patbind"
+                                                && wfb.clauses.len() == 1
+                                                && wfb.clauses[0].pats.len() == 1
+                                            {
+                                                let wpat = lower_pat(ctx, &wfb.clauses[0].pats[0]);
+                                                let wrhs = lower_rhs(ctx, &wfb.clauses[0].rhs);
+                                                return Some(hir::Binding { pat: wpat, sig: None, rhs: wrhs, span: wfb.span });
+                                            }
+                                            let wd_id = ctx.lookup_value(wfb.name.name)
+                                                .expect("where binding should be bound");
+                                            if wfb.clauses.len() == 1 && wfb.clauses[0].pats.is_empty() {
+                                                let wrhs = lower_rhs(ctx, &wfb.clauses[0].rhs);
+                                                return Some(hir::Binding {
+                                                    pat: hir::Pat::Var(wfb.name.name, wd_id, wfb.span),
+                                                    sig: None, rhs: wrhs, span: wfb.span,
+                                                });
+                                            }
+                                            // For where-bindings with parameters, lower to lambda
+                                            if wfb.clauses.len() == 1 {
+                                                let wc = &wfb.clauses[0];
+                                                ctx.enter_scope();
+                                                for wp in &wc.pats { bind_pattern(ctx, wp); }
+                                                let wpats: Vec<hir::Pat> = wc.pats.iter().map(|wp| lower_pat(ctx, wp)).collect();
+                                                let wbody = lower_rhs(ctx, &wc.rhs);
+                                                ctx.exit_scope();
+                                                let wlam = hir::Expr::Lam(wpats, Box::new(wbody), wfb.span);
+                                                return Some(hir::Binding {
+                                                    pat: hir::Pat::Var(wfb.name.name, wd_id, wfb.span),
+                                                    sig: None, rhs: wlam, span: wfb.span,
+                                                });
+                                            }
+                                        }
+                                        None
+                                    }).collect();
+                                    ctx.exit_scope();
+                                    hir::Expr::Let(wbs, Box::new(rhs_expr), clause.span)
+                                } else {
+                                    lower_rhs(ctx, &clause.rhs)
+                                };
                                 ctx.exit_scope();
                                 alts.push(hir::CaseAlt {
                                     pat,

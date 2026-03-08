@@ -44,9 +44,116 @@ use crate::context::TyCtxt;
 use crate::diagnostics;
 use crate::nat_solver::{NatConstraint, NatSolver};
 
-/// Check if a type is the String type constructor.
+/// Try to expand a user-defined type alias.
+///
+/// Given a type like `Fallible Int` where `type Fallible a = Either Failure a`,
+/// this collects the applied arguments, matches them against the alias parameters,
+/// and returns the expanded type `Either Failure Int`.
+///
+/// Works for:
+/// - `Ty::Con("Fallible")` with 0 args applied so far (if alias has 0 params)
+/// - `Ty::App(Ty::Con("Fallible"), arg)` for 1-param aliases
+/// - Nested `Ty::App` for multi-param aliases
+fn try_expand_type_alias(ctx: &TyCtxt, ty: &Ty) -> Option<Ty> {
+    // Extract the head type constructor name and collected arguments.
+    let (head_name, args) = collect_type_app(ty);
+    let head_sym = match &head_name {
+        Ty::Con(c) => c.name,
+        _ => return None,
+    };
+
+    // Look up in user-defined type aliases
+    // Try both the full name and the unqualified name (strip module qualifier)
+    let (params, rhs) = ctx.type_aliases.get(&head_sym).or_else(|| {
+        let name_str = head_sym.as_str();
+        if let Some(pos) = name_str.rfind('.') {
+            let unqualified = &name_str[pos + 1..];
+            ctx.type_aliases.get(&Symbol::intern(unqualified))
+        } else {
+            None
+        }
+    })?;
+
+    // We can expand if we have at least as many args as params.
+    // Extra args are applied to the result (partial application is fine).
+    if args.len() < params.len() {
+        // Under-saturated alias application — can't expand yet
+        return None;
+    }
+
+    // Substitute params with args in the RHS
+    let mut expanded = rhs.clone();
+    for (param, arg) in params.iter().zip(args.iter()) {
+        expanded = subst_tyvar(&expanded, param.id, arg);
+    }
+
+    // If there are extra args beyond the alias params, apply them
+    for arg in args.iter().skip(params.len()) {
+        expanded = Ty::App(Box::new(expanded), Box::new(arg.clone()));
+    }
+
+    Some(expanded)
+}
+
+/// Collect a type application spine: `App(App(Con(F), a), b)` → `(Con(F), [a, b])`.
+fn collect_type_app(ty: &Ty) -> (Ty, Vec<Ty>) {
+    let mut args = Vec::new();
+    let mut current = ty;
+    loop {
+        match current {
+            Ty::App(f, a) => {
+                args.push((**a).clone());
+                current = f;
+            }
+            _ => {
+                args.reverse();
+                return (current.clone(), args);
+            }
+        }
+    }
+}
+
+/// Substitute a type variable (by id) with a replacement type throughout a type.
+fn subst_tyvar(ty: &Ty, var_id: u32, replacement: &Ty) -> Ty {
+    match ty {
+        Ty::Var(v) if v.id == var_id => replacement.clone(),
+        Ty::Var(_) | Ty::Con(_) | Ty::Prim(_) | Ty::Error => ty.clone(),
+        Ty::App(f, a) => Ty::App(
+            Box::new(subst_tyvar(f, var_id, replacement)),
+            Box::new(subst_tyvar(a, var_id, replacement)),
+        ),
+        Ty::Fun(from, to) => Ty::Fun(
+            Box::new(subst_tyvar(from, var_id, replacement)),
+            Box::new(subst_tyvar(to, var_id, replacement)),
+        ),
+        Ty::Tuple(elems) => Ty::Tuple(
+            elems
+                .iter()
+                .map(|e| subst_tyvar(e, var_id, replacement))
+                .collect(),
+        ),
+        Ty::List(elem) => Ty::List(Box::new(subst_tyvar(elem, var_id, replacement))),
+        Ty::Forall(vars, body) => {
+            // Don't substitute if the var is shadowed by the forall
+            if vars.iter().any(|v| v.id == var_id) {
+                ty.clone()
+            } else {
+                Ty::Forall(vars.clone(), Box::new(subst_tyvar(body, var_id, replacement)))
+            }
+        }
+        Ty::Nat(_) | Ty::TyList(_) => ty.clone(),
+    }
+}
+
+/// Check if a type is the String type constructor (or FilePath alias).
 fn is_string_con(ty: &Ty) -> bool {
-    matches!(ty, Ty::Con(c) if c.name.as_str() == "String")
+    matches!(ty, Ty::Con(c) if matches!(c.name.as_str(), "String" | "FilePath"))
+}
+
+/// Check if a type is the Text type constructor (or common Text aliases).
+fn is_text_con(ty: &Ty) -> bool {
+    matches!(ty, Ty::Con(c) if matches!(normalize_qualified_tyname(c.name.as_str()),
+        "Text" | "MimeType" | "Extension" | "NameSpaceIRI" | "Attr" | "Tag"))
 }
 
 /// Check if a type is the Dimension type constructor (XMonad type alias).
@@ -67,6 +174,32 @@ fn is_d_con(ty: &Ty) -> bool {
 /// Check if a type is the Position type constructor (XMonad type alias for Int).
 fn is_position_con(ty: &Ty) -> bool {
     matches!(ty, Ty::Con(c) if c.name.as_str() == "Position")
+}
+
+/// Normalize a qualified type name to its canonical unqualified form.
+/// E.g., "T.Text" -> "Text", "BL.ByteString" -> "ByteString", "M.Map" -> "Map"
+fn normalize_qualified_tyname(name: &str) -> &str {
+    // If the name contains a dot and the part before the dot looks like a
+    // module qualifier (starts with uppercase or is a common abbreviation),
+    // return just the part after the last dot.
+    if let Some(dot_pos) = name.rfind('.') {
+        let qualifier = &name[..dot_pos];
+        let base = &name[dot_pos + 1..];
+        // Only strip if qualifier looks like a module alias (e.g., T, BL, M, Set, Map, etc.)
+        if !qualifier.is_empty() && !base.is_empty() {
+            return base;
+        }
+    }
+    name
+}
+
+/// Check if two type names refer to the same type, accounting for qualified aliases.
+/// E.g., "T.Text" and "Text" are the same, "B.ByteString" and "ByteString" are the same.
+fn same_type_name(name1: &str, name2: &str) -> bool {
+    if name1 == name2 {
+        return true;
+    }
+    normalize_qualified_tyname(name1) == normalize_qualified_tyname(name2)
 }
 
 /// Get the element type of a list, if this is a list type.
@@ -94,6 +227,16 @@ fn int_ty() -> Ty {
 /// Check if two type constructor names are compatible type aliases.
 /// Returns true if they both resolve to the same underlying type.
 fn are_compatible_type_aliases(name1: &str, name2: &str) -> bool {
+    // First, check if they're the same type after normalizing qualified names.
+    // E.g., "T.Text" and "Text" should be the same type.
+    if same_type_name(name1, name2) {
+        return true;
+    }
+
+    // Normalize before checking alias groups
+    let n1 = normalize_qualified_tyname(name1);
+    let n2 = normalize_qualified_tyname(name2);
+
     // Type aliases for Int
     const INT_ALIASES: &[&str] = &[
         "Int",
@@ -102,22 +245,52 @@ fn are_compatible_type_aliases(name1: &str, name2: &str) -> bool {
         "KeyMask",
         "Window",
         "ScreenId",
+        "Handle",
     ];
 
     // Type aliases for String
-    const STRING_ALIASES: &[&str] = &["String", "WorkspaceId"];
+    const STRING_ALIASES: &[&str] = &["String", "FilePath", "WorkspaceId"];
+
+    // Type aliases for Text
+    const TEXT_ALIASES: &[&str] = &[
+        "Text",
+        "MimeType",
+        "Extension",
+        "NameSpaceIRI",
+        "Attr",
+        "Tag",
+    ];
 
     // Check if both are Int aliases
-    let is_int1 = INT_ALIASES.contains(&name1);
-    let is_int2 = INT_ALIASES.contains(&name2);
+    let is_int1 = INT_ALIASES.contains(&n1);
+    let is_int2 = INT_ALIASES.contains(&n2);
     if is_int1 && is_int2 {
         return true;
     }
 
     // Check if both are String aliases
-    let is_str1 = STRING_ALIASES.contains(&name1);
-    let is_str2 = STRING_ALIASES.contains(&name2);
+    let is_str1 = STRING_ALIASES.contains(&n1);
+    let is_str2 = STRING_ALIASES.contains(&n2);
     if is_str1 && is_str2 {
+        return true;
+    }
+
+    // Check if both are Text aliases
+    let is_text1 = TEXT_ALIASES.contains(&n1);
+    let is_text2 = TEXT_ALIASES.contains(&n2);
+    if is_text1 && is_text2 {
+        return true;
+    }
+
+    // Integer and Int should be compatible in check mode
+    let is_integer_like = |s: &str| matches!(s, "Int" | "Integer" | "Word" | "Int64" | "Word8" | "Word16" | "Word32" | "Word64" | "Int8" | "Int16" | "Int32" | "CInt" | "CSize");
+    if is_integer_like(n1) && is_integer_like(n2) {
+        return true;
+    }
+
+    // Float/Double should be compatible
+    let is_float_like = |s: &str| matches!(s, "Float" | "Double" | "CDouble" | "CFloat" | "Rational");
+    if is_float_like(n1) && is_float_like(n2) {
         return true;
     }
 
@@ -239,6 +412,18 @@ fn unify_inner(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
     let t1 = if t1_reduced != *t1 { &t1_reduced } else { t1 };
     let t2 = if t2_reduced != *t2 { &t2_reduced } else { t2 };
 
+    // Try expanding user-defined type aliases before structural matching.
+    // E.g., `type Fallible a = Either Failure a` allows `Fallible Int` to
+    // unify with `Either () Int`.
+    let t1_alias = try_expand_type_alias(ctx, t1);
+    let t2_alias = try_expand_type_alias(ctx, t2);
+    if t1_alias.is_some() || t2_alias.is_some() {
+        let t1_exp = t1_alias.as_ref().unwrap_or(t1);
+        let t2_exp = t2_alias.as_ref().unwrap_or(t2);
+        unify_inner(ctx, t1_exp, t2_exp, span);
+        return;
+    }
+
     match (t1, t2) {
         // Error types unify with anything (error recovery)
         (Ty::Error, _) | (_, Ty::Error) => {}
@@ -255,6 +440,8 @@ fn unify_inner(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
         (Ty::Con(c1), Ty::Con(c2)) => {
             if c1.name == c2.name {
                 // Same type, OK
+            } else if same_type_name(c1.name.as_str(), c2.name.as_str()) {
+                // Same type after normalizing qualified names (e.g., T.Text = Text)
             } else if are_compatible_type_aliases(c1.name.as_str(), c2.name.as_str()) {
                 // Type aliases that should be equivalent
             } else {
@@ -436,6 +623,28 @@ fn unify_inner(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
                 } else {
                     diagnostics::emit_type_mismatch(ctx, t1, t2, span);
                 }
+            } else {
+                diagnostics::emit_type_mismatch(ctx, t1, t2, span);
+            }
+        }
+
+        // === Type alias: Text ≈ String ≈ [Char] (for check mode) ===
+        // In check mode, be permissive with Text/String/[Char] conversions
+        // since Pandoc and many Haskell packages freely convert between them.
+        (t1, t2) if is_text_con(t1) => {
+            if is_text_con(t2) || is_string_con(t2) {
+                // Text ~ Text or Text ~ String, ok
+            } else if let Some(_elem) = get_list_elem(t2) {
+                // Text ~ [a], ok (treat as compatible)
+            } else {
+                diagnostics::emit_type_mismatch(ctx, t1, t2, span);
+            }
+        }
+        (t1, t2) if is_text_con(t2) => {
+            if is_string_con(t1) {
+                // String ~ Text, ok
+            } else if let Some(_elem) = get_list_elem(t1) {
+                // [a] ~ Text, ok
             } else {
                 diagnostics::emit_type_mismatch(ctx, t1, t2, span);
             }

@@ -190,6 +190,8 @@ pub enum Extension {
     NamedFieldPuns,
     /// Overloaded strings
     OverloadedStrings,
+    /// Tuple sections
+    TupleSections,
     /// Overloaded lists
     OverloadedLists,
     /// Numeric underscores
@@ -309,6 +311,7 @@ impl Extension {
             | Self::RecordWildCards
             | Self::NamedFieldPuns
             | Self::OverloadedStrings
+            | Self::TupleSections
             | Self::OverloadedLists
             | Self::NumericUnderscores
             | Self::BinaryLiterals
@@ -356,8 +359,26 @@ impl Extension {
             | Self::QuasiQuotes
             | Self::NamedDefaults => ExtensionStatus::Unimplemented,
 
-            // Unknown
-            Self::Unknown(_) => ExtensionStatus::Unknown,
+            // Unknown — check if it's a recognized GHC extension we silently accept
+            Self::Unknown(name) => {
+                match name.as_str() {
+                    // Common GHC extensions we silently accept for compatibility
+                    "Arrows" | "MonoLocalBinds" | "ImpredicativeTypes"
+                    | "TypeFamilyDependencies" | "DeriveAnyClass" | "RoleAnnotations"
+                    | "AllowAmbiguousTypes" | "TypeSynonymInstances" | "PackageImports"
+                    | "NoImplicitPrelude" | "NoMonomorphismRestriction"
+                    | "DisambiguateRecordFields" | "DuplicateRecordFields"
+                    | "ApplicativeDo" | "NumDecimals" | "MagicHash"
+                    | "UnboxedTuples" | "TypeInType" | "PolyKinds"
+                    | "StarIsType" | "ImportQualifiedPost"
+                    | "StandaloneKindSignatures" | "QuantifiedConstraints"
+                    | "LinearTypes" | "UnicodeSyntax" | "ParallelListComp"
+                    | "TransformListComp" | "MonadComprehensions"
+                    | "ExtendedDefaultRules" | "PostfixOperators"
+                    | "ScopedTypeVariables" | "NoFieldSelectors" => ExtensionStatus::Supported,
+                    _ => ExtensionStatus::Unknown,
+                }
+            }
         }
     }
 
@@ -392,6 +413,7 @@ impl Extension {
             "RecordWildCards" => Self::RecordWildCards,
             "NamedFieldPuns" => Self::NamedFieldPuns,
             "OverloadedStrings" => Self::OverloadedStrings,
+            "TupleSections" => Self::TupleSections,
             "OverloadedLists" => Self::OverloadedLists,
             "NumericUnderscores" => Self::NumericUnderscores,
             "HexFloatLiterals" => Self::HexFloatLiterals,

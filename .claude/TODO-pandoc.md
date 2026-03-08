@@ -3,7 +3,10 @@
 **Document ID:** BHC-TODO-PANDOC
 **Status:** In Progress
 **Created:** 2026-01-30
-**Updated:** 2026-02-27
+**Updated:** 2026-03-04
+
+**See also:** [ROADMAP.md](ROADMAP.md) — GHC boot library vs third-party package
+classification and milestone plan (P1–P5).
 
 ---
 

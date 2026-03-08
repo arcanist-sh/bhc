@@ -550,7 +550,7 @@ impl Builtins {
     /// - Alternative: <|>
     /// - And many more...
     pub fn register_primitive_ops(&self, env: &mut TypeEnv) {
-        // Start after types (24) and constructors (37) = 61
+        // Start after types (25) and constructors (49) = 74
         // Order MUST match bhc_lower::context::define_builtins
         let mut next_id = BUILTIN_TYPE_COUNT
             + BUILTIN_CON_COUNT
@@ -729,16 +729,16 @@ impl Builtins {
                     Ty::fun(Ty::fun(Ty::Var(a.clone()), mb.clone()), Ty::fun(ma, mb)),
                 )
             }),
-            // Applicative/Functor operators (list-specialized)
+            // Applicative/Functor operators (polymorphic for parser/monad support)
             // NOTE: Order MUST match bhc_lower::context::define_builtins
             ("<*>", {
-                // (<*>) :: [a -> b] -> [a] -> [b] (list applicative)
-                let list_fn = Ty::List(Box::new(Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone()))));
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
+                // (<*>) :: Applicative f => f (a -> b) -> f a -> f b (polymorphic: c -> d -> e)
+                let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
+                let d = TyVar::new_star(BUILTIN_TYVAR_B + 2);
+                let e = TyVar::new_star(BUILTIN_TYVAR_B + 3);
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(list_fn, Ty::fun(list_a, list_b)),
+                    vec![c.clone(), d.clone(), e.clone()],
+                    Ty::fun(Ty::Var(c), Ty::fun(Ty::Var(d), Ty::Var(e))),
                 )
             }),
             ("<$>", {
@@ -754,30 +754,25 @@ impl Builtins {
                 )
             }),
             ("<$", {
-                // (<$) :: a -> [b] -> [a] (replace all with constant)
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
+                // (<$) :: Functor f => a -> f b -> f a (polymorphic: a -> b -> c)
+                let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(Ty::Var(a.clone()), Ty::fun(list_b, list_a)),
+                    vec![a.clone(), b.clone(), c.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(c))),
                 )
             }),
             ("*>", {
-                // (*>) :: [a] -> [b] -> [b] (sequence, discarding first result)
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
+                // (*>) :: Applicative f => f a -> f b -> f b (polymorphic: a -> b -> b)
                 Scheme::poly(
                     vec![a.clone(), b.clone()],
-                    Ty::fun(list_a, Ty::fun(list_b.clone(), list_b)),
+                    Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))),
                 )
             }),
             ("<*", {
-                // (<*) :: [a] -> [b] -> [a] (sequence, discarding second result)
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
+                // (<*) :: Applicative f => f a -> f b -> f a (polymorphic: a -> b -> a)
                 Scheme::poly(
                     vec![a.clone(), b.clone()],
-                    Ty::fun(list_a.clone(), Ty::fun(list_b, list_a)),
+                    Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(a.clone()))),
                 )
             }),
             ("fmap", {
@@ -794,19 +789,17 @@ impl Builtins {
                     ),
                 )
             }),
-            // Alternative operator (list-specialized)
+            // Alternative operators (polymorphic for parser support)
             ("<|>", {
-                // (<|>) :: [a] -> [a] -> [a] (same as ++ for lists)
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                // (<|>) :: Alternative f => f a -> f a -> f a (polymorphic: a -> a -> a)
                 Scheme::poly(
                     vec![a.clone()],
-                    Ty::fun(list_a.clone(), Ty::fun(list_a.clone(), list_a)),
+                    Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))),
                 )
             }),
             ("empty", {
-                // empty :: [a] (empty list for Alternative)
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                Scheme::poly(vec![a.clone()], list_a)
+                // empty :: Alternative f => f a (polymorphic: a)
+                Scheme::poly(vec![a.clone()], Ty::Var(a.clone()))
             }),
             // Semigroup/Monoid operators (polymorphic)
             ("<>", {
@@ -894,63 +887,59 @@ impl Builtins {
                 )
             }),
             ("mapM", {
-                // mapM :: (a -> IO b) -> [a] -> IO [b] (IO-specialized)
-                let io_b = Ty::App(
-                    Box::new(Ty::Con(self.io_con.clone())),
-                    Box::new(Ty::Var(b.clone())),
-                );
+                // mapM :: Monad m => (a -> m b) -> [a] -> m [b] (polymorphic)
+                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let mb = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
                 let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                 let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
-                let io_list_b = Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(list_b));
+                let m_list_b = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(list_b));
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![m.clone(), a.clone(), b.clone()],
                     Ty::fun(
-                        Ty::fun(Ty::Var(a.clone()), io_b),
-                        Ty::fun(list_a, io_list_b),
+                        Ty::fun(Ty::Var(a.clone()), mb),
+                        Ty::fun(list_a, m_list_b),
                     ),
                 )
             }),
             ("mapM_", {
-                // mapM_ :: (a -> IO b) -> [a] -> IO () (IO-specialized)
-                let io_b = Ty::App(
-                    Box::new(Ty::Con(self.io_con.clone())),
-                    Box::new(Ty::Var(b.clone())),
-                );
+                // mapM_ :: Monad m => (a -> m b) -> [a] -> m () (polymorphic)
+                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let mb = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
                 let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let io_unit = Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(Ty::unit()));
+                let m_unit = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::unit()));
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(Ty::fun(Ty::Var(a.clone()), io_b), Ty::fun(list_a, io_unit)),
+                    vec![m.clone(), a.clone(), b.clone()],
+                    Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), Ty::fun(list_a, m_unit)),
                 )
             }),
             ("forM", {
-                // forM :: [a] -> (a -> IO b) -> IO [b] (flipped mapM)
-                let io_b = Ty::App(
-                    Box::new(Ty::Con(self.io_con.clone())),
-                    Box::new(Ty::Var(b.clone())),
-                );
+                // forM :: Monad m => [a] -> (a -> m b) -> m [b] (polymorphic)
+                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let mb = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
                 let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                 let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
-                let io_list_b = Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(list_b));
+                let m_list_b = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(list_b));
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![m.clone(), a.clone(), b.clone()],
                     Ty::fun(
                         list_a,
-                        Ty::fun(Ty::fun(Ty::Var(a.clone()), io_b), io_list_b),
+                        Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), m_list_b),
                     ),
                 )
             }),
             ("forM_", {
-                // forM_ :: [a] -> (a -> IO b) -> IO () (flipped mapM_)
-                let io_b = Ty::App(
-                    Box::new(Ty::Con(self.io_con.clone())),
-                    Box::new(Ty::Var(b.clone())),
-                );
+                // forM_ :: Monad m => [a] -> (a -> m b) -> m () (polymorphic)
+                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let mb = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
                 let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let io_unit = Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(Ty::unit()));
+                let m_unit = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::unit()));
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(list_a, Ty::fun(Ty::fun(Ty::Var(a.clone()), io_b), io_unit)),
+                    vec![m.clone(), a.clone(), b.clone()],
+                    Ty::fun(list_a, Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), m_unit)),
                 )
             }),
             ("sequence", {
@@ -975,29 +964,32 @@ impl Builtins {
                 Scheme::poly(vec![a.clone()], Ty::fun(list_io_a, io_unit))
             }),
             ("when", {
-                // when :: Bool -> IO () -> IO ()
-                let io_unit = Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(Ty::unit()));
-                Scheme::mono(Ty::fun(
+                // when :: Monad m => Bool -> m () -> m () (polymorphic)
+                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let m_unit = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::unit()));
+                Scheme::poly(vec![m], Ty::fun(
                     self.bool_ty.clone(),
-                    Ty::fun(io_unit.clone(), io_unit),
+                    Ty::fun(m_unit.clone(), m_unit),
                 ))
             }),
             ("unless", {
-                // unless :: Bool -> IO () -> IO ()
-                let io_unit = Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(Ty::unit()));
-                Scheme::mono(Ty::fun(
+                // unless :: Monad m => Bool -> m () -> m () (polymorphic)
+                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let m_unit = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::unit()));
+                Scheme::poly(vec![m], Ty::fun(
                     self.bool_ty.clone(),
-                    Ty::fun(io_unit.clone(), io_unit),
+                    Ty::fun(m_unit.clone(), m_unit),
                 ))
             }),
             ("void", {
-                // void :: IO a -> IO ()
-                let io_a = Ty::App(
-                    Box::new(Ty::Con(self.io_con.clone())),
-                    Box::new(Ty::Var(a.clone())),
-                );
-                let io_unit = Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(Ty::unit()));
-                Scheme::poly(vec![a.clone()], Ty::fun(io_a, io_unit))
+                // void :: Functor f => f a -> f () (polymorphic)
+                let f_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let f = TyVar::new(BUILTIN_TYVAR_F, f_kind);
+                let fa = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(a.clone())));
+                let f_unit = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::unit()));
+                Scheme::poly(vec![f, a.clone()], Ty::fun(fa, f_unit))
             }),
             ("filterM", {
                 // filterM :: (a -> IO Bool) -> [a] -> IO [a]
@@ -2623,10 +2615,11 @@ impl Builtins {
             ),
             // Guard helper
             ("guard", {
-                // guard :: Alternative f => Bool -> f ()
-                // List-specialized: guard :: Bool -> [()]
-                let list_unit = Ty::List(Box::new(Ty::unit()));
-                Scheme::mono(Ty::fun(self.bool_ty.clone(), list_unit))
+                // guard :: Alternative f => Bool -> f () (polymorphic)
+                let f_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let f = TyVar::new(BUILTIN_TYVAR_F, f_kind);
+                let f_unit = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::unit()));
+                Scheme::poly(vec![f], Ty::fun(self.bool_ty.clone(), f_unit))
             }),
             // Tuple functions
             ("fst", {
@@ -2778,20 +2771,20 @@ impl Builtins {
                 Scheme::mono(Ty::fun(self.float_ty.clone(), self.float_ty.clone()))
             }),
             ("truncate", {
-                // truncate :: Float -> Int
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.int_ty.clone()))
+                // truncate :: (RealFrac a, Integral b) => a -> b
+                Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())))
             }),
             ("round", {
-                // round :: Float -> Int
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.int_ty.clone()))
+                // round :: (RealFrac a, Integral b) => a -> b
+                Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())))
             }),
             ("ceiling", {
-                // ceiling :: Float -> Int
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.int_ty.clone()))
+                // ceiling :: (RealFrac a, Integral b) => a -> b
+                Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())))
             }),
             ("floor", {
-                // floor :: Float -> Int
-                Scheme::mono(Ty::fun(self.float_ty.clone(), self.int_ty.clone()))
+                // floor :: (RealFrac a, Integral b) => a -> b
+                Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())))
             }),
             // even/odd/gcd/lcm/quot/rem/quotRem/divMod moved to fixed DefIds 10500+
             // Keep placeholders to maintain sequential alignment
@@ -2988,16 +2981,12 @@ impl Builtins {
                 Scheme::poly(vec![a.clone()], Ty::fun(list_a, list_maybe))
             }),
             ("some", {
-                // some :: [a] -> [[a]] (one or more occurrences, list-specialized)
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let list_list_a = Ty::List(Box::new(list_a.clone()));
-                Scheme::poly(vec![a.clone()], Ty::fun(list_a, list_list_a))
+                // some :: Alternative f => f a -> f [a] (polymorphic: a -> b)
+                Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())))
             }),
             ("many", {
-                // many :: [a] -> [[a]] (zero or more occurrences, list-specialized)
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let list_list_a = Ty::List(Box::new(list_a.clone()));
-                Scheme::poly(vec![a.clone()], Ty::fun(list_a, list_list_a))
+                // many :: Alternative f => f a -> f [a] (polymorphic: a -> b)
+                Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())))
             }),
             // Data.Foldable (list-specialized versions)
             ("fold", {
@@ -3124,14 +3113,13 @@ impl Builtins {
             // These must be in the exact same order as context.rs
             // Monad fail
             ("fail", {
-                // fail :: String -> m a
-                let io_a = Ty::App(
-                    Box::new(Ty::Con(self.io_con.clone())),
-                    Box::new(Ty::Var(a.clone())),
-                );
+                // fail :: MonadFail m => String -> m a (polymorphic)
+                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let ma = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())));
                 Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(self.string_ty.clone(), io_a),
+                    vec![m, a.clone()],
+                    Ty::fun(self.string_ty.clone(), ma),
                 )
             }),
             // Control.Applicative.Backwards
@@ -3613,9 +3601,23 @@ impl Builtins {
             ("Data.Map.size", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), self.int_ty.clone()))),
             ("Data.Map.member", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), self.bool_ty.clone())))),
             ("Data.Map.notMember", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), self.bool_ty.clone())))),
-            ("Data.Map.lookup", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))))),
+            ("Data.Map.lookup", {
+                // lookup :: Ord k => k -> Map k v -> Maybe v
+                let k = a.clone();
+                let v = b.clone();
+                let map_con = TyCon::new(Symbol::intern("Map"), Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)))));
+                let map_kv = Ty::App(Box::new(Ty::App(Box::new(Ty::Con(map_con)), Box::new(Ty::Var(k.clone())))), Box::new(Ty::Var(v.clone())));
+                Scheme::poly(vec![k, v], Ty::fun(Ty::Var(a.clone()), Ty::fun(map_kv, self.maybe_of(Ty::Var(b.clone())))))
+            }),
             ("Data.Map.findWithDefault", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())))))),
-            ("Data.Map.!", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))))),
+            ("Data.Map.!", {
+                // (!) :: Ord k => Map k v -> k -> v
+                let k = a.clone();
+                let v = b.clone();
+                let map_con = TyCon::new(Symbol::intern("Map"), Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)))));
+                let map_kv = Ty::App(Box::new(Ty::App(Box::new(Ty::Con(map_con)), Box::new(Ty::Var(k.clone())))), Box::new(Ty::Var(v.clone())));
+                Scheme::poly(vec![k, v], Ty::fun(map_kv, Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone()))))
+            }),
             ("Data.Map.insert", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())))))),
             ("Data.Map.insertWith", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())), Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone()))))))),
             ("Data.Map.delete", Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone()))))),
@@ -7499,46 +7501,47 @@ impl Builtins {
 // DefId layout (MUST match bhc-lower/src/context.rs):
 // - Types: Int, Float, Double, Char, Bool, String, IO, Maybe, Either, Ordering,
 //          NonEmpty, ExitCode, IOMode, BufferMode, Endo, Backwards, All, Any,
-//          XdgDirectory, StdStream, TypeRep, SomeException, Permissions, Text (DefIds 0-23)
+//          XdgDirectory, StdStream, TypeRep, SomeException, Permissions, Text,
+//          Rational (DefIds 0-24)
 // - Constructors: True, False, Nothing, Just, Left, Right, LT, EQ, GT, [], :, (),
-//                 (,), (,,), :|, Backwards, Endo, ExitSuccess, ExitFailure,
-//                 SomeException, ReadMode, WriteMode, AppendMode, ReadWriteMode,
-//                 NoBuffering, LineBuffering, BlockBuffering, XdgData, XdgConfig,
-//                 XdgCache, CreatePipe, Inherit, UseHandle, NoStream, TypeRep,
-//                 All, Any (DefIds 24-60)
-// - Functions: +, -, *, /, ... (DefIds 61+)
+//                 (,), (,,), (,,,), ..., (,,,,,,,,,,,,,,), :|, Backwards, Endo,
+//                 ExitSuccess, ExitFailure, SomeException, ReadMode, WriteMode,
+//                 AppendMode, ReadWriteMode, NoBuffering, LineBuffering,
+//                 BlockBuffering, XdgData, XdgConfig, XdgCache, CreatePipe,
+//                 Inherit, UseHandle, NoStream, TypeRep, All, Any (DefIds 25-73)
+// - Functions: +, -, *, /, ... (DefIds 74+)
 //
-// We skip the type DefIds (0-23) and start constructors at 24.
-const BUILTIN_TYPE_COUNT: usize = 24; // All types registered in context.rs
+// We skip the type DefIds (0-24) and start constructors at 25.
+const BUILTIN_TYPE_COUNT: usize = 25; // All types registered in context.rs (including Rational)
 
-const BUILTIN_TRUE_ID: usize = BUILTIN_TYPE_COUNT; // 24
-const BUILTIN_FALSE_ID: usize = BUILTIN_TYPE_COUNT + 1; // 25
-const BUILTIN_NOTHING_ID: usize = BUILTIN_TYPE_COUNT + 2; // 26
-const BUILTIN_JUST_ID: usize = BUILTIN_TYPE_COUNT + 3; // 27
-const BUILTIN_LEFT_ID: usize = BUILTIN_TYPE_COUNT + 4; // 28
-const BUILTIN_RIGHT_ID: usize = BUILTIN_TYPE_COUNT + 5; // 29
+const BUILTIN_TRUE_ID: usize = BUILTIN_TYPE_COUNT; // 25
+const BUILTIN_FALSE_ID: usize = BUILTIN_TYPE_COUNT + 1; // 26
+const BUILTIN_NOTHING_ID: usize = BUILTIN_TYPE_COUNT + 2; // 27
+const BUILTIN_JUST_ID: usize = BUILTIN_TYPE_COUNT + 3; // 28
+const BUILTIN_LEFT_ID: usize = BUILTIN_TYPE_COUNT + 4; // 29
+const BUILTIN_RIGHT_ID: usize = BUILTIN_TYPE_COUNT + 5; // 30
 
 const BUILTIN_CON_COUNT: usize = 6; // True, False, Nothing, Just, Left, Right
 
 // Ordering constructors
-const BUILTIN_LT_ID: usize = BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT; // 30
-const BUILTIN_EQ_ID: usize = BUILTIN_LT_ID + 1; // 31
-const BUILTIN_GT_ID: usize = BUILTIN_LT_ID + 2; // 32
+const BUILTIN_LT_ID: usize = BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT; // 31
+const BUILTIN_EQ_ID: usize = BUILTIN_LT_ID + 1; // 32
+const BUILTIN_GT_ID: usize = BUILTIN_LT_ID + 2; // 33
 const BUILTIN_ORDERING_COUNT: usize = 3; // LT, EQ, GT
 
 // List and unit constructors
-const BUILTIN_NIL_ID: usize = BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT + BUILTIN_ORDERING_COUNT; // 33
-const BUILTIN_CONS_ID: usize = BUILTIN_NIL_ID + 1; // 34
-const BUILTIN_UNIT_ID: usize = BUILTIN_NIL_ID + 2; // 35
+const BUILTIN_NIL_ID: usize = BUILTIN_TYPE_COUNT + BUILTIN_CON_COUNT + BUILTIN_ORDERING_COUNT; // 34
+const BUILTIN_CONS_ID: usize = BUILTIN_NIL_ID + 1; // 35
+const BUILTIN_UNIT_ID: usize = BUILTIN_NIL_ID + 2; // 36
 
 // Count of list/unit constructors
 const BUILTIN_LIST_UNIT_COUNT: usize = 3; // [], :, ()
 
 // Tuple constructors - after list/unit constructors
-const BUILTIN_PAIR_ID: usize = BUILTIN_NIL_ID + BUILTIN_LIST_UNIT_COUNT; // 36
-const BUILTIN_TRIPLE_ID: usize = BUILTIN_PAIR_ID + 1; // 37
+const BUILTIN_PAIR_ID: usize = BUILTIN_NIL_ID + BUILTIN_LIST_UNIT_COUNT; // 37
+const BUILTIN_TRIPLE_ID: usize = BUILTIN_PAIR_ID + 1; // 38
 
-const BUILTIN_TUPLE_COUNT: usize = 2; // (,), (,,)
+const BUILTIN_TUPLE_COUNT: usize = 14; // (,) through (,,,,,,,,,,,,,,) — 2-tuple to 15-tuple
 
 // Extra constructors after tuples (:|, Backwards, Endo, ExitSuccess, ExitFailure,
 // SomeException, IOMode×4, BufferMode×3, XdgDirectory×3, StdStream×4, TypeRep, All, Any)

@@ -988,10 +988,15 @@ impl<'src> Lexer<'src> {
     fn lex_char(&mut self, _start: usize) -> Token {
         self.advance(); // Opening '
 
-        // M9: Check for promoted list syntax '[
+        // M9: Check for promoted list syntax '[ vs char literal '['
         if self.peek() == Some('[') {
-            self.advance();
-            return Token::new(TokenKind::TickLBracket);
+            // Lookahead: '[' followed by closing quote means char literal '['
+            if self.peek2() == Some('\'') {
+                // It's the char literal '[' — fall through to normal char handling
+            } else {
+                self.advance();
+                return Token::new(TokenKind::TickLBracket);
+            }
         }
 
         let c = match self.peek() {

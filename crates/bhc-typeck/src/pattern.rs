@@ -230,12 +230,20 @@ fn unify_constructor_pattern(
 }
 
 /// Infer the type of a literal.
-fn infer_lit_type(ctx: &TyCtxt, lit: &Lit) -> Ty {
+fn infer_lit_type(ctx: &mut TyCtxt, lit: &Lit) -> Ty {
     match lit {
         Lit::Int(_) => ctx.builtins.int_ty.clone(),
         Lit::Float(_) => ctx.builtins.float_ty.clone(),
         Lit::Char(_) => ctx.builtins.char_ty.clone(),
-        Lit::String(_) => ctx.builtins.string_ty.clone(),
+        Lit::String(_) => {
+            if ctx.overloaded_strings {
+                // With OverloadedStrings, string patterns have type `IsString a => a`
+                let ty = ctx.fresh_ty();
+                ty
+            } else {
+                ctx.builtins.string_ty.clone()
+            }
+        }
     }
 }
 

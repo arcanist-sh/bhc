@@ -112,6 +112,16 @@ pub enum CompileError {
     #[error("type checking failed: {0} errors")]
     TypeError(usize),
 
+    /// Type checking failed but module exports are still available.
+    /// This allows downstream modules to continue checking.
+    #[error("type checking failed: {count} errors")]
+    TypeErrorWithInfo {
+        /// Number of type errors.
+        count: usize,
+        /// Module info with exports (available because HIR parsed/lowered successfully).
+        info: CompiledModuleInfo,
+    },
+
     /// HIR to Core lowering failed.
     #[error("core lowering failed: {0}")]
     CoreLowerError(#[from] bhc_hir_to_core::LowerError),
@@ -281,6 +291,8 @@ pub struct CompiledModuleInfo {
     pub symbols: Vec<CompiledSymbol>,
     /// Module exports for feeding into the lowering context of later modules.
     pub exports: ModuleExports,
+    /// Type aliases defined in this module, for cross-module alias expansion.
+    pub type_aliases: Vec<(bhc_intern::Symbol, Vec<bhc_types::TyVar>, bhc_types::Ty)>,
 }
 
 /// Accumulates compilation artifacts across modules during multi-module compilation.
@@ -1392,6 +1404,7 @@ impl Compiler {
             module_name: module_name.to_string(),
             symbols: compiled_symbols,
             exports,
+            type_aliases: Vec::new(),
         };
 
         Ok((object_path, compiled_info))
@@ -1545,16 +1558,59 @@ impl Compiler {
         // Phase 2: Lower AST to HIR with registry context
         let (hir, lower_ctx) = self.lower_with_registry(&ast, registry)?;
 
-        // Phase 3: Type check HIR
-        let _typed = self.type_check(&hir, file_id, &lower_ctx)?;
+        // Phase 3: Collect type aliases from imported modules
+        let mut imported_aliases = Vec::new();
+        for (_mod_name, info) in &registry.modules {
+            for (name, params, ty) in &info.type_aliases {
+                imported_aliases.push((*name, params.clone(), ty.clone()));
+            }
+        }
 
-        // Build exports for downstream modules (no Core IR needed)
+        // Phase 4: Type check HIR with imported type aliases
+        let type_errors = match bhc_typeck::type_check_module_full(&hir, file_id, Some(&lower_ctx.defs), &imported_aliases) {
+            Ok(_typed) => None,
+            Err(diagnostics) => {
+                eprintln!("Type errors:");
+                for (i, diag) in diagnostics.iter().enumerate() {
+                    eprintln!("  {}: {}", i + 1, diag.message);
+                }
+                Some(diagnostics.len())
+            }
+        };
+
+        // Build exports for downstream modules (no Core IR needed).
+        // We build exports even if type checking failed, since exports come from
+        // the HIR (which parsed and lowered successfully). This allows downstream
+        // modules to still be checked rather than being skipped entirely.
         let exports = Self::build_module_exports_from_hir(module_name, &hir, &lower_ctx);
+
+        // Extract type aliases for cross-module propagation
+        let mut type_aliases = Vec::new();
+        for item in &hir.items {
+            if let bhc_hir::Item::TypeAlias(alias) = item {
+                type_aliases.push((alias.name, alias.params.clone(), alias.ty.clone()));
+            }
+        }
+
+        // If there were type errors, return both the compiled info and the error.
+        // The caller can still register exports while reporting the failure.
+        if let Some(count) = type_errors {
+            return Err(CompileError::TypeErrorWithInfo {
+                count,
+                info: CompiledModuleInfo {
+                    module_name: module_name.to_string(),
+                    symbols: Vec::new(),
+                    exports,
+                    type_aliases,
+                },
+            });
+        }
 
         Ok(CompiledModuleInfo {
             module_name: module_name.to_string(),
             symbols: Vec::new(),
             exports,
+            type_aliases,
         })
     }
 
@@ -2877,6 +2933,7 @@ impl Compiler {
             "Foreign.C",
             "Foreign.C.Types",
             "Foreign.C.String",
+            "Foreign.C.Error",
             "Foreign.Storable",
             "Foreign.Marshal",
             "Foreign.Marshal.Alloc",
@@ -3220,7 +3277,9 @@ impl Compiler {
                 continue;
             }
 
-            // Skip if any local dependency failed
+            // Skip if any local dependency failed to parse/lower (not type-check).
+            // Type-check failures don't block downstream: those modules still have
+            // their exports registered in the registry via TypeErrorWithInfo below.
             let dep_failed = imports
                 .iter()
                 .any(|imp| failed_modules.contains(imp.as_str()));
@@ -3240,6 +3299,15 @@ impl Compiler {
                 Ok(compiled_info) => {
                     registry.modules.insert(mod_name.clone(), compiled_info);
                     results.push((mod_name.clone(), Ok(())));
+                }
+                Err(CompileError::TypeErrorWithInfo { count, info }) => {
+                    // Type checking failed, but parsing and lowering succeeded.
+                    // Register the module's exports so downstream modules can
+                    // still be checked (they won't be skipped due to dependency failure).
+                    registry.modules.insert(mod_name.clone(), info);
+                    // Still mark as failed for reporting purposes, but do NOT
+                    // add to failed_modules so downstream modules aren't skipped.
+                    results.push((mod_name.clone(), Err(CompileError::TypeError(count))));
                 }
                 Err(e) => {
                     failed_modules.insert(mod_name.clone());

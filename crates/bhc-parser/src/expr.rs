@@ -369,11 +369,16 @@ impl<'src> Parser<'src> {
             "^" | "^^" | "**" => (8, Assoc::Right),
             "*" | "/" | "`div`" | "`mod`" => (7, Assoc::Left),
             "+" | "-" => (6, Assoc::Left),
+            "<>" => (6, Assoc::Right),
             ":" | "++" => (5, Assoc::Right),
-            "==" | "/=" | "<" | "<=" | ">" | ">=" => (4, Assoc::None),
+            "==" | "/=" | "<" | "<=" | ">" | ">=" | "`elem`" | "`notElem`" => (4, Assoc::None),
+            "<$>" | "<*>" | "<*" | "*>" => (4, Assoc::Left),
+            "<$" => (4, Assoc::Left),
+            "<|>" => (3, Assoc::Left),
             "&&" => (3, Assoc::Right),
             "||" => (2, Assoc::Right),
             ">>=" | ">>" => (1, Assoc::Left),
+            "=<<" => (1, Assoc::Right),
             "$" | "$!" => (0, Assoc::Right),
             _ => (9, Assoc::Left), // Default
         }
@@ -506,6 +511,13 @@ impl<'src> Parser<'src> {
             // Continue parsing any remaining infix operators (e.g., `1 % 3 + 1 % 6`)
             let infix_expr = self.continue_infix_expr(first_infix, 0)?;
 
+            // Check for type annotation: (expr $ expr :: Type)
+            let infix_expr = if self.check(&TokenKind::DoubleColon) {
+                self.parse_type_annotation(infix_expr)?
+            } else {
+                infix_expr
+            };
+
             // Check if this is a tuple: (a .|. b, c, ...)
             if self.eat(&TokenKind::Comma) {
                 let mut exprs = vec![infix_expr];
@@ -573,6 +585,13 @@ impl<'src> Parser<'src> {
             let infix_span = first.span().merge(rhs.span());
             let first_infix = Expr::Infix(Box::new(first), func, Box::new(rhs), infix_span);
             let infix_expr = self.continue_infix_expr(first_infix, 0)?;
+
+            // Check for type annotation: (expr `op` expr :: Type)
+            let infix_expr = if self.check(&TokenKind::DoubleColon) {
+                self.parse_type_annotation(infix_expr)?
+            } else {
+                infix_expr
+            };
 
             // Check for tuple
             if self.eat(&TokenKind::Comma) {

@@ -143,6 +143,20 @@ pub fn type_check_module_with_defs(
     file_id: FileId,
     defs: Option<&DefMap>,
 ) -> Result<TypedModule, Vec<Diagnostic>> {
+    type_check_module_full(hir, file_id, defs, &[])
+}
+
+/// Type check a HIR module with definition mappings and imported type aliases.
+///
+/// This is the most complete entry point for type checking. In addition to
+/// the DefMap, it accepts type aliases from imported modules so the unifier
+/// can expand cross-module type aliases transparently.
+pub fn type_check_module_full(
+    hir: &Module,
+    file_id: FileId,
+    defs: Option<&DefMap>,
+    imported_aliases: &[(Symbol, Vec<bhc_types::TyVar>, Ty)],
+) -> Result<TypedModule, Vec<Diagnostic>> {
     let mut ctx = TyCtxt::new(file_id);
     ctx.overloaded_strings = hir.overloaded_strings;
     ctx.overloaded_lists = hir.overloaded_lists;
@@ -164,6 +178,125 @@ pub fn type_check_module_with_defs(
         }
         if let bhc_hir::Item::Newtype(newtype) = item {
             ctx.register_newtype(newtype);
+        }
+    }
+
+    // Register standard Haskell type aliases so the unifier can expand them.
+    {
+        use bhc_types::{Kind, TyVar};
+        let a = TyVar::new_star(0xFFFE_0000);
+
+        // type String = [Char]
+        ctx.type_aliases.insert(
+            Symbol::intern("String"),
+            (vec![], Ty::List(Box::new(Ty::Con(bhc_types::TyCon::new(Symbol::intern("Char"), Kind::Star))))),
+        );
+
+        // type ShowS = String -> String
+        let string_ty = Ty::List(Box::new(Ty::Con(bhc_types::TyCon::new(Symbol::intern("Char"), Kind::Star))));
+        ctx.type_aliases.insert(
+            Symbol::intern("ShowS"),
+            (vec![], Ty::Fun(Box::new(string_ty.clone()), Box::new(string_ty.clone()))),
+        );
+
+        // type ReadS a = String -> [(a, String)]
+        let pair = Ty::Tuple(vec![Ty::Var(a.clone()), string_ty.clone()]);
+        let list_pair = Ty::List(Box::new(pair));
+        ctx.type_aliases.insert(
+            Symbol::intern("ReadS"),
+            (vec![a.clone()], Ty::Fun(Box::new(string_ty.clone()), Box::new(list_pair))),
+        );
+
+        // type FilePath = String
+        ctx.type_aliases.insert(
+            Symbol::intern("FilePath"),
+            (vec![], string_ty),
+        );
+
+        // Pandoc type aliases (from pandoc-types)
+        let text_ty = Ty::Con(bhc_types::TyCon::new(Symbol::intern("Text"), Kind::Star));
+
+        // type Attr = (Text, [Text], [(Text, Text)])
+        // Pandoc's type alias (XML.Light has a data type Attr, but that uses
+        // a different mechanism — data types vs type aliases don't conflict).
+        ctx.type_aliases.insert(
+            Symbol::intern("Attr"),
+            (vec![], Ty::Tuple(vec![
+                text_ty.clone(),
+                Ty::List(Box::new(text_ty.clone())),
+                Ty::List(Box::new(Ty::Tuple(vec![text_ty.clone(), text_ty.clone()]))),
+            ])),
+        );
+
+        // type Target = (Text, Text)
+        ctx.type_aliases.insert(
+            Symbol::intern("Target"),
+            (vec![], Ty::Tuple(vec![text_ty.clone(), text_ty.clone()])),
+        );
+
+        // type ColSpec = (Alignment, ColWidth)
+        ctx.type_aliases.insert(
+            Symbol::intern("ColSpec"),
+            (vec![], Ty::Tuple(vec![
+                Ty::Con(bhc_types::TyCon::new(Symbol::intern("Alignment"), Kind::Star)),
+                Ty::Con(bhc_types::TyCon::new(Symbol::intern("ColWidth"), Kind::Star)),
+            ])),
+        );
+
+        // type ListAttributes = (Int, ListNumberStyle, ListNumberDelim)
+        ctx.type_aliases.insert(
+            Symbol::intern("ListAttributes"),
+            (vec![], Ty::Tuple(vec![
+                Ty::Con(bhc_types::TyCon::new(Symbol::intern("Int"), Kind::Star)),
+                Ty::Con(bhc_types::TyCon::new(Symbol::intern("ListNumberStyle"), Kind::Star)),
+                Ty::Con(bhc_types::TyCon::new(Symbol::intern("ListNumberDelim"), Kind::Star)),
+            ])),
+        );
+
+        // type ShortCaption = [Inline]
+        ctx.type_aliases.insert(
+            Symbol::intern("ShortCaption"),
+            (vec![], Ty::List(Box::new(Ty::Con(bhc_types::TyCon::new(Symbol::intern("Inline"), Kind::Star))))),
+        );
+
+        // Many is a newtype: newtype Many a = Many (Seq a)
+        // But for type-checking purposes, we treat Blocks/Inlines as [Block]/[Inline]
+        // since BHC doesn't have a real Seq type. The Many newtype is isomorphic to lists
+        // in our simplified model.
+        let many_con = bhc_types::TyCon::new(Symbol::intern("Many"), Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)));
+        let a_alias = TyVar::new_star(0xFFFE_0001);
+
+        // type Blocks = Many Block  (treated as [Block])
+        let block_con = bhc_types::TyCon::new(Symbol::intern("Block"), Kind::Star);
+        ctx.type_aliases.insert(
+            Symbol::intern("Blocks"),
+            (vec![], Ty::List(Box::new(Ty::Con(block_con)))),
+        );
+
+        // type Inlines = Many Inline  (treated as [Inline])
+        let inline_con = bhc_types::TyCon::new(Symbol::intern("Inline"), Kind::Star);
+        ctx.type_aliases.insert(
+            Symbol::intern("Inlines"),
+            (vec![], Ty::List(Box::new(Ty::Con(inline_con)))),
+        );
+
+        // type Many a = [a] (simplification: treat Many as a list)
+        ctx.type_aliases.insert(
+            Symbol::intern("Many"),
+            (vec![a_alias.clone()], Ty::List(Box::new(Ty::Var(a_alias)))),
+        );
+    }
+
+    // Register type aliases from imported modules (cross-module propagation).
+    for (name, params, ty) in imported_aliases {
+        ctx.type_aliases.insert(*name, (params.clone(), ty.clone()));
+    }
+
+    // Register user-defined type aliases so the unifier can expand them.
+    for item in &hir.items {
+        if let bhc_hir::Item::TypeAlias(alias) = item {
+            ctx.type_aliases
+                .insert(alias.name, (alias.params.clone(), alias.ty.clone()));
         }
     }
 

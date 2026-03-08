@@ -112,8 +112,14 @@ fn pre_bind_let_decls(ctx: &mut LowerContext, decls: &[ast::Decl]) {
 
     for decl in decls {
         if let ast::Decl::FunBind(fun_bind) = decl {
-            // Only handle simple bindings (single clause, no patterns)
-            if fun_bind.clauses.len() == 1 && fun_bind.clauses[0].pats.is_empty() {
+            // Handle pattern bindings: let (x, y) = expr
+            if fun_bind.name.name.as_str() == "$patbind"
+                && fun_bind.clauses.len() == 1
+                && fun_bind.clauses[0].pats.len() == 1
+            {
+                bind_pattern(ctx, &fun_bind.clauses[0].pats[0]);
+            } else {
+                // Simple and function bindings: bind the function name
                 let def_id = ctx.fresh_def_id();
                 ctx.define(def_id, fun_bind.name.name, DefKind::Value, fun_bind.span);
                 ctx.bind_value(fun_bind.name.name, def_id);
@@ -136,13 +142,16 @@ fn desugar_let_decls(
     // First pass: bind all names (if not already bound by pre_bind_let_decls)
     for decl in decls {
         if let ast::Decl::FunBind(fun_bind) = decl {
-            if fun_bind.clauses.len() == 1 && fun_bind.clauses[0].pats.is_empty() {
-                // Only bind if not already bound (e.g., from do-notation pre-binding)
-                if ctx.lookup_value(fun_bind.name.name).is_none() {
-                    let def_id = ctx.fresh_def_id();
-                    ctx.define(def_id, fun_bind.name.name, DefKind::Value, fun_bind.span);
-                    ctx.bind_value(fun_bind.name.name, def_id);
-                }
+            // Handle pattern bindings: let (x, y) = expr
+            if fun_bind.name.name.as_str() == "$patbind"
+                && fun_bind.clauses.len() == 1
+                && fun_bind.clauses[0].pats.len() == 1
+            {
+                // Pattern binding variables are already bound by pre_bind_let_decls
+            } else if ctx.lookup_value(fun_bind.name.name).is_none() {
+                let def_id = ctx.fresh_def_id();
+                ctx.define(def_id, fun_bind.name.name, DefKind::Value, fun_bind.span);
+                ctx.bind_value(fun_bind.name.name, def_id);
             }
         }
     }
@@ -152,8 +161,28 @@ fn desugar_let_decls(
 
     for decl in decls {
         if let ast::Decl::FunBind(fun_bind) = decl {
-            // Simple function binding becomes a pattern binding
-            if fun_bind.clauses.len() == 1 && fun_bind.clauses[0].pats.is_empty() {
+            // Pattern binding: let (x, y) = expr
+            if fun_bind.name.name.as_str() == "$patbind"
+                && fun_bind.clauses.len() == 1
+                && fun_bind.clauses[0].pats.len() == 1
+            {
+                let clause = &fun_bind.clauses[0];
+                let pat = lower_pat(ctx, &clause.pats[0]);
+                let rhs = match &clause.rhs {
+                    ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
+                    ast::Rhs::Guarded(guards, _) => {
+                        desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
+                    }
+                };
+
+                bindings.push(hir::Binding {
+                    pat,
+                    sig: None,
+                    rhs,
+                    span: fun_bind.span,
+                });
+            } else if fun_bind.clauses.len() == 1 && fun_bind.clauses[0].pats.is_empty() {
+                // Simple function binding becomes a pattern binding
                 let clause = &fun_bind.clauses[0];
                 let def_id = ctx
                     .lookup_value(fun_bind.name.name)
@@ -165,6 +194,46 @@ fn desugar_let_decls(
                         desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
                     }
                 };
+
+                bindings.push(hir::Binding {
+                    pat,
+                    sig: None,
+                    rhs,
+                    span: fun_bind.span,
+                });
+            } else {
+                // Function binding with parameters: let f x y = expr
+                let def_id = ctx
+                    .lookup_value(fun_bind.name.name)
+                    .expect("do-let binding should be bound");
+                let pat = hir::Pat::Var(fun_bind.name.name, def_id, fun_bind.span);
+
+                // Build lambda from parameters
+                let clause = &fun_bind.clauses[0];
+
+                // Enter a scope for the lambda parameters
+                ctx.enter_scope();
+
+                // Pre-bind all lambda parameter patterns
+                for p in &clause.pats {
+                    bind_pattern(ctx, p);
+                }
+
+                let rhs_body = match &clause.rhs {
+                    ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
+                    ast::Rhs::Guarded(guards, _) => {
+                        desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
+                    }
+                };
+
+                // Wrap in lambdas for each parameter
+                let mut rhs = rhs_body;
+                for p in clause.pats.iter().rev() {
+                    let lam_pat = lower_pat(ctx, p);
+                    rhs = hir::Expr::Lam(vec![lam_pat], Box::new(rhs), fun_bind.span);
+                }
+
+                ctx.exit_scope();
 
                 bindings.push(hir::Binding {
                     pat,

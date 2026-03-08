@@ -95,7 +95,7 @@ pub struct Scope {
     /// Parent scope, if any.
     pub parent: Option<ScopeId>,
     /// Value bindings (variables, functions).
-    values: FxHashMap<Symbol, DefId>,
+    pub values: FxHashMap<Symbol, DefId>,
     /// Type bindings (types, type constructors).
     types: FxHashMap<Symbol, DefId>,
     /// Constructor bindings.
@@ -1814,6 +1814,13 @@ impl LowerContext {
             "Full",
             // System.Locale
             "LocaleCategory",
+            // Text.Parsec
+            "SourcePos",
+            "ParsecT",
+            "ParseError",
+            // Network.URI
+            "URI",
+            "URIAuth",
         ];
 
         for name in stub_types {
@@ -2320,6 +2327,16 @@ impl LowerContext {
         &self.scopes[self.current_scope.index()]
     }
 
+    /// Gets the current scope ID (for debugging).
+    pub fn current_scope_id(&self) -> ScopeId {
+        self.current_scope
+    }
+
+    /// Gets all scopes (for debugging).
+    pub fn all_scopes(&self) -> &[Scope] {
+        &self.scopes
+    }
+
     /// Gets the current scope mutably.
     pub fn current_scope_mut(&mut self) -> &mut Scope {
         let idx = self.current_scope.index();
@@ -2441,26 +2458,36 @@ impl LowerContext {
     ///
     /// Returns the DefId if found, or None if not resolvable.
     pub fn resolve_qualified_var(&self, qualifier: Symbol, name: Symbol) -> Option<DefId> {
-        // First, check if the qualifier is an alias
-        let module = self
-            .import_aliases
-            .get(&qualifier)
-            .copied()
-            .unwrap_or(qualifier);
+        // First, try direct lookup of "Qualifier.name" as registered during import processing.
+        // This handles cases where multiple modules share the same qualifier alias
+        // (e.g., `import qualified Data.Text as T` and `import qualified Data.Text.Encoding as T`).
+        let aliased_name = Symbol::intern(&format!("{}.{}", qualifier.as_str(), name.as_str()));
+        if let Some(def_id) = self.lookup_value(aliased_name) {
+            return Some(def_id);
+        }
 
-        // Try to look up as "Module.name"
-        let qualified_name = Symbol::intern(&format!("{}.{}", module.as_str(), name.as_str()));
-
-        // Check if we have a qualified name mapping
-        if let Some(unqualified) = self.qualified_names.get(&qualified_name) {
+        // Check if we have a qualified name mapping for the aliased name
+        if let Some(unqualified) = self.qualified_names.get(&aliased_name) {
             if let Some(def_id) = self.lookup_value(*unqualified) {
                 return Some(def_id);
             }
         }
 
-        // Try direct lookup of the qualified name
-        if let Some(def_id) = self.lookup_value(qualified_name) {
-            return Some(def_id);
+        // Then, check if the qualifier is an alias and try the full module name
+        if let Some(&module) = self.import_aliases.get(&qualifier) {
+            let qualified_name = Symbol::intern(&format!("{}.{}", module.as_str(), name.as_str()));
+
+            // Check if we have a qualified name mapping
+            if let Some(unqualified) = self.qualified_names.get(&qualified_name) {
+                if let Some(def_id) = self.lookup_value(*unqualified) {
+                    return Some(def_id);
+                }
+            }
+
+            // Try direct lookup of the qualified name
+            if let Some(def_id) = self.lookup_value(qualified_name) {
+                return Some(def_id);
+            }
         }
 
         // Try looking up the unqualified name directly (for builtins)
@@ -2471,26 +2498,32 @@ impl LowerContext {
     ///
     /// Returns the DefId if found, or None if not resolvable.
     pub fn resolve_qualified_constructor(&self, qualifier: Symbol, name: Symbol) -> Option<DefId> {
-        // First, check if the qualifier is an alias
-        let module = self
-            .import_aliases
-            .get(&qualifier)
-            .copied()
-            .unwrap_or(qualifier);
+        // First, try direct lookup of "Qualifier.Name" as registered during import processing.
+        let aliased_name = Symbol::intern(&format!("{}.{}", qualifier.as_str(), name.as_str()));
+        if let Some(def_id) = self.lookup_constructor(aliased_name) {
+            return Some(def_id);
+        }
 
-        // Try to look up as "Module.Name"
-        let qualified_name = Symbol::intern(&format!("{}.{}", module.as_str(), name.as_str()));
-
-        // Check if we have a qualified name mapping
-        if let Some(unqualified) = self.qualified_names.get(&qualified_name) {
+        // Check qualified name mapping for the aliased name
+        if let Some(unqualified) = self.qualified_names.get(&aliased_name) {
             if let Some(def_id) = self.lookup_constructor(*unqualified) {
                 return Some(def_id);
             }
         }
 
-        // Try direct lookup of the qualified name
-        if let Some(def_id) = self.lookup_constructor(qualified_name) {
-            return Some(def_id);
+        // Then, check if the qualifier is an alias and try the full module name
+        if let Some(&module) = self.import_aliases.get(&qualifier) {
+            let qualified_name = Symbol::intern(&format!("{}.{}", module.as_str(), name.as_str()));
+
+            if let Some(unqualified) = self.qualified_names.get(&qualified_name) {
+                if let Some(def_id) = self.lookup_constructor(*unqualified) {
+                    return Some(def_id);
+                }
+            }
+
+            if let Some(def_id) = self.lookup_constructor(qualified_name) {
+                return Some(def_id);
+            }
         }
 
         // Try looking up the unqualified name directly (for builtins)

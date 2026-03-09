@@ -3022,9 +3022,12 @@ fn register_standard_module_exports(
             "MimeType", "MimeMap", "FileName",
         ],
         "Network.Socket" => &[
-            "Socket", "SockAddr", "SocketType", "Family",
+            "Socket", "SockAddr", "SockAddrUnix", "SocketType", "Family",
+            "AF_UNIX", "AF_INET", "AF_INET6",
+            "Stream", "Datagram",
             "socket", "connect", "bind", "listen", "accept", "close",
-            "withSocketsDo",
+            "withSocketsDo", "gracefulClose",
+            "defaultProtocol", "setSocketOption", "getSocketName",
         ],
         "Network.Connection" => &[
             "TLSSettings", "initConnectionContext", "ConnectionParams",
@@ -3374,6 +3377,38 @@ fn register_standard_module_exports(
             "presentationToArchive",
         ],
         // =====================================================================
+        // aeson (extended)
+        // =====================================================================
+        "Data.Aeson.Key" => &[
+            "Key", "fromText", "toText", "fromString",
+        ],
+        "Data.Aeson.KeyMap" => &[
+            "KeyMap",
+            "empty", "singleton", "null", "size",
+            "member", "lookup", "insert", "delete",
+            "union", "intersection", "difference",
+            "map", "mapWithKey", "filter", "filterWithKey",
+            "foldMapWithKey", "foldrWithKey", "toList", "fromList",
+            "toHashMap", "fromHashMap", "toMap", "fromMap",
+            "keys", "elems",
+        ],
+
+        // =====================================================================
+        // time (extended)
+        // =====================================================================
+        "Data.Time.Clock.System" => &[
+            "SystemTime", "getSystemTime", "systemToUTCTime", "utcToSystemTime",
+            "systemSeconds", "systemNanoseconds",
+        ],
+
+        // =====================================================================
+        // network (extended)
+        // =====================================================================
+        "Network.Socket.ByteString" | "Network.Socket.ByteString.Lazy" => &[
+            "recv", "recvFrom", "send", "sendTo", "sendAll", "sendAllTo",
+        ],
+
+        // =====================================================================
         // hashable
         // =====================================================================
         "Data.Hashable" | "Data.Hashable.Class" => &[
@@ -3417,7 +3452,7 @@ fn register_standard_module_exports(
             "many", "some", "optional",
             "command", "subparser", "hsubparser",
             "auto", "str", "eitherReader", "maybeReader",
-            "(<>)", "(<**>)", "(<|>)",
+            "(<>)", "(<**>)", "(<|>)", "<**>", "helper",
         ],
         "Options.Applicative.Builder" => &[
             "strOption", "option", "strArgument", "argument", "switch", "flag", "flag'",

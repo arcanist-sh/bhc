@@ -2582,7 +2582,7 @@ impl Compiler {
         }
 
         // Phase 2: Build dependency graph and topological sort
-        let ordered = Self::topological_sort(&module_info)?;
+        let (ordered, _cyclic) = Self::topological_sort(&module_info)?;
 
         // Phase 3: Compile each module in dependency order with cross-module context
         let mut registry = ModuleRegistry::default();
@@ -2737,9 +2737,10 @@ impl Compiler {
     /// Compute a topological ordering of modules based on import dependencies.
     ///
     /// Returns indices into the input slice in compilation order (dependencies first).
+    /// Returns (ordered indices, set of indices in cycles).
     fn topological_sort(
         modules: &[(Utf8PathBuf, String, Vec<String>)],
-    ) -> CompileResult<Vec<usize>> {
+    ) -> CompileResult<(Vec<usize>, rustc_hash::FxHashSet<usize>)> {
         // Build name -> index mapping
         let name_to_idx: FxHashMap<&str, usize> = modules
             .iter()
@@ -2777,19 +2778,30 @@ impl Compiler {
             }
         }
 
+        let mut cyclic_indices = rustc_hash::FxHashSet::default();
         if result.len() != n {
-            // Circular dependency detected
-            let unvisited: Vec<String> = (0..n)
+            // Circular dependency detected — break the cycle by processing
+            // remaining modules in order of fewest unresolved deps first.
+            let mut remaining: Vec<usize> = (0..n)
                 .filter(|i| in_degree[*i] > 0)
-                .map(|i| modules[i].1.clone())
                 .collect();
-            return Err(CompileError::Other(format!(
-                "circular module dependency involving: {}",
-                unvisited.join(", ")
-            )));
+            let cycle_names: Vec<String> = remaining
+                .iter()
+                .map(|i| modules[*i].1.clone())
+                .collect();
+            eprintln!(
+                "warning: circular module dependency involving: {}",
+                cycle_names.join(", ")
+            );
+            for &idx in &remaining {
+                cyclic_indices.insert(idx);
+            }
+            // Sort by in-degree (fewest deps first) to maximize resolvable imports
+            remaining.sort_by_key(|i| in_degree[*i]);
+            result.extend(remaining);
         }
 
-        Ok(result)
+        Ok((result, cyclic_indices))
     }
 
     /// Set of module names treated as builtins (stdlib / Prelude).
@@ -3152,6 +3164,14 @@ impl Compiler {
             "AsciiDoc",
             // Powerpoint
             "Text.Pandoc.Writers.Powerpoint.Output",
+            // network (extended)
+            "Network.Socket.ByteString",
+            "Network.Socket.ByteString.Lazy",
+            // aeson (extended)
+            "Data.Aeson.Key",
+            "Data.Aeson.KeyMap",
+            // time (extended)
+            "Data.Time.Clock.System",
             // hashable
             "Data.Hashable",
             "Data.Hashable.Class",
@@ -3264,7 +3284,7 @@ impl Compiler {
             .collect();
 
         // Topological sort (only satisfiable modules)
-        let ordered = Self::topological_sort(&module_info)?;
+        let (ordered, cyclic_indices) = Self::topological_sort(&module_info)?;
 
         // Phase 3: Check each module in order, tracking which succeeded
         let mut registry = ModuleRegistry::default();
@@ -3298,9 +3318,12 @@ impl Compiler {
             // Skip if any local dependency failed to parse/lower (not type-check).
             // Type-check failures don't block downstream: those modules still have
             // their exports registered in the registry via TypeErrorWithInfo below.
-            let dep_failed = imports
-                .iter()
-                .any(|imp| failed_modules.contains(imp.as_str()));
+            // Exception: cyclic modules are never skipped due to dependency failure,
+            // since the cycle guarantees some dep will fail on first pass.
+            let dep_failed = !cyclic_indices.contains(idx)
+                && imports
+                    .iter()
+                    .any(|imp| failed_modules.contains(imp.as_str()));
             if dep_failed {
                 results.push((
                     mod_name.clone(),

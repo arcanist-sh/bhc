@@ -1105,6 +1105,7 @@ fn register_standard_module_exports(
             "getEnv",
             "lookupEnv",
             "setEnv",
+            "getEnvironment",
         ],
         "System.Directory" => &[
             "doesFileExist",
@@ -1115,6 +1116,12 @@ fn register_standard_module_exports(
             "removeDirectory",
             "getCurrentDirectory",
             "setCurrentDirectory",
+            "findExecutable",
+            "getPermissions", "executable",
+            "getDirectoryContents", "listDirectory",
+            "renameFile", "copyFile",
+            "getTemporaryDirectory", "getHomeDirectory",
+            "getModificationTime",
         ],
         "Data.String" => &[
             "IsString",
@@ -1333,6 +1340,7 @@ fn register_standard_module_exports(
             "stripEnd",
             "stripPrefix",
             "stripSuffix",
+            "split",
             "splitAt",
             "splitOn",
             "breakOn",
@@ -1818,6 +1826,11 @@ fn register_standard_module_exports(
             "withScientific",
             "withBool",
             "typeMismatch", "prependFailure", "modifyFailure",
+            // Re-exports from Data.Aeson.TH
+            "deriveJSON", "deriveToJSON", "deriveFromJSON",
+            "defaultOptions", "fieldLabelModifier", "constructorTagModifier",
+            "omitNothingFields", "allNullaryToStringTag",
+            "Options", "SumEncoding", "camelTo2",
         ],
         // === Network ===
         "Network.URI" => &[
@@ -2353,7 +2366,8 @@ fn register_standard_module_exports(
             "lookupMeta", "docTitle", "docAuthors", "docDate",
         ],
         "Text.Pandoc.Builder" => &[
-            "doc", "setTitle", "setAuthors", "setDate", "setMeta",
+            "doc", "setTitle", "setAuthors", "setDate", "setMeta", "deleteMeta",
+            "HasMeta",
             "text", "str", "emph", "underline", "strong", "strikeout",
             "superscript", "subscript", "smallcaps", "singleQuoted",
             "doubleQuoted", "cite", "codeWith", "code", "space",
@@ -2421,7 +2435,7 @@ fn register_standard_module_exports(
             "skipMany", "skipMany1", "option", "optionMaybe", "optional",
             "choice", "count", "between", "sepBy", "sepBy1",
             "endBy", "endBy1", "eof",
-            "getState", "putState", "updateState", "modifyState",
+            "getState", "putState", "setState", "updateState", "modifyState",
             "getPosition", "setPosition", "getInput", "setInput",
             "SourcePos", "sourceLine", "sourceColumn", "sourceName",
             "<?>", "label", "unexpected",
@@ -2511,9 +2525,11 @@ fn register_standard_module_exports(
             "unqual", "blank_element", "blank_cdata", "add_attr", "add_attrs",
             "findAttr", "lookupAttr", "lookupAttrBy",
             "findElement", "findChild", "findChildren", "filterChildren", "filterChildrenName",
+            "filterChild", "filterChildName", "filterElement", "filterElements",
+            "filterElementName", "filterElementsName", "findAttrBy",
             "strContent", "showElement", "showContent", "ppElement", "ppTopElement", "ppContent",
             "showTopElement", "showQName",
-            "parseXML", "parseXMLElement", "onlyElems", "elsByTag",
+            "parseXML", "parseXMLElement", "parseXMLContents", "onlyElems", "elsByTag",
             "Elem", "Text", "CRef",
             "CDataText", "CDataVerbatim", "CDataRaw",
         ],
@@ -2878,6 +2894,9 @@ fn register_standard_module_exports(
             "dateLiteral", "dateParts", "dateCirca",
             // Val constructors
             "TextVal", "FancyVal", "NumVal", "NamesVal", "DateVal",
+            // Val/Reference functions
+            "lookupVariable", "valToText", "valToNumber",
+            "unItemId",
             // Conversion functions
             "toVariable", "fromVariable",
             // Date utilities
@@ -3134,7 +3153,7 @@ fn register_standard_module_exports(
         "Codec.Picture" | "Codec.Picture.Metadata" => &[
             "DynamicImage", "Image", "PixelRGBA8", "PixelRGB8",
             "decodePng", "decodeJpeg", "decodeGif",
-            "decodeImage", "readImage",
+            "decodeImage", "decodeImageWithMetadata", "readImage",
             "encodePng", "encodeJpeg",
             "dynamicMap", "imageWidth", "imageHeight",
             "Metadatas", "Keys", "lookup", "Width", "Height", "DpiX", "DpiY",

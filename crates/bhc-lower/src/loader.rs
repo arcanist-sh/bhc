@@ -246,6 +246,65 @@ pub fn collect_exports(module: &ast::Module, ctx: &mut LowerContext) -> ModuleEx
         collect_decl_exports(ctx, decl, &mut exports, export_all, &explicit_exports);
     }
 
+    // Handle re-exported names: if the module has an explicit export list,
+    // any exported name not yet in our exports map is likely re-exported from
+    // an import. Create stub entries for these so downstream modules can
+    // resolve the names. Without this, re-exports like
+    //   module Foo (bar) where import Baz (bar)
+    // would lose `bar` when Foo is loaded as a dependency.
+    if let Some(export_list) = &module.exports {
+        for exp in export_list {
+            match exp {
+                ast::Export::Var(ident, span) => {
+                    if !exports.values.contains_key(&ident.name) {
+                        let def_id = ctx.fresh_def_id();
+                        ctx.define(def_id, ident.name, DefKind::Value, *span);
+                        exports.values.insert(ident.name, def_id);
+                    }
+                }
+                ast::Export::Type(ident, cons, span) => {
+                    if !exports.types.contains_key(&ident.name) {
+                        let def_id = ctx.fresh_def_id();
+                        ctx.define(def_id, ident.name, DefKind::Type, *span);
+                        exports.types.insert(ident.name, def_id);
+                    }
+                    // Also export constructors listed with the type
+                    if let Some(con_list) = cons {
+                        if con_list.is_empty() {
+                            // Type(..) — we don't know the constructors, skip
+                        } else {
+                            for con_ident in con_list {
+                                if !exports.values.contains_key(&con_ident.name)
+                                    && !exports.constructors.contains_key(&con_ident.name)
+                                {
+                                    let con_def_id = ctx.fresh_def_id();
+                                    ctx.define(
+                                        con_def_id,
+                                        con_ident.name,
+                                        DefKind::Value,
+                                        *span,
+                                    );
+                                    exports.values.insert(con_ident.name, con_def_id);
+                                }
+                            }
+                        }
+                    }
+                }
+                ast::Export::Module(_, _) => {
+                    // Module re-exports (e.g., `module Data.Text`) — would need
+                    // recursive module loading to handle fully. Skip for now.
+                }
+                ast::Export::Pattern(ident, span) => {
+                    if !exports.values.contains_key(&ident.name) {
+                        let def_id = ctx.fresh_def_id();
+                        ctx.define(def_id, ident.name, DefKind::Value, *span);
+                        exports.values.insert(ident.name, def_id);
+                    }
+                }
+            }
+        }
+    }
+
     exports
 }
 

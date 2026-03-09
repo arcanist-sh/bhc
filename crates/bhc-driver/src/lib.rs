@@ -1539,6 +1539,150 @@ impl Compiler {
         exports
     }
 
+    /// Build stub module exports directly from the AST (no lowering needed).
+    /// Used for pre-registering cyclic module exports so mutually-recursive
+    /// modules can see each other's names during lowering.
+    fn build_module_exports_from_ast(
+        module_name: &str,
+        ast: &bhc_ast::Module,
+    ) -> ModuleExports {
+        use bhc_index::Idx;
+        use bhc_lower::loader::ConstructorInfo as LowerConInfo;
+
+        let mut exports = ModuleExports::new(Symbol::intern(module_name));
+        let mut next_id = 50000usize; // Use high IDs to avoid collision
+
+        for decl in &ast.decls {
+            match decl {
+                bhc_ast::Decl::FunBind(fb) => {
+                    let name = fb.name.name;
+                    let id = bhc_hir::DefId::new(next_id);
+                    next_id += 1;
+                    exports.values.insert(name, id);
+                }
+                bhc_ast::Decl::TypeSig(sig) => {
+                    for name_ident in &sig.names {
+                        let name = name_ident.name;
+                        if !exports.values.contains_key(&name) {
+                            let id = bhc_hir::DefId::new(next_id);
+                            next_id += 1;
+                            exports.values.insert(name, id);
+                        }
+                    }
+                }
+                bhc_ast::Decl::DataDecl(data) => {
+                    let type_name = data.name.name;
+                    let type_id = bhc_hir::DefId::new(next_id);
+                    next_id += 1;
+                    exports.types.insert(type_name, type_id);
+
+                    for (tag, con) in data.constrs.iter().enumerate() {
+                        let con_name = con.name.name;
+                        let arity = match &con.fields {
+                            bhc_ast::ConFields::Positional(fs) => fs.len(),
+                            bhc_ast::ConFields::Record(fs) => fs.len(),
+                        };
+                        let con_id = bhc_hir::DefId::new(next_id);
+                        next_id += 1;
+                        let field_names = match &con.fields {
+                            bhc_ast::ConFields::Record(fs) => {
+                                Some(fs.iter().map(|f| f.name.name).collect())
+                            }
+                            _ => None,
+                        };
+                        exports.constructors.insert(
+                            con_name,
+                            LowerConInfo {
+                                def_id: con_id,
+                                arity,
+                                type_con_name: type_name,
+                                type_param_count: data.params.len(),
+                                tag: tag as u32,
+                                field_names,
+                                is_newtype: false,
+                            },
+                        );
+                        // Also export constructor as a value (for use in expressions)
+                        exports.values.insert(con_name, con_id);
+                        // Export record field selectors
+                        if let bhc_ast::ConFields::Record(fs) = &con.fields {
+                            for f in fs {
+                                let fid = bhc_hir::DefId::new(next_id);
+                                next_id += 1;
+                                exports.values.insert(f.name.name, fid);
+                            }
+                        }
+                    }
+                    // GADT constructors
+                    for (tag, con) in data.gadt_constrs.iter().enumerate() {
+                        let con_name = con.name.name;
+                        let con_id = bhc_hir::DefId::new(next_id);
+                        next_id += 1;
+                        exports.constructors.insert(
+                            con_name,
+                            LowerConInfo {
+                                def_id: con_id,
+                                arity: 0, // Unknown without lowering
+                                type_con_name: type_name,
+                                type_param_count: data.params.len(),
+                                tag: tag as u32,
+                                field_names: None,
+                                is_newtype: false,
+                            },
+                        );
+                        exports.values.insert(con_name, con_id);
+                    }
+                }
+                bhc_ast::Decl::Newtype(nt) => {
+                    let type_name = nt.name.name;
+                    let type_id = bhc_hir::DefId::new(next_id);
+                    next_id += 1;
+                    exports.types.insert(type_name, type_id);
+
+                    let con_name = nt.constr.name.name;
+                    let arity = match &nt.constr.fields {
+                        bhc_ast::ConFields::Positional(fs) => fs.len(),
+                        bhc_ast::ConFields::Record(fs) => fs.len(),
+                    };
+                    let con_id = bhc_hir::DefId::new(next_id);
+                    next_id += 1;
+                    exports.constructors.insert(
+                        con_name,
+                        LowerConInfo {
+                            def_id: con_id,
+                            arity,
+                            type_con_name: type_name,
+                            type_param_count: nt.params.len(),
+                            tag: 0,
+                            field_names: None,
+                            is_newtype: true,
+                        },
+                    );
+                    exports.values.insert(con_name, con_id);
+                }
+                bhc_ast::Decl::ClassDecl(cls) => {
+                    let class_name = cls.name.name;
+                    let class_id = bhc_hir::DefId::new(next_id);
+                    next_id += 1;
+                    exports.types.insert(class_name, class_id);
+                    // Export class methods
+                    for method in &cls.methods {
+                        if let bhc_ast::Decl::TypeSig(sig) = method {
+                            for name_ident in &sig.names {
+                                let mid = bhc_hir::DefId::new(next_id);
+                                next_id += 1;
+                                exports.values.insert(name_ident.name, mid);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        exports
+    }
+
     /// Type-check a single module in multi-module context.
     ///
     /// Runs parse → lower (with registry) → type check → build exports.
@@ -3287,12 +3431,40 @@ impl Compiler {
         let (ordered, cyclic_indices) = Self::topological_sort(&module_info)?;
 
         // Phase 3: Check each module in order, tracking which succeeded
+        // For cyclic modules, a pre-registration pass is done when we first
+        // encounter them, after all non-cyclic modules are already registered.
         let mut registry = ModuleRegistry::default();
         let mut failed_modules: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
         let mut results: Vec<(String, Result<(), CompileError>)> = Vec::new();
+        let mut cycle_preregistered = false;
 
         for idx in &ordered {
             let (ref path, ref mod_name, ref imports) = module_info[*idx];
+
+            // Pre-register exports for cyclic modules when we first encounter one.
+            // Extract export names directly from the AST (no lowering needed).
+            if cyclic_indices.contains(idx) && !cycle_preregistered {
+                cycle_preregistered = true;
+                let file_id = FileId::new(0);
+                for &cidx in &cyclic_indices {
+                    let (ref cpath, ref cmod_name, _) = module_info[cidx];
+                    if let Ok(unit) = CompilationUnit::from_path(cpath.clone()) {
+                        if let Ok(ast) = self.parse(&unit, file_id) {
+                            let exports =
+                                Self::build_module_exports_from_ast(cmod_name, &ast);
+                            registry.modules.insert(
+                                cmod_name.clone(),
+                                CompiledModuleInfo {
+                                    module_name: cmod_name.clone(),
+                                    symbols: Vec::new(),
+                                    exports,
+                                    type_aliases: Vec::new(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
 
             // Skip if unsatisfiable imports
             if !satisfiable[*idx] {

@@ -21,6 +21,7 @@ bhc-hir-to-core = { workspace = true }
 bhc-typeck = { workspace = true }
 bhc-types = { workspace = true }
 bhc-intern = { workspace = true }
+bhc-index = { workspace = true }
 
 # Internal crates - IR pipeline
 bhc-core = { workspace = true }

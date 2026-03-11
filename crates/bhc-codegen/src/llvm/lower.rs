@@ -355,6 +355,10 @@ pub struct Lowering<'ctx, 'm> {
     /// E.45: Set of variable IDs that hold Integer (arbitrary precision) values.
     /// Used by show dispatch to route to bhc_integer_show instead of show_int.
     integer_vars: FxHashSet<VarId>,
+    /// Cache of generated stub functions for unimplemented external package functions.
+    /// When a stub variable is referenced, we lazily generate an LLVM function that
+    /// calls bhc_error with the stub name and cache it here.
+    stub_functions: FxHashMap<String, FunctionValue<'ctx>>,
 }
 
 impl<'ctx, 'm> Lowering<'ctx, 'm> {
@@ -392,6 +396,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
             integer_vars: FxHashSet::default(),
+            stub_functions: FxHashMap::default(),
         };
         lowering.declare_rts_functions();
         lowering
@@ -439,6 +444,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
             integer_vars: FxHashSet::default(),
+            stub_functions: FxHashMap::default(),
         };
         lowering.declare_rts_functions();
         lowering.declare_external_symbols(imported_symbols)?;
@@ -4649,10 +4655,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "acos" => self.lower_builtin_math_unary(args[0], 1020, "acos"),
             "atan" => self.lower_builtin_math_unary(args[0], 1021, "atan"),
             "atan2" => self.lower_builtin_math_binary(args[0], args[1], 1022, "atan2"),
-            "ceiling" => self.lower_builtin_float_to_int(args[0], 1023, "ceiling"),
-            "floor" => self.lower_builtin_float_to_int(args[0], 1024, "floor"),
-            "round" => self.lower_builtin_float_to_int(args[0], 1025, "round"),
-            "truncate" => self.lower_builtin_float_to_int(args[0], 1026, "truncate"),
+            "ceiling" => self.lower_builtin_float_to_int(args[0], 1000023, "ceiling"),
+            "floor" => self.lower_builtin_float_to_int(args[0], 1000024, "floor"),
+            "round" => self.lower_builtin_float_to_int(args[0], 1000025, "round"),
+            "truncate" => self.lower_builtin_float_to_int(args[0], 1000026, "truncate"),
 
             // Rational operations
             "%" => self.lower_builtin_rational_make(args[0], args[1]),
@@ -33481,10 +33487,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // Constructor used as a first-class value — create a closure wrapper
                     self.create_constructor_closure(name, arity)
                 } else {
-                    Err(CodegenError::Internal(format!(
-                        "unbound variable: {}",
-                        name
-                    )))
+                    // Unknown variable — generate a runtime stub.
+                    // This handles StubValue defs from external packages that passed
+                    // type checking but have no implementation.
+                    let stub_fn = self.get_or_create_stub_function(name)?;
+                    let fn_ptr = stub_fn.as_global_value().as_pointer_value();
+                    let closure_ptr = self.alloc_closure(fn_ptr, &[])?;
+                    Ok(Some(closure_ptr.into()))
                 }
             }
 
@@ -33984,6 +33993,66 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Create a closure wrapping a builtin operation.
     /// This is used when a builtin like (>>) is used as a first-class value.
+    /// Generate (or return cached) a stub function for an unimplemented external function.
+    ///
+    /// The stub has signature `(ptr) -> ptr` and calls `bhc_error` with a diagnostic
+    /// message, then hits unreachable. This allows compilation to succeed for code
+    /// paths that reference stub functions, deferring the error to runtime.
+    fn get_or_create_stub_function(
+        &mut self,
+        name: &str,
+    ) -> CodegenResult<FunctionValue<'ctx>> {
+        if let Some(fn_val) = self.stub_functions.get(name) {
+            return Ok(*fn_val);
+        }
+
+        let ptr_type = self.type_mapper().ptr_type();
+
+        // Sanitize name for LLVM symbol
+        let stub_fn_name = format!(
+            "bhc_stub_{}",
+            name.replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
+        );
+
+        let fn_type = ptr_type.fn_type(&[ptr_type.into()], false);
+        let stub_fn = self
+            .module
+            .llvm_module()
+            .add_function(&stub_fn_name, fn_type, None);
+
+        // Build the function body: call bhc_error then unreachable
+        let entry_bb = self.llvm_ctx.append_basic_block(stub_fn, "entry");
+        let saved_bb = self.builder().get_insert_block();
+
+        self.builder().position_at_end(entry_bb);
+
+        let error_msg = format!("stub: {} not implemented", name);
+        let msg_global = self
+            .module
+            .add_global_string(&stub_fn_name, &error_msg);
+
+        let error_fn = self
+            .functions
+            .get(&VarId::new(1000006))
+            .copied()
+            .ok_or_else(|| CodegenError::Internal("bhc_error not declared".to_string()))?;
+
+        self.builder()
+            .build_call(error_fn, &[msg_global.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("stub call error: {:?}", e)))?;
+        self.builder()
+            .build_unreachable()
+            .map_err(|e| CodegenError::Internal(format!("stub unreachable: {:?}", e)))?;
+
+        // Restore insertion point
+        if let Some(bb) = saved_bb {
+            self.builder().position_at_end(bb);
+        }
+
+        self.stub_functions.insert(name.to_string(), stub_fn);
+        Ok(stub_fn)
+    }
+
     fn create_builtin_closure(
         &mut self,
         name: &str,
@@ -34038,9 +34107,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Perform the builtin operation
             let result = self.lower_builtin_direct(name, &args)?;
 
-            // Return the result
+            // Return the result — convert non-pointer values if needed
             let result_ptr = match result {
-                Some(v) => v.into_pointer_value(),
+                Some(v) => {
+                    if v.is_pointer_value() {
+                        v.into_pointer_value()
+                    } else if v.is_int_value() {
+                        self.int_to_ptr(v.into_int_value())?
+                    } else {
+                        // Float or other — box it
+                        let ptr_val = self.value_to_ptr(v)?;
+                        ptr_val
+                    }
+                }
                 None => ptr_type.const_null(), // Unit/void result
             };
             self.builder()
@@ -34341,6 +34420,102 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // return :: a -> m a
                 // For our simple IO model, just return the value
                 Ok(Some(args[0]))
+            }
+            "id" => {
+                // id :: a -> a
+                Ok(Some(args[0]))
+            }
+            "const" if args.len() >= 2 => {
+                // const :: a -> b -> a
+                Ok(Some(args[0]))
+            }
+            "flip" if args.len() >= 3 => {
+                // flip :: (a -> b -> c) -> b -> a -> c
+                let func = args[0].into_pointer_value();
+                let fn_ptr = self.extract_closure_fn_ptr(func)?;
+                let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+                let result = self
+                    .builder()
+                    .build_indirect_call(
+                        fn_type,
+                        fn_ptr,
+                        &[func.into(), args[2].into(), args[1].into()],
+                        "flip_result",
+                    )
+                    .map_err(|e| {
+                        CodegenError::Internal(format!("flip call failed: {:?}", e))
+                    })?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| {
+                        CodegenError::Internal("flip: returned void".to_string())
+                    })?;
+                Ok(Some(result))
+            }
+            "seq" if args.len() >= 2 => {
+                // seq :: a -> b -> b (evaluate first, return second)
+                Ok(Some(args[1]))
+            }
+            "$" if args.len() >= 2 => {
+                // ($) :: (a -> b) -> a -> b
+                let func = args[0].into_pointer_value();
+                let fn_ptr = self.extract_closure_fn_ptr(func)?;
+                let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                let result = self
+                    .builder()
+                    .build_indirect_call(
+                        fn_type,
+                        fn_ptr,
+                        &[func.into(), args[1].into()],
+                        "dollar_result",
+                    )
+                    .map_err(|e| {
+                        CodegenError::Internal(format!("$ call failed: {:?}", e))
+                    })?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| {
+                        CodegenError::Internal("$: returned void".to_string())
+                    })?;
+                Ok(Some(result))
+            }
+            "." if args.len() >= 3 => {
+                // (.) :: (b -> c) -> (a -> b) -> a -> c
+                let f = args[0].into_pointer_value();
+                let g = args[1].into_pointer_value();
+                let x = args[2];
+
+                // Apply g to x first
+                let g_fn_ptr = self.extract_closure_fn_ptr(g)?;
+                let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                let g_result = self
+                    .builder()
+                    .build_indirect_call(
+                        fn_type,
+                        g_fn_ptr,
+                        &[g.into(), x.into()],
+                        "compose_g",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("compose g call failed: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("compose g: returned void".to_string()))?;
+
+                // Apply f to (g x)
+                let f_fn_ptr = self.extract_closure_fn_ptr(f)?;
+                let f_result = self
+                    .builder()
+                    .build_indirect_call(
+                        fn_type,
+                        f_fn_ptr,
+                        &[f.into(), g_result.into()],
+                        "compose_f",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("compose f call failed: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("compose f: returned void".to_string()))?;
+                Ok(Some(f_result))
             }
             "fmap" | "<$>" => {
                 // fmap :: (a -> b) -> f a -> f b
@@ -35857,10 +36032,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 {
                     self.lower_builtin_container_direct(name, args)
                 } else {
-                    Err(CodegenError::Internal(format!(
-                        "lower_builtin_direct: unhandled builtin '{}'",
-                        name
-                    )))
+                    // For builtins that are handled in lower_builtin but not
+                    // lower_builtin_direct, generate a stub that calls bhc_error
+                    // at runtime rather than failing compilation.
+                    let stub_fn = self.get_or_create_stub_function(name)?;
+                    let null_env = self.type_mapper().ptr_type().const_null();
+                    let call_result = self.builder()
+                        .build_call(stub_fn, &[null_env.into()], "stub_call")
+                        .map_err(|e| CodegenError::Internal(format!("stub call: {:?}", e)))?;
+                    if let Some(ret_val) = call_result.try_as_basic_value().basic() {
+                        Ok(Some(ret_val))
+                    } else {
+                        Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+                    }
                 }
             }
         }
@@ -37436,10 +37620,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     }
                 }
 
-                Err(CodegenError::Internal(format!(
-                    "unknown function: {}",
-                    name
-                )))
+                {
+                    // Unknown function in application — generate a runtime stub.
+                    let stub_fn = self.get_or_create_stub_function(name)?;
+                    let null_env = self.type_mapper().ptr_type().const_null();
+                    let call_result = self
+                        .builder()
+                        .build_call(stub_fn, &[null_env.into()], "stub_call")
+                        .map_err(|e| {
+                            CodegenError::Internal(format!("stub call: {:?}", e))
+                        })?;
+                    if let Some(ret_val) = call_result.try_as_basic_value().basic() {
+                        Ok(Some(ret_val))
+                    } else {
+                        Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+                    }
+                }
             }
             _ => {
                 // Indirect call - evaluate the function expression
@@ -37833,26 +38029,44 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             Bind::Rec(bindings) => {
                 // For recursive let bindings, we lift them to top-level functions.
-                // This works because:
-                // 1. We declare all the functions first (so they can reference each other)
-                // 2. Then we define their bodies
-                // 3. The body of the let can then call them
+                // Free variables from the enclosing scope are captured via the
+                // closure environment (param 0).
 
                 // Save the current insertion point
                 let current_block = self.builder().get_insert_block();
 
+                // Compute free variables for the entire rec group
+                let rec_var_ids: FxHashSet<VarId> = bindings.iter().map(|(v, _)| v.id).collect();
+                let mut all_free = FxHashSet::default();
+                for (_var, expr) in bindings {
+                    let fv = self.free_vars(expr);
+                    for v in fv {
+                        if !rec_var_ids.contains(&v) {
+                            all_free.insert(v);
+                        }
+                    }
+                }
+
+                // Collect captured values (free vars that exist in current env)
+                let captured: Vec<(VarId, BasicValueEnum<'ctx>)> = all_free
+                    .iter()
+                    .filter_map(|vid| {
+                        self.env.get(vid).map(|val| (*vid, *val))
+                    })
+                    .collect();
+
                 // First pass: declare all recursive functions
                 for (var, _expr) in bindings {
-                    // Generate a unique name for the lifted function
                     let lifted_name = format!("{}${}", var.name.as_str(), var.id.index());
                     let fn_type = self.lower_function_type(&var.ty)?;
                     let fn_val = self.module.add_function(&lifted_name, fn_type);
                     self.functions.insert(var.id, fn_val);
                 }
 
-                // Second pass: define all recursive functions
+                // Second pass: define all recursive functions, injecting captured
+                // free variables from the closure env into self.env
                 for (var, expr) in bindings {
-                    self.lower_recursive_function(var, expr)?;
+                    self.lower_recursive_function_with_captures(var, expr, &captured)?;
                 }
 
                 // Restore insertion point
@@ -37860,12 +38074,24 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     self.builder().position_at_end(block);
                 }
 
+                // Restore captured variable values in env (they were overwritten
+                // during recursive function body lowering with values from that
+                // function's closure env which are invalid in this scope).
+                for (vid, val) in &captured {
+                    self.env.insert(*vid, *val);
+                }
+
+                // Create closures for the lifted functions so they can be
+                // called (the closure env carries the captured free variables).
+                for (var, _expr) in bindings {
+                    let fn_val = self.functions[&var.id];
+                    let fn_ptr = fn_val.as_global_value().as_pointer_value();
+                    let closure_ptr = self.alloc_closure(fn_ptr, &captured)?;
+                    self.env.insert(var.id, closure_ptr.into());
+                }
+
                 // Lower the body (recursive functions are now available)
                 let result = self.lower_expr(body)?;
-
-                // Note: We don't remove the functions from self.functions
-                // because they're now top-level and may be needed later.
-                // This is fine because VarIds are unique.
 
                 Ok(result)
             }
@@ -37900,6 +38126,71 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         if !has_terminator {
             // Build return - convert to pointer if return type is pointer (uniform calling convention)
+            let ret_type = fn_val.get_type().get_return_type();
+            if let Some(val) = result {
+                let ret_val: BasicValueEnum<'ctx> =
+                    if ret_type == Some(self.type_mapper().ptr_type().into()) {
+                        self.value_to_ptr(val)?.into()
+                    } else {
+                        val
+                    };
+                self.builder().build_return(Some(&ret_val)).map_err(|e| {
+                    CodegenError::Internal(format!("failed to build return: {:?}", e))
+                })?;
+            } else {
+                self.builder().build_return(None).map_err(|e| {
+                    CodegenError::Internal(format!("failed to build return: {:?}", e))
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Lower a recursive function with captured free variables from enclosing scope.
+    /// The captured variables are extracted from the closure environment (param 0).
+    fn lower_recursive_function_with_captures(
+        &mut self,
+        var: &Var,
+        expr: &Expr,
+        captures: &[(VarId, BasicValueEnum<'ctx>)],
+    ) -> CodegenResult<()> {
+        let fn_val = self.functions.get(&var.id).copied().ok_or_else(|| {
+            CodegenError::Internal(format!(
+                "recursive function not declared: {}",
+                var.name.as_str()
+            ))
+        })?;
+
+        // Create entry block
+        let entry = self.llvm_context().append_basic_block(fn_val, "entry");
+        self.builder().position_at_end(entry);
+
+        // Extract captured variables from closure env (param 0)
+        if !captures.is_empty() {
+            if let Some(env_ptr) = fn_val.get_nth_param(0) {
+                let env_ptr = env_ptr.into_pointer_value();
+                let env_size = captures.len() as u32;
+                for (i, (vid, _)) in captures.iter().enumerate() {
+                    let val = self.extract_closure_env_elem(env_ptr, env_size, i as u32)?;
+                    self.env.insert(*vid, val.into());
+                }
+            }
+        }
+
+        // E.45: Extract Integer parameter positions from the function's type signature
+        let integer_param_positions = self.extract_integer_param_positions(&var.ty);
+
+        // Handle lambda parameters
+        let result = self.lower_function_body(fn_val, expr, &integer_param_positions)?;
+
+        // Check if the current block already has a terminator
+        let current_block = self.builder().get_insert_block();
+        let has_terminator = current_block
+            .map(|bb| bb.get_terminator().is_some())
+            .unwrap_or(false);
+
+        if !has_terminator {
             let ret_type = fn_val.get_type().get_return_type();
             if let Some(val) = result {
                 let ret_val: BasicValueEnum<'ctx> =
@@ -38925,6 +39216,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     ))
                 }
             }
+        }
+
+        // Deduplicate switch cases — if nested patterns cause the same tag to
+        // appear multiple times, keep only the first (the later alternatives are
+        // dead code or handled by nested pattern matching inside the first alt).
+        {
+            let mut seen_tags = FxHashSet::default();
+            cases.retain(|(tag_val, _block)| {
+                let tag_u64 = tag_val.get_zero_extended_constant().unwrap_or(u64::MAX);
+                seen_tags.insert(tag_u64)
+            });
         }
 
         // Build switch on tag

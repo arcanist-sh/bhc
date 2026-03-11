@@ -5677,7 +5677,11 @@ fn lower_import(imp: &ast::ImportDecl) -> hir::Import {
                     ast::Import::Type(ident, children, span) => hir::ImportItem {
                         name: ident.name,
                         children: children.as_ref().map_or(hir::ExportChildren::None, |cs| {
-                            hir::ExportChildren::Some(cs.iter().map(|c| c.name).collect())
+                            if cs.is_empty() {
+                                hir::ExportChildren::All
+                            } else {
+                                hir::ExportChildren::Some(cs.iter().map(|c| c.name).collect())
+                            }
                         }),
                         span: *span,
                     },
@@ -5705,7 +5709,12 @@ fn lower_export(exp: &ast::Export) -> hir::Export {
         ast::Export::Type(ident, children, span) => hir::Export {
             name: ident.name,
             children: children.as_ref().map_or(hir::ExportChildren::None, |cs| {
-                hir::ExportChildren::Some(cs.iter().map(|c| c.name).collect())
+                if cs.is_empty() {
+                    // Type(..) — export all constructors/methods
+                    hir::ExportChildren::All
+                } else {
+                    hir::ExportChildren::Some(cs.iter().map(|c| c.name).collect())
+                }
             }),
             span: *span,
         },

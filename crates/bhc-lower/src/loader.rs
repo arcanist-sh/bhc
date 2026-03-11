@@ -650,10 +650,12 @@ pub fn apply_import_spec(exports: &ModuleExports, spec: &Option<ast::ImportSpec>
                         // Handle constructors/class methods
                         if let Some(constructors) = cons {
                             if constructors.is_empty() {
-                                // Type(..) or Class(..) — import all constructors
+                                // Type(..) or Class(..) — import constructors belonging to this type
                                 // AND all values (class methods are lowercase values)
                                 for (&name, info) in &exports.constructors {
-                                    filtered.constructors.insert(name, info.clone());
+                                    if info.type_con_name == ident.name {
+                                        filtered.constructors.insert(name, info.clone());
+                                    }
                                 }
                                 for (&name, &def_id) in &exports.values {
                                     filtered.values.insert(name, def_id);
@@ -760,14 +762,11 @@ pub fn register_imported_names(
         // might find a different DefId — e.g., a Prelude builtin).
         ctx.bind_value(qualified, def_id);
 
-        // Bind the value in the context (if not already bound by a builtin)
-        if ctx.lookup_value(name).is_none() {
-            ctx.bind_value(name, def_id);
-        }
-
-        // For non-qualified imports, make the unqualified name available
+        // For non-qualified imports, also bind the unqualified name
         if !import.qualified {
-            // The value is already bound above
+            if ctx.lookup_value(name).is_none() {
+                ctx.bind_value(name, def_id);
+            }
         }
     }
 
@@ -777,8 +776,10 @@ pub fn register_imported_names(
         ctx.register_qualified_name(qualified, name);
         ctx.bind_type(qualified, def_id);
 
-        if ctx.lookup_type(name).is_none() {
-            ctx.bind_type(name, def_id);
+        if !import.qualified {
+            if ctx.lookup_type(name).is_none() {
+                ctx.bind_type(name, def_id);
+            }
         }
     }
 
@@ -788,8 +789,10 @@ pub fn register_imported_names(
         ctx.register_qualified_name(qualified, name);
         ctx.bind_constructor(qualified, info.def_id);
 
-        if ctx.lookup_constructor(name).is_none() {
-            ctx.bind_constructor(name, info.def_id);
+        if !import.qualified {
+            if ctx.lookup_constructor(name).is_none() {
+                ctx.bind_constructor(name, info.def_id);
+            }
         }
     }
 }

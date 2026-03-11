@@ -1457,16 +1457,93 @@ impl Compiler {
             }
         }
 
+        // Build set of exported names from the module's explicit export list.
+        // If `hir.exports` is None, export everything. If Some, only export listed items.
+        let export_filter: Option<(
+            rustc_hash::FxHashSet<Symbol>,  // exported value/type names
+            rustc_hash::FxHashSet<Symbol>,  // exported constructor names (from Type(..))
+        )> = hir.exports.as_ref().map(|export_list| {
+            let mut names = rustc_hash::FxHashSet::default();
+            let mut con_names = rustc_hash::FxHashSet::default();
+            for export in export_list {
+                names.insert(export.name);
+                match &export.children {
+                    bhc_hir::ExportChildren::All => {
+                        // Type(..) or Class(..) — export all constructors/methods of this type
+                        // Find constructors belonging to this type in HIR
+                        for item in &hir.items {
+                            if let bhc_hir::Item::Data(data_def) = item {
+                                if data_def.name == export.name {
+                                    for con in &data_def.cons {
+                                        con_names.insert(con.name);
+                                        // Also export record field accessors as values
+                                        if let bhc_hir::ConFields::Named(fields) = &con.fields {
+                                            for field in fields {
+                                                names.insert(field.name);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if let bhc_hir::Item::Newtype(nt) = item {
+                                if nt.name == export.name {
+                                    con_names.insert(nt.con.name);
+                                    // Also export record field accessors
+                                    if let bhc_hir::ConFields::Named(fields) = &nt.con.fields {
+                                        for field in fields {
+                                            names.insert(field.name);
+                                        }
+                                    }
+                                }
+                            }
+                            // Also handle class methods as values
+                            if let bhc_hir::Item::Class(class_def) = item {
+                                if class_def.name == export.name {
+                                    for method in &class_def.methods {
+                                        names.insert(method.name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    bhc_hir::ExportChildren::Some(children) => {
+                        for child in children {
+                            con_names.insert(*child);
+                        }
+                    }
+                    bhc_hir::ExportChildren::None => {}
+                }
+            }
+            (names, con_names)
+        });
+
         // Export values, types, and constructors from the lowering context
         for def_info in lower_ctx.defs.values() {
             match def_info.kind {
                 bhc_lower::DefKind::Value => {
+                    // Check export filter
+                    if let Some((ref names, ref con_names)) = export_filter {
+                        if !names.contains(&def_info.name) && !con_names.contains(&def_info.name) {
+                            continue;
+                        }
+                    }
                     exports.values.insert(def_info.name, def_info.id);
                 }
                 bhc_lower::DefKind::Type => {
+                    if let Some((ref names, _)) = export_filter {
+                        if !names.contains(&def_info.name) {
+                            continue;
+                        }
+                    }
                     exports.types.insert(def_info.name, def_info.id);
                 }
                 bhc_lower::DefKind::Constructor => {
+                    // Check export filter: constructor must be in con_names set
+                    if let Some((ref names, ref con_names)) = export_filter {
+                        if !con_names.contains(&def_info.name) && !names.contains(&def_info.name) {
+                            continue;
+                        }
+                    }
                     // Look up the actual type constructor name and tag from HIR data defs
                     let (type_con_name, type_param_count, tag) =
                         if let Some((name, params, tag)) = con_type_info.get(&def_info.id) {
@@ -1535,6 +1612,9 @@ impl Compiler {
                         is_newtype,
                     };
                     exports.constructors.insert(def_info.name, con_info);
+                    // Also export constructor as a value (constructors are
+                    // usable in expression context, e.g. `Just 42`)
+                    exports.values.insert(def_info.name, def_info.id);
                 }
                 _ => {}
             }
@@ -1806,8 +1886,14 @@ impl Compiler {
                 if builtins.contains(con_name.as_str()) {
                     continue;
                 }
-                if con_info.type_con_name == con_name {
-                    // type_con_name == constructor name indicates broken metadata
+                // Only skip if type_con_name == constructor name AND it's a
+                // non-record constructor with zero arity — this indicates broken
+                // metadata from builtins. Record types commonly have the same name
+                // for both the type and constructor (e.g., data Foo = Foo { ... }).
+                if con_info.type_con_name == con_name
+                    && con_info.arity == 0
+                    && con_info.field_names.is_none()
+                {
                     continue;
                 }
 
@@ -2747,10 +2833,32 @@ impl Compiler {
         }
 
         // Phase 2: Build dependency graph and topological sort
-        let (ordered, _cyclic) = Self::topological_sort(&module_info)?;
+        let (ordered, cyclic) = Self::topological_sort(&module_info)?;
+
+        // Phase 2b: Pre-register stub exports for cyclic modules so they can
+        // see each other's constructors and values during compilation.
+        let mut registry = ModuleRegistry::default();
+        if !cyclic.is_empty() {
+            for &idx in &cyclic {
+                let (ref path, ref mod_name, _) = module_info[idx];
+                let unit = CompilationUnit::from_path(path.clone())?;
+                let file_id = FileId::new(0);
+                let ast = self.parse(&unit, file_id)?;
+                let stub_exports = Self::build_module_exports_from_ast(mod_name, &ast);
+                registry.modules.insert(
+                    mod_name.clone(),
+                    CompiledModuleInfo {
+                        module_name: mod_name.clone(),
+                        symbols: Vec::new(),
+                        exports: stub_exports,
+                        type_aliases: Vec::new(),
+                        value_schemes: FxHashMap::default(),
+                    },
+                );
+            }
+        }
 
         // Phase 3: Compile each module in dependency order with cross-module context
-        let mut registry = ModuleRegistry::default();
         let mut object_paths = Vec::new();
 
         for idx in &ordered {

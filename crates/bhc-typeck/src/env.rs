@@ -274,7 +274,7 @@ impl TypeEnv {
         self.type_cons.get(&name)
     }
 
-    /// Register a data constructor.
+    /// Register a data constructor (by both name and DefId).
     pub fn register_data_con(&mut self, def_id: DefId, name: Symbol, scheme: Scheme) {
         let info = DataConInfo {
             def_id,
@@ -282,6 +282,21 @@ impl TypeEnv {
             scheme,
         };
         self.data_cons.insert(name, info.clone());
+        self.data_cons_by_id.insert(def_id, info);
+    }
+
+    /// Register a data constructor by DefId only (no by-name entry).
+    ///
+    /// Use this for constructors from the defs map that may collide with
+    /// same-named constructors from other modules. The type checker uses
+    /// `lookup_data_con_by_id` for user-defined constructors, so by-name
+    /// registration is only needed for builtins.
+    pub fn register_data_con_by_id(&mut self, def_id: DefId, name: Symbol, scheme: Scheme) {
+        let info = DataConInfo {
+            def_id,
+            name,
+            scheme,
+        };
         self.data_cons_by_id.insert(def_id, info);
     }
 

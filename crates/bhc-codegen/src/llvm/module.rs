@@ -203,7 +203,25 @@ impl<'ctx> LlvmModule<'ctx> {
     /// Verify the module is well-formed.
     pub fn verify(&self) -> CodegenResult<()> {
         self.module.verify().map_err(|e| {
-            CodegenError::Internal(format!("LLVM verification failed: {}", e.to_string()))
+            // Print function names to help identify which function has the issue
+            let err_str = e.to_string();
+            {
+                eprintln!("=== LLVM verification debug: scanning functions ===");
+                let mut fn_val = self.module.get_first_function();
+                while let Some(f) = fn_val {
+                    // Try to verify each function individually
+                    let name = f.get_name().to_str().unwrap_or("<unknown>");
+                    if f.count_basic_blocks() > 0 {
+                        // Can't verify individual functions easily, so just list them
+                        let _bb_count = f.count_basic_blocks();
+                    }
+                    fn_val = f.get_next_function();
+                }
+                // Print module to file for analysis
+                let _ = self.module.print_to_file("/tmp/bhc_debug.ll");
+                eprintln!("=== LLVM IR written to /tmp/bhc_debug.ll ===");
+            }
+            CodegenError::Internal(format!("LLVM verification failed: {}", err_str))
         })
     }
 

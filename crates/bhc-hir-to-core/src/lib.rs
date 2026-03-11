@@ -27,6 +27,7 @@ use bhc_hir::{DefId, Module as HirModule};
 use bhc_intern::Symbol;
 use bhc_span::Span;
 use bhc_types::Scheme;
+use context::FieldSelectorInfo;
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 use thiserror::Error;
@@ -69,7 +70,7 @@ pub enum LowerError {
     },
 
     /// Multiple errors occurred.
-    #[error("multiple errors")]
+    #[error("multiple errors:\n{}", .0.iter().map(|e| format!("  - {}", e)).collect::<Vec<_>>().join("\n"))]
     Multiple(Vec<LowerError>),
 }
 
@@ -148,6 +149,23 @@ pub fn lower_module_with_defs_and_constructors(
     // If we have imported constructor metadata, register it
     if let Some(con_map) = imported_constructors {
         for (def_id, info) in con_map {
+            // Register field selectors for record constructors so that
+            // record updates in the importing module can find field info
+            if !info.field_names.is_empty() {
+                for (i, field_name) in info.field_names.iter().enumerate() {
+                    ctx.register_field_selector(
+                        *field_name,
+                        FieldSelectorInfo {
+                            field_name: *field_name,
+                            con_id: *def_id,
+                            con_name: info.name,
+                            type_name: info.type_name,
+                            field_index: i,
+                            total_fields: info.field_names.len(),
+                        },
+                    );
+                }
+            }
             ctx.register_constructor(*def_id, info.clone());
         }
     }

@@ -1073,6 +1073,7 @@ impl TyCtxt {
             }
 
             let name = def_info.name.as_str();
+            let mut is_builtin_con = true;
             let scheme = match name {
                 // Bool constructors
                 "True" | "False" => Scheme::mono(self.builtins.bool_ty.clone()),
@@ -1578,7 +1579,11 @@ impl TyCtxt {
 
                 // For imported constructors that aren't known builtins,
                 // create a function type based on the constructor's arity.
+                // Mark as non-builtin so we only register by DefId (not by name),
+                // avoiding name collisions between same-named constructors from
+                // different modules.
                 _ => {
+                    is_builtin_con = false;
                     if let (Some(arity), Some(type_con_name), Some(type_param_count)) = (
                         def_info.arity,
                         def_info.type_con_name,
@@ -1660,9 +1665,19 @@ impl TyCtxt {
                 }
             };
 
-            // Register the constructor with its DefId from the lowering pass
-            self.env
-                .register_data_con(def_info.id, def_info.name, scheme);
+            // Register the constructor with its DefId from the lowering pass.
+            // For known builtins, register by both name and DefId (needed for
+            // by-name lookups in builtins.rs). For user-defined constructors,
+            // only register by DefId to avoid name collisions between
+            // same-named constructors from different modules (e.g., Types.CedarEngine
+            // arity 0 vs Cedar.CedarEngine arity 3).
+            if is_builtin_con {
+                self.env
+                    .register_data_con(def_info.id, def_info.name, scheme);
+            } else {
+                self.env
+                    .register_data_con_by_id(def_info.id, def_info.name, scheme);
+            }
         }
 
         // Helper to create common type schemes

@@ -1399,6 +1399,12 @@ impl Compiler {
 
         let exports = Self::build_module_exports_from_hir(module_name, &hir, &lower_ctx, Some(registry));
 
+        if module_name == "Text.Pandoc.Shared" {
+            let has_es = exports.values.keys().any(|k| k.as_str() == "extractSpaces");
+            eprintln!("[DEBUG] Text.Pandoc.Shared exports: {} values, {} types, {} cons, extractSpaces={}",
+                exports.values.len(), exports.types.len(), exports.constructors.len(), has_es);
+        }
+
         debug!(module = %unit.module_name, object = %object_path.display(), "code generation complete");
         self.callbacks
             .on_phase_complete(CompilePhase::Codegen, &unit.module_name);
@@ -1460,7 +1466,6 @@ impl Compiler {
 
         // Build set of exported names from the module's explicit export list.
         // If `hir.exports` is None, export everything. If Some, only export listed items.
-        eprintln!("[TRACE exports] module={} hir.exports={}", module_name, if hir.exports.is_some() { "Some" } else { "None" });
         let export_filter: Option<(
             rustc_hash::FxHashSet<Symbol>,  // exported value/type names
             rustc_hash::FxHashSet<Symbol>,  // exported constructor names (from Type(..))
@@ -1511,32 +1516,60 @@ impl Compiler {
                                 }
                             }
                         }
-                        // If not found locally, this is a re-exported type.
-                        // Search the registry's module exports for constructors belonging to this type.
+                        // If not found locally, this could be:
+                        // 1. A re-exported type — search for its constructors
+                        // 2. A module re-export (`module X` in export list) — expand to all of X's exports
                         if !found_locally {
-                            // First try lower_ctx.defs
-                            for def_info in lower_ctx.defs.values() {
-                                if def_info.kind == bhc_lower::DefKind::Constructor {
-                                    if def_info.type_con_name == Some(export.name) {
-                                        con_names.insert(def_info.name);
-                                        if let Some(ref fns) = def_info.field_names {
-                                            for fname in fns {
-                                                names.insert(*fname);
+                            // Check if this is a module re-export (name matches a registry module)
+                            let mut is_module_reexport = false;
+                            if let Some(reg) = registry {
+                                if let Some(compiled) = reg.modules.get(export.name.as_str()) {
+                                    is_module_reexport = true;
+                                    // Re-export ALL values, types, and constructors from this module
+                                    for (&name, _) in &compiled.exports.values {
+                                        names.insert(name);
+                                    }
+                                    for (&name, _) in &compiled.exports.types {
+                                        names.insert(name);
+                                    }
+                                    for (&name, _) in &compiled.exports.constructors {
+                                        con_names.insert(name);
+                                    }
+                                }
+                            }
+
+                            if !is_module_reexport {
+                                // This is a re-exported type — search for its constructors
+                                // First try lower_ctx.defs
+                                for def_info in lower_ctx.defs.values() {
+                                    if def_info.kind == bhc_lower::DefKind::Constructor {
+                                        if def_info.type_con_name == Some(export.name) {
+                                            con_names.insert(def_info.name);
+                                            if let Some(ref fns) = def_info.field_names {
+                                                for fname in fns {
+                                                    names.insert(*fname);
+                                                }
                                             }
                                         }
                                     }
                                 }
-                            }
-                            // Then search registry for re-exported constructors
-                            if let Some(reg) = registry {
-                                for compiled in reg.modules.values() {
-                                    for (con_name, con_info) in &compiled.exports.constructors {
-                                        if con_info.type_con_name == export.name {
-                                            con_names.insert(*con_name);
-                                            if let Some(ref fns) = con_info.field_names {
-                                                for fname in fns {
-                                                    names.insert(*fname);
+                                // Then search registry for re-exported constructors and class methods
+                                if let Some(reg) = registry {
+                                    for compiled in reg.modules.values() {
+                                        for (con_name, con_info) in &compiled.exports.constructors {
+                                            if con_info.type_con_name == export.name {
+                                                con_names.insert(*con_name);
+                                                if let Some(ref fns) = con_info.field_names {
+                                                    for fname in fns {
+                                                        names.insert(*fname);
+                                                    }
                                                 }
+                                            }
+                                        }
+                                        // Also search for class methods
+                                        if let Some(methods) = compiled.exports.class_methods.get(&export.name) {
+                                            for method_name in methods {
+                                                names.insert(*method_name);
                                             }
                                         }
                                     }
@@ -1558,30 +1591,75 @@ impl Compiler {
         // Export values, types, and constructors from the lowering context
         for def_info in lower_ctx.defs.values() {
             match def_info.kind {
-                bhc_lower::DefKind::Value => {
-                    // Check export filter
-                    if let Some((ref names, ref con_names)) = export_filter {
-                        if !names.contains(&def_info.name) && !con_names.contains(&def_info.name) {
+                bhc_lower::DefKind::Value | bhc_lower::DefKind::StubValue | bhc_lower::DefKind::ImportedValue => {
+                    // Check export filter.
+                    // Some imported stub names are stored as qualified (e.g. "Text.Parsec.many1")
+                    // due to has_typed_sigs.  We must also check the unqualified portion
+                    // against the filter so that re-exports of external names work correctly.
+                    let name_str = def_info.name.as_str();
+                    let unqualified_name = if let Some(dot_pos) = name_str.rfind('.') {
+                        Some(Symbol::intern(&name_str[dot_pos + 1..]))
+                    } else {
+                        None
+                    };
+                    let export_name = if let Some((ref names, ref con_names)) = export_filter {
+                        if names.contains(&def_info.name) || con_names.contains(&def_info.name) {
+                            def_info.name
+                        } else if let Some(uq) = unqualified_name {
+                            if names.contains(&uq) || con_names.contains(&uq) {
+                                uq // Use unqualified name as the export key
+                            } else {
+                                continue;
+                            }
+                        } else {
                             continue;
                         }
-                    }
-                    exports.values.insert(def_info.name, def_info.id);
+                    } else {
+                        // No filter — use unqualified name if available, to avoid
+                        // polluting downstream exports with qualified stub names.
+                        unqualified_name.unwrap_or(def_info.name)
+                    };
+                    exports.values.insert(export_name, def_info.id);
                 }
-                bhc_lower::DefKind::Type => {
-                    if let Some((ref names, _)) = export_filter {
-                        if !names.contains(&def_info.name) {
+                bhc_lower::DefKind::Type | bhc_lower::DefKind::StubType | bhc_lower::DefKind::Class => {
+                    let tname_str = def_info.name.as_str();
+                    let uq_type = if let Some(dot_pos) = tname_str.rfind('.') {
+                        Some(Symbol::intern(&tname_str[dot_pos + 1..]))
+                    } else {
+                        None
+                    };
+                    let export_type_name = if let Some((ref names, _)) = export_filter {
+                        if names.contains(&def_info.name) {
+                            def_info.name
+                        } else if let Some(uq) = uq_type {
+                            if names.contains(&uq) { uq } else { continue; }
+                        } else {
                             continue;
                         }
-                    }
-                    exports.types.insert(def_info.name, def_info.id);
+                    } else {
+                        uq_type.unwrap_or(def_info.name)
+                    };
+                    exports.types.insert(export_type_name, def_info.id);
                 }
-                bhc_lower::DefKind::Constructor => {
+                bhc_lower::DefKind::Constructor | bhc_lower::DefKind::StubConstructor => {
                     // Check export filter: constructor must be in con_names set
-                    if let Some((ref names, ref con_names)) = export_filter {
-                        if !con_names.contains(&def_info.name) && !names.contains(&def_info.name) {
+                    let cname_str = def_info.name.as_str();
+                    let uq_con = if let Some(dot_pos) = cname_str.rfind('.') {
+                        Some(Symbol::intern(&cname_str[dot_pos + 1..]))
+                    } else {
+                        None
+                    };
+                    let export_con_name = if let Some((ref names, ref con_names)) = export_filter {
+                        if con_names.contains(&def_info.name) || names.contains(&def_info.name) {
+                            def_info.name
+                        } else if let Some(uq) = uq_con {
+                            if con_names.contains(&uq) || names.contains(&uq) { uq } else { continue; }
+                        } else {
                             continue;
                         }
-                    }
+                    } else {
+                        uq_con.unwrap_or(def_info.name)
+                    };
                     // Look up the actual type constructor name and tag from HIR data defs
                     let (type_con_name, type_param_count, tag) =
                         if let Some((name, params, tag)) = con_type_info.get(&def_info.id) {
@@ -1649,10 +1727,10 @@ impl Compiler {
                         field_names,
                         is_newtype,
                     };
-                    exports.constructors.insert(def_info.name, con_info);
+                    exports.constructors.insert(export_con_name, con_info);
                     // Also export constructor as a value (constructors are
                     // usable in expression context, e.g. `Just 42`)
-                    exports.values.insert(def_info.name, def_info.id);
+                    exports.values.insert(export_con_name, def_info.id);
                 }
                 _ => {}
             }
@@ -1662,11 +1740,6 @@ impl Compiler {
         // lower_ctx.defs (because they come from imported modules), merge them
         // from the registry.
         if let (Some((ref filter_names, ref filter_cons)), Some(reg)) = (&export_filter, registry) {
-            eprintln!("[TRACE re-export] module={} filter_names={:?} filter_cons={:?} registry_modules={:?}",
-                module_name,
-                filter_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                filter_cons.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                reg.modules.keys().collect::<Vec<_>>());
             for compiled in reg.modules.values() {
                 // Merge values
                 for (&name, &def_id) in &compiled.exports.values {
@@ -1692,6 +1765,32 @@ impl Compiler {
                         if !exports.values.contains_key(name) {
                             exports.values.insert(*name, con_info.def_id);
                         }
+                    }
+                }
+            }
+        }
+
+        // Populate class_methods from HIR class definitions
+        for item in &hir.items {
+            if let bhc_hir::Item::Class(class_def) = item {
+                // Only include if the class is exported
+                if exports.types.contains_key(&class_def.name) {
+                    let method_names: Vec<Symbol> = class_def.methods.iter()
+                        .map(|m| m.name)
+                        .collect();
+                    if !method_names.is_empty() {
+                        exports.class_methods.insert(class_def.name, method_names);
+                    }
+                }
+            }
+        }
+
+        // Also propagate class_methods from registry modules that we re-export
+        if let Some(reg) = registry {
+            for compiled in reg.modules.values() {
+                for (class_name, methods) in &compiled.exports.class_methods {
+                    if exports.types.contains_key(class_name) && !exports.class_methods.contains_key(class_name) {
+                        exports.class_methods.insert(*class_name, methods.clone());
                     }
                 }
             }
@@ -1826,15 +1925,20 @@ impl Compiler {
                     let class_id = bhc_hir::DefId::new(next_id);
                     next_id += 1;
                     exports.types.insert(class_name, class_id);
-                    // Export class methods
+                    // Export class methods and record class→method mapping
+                    let mut method_names = Vec::new();
                     for method in &cls.methods {
                         if let bhc_ast::Decl::TypeSig(sig) = method {
                             for name_ident in &sig.names {
                                 let mid = bhc_hir::DefId::new(next_id);
                                 next_id += 1;
                                 exports.values.insert(name_ident.name, mid);
+                                method_names.push(name_ident.name);
                             }
                         }
+                    }
+                    if !method_names.is_empty() {
+                        exports.class_methods.insert(class_name, method_names);
                     }
                 }
                 _ => {}
@@ -1881,7 +1985,8 @@ impl Compiler {
             Err(diagnostics) => {
                 eprintln!("Type errors:");
                 for (i, diag) in diagnostics.iter().enumerate() {
-                    eprintln!("  {}: {}", i + 1, diag.message);
+                    let span_info = diag.labels.first().map(|l| format!(" [span {:?}]", l.span)).unwrap_or_default();
+                    eprintln!("  {}: {}{}", i + 1, diag.message, span_info);
                 }
                 Some(diagnostics.len())
             }

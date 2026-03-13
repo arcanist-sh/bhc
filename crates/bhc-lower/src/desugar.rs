@@ -13,8 +13,126 @@ use bhc_hir as hir;
 use bhc_intern::Symbol;
 use bhc_span::Span;
 
-use crate::context::LowerContext;
+use crate::context::{DefKind, LowerContext};
 use crate::resolve::bind_pattern;
+
+/// Desugar a function body that has where-clause bindings.
+/// Enters a scope, pre-binds where names, lowers the body, wraps in Let.
+fn desugar_body_with_wheres(
+    ctx: &mut LowerContext,
+    rhs: &ast::Rhs,
+    wheres: &[ast::Decl],
+    span: Span,
+    lower_expr: &impl Fn(&mut LowerContext, &ast::Expr) -> hir::Expr,
+    lower_pat: &impl Fn(&mut LowerContext, &ast::Pat) -> hir::Pat,
+) -> hir::Expr {
+    ctx.enter_scope();
+    // Pre-bind nested where names
+    for nested_decl in wheres {
+        if let ast::Decl::FunBind(nested_fb) = nested_decl {
+            if nested_fb.name.name.as_str() == "$patbind"
+                && nested_fb.clauses.len() == 1
+                && nested_fb.clauses[0].pats.len() == 1
+            {
+                bind_pattern(ctx, &nested_fb.clauses[0].pats[0]);
+            } else {
+                let nested_def_id = ctx.fresh_def_id();
+                ctx.define(
+                    nested_def_id,
+                    nested_fb.name.name,
+                    DefKind::Value,
+                    nested_fb.span,
+                );
+                ctx.bind_value(nested_fb.name.name, nested_def_id);
+            }
+        }
+    }
+    let rhs_expr = match rhs {
+        ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
+        ast::Rhs::Guarded(guards, _) => {
+            desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
+        }
+    };
+    // Lower nested where bindings
+    let nested_bindings: Vec<hir::Binding> = wheres
+        .iter()
+        .filter_map(|d| {
+            if let ast::Decl::FunBind(nested_fb) = d {
+                if nested_fb.name.name.as_str() == "$patbind"
+                    && nested_fb.clauses.len() == 1
+                    && nested_fb.clauses[0].pats.len() == 1
+                {
+                    let pat = lower_pat(ctx, &nested_fb.clauses[0].pats[0]);
+                    let nested_rhs = match &nested_fb.clauses[0].rhs {
+                        ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
+                        ast::Rhs::Guarded(guards, _) => {
+                            desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
+                        }
+                    };
+                    return Some(hir::Binding {
+                        pat,
+                        sig: None,
+                        rhs: nested_rhs,
+                        span: nested_fb.span,
+                    });
+                }
+                let nested_def_id = ctx
+                    .lookup_value(nested_fb.name.name)
+                    .expect("nested where binding should be bound");
+                if nested_fb.clauses.len() == 1 && nested_fb.clauses[0].pats.is_empty() {
+                    let nested_rhs = match &nested_fb.clauses[0].rhs {
+                        ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
+                        ast::Rhs::Guarded(guards, _) => {
+                            desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
+                        }
+                    };
+                    return Some(hir::Binding {
+                        pat: hir::Pat::Var(
+                            nested_fb.name.name,
+                            nested_def_id,
+                            nested_fb.span,
+                        ),
+                        sig: None,
+                        rhs: nested_rhs,
+                        span: nested_fb.span,
+                    });
+                }
+                // Single-clause with parameters: lower to lambda
+                if nested_fb.clauses.len() == 1 {
+                    let clause = &nested_fb.clauses[0];
+                    ctx.enter_scope();
+                    for p in &clause.pats {
+                        bind_pattern(ctx, p);
+                    }
+                    let pats: Vec<hir::Pat> = clause.pats.iter()
+                        .map(|p| lower_pat(ctx, p))
+                        .collect();
+                    let body = match &clause.rhs {
+                        ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
+                        ast::Rhs::Guarded(guards, _) => {
+                            desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
+                        }
+                    };
+                    ctx.exit_scope();
+                    let lam = hir::Expr::Lam(pats, Box::new(body), nested_fb.span);
+                    return Some(hir::Binding {
+                        pat: hir::Pat::Var(
+                            nested_fb.name.name,
+                            nested_def_id,
+                            nested_fb.span,
+                        ),
+                        sig: None,
+                        rhs: lam,
+                        span: nested_fb.span,
+                    });
+                }
+            }
+            None
+        })
+        .collect();
+    ctx.exit_scope();
+    hir::Expr::Let(nested_bindings, Box::new(rhs_expr), span)
+}
 
 /// Desugar do-notation into monadic bind and sequence operations.
 ///
@@ -188,10 +306,14 @@ fn desugar_let_decls(
                     .lookup_value(fun_bind.name.name)
                     .expect("do-let binding should be bound");
                 let pat = hir::Pat::Var(fun_bind.name.name, def_id, fun_bind.span);
-                let rhs = match &clause.rhs {
-                    ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
-                    ast::Rhs::Guarded(guards, _) => {
-                        desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
+                let rhs = if !clause.wheres.is_empty() {
+                    desugar_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fun_bind.span, lower_expr, lower_pat)
+                } else {
+                    match &clause.rhs {
+                        ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
+                        ast::Rhs::Guarded(guards, _) => {
+                            desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
+                        }
                     }
                 };
 
@@ -219,10 +341,14 @@ fn desugar_let_decls(
                     bind_pattern(ctx, p);
                 }
 
-                let rhs_body = match &clause.rhs {
-                    ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
-                    ast::Rhs::Guarded(guards, _) => {
-                        desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
+                let rhs_body = if !clause.wheres.is_empty() {
+                    desugar_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fun_bind.span, lower_expr, lower_pat)
+                } else {
+                    match &clause.rhs {
+                        ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
+                        ast::Rhs::Guarded(guards, _) => {
+                            desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
+                        }
                     }
                 };
 

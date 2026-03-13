@@ -110,6 +110,24 @@ impl<'src> Parser<'src> {
                     }
                     (Ident::new(*sym), prec, assoc)
                 }
+                // Handle qualified operators like Seq.|> or M.\\
+                TokenKind::QualOperator(qual, sym) => {
+                    let (prec, assoc) = self.get_operator_info(sym.as_str());
+                    if prec < min_prec {
+                        break;
+                    }
+                    let full_name = format!("{}.{}", qual.as_str(), sym.as_str());
+                    (Ident::from_str(&full_name), prec, assoc)
+                }
+                // Handle qualified constructor operators like Seq.:> in expressions
+                TokenKind::QualConOperator(qual, sym) => {
+                    let (prec, assoc) = self.get_operator_info(sym.as_str());
+                    if prec < min_prec {
+                        break;
+                    }
+                    let full_name = format!("{}.{}", qual.as_str(), sym.as_str());
+                    (Ident::from_str(&full_name), prec, assoc)
+                }
                 _ => break,
             };
 
@@ -412,6 +430,8 @@ impl<'src> Parser<'src> {
                 | Some(TokenKind::Percent)
                 | Some(TokenKind::Dot)
                 | Some(TokenKind::ConOperator(_))
+                | Some(TokenKind::QualOperator(_, _))
+                | Some(TokenKind::QualConOperator(_, _))
         ) {
             return self.parse_operator_section(start);
         }
@@ -480,6 +500,14 @@ impl<'src> Parser<'src> {
             Some(TokenKind::Percent) => Some(Ident::from_str("%")),
             Some(TokenKind::Dot) => Some(Ident::from_str(".")),
             Some(TokenKind::ConOperator(sym)) => Some(Ident::new(sym)),
+            Some(TokenKind::QualOperator(qual, sym)) => {
+                let full_name = format!("{}.{}", qual.as_str(), sym.as_str());
+                Some(Ident::from_str(&full_name))
+            }
+            Some(TokenKind::QualConOperator(qual, sym)) => {
+                let full_name = format!("{}.{}", qual.as_str(), sym.as_str());
+                Some(Ident::from_str(&full_name))
+            }
             _ => None,
         };
 
@@ -1018,6 +1046,17 @@ impl<'src> Parser<'src> {
         let decls = self.parse_local_decls()?;
 
         self.expect(&TokenKind::In)?;
+
+        // When `in` appears on the same line as a case alternative (e.g.,
+        //   let x = case n of _ -> 0 in body
+        // ), the lexer still emits VirtualRBrace tokens for the case-of and
+        // let layout contexts when the next line is at a lower column. These
+        // are "phantom" closers — the blocks were already semantically
+        // terminated by `in`. Skip them so `parse_expr` sees the body.
+        while self.check(&TokenKind::VirtualRBrace) {
+            self.advance();
+        }
+
         let body = self.parse_expr()?;
         let span = start.to(body.span());
 
@@ -1126,16 +1165,24 @@ impl<'src> Parser<'src> {
                 TokenKind::VirtualRBrace
             };
 
-            if !self.check(&rbrace) {
+            // `in` terminates case blocks inside `let` (when on the same line
+            // as the last alternative, the lexer doesn't insert VirtualRBrace)
+            let is_terminated = |s: &Self| {
+                s.check(&rbrace)
+                    || s.check(&TokenKind::VirtualRBrace)
+                    || (!explicit_braces && s.check(&TokenKind::In))
+            };
+
+            if !is_terminated(self) {
                 alts.push(self.parse_alt()?);
                 // Accept either real or virtual semicolons
                 while self.eat(&TokenKind::Semi) || self.eat(&TokenKind::VirtualSemi) {
-                    if self.check(&rbrace) || self.check(&TokenKind::VirtualRBrace) {
+                    if is_terminated(self) {
                         break;
                     }
                     // Skip any extra semicolons
                     while self.eat(&TokenKind::Semi) || self.eat(&TokenKind::VirtualSemi) {}
-                    if self.check(&rbrace) || self.check(&TokenKind::VirtualRBrace) {
+                    if is_terminated(self) {
                         break;
                     }
                     alts.push(self.parse_alt()?);
@@ -1145,7 +1192,8 @@ impl<'src> Parser<'src> {
             if explicit_braces {
                 self.expect(&TokenKind::RBrace)?;
             } else {
-                // Virtual braces: consume if present, but don't require
+                // Virtual braces: consume if present, but don't require.
+                // Don't consume `in` — it's consumed by parse_let_expr.
                 self.eat(&TokenKind::VirtualRBrace);
             }
         } else {
@@ -1470,6 +1518,14 @@ impl<'src> Parser<'src> {
             TokenKind::Percent => Ident::from_str("%"),
             TokenKind::Dot => Ident::from_str("."),
             TokenKind::ConOperator(sym) => Ident::new(*sym),
+            TokenKind::QualOperator(qual, sym) => {
+                let full_name = format!("{}.{}", qual.as_str(), sym.as_str());
+                Ident::from_str(&full_name)
+            }
+            TokenKind::QualConOperator(qual, sym) => {
+                let full_name = format!("{}.{}", qual.as_str(), sym.as_str());
+                Ident::from_str(&full_name)
+            }
             _ => {
                 return Err(ParseError::Unexpected {
                     found: tok.node.kind.description().to_string(),

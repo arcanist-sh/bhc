@@ -1719,7 +1719,7 @@ impl TyCtxt {
             // Skip pattern variables (function parameters, let-bound vars) —
             // they should never be registered as global builtins.
             // Also skip imported values from other modules in the same compilation
-            // unit — they should get fresh polymorphic types in the second pass,
+            // unit — they should get their type scheme from the registry (second pass),
             // not hardcoded Prelude types (e.g., Cache.lookup != Prelude.lookup).
             if matches!(def_info.kind, DefKind::PatVar | DefKind::ImportedValue) {
                 continue;
@@ -1966,31 +1966,33 @@ impl TyCtxt {
                     let list_int = Ty::List(Box::new(self.builtins.int_ty.clone()));
                     Scheme::mono(Ty::fun(list_int, self.builtins.int_ty.clone()))
                 }
-                // foldl :: (b -> a -> b) -> b -> c -> b
-                // Container arg is polymorphic — codegen dispatches by expression structure.
+                // foldl :: (b -> a -> b) -> b -> [a] -> b
+                // Specialized to lists (no Foldable typeclass yet).
                 "foldl" | "foldl'" => {
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                     Scheme::poly(
-                        vec![a.clone(), b.clone(), c.clone()],
+                        vec![a.clone(), b.clone()],
                         Ty::fun(
                             Ty::fun(
                                 Ty::Var(b.clone()),
                                 Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
                             ),
-                            Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(c.clone()), Ty::Var(b.clone()))),
+                            Ty::fun(Ty::Var(b.clone()), Ty::fun(list_a, Ty::Var(b.clone()))),
                         ),
                     )
                 }
-                // foldr :: Foldable t => (a -> b -> b) -> b -> t a -> b
-                // Container arg is polymorphic — codegen dispatches by expression structure.
+                // foldr :: (a -> b -> b) -> b -> [a] -> b
+                // Specialized to lists (no Foldable typeclass yet).
                 "foldr" => {
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                     Scheme::poly(
-                        vec![a.clone(), b.clone(), c.clone()],
+                        vec![a.clone(), b.clone()],
                         Ty::fun(
                             Ty::fun(
                                 Ty::Var(a.clone()),
                                 Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
                             ),
-                            Ty::fun(Ty::Var(b.clone()), Ty::fun(Ty::Var(c.clone()), Ty::Var(b.clone()))),
+                            Ty::fun(Ty::Var(b.clone()), Ty::fun(list_a, Ty::Var(b.clone()))),
                         ),
                     )
                 }
@@ -2165,6 +2167,38 @@ impl TyCtxt {
                 )),
                 // chr :: Int -> Char
                 "chr" => Scheme::mono(Ty::fun(
+                    self.builtins.int_ty.clone(),
+                    self.builtins.char_ty.clone(),
+                )),
+                // Data.Char predicates :: Char -> Bool
+                "isSpace" | "isAlpha" | "isAlphaNum" | "isAscii" |
+                "isControl" | "isDigit" | "isHexDigit" | "isLetter" |
+                "isLower" | "isNumber" | "isPrint" | "isPunctuation" |
+                "isSymbol" | "isUpper" | "isLatin1" | "isAsciiLower" |
+                "isAsciiUpper" | "isMark" | "isSeparator" |
+                "isOtherLetter" | "isTitleCase" | "isModifierLetter" |
+                "isNonSpacingMark" | "isSpacingCombiningMark" |
+                "isEnclosingMark" | "isDecimalNumber" | "isLetterNumber" |
+                "isOtherNumber" | "isConnectorPunctuation" |
+                "isDashPunctuation" | "isOpenPunctuation" |
+                "isClosePunctuation" | "isInitialQuote" | "isFinalQuote" |
+                "isOtherPunctuation" | "isMathSymbol" | "isCurrencySymbol" |
+                "isModifierSymbol" | "isOtherSymbol" => Scheme::mono(Ty::fun(
+                    self.builtins.char_ty.clone(),
+                    self.builtins.bool_ty.clone(),
+                )),
+                // Data.Char case conversion :: Char -> Char
+                "toLower" | "toUpper" | "toTitle" => Scheme::mono(Ty::fun(
+                    self.builtins.char_ty.clone(),
+                    self.builtins.char_ty.clone(),
+                )),
+                // digitToInt :: Char -> Int
+                "digitToInt" => Scheme::mono(Ty::fun(
+                    self.builtins.char_ty.clone(),
+                    self.builtins.int_ty.clone(),
+                )),
+                // intToDigit :: Int -> Char
+                "intToDigit" => Scheme::mono(Ty::fun(
                     self.builtins.int_ty.clone(),
                     self.builtins.char_ty.clone(),
                 )),
@@ -2687,6 +2721,33 @@ impl TyCtxt {
                         Ty::fun(self.builtins.string_ty.clone(), io_a),
                     )
                 }
+                // ioError :: IOError -> IO a  (polymorphic first arg since no real IOError type)
+                "ioError" => {
+                    let io_b = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(b.clone())),
+                    );
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(Ty::Var(a.clone()), io_b),
+                    )
+                }
+                // userError :: String -> IOError  (stub: String -> String)
+                "userError" => Scheme::mono(Ty::fun(
+                    self.builtins.string_ty.clone(),
+                    self.builtins.string_ty.clone(),
+                )),
+                // fail :: String -> m a  (stub: String -> IO a)
+                "fail" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(self.builtins.string_ty.clone(), io_a),
+                    )
+                }
                 // try :: IO a -> IO (Either SomeException a)
                 "try" => {
                     // try :: IO a -> IO (Either e a)
@@ -2769,6 +2830,30 @@ impl TyCtxt {
                         Box::new(Ty::Var(a.clone())),
                     );
                     Scheme::poly(vec![a.clone()], io_a)
+                }
+                // forkIO :: IO () -> IO ThreadId
+                // Simplified: IO a -> IO b (ThreadId is opaque)
+                "forkIO" => {
+                    let io_a = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    let io_b = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Var(b.clone())),
+                    );
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(io_a, io_b),
+                    )
+                }
+                // threadDelay :: Int -> IO ()
+                "threadDelay" => {
+                    let io_unit = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::unit()),
+                    );
+                    Scheme::mono(Ty::fun(self.builtins.int_ty.clone(), io_unit))
                 }
                 // openFile :: FilePath -> IOMode -> IO Handle
                 // Simplified: String -> a -> IO b (IOMode and Handle are opaque)
@@ -2891,6 +2976,58 @@ impl TyCtxt {
                         self.builtins.string_ty.clone(),
                         self.builtins.bool_ty.clone(),
                     ))
+                }
+                // System.FilePath — Char -> Bool predicates
+                "isPathSeparator" | "isExtSeparator" => {
+                    Scheme::mono(Ty::fun(
+                        self.builtins.char_ty.clone(),
+                        self.builtins.bool_ty.clone(),
+                    ))
+                }
+                // System.FilePath — pathSeparator :: Char
+                "pathSeparator" | "extSeparator" | "searchPathSeparator" => {
+                    Scheme::mono(self.builtins.char_ty.clone())
+                }
+                // System.FilePath — String -> [String]
+                "splitDirectories" | "splitPath" => {
+                    let list_string = Ty::List(Box::new(self.builtins.string_ty.clone()));
+                    Scheme::mono(Ty::fun(self.builtins.string_ty.clone(), list_string))
+                }
+                // System.FilePath — [String] -> String
+                "joinPath" => {
+                    let list_string = Ty::List(Box::new(self.builtins.string_ty.clone()));
+                    Scheme::mono(Ty::fun(list_string, self.builtins.string_ty.clone()))
+                }
+                // System.FilePath — normalise, makeRelative, combine, etc.
+                "normalise" | "dropTrailingPathSeparator" => {
+                    Scheme::mono(Ty::fun(
+                        self.builtins.string_ty.clone(),
+                        self.builtins.string_ty.clone(),
+                    ))
+                }
+                "makeRelative" | "combine" => {
+                    Scheme::mono(Ty::fun(
+                        self.builtins.string_ty.clone(),
+                        Ty::fun(
+                            self.builtins.string_ty.clone(),
+                            self.builtins.string_ty.clone(),
+                        ),
+                    ))
+                }
+                // System.FilePath — isValid :: String -> Bool
+                "isValid" => {
+                    Scheme::mono(Ty::fun(
+                        self.builtins.string_ty.clone(),
+                        self.builtins.bool_ty.clone(),
+                    ))
+                }
+                // System.FilePath — splitFileName :: String -> (String, String)
+                "splitFileName" => {
+                    let tuple_ss = Ty::Tuple(vec![
+                        self.builtins.string_ty.clone(),
+                        self.builtins.string_ty.clone(),
+                    ]);
+                    Scheme::mono(Ty::fun(self.builtins.string_ty.clone(), tuple_ss))
                 }
                 // E.19: System.FilePath — splitExtension :: String -> (String, String)
                 "splitExtension" => {

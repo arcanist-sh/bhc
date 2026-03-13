@@ -508,6 +508,10 @@ fn register_standard_module_exports(
             "interact",
             // Read/lex
             "lex", "read", "reads", "readParen",
+            // MonadFail
+            "fail",
+            // Error
+            "userError", "ioError",
         ],
         "Data.Map" | "Data.Map.Strict" | "Data.Map.Lazy" | "Data.Map.Strict.Internal" | "Data.Map.Internal" => &[
             "Map",
@@ -613,6 +617,7 @@ fn register_standard_module_exports(
             "fromList",
             "findWithDefault",
             "adjust",
+            "lookupMax", "lookupMin", "lookupGT", "lookupLT", "lookupGE", "lookupLE",
         ],
         "Data.IntSet" => &[
             "empty",
@@ -941,6 +946,7 @@ fn register_standard_module_exports(
             "isLatin1",
             "isAsciiLower",
             "isAsciiUpper",
+            "readLitChar",
             // Unicode category predicates
             "isMark",
             "isSeparator",
@@ -1146,6 +1152,7 @@ fn register_standard_module_exports(
             "Word16",
             "Word32",
             "Word64",
+            "bitReverse32",
         ],
         "Data.Text.IO" => &[
             "readFile",
@@ -1532,6 +1539,33 @@ fn register_standard_module_exports(
             "hGetLine",
             "putStr",
             "getContents",
+            "elemIndex",
+            "findIndex",
+            "elem",
+            "find",
+            "index",
+            "breakByte",
+            "span",
+            "break",
+            "dropWhile",
+            "takeWhile",
+            "strip",
+            "intersperse",
+            "zip",
+            "unzip",
+            "copy",
+            "replicate",
+            "unfoldr",
+            "unfoldrN",
+            "sort",
+            "group",
+            "groupBy",
+            "tails",
+            "inits",
+            "transpose",
+            "interact",
+            "hGetSome",
+            "hPutNonBlocking",
         ],
         "Data.ByteString.Char8" => &[
             "ByteString",
@@ -1674,6 +1708,7 @@ fn register_standard_module_exports(
         // === Data modules ===
         "Data.Functor" => &[
             "<$>",
+            "<$!>",
             "$>",
             "<&>",
             "void",
@@ -2333,6 +2368,9 @@ fn register_standard_module_exports(
             "braces", "brackets", "parens", "quotes", "doubleQuotes",
             "$$", "$+$", "<+>", "<>", "</>", "inside",
             "charWidth", "updateColumn", "blanklines",
+            // Constructors (for pattern matching)
+            "AfterBreak", "BreakingSpace", "NewLine", "Concat", "Text",
+            "vfill", "hfill",
         ],
         "Text.Pandoc.Definition" => &[
             // Core types
@@ -2361,9 +2399,15 @@ fn register_standard_module_exports(
             "LowerAlpha", "UpperAlpha",
             "DefaultDelim", "Period", "OneParen", "TwoParens",
             "ColWidthDefault",
+            // Pattern synonyms
+            "SimpleFigure",
+            // Record fields
+            "citationId", "citationPrefix", "citationSuffix",
+            "citationMode", "citationHash", "citationNoteNum",
             // Functions
             "nullAttr", "nullMeta", "pandocTypesVersion",
             "lookupMeta", "docTitle", "docAuthors", "docDate",
+            "lookupContext",
         ],
         "Text.Pandoc.Builder" => &[
             "doc", "setTitle", "setAuthors", "setDate", "setMeta", "deleteMeta",
@@ -2375,16 +2419,17 @@ fn register_standard_module_exports(
             "rawInline", "link", "linkWith", "image", "imageWith",
             "note", "spanWith", "trimInlines",
             "para", "plain", "lineBlock", "codeBlockWith", "codeBlock",
-            "rawBlock", "blockQuote", "orderedList", "bulletList",
+            "rawBlock", "blockQuote", "orderedList", "orderedListWith", "bulletList",
             "definitionList", "header", "headerWith", "horizontalRule",
-            "table", "simpleTable", "figure", "figureWith", "divWith",
+            "table", "tableWith", "simpleTable", "figure", "figureWith", "divWith",
             "Blocks", "Inlines", "Many", "toList", "fromList",
             "singleton", "isNull", "<>",
             "unMany",
             // Table utilities (from pandoc-types Text.Pandoc.Builder)
             "emptyCell", "simpleCell", "emptyCaption", "simpleFigureWith",
             "clipRows", "clipColumns",
-            "cell", "simpleRow", "toRow", "toColSpec",
+            "cell", "cellWith", "simpleCaption", "simpleRow", "toRow", "toColSpec",
+            "normalizeTableHead", "normalizeTableBody", "normalizeTableFoot",
             // Re-exports from Text.Pandoc.Definition
             "Pandoc", "Meta", "MetaValue", "Block", "Inline", "Alignment",
             "ListAttributes", "ListNumberStyle", "ListNumberDelim",
@@ -2409,6 +2454,11 @@ fn register_standard_module_exports(
             "ColWidthDefault",
             "nullAttr", "nullMeta",
             "lookupMeta", "docTitle", "docAuthors", "docDate",
+            // Pattern synonyms
+            "SimpleFigure",
+            // Citation record fields
+            "citationId", "citationPrefix", "citationSuffix",
+            "citationMode", "citationHash", "citationNoteNum",
             // ToMetaValue class
             "ToMetaValue", "toMetaValue",
         ],
@@ -2434,7 +2484,7 @@ fn register_standard_module_exports(
             "many1", "manyTill", "lookAhead", "notFollowedBy",
             "skipMany", "skipMany1", "option", "optionMaybe", "optional",
             "choice", "count", "between", "sepBy", "sepBy1",
-            "endBy", "endBy1", "eof",
+            "endBy", "endBy1", "eof", "sepEndBy", "sepEndBy1",
             "getState", "putState", "setState", "updateState", "modifyState",
             "getPosition", "setPosition", "getInput", "setInput",
             "SourcePos", "sourceLine", "sourceColumn", "sourceName",
@@ -2443,6 +2493,7 @@ fn register_standard_module_exports(
             "ParseError",
             "updatePosChar",
             "tokenPrim",
+            "errorPos", "errorMessages",
         ],
         "Text.Parsec.Char" => &[
             "char", "string", "anyChar", "letter", "digit", "space", "spaces",
@@ -2524,8 +2575,9 @@ fn register_standard_module_exports(
             "attrKey", "attrVal",
             "unqual", "blank_element", "blank_cdata", "add_attr", "add_attrs",
             "findAttr", "lookupAttr", "lookupAttrBy",
-            "findElement", "findChild", "findChildren", "filterChildren", "filterChildrenName",
+            "findElement", "findElements", "findChild", "findChildren", "filterChildren", "filterChildrenName",
             "filterChild", "filterChildName", "filterElement", "filterElements",
+            "unode",
             "filterElementName", "filterElementsName", "findAttrBy",
             "strContent", "showElement", "showContent", "ppElement", "ppTopElement", "ppContent",
             "showTopElement", "showQName",
@@ -2576,12 +2628,16 @@ fn register_standard_module_exports(
         // =====================================================================
         "Text.DocTemplates" => &[
             "Template", "Context", "Val",
+            // Val constructors
+            "SimpleVal", "MapVal", "ListVal", "BoolVal", "NullVal",
             "compileTemplate", "renderTemplate", "applyTemplate",
             "compileTemplateFile",
-            "toVal", "toContext",
+            "toVal", "fromVal", "toContext",
             "WithDefaultPartials", "WithPartials",
             "runWithDefaultPartials", "runWithPartials",
-            "TemplateMonad",
+            "TemplateMonad", "TemplateTarget",
+            "ToContext", "FromContext",
+            "lookupContext",
         ],
         // =====================================================================
         // Skylighting stubs
@@ -2631,6 +2687,7 @@ fn register_standard_module_exports(
             "secondsToNominalDiffTime", "nominalDiffTimeToSeconds",
             // Re-exports from Data.Time.Calendar
             "Day", "fromGregorian", "toGregorian", "addDays", "diffDays",
+            "showGregorian", "addGregorianMonthsClip", "addGregorianYearsClip",
             // Re-exports from Data.Time.Format
             "formatTime", "parseTimeM", "defaultTimeLocale",
             "iso8601DateFormat", "rfc822DateFormat",
@@ -2640,6 +2697,11 @@ fn register_standard_module_exports(
             "utcToLocalTime", "localTimeToUTC",
             "getCurrentTimeZone", "utc",
             "zonedTimeToUTC", "utcToZonedTime",
+            // Record field accessors
+            "zonedTimeToLocalTime", "zonedTimeZone",
+            "localDay", "localTimeOfDay",
+            "todHour", "todMin", "todSec",
+            "getZonedTime",
         ],
         "Data.Time.Clock.POSIX" => &[
             "POSIXTime", "posixSecondsToUTCTime", "utcTimeToPOSIXSeconds",
@@ -2653,12 +2715,15 @@ fn register_standard_module_exports(
         "Data.Time.Calendar" => &[
             "Day", "fromGregorian", "toGregorian",
             "addDays", "diffDays",
+            "showGregorian", "addGregorianMonthsClip", "addGregorianYearsClip",
         ],
         "Data.Time.LocalTime" => &[
             "LocalTime", "ZonedTime", "TimeZone", "TimeOfDay",
             "utcToLocalTime", "localTimeToUTC",
             "getCurrentTimeZone", "utc",
             "zonedTimeToUTC", "utcToZonedTime",
+            "zonedTimeToLocalTime", "localDay", "localTimeOfDay",
+            "todHour", "todMin", "todSec",
         ],
         // =====================================================================
         // Codec.Archive.Zip stubs
@@ -2679,7 +2744,8 @@ fn register_standard_module_exports(
         "Text.TeXMath" | "Text.TeXMath.Types" => &[
             "Exp", "TextType", "Alignment", "DisplayType",
             "readTeX", "writeMathML", "writeTeX", "writeLaTeX",
-            "writeOMML", "readMathML", "readOMML",
+            "writeOMML", "readMathML", "readOMML", "writePandoc",
+            "DisplayBlock", "DisplayInline",
             "Grouped", "ESymbol", "ENumber", "EIdentifier",
             "EMathOperator", "EText", "EDelimited",
             "EStyled", "ESub", "ESuper", "ESubsup",
@@ -2690,6 +2756,60 @@ fn register_standard_module_exports(
             "TextSansSerif", "TextDoubleStruck", "TextScript", "TextFraktur",
             "TextBoldItalic", "TextSansSerifBold", "TextSansSerifBoldItalic",
             "TextBoldScript", "TextBoldFraktur", "TextSansSerifItalic",
+        ],
+        // =====================================================================
+        // Data.Attoparsec stubs
+        // =====================================================================
+        "Data.Attoparsec.ByteString" => &[
+            "Parser", "Result", "IResult",
+            "parse", "parseOnly", "feed",
+            "string", "word8", "anyWord8", "satisfy", "satisfyWith",
+            "take", "takeWhile", "takeWhile1", "takeTill",
+            "skipWhile", "takeByteString", "takeLazyByteString",
+            "notWord8", "inClass", "notInClass",
+            "try", "choice", "count", "option",
+            "many'", "many1'", "manyTill'",
+            "sepBy", "sepBy'", "sepBy1", "sepBy1'",
+            "skipMany", "skipMany1",
+            "eitherP", "match", "endOfInput", "atEnd",
+            "Partial", "Done", "Fail",
+        ],
+        "Data.Attoparsec.ByteString.Char8" => &[
+            "Parser", "Result", "IResult",
+            "parse", "parseOnly",
+            "char8", "anyChar", "satisfy", "satisfyWith",
+            "char", "notChar",
+            "digit", "letter_iso8859_15", "letter_ascii",
+            "space", "isDigit", "isAlpha_iso8859_15",
+            "isAlpha_ascii", "isSpace",
+            "decimal", "hexadecimal", "double", "number", "rational",
+            "signed", "scientific",
+            "string", "stringCI", "take", "takeWhile", "takeWhile1",
+            "takeTill", "skipWhile", "skipSpace",
+            "endOfLine", "endOfInput", "atEnd",
+            "try", "choice", "count", "option",
+            "many'", "many1'", "manyTill'",
+            "many1", "manyTill",
+            "sepBy", "sepBy'", "sepBy1", "sepBy1'",
+            "Partial", "Done", "Fail",
+            "inClass", "notInClass",
+        ],
+        "Data.Attoparsec.Text" => &[
+            "Parser", "Result", "IResult",
+            "parse", "parseOnly", "feed",
+            "char", "anyChar", "satisfy", "satisfyWith",
+            "notChar", "string", "stringCI",
+            "take", "takeWhile", "takeWhile1", "takeTill", "takeText",
+            "skipWhile", "skipSpace",
+            "decimal", "hexadecimal", "double", "number", "rational",
+            "signed", "scientific",
+            "endOfLine", "endOfInput", "atEnd",
+            "try", "choice", "count", "option",
+            "many'", "many1'", "manyTill'",
+            "many1", "manyTill",
+            "sepBy", "sepBy'", "sepBy1", "sepBy1'",
+            "Partial", "Done", "Fail",
+            "inClass", "notInClass",
         ],
         // =====================================================================
         // Text.Collate stubs
@@ -2778,7 +2898,8 @@ fn register_standard_module_exports(
             "replicate", "generate",
             "(!)", "(!?)",
             "freeze", "thaw",
-            "imapM_", "forM_", "mapM_",
+            "imap", "imapM_", "forM_", "mapM_",
+            "uncons",
         ],
         "Data.List.Split" => &[
             "splitOn", "splitWhen", "splitOneOf",
@@ -2823,17 +2944,6 @@ fn register_standard_module_exports(
         "Data.Text.Normalize" => &[
             "normalize", "NormalizationMode",
             "NFC", "NFD", "NFKC", "NFKD",
-        ],
-        "Data.Attoparsec.Text" => &[
-            "Parser", "parse", "parseOnly", "feed",
-            "string", "char", "anyChar", "satisfy",
-            "takeWhile", "takeWhile1", "takeTill", "takeText",
-            "decimal", "double", "number", "signed",
-            "endOfInput", "atEnd",
-            "many1", "manyTill", "option", "choice",
-            "skipWhile", "skipSpace",
-            "IResult", "Done", "Fail", "Partial",
-            "inClass", "notInClass",
         ],
         "Data.FileEmbed" => &[
             "embedFile", "embedDir", "embedStringFile",
@@ -3157,7 +3267,7 @@ fn register_standard_module_exports(
             "DynamicImage", "Image", "PixelRGBA8", "PixelRGB8",
             "decodePng", "decodeJpeg", "decodeGif",
             "decodeImage", "decodeImageWithMetadata", "readImage",
-            "encodePng", "encodeJpeg",
+            "encodePng", "encodeJpeg", "savePngImage",
             "dynamicMap", "imageWidth", "imageHeight",
             "Metadatas", "Keys", "lookup", "Width", "Height", "DpiX", "DpiY",
         ],
@@ -3269,11 +3379,21 @@ fn register_standard_module_exports(
             "(<>)", "(<+>)", "($$)", "($+$)",
             "hcat", "hsep", "vcat", "sep", "cat", "fsep", "fcat",
             "parens", "brackets", "braces", "quotes", "doubleQuotes",
-            "empty", "render", "renderStyle", "Style",
+            "empty", "render", "renderStyle", "Style", "style",
+            "lineLength", "ribbonsPerLine", "mode",
+            "Mode", "PageMode", "ZigZagMode", "LeftMode", "OneLineMode",
         ],
         "Text.GridTable" => &[
             "gridTable", "parseGridTable",
             "GridTable", "Cell", "Row",
+            "arrayTableFoot", "arrayTableHead", "arrayTableBody",
+            "fromRowIndex", "toRowIndex", "RowIndex",
+            "ColIndex", "fromColIndex", "toColIndex",
+            "arrayTable", "lookupCell",
+            "arrayTableColSpecs", "RowSpan", "ColSpan",
+            "rows", "mapCells",
+            "AlignLeft", "AlignRight", "AlignCenter", "AlignDefault",
+            "Alignment",
         ],
         // =====================================================================
         // Typst stubs
@@ -3578,6 +3698,8 @@ fn register_standard_module_exports(
                 | "Network.URI"
                 | "Network.HTTP.Types"
                 | "Data.Attoparsec.Text"
+                | "Data.Attoparsec.ByteString"
+                | "Data.Attoparsec.ByteString.Char8"
                 | "Data.ByteString.Base64"
                 | "Text.Parsec"
                 | "Text.Parsec.Prim"
@@ -3637,7 +3759,8 @@ fn register_standard_module_exports(
         if !is_explicitly_imported {
             // Skip unqualified registration — this name wasn't in the explicit import list.
             // Qualified names (e.g., T.foldr) are still registered above.
-        } else if (is_unqualified_import && module_name != "GHC.Generics") || ctx.lookup_value(unqualified).is_none() {
+        } else if ctx.lookup_value(unqualified).is_none() {
+            // No existing binding — create a stub for this imported name.
             let def_id = ctx.fresh_def_id();
             let def_name = if has_typed_sigs {
                 Symbol::intern(&format!("{}.{}", module_name, export))
@@ -3649,6 +3772,38 @@ fn register_standard_module_exports(
             } else {
                 ctx.define(def_id, def_name, DefKind::StubValue, Span::default());
             }
+            ctx.bind_value(unqualified, def_id);
+        } else if is_unqualified_import && module_name != "GHC.Generics" {
+            // There's already a binding. Create a fresh DefId to avoid sharing
+            // DefIds across function boundaries in multi-module compilation
+            // (which causes LLVM "referring to argument in another function" errors).
+            // Preserve the existing DefKind so builtins keep their codegen support.
+            let existing_def_id = ctx.lookup_value(unqualified).unwrap();
+            let existing_kind = ctx.defs.get(&existing_def_id)
+                .map(|info| info.kind.clone());
+            let def_id = ctx.fresh_def_id();
+            let def_name = if has_typed_sigs {
+                Symbol::intern(&format!("{}.{}", module_name, export))
+            } else {
+                unqualified
+            };
+            let kind = match existing_kind {
+                Some(kind) if !kind.is_stub() => {
+                    // Preserve real builtin kind (DefKind::Value) — codegen
+                    // uses name-based matching, so a new DefId with the same
+                    // name and kind will still be recognized as a builtin.
+                    kind
+                }
+                _ => {
+                    // Existing is a stub or unknown; create appropriate stub.
+                    if is_constructor {
+                        DefKind::StubConstructor
+                    } else {
+                        DefKind::StubValue
+                    }
+                }
+            };
+            ctx.define(def_id, def_name, kind, Span::default());
             ctx.bind_value(unqualified, def_id);
         }
 
@@ -4526,6 +4681,103 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
 }
 
 /// Lower a right-hand side.
+/// Lower a function body that has where-clause bindings.
+/// Enters a scope, pre-binds where names, lowers the body, wraps in Let.
+fn lower_body_with_wheres(
+    ctx: &mut LowerContext,
+    rhs: &ast::Rhs,
+    wheres: &[ast::Decl],
+    span: Span,
+) -> hir::Expr {
+    ctx.enter_scope();
+    // Pre-bind nested where names
+    for nested_decl in wheres {
+        if let ast::Decl::FunBind(nested_fb) = nested_decl {
+            if nested_fb.name.name.as_str() == "$patbind"
+                && nested_fb.clauses.len() == 1
+                && nested_fb.clauses[0].pats.len() == 1
+            {
+                bind_pattern(ctx, &nested_fb.clauses[0].pats[0]);
+            } else {
+                let nested_def_id = ctx.fresh_def_id();
+                ctx.define(
+                    nested_def_id,
+                    nested_fb.name.name,
+                    DefKind::Value,
+                    nested_fb.span,
+                );
+                ctx.bind_value(nested_fb.name.name, nested_def_id);
+            }
+        }
+    }
+    let rhs_expr = lower_rhs(ctx, rhs);
+    // Lower nested where bindings
+    let nested_bindings: Vec<hir::Binding> = wheres
+        .iter()
+        .filter_map(|d| {
+            if let ast::Decl::FunBind(nested_fb) = d {
+                // Handle pattern bindings ($patbind)
+                if nested_fb.name.name.as_str() == "$patbind"
+                    && nested_fb.clauses.len() == 1
+                    && nested_fb.clauses[0].pats.len() == 1
+                {
+                    let pat = lower_pat(ctx, &nested_fb.clauses[0].pats[0]);
+                    let nested_rhs = lower_rhs(ctx, &nested_fb.clauses[0].rhs);
+                    return Some(hir::Binding {
+                        pat,
+                        sig: None,
+                        rhs: nested_rhs,
+                        span: nested_fb.span,
+                    });
+                }
+                let nested_def_id = ctx
+                    .lookup_value(nested_fb.name.name)
+                    .expect("nested where binding should be bound");
+                if nested_fb.clauses.len() == 1 && nested_fb.clauses[0].pats.is_empty() {
+                    let nested_rhs = lower_rhs(ctx, &nested_fb.clauses[0].rhs);
+                    return Some(hir::Binding {
+                        pat: hir::Pat::Var(
+                            nested_fb.name.name,
+                            nested_def_id,
+                            nested_fb.span,
+                        ),
+                        sig: None,
+                        rhs: nested_rhs,
+                        span: nested_fb.span,
+                    });
+                }
+                // Single-clause with parameters: lower to lambda
+                if nested_fb.clauses.len() == 1 {
+                    let clause = &nested_fb.clauses[0];
+                    ctx.enter_scope();
+                    for p in &clause.pats {
+                        bind_pattern(ctx, p);
+                    }
+                    let pats: Vec<hir::Pat> = clause.pats.iter()
+                        .map(|p| lower_pat(ctx, p))
+                        .collect();
+                    let body = lower_rhs(ctx, &clause.rhs);
+                    ctx.exit_scope();
+                    let lam = hir::Expr::Lam(pats, Box::new(body), nested_fb.span);
+                    return Some(hir::Binding {
+                        pat: hir::Pat::Var(
+                            nested_fb.name.name,
+                            nested_def_id,
+                            nested_fb.span,
+                        ),
+                        sig: None,
+                        rhs: lam,
+                        span: nested_fb.span,
+                    });
+                }
+            }
+            None
+        })
+        .collect();
+    ctx.exit_scope();
+    hir::Expr::Let(nested_bindings, Box::new(rhs_expr), span)
+}
+
 fn lower_rhs(ctx: &mut LowerContext, rhs: &ast::Rhs) -> hir::Expr {
     match rhs {
         ast::Rhs::Simple(expr, _) => lower_expr(ctx, expr),
@@ -4652,17 +4904,30 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
             // For qualified names like "E.catch", check the last part (after the last dot)
             let op_name_str = op.name.as_str();
             let is_con = if let Some(dot_pos) = op_name_str.rfind('.') {
-                // Qualified name - check the part after the last dot
-                op_name_str[dot_pos + 1..]
-                    .chars()
-                    .next()
-                    .map_or(false, |c| c.is_uppercase())
+                // Only treat as qualified if the part before the dot looks like a module
+                // (starts with uppercase). Otherwise `.:` would incorrectly split into
+                // qualifier="" and operator ":" which starts with ':'.
+                let before_dot = &op_name_str[..dot_pos];
+                let is_qualified = before_dot.chars().next().map_or(false, |c| c.is_uppercase());
+                if is_qualified {
+                    // Qualified name - check the part after the last dot
+                    op_name_str[dot_pos + 1..]
+                        .chars()
+                        .next()
+                        .map_or(false, |c| c.is_uppercase() || c == ':')
+                } else {
+                    // Not a real qualifier (e.g. `.:` operator) - check first char
+                    op_name_str
+                        .chars()
+                        .next()
+                        .map_or(false, |c| c.is_uppercase() || c == ':')
+                }
             } else {
                 // Unqualified name - check the first character
                 op_name_str
                     .chars()
                     .next()
-                    .map_or(false, |c| c.is_uppercase())
+                    .map_or(false, |c| c.is_uppercase() || c == ':')
             };
             let op_expr = if is_con {
                 // Constructor
@@ -4774,7 +5039,12 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
 
                         // Simple binding (no parameters): let x = expr
                         if fb.clauses.len() == 1 && fb.clauses[0].pats.is_empty() {
-                            let rhs_expr = lower_rhs(ctx, &fb.clauses[0].rhs);
+                            let clause = &fb.clauses[0];
+                            let rhs_expr = if !clause.wheres.is_empty() {
+                                lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fb.span)
+                            } else {
+                                lower_rhs(ctx, &clause.rhs)
+                            };
                             return Some(hir::Binding {
                                 pat: hir::Pat::Var(fb.name.name, def_id, fb.span),
                                 sig: None,
@@ -4794,7 +5064,11 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                             for p in &clause.pats {
                                 pats.push(lower_pat(ctx, p));
                             }
-                            let body_expr = lower_rhs(ctx, &clause.rhs);
+                            let body_expr = if !clause.wheres.is_empty() {
+                                lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fb.span)
+                            } else {
+                                lower_rhs(ctx, &clause.rhs)
+                            };
                             ctx.exit_scope();
                             let lam = hir::Expr::Lam(pats, Box::new(body_expr), fb.span);
                             return Some(hir::Binding {
@@ -4838,7 +5112,11 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                                         fb.span,
                                     )
                                 };
-                                let clause_body = lower_rhs(ctx, &clause.rhs);
+                                let clause_body = if !clause.wheres.is_empty() {
+                                    lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fb.span)
+                                } else {
+                                    lower_rhs(ctx, &clause.rhs)
+                                };
                                 ctx.exit_scope();
                                 alts.push(hir::CaseAlt {
                                     pat,

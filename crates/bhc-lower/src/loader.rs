@@ -99,6 +99,8 @@ pub struct ModuleExports {
     pub types: FxHashMap<Symbol, DefId>,
     /// Exported data constructors with their arities.
     pub constructors: FxHashMap<Symbol, ConstructorInfo>,
+    /// Class name → method names mapping for re-export resolution.
+    pub class_methods: FxHashMap<Symbol, Vec<Symbol>>,
 }
 
 impl ModuleExports {
@@ -110,6 +112,7 @@ impl ModuleExports {
             values: FxHashMap::default(),
             types: FxHashMap::default(),
             constructors: FxHashMap::default(),
+            class_methods: FxHashMap::default(),
         }
     }
 
@@ -160,6 +163,11 @@ impl ModuleCache {
         self.loading.remove(&name);
     }
 
+    /// Returns an iterator over all cached module exports.
+    pub fn all_exports(&self) -> impl Iterator<Item = &ModuleExports> {
+        self.exports.values()
+    }
+
     /// Returns true if the module is currently being loaded.
     #[must_use]
     pub fn is_loading(&self, name: Symbol) -> bool {
@@ -206,7 +214,7 @@ pub fn find_module_file(name: &str, search_paths: &[Utf8PathBuf]) -> Option<Utf8
 /// - If there is an export list, only explicitly listed items are exported.
 /// - For data types, constructors and record fields may be exported depending
 ///   on the export specification.
-pub fn collect_exports(module: &ast::Module, ctx: &mut LowerContext) -> ModuleExports {
+pub fn collect_exports(module: &ast::Module, ctx: &mut LowerContext, cache: &ModuleCache) -> ModuleExports {
     let module_name = module.name.as_ref().map_or_else(
         || Symbol::intern("Main"),
         |n| {
@@ -271,7 +279,37 @@ pub fn collect_exports(module: &ast::Module, ctx: &mut LowerContext) -> ModuleEx
                     // Also export constructors listed with the type
                     if let Some(con_list) = cons {
                         if con_list.is_empty() {
-                            // Type(..) — we don't know the constructors, skip
+                            // Type(..) — export all children (constructors + class methods)
+                            // Search the module cache for the originating module
+                            let type_name = ident.name;
+                            for cached_exports in cache.all_exports() {
+                                // Check if this cached module has class methods for this type
+                                if let Some(methods) = cached_exports.class_methods.get(&type_name) {
+                                    for method_name in methods {
+                                        if !exports.values.contains_key(method_name) {
+                                            let m_def_id = ctx.fresh_def_id();
+                                            ctx.define(m_def_id, *method_name, DefKind::Value, *span);
+                                            exports.values.insert(*method_name, m_def_id);
+                                        }
+                                    }
+                                    // Also copy the class_methods entry for transitive re-exports
+                                    exports.class_methods.entry(type_name)
+                                        .or_insert_with(|| methods.clone());
+                                    break;
+                                }
+                                // Check if this cached module has constructors for this type
+                                for (con_name, con_info) in &cached_exports.constructors {
+                                    if con_info.type_con_name == type_name {
+                                        if !exports.values.contains_key(con_name)
+                                            && !exports.constructors.contains_key(con_name)
+                                        {
+                                            let c_def_id = ctx.fresh_def_id();
+                                            ctx.define(c_def_id, *con_name, DefKind::Value, *span);
+                                            exports.values.insert(*con_name, c_def_id);
+                                        }
+                                    }
+                                }
+                            }
                         } else {
                             for con_ident in con_list {
                                 if !exports.values.contains_key(&con_ident.name)
@@ -484,7 +522,8 @@ fn collect_decl_exports(
                 ctx.define(class_def_id, class_name, DefKind::Class, class_decl.span);
                 exports.types.insert(class_name, class_def_id);
 
-                // Export class methods
+                // Export class methods and record class→method mapping
+                let mut method_names = Vec::new();
                 for method_decl in &class_decl.methods {
                     if let ast::Decl::TypeSig(type_sig) = method_decl {
                         for name_ident in &type_sig.names {
@@ -492,8 +531,12 @@ fn collect_decl_exports(
                             let method_def_id = ctx.fresh_def_id();
                             ctx.define(method_def_id, method_name, DefKind::Value, type_sig.span);
                             exports.values.insert(method_name, method_def_id);
+                            method_names.push(method_name);
                         }
                     }
+                }
+                if !method_names.is_empty() {
+                    exports.class_methods.insert(class_name, method_names);
                 }
             }
         }
@@ -619,7 +662,7 @@ pub fn load_module(
     };
 
     // Collect exports
-    let exports = collect_exports(&module, ctx);
+    let exports = collect_exports(&module, ctx, cache);
 
     // Cache the result
     cache.end_loading(sym);
@@ -657,8 +700,19 @@ pub fn apply_import_spec(exports: &ModuleExports, spec: &Option<ast::ImportSpec>
                                         filtered.constructors.insert(name, info.clone());
                                     }
                                 }
-                                for (&name, &def_id) in &exports.values {
-                                    filtered.values.insert(name, def_id);
+                                // Import class methods if this is a class
+                                if let Some(methods) = exports.class_methods.get(&ident.name) {
+                                    for method_name in methods {
+                                        if let Some(&def_id) = exports.values.get(method_name) {
+                                            filtered.values.insert(*method_name, def_id);
+                                        }
+                                    }
+                                    filtered.class_methods.insert(ident.name, methods.clone());
+                                } else {
+                                    // Fallback: import all values (legacy behavior)
+                                    for (&name, &def_id) in &exports.values {
+                                        filtered.values.insert(name, def_id);
+                                    }
                                 }
                             } else {
                                 for con in constructors {

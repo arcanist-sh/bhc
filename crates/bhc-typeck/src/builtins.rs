@@ -3441,12 +3441,13 @@ impl Builtins {
                 Scheme::mono(Ty::fun(self.string_ty.clone(), self.string_ty.clone()))
             }),
             ("ioError", {
-                // ioError :: IOException -> IO a (modeled as String -> IO a)
+                // ioError :: IOError -> IO a
+                // Use polymorphic first arg since BHC doesn't have a real IOError type
                 Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(self.string_ty.clone(), Ty::App(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::App(
                         Box::new(Ty::Con(self.io_con.clone())),
-                        Box::new(Ty::Var(a.clone())),
+                        Box::new(Ty::Var(b.clone())),
                     )),
                 )
             }),

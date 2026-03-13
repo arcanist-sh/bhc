@@ -1,7 +1,7 @@
 //! Pattern parsing.
 
 use bhc_ast::{Expr, FieldPat, Lit, ModuleName, Pat};
-use bhc_intern::Ident;
+use bhc_intern::{Ident, Symbol};
 use bhc_lexer::TokenKind;
 use bhc_span::Span;
 
@@ -45,6 +45,15 @@ impl<'src> Parser<'src> {
                 // Constructor operators like `:`, `:|` are valid in infix patterns
                 TokenKind::ConOperator(sym) => {
                     let op = Ident::new(*sym);
+                    self.advance();
+                    let rhs = self.parse_infix_pattern()?;
+                    let span = pat.span().to(rhs.span());
+                    pat = Pat::Infix(Box::new(pat), op, Box::new(rhs), span);
+                }
+                // Qualified constructor operators like `Seq.:>` in infix patterns
+                TokenKind::QualConOperator(qual, sym) => {
+                    let qualified_name = Symbol::intern(&format!("{}.{}", qual.as_str(), sym.as_str()));
+                    let op = Ident::new(qualified_name);
                     self.advance();
                     let rhs = self.parse_infix_pattern()?;
                     let span = pat.span().to(rhs.span());
@@ -269,6 +278,34 @@ impl<'src> Parser<'src> {
             return Ok(Pat::View(Box::new(view_expr), Box::new(result_pat), span));
         }
 
+        // View pattern with function application: (f x y -> pat)
+        // If the first element is a variable (not a constructor) and the next
+        // token could be a function argument (not a separator/closer), try
+        // parsing as an applied view expression.
+        if matches!(&first, Pat::Var(..)) && self.is_apat_start() {
+            // Speculatively try to parse as view pattern with args
+            let save_pos = self.pos;
+            let mut args: Vec<Pat> = Vec::new();
+            while self.is_apat_start() && !self.check(&TokenKind::Arrow) {
+                args.push(self.parse_atom_pattern()?);
+            }
+            if self.eat(&TokenKind::Arrow) {
+                // It's a view pattern: build (f arg1 arg2 ... -> resultPat)
+                let mut view_expr = self.pat_to_expr(&first)?;
+                for arg in &args {
+                    let arg_expr = self.pat_to_expr(arg)?;
+                    let new_span = view_expr.span().to(arg_expr.span());
+                    view_expr = Expr::App(Box::new(view_expr), Box::new(arg_expr), new_span);
+                }
+                let result_pat = self.parse_pattern()?;
+                let end = self.expect(&TokenKind::RParen)?;
+                let span = start.to(end.span);
+                return Ok(Pat::View(Box::new(view_expr), Box::new(result_pat), span));
+            }
+            // Not a view pattern — backtrack
+            self.pos = save_pos;
+        }
+
         // Check for pattern type signature: (pat :: Type)
         if self.eat(&TokenKind::DoubleColon) {
             let ty = self.parse_type()?;
@@ -302,7 +339,23 @@ impl<'src> Parser<'src> {
     fn pat_to_expr(&self, pat: &Pat) -> ParseResult<Expr> {
         use bhc_ast::Expr;
         match pat {
-            Pat::Var(name, span) => Ok(Expr::Var(*name, *span)),
+            Pat::Var(name, span) => {
+                // Check if this is a qualified variable (e.g. "L.reverse" from QualIdent token)
+                let name_str = name.name.as_str();
+                if let Some(dot_pos) = name_str.rfind('.') {
+                    let qualifier = &name_str[..dot_pos];
+                    let local = &name_str[dot_pos + 1..];
+                    if !qualifier.is_empty() && !local.is_empty() {
+                        let module_name = ModuleName {
+                            parts: vec![Symbol::intern(qualifier)],
+                            span: *span,
+                        };
+                        let local_ident = Ident::from_str(local);
+                        return Ok(Expr::QualVar(module_name, local_ident, *span));
+                    }
+                }
+                Ok(Expr::Var(*name, *span))
+            }
             Pat::Con(name, args, span) => {
                 if args.is_empty() {
                     Ok(Expr::Con(*name, *span))
@@ -331,9 +384,28 @@ impl<'src> Parser<'src> {
                     Ok(result)
                 }
             }
+            Pat::Lit(lit, span) => Ok(Expr::Lit(lit.clone(), *span)),
             Pat::Paren(inner, span) => {
                 let inner_expr = self.pat_to_expr(inner)?;
                 Ok(Expr::Paren(Box::new(inner_expr), *span))
+            }
+            Pat::Tuple(elems, span) => {
+                let mut exprs = Vec::new();
+                for elem in elems {
+                    exprs.push(self.pat_to_expr(elem)?);
+                }
+                Ok(Expr::Tuple(exprs, *span))
+            }
+            Pat::List(elems, span) => {
+                let mut exprs = Vec::new();
+                for elem in elems {
+                    exprs.push(self.pat_to_expr(elem)?);
+                }
+                Ok(Expr::List(exprs, *span))
+            }
+            Pat::Wildcard(span) => {
+                // Wildcard in view expression context — shouldn't happen, but handle gracefully
+                Ok(Expr::Var(Ident::from_str("_"), *span))
             }
             _ => Err(ParseError::Unexpected {
                 found: "complex pattern".to_string(),

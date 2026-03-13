@@ -33557,8 +33557,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     self.create_builtin_closure(name, arity)
                 } else if let Some(&fn_val) = self.external_functions.get(&var.name) {
                     // Cross-module imported function
-                    let fn_ptr = fn_val.as_global_value().as_pointer_value();
-                    Ok(Some(fn_ptr.into()))
+                    // Check if it's a CAF (only env pointer, no real arguments)
+                    let fn_type = fn_val.get_type();
+                    if fn_type.count_param_types() <= 1 {
+                        // CAF - call the function with null env to get its value
+                        let null_env = self.type_mapper().ptr_type().const_null();
+                        let call_result = self
+                            .builder()
+                            .build_call(fn_val, &[null_env.into()], "ext_caf_result")
+                            .map_err(|e| {
+                                CodegenError::Internal(format!(
+                                    "failed to call external CAF: {:?}",
+                                    e
+                                ))
+                            })?;
+                        if let Some(ret_val) = call_result.try_as_basic_value().basic() {
+                            Ok(Some(ret_val))
+                        } else {
+                            Ok(None)
+                        }
+                    } else {
+                        // Function with parameters - wrap in closure
+                        let fn_ptr = fn_val.as_global_value().as_pointer_value();
+                        let closure_ptr = self.alloc_closure(fn_ptr, &[])?;
+                        Ok(Some(closure_ptr.into()))
+                    }
                 } else if let Some((_tag, arity)) = self.constructor_info(name) {
                     // Constructor used as a first-class value — create a closure wrapper
                     self.create_constructor_closure(name, arity)
@@ -34031,7 +34054,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let wrapper_fn =
                 self.module
                     .llvm_module()
-                    .add_function(&wrapper_name, wrapper_fn_type, None);
+                    .add_function(&wrapper_name, wrapper_fn_type, Some(inkwell::module::Linkage::Internal));
 
             // Build the wrapper function body
             let entry_bb = self.llvm_ctx.append_basic_block(wrapper_fn, "entry");
@@ -34094,7 +34117,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let stub_fn = self
             .module
             .llvm_module()
-            .add_function(&stub_fn_name, fn_type, None);
+            .add_function(&stub_fn_name, fn_type, Some(inkwell::module::Linkage::Internal));
 
         // Build the function body: call bhc_error then unreachable
         let entry_bb = self.llvm_ctx.append_basic_block(stub_fn, "entry");
@@ -34167,7 +34190,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let wrapper_fn =
                 self.module
                     .llvm_module()
-                    .add_function(&wrapper_name, wrapper_fn_type, None);
+                    .add_function(&wrapper_name, wrapper_fn_type, Some(inkwell::module::Linkage::Internal));
 
             // Build the wrapper function body
             let entry_bb = self.llvm_ctx.append_basic_block(wrapper_fn, "entry");
@@ -34258,7 +34281,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let wrapper_fn =
                 self.module
                     .llvm_module()
-                    .add_function(&wrapper_name, wrapper_fn_type, None);
+                    .add_function(&wrapper_name, wrapper_fn_type, Some(inkwell::module::Linkage::Internal));
 
             let entry_bb = self.llvm_ctx.append_basic_block(wrapper_fn, "entry");
             let current_bb = self.builder().get_insert_block();
@@ -34336,7 +34359,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let wrapper_fn =
                 self.module
                     .llvm_module()
-                    .add_function(&wrapper_name, wrapper_fn_type, None);
+                    .add_function(&wrapper_name, wrapper_fn_type, Some(inkwell::module::Linkage::Internal));
 
             // Build the wrapper function body
             let entry_bb = self.llvm_ctx.append_basic_block(wrapper_fn, "entry");

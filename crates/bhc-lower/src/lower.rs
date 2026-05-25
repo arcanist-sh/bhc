@@ -2371,6 +2371,11 @@ fn register_standard_module_exports(
             // Constructors (for pattern matching)
             "AfterBreak", "BreakingSpace", "NewLine", "Concat", "Text",
             "vfill", "hfill",
+            // ANSI styling and color (rendered as escape sequences)
+            "bold", "italic", "underlined", "strikeout",
+            "fg", "bg", "link",
+            "red", "green", "blue", "yellow", "cyan", "magenta", "white", "black",
+            "renderANSI", "replicateChar",
         ],
         "Text.Pandoc.Definition" => &[
             // Core types
@@ -2652,6 +2657,8 @@ fn register_standard_module_exports(
             "defaultStyle", "pygments", "kate", "espresso", "tango",
             "haddock", "monochrome", "breezeDark", "zenburn",
             "formatHtmlBlock", "formatHtmlInline", "formatLaTeXBlock",
+            "formatLaTeXInline", "formatConTeXtBlock", "formatConTeXtInline",
+            "formatANSI", "styleToCss", "styleToLaTeX", "styleToConTeXt",
             "tokenize", "TokenizerConfig", "defaultTokenizerConfig",
             "syntaxesByExtension", "syntaxesByFilename",
             // FormatOptions and record fields
@@ -3207,17 +3214,62 @@ fn register_standard_module_exports(
         // =====================================================================
         "Djot" => &[
             "parseDjot", "renderDjot", "renderHtml",
+            "parseDoc",
             "ParseOptions", "RenderOptions",
             "defaultParseOptions", "defaultRenderOptions",
+            // SourcePosOption + constructors (Readers/Djot pattern-matches these)
+            "SourcePosOption", "AllSourcePos", "NoSourcePos",
+            // Pos + constructors
+            "Pos", "NoPos",
+            "sourcePositions",
         ],
         "Djot.AST" => &[
-            "Doc", "Block", "Inline", "Attr",
+            // Core types
+            "Doc", "Block", "Blocks", "Inline", "Inlines",
+            "Attr", "Node", "Section", "Caption",
+            "Format", "Reference", "ReferenceMap", "NoteMap",
+            "OrderedListAttributes", "Cell",
+            // Block constructors (used in pattern matching by Readers/Djot.hs)
             "Para", "Heading", "CodeBlock", "BlockQuote",
-            "BulletList", "OrderedList", "DefinitionList",
+            "BulletList", "OrderedList", "DefinitionList", "TaskList",
             "Table", "Div", "ThematicBreak", "RawBlock",
+            // Inline constructors
             "Str", "Emph", "Strong", "Link", "Image",
-            "Code", "RawInline", "SoftBreak", "HardBreak",
-            "Span", "Superscript", "Subscript", "Strikeout",
+            "Verbatim", "RawInline", "SoftBreak", "HardBreak",
+            "Span", "Superscript", "Subscript", "Delete", "Insert",
+            "Highlight", "Quoted", "Math", "Symbol", "FootnoteReference",
+            "NonBreakingSpace", "UrlLink", "EmailLink",
+            // Quote / math / alignment / list-style / link-type enums
+            "SingleQuotes", "DoubleQuotes",
+            "DisplayMath", "InlineMath",
+            "AlignLeft", "AlignRight", "AlignCenter", "AlignDefault",
+            "Direct", "Section",
+            "Decimal", "LetterLower", "LetterUpper", "RomanLower", "RomanUpper",
+            "RightPeriod", "RightParen", "LeftRightParen",
+            "Loose", "Tight", "Complete",
+            "HeadCell", "BodyCell",
+            "TaskStatus",
+            // Doc record fields (Readers/Djot reads these)
+            "docBlocks", "docReferences", "docFootnotes",
+            "docAutoReferences", "docAutoIdentifiers",
+            // OrderedListAttributes record fields
+            "orderedListStart", "orderedListStyle", "orderedListDelim",
+            // Smart constructors / functions (Writers/Djot)
+            "para", "heading", "codeBlock", "blockQuote",
+            "bulletList", "orderedList", "definitionList",
+            "table", "div", "thematicBreak", "rawBlock",
+            "str", "emph", "strong", "link", "image",
+            "verbatim", "rawInline", "softBreak", "hardBreak",
+            "span_", "superscript", "subscript", "delete", "highlight",
+            "singleQuoted", "doubleQuoted", "inlineMath", "displayMath",
+            "section", "footnoteReference", "urlLink", "emailLink",
+            "addAttr",
+            // Utility/lookup functions
+            "lookupReference", "lookupNote",
+            "insertReference", "insertNote",
+            "normalizeLabel",
+            "inlinesToByteString",
+            "unMany",
         ],
         // =====================================================================
         // Data.Scientific

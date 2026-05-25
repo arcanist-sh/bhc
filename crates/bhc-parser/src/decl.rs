@@ -801,10 +801,14 @@ impl<'src> Parser<'src> {
             return self.parse_pattern_binding(start);
         }
 
-        // Handle declarations starting with a constructor (ConId):
+        // Handle declarations starting with a constructor:
         // This could be an infix operator definition like `Box f <*> Box x = Box (f x)`
         // (i.e., `pat varop pat = rhs`) or a pattern binding like `Box x = expr`.
-        if matches!(self.current_kind(), Some(TokenKind::ConId(_))) {
+        // The constructor may be qualified: `D.ReferenceMap autos = ...`.
+        if matches!(
+            self.current_kind(),
+            Some(TokenKind::ConId(_) | TokenKind::QualConId(_, _))
+        ) {
             let saved_pos = self.pos;
             // Try parsing a pattern (e.g., `Box f`)
             if let Ok(left_pat) = self.parse_pattern() {

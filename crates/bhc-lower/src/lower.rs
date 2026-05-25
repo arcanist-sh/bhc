@@ -3222,6 +3222,8 @@ fn register_standard_module_exports(
             // Pos + constructors
             "Pos", "NoPos",
             "sourcePositions",
+            // Re-exported utilities
+            "toIdentifier",
         ],
         "Djot.AST" => &[
             // Core types

@@ -315,6 +315,21 @@ impl<'src> Parser<'src> {
                     last_span = Some(span);
                     texts.push(actual_text);
                 }
+                // Two consecutive `-- |` doc lines at the same column produce a
+                // VirtualSemi between them (the layout rule treats them as same-
+                // column items). Skip it so the whole block is collected as one
+                // doc comment instead of orphaning the second line.
+                TokenKind::VirtualSemi if !texts.is_empty() => {
+                    let save = self.pos;
+                    self.advance();
+                    if !matches!(
+                        self.current().map(|t| &t.node.kind),
+                        Some(TokenKind::DocCommentLine(_) | TokenKind::DocCommentBlock(_))
+                    ) {
+                        self.pos = save;
+                        break;
+                    }
+                }
                 _ => break,
             }
         }

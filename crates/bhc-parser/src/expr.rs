@@ -65,8 +65,13 @@ impl<'src> Parser<'src> {
                     (Ident::from_str("%"), prec, assoc)
                 }
                 TokenKind::Backtick => {
-                    // Infix function application: `x `mod` y` or `x `E.catch` y`
-                    let _start = tok.span;
+                    // Infix function application: `x `mod` y` or `x `E.catch` y`.
+                    // Backtick-quoted identifiers have default precedence 9, left-assoc.
+                    // Bail BEFORE consuming any tokens if the precedence is too low —
+                    // otherwise we would strand the operator and its trailing operand.
+                    if 9 < min_prec {
+                        break;
+                    }
                     self.advance(); // `
                     let Some(func_tok) = self.current() else {
                         return Err(ParseError::UnexpectedEof {

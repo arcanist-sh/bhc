@@ -1349,7 +1349,38 @@ impl Evaluator {
         let args = forced?;
 
         match op {
-            PrimOp::AddInt => {
+            // The Add/Sub/Mul/Div/Neg "Int" primops are polymorphic in
+            // practice: the `+` / `-` / `*` / `negate` symbols all dispatch
+            // through here regardless of how the typechecker resolved them.
+            // Match on the runtime value shape so Float and Double also work.
+            PrimOp::AddInt => match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_add(*b))),
+                (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(a.wrapping_add(*b))),
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
+                (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a + b)),
+                _ => numeric_fallback(&args, |a, b| a.wrapping_add(b), |a, b| a + b),
+            },
+
+            PrimOp::SubInt => match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_sub(*b))),
+                (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(a.wrapping_sub(*b))),
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
+                (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a - b)),
+                _ => numeric_fallback(&args, |a, b| a.wrapping_sub(b), |a, b| a - b),
+            },
+
+            PrimOp::MulInt => match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_mul(*b))),
+                (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(a.wrapping_mul(*b))),
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
+                (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a * b)),
+                _ => numeric_fallback(&args, |a, b| a.wrapping_mul(b), |a, b| a * b),
+            },
+
+            PrimOp::DivInt => {
+                // `div` is integral-only in Haskell. Keep the integer path
+                // strict so calling it on floats produces a clear type error
+                // rather than silently coercing.
                 let a = args[0].as_int().ok_or_else(|| EvalError::TypeError {
                     expected: "Int".into(),
                     got: format!("{:?}", args[0]),
@@ -1358,24 +1389,6 @@ impl Evaluator {
                     expected: "Int".into(),
                     got: format!("{:?}", args[1]),
                 })?;
-                Ok(Value::Int(a.wrapping_add(b)))
-            }
-
-            PrimOp::SubInt => {
-                let a = args[0].as_int().unwrap_or(0);
-                let b = args[1].as_int().unwrap_or(0);
-                Ok(Value::Int(a.wrapping_sub(b)))
-            }
-
-            PrimOp::MulInt => {
-                let a = args[0].as_int().unwrap_or(0);
-                let b = args[1].as_int().unwrap_or(0);
-                Ok(Value::Int(a.wrapping_mul(b)))
-            }
-
-            PrimOp::DivInt => {
-                let a = args[0].as_int().unwrap_or(0);
-                let b = args[1].as_int().unwrap_or(0);
                 if b == 0 {
                     return Err(EvalError::DivisionByZero);
                 }
@@ -1383,18 +1396,33 @@ impl Evaluator {
             }
 
             PrimOp::ModInt => {
-                let a = args[0].as_int().unwrap_or(0);
-                let b = args[1].as_int().unwrap_or(0);
+                let a = args[0].as_int().ok_or_else(|| EvalError::TypeError {
+                    expected: "Int".into(),
+                    got: format!("{:?}", args[0]),
+                })?;
+                let b = args[1].as_int().ok_or_else(|| EvalError::TypeError {
+                    expected: "Int".into(),
+                    got: format!("{:?}", args[1]),
+                })?;
                 if b == 0 {
                     return Err(EvalError::DivisionByZero);
                 }
                 Ok(Value::Int(a % b))
             }
 
-            PrimOp::NegInt => {
-                let a = args[0].as_int().unwrap_or(0);
-                Ok(Value::Int(-a))
-            }
+            PrimOp::NegInt => match &args[0] {
+                Value::Int(a) => Ok(Value::Int(a.wrapping_neg())),
+                Value::Integer(a) => Ok(Value::Integer(a.wrapping_neg())),
+                Value::Float(a) => Ok(Value::Float(-a)),
+                Value::Double(a) => Ok(Value::Double(-a)),
+                _ => {
+                    let a = args[0].as_double().ok_or_else(|| EvalError::TypeError {
+                        expected: "Num".into(),
+                        got: format!("{:?}", args[0]),
+                    })?;
+                    Ok(Value::Double(-a))
+                }
+            },
 
             PrimOp::AddDouble => {
                 let a = args[0].as_double().unwrap_or(0.0);
@@ -6841,6 +6869,28 @@ impl Default for Evaluator {
     fn default() -> Self {
         Self::new(EvalMode::Lazy)
     }
+}
+
+/// Fallback for the Add/Sub/Mul numeric primops when the two arguments
+/// have mismatched or unexpected numeric shapes. Tries integer arithmetic
+/// when both operands convert to i64, otherwise promotes to Double.
+fn numeric_fallback(
+    args: &[Value],
+    int_op: fn(i64, i64) -> i64,
+    double_op: fn(f64, f64) -> f64,
+) -> Result<Value, EvalError> {
+    if let (Some(a), Some(b)) = (args[0].as_int(), args[1].as_int()) {
+        return Ok(Value::Int(int_op(a, b)));
+    }
+    let a = args[0].as_double().ok_or_else(|| EvalError::TypeError {
+        expected: "Num".into(),
+        got: format!("{:?}", args[0]),
+    })?;
+    let b = args[1].as_double().ok_or_else(|| EvalError::TypeError {
+        expected: "Num".into(),
+        got: format!("{:?}", args[1]),
+    })?;
+    Ok(Value::Double(double_op(a, b)))
 }
 
 /// Generate the next permutation of indices in lexicographic order.

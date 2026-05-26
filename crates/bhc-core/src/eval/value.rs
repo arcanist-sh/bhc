@@ -694,6 +694,8 @@ pub enum PrimOp {
     // Comparison
     /// Integer equality.
     EqInt,
+    /// Integer inequality. Polymorphic, like EqInt; result is the negation.
+    NeqInt,
     /// Integer less-than.
     LtInt,
     /// Integer less-than-or-equal.

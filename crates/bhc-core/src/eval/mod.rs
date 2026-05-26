@@ -237,7 +237,7 @@ impl Evaluator {
             ("*.", PrimOp::MulDouble),
             ("/.", PrimOp::DivDouble),
             ("==", PrimOp::EqInt),
-            ("/=", PrimOp::EqInt), // We'll negate the result
+            ("/=", PrimOp::NeqInt),
             ("<", PrimOp::LtInt),
             ("<=", PrimOp::LeInt),
             (">", PrimOp::GtInt),
@@ -1474,6 +1474,12 @@ impl Evaluator {
                         Ok(Value::bool(a == b))
                     }
                 }
+            }
+
+            PrimOp::NeqInt => {
+                // Polymorphic inequality: reuse EqInt and negate the result.
+                let eq = self.apply_primop(PrimOp::EqInt, args)?;
+                Ok(Value::bool(eq.as_bool() != Some(true)))
             }
 
             PrimOp::LtInt => {

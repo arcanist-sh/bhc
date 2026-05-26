@@ -68,18 +68,41 @@ jobs:
             target
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build release binary and RTS
+      - name: Build release binary, RTS, and stdlib
         run: |
+          # Compiler driver
           cargo build --release --target ${{ matrix.target }} -p bhc
+          # RTS — required to link any compiled program
           cargo build --release --target ${{ matrix.target }} -p bhc-rts
+          # Standard library static archives — without these the compiled
+          # output can't satisfy putStrLn / show / etc. at link time. Every
+          # stdlib crate ships a staticlib target (see stdlib/*/Cargo.toml).
+          cargo build --release --target ${{ matrix.target }} \
+            -p bhc-prelude \
+            -p bhc-base \
+            -p bhc-text \
+            -p bhc-containers \
+            -p bhc-transformers \
+            -p bhc-numeric \
+            -p bhc-concurrent \
+            -p bhc-system \
+            -p bhc-utils
 
       - name: Prepare artifact
         run: |
           mkdir -p dist/lib
           cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} dist/
           chmod +x dist/${{ matrix.artifact_name }}
-          # Copy RTS static library
-          cp target/${{ matrix.target }}/release/libbhc_rts.a dist/lib/
+          # RTS + every stdlib static archive. The shell glob means a new
+          # stdlib crate is picked up automatically as long as it ends up
+          # in target/.../release/ with a libbhc_*.a name.
+          cp target/${{ matrix.target }}/release/libbhc_*.a dist/lib/
+          # Verify the critical ones are present so a packaging regression
+          # fails the workflow instead of producing a broken artifact.
+          for lib in libbhc_rts.a libbhc_text.a libbhc_base.a libbhc_prelude.a; do
+            test -f "dist/lib/$lib" || { echo "Missing required library: $lib"; exit 1; }
+          done
+          ls -la dist/lib/
           cd dist && tar -czvf ../${{ matrix.asset_name }}.tar.gz *
 
       - name: Upload artifact

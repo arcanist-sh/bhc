@@ -891,7 +891,16 @@ fn eval_input(state: &mut ReplState, input: &str) {
             if state.options.show_types {
                 let ty_str = match state.last_inferred_type.as_ref() {
                     Some(ty) if ty.free_vars().is_empty() => format!("{ty}"),
-                    _ => type_from_value(&value),
+                    _ => {
+                        // Force the value first so recursive type inference
+                        // (for lists, tuples, Maybe, Either, ...) doesn't trip
+                        // over unforced thunks in the fields.
+                        let forced = value
+                            .clone()
+                            .deep_force(&state.evaluator)
+                            .unwrap_or_else(|_| value.clone());
+                        type_from_value(&forced)
+                    }
                 };
                 println!("  :: {}", ty_str);
                 state.last_inferred_type = None;

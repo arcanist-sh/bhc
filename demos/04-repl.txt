@@ -1,0 +1,38 @@
+-- REPL session script — paste one line at a time into `bhci`.
+-- Lines starting with `--` are comments for the demoer; bhci ignores them.
+--
+-- Start the REPL:
+--   bhci
+
+-- Arithmetic and operator precedence
+2 + 3 * 4
+1.5 * 2.0
+
+-- Equality and inequality (we shipped a fix for /= recently)
+1 /= 2
+[(x,y) | x <- [1..3], y <- [1..3], x /= y]
+
+-- Pure list pipeline
+map (* 2) [1..10]
+filter even [1..20]
+foldr (+) 0 [1..100]
+zipWith (+) [1, 2, 3] [10, 20, 30]
+take 10 (iterate (*2) 1)
+
+-- Recursive let — a textbook factorial
+let fact n = if n == 0 then 1 else n * fact (n - 1) in fact 10
+
+-- Persistent binding for the rest of the session
+let greet = \name -> "Hello, " ++ name ++ "!"
+greet "Zurihac"
+
+-- Nested let with shared sub-expression
+let xs = [1..10] in (sum xs, length xs, maximum xs)
+
+-- Pure ADT values
+Just 5
+Nothing
+(1, "hello", True)
+
+-- Exit
+:quit

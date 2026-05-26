@@ -200,7 +200,12 @@ impl Vec4F32 {
             vst1q_f32(result.data.as_mut_ptr(), r);
             return result;
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        // Scalar fallback. Active on x86_64 too so that the function still
+        // has a return path when `is_x86_feature_detected!` returns false
+        // for the relevant SIMD feature; the aarch64 branch above has an
+        // unconditional return so this is unreachable on aarch64 and gated
+        // out accordingly.
+        #[cfg(not(target_arch = "aarch64"))]
         Self {
             data: [
                 self.data[0] + other.data[0],
@@ -234,7 +239,12 @@ impl Vec4F32 {
             vst1q_f32(result.data.as_mut_ptr(), r);
             return result;
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        // Scalar fallback. Active on x86_64 too so that the function still
+        // has a return path when `is_x86_feature_detected!` returns false
+        // for the relevant SIMD feature; the aarch64 branch above has an
+        // unconditional return so this is unreachable on aarch64 and gated
+        // out accordingly.
+        #[cfg(not(target_arch = "aarch64"))]
         Self {
             data: [
                 self.data[0] - other.data[0],
@@ -268,7 +278,12 @@ impl Vec4F32 {
             vst1q_f32(result.data.as_mut_ptr(), r);
             return result;
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        // Scalar fallback. Active on x86_64 too so that the function still
+        // has a return path when `is_x86_feature_detected!` returns false
+        // for the relevant SIMD feature; the aarch64 branch above has an
+        // unconditional return so this is unreachable on aarch64 and gated
+        // out accordingly.
+        #[cfg(not(target_arch = "aarch64"))]
         Self {
             data: [
                 self.data[0] * other.data[0],
@@ -302,7 +317,12 @@ impl Vec4F32 {
             vst1q_f32(result.data.as_mut_ptr(), r);
             return result;
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        // Scalar fallback. Active on x86_64 too so that the function still
+        // has a return path when `is_x86_feature_detected!` returns false
+        // for the relevant SIMD feature; the aarch64 branch above has an
+        // unconditional return so this is unreachable on aarch64 and gated
+        // out accordingly.
+        #[cfg(not(target_arch = "aarch64"))]
         Self {
             data: [
                 self.data[0] / other.data[0],
@@ -336,7 +356,12 @@ impl Vec4F32 {
             vst1q_f32(result.data.as_mut_ptr(), r);
             return result;
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        // Scalar fallback. Active on x86_64 too so that the function still
+        // has a return path when `is_x86_feature_detected!` returns false
+        // for the relevant SIMD feature; the aarch64 branch above has an
+        // unconditional return so this is unreachable on aarch64 and gated
+        // out accordingly.
+        #[cfg(not(target_arch = "aarch64"))]
         Self {
             data: [
                 self.data[0].min(other.data[0]),
@@ -370,7 +395,12 @@ impl Vec4F32 {
             vst1q_f32(result.data.as_mut_ptr(), r);
             return result;
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        // Scalar fallback. Active on x86_64 too so that the function still
+        // has a return path when `is_x86_feature_detected!` returns false
+        // for the relevant SIMD feature; the aarch64 branch above has an
+        // unconditional return so this is unreachable on aarch64 and gated
+        // out accordingly.
+        #[cfg(not(target_arch = "aarch64"))]
         Self {
             data: [
                 self.data[0].max(other.data[0]),
@@ -402,7 +432,12 @@ impl Vec4F32 {
             vst1q_f32(result.data.as_mut_ptr(), r);
             return result;
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        // Scalar fallback. Active on x86_64 too so that the function still
+        // has a return path when `is_x86_feature_detected!` returns false
+        // for the relevant SIMD feature; the aarch64 branch above has an
+        // unconditional return so this is unreachable on aarch64 and gated
+        // out accordingly.
+        #[cfg(not(target_arch = "aarch64"))]
         Self {
             data: [
                 self.data[0].sqrt(),
@@ -477,7 +512,12 @@ impl Vec4F32 {
             vst1q_f32(result.data.as_mut_ptr(), r);
             return result;
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        // Scalar fallback. Active on x86_64 too so that the function still
+        // has a return path when `is_x86_feature_detected!` returns false
+        // for the relevant SIMD feature; the aarch64 branch above has an
+        // unconditional return so this is unreachable on aarch64 and gated
+        // out accordingly.
+        #[cfg(not(target_arch = "aarch64"))]
         self.mul(b).add(c)
     }
 
@@ -732,7 +772,12 @@ impl Vec2F64 {
             vst1q_f64(result.data.as_mut_ptr(), r);
             return result;
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        // Scalar fallback. Active on x86_64 too so that the function still
+        // has a return path when `is_x86_feature_detected!` returns false
+        // for the relevant SIMD feature; the aarch64 branch above has an
+        // unconditional return so this is unreachable on aarch64 and gated
+        // out accordingly.
+        #[cfg(not(target_arch = "aarch64"))]
         Self {
             data: [self.data[0] + other.data[0], self.data[1] + other.data[1]],
         }
@@ -761,7 +806,12 @@ impl Vec2F64 {
             vst1q_f64(result.data.as_mut_ptr(), r);
             return result;
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        // Scalar fallback. Active on x86_64 too so that the function still
+        // has a return path when `is_x86_feature_detected!` returns false
+        // for the relevant SIMD feature; the aarch64 branch above has an
+        // unconditional return so this is unreachable on aarch64 and gated
+        // out accordingly.
+        #[cfg(not(target_arch = "aarch64"))]
         Self {
             data: [self.data[0] - other.data[0], self.data[1] - other.data[1]],
         }
@@ -790,7 +840,12 @@ impl Vec2F64 {
             vst1q_f64(result.data.as_mut_ptr(), r);
             return result;
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        // Scalar fallback. Active on x86_64 too so that the function still
+        // has a return path when `is_x86_feature_detected!` returns false
+        // for the relevant SIMD feature; the aarch64 branch above has an
+        // unconditional return so this is unreachable on aarch64 and gated
+        // out accordingly.
+        #[cfg(not(target_arch = "aarch64"))]
         Self {
             data: [self.data[0] * other.data[0], self.data[1] * other.data[1]],
         }
@@ -819,7 +874,12 @@ impl Vec2F64 {
             vst1q_f64(result.data.as_mut_ptr(), r);
             return result;
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        // Scalar fallback. Active on x86_64 too so that the function still
+        // has a return path when `is_x86_feature_detected!` returns false
+        // for the relevant SIMD feature; the aarch64 branch above has an
+        // unconditional return so this is unreachable on aarch64 and gated
+        // out accordingly.
+        #[cfg(not(target_arch = "aarch64"))]
         Self {
             data: [self.data[0] / other.data[0], self.data[1] / other.data[1]],
         }
@@ -850,7 +910,12 @@ impl Vec2F64 {
             vst1q_f64(result.data.as_mut_ptr(), r);
             return result;
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        // Scalar fallback. Active on x86_64 too so that the function still
+        // has a return path when `is_x86_feature_detected!` returns false
+        // for the relevant SIMD feature; the aarch64 branch above has an
+        // unconditional return so this is unreachable on aarch64 and gated
+        // out accordingly.
+        #[cfg(not(target_arch = "aarch64"))]
         self.mul(b).add(c)
     }
 
@@ -1382,7 +1447,12 @@ impl SimdFeatures {
                 neon: true, // NEON is always available on aarch64
             }
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        // Scalar fallback. Active on x86_64 too so that the function still
+        // has a return path when `is_x86_feature_detected!` returns false
+        // for the relevant SIMD feature; the aarch64 branch above has an
+        // unconditional return so this is unreachable on aarch64 and gated
+        // out accordingly.
+        #[cfg(not(target_arch = "aarch64"))]
         {
             SimdFeatures::default()
         }

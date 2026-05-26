@@ -883,12 +883,15 @@ fn eval_input(state: &mut ReplState, input: &str) {
                 print_value(&state.evaluator, &value);
             }
 
-            // Print type if enabled
+            // Print type if enabled.
+            // Prefer the typechecker's inferred scheme, but fall back to the
+            // value-derived type when the inferred type still has unresolved
+            // free variables (for example because a Num constraint wasn't
+            // defaulted at the synthetic `it` binding).
             if state.options.show_types {
-                let ty_str = if let Some(ref ty) = state.last_inferred_type {
-                    format!("{ty}")
-                } else {
-                    type_from_value(&value)
+                let ty_str = match state.last_inferred_type.as_ref() {
+                    Some(ty) if ty.free_vars().is_empty() => format!("{ty}"),
+                    _ => type_from_value(&value),
                 };
                 println!("  :: {}", ty_str);
                 state.last_inferred_type = None;
@@ -979,9 +982,45 @@ fn type_from_value(value: &Value) -> String {
         Value::String(_) => "String".to_string(),
         Value::Data(d) => {
             let name = d.con.name.as_str();
+            // List: nil and cons share the [] type constructor.
+            if name == "[]" || name == ":" {
+                let elem = value
+                    .as_list()
+                    .and_then(|xs| xs.into_iter().next())
+                    .map(|head| type_from_value(&head))
+                    .unwrap_or_else(|| "a".to_string());
+                // Char list reads more naturally as String for the REPL.
+                if elem == "Char" {
+                    return "String".to_string();
+                }
+                return format!("[{elem}]");
+            }
+            // Tuple constructors are named "(,)", "(,,)", etc.
+            if name.starts_with('(') && name.ends_with(')')
+                && name.chars().skip(1).take(name.len() - 2).all(|c| c == ',')
+            {
+                let parts: Vec<String> = d.args.iter().map(type_from_value).collect();
+                return format!("({})", parts.join(", "));
+            }
             match name {
                 "True" | "False" => "Bool".to_string(),
                 "()" => "()".to_string(),
+                "Nothing" => "Maybe a".to_string(),
+                "Just" => d
+                    .args
+                    .first()
+                    .map(|v| format!("Maybe {}", type_from_value(v)))
+                    .unwrap_or_else(|| "Maybe a".to_string()),
+                "Left" => d
+                    .args
+                    .first()
+                    .map(|v| format!("Either {} b", type_from_value(v)))
+                    .unwrap_or_else(|| "Either a b".to_string()),
+                "Right" => d
+                    .args
+                    .first()
+                    .map(|v| format!("Either a {}", type_from_value(v)))
+                    .unwrap_or_else(|| "Either a b".to_string()),
                 _ => name.to_string(),
             }
         }

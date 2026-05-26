@@ -148,55 +148,47 @@ jobs:
           cat ../SHA256SUMS.txt
 
       - name: Create release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          cat << 'EOF' > RELEASE_NOTES.md
-          # BHC ${{ steps.version.outputs.version }}
+          # Prefer per-version notes from .github/release-notes/$VERSION.md
+          # so each release can ship its own write-up without editing this
+          # workflow. Falls back to a generic stub if no notes file is
+          # checked in for the tagged version.
+          NOTES_FILE=".github/release-notes/${VERSION}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            cp "$NOTES_FILE" RELEASE_NOTES.md
+            echo "Using $NOTES_FILE for release notes"
+          else
+            echo "::warning::No release notes at $NOTES_FILE; using generic stub"
+            cat > RELEASE_NOTES.md << EOF
+          # BHC ${VERSION}
 
-          ## Phase 1: Native Code Generation Complete
+          See [CHANGELOG.md](https://github.com/arcanist-sh/bhc/blob/main/CHANGELOG.md)
+          and [the BHC blog](https://arcanist.sh/bhc/blog/) for what changed.
 
-          This release marks the completion of Phase 1 of BHC development. The Basel Haskell Compiler can now produce working native executables from Haskell source code.
+          ## Installation
 
-          ### Working Features
+          \`\`\`bash
+          curl -fsSL https://arcanist.sh/bhc/install.sh | sh
+          \`\`\`
 
-          | Feature | Example | Status |
-          |---------|---------|--------|
-          | Hello World | `putStrLn "Hello, World!"` | ✅ |
-          | Integer literals | `print 42` | ✅ |
-          | Arithmetic | `print (1 + 2 * 3)` | ✅ |
-          | Let bindings | `let x = 5 in print x` | ✅ |
-          | Function definitions | `double x = x + x` | ✅ |
-          | Recursion (factorial) | `factorial 10` → 3,628,800 | ✅ |
-          | Recursion (fibonacci) | `fib 20` → 6,765 | ✅ |
+          Or via Homebrew:
 
-          ### Complete Pipeline
+          \`\`\`bash
+          brew install arcanist-sh/tap/bhc
+          \`\`\`
 
-          - ✅ Haskell source parsing
-          - ✅ Type checking (Hindley-Milner)
-          - ✅ Core IR lowering
-          - ✅ LLVM IR generation
-          - ✅ RTS linking
-          - ✅ Native executable output
+          ## Platforms
 
-          ### Installation
-
-          ```bash
-          curl -fsSL https://bhc.raskell.io/install.sh | sh
-          ```
-
-          Or download the appropriate binary for your platform below.
-
-          ### Platform Support
-
-          This release includes binaries for:
           - Linux x86_64
           - macOS aarch64 (Apple Silicon)
 
-          Windows, Linux aarch64, and macOS x86_64 (Intel) binaries will be available in a future release.
+          ## Checksums
 
-          ### Checksums
-
-          See `SHA256SUMS.txt` for file checksums.
+          See \`SHA256SUMS.txt\`.
           EOF
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1

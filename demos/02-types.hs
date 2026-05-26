@@ -1,50 +1,59 @@
--- ADTs, pattern matching, recursion, type classes with dictionary passing.
+-- ADTs, pattern matching, recursion, user-defined typeclass.
 -- Compiles end-to-end:
 --
 --   bhc demos/02-types.hs -o /tmp/types
 --   /tmp/types
 --
 -- Output:
+--   == Trees ==
 --   Leaf
---   Branch (Leaf) 1 (Branch (Leaf) 2 (Leaf))
---   sum = 3, depth = 3, count = 2
+--   Branch 2 (children: Branch 1, Branch 3)
+--   == Folds ==
+--   sum = 6, depth = 2, count = 3
 module Main where
 
-data Tree a = Leaf | Branch (Tree a) a (Tree a)
-
-insert :: Ord a => a -> Tree a -> Tree a
-insert x Leaf = Branch Leaf x Leaf
-insert x t@(Branch l v r)
-  | x < v     = Branch (insert x l) v r
-  | x > v     = Branch l v (insert x r)
-  | otherwise = t
+data Tree = Leaf | Branch Tree Int Tree
 
 class Summary a where
   describe :: a -> String
 
-instance Show a => Summary (Tree a) where
+valueOrDash :: Tree -> String
+valueOrDash Leaf = "Leaf"
+valueOrDash (Branch _ v _) = "Branch " ++ show v
+
+instance Summary Tree where
   describe Leaf = "Leaf"
   describe (Branch l v r) =
-    "Branch (" ++ describe l ++ ") " ++ show v ++ " (" ++ describe r ++ ")"
+    "Branch " ++ show v
+      ++ " (children: " ++ valueOrDash l ++ ", " ++ valueOrDash r ++ ")"
 
-sumTree :: Num a => Tree a -> a
+sumTree :: Tree -> Int
 sumTree Leaf = 0
 sumTree (Branch l v r) = sumTree l + v + sumTree r
 
-depth :: Tree a -> Int
-depth Leaf = 0
-depth (Branch l _ r) = 1 + max (depth l) (depth r)
+depthTree :: Tree -> Int
+depthTree Leaf = 0
+depthTree (Branch l _ r) =
+  let dl = depthTree l
+      dr = depthTree r
+  in 1 + (if dl >= dr then dl else dr)
 
-countBranches :: Tree a -> Int
+countBranches :: Tree -> Int
 countBranches Leaf = 0
 countBranches (Branch l _ r) = 1 + countBranches l + countBranches r
 
+-- A small fixed tree:    2
+--                       / \
+--                      1   3
+sampleTree :: Tree
+sampleTree = Branch (Branch Leaf 1 Leaf) 2 (Branch Leaf 3 Leaf)
+
 main :: IO ()
 main = do
-  let empty = Leaf :: Tree Int
-      t     = foldr insert empty [2, 1]
-  putStrLn (describe (Leaf :: Tree Int))
-  putStrLn (describe t)
-  putStrLn ("sum = " ++ show (sumTree t)
-         ++ ", depth = " ++ show (depth t)
-         ++ ", count = " ++ show (countBranches t))
+  putStrLn "== Trees =="
+  putStrLn (describe Leaf)
+  putStrLn (describe sampleTree)
+  putStrLn "== Folds =="
+  putStrLn ("sum = " ++ show (sumTree sampleTree)
+         ++ ", depth = " ++ show (depthTree sampleTree)
+         ++ ", count = " ++ show (countBranches sampleTree))

@@ -1,6 +1,6 @@
 -- A small real Haskell idiom: a Roman numeral converter both ways.
--- Demonstrates: ADTs, pattern matching on integer ranges, Maybe for
--- partial functions, list-based recursion, lookup over a static table.
+-- Demonstrates: lists, pattern matching, Maybe for partial functions,
+-- recursion over a static table, prefix matching.
 --
 --   bhc demos/03-roman.hs -o /tmp/roman
 --   /tmp/roman
@@ -10,12 +10,11 @@
 --   2026 -> MMXXVI
 --   MCMXCIX -> Just 1999
 --   MMXXVI  -> Just 2026
---   nonsense -> Nothing
+--   ABCDE   -> Nothing
 module Main where
 
 import Data.List (isPrefixOf)
 
--- Encode: greedy subtraction against a value table.
 romanTable :: [(Int, String)]
 romanTable =
   [ (1000, "M"), (900, "CM"), (500, "D"), (400, "CD")
@@ -24,26 +23,31 @@ romanTable =
   , (1,    "I")
   ]
 
+-- Encode: greedy subtraction against the value table.
+encode :: Int -> [(Int, String)] -> String
+encode _ [] = ""
+encode k ((v, s):rest)
+  | k <= 0    = ""
+  | k >= v    = s ++ encode (k - v) ((v, s):rest)
+  | otherwise = encode k rest
+
 toRoman :: Int -> String
-toRoman n
-  | n <= 0    = ""
-  | otherwise = go n romanTable
-  where
-    go _ [] = ""
-    go k ((v, s):rest)
-      | k >= v    = s ++ go (k - v) ((v, s):rest)
-      | otherwise = go k rest
+toRoman n = encode n romanTable
 
 -- Decode: match prefixes against the same table, longest first.
 -- Returns Nothing if any portion fails to decode.
+decode :: String -> [(Int, String)] -> Maybe Int
+decode []  _  = Just 0
+decode _   [] = Nothing
+decode str ((v, sym):rest)
+  | sym `isPrefixOf` str =
+      case decode (drop (length sym) str) ((v, sym):rest) of
+        Just n  -> Just (v + n)
+        Nothing -> Nothing
+  | otherwise = decode str rest
+
 fromRoman :: String -> Maybe Int
-fromRoman s = go s 0
-  where
-    go []  acc = Just acc
-    go str acc =
-      case dropWhile (\(_, sym) -> not (sym `isPrefixOf` str)) romanTable of
-        []           -> Nothing
-        (v, sym):_   -> go (drop (length sym) str) (acc + v)
+fromRoman s = decode s romanTable
 
 main :: IO ()
 main = do
@@ -51,4 +55,4 @@ main = do
   putStrLn ("2026 -> " ++ toRoman 2026)
   putStrLn ("MCMXCIX -> " ++ show (fromRoman "MCMXCIX"))
   putStrLn ("MMXXVI  -> " ++ show (fromRoman "MMXXVI"))
-  putStrLn ("nonsense -> " ++ show (fromRoman "ABCDE"))
+  putStrLn ("ABCDE   -> " ++ show (fromRoman "ABCDE"))

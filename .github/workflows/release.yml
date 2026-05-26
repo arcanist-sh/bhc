@@ -40,17 +40,19 @@ jobs:
       - name: Install LLVM and dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: |
+          # bhc-codegen pins inkwell 0.8 + llvm21-1; the workspace needs
+          # LLVM 21 on the runner.
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 18 all
-          sudo apt-get install -y libpolly-18-dev libzstd-dev
-          echo "LLVM_SYS_180_PREFIX=/usr/lib/llvm-18" >> $GITHUB_ENV
+          sudo ./llvm.sh 21 all
+          sudo apt-get install -y libpolly-21-dev libzstd-dev
+          echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> $GITHUB_ENV
 
       - name: Install LLVM and dependencies (macOS)
         if: startsWith(matrix.os, 'macos')
         run: |
-          brew install llvm@18 zstd
-          echo "LLVM_SYS_180_PREFIX=$(brew --prefix llvm@18)" >> $GITHUB_ENV
+          brew install llvm@21 zstd
+          echo "LLVM_SYS_211_PREFIX=$(brew --prefix llvm@21)" >> $GITHUB_ENV
           echo "LIBRARY_PATH=$(brew --prefix zstd)/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Install Rust
@@ -218,9 +220,9 @@ jobs:
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 18 all
-          sudo apt-get install -y libpolly-18-dev libzstd-dev
-          echo "LLVM_SYS_180_PREFIX=/usr/lib/llvm-18" >> $GITHUB_ENV
+          sudo ./llvm.sh 21 all
+          sudo apt-get install -y libpolly-21-dev libzstd-dev
+          echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> $GITHUB_ENV
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

@@ -1447,12 +1447,10 @@ impl SimdFeatures {
                 neon: true, // NEON is always available on aarch64
             }
         }
-        // Scalar fallback. Active on x86_64 too so that the function still
-        // has a return path when `is_x86_feature_detected!` returns false
-        // for the relevant SIMD feature; the aarch64 branch above has an
-        // unconditional return so this is unreachable on aarch64 and gated
-        // out accordingly.
-        #[cfg(not(target_arch = "aarch64"))]
+        // detect() has no early `return` in its cfg blocks — the block
+        // for the active arch IS the function's value expression — so
+        // the scalar fallback must stay gated out of x86_64/aarch64.
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             SimdFeatures::default()
         }

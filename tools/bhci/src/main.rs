@@ -771,20 +771,73 @@ fn update_completion_identifiers(state: &ReplState) {
     }
 }
 
+/// True if `s` is a single Haskell-style lowercase-starting identifier.
+fn is_plain_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'')
+}
+
+/// True if `s` contains the keyword `in` outside any string/char literal —
+/// crude but sufficient to distinguish `let x = expr` from `let x = expr in ...`.
+/// Looks for whitespace-bounded "in".
+fn contains_top_level_in(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut in_str = false;
+    let mut in_char = false;
+    while i + 1 < bytes.len() {
+        let c = bytes[i];
+        if in_str {
+            if c == b'\\' { i += 2; continue; }
+            if c == b'"' { in_str = false; }
+        } else if in_char {
+            if c == b'\\' { i += 2; continue; }
+            if c == b'\'' { in_char = false; }
+        } else {
+            match c {
+                b'"' => in_str = true,
+                b'\'' => in_char = true,
+                _ => {
+                    if c.is_ascii_whitespace()
+                        && bytes.get(i + 1) == Some(&b'i')
+                        && bytes.get(i + 2) == Some(&b'n')
+                        && bytes.get(i + 3).is_none_or(|b| b.is_ascii_whitespace())
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 fn eval_input(state: &mut ReplState, input: &str) {
     use std::time::Instant;
 
     let start = Instant::now();
 
-    // Handle let declarations: `let name = expr`
+    // Handle let declarations: `let name = expr`.
+    // Distinct from a let-expression (`let name = expr in body`) — if the input
+    // contains a top-level ` in ` it's an expression, not a binding. Also
+    // require the binding name to be a single identifier so that function-form
+    // bindings (`let f n = ...`) and ill-formed inputs aren't misclassified
+    // and routed away from the expression evaluator.
     let trimmed = input.trim();
     if let Some(rest) = trimmed.strip_prefix("let ") {
-        if let Some(eq_pos) = rest.find('=') {
-            let name = rest[..eq_pos].trim().to_string();
-            let expr_str = rest[eq_pos + 1..].trim();
-            if !name.is_empty() && !expr_str.is_empty() {
-                eval_let_binding(state, &name, expr_str);
-                return;
+        if !contains_top_level_in(rest) {
+            if let Some(eq_pos) = rest.find('=') {
+                let name_raw = rest[..eq_pos].trim();
+                let expr_str = rest[eq_pos + 1..].trim();
+                if is_plain_identifier(name_raw) && !expr_str.is_empty() {
+                    eval_let_binding(state, name_raw, expr_str);
+                    return;
+                }
             }
         }
     }

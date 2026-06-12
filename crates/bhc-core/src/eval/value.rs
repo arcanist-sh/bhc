@@ -145,7 +145,7 @@ impl fmt::Debug for Value {
             Self::Closure(c) => write!(f, "<closure {}>", c.var.name),
             Self::Data(d) => {
                 write!(f, "{}", d.con.name)?;
-                for arg in &d.args {
+                for arg in d.args.iter() {
                     write!(f, " {arg:?}")?;
                 }
                 Ok(())
@@ -315,7 +315,7 @@ impl fmt::Display for Value {
 
                 // Constructor with args
                 write!(f, "{name}")?;
-                for arg in &d.args {
+                for arg in d.args.iter() {
                     write!(f, " ")?;
                     if needs_parens(arg) {
                         write!(f, "({arg})")?;
@@ -343,12 +343,13 @@ impl Value {
             Self::Data(d) => {
                 let forced_args = d
                     .args
+                    .into_vec()
                     .into_iter()
                     .map(|arg| arg.deep_force(evaluator))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Self::Data(DataValue {
                     con: d.con,
-                    args: forced_args,
+                    args: forced_args.into(),
                 }))
             }
             other => Ok(other),
@@ -415,7 +416,7 @@ impl Value {
                 tag: if b { 1 } else { 0 },
                 arity: 0,
             },
-            args: Vec::new(),
+            args: Vec::new().into(),
         })
     }
 
@@ -430,7 +431,7 @@ impl Value {
                 tag: 0,
                 arity: 0,
             },
-            args: Vec::new(),
+            args: Vec::new().into(),
         })
     }
 
@@ -445,7 +446,7 @@ impl Value {
                 tag: 0,
                 arity: 0,
             },
-            args: Vec::new(),
+            args: Vec::new().into(),
         })
     }
 
@@ -460,7 +461,7 @@ impl Value {
                 tag: 1,
                 arity: 2,
             },
-            args: vec![head, tail],
+            args: vec![head, tail].into(),
         })
     }
 
@@ -642,7 +643,7 @@ pub struct DataValue {
     /// The data constructor.
     pub con: DataCon,
     /// The constructor arguments (may be partial).
-    pub args: Vec<Value>,
+    pub args: Args,
 }
 
 impl DataValue {
@@ -650,6 +651,92 @@ impl DataValue {
     #[must_use]
     pub fn is_saturated(&self) -> bool {
         self.args.len() == self.con.arity as usize
+    }
+}
+
+/// Shared constructor arguments.
+///
+/// Cloning is O(1): long cons spines (lists) are shared rather than deep
+/// copied, which would otherwise recurse once per cell and overflow the
+/// stack on lists of a few thousand elements.
+///
+/// Dropping tears down nested data spines iteratively for the same reason.
+///
+/// The inner `Option` is only `None` mid-drop; all other code may assume
+/// `Some` (enforced by the constructors).
+pub struct Args(Option<Arc<Vec<Value>>>);
+
+impl Args {
+    /// Create from a vector of argument values.
+    #[must_use]
+    pub fn new(values: Vec<Value>) -> Self {
+        Self(Some(Arc::new(values)))
+    }
+
+    /// Append an argument (partial constructor application).
+    ///
+    /// Clones the underlying vector if it is shared; partial applications
+    /// are at most `arity` elements, so this stays cheap.
+    pub fn push(&mut self, value: Value) {
+        let arc = self.0.as_mut().expect("Args accessed mid-drop");
+        Arc::make_mut(arc).push(value);
+    }
+
+    /// Extract the argument vector, cloning only if shared.
+    #[must_use]
+    pub fn into_vec(mut self) -> Vec<Value> {
+        let arc = self.0.take().expect("Args accessed mid-drop");
+        Arc::try_unwrap(arc).unwrap_or_else(|shared| (*shared).clone())
+    }
+}
+
+impl std::ops::Deref for Args {
+    type Target = [Value];
+
+    fn deref(&self) -> &[Value] {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+}
+
+impl From<Vec<Value>> for Args {
+    fn from(values: Vec<Value>) -> Self {
+        Self::new(values)
+    }
+}
+
+impl Clone for Args {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl fmt::Debug for Args {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl Drop for Args {
+    fn drop(&mut self) {
+        // Fast path: shared elsewhere or already taken — nothing to tear down.
+        let Some(arc) = self.0.take() else { return };
+        let Ok(vec) = Arc::try_unwrap(arc) else {
+            return;
+        };
+        // Iteratively dismantle nested data values so that dropping a long
+        // cons spine does not recurse once per cell.
+        let mut worklist: Vec<Vec<Value>> = vec![vec];
+        while let Some(vec) = worklist.pop() {
+            for value in vec {
+                if let Value::Data(mut data) = value {
+                    if let Some(arc) = data.args.0.take() {
+                        if let Ok(inner) = Arc::try_unwrap(arc) {
+                            worklist.push(inner);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

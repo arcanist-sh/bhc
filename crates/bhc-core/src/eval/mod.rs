@@ -942,7 +942,7 @@ impl Evaluator {
                     tag: 1,
                     arity: 2,
                 },
-                args: vec![],
+                args: vec![].into(),
             }),
         );
 
@@ -957,7 +957,7 @@ impl Evaluator {
                     tag: 0,
                     arity: 0,
                 },
-                args: vec![],
+                args: vec![].into(),
             }),
         );
 
@@ -971,7 +971,7 @@ impl Evaluator {
                     tag: 0,
                     arity: 2,
                 },
-                args: vec![],
+                args: vec![].into(),
             }),
         );
 
@@ -985,7 +985,7 @@ impl Evaluator {
                     tag: 0,
                     arity: 3,
                 },
-                args: vec![],
+                args: vec![].into(),
             }),
         );
 
@@ -999,7 +999,7 @@ impl Evaluator {
                     tag: 0,
                     arity: 4,
                 },
-                args: vec![],
+                args: vec![].into(),
             }),
         );
 
@@ -1013,7 +1013,7 @@ impl Evaluator {
                     tag: 0,
                     arity: 5,
                 },
-                args: vec![],
+                args: vec![].into(),
             }),
         );
 
@@ -1032,7 +1032,7 @@ impl Evaluator {
                     tag: 0,
                     arity: 0,
                 },
-                args: vec![],
+                args: vec![].into(),
             }),
         );
         prims.insert(
@@ -1044,7 +1044,7 @@ impl Evaluator {
                     tag: 1,
                     arity: 1,
                 },
-                args: vec![],
+                args: vec![].into(),
             }),
         );
 
@@ -1062,7 +1062,7 @@ impl Evaluator {
                     tag: 0,
                     arity: 1,
                 },
-                args: vec![],
+                args: vec![].into(),
             }),
         );
         prims.insert(
@@ -1074,7 +1074,7 @@ impl Evaluator {
                     tag: 1,
                     arity: 1,
                 },
-                args: vec![],
+                args: vec![].into(),
             }),
         );
 
@@ -1088,7 +1088,7 @@ impl Evaluator {
                     tag: 0,
                     arity: 0,
                 },
-                args: vec![],
+                args: vec![].into(),
             }),
         );
         prims.insert(
@@ -1100,7 +1100,7 @@ impl Evaluator {
                     tag: 1,
                     arity: 0,
                 },
-                args: vec![],
+                args: vec![].into(),
             }),
         );
         prims.insert(
@@ -1112,7 +1112,7 @@ impl Evaluator {
                     tag: 2,
                     arity: 0,
                 },
-                args: vec![],
+                args: vec![].into(),
             }),
         );
     }
@@ -1263,7 +1263,7 @@ impl Evaluator {
                         tag: var.id.index() as u32,
                         arity: 100, // Large arity to accept arguments
                     },
-                    args: vec![],
+                    args: vec![].into(),
                 }));
             }
         }
@@ -2033,7 +2033,7 @@ impl Evaluator {
                                 tag: 0,
                                 arity: 2,
                             },
-                            args: vec![x, y],
+                            args: vec![x, y].into(),
                         })
                     })
                     .collect();
@@ -4652,7 +4652,7 @@ impl Evaluator {
                     Value::Handle(handle) => {
                         let mut guard = handle.file.lock().unwrap();
                         *guard = None; // Drop the file to close it
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
                     }
                     _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
                 }
@@ -4752,7 +4752,7 @@ impl Evaluator {
                                 return Err(EvalError::UserError("hPutChar: handle closed".into()));
                             }
                         }
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
                     }
                     _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
                 }
@@ -4779,7 +4779,7 @@ impl Evaluator {
                                 return Err(EvalError::UserError("hPutStr: handle closed".into()));
                             }
                         }
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
                     }
                     _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
                 }
@@ -4806,7 +4806,7 @@ impl Evaluator {
                                 return Err(EvalError::UserError("hPutStrLn: handle closed".into()));
                             }
                         }
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
                     }
                     _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
                 }
@@ -4830,7 +4830,7 @@ impl Evaluator {
                                 return Err(EvalError::UserError("hPrint: handle closed".into()));
                             }
                         }
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
                     }
                     _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
                 }
@@ -4850,7 +4850,7 @@ impl Evaluator {
                                 f.flush().map_err(|e| EvalError::UserError(format!("hFlush: {e}")))?;
                             }
                         }
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
                     }
                     _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
                 }
@@ -4885,9 +4885,9 @@ impl Evaluator {
                     Value::Handle(_) => {
                         if matches!(op, PrimOp::HGetBuffering) {
                             // Return LineBuffering as default
-                            Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("LineBuffering"), tag: 1, ty_con: bhc_types::TyCon::new(Symbol::intern("BufferMode"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                            Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("LineBuffering"), tag: 1, ty_con: bhc_types::TyCon::new(Symbol::intern("BufferMode"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
                         } else {
-                            Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                            Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
                         }
                     }
                     _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
@@ -4905,7 +4905,7 @@ impl Evaluator {
                         if let Some(ref mut f) = *guard {
                             f.seek(std::io::SeekFrom::Start(offset as u64)).map_err(|e| EvalError::UserError(format!("hSeek: {e}")))?;
                         }
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
                     }
                     _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
                 }
@@ -4979,7 +4979,7 @@ impl Evaluator {
                     Value::IORef(ref_cell) => {
                         let mut guard = ref_cell.lock().unwrap();
                         *guard = v;
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
                     }
                     _ => Err(EvalError::TypeError { expected: "IORef".into(), got: format!("{r:?}") }),
                 }
@@ -5001,7 +5001,7 @@ impl Evaluator {
                         };
                         let mut guard = ref_cell.lock().unwrap();
                         *guard = new_val;
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
                     }
                     _ => Err(EvalError::TypeError { expected: "IORef".into(), got: format!("{r:?}") }),
                 }
@@ -5108,7 +5108,7 @@ impl Evaluator {
                 };
                 // SAFETY: This is unsafe in Rust but we're in a single-threaded interpreter
                 unsafe { std::env::set_var(&key_str, &val_str); }
-                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
             }
 
             // === System.Directory PrimOps ===
@@ -5135,7 +5135,7 @@ impl Evaluator {
                     _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
                 };
                 std::fs::create_dir(&path_str).map_err(|e| EvalError::UserError(format!("createDirectory: {e}")))?;
-                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
             }
             PrimOp::CreateDirectoryIfMissing => {
                 let parents = self.force(args[0].clone())?;
@@ -5150,7 +5150,7 @@ impl Evaluator {
                 } else if !std::path::Path::new(&path_str).exists() {
                     std::fs::create_dir(&path_str).map_err(|e| EvalError::UserError(format!("createDirectoryIfMissing: {e}")))?;
                 }
-                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
             }
             PrimOp::RemoveFile => {
                 let path = self.force(args[0].clone())?;
@@ -5159,7 +5159,7 @@ impl Evaluator {
                     _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
                 };
                 std::fs::remove_file(&path_str).map_err(|e| EvalError::UserError(format!("removeFile: {e}")))?;
-                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
             }
             PrimOp::RemoveDirectory => {
                 let path = self.force(args[0].clone())?;
@@ -5168,7 +5168,7 @@ impl Evaluator {
                     _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
                 };
                 std::fs::remove_dir(&path_str).map_err(|e| EvalError::UserError(format!("removeDirectory: {e}")))?;
-                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
             }
             PrimOp::GetCurrentDirectory => {
                 let cwd = std::env::current_dir().map_err(|e| EvalError::UserError(format!("getCurrentDirectory: {e}")))?;
@@ -5181,7 +5181,7 @@ impl Evaluator {
                     _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
                 };
                 std::env::set_current_dir(&path_str).map_err(|e| EvalError::UserError(format!("setCurrentDirectory: {e}")))?;
-                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![] }))
+                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
             }
 
             // ---- Control.Monad ----
@@ -5594,7 +5594,7 @@ impl Evaluator {
                         // Right v
                         Ok(Value::Data(DataValue {
                             con: crate::DataCon { name: Symbol::intern("Right"), tag: 1, ty_con: bhc_types::TyCon::new(Symbol::intern("Either"), bhc_types::Kind::Star), arity: 1 },
-                            args: vec![v],
+                            args: vec![v].into(),
                         }))
                     }
                     Err(e) => {
@@ -5602,7 +5602,7 @@ impl Evaluator {
                         let err_str = Value::String(Arc::from(format!("{e}")));
                         Ok(Value::Data(DataValue {
                             con: crate::DataCon { name: Symbol::intern("Left"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("Either"), bhc_types::Kind::Star), arity: 1 },
-                            args: vec![err_str],
+                            args: vec![err_str].into(),
                         }))
                     }
                 }
@@ -6524,7 +6524,7 @@ impl Evaluator {
                 tag: 0,
                 arity: 2,
             },
-            args: vec![a, b],
+            args: vec![a, b].into(),
         })
     }
 
@@ -6538,7 +6538,7 @@ impl Evaluator {
                 tag: 1,
                 arity: 1,
             },
-            args: vec![a],
+            args: vec![a].into(),
         })
     }
 
@@ -6552,7 +6552,7 @@ impl Evaluator {
                 tag: 0,
                 arity: 0,
             },
-            args: Vec::new(),
+            args: Vec::new().into(),
         })
     }
 
@@ -6689,7 +6689,7 @@ impl Evaluator {
                 tag: 0,
                 arity: 3,
             },
-            args: vec![a, b, c],
+            args: vec![a, b, c].into(),
         })
     }
 
@@ -6703,7 +6703,7 @@ impl Evaluator {
                 tag: 0,
                 arity: 1,
             },
-            args: vec![a],
+            args: vec![a].into(),
         })
     }
 
@@ -6717,7 +6717,7 @@ impl Evaluator {
                 tag: 1,
                 arity: 1,
             },
-            args: vec![a],
+            args: vec![a].into(),
         })
     }
 
@@ -6736,7 +6736,7 @@ impl Evaluator {
                 tag,
                 arity: 0,
             },
-            args: Vec::new(),
+            args: Vec::new().into(),
         })
     }
 

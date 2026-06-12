@@ -23,9 +23,9 @@ pub struct LlvmContext {
     config: CodegenConfig,
 }
 
-// Safety: Context is Send+Sync in inkwell when not actively being modified
-unsafe impl Send for LlvmContext {}
-unsafe impl Sync for LlvmContext {}
+// NOTE: deliberately NOT Send/Sync. inkwell's `Context` is `!Send + !Sync`
+// because LLVMContext has no internal locking; sharing one across threads
+// is UB. Parallel compilation must create one `LlvmContext` per thread.
 
 impl LlvmContext {
     /// Create a new LLVM context for the given configuration.

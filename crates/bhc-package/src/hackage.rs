@@ -20,14 +20,46 @@ use crate::cabal::{CabalError, CabalFile};
 use camino::{Utf8Path, Utf8PathBuf};
 use flate2::read::GzDecoder;
 use semver::Version;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use tar::Archive;
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+
+/// Escape hatch: allow package downloads when no checksum is published.
+pub const ALLOW_UNVERIFIED_ENV: &str = "BHC_ALLOW_UNVERIFIED_DOWNLOADS";
+
+/// Validate a package name or version before it is interpolated into
+/// cache paths and URLs.
+///
+/// Names and versions originate from `.cabal` files of (transitive)
+/// dependencies, so a hostile value like `../../x` must not be able to
+/// traverse outside the cache directory.
+fn validate_component(value: &str, what: &str) -> HackageResult<()> {
+    let ok = !value.is_empty()
+        && !value.starts_with(['.', '-'])
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(HackageError::InvalidComponent {
+            what: what.to_string(),
+            value: value.to_string(),
+        })
+    }
+}
 
 /// Hackage base URL.
 pub const HACKAGE_URL: &str = "https://hackage.haskell.org";
+
+/// Hex-encoded SHA-256 of a byte slice.
+fn hex_sha256(data: &[u8]) -> String {
+    let digest = Sha256::digest(data);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// Errors from Hackage operations.
 #[derive(Debug, Error)]
@@ -60,6 +92,33 @@ pub enum HackageError {
     /// Archive error.
     #[error("archive error: {0}")]
     Archive(String),
+
+    /// Invalid package name or version.
+    #[error("invalid package {what}: {value:?}")]
+    InvalidComponent {
+        /// What was invalid ("name" or "version").
+        what: String,
+        /// The offending value.
+        value: String,
+    },
+
+    /// Tarball checksum mismatch.
+    #[error("checksum mismatch for {package}: expected {expected}, got {actual}")]
+    ChecksumMismatch {
+        /// Package identifier.
+        package: String,
+        /// Expected SHA-256.
+        expected: String,
+        /// Actual SHA-256.
+        actual: String,
+    },
+
+    /// No published checksum is available for this package.
+    #[error(
+        "no published checksum for {0}; refusing unverified download \
+         (set BHC_ALLOW_UNVERIFIED_DOWNLOADS=1 to override)"
+    )]
+    MissingChecksum(String),
 }
 
 /// Result type for Hackage operations.
@@ -182,6 +241,9 @@ impl Hackage {
 
     /// Fetch a package from Hackage, downloading if not cached.
     pub fn fetch_package(&self, name: &str, version: &str) -> HackageResult<HackagePackage> {
+        validate_component(name, "name")?;
+        validate_component(version, "version")?;
+
         let pkg_path = self.package_path(name, version);
 
         // Check cache first
@@ -194,11 +256,74 @@ impl Hackage {
         info!("Downloading {}-{} from Hackage...", name, version);
         let tarball = self.download_tarball(name, version)?;
 
+        // Verify against the SHA-256 Hackage publishes in the package's
+        // TUF target metadata before extracting anything
+        self.verify_tarball(name, version, &tarball)?;
+
         // Extract to cache
         self.extract_tarball(name, version, &tarball)?;
 
         // Load the package
         self.load_cached_package(name, version)
+    }
+
+    /// Verify a downloaded tarball against Hackage's published SHA-256.
+    ///
+    /// Hackage serves per-package TUF target metadata at
+    /// `/package/{name}-{version}/package.json` containing the tarball's
+    /// SHA-256. If no checksum can be obtained, the download is rejected
+    /// unless `BHC_ALLOW_UNVERIFIED_DOWNLOADS=1` is set.
+    fn verify_tarball(&self, name: &str, version: &str, tarball: &[u8]) -> HackageResult<()> {
+        let pkg_id = format!("{name}-{version}");
+
+        let expected = match self.fetch_published_sha256(&pkg_id) {
+            Some(hash) => hash,
+            None => {
+                if std::env::var(ALLOW_UNVERIFIED_ENV)
+                    .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                {
+                    warn!(
+                        "No published checksum for {pkg_id}; proceeding unverified \
+                         because {ALLOW_UNVERIFIED_ENV} is set"
+                    );
+                    return Ok(());
+                }
+                return Err(HackageError::MissingChecksum(pkg_id));
+            }
+        };
+
+        let actual = hex_sha256(tarball);
+        if actual != expected {
+            return Err(HackageError::ChecksumMismatch {
+                package: pkg_id,
+                expected,
+                actual,
+            });
+        }
+        debug!("Verified SHA-256 for {pkg_id}");
+        Ok(())
+    }
+
+    /// Fetch the published SHA-256 for a package from its TUF metadata.
+    fn fetch_published_sha256(&self, pkg_id: &str) -> Option<String> {
+        let url = format!("{}/package/{pkg_id}/package.json", self.config.base_url);
+        debug!("Fetching checksum metadata: {url}");
+
+        let response = ureq::get(&url)
+            .timeout(std::time::Duration::from_secs(self.config.timeout))
+            .call()
+            .ok()?;
+        let body: serde_json::Value = response.into_json().ok()?;
+
+        // {"signed": {"targets": {"<path>": {"hashes": {"sha256": "..."}}}}}
+        let targets = body.get("signed")?.get("targets")?.as_object()?;
+        let hash = targets
+            .values()
+            .next()?
+            .get("hashes")?
+            .get("sha256")?
+            .as_str()?;
+        Some(hash.to_ascii_lowercase())
     }
 
     /// Download a package tarball from Hackage.

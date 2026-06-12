@@ -501,11 +501,15 @@ fn allocate_device_memory(
         DeviceKind::Rocm => crate::runtime::rocm::malloc(size),
 
         DeviceKind::Mock | _ => {
-            // Mock allocation: use host memory
+            // Mock allocation: use host memory.
+            // The global allocator must not be called with a zero-size layout
+            if size == 0 {
+                return Ok(DevicePtr(256));
+            }
             let layout = Layout::from_size_align(size, 256)
                 .map_err(|_| GpuError::AllocationFailed { size })?;
 
-            // Safety: layout is valid
+            // Safety: layout is valid and non-zero
             let ptr = unsafe { std::alloc::alloc(layout) };
             if ptr.is_null() {
                 Err(GpuError::AllocationFailed { size })

@@ -35,7 +35,7 @@
 //! - No GC roots or write barriers
 //! - Static stack allocation
 
-use crate::{AllocError, AllocResult, MemoryRegion};
+use crate::{AllocError, AllocResult, MemoryRegion, Zeroable};
 use std::alloc::Layout;
 use std::cell::UnsafeCell;
 use std::ptr::NonNull;
@@ -53,7 +53,10 @@ pub struct StaticAllocator {
     cursor: AtomicUsize,
     /// Total capacity in bytes.
     capacity: AtomicUsize,
-    /// Whether the allocator has been initialized.
+    /// Whether a thread has claimed initialization (set first, via CAS).
+    claimed: AtomicBool,
+    /// Whether the allocator is fully initialized and ready for use
+    /// (set last, after base/capacity are written).
     initialized: AtomicBool,
     /// Total bytes allocated.
     bytes_allocated: AtomicUsize,
@@ -73,6 +76,7 @@ impl StaticAllocator {
             base: UnsafeCell::new(std::ptr::null_mut()),
             cursor: AtomicUsize::new(0),
             capacity: AtomicUsize::new(0),
+            claimed: AtomicBool::new(false),
             initialized: AtomicBool::new(false),
             bytes_allocated: AtomicUsize::new(0),
             allocation_count: AtomicUsize::new(0),
@@ -87,7 +91,13 @@ impl StaticAllocator {
     /// The buffer must have a static lifetime and must not be accessed
     /// through any other reference while the allocator is in use.
     pub unsafe fn init(&self, buffer: &'static mut [u8]) {
-        if self.initialized.load(Ordering::Acquire) {
+        // Claim initialization atomically so two racing init calls cannot
+        // both write the base pointer (check-then-store was a TOCTOU)
+        if self
+            .claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             panic!("StaticAllocator already initialized");
         }
 
@@ -96,6 +106,7 @@ impl StaticAllocator {
         }
         self.capacity.store(buffer.len(), Ordering::Release);
         self.cursor.store(0, Ordering::Release);
+        // Published last: alloc() acquires this flag before reading base
         self.initialized.store(true, Ordering::Release);
     }
 
@@ -107,7 +118,13 @@ impl StaticAllocator {
     /// - The memory must be exclusively owned by this allocator
     /// - The memory must have a static lifetime
     pub unsafe fn init_raw(&self, ptr: *mut u8, capacity: usize) {
-        if self.initialized.load(Ordering::Acquire) {
+        // Claim initialization atomically so two racing init calls cannot
+        // both write the base pointer (check-then-store was a TOCTOU)
+        if self
+            .claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             panic!("StaticAllocator already initialized");
         }
 
@@ -116,6 +133,7 @@ impl StaticAllocator {
         }
         self.capacity.store(capacity, Ordering::Release);
         self.cursor.store(0, Ordering::Release);
+        // Published last: alloc() acquires this flag before reading base
         self.initialized.store(true, Ordering::Release);
     }
 
@@ -216,7 +234,11 @@ impl StaticAllocator {
     }
 
     /// Allocate a zeroed array.
-    pub fn alloc_array_zeroed<T>(&self, len: usize) -> AllocResult<&'static mut [T]> {
+    ///
+    /// `T: Zeroable` guarantees the all-zero byte pattern is a valid `T`;
+    /// without that bound this API could mint invalid values (e.g. zeroed
+    /// references) from safe code.
+    pub fn alloc_array_zeroed<T: Zeroable>(&self, len: usize) -> AllocResult<&'static mut [T]> {
         if len == 0 {
             return Ok(unsafe { std::slice::from_raw_parts_mut(NonNull::dangling().as_ptr(), 0) });
         }

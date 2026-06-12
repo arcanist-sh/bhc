@@ -45,6 +45,15 @@ pub enum ParseError {
         /// Location.
         span: Span,
     },
+
+    /// Nesting too deep for the parser.
+    #[error("expression nesting exceeds the maximum depth of {limit}")]
+    RecursionLimit {
+        /// The configured limit.
+        limit: usize,
+        /// Location.
+        span: Span,
+    },
 }
 
 impl ParseError {
@@ -65,6 +74,10 @@ impl ParseError {
                 Diagnostic::error(format!("invalid literal: {message}"))
                     .with_label(FullSpan::new(file, *span), "invalid literal")
             }
+            Self::RecursionLimit { limit, span } => Diagnostic::error(format!(
+                "expression nesting exceeds the maximum depth of {limit}"
+            ))
+            .with_label(FullSpan::new(file, *span), "nesting too deep here"),
         }
     }
 }
@@ -85,7 +98,16 @@ pub struct Parser<'src> {
     /// The source code (for error messages).
     #[allow(dead_code)]
     src: &'src str,
+    /// Current recursion depth (expressions, types, patterns).
+    depth: usize,
 }
+
+/// Maximum nesting depth for expressions, types, and patterns.
+///
+/// Recursive-descent parsing uses the host stack; without a cap, deeply
+/// nested input (e.g. thousands of opening parentheses) overflows the
+/// stack and aborts the process instead of reporting a diagnostic.
+const MAX_PARSE_DEPTH: usize = 64;
 
 impl<'src> Parser<'src> {
     /// Create a new parser for the given source code.
@@ -98,7 +120,25 @@ impl<'src> Parser<'src> {
             diagnostics: DiagnosticHandler::new(),
             file_id,
             src,
+            depth: 0,
         }
+    }
+
+    /// Enter one level of parse recursion, erroring at the depth limit.
+    pub(crate) fn enter_recursion(&mut self) -> ParseResult<()> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            return Err(ParseError::RecursionLimit {
+                limit: MAX_PARSE_DEPTH,
+                span: self.current_span(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Leave one level of parse recursion.
+    pub(crate) fn exit_recursion(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 
     /// Get the current token.

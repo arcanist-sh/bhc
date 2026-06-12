@@ -73,6 +73,18 @@ pub enum RegistryError {
         reason: String,
     },
 
+    /// The index entry provides no checksum to verify against.
+    #[error(
+        "no checksum available for {package} v{version}; refusing unverified download \
+         (set verify_checksums = false to override)"
+    )]
+    MissingChecksum {
+        /// Package name.
+        package: String,
+        /// Version.
+        version: Version,
+    },
+
     /// Checksum mismatch.
     #[error("checksum mismatch for {package}: expected {expected}, got {actual}")]
     ChecksumMismatch {
@@ -597,14 +609,23 @@ impl PackageRegistry for Registry {
         // Fetch tarball
         let data = self.fetch_tarball(name, version)?;
 
-        // Verify checksum
+        // Verify checksum (fail closed: an index entry that simply omits
+        // its checksum must not bypass verification)
         if self.config.verify_checksums {
-            if let Some(ref expected) = version_info.checksum {
-                if !self.verify_checksum(&data, expected) {
-                    return Err(RegistryError::ChecksumMismatch {
+            match version_info.checksum {
+                Some(ref expected) => {
+                    if !self.verify_checksum(&data, expected) {
+                        return Err(RegistryError::ChecksumMismatch {
+                            package: name.to_string(),
+                            expected: expected.clone(),
+                            actual: compute_sha256(&data),
+                        });
+                    }
+                }
+                None => {
+                    return Err(RegistryError::MissingChecksum {
                         package: name.to_string(),
-                        expected: expected.clone(),
-                        actual: compute_sha256(&data),
+                        version: version.clone(),
                     });
                 }
             }

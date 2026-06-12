@@ -2576,6 +2576,33 @@ impl TyCtxt {
                     let pair_ba = Ty::Tuple(vec![Ty::Var(b.clone()), Ty::Var(a.clone())]);
                     Scheme::poly(vec![a.clone(), b.clone()], Ty::fun(pair_ab, pair_ba))
                 }
+                // succ :: Int -> Int
+                "succ" => {
+                    Scheme::mono(Ty::fun(
+                        self.builtins.int_ty.clone(),
+                        self.builtins.int_ty.clone(),
+                    ))
+                }
+                // pred :: Int -> Int
+                "pred" => {
+                    Scheme::mono(Ty::fun(
+                        self.builtins.int_ty.clone(),
+                        self.builtins.int_ty.clone(),
+                    ))
+                }
+                // (&) :: a -> (a -> b) -> b
+                "&" => {
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(
+                            Ty::Var(a.clone()),
+                            Ty::fun(
+                                Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                                Ty::Var(b.clone()),
+                            ),
+                        ),
+                    )
+                }
                 // readFile :: String -> IO String
                 "readFile" => {
                     Scheme::mono(Ty::fun(

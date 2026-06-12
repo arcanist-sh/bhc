@@ -292,6 +292,29 @@ impl RawBlock {
     }
 }
 
+/// Types for which the all-zero byte pattern is a valid value.
+///
+/// # Safety
+///
+/// Implementors must guarantee that a value consisting entirely of zero
+/// bytes is a valid `Self`. This rules out references, `NonZero*` types,
+/// function pointers, and most enums. `Copy` alone is NOT sufficient
+/// (e.g. `&T` is `Copy` but a zeroed reference is instant UB).
+pub unsafe trait Zeroable: Copy {}
+
+macro_rules! impl_zeroable {
+    ($($t:ty),* $(,)?) => {
+        $(
+            // Safety: the all-zero bit pattern is a valid value of this type
+            unsafe impl Zeroable for $t {}
+        )*
+    };
+}
+
+impl_zeroable!(
+    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64, bool, char, ()
+);
+
 /// Statistics for memory allocation tracking.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AllocStats {
@@ -380,44 +403,43 @@ pub fn is_aligned(ptr: *const u8, align: usize) -> bool {
 /// ```
 #[derive(Debug, Default)]
 pub struct PinnedAllocator {
-    stats: std::cell::UnsafeCell<AllocStats>,
+    // A Mutex (rather than UnsafeCell) keeps the auto-derived Send/Sync
+    // sound: allocate/deallocate take &self and may be called from
+    // multiple threads concurrently.
+    stats: std::sync::Mutex<AllocStats>,
 }
-
-// Safety: The UnsafeCell is only used for interior mutability of statistics,
-// which is only modified during allocation/deallocation operations.
-// In practice, allocations should be synchronized at a higher level.
-unsafe impl Send for PinnedAllocator {}
-unsafe impl Sync for PinnedAllocator {}
 
 impl PinnedAllocator {
     /// Create a new pinned allocator.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            stats: std::cell::UnsafeCell::new(AllocStats::new()),
+            stats: std::sync::Mutex::new(AllocStats::new()),
         }
     }
 
     /// Get allocation statistics.
     #[must_use]
     pub fn stats(&self) -> AllocStats {
-        // Safety: We're only reading the stats
-        unsafe { *self.stats.get() }
+        self.stats.lock().map(|s| *s).unwrap_or_default()
     }
 
     fn record_alloc(&self, size: usize) {
-        // Safety: Single-threaded modification during allocation
-        unsafe { (*self.stats.get()).record_alloc(size) }
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.record_alloc(size);
+        }
     }
 
     fn record_dealloc(&self, size: usize) {
-        // Safety: Single-threaded modification during deallocation
-        unsafe { (*self.stats.get()).record_dealloc(size) }
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.record_dealloc(size);
+        }
     }
 
     fn record_failure(&self) {
-        // Safety: Single-threaded modification
-        unsafe { (*self.stats.get()).record_failure() }
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.record_failure();
+        }
     }
 }
 
@@ -478,6 +500,10 @@ impl Allocator for PinnedAllocator {
 pub struct PinnedBuffer<T> {
     ptr: NonNull<T>,
     len: usize,
+    /// Layout used for the allocation; `Drop` must deallocate with exactly
+    /// this layout (e.g. `new_aligned` may use a larger alignment than
+    /// `Layout::array::<T>` would).
+    layout: Layout,
     allocator: PinnedAllocator,
 }
 
@@ -495,6 +521,7 @@ impl<T> PinnedBuffer<T> {
             return Ok(Self {
                 ptr: NonNull::dangling(),
                 len: 0,
+                layout: Layout::new::<T>(),
                 allocator: PinnedAllocator::new(),
             });
         }
@@ -509,6 +536,7 @@ impl<T> PinnedBuffer<T> {
         Ok(Self {
             ptr: ptr.cast(),
             len,
+            layout,
             allocator,
         })
     }
@@ -519,6 +547,7 @@ impl<T> PinnedBuffer<T> {
             return Ok(Self {
                 ptr: NonNull::dangling(),
                 len: 0,
+                layout: Layout::new::<T>(),
                 allocator: PinnedAllocator::new(),
             });
         }
@@ -533,6 +562,7 @@ impl<T> PinnedBuffer<T> {
         Ok(Self {
             ptr: ptr.cast(),
             len,
+            layout,
             allocator,
         })
     }
@@ -543,6 +573,7 @@ impl<T> PinnedBuffer<T> {
             return Ok(Self {
                 ptr: NonNull::dangling(),
                 len: 0,
+                layout: Layout::new::<T>(),
                 allocator: PinnedAllocator::new(),
             });
         }
@@ -561,6 +592,7 @@ impl<T> PinnedBuffer<T> {
         Ok(Self {
             ptr: ptr.cast(),
             len,
+            layout,
             allocator,
         })
     }
@@ -661,10 +693,11 @@ impl<T> PinnedBuffer<T> {
 impl<T> Drop for PinnedBuffer<T> {
     fn drop(&mut self) {
         if self.len > 0 {
-            let layout = Layout::array::<T>(self.len).expect("layout was valid at allocation");
-            // Safety: This pointer was allocated by our allocator with this layout
+            // Safety: this pointer was allocated by our allocator with
+            // exactly `self.layout` (deallocating with a different
+            // alignment would be UB)
             unsafe {
-                self.allocator.deallocate(self.ptr.cast(), layout);
+                self.allocator.deallocate(self.ptr.cast(), self.layout);
             }
         }
     }

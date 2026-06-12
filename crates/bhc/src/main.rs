@@ -187,7 +187,29 @@ enum Commands {
     },
 }
 
+/// Install a panic hook that reports internal compiler errors with a
+/// bug-report banner instead of a raw Rust backtrace.
+fn install_ice_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        eprintln!();
+        eprintln!("error: internal compiler error: unexpected panic");
+        eprintln!();
+        eprintln!("note: the compiler unexpectedly panicked. this is a bug.");
+        eprintln!();
+        eprintln!(
+            "note: we would appreciate a bug report: \
+             https://github.com/raskell-io/bhc/issues/new"
+        );
+        eprintln!("note: bhc version: {}", env!("CARGO_PKG_VERSION"));
+        eprintln!("note: re-run with RUST_BACKTRACE=1 for a backtrace if one is not shown below");
+        eprintln!();
+        default_hook(info);
+    }));
+}
+
 fn main() -> Result<()> {
+    install_ice_hook();
     let cli = Cli::parse();
 
     // --numeric-version: print bare version and exit (used by hx-bhc for toolchain detection)

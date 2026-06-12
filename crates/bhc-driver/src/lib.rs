@@ -549,14 +549,8 @@ impl Compiler {
             self.callbacks
                 .on_phase_start(CompilePhase::TensorLower, &unit.module_name);
 
-            // In a full implementation, we would:
-            // 1. Get Core IR from previous phase
-            // 2. Lower Core IR to Tensor IR using bhc_tensor_ir::lower::lower_module()
-            //
-            // For now, we demonstrate the fusion pipeline with an empty operation list.
-            // When Core IR lowering is complete, replace this with:
-            //   let tensor_ops = bhc_tensor_ir::lower::lower_module(&core_module);
-            let tensor_ops: Vec<bhc_tensor_ir::TensorOp> = Vec::new();
+            // Lower the Core IR produced in the previous phase to Tensor IR
+            let tensor_ops = bhc_tensor_ir::lower::lower_module(&core);
 
             // Run fusion pass (strict mode for Numeric profile)
             let mut fusion_ctx = FusionContext::new(true);
@@ -1198,16 +1192,14 @@ impl Compiler {
             CodegenOutputType::LlvmBitcode => "bc",
         };
 
-        // Create a unique temp directory to avoid collisions during parallel compilation
-        let unique_id = std::process::id();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let output_dir = std::env::temp_dir().join(format!("bhc-{}-{}", unique_id, timestamp));
-        std::fs::create_dir_all(&output_dir).map_err(|e| {
-            CompileError::CodegenError(format!("failed to create output dir: {}", e))
-        })?;
+        // Unpredictable, owner-only temp directory: a fixed pid/timestamp
+        // name in the shared system temp dir could be pre-created (or
+        // symlinked) by another local user to redirect compiler output
+        let output_dir = tempfile::Builder::new()
+            .prefix("bhc-")
+            .tempdir()
+            .map_err(|e| CompileError::CodegenError(format!("failed to create output dir: {}", e)))?
+            .keep();
 
         let output_path = output_dir.join(format!("{}.{}", module_name, extension));
 
@@ -2403,15 +2395,14 @@ impl Compiler {
             CodegenOutputType::LlvmBitcode => "bc",
         };
 
-        let unique_id = std::process::id();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let output_dir = std::env::temp_dir().join(format!("bhc-{}-{}", unique_id, timestamp));
-        std::fs::create_dir_all(&output_dir).map_err(|e| {
-            CompileError::CodegenError(format!("failed to create output dir: {}", e))
-        })?;
+        // Unpredictable, owner-only temp directory: a fixed pid/timestamp
+        // name in the shared system temp dir could be pre-created (or
+        // symlinked) by another local user to redirect compiler output
+        let output_dir = tempfile::Builder::new()
+            .prefix("bhc-")
+            .tempdir()
+            .map_err(|e| CompileError::CodegenError(format!("failed to create output dir: {}", e)))?
+            .keep();
 
         let output_path = output_dir.join(format!("{}.{}", display_name, extension));
 

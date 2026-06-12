@@ -36,10 +36,12 @@
 
 pub mod frame;
 
-use bhc_rts_alloc::{align_up, Alignment, AllocError, AllocResult, AllocStats, MemoryRegion};
+use bhc_rts_alloc::{
+    align_up, Alignment, AllocError, AllocResult, AllocStats, MemoryRegion, Zeroable,
+};
 use std::alloc::{alloc, dealloc, Layout};
 use std::cell::Cell;
-use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
 /// Default arena size (1 MB).
@@ -63,6 +65,9 @@ pub struct HotArena {
     cursor: Cell<*mut u8>,
     /// Total capacity in bytes.
     capacity: usize,
+    /// Layout used for the backing allocation; `Drop` must deallocate with
+    /// exactly this layout (a mismatched alignment would be UB).
+    layout: Layout,
     /// Allocation statistics.
     stats: Cell<AllocStats>,
 }
@@ -88,14 +93,22 @@ impl HotArena {
         let layout =
             Layout::from_size_align(capacity, alignment.as_usize()).expect("invalid arena layout");
 
-        // Safety: layout is valid and non-zero
-        let base = unsafe { alloc(layout) };
-        let base = NonNull::new(base).expect("failed to allocate arena memory");
+        // The global allocator must not be called with a zero-size layout;
+        // a capacity-0 arena gets a dangling (aligned) base and never
+        // allocates or deallocates.
+        let base = if capacity == 0 {
+            NonNull::new(alignment.as_usize() as *mut u8).expect("alignment is non-zero")
+        } else {
+            // Safety: layout is valid and non-zero
+            let base = unsafe { alloc(layout) };
+            NonNull::new(base).expect("failed to allocate arena memory")
+        };
 
         Self {
             base,
             cursor: Cell::new(base.as_ptr()),
             capacity,
+            layout,
             stats: Cell::new(AllocStats::new()),
         }
     }
@@ -179,10 +192,10 @@ impl HotArena {
 
     /// Allocate an uninitialized slice in the arena.
     ///
-    /// # Safety
-    ///
-    /// The caller must initialize all elements before reading them.
-    pub unsafe fn alloc_slice_uninit<T>(&self, len: usize) -> AllocResult<&mut [T]> {
+    /// The returned slice is `MaybeUninit<T>`, so reading elements before
+    /// initializing them is a compile-time obligation rather than UB-by-
+    /// convention.
+    pub fn alloc_slice_uninit<T>(&self, len: usize) -> AllocResult<&mut [MaybeUninit<T>]> {
         if len == 0 {
             return Ok(&mut []);
         }
@@ -192,15 +205,18 @@ impl HotArena {
 
         let ptr = self.alloc_raw(layout)?;
 
-        // Safety: ptr is properly aligned and has enough space
+        // Safety: ptr is properly aligned and has enough space; MaybeUninit
+        // imposes no validity requirement on the contents
         unsafe {
-            let slice_ptr = ptr.as_ptr() as *mut T;
+            let slice_ptr = ptr.as_ptr() as *mut MaybeUninit<T>;
             Ok(std::slice::from_raw_parts_mut(slice_ptr, len))
         }
     }
 
     /// Allocate a zeroed slice in the arena.
-    pub fn alloc_slice_zeroed<T: Copy>(&self, len: usize) -> AllocResult<&mut [T]> {
+    ///
+    /// `T: Zeroable` guarantees the all-zero byte pattern is a valid `T`.
+    pub fn alloc_slice_zeroed<T: Zeroable>(&self, len: usize) -> AllocResult<&mut [T]> {
         if len == 0 {
             return Ok(&mut []);
         }
@@ -275,12 +291,14 @@ impl HotArena {
 
 impl Drop for HotArena {
     fn drop(&mut self) {
-        let layout = Layout::from_size_align(self.capacity, Alignment::CacheLine.as_usize())
-            .expect("layout was valid at construction");
+        if self.capacity == 0 {
+            return;
+        }
 
-        // Safety: base was allocated with this layout
+        // Safety: base was allocated with exactly this layout in
+        // `with_alignment`
         unsafe {
-            dealloc(self.base.as_ptr(), layout);
+            dealloc(self.base.as_ptr(), self.layout);
         }
     }
 }
@@ -293,21 +311,28 @@ unsafe impl Send for HotArena {}
 ///
 /// This enables nested arena scopes where inner allocations are
 /// freed before outer ones.
+///
+/// The scope borrows the arena *exclusively*: this is what makes the
+/// cursor rewind in `Drop` sound. If the scope held only `&HotArena`,
+/// safe code could keep references from `HotArena::alloc` alive across
+/// the scope's end and have the rewound cursor reallocate over them.
+/// With `&mut`, the borrow checker rules that out, and references handed
+/// out by [`ArenaScope::alloc`] are tied to the scope borrow, so they
+/// cannot outlive the reset either.
 #[derive(Debug)]
 pub struct ArenaScope<'a> {
-    arena: &'a HotArena,
+    arena: &'a mut HotArena,
     saved_cursor: *mut u8,
-    _marker: PhantomData<&'a ()>,
 }
 
 impl<'a> ArenaScope<'a> {
     /// Create a new arena scope.
     #[must_use]
-    pub fn new(arena: &'a HotArena) -> Self {
+    pub fn new(arena: &'a mut HotArena) -> Self {
+        let saved_cursor = arena.cursor.get();
         Self {
             arena,
-            saved_cursor: arena.cursor.get(),
-            _marker: PhantomData,
+            saved_cursor,
         }
     }
 
@@ -349,7 +374,7 @@ where
 ///
 /// Allocations within the scope are freed when the function returns,
 /// but the parent arena remains valid.
-pub fn with_scope<'a, F, R>(arena: &'a HotArena, f: F) -> R
+pub fn with_scope<'a, F, R>(arena: &'a mut HotArena, f: F) -> R
 where
     F: FnOnce(&ArenaScope<'a>) -> R,
 {
@@ -407,20 +432,43 @@ mod tests {
 
     #[test]
     fn test_arena_scope() {
-        let arena = HotArena::new(4096);
+        let mut arena = HotArena::new(4096);
 
         let _ = arena.alloc(1i32).unwrap();
         let used_before_scope = arena.used();
 
         {
-            let scope = ArenaScope::new(&arena);
+            let scope = ArenaScope::new(&mut arena);
             let _ = scope.alloc(2i32).unwrap();
             let _ = scope.alloc_slice(&[1, 2, 3]).unwrap();
-            assert!(arena.used() > used_before_scope);
+            assert!(scope.scope_used() > 0);
         }
 
         // After scope ends, cursor is restored
         assert_eq!(arena.used(), used_before_scope);
+    }
+
+    #[test]
+    fn test_arena_drop_with_custom_alignment() {
+        // Drop must deallocate with the same layout it allocated with
+        let arena = HotArena::with_alignment(8192, Alignment::Page);
+        let _ = arena.alloc(7u64).unwrap();
+        drop(arena);
+    }
+
+    #[test]
+    fn test_zero_capacity_arena() {
+        let arena = HotArena::new(0);
+        assert!(arena.alloc(1i32).is_err());
+    }
+
+    #[test]
+    fn test_alloc_slice_uninit_maybeuninit() {
+        let arena = HotArena::new(4096);
+        let slice = arena.alloc_slice_uninit::<u32>(4).unwrap();
+        for elem in slice.iter_mut() {
+            elem.write(7);
+        }
     }
 
     #[test]

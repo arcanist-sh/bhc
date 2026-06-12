@@ -33,7 +33,10 @@ impl<'src> Parser<'src> {
 
     /// Parse a pattern.
     pub fn parse_pattern(&mut self) -> ParseResult<Pat> {
-        self.parse_infix_pattern()
+        self.enter_recursion()?;
+        let result = self.parse_infix_pattern();
+        self.exit_recursion();
+        result
     }
 
     /// Parse an infix pattern like `x : xs` or `x :| xs`.

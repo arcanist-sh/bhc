@@ -11,8 +11,18 @@
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::AssertUnwindSafe;
 use std::ptr;
+use std::sync::atomic::{AtomicI64, AtomicPtr, Ordering};
 
 use crate::{global, init_default, Profile, RuntimeConfig};
+
+/// Abort the process with an RTS error message.
+///
+/// Used at FFI boundaries where unwinding into C is not an option and
+/// continuing with corrupted state would be undefined behavior.
+fn rts_abort(msg: &str) -> ! {
+    eprintln!("BHC Runtime Error: {msg}");
+    std::process::exit(1);
+}
 
 /// Initialize the BHC runtime system with default configuration.
 ///
@@ -126,6 +136,10 @@ pub extern "C" fn bhc_gc() {
 /// The returned pointer must be freed using `bhc_free` or by GC.
 #[no_mangle]
 pub extern "C" fn bhc_alloc(size: usize) -> *mut u8 {
+    // The global allocator must not be called with a zero-size layout
+    if size == 0 {
+        return 8 as *mut u8; // aligned dangling pointer; bhc_free ignores size 0
+    }
     let layout = std::alloc::Layout::from_size_align(size, 8).ok();
     match layout {
         Some(layout) => unsafe { std::alloc::alloc(layout) },
@@ -148,6 +162,10 @@ pub extern "C" fn bhc_alloc(size: usize) -> *mut u8 {
 /// The returned pointer must be freed using `bhc_free` or by GC.
 #[no_mangle]
 pub extern "C" fn bhc_alloc_zeroed(size: usize) -> *mut u8 {
+    // The global allocator must not be called with a zero-size layout
+    if size == 0 {
+        return 8 as *mut u8; // aligned dangling pointer; bhc_free ignores size 0
+    }
     let layout = std::alloc::Layout::from_size_align(size, 8).ok();
     match layout {
         Some(layout) => unsafe { std::alloc::alloc_zeroed(layout) },
@@ -168,7 +186,9 @@ pub extern "C" fn bhc_alloc_zeroed(size: usize) -> *mut u8 {
 /// or this is undefined behavior.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_free(ptr: *mut u8, size: usize) {
-    if !ptr.is_null() {
+    // Size-0 "allocations" are dangling sentinels from bhc_alloc; there is
+    // nothing to deallocate (and dealloc with a zero-size layout is UB)
+    if !ptr.is_null() && size > 0 {
         if let Some(layout) = std::alloc::Layout::from_size_align(size, 8).ok() {
             unsafe { std::alloc::dealloc(ptr, layout) };
         }
@@ -447,14 +467,17 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
         return obj;
     }
 
-    // Read the tag (i64 at offset 0)
-    let tag_ptr = obj as *mut i64;
-    let tag = unsafe { *tag_ptr };
+    // Tag and result-slot accesses are atomic: if a thunk is ever shared
+    // across tasks, plain loads/stores on these words would be a data race
+    // (UB), and a torn update could dispatch on a garbage tag.
+    let tag_atomic = unsafe { &*(obj as *const AtomicI64) };
+    let tag = tag_atomic.load(Ordering::Acquire);
 
     // Check for indirection (previously evaluated thunk) — must check before tag >= 0
     if tag == BHC_TAG_INDIRECTION {
-        // Return cached result from offset 8
-        return unsafe { *(obj.add(8) as *const *mut u8) };
+        // Return cached result from offset 8 (published with Release below)
+        let result_slot = unsafe { &*(obj.add(8) as *const AtomicPtr<u8>) };
+        return result_slot.load(Ordering::Acquire);
     }
 
     if tag >= 0 {
@@ -463,16 +486,28 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
     }
 
     if tag == BHC_TAG_BLACKHOLE {
-        // Circular reference detected - panic
-        eprintln!("BHC Runtime Error: <<loop>> - circular reference in thunk evaluation");
-        std::process::exit(1);
+        // Circular reference detected
+        rts_abort("<<loop>> - circular reference in thunk evaluation");
     }
 
     if tag == BHC_TAG_THUNK {
-        // Unevaluated thunk - mark as blackhole and evaluate
-        unsafe { *tag_ptr = BHC_TAG_BLACKHOLE };
+        // Claim the thunk: only the thread that wins the CAS evaluates it
+        if tag_atomic
+            .compare_exchange(
+                BHC_TAG_THUNK,
+                BHC_TAG_BLACKHOLE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            // Lost the race: another forcing is in progress or finished.
+            // Single-owner semantics treat a blackhole as <<loop>>.
+            rts_abort("<<loop>> - circular reference in thunk evaluation");
+        }
 
-        // Read eval function pointer (at offset 8)
+        // Read eval function pointer (at offset 8); we own the thunk after
+        // winning the CAS, so plain reads of its fields are fine
         let eval_fn_ptr = unsafe { *(obj.add(8) as *const *const u8) };
 
         // Read env_size (at offset 16) - currently unused but kept for documentation
@@ -489,12 +524,11 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
         // Call the evaluation function with the environment
         let result = eval_fn(env_ptr as *mut u8);
 
-        // Update the thunk with the result (indirection)
-        // Set tag to -3 (INDIRECTION) so re-forcing returns cached result
-        unsafe {
-            *tag_ptr = BHC_TAG_INDIRECTION;
-            *(obj.add(8) as *mut *mut u8) = result;
-        }
+        // Publish the result, then the INDIRECTION tag (both Release so a
+        // reader that Acquire-loads the tag sees the result pointer)
+        let result_slot = unsafe { &*(obj.add(8) as *const AtomicPtr<u8>) };
+        result_slot.store(result, Ordering::Release);
+        tag_atomic.store(BHC_TAG_INDIRECTION, Ordering::Release);
 
         return result;
     }
@@ -733,7 +767,12 @@ fn rational_make_normalized(num: i64, denom: i64) -> *mut u8 {
     let n = n / g;
     let d = d / g;
     unsafe {
-        let ptr = std::alloc::alloc(std::alloc::Layout::from_size_align(24, 8).unwrap());
+        let layout = std::alloc::Layout::from_size_align(24, 8).unwrap();
+        let ptr = std::alloc::alloc(layout);
+        if ptr.is_null() {
+            // Writing through a null allocation result would be UB
+            std::alloc::handle_alloc_error(layout);
+        }
         *(ptr as *mut i64) = 0; // tag
         *(ptr.add(8) as *mut i64) = n;
         *(ptr.add(16) as *mut i64) = d;
@@ -748,47 +787,68 @@ pub extern "C" fn bhc_rational_make(num: i64, denom: i64) -> *mut u8 {
     result
 }
 
+/// Read a Rational's (numerator, denominator), aborting on null.
+///
+/// A null pointer here means the generated code is broken; dereferencing
+/// it would be UB, so abort with a diagnostic instead.
+fn rational_parts(r: *const u8) -> (i64, i64) {
+    if r.is_null() {
+        rts_abort("Rational operation on null pointer");
+    }
+    unsafe { (*(r.add(8) as *const i64), *(r.add(16) as *const i64)) }
+}
+
 /// Extract numerator from a Rational.
+///
+/// # Safety
+///
+/// `r` must be a valid pointer to a Rational heap object created by
+/// `bhc_rational_make` (null is tolerated and aborts with a diagnostic).
 #[no_mangle]
-pub extern "C" fn bhc_rational_numerator(r: *mut u8) -> i64 {
-    unsafe { *(r.add(8) as *const i64) }
+pub unsafe extern "C" fn bhc_rational_numerator(r: *mut u8) -> i64 {
+    rational_parts(r).0
 }
 
 /// Extract denominator from a Rational.
+///
+/// # Safety
+///
+/// `r` must be a valid pointer to a Rational heap object created by
+/// `bhc_rational_make` (null is tolerated and aborts with a diagnostic).
 #[no_mangle]
-pub extern "C" fn bhc_rational_denominator(r: *mut u8) -> i64 {
-    unsafe { *(r.add(16) as *const i64) }
+pub unsafe extern "C" fn bhc_rational_denominator(r: *mut u8) -> i64 {
+    rational_parts(r).1
 }
 
 /// Rational addition: a/b + c/d = (a*d + b*c) / (b*d)
 #[no_mangle]
 pub extern "C" fn bhc_rational_add(a: *mut u8, b: *mut u8) -> *mut u8 {
-    let (an, ad) = (bhc_rational_numerator(a), bhc_rational_denominator(a));
-    let (bn, bd) = (bhc_rational_numerator(b), bhc_rational_denominator(b));
+    let (an, ad) = rational_parts(a);
+    let (bn, bd) = rational_parts(b);
     rational_make_normalized(an * bd + bn * ad, ad * bd)
 }
 
 /// Rational subtraction: a/b - c/d = (a*d - b*c) / (b*d)
 #[no_mangle]
 pub extern "C" fn bhc_rational_sub(a: *mut u8, b: *mut u8) -> *mut u8 {
-    let (an, ad) = (bhc_rational_numerator(a), bhc_rational_denominator(a));
-    let (bn, bd) = (bhc_rational_numerator(b), bhc_rational_denominator(b));
+    let (an, ad) = rational_parts(a);
+    let (bn, bd) = rational_parts(b);
     rational_make_normalized(an * bd - bn * ad, ad * bd)
 }
 
 /// Rational multiplication: (a/b) * (c/d) = (a*c) / (b*d)
 #[no_mangle]
 pub extern "C" fn bhc_rational_mul(a: *mut u8, b: *mut u8) -> *mut u8 {
-    let (an, ad) = (bhc_rational_numerator(a), bhc_rational_denominator(a));
-    let (bn, bd) = (bhc_rational_numerator(b), bhc_rational_denominator(b));
+    let (an, ad) = rational_parts(a);
+    let (bn, bd) = rational_parts(b);
     rational_make_normalized(an * bn, ad * bd)
 }
 
 /// Rational division: (a/b) / (c/d) = (a*d) / (b*c)
 #[no_mangle]
 pub extern "C" fn bhc_rational_div(a: *mut u8, b: *mut u8) -> *mut u8 {
-    let (an, ad) = (bhc_rational_numerator(a), bhc_rational_denominator(a));
-    let (bn, bd) = (bhc_rational_numerator(b), bhc_rational_denominator(b));
+    let (an, ad) = rational_parts(a);
+    let (bn, bd) = rational_parts(b);
     if bn == 0 {
         panic!("Rational: division by zero");
     }
@@ -798,21 +858,21 @@ pub extern "C" fn bhc_rational_div(a: *mut u8, b: *mut u8) -> *mut u8 {
 /// Rational negation: -(a/b)
 #[no_mangle]
 pub extern "C" fn bhc_rational_negate(r: *mut u8) -> *mut u8 {
-    let (n, d) = (bhc_rational_numerator(r), bhc_rational_denominator(r));
+    let (n, d) = rational_parts(r);
     rational_make_normalized(-n, d)
 }
 
 /// Rational absolute value: |a/b|
 #[no_mangle]
 pub extern "C" fn bhc_rational_abs(r: *mut u8) -> *mut u8 {
-    let (n, d) = (bhc_rational_numerator(r), bhc_rational_denominator(r));
+    let (n, d) = rational_parts(r);
     rational_make_normalized(n.abs(), d)
 }
 
 /// Rational signum: sign(a)/1
 #[no_mangle]
 pub extern "C" fn bhc_rational_signum(r: *mut u8) -> *mut u8 {
-    let n = bhc_rational_numerator(r);
+    let n = rational_parts(r).0;
     let s = if n > 0 { 1 } else if n < 0 { -1 } else { 0 };
     rational_make_normalized(s, 1)
 }
@@ -820,16 +880,16 @@ pub extern "C" fn bhc_rational_signum(r: *mut u8) -> *mut u8 {
 /// Rational equality: 1 if equal (both already normalized)
 #[no_mangle]
 pub extern "C" fn bhc_rational_eq(a: *mut u8, b: *mut u8) -> i64 {
-    let (an, ad) = (bhc_rational_numerator(a), bhc_rational_denominator(a));
-    let (bn, bd) = (bhc_rational_numerator(b), bhc_rational_denominator(b));
+    let (an, ad) = rational_parts(a);
+    let (bn, bd) = rational_parts(b);
     if an == bn && ad == bd { 1 } else { 0 }
 }
 
 /// Rational comparison: -1/0/1 via cross-multiplication
 #[no_mangle]
 pub extern "C" fn bhc_rational_compare(a: *mut u8, b: *mut u8) -> i32 {
-    let (an, ad) = (bhc_rational_numerator(a), bhc_rational_denominator(a));
-    let (bn, bd) = (bhc_rational_numerator(b), bhc_rational_denominator(b));
+    let (an, ad) = rational_parts(a);
+    let (bn, bd) = rational_parts(b);
     let left = an * bd;
     let right = bn * ad;
     match left.cmp(&right) {
@@ -848,14 +908,14 @@ pub extern "C" fn bhc_rational_from_int(n: i64) -> *mut u8 {
 /// Convert Rational to Double: num / denom as f64
 #[no_mangle]
 pub extern "C" fn bhc_rational_to_double(r: *mut u8) -> f64 {
-    let (n, d) = (bhc_rational_numerator(r), bhc_rational_denominator(r));
+    let (n, d) = rational_parts(r);
     n as f64 / d as f64
 }
 
 /// Rational reciprocal: (a/b) -> (b/a)
 #[no_mangle]
 pub extern "C" fn bhc_rational_recip(r: *mut u8) -> *mut u8 {
-    let (n, d) = (bhc_rational_numerator(r), bhc_rational_denominator(r));
+    let (n, d) = rational_parts(r);
     if n == 0 {
         panic!("Rational: reciprocal of zero");
     }
@@ -865,7 +925,7 @@ pub extern "C" fn bhc_rational_recip(r: *mut u8) -> *mut u8 {
 /// Show Rational: "num % denom" format, heap-allocated string
 #[no_mangle]
 pub extern "C" fn bhc_rational_show(r: *mut u8) -> *mut c_char {
-    let (n, d) = (bhc_rational_numerator(r), bhc_rational_denominator(r));
+    let (n, d) = rational_parts(r);
     let s = format!("{} % {}", n, d);
     let c_string = std::ffi::CString::new(s).unwrap();
     c_string.into_raw()
@@ -879,14 +939,30 @@ pub extern "C" fn bhc_new_ioref(val: *const u8) -> *mut u8 {
 }
 
 /// Read the value from an IORef
+///
+/// # Safety
+///
+/// `ref_ptr` must be a pointer returned by `bhc_new_ioref` (null is
+/// tolerated and aborts with a diagnostic).
 #[no_mangle]
-pub extern "C" fn bhc_read_ioref(ref_ptr: *const u8) -> *const u8 {
+pub unsafe extern "C" fn bhc_read_ioref(ref_ptr: *const u8) -> *const u8 {
+    if ref_ptr.is_null() {
+        rts_abort("readIORef on null reference");
+    }
     unsafe { *(ref_ptr as *const *const u8) }
 }
 
 /// Write a value to an IORef
+///
+/// # Safety
+///
+/// `ref_ptr` must be a pointer returned by `bhc_new_ioref` (null is
+/// tolerated and aborts with a diagnostic).
 #[no_mangle]
-pub extern "C" fn bhc_write_ioref(ref_ptr: *mut u8, val: *const u8) {
+pub unsafe extern "C" fn bhc_write_ioref(ref_ptr: *mut u8, val: *const u8) {
+    if ref_ptr.is_null() {
+        rts_abort("writeIORef on null reference");
+    }
     unsafe { *(ref_ptr as *mut *const u8) = val; }
 }
 

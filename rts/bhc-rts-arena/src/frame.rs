@@ -250,7 +250,10 @@ impl FrameArena {
     /// Allocate a zeroed slice in the current frame.
     ///
     /// Panics if not in a frame.
-    pub fn alloc_slice_zeroed<T: Copy>(&mut self, len: usize) -> AllocResult<&mut [T]> {
+    pub fn alloc_slice_zeroed<T: bhc_rts_alloc::Zeroable>(
+        &mut self,
+        len: usize,
+    ) -> AllocResult<&mut [T]> {
         assert_eq!(
             self.state,
             FrameState::InFrame,

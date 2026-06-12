@@ -10,6 +10,13 @@ use crate::{ParseError, ParseResult, Parser};
 impl<'src> Parser<'src> {
     /// Parse an expression, including optional type annotation.
     pub fn parse_expr(&mut self) -> ParseResult<Expr> {
+        self.enter_recursion()?;
+        let result = self.parse_expr_guarded();
+        self.exit_recursion();
+        result
+    }
+
+    fn parse_expr_guarded(&mut self) -> ParseResult<Expr> {
         let expr = self.parse_infix_expr(0)?;
 
         // Check for type annotation: expr :: Type
@@ -186,6 +193,16 @@ impl<'src> Parser<'src> {
 
     /// Parse a prefix expression (negation, etc.).
     fn parse_prefix_expr(&mut self) -> ParseResult<Expr> {
+        // This is the knot every nested expression form recurses through
+        // (paren exprs re-enter here without passing parse_expr), so the
+        // depth guard lives here as well
+        self.enter_recursion()?;
+        let result = self.parse_prefix_expr_guarded();
+        self.exit_recursion();
+        result
+    }
+
+    fn parse_prefix_expr_guarded(&mut self) -> ParseResult<Expr> {
         if let Some(tok) = self.current() {
             // Handle prefix negation - lexer produces TokenKind::Minus for standalone `-`
             let is_minus = matches!(&tok.node.kind, TokenKind::Minus)

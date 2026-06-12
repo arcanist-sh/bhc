@@ -9,6 +9,13 @@ use crate::{ParseError, ParseResult, Parser};
 impl<'src> Parser<'src> {
     /// Parse a type.
     pub fn parse_type(&mut self) -> ParseResult<Type> {
+        self.enter_recursion()?;
+        let result = self.parse_type_guarded();
+        self.exit_recursion();
+        result
+    }
+
+    fn parse_type_guarded(&mut self) -> ParseResult<Type> {
         let start = self.current_span();
 
         // Check for forall

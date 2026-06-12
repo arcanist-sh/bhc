@@ -4406,17 +4406,17 @@ mod tests {
             exe_path
         );
 
-        // Run the executable and check exit code
-        // Note: Our main returns 42, which becomes the exit code
+        // Run the executable and check exit code.
+        // Haskell semantics: main's value is discarded; the C entry-point
+        // wrapper returns 0 unless exitWith is called.
         let output = Command::new(&exe_path)
             .output()
             .expect("failed to run executable");
 
-        // Exit code should be 42 (main's return value)
         assert_eq!(
             output.status.code(),
-            Some(42),
-            "Executable should exit with code 42"
+            Some(0),
+            "Executable should exit cleanly with code 0"
         );
     }
 

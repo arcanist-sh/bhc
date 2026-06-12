@@ -2892,7 +2892,7 @@ mod tests {
                 },
             ],
             is_gadt: false,
-            deriving: vec![Symbol::intern("Eq")],
+            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Eq") }],
             span: Span::default(),
         };
 
@@ -2926,7 +2926,7 @@ mod tests {
                 span: Span::default(),
             }],
             is_gadt: false,
-            deriving: vec![Symbol::intern("Eq")],
+            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Eq") }],
             span: Span::default(),
         };
 
@@ -2977,7 +2977,7 @@ mod tests {
                 },
             ],
             is_gadt: false,
-            deriving: vec![Symbol::intern("Ord")],
+            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Ord") }],
             span: Span::default(),
         };
 
@@ -3019,7 +3019,7 @@ mod tests {
                 },
             ],
             is_gadt: false,
-            deriving: vec![Symbol::intern("Show")],
+            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Show") }],
             span: Span::default(),
         };
 
@@ -3070,7 +3070,7 @@ mod tests {
                 },
             ],
             is_gadt: false,
-            deriving: vec![Symbol::intern("Enum")],
+            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Enum") }],
             span: Span::default(),
         };
 
@@ -3121,7 +3121,7 @@ mod tests {
                 },
             ],
             is_gadt: false,
-            deriving: vec![Symbol::intern("Enum")],
+            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Enum") }],
             span: Span::default(),
         };
 
@@ -3168,7 +3168,7 @@ mod tests {
                 },
             ],
             is_gadt: false,
-            deriving: vec![Symbol::intern("Bounded")],
+            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Bounded") }],
             span: Span::default(),
         };
 
@@ -3207,7 +3207,7 @@ mod tests {
                 span: Span::default(),
             }],
             is_gadt: false,
-            deriving: vec![Symbol::intern("Functor")],
+            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Functor") }],
             span: Span::default(),
         };
 
@@ -3241,7 +3241,7 @@ mod tests {
                 span: Span::default(),
             }],
             is_gadt: false,
-            deriving: vec![Symbol::intern("Functor")],
+            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Functor") }],
             span: Span::default(),
         };
 
@@ -3268,7 +3268,7 @@ mod tests {
                 span: Span::default(),
             }],
             is_gadt: false,
-            deriving: vec![Symbol::intern("Foldable")],
+            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Foldable") }],
             span: Span::default(),
         };
 
@@ -3302,7 +3302,7 @@ mod tests {
                 span: Span::default(),
             }],
             is_gadt: false,
-            deriving: vec![Symbol::intern("Traversable")],
+            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Traversable") }],
             span: Span::default(),
         };
 

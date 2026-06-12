@@ -251,6 +251,7 @@ mod tests {
             exports: vec![],
             overloaded_strings: false,
             constructors: vec![],
+            foreign_imports: vec![],
         }
     }
 

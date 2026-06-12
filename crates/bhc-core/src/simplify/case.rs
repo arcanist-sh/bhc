@@ -6,7 +6,7 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::{Alt, AltCon, Expr, Literal};
+use crate::{Alt, AltCon, Bind, Expr, Literal};
 
 use super::expr_util::expr_size;
 use super::subst::substitute;
@@ -17,11 +17,11 @@ use super::subst::substitute;
 /// `None` otherwise.
 pub fn try_case_of_known(scrutinee: &Expr, alts: &[Alt]) -> Option<Expr> {
     match scrutinee {
-        Expr::Lit(lit, _, _) => try_case_of_literal(lit, alts),
+        Expr::Lit(lit, _, _) => try_case_of_literal(scrutinee, lit, alts),
         _ => {
             // Try to detect constructor application: Con a1 a2 ... an
             if let Some((con_name, args)) = peel_constructor_app(scrutinee) {
-                try_case_of_constructor(&con_name, &args, alts)
+                try_case_of_constructor(scrutinee, &con_name, &args, alts)
             } else {
                 None
             }
@@ -29,8 +29,32 @@ pub fn try_case_of_known(scrutinee: &Expr, alts: &[Alt]) -> Option<Expr> {
     }
 }
 
+/// Select a Default alternative, binding its binder (if any) to the scrutinee.
+///
+/// `case e of { x -> rhs }` selects `rhs` with `x` bound to `e`: literals are
+/// substituted directly; anything else is let-bound to avoid duplicating work.
+fn select_default_alt(scrutinee: &Expr, alt: &Alt) -> Expr {
+    match alt.binders.first() {
+        None => alt.rhs.clone(),
+        Some(binder) => {
+            if matches!(scrutinee, Expr::Lit(..) | Expr::Var(..)) {
+                let mut subst = FxHashMap::default();
+                subst.insert(binder.id, scrutinee.clone());
+                substitute(alt.rhs.clone(), &subst)
+            } else {
+                let span = alt.rhs.span();
+                Expr::Let(
+                    Box::new(Bind::NonRec(binder.clone(), Box::new(scrutinee.clone()))),
+                    Box::new(alt.rhs.clone()),
+                    span,
+                )
+            }
+        }
+    }
+}
+
 /// Match a literal scrutinee against case alternatives.
-fn try_case_of_literal(lit: &Literal, alts: &[Alt]) -> Option<Expr> {
+fn try_case_of_literal(scrutinee: &Expr, lit: &Literal, alts: &[Alt]) -> Option<Expr> {
     // First try exact literal match
     for alt in alts {
         if let AltCon::Lit(alt_lit) = &alt.con {
@@ -42,7 +66,7 @@ fn try_case_of_literal(lit: &Literal, alts: &[Alt]) -> Option<Expr> {
     // Fall back to default
     for alt in alts {
         if alt.con == AltCon::Default {
-            return Some(alt.rhs.clone());
+            return Some(select_default_alt(scrutinee, alt));
         }
     }
     None
@@ -93,7 +117,12 @@ fn is_constructor_name(name: &str) -> bool {
 }
 
 /// Match a known constructor application against case alternatives.
-fn try_case_of_constructor(con_name: &str, args: &[Expr], alts: &[Alt]) -> Option<Expr> {
+fn try_case_of_constructor(
+    scrutinee: &Expr,
+    con_name: &str,
+    args: &[Expr],
+    alts: &[Alt],
+) -> Option<Expr> {
     // Find matching alternative
     for alt in alts {
         if let AltCon::DataCon(dc) = &alt.con {
@@ -110,7 +139,7 @@ fn try_case_of_constructor(con_name: &str, args: &[Expr], alts: &[Alt]) -> Optio
     // Fall back to default
     for alt in alts {
         if alt.con == AltCon::Default {
-            return Some(alt.rhs.clone());
+            return Some(select_default_alt(scrutinee, alt));
         }
     }
     None
@@ -244,6 +273,58 @@ mod tests {
         let result = try_case_of_known(&mk_int(99), &alts);
         assert!(result.is_some());
         assert!(matches!(result.unwrap(), Expr::Lit(Literal::Int(0), _, _)));
+    }
+
+    #[test]
+    fn test_case_of_literal_default_with_binder() {
+        // case 7 of { x -> x } — the binder must be bound to the scrutinee
+        let alts = vec![Alt {
+            con: AltCon::Default,
+            binders: vec![mk_var("x", 20)],
+            rhs: mk_var_expr("x", 20),
+        }];
+        let result = try_case_of_known(&mk_int(7), &alts);
+        assert!(result.is_some());
+        // 7 substituted for x
+        assert!(matches!(result.unwrap(), Expr::Lit(Literal::Int(7), _, _)));
+    }
+
+    #[test]
+    fn test_case_of_constructor_default_with_binder() {
+        // case Just 42 of { Nothing -> 0; y -> 1 } — y must be let-bound,
+        // not left dangling
+        let just_42 = Expr::App(
+            Box::new(Expr::Var(mk_var("Just", 10), Span::default())),
+            Box::new(mk_int(42)),
+            Span::default(),
+        );
+        let alts = vec![
+            Alt {
+                con: AltCon::DataCon(mk_data_con("Nothing", 0, 0)),
+                binders: vec![],
+                rhs: mk_int(0),
+            },
+            Alt {
+                con: AltCon::Default,
+                binders: vec![mk_var("y", 20)],
+                rhs: mk_var_expr("y", 20),
+            },
+        ];
+        let result = try_case_of_known(&just_42, &alts).unwrap();
+        // y is bound via let to the scrutinee (non-trivial expr, not duplicated)
+        match result {
+            Expr::Let(bind, body, _) => {
+                match bind.as_ref() {
+                    crate::Bind::NonRec(var, rhs) => {
+                        assert_eq!(var.name.as_str(), "y");
+                        assert!(matches!(rhs.as_ref(), Expr::App(..)));
+                    }
+                    other => panic!("expected NonRec bind, got {other:?}"),
+                }
+                assert!(matches!(body.as_ref(), Expr::Var(v, _) if v.name.as_str() == "y"));
+            }
+            other => panic!("expected Let, got {other:?}"),
+        }
     }
 
     #[test]

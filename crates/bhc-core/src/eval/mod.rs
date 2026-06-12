@@ -1132,7 +1132,15 @@ impl Evaluator {
             *depth += 1;
         }
 
-        let result = self.eval_inner(expr, env);
+        // Grow the stack on demand: eval frames are large (especially in
+        // debug builds, where one eval_inner frame plus helpers can exceed
+        // 100KB), so deep recursion would otherwise overflow the physical
+        // stack long before the logical max_depth guard fires. The red zone
+        // must comfortably exceed the largest frame chain between two
+        // consecutive eval() calls.
+        let result = stacker::maybe_grow(1024 * 1024, 32 * 1024 * 1024, || {
+            self.eval_inner(expr, env)
+        });
 
         // Decrement depth
         *self.depth.borrow_mut() -= 1;

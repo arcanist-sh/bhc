@@ -166,6 +166,7 @@ petgraph = "0.6"
 dashmap = "5.5"
 rustc-hash = "1.1"
 indexmap = "2.1"
+stacker = "0.1"
 smallvec = { version = "1.11", features = ["union", "const_generics", "serde"] }
 bumpalo = { version = "3.14", features = ["collections"] }
 typed-arena = "2.0"

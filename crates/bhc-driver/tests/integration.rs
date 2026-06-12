@@ -1203,7 +1203,6 @@ main = fib 10
 }
 
 #[test]
-#[ignore = "Ackermann causes stack overflow in interpreter due to deep recursion"]
 fn test_ackermann_small() {
     // ackermann 2 3 = 9
     let source = r#"

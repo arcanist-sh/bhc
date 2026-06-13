@@ -1,8 +1,22 @@
-//! Test parsing XMonad source files
+//! Test parsing XMonad source files.
+//!
+//! These tests parse a local XMonad checkout at /tmp/xmonad and are skipped
+//! when it is absent (clone https://github.com/xmonad/xmonad to /tmp/xmonad
+//! to run them).
 
 use bhc_parser::parse_module;
 use bhc_span::FileId;
 use std::fs;
+
+/// Returns true (and prints a notice) when the XMonad checkout is missing.
+fn xmonad_missing() -> bool {
+    if std::path::Path::new("/tmp/xmonad/src").exists() {
+        false
+    } else {
+        eprintln!("skipping: no XMonad checkout at /tmp/xmonad");
+        true
+    }
+}
 
 fn test_parse_file(path: &str) -> (usize, usize, usize) {
     let source = fs::read_to_string(path).expect("read file");
@@ -22,6 +36,9 @@ fn test_parse_file(path: &str) -> (usize, usize, usize) {
 
 #[test]
 fn test_xmonad_core() {
+    if xmonad_missing() {
+        return;
+    }
     let (imports, decls, errors) = test_parse_file("/tmp/xmonad/src/XMonad/Core.hs");
     println!(
         "Core.hs: {} imports, {} decls, {} errors",
@@ -33,6 +50,9 @@ fn test_xmonad_core() {
 
 #[test]
 fn test_xmonad_stackset() {
+    if xmonad_missing() {
+        return;
+    }
     let (imports, decls, errors) = test_parse_file("/tmp/xmonad/src/XMonad/StackSet.hs");
     println!(
         "StackSet.hs: {} imports, {} decls, {} errors",
@@ -43,6 +63,9 @@ fn test_xmonad_stackset() {
 
 #[test]
 fn test_xmonad_main() {
+    if xmonad_missing() {
+        return;
+    }
     let (imports, decls, errors) = test_parse_file("/tmp/xmonad/src/XMonad.hs");
     println!(
         "XMonad.hs: {} imports, {} decls, {} errors",
@@ -53,6 +76,9 @@ fn test_xmonad_main() {
 
 #[test]
 fn test_all_xmonad_files() {
+    if xmonad_missing() {
+        return;
+    }
     let files = [
         ("/tmp/xmonad/src/XMonad.hs", "XMonad"),
         ("/tmp/xmonad/src/XMonad/Core.hs", "Core"),
@@ -87,6 +113,9 @@ fn test_all_xmonad_files() {
 
 #[test]
 fn test_layout_parse_errors() {
+    if xmonad_missing() {
+        return;
+    }
     let path = "/tmp/xmonad/src/XMonad/Layout.hs";
     let source = fs::read_to_string(path).expect("read file");
     let file_id = FileId::new(0);
@@ -117,6 +146,9 @@ fn test_layout_parse_errors() {
 
 #[test]
 fn test_operations_parse_errors() {
+    if xmonad_missing() {
+        return;
+    }
     let path = "/tmp/xmonad/src/XMonad/Operations.hs";
     let source = fs::read_to_string(path).expect("read file");
     let file_id = FileId::new(0);

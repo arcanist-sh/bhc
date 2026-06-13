@@ -441,7 +441,7 @@ fn test_if_expression_type_match() {
         "result",
         Expr::If(
             Box::new(Expr::Con(DefRef {
-                def_id: DefId::new(9), // True builtin ID
+                def_id: DefId::new(25), // True builtin ID
                 span: Span::DUMMY,
             })),
             Box::new(Expr::Lit(Lit::Int(1), Span::DUMMY)),
@@ -1126,7 +1126,7 @@ fn test_instance_declaration() {
             ],
             guards: vec![],
             rhs: Expr::Con(DefRef {
-                def_id: DefId::new(9), // True
+                def_id: DefId::new(25), // True
                 span: Span::DUMMY,
             }),
             span: Span::DUMMY,
@@ -1204,7 +1204,7 @@ fn test_instance_with_multiple_methods() {
             pats: vec![Pat::Var(Symbol::intern("x"), def_id(302), Span::DUMMY)],
             guards: vec![],
             rhs: Expr::Con(DefRef {
-                def_id: DefId::new(9), // True (placeholder)
+                def_id: DefId::new(25), // True (placeholder)
                 span: Span::DUMMY,
             }),
             span: Span::DUMMY,
@@ -1220,7 +1220,7 @@ fn test_instance_with_multiple_methods() {
             pats: vec![Pat::Var(Symbol::intern("x"), def_id(304), Span::DUMMY)],
             guards: vec![],
             rhs: Expr::Con(DefRef {
-                def_id: DefId::new(9), // True (placeholder)
+                def_id: DefId::new(25), // True (placeholder)
                 span: Span::DUMMY,
             }),
             span: Span::DUMMY,

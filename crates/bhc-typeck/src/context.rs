@@ -1053,7 +1053,11 @@ impl TyCtxt {
     /// The lowering pass assigns DefIds to builtin functions and constructors.
     /// This method registers those builtins in the type environment with the
     /// correct DefIds so that type checking can find them.
-    pub fn register_lowered_builtins(&mut self, defs: &crate::DefMap) {
+    pub fn register_lowered_builtins(
+        &mut self,
+        defs: &crate::DefMap,
+        local_value_ids: &rustc_hash::FxHashSet<DefId>,
+    ) {
         use bhc_lower::DefKind;
         use bhc_types::TyVar;
 
@@ -1724,6 +1728,13 @@ impl TyCtxt {
             if matches!(def_info.kind, DefKind::PatVar | DefKind::ImportedValue) {
                 continue;
             }
+            // Skip names the module defines itself (top-level values, class
+            // and instance methods) — the user's definition shadows any
+            // same-named Prelude builtin, so it must not get the hardcoded
+            // builtin scheme. Its type comes from inference or its signature.
+            if local_value_ids.contains(&def_info.id) {
+                continue;
+            }
             let raw_name = def_info.name.as_str();
             // Normalize ByteString variant module names so they share type signatures,
             // EXCEPT for Char8-specific functions that need Char instead of Word8/Int.
@@ -1966,33 +1977,39 @@ impl TyCtxt {
                     let list_int = Ty::List(Box::new(self.builtins.int_ty.clone()));
                     Scheme::mono(Ty::fun(list_int, self.builtins.int_ty.clone()))
                 }
-                // foldl :: (b -> a -> b) -> b -> [a] -> b
-                // Specialized to lists (no Foldable typeclass yet).
+                // foldl :: (b -> a -> b) -> b -> c -> b
+                // Container arg is polymorphic so DeriveFoldable types work —
+                // codegen dispatches by expression structure (E.52).
                 "foldl" | "foldl'" => {
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                     Scheme::poly(
-                        vec![a.clone(), b.clone()],
+                        vec![a.clone(), b.clone(), c.clone()],
                         Ty::fun(
                             Ty::fun(
                                 Ty::Var(b.clone()),
                                 Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
                             ),
-                            Ty::fun(Ty::Var(b.clone()), Ty::fun(list_a, Ty::Var(b.clone()))),
+                            Ty::fun(
+                                Ty::Var(b.clone()),
+                                Ty::fun(Ty::Var(c.clone()), Ty::Var(b.clone())),
+                            ),
                         ),
                     )
                 }
-                // foldr :: (a -> b -> b) -> b -> [a] -> b
-                // Specialized to lists (no Foldable typeclass yet).
+                // foldr :: (a -> b -> b) -> b -> c -> b
+                // Container arg is polymorphic so DeriveFoldable types work —
+                // codegen dispatches by expression structure (E.52).
                 "foldr" => {
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
                     Scheme::poly(
-                        vec![a.clone(), b.clone()],
+                        vec![a.clone(), b.clone(), c.clone()],
                         Ty::fun(
                             Ty::fun(
                                 Ty::Var(a.clone()),
                                 Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
                             ),
-                            Ty::fun(Ty::Var(b.clone()), Ty::fun(list_a, Ty::Var(b.clone()))),
+                            Ty::fun(
+                                Ty::Var(b.clone()),
+                                Ty::fun(Ty::Var(c.clone()), Ty::Var(b.clone())),
+                            ),
                         ),
                     )
                 }
@@ -4663,9 +4680,24 @@ impl TyCtxt {
                     );
                     Scheme::mono(io_text)
                 }
-                "Data.Text.IO.readFile" | "Data.Text.IO.writeFile" => {
-                    // FilePath -> IO Text / FilePath -> Text -> IO ()
-                    Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())))
+                "Data.Text.IO.readFile" => {
+                    // FilePath -> IO Text
+                    let io_text = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(self.builtins.text_ty.clone()),
+                    );
+                    Scheme::mono(Ty::fun(self.builtins.string_ty.clone(), io_text))
+                }
+                "Data.Text.IO.writeFile" | "Data.Text.IO.appendFile" => {
+                    // FilePath -> Text -> IO ()
+                    let io_unit = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::Tuple(vec![])),
+                    );
+                    Scheme::mono(Ty::fun(
+                        self.builtins.string_ty.clone(),
+                        Ty::fun(self.builtins.text_ty.clone(), io_unit),
+                    ))
                 }
 
                 // Data.Text: groupBy, splitOn, breakOn, etc. (missing from earlier stubs)

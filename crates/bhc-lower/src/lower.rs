@@ -3796,15 +3796,23 @@ fn register_standard_module_exports(
                 }
             }
         } else {
-            // For modules without typed sigs, use indirect mapping
+            // For modules without typed sigs, prefer an existing binding of the
+            // fully-qualified name (e.g. fixed-DefId prelude bindings like
+            // Data.ByteString.Builder.toLazyByteString) — codegen dispatches on
+            // that name. Only fall back to the unqualified indirect mapping
+            // when no such binding exists; otherwise the alias would resolve to
+            // an unqualified stub that panics at runtime.
+            let full_qualified = Symbol::intern(&format!("{}.{}", module_name, export));
+            let prelude_bound = ctx.lookup_value(full_qualified);
             if ctx.lookup_value(aliased_qualified).is_none() {
-                ctx.register_qualified_name(aliased_qualified, unqualified);
-            }
-            if qualifier != module_name {
-                let full_qualified = Symbol::intern(&format!("{}.{}", module_name, export));
-                if ctx.lookup_value(full_qualified).is_none() {
-                    ctx.register_qualified_name(full_qualified, unqualified);
+                if let Some(def_id) = prelude_bound {
+                    ctx.bind_value(aliased_qualified, def_id);
+                } else {
+                    ctx.register_qualified_name(aliased_qualified, unqualified);
                 }
+            }
+            if qualifier != module_name && prelude_bound.is_none() {
+                ctx.register_qualified_name(full_qualified, unqualified);
             }
         }
 

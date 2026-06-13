@@ -166,9 +166,31 @@ pub fn type_check_module_full(
     ctx.register_builtins();
 
     // If we have definition mappings from the lowering pass, use them
-    // to register builtins with the correct DefIds
+    // to register builtins with the correct DefIds.
+    //
+    // Names defined by this module's own source (top-level values, class
+    // methods, instance methods) shadow Prelude builtins, so they must not
+    // receive hardcoded builtin schemes — e.g. a user class method named
+    // `combine` is unrelated to System.FilePath's `combine`.
     if let Some(def_map) = defs {
-        ctx.register_lowered_builtins(def_map);
+        let local_value_ids: rustc_hash::FxHashSet<DefId> = hir
+            .items
+            .iter()
+            .flat_map(|item| -> Vec<DefId> {
+                match item {
+                    bhc_hir::Item::Value(vd) => vec![vd.id],
+                    bhc_hir::Item::Class(c) => c
+                        .methods
+                        .iter()
+                        .map(|m| m.id)
+                        .chain(c.defaults.iter().map(|d| d.id))
+                        .collect(),
+                    bhc_hir::Item::Instance(i) => i.methods.iter().map(|m| m.id).collect(),
+                    _ => vec![],
+                }
+            })
+            .collect();
+        ctx.register_lowered_builtins(def_map, &local_value_ids);
     }
 
     // Register data types from the module

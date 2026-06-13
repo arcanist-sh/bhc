@@ -837,6 +837,7 @@ pub struct Scope<'a> {
 }
 
 /// A type-erased task handle for scope tracking.
+#[derive(Clone)]
 struct ScopedTaskHandle {
     /// Completion flag.
     done: Arc<AtomicBool>,
@@ -983,9 +984,12 @@ impl<'a> Scope<'a> {
 
     /// Wait for all tasks in this scope to complete.
     fn wait_all(&self) {
-        let handles = self.task_handles.lock();
+        // Snapshot the handle list, then release the lock. `check_deadline`
+        // calls `cancel`, which re-locks `task_handles` — holding it across
+        // the wait loop would deadlock.
+        let handles: Vec<ScopedTaskHandle> = self.task_handles.lock().clone();
 
-        for handle in handles.iter() {
+        for handle in &handles {
             // Check deadline periodically while waiting
             while !handle.done.load(Ordering::Acquire) {
                 if self.check_deadline() {

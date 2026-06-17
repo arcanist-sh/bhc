@@ -1850,10 +1850,7 @@ fn show_stats_from_source(file: &PathBuf, timing: bool, _memory: bool) -> Result
     println!("  Lines:        {}", lines_of_code);
     println!("  Declarations: {}", decl_count);
     println!("  Core bindings: {}", core.bindings.len());
-    println!(
-        "  Total time:   {:.2}ms",
-        total_time
-    );
+    println!("  Total time:   {:.2}ms", total_time);
     println!();
 
     // Timing breakdown

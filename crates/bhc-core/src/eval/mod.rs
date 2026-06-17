@@ -658,7 +658,10 @@ impl Evaluator {
             ("atomicModifyIORef", PrimOp::AtomicModifyIORef),
             ("Data.IORef.atomicModifyIORef", PrimOp::AtomicModifyIORef),
             ("atomicModifyIORef'", PrimOp::AtomicModifyIORefStrict),
-            ("Data.IORef.atomicModifyIORef'", PrimOp::AtomicModifyIORefStrict),
+            (
+                "Data.IORef.atomicModifyIORef'",
+                PrimOp::AtomicModifyIORefStrict,
+            ),
             // System.Exit
             ("exitSuccess", PrimOp::ExitSuccess),
             ("System.Exit.exitSuccess", PrimOp::ExitSuccess),
@@ -681,19 +684,31 @@ impl Evaluator {
             ("doesFileExist", PrimOp::DoesFileExist),
             ("System.Directory.doesFileExist", PrimOp::DoesFileExist),
             ("doesDirectoryExist", PrimOp::DoesDirectoryExist),
-            ("System.Directory.doesDirectoryExist", PrimOp::DoesDirectoryExist),
+            (
+                "System.Directory.doesDirectoryExist",
+                PrimOp::DoesDirectoryExist,
+            ),
             ("createDirectory", PrimOp::CreateDirectory),
             ("System.Directory.createDirectory", PrimOp::CreateDirectory),
             ("createDirectoryIfMissing", PrimOp::CreateDirectoryIfMissing),
-            ("System.Directory.createDirectoryIfMissing", PrimOp::CreateDirectoryIfMissing),
+            (
+                "System.Directory.createDirectoryIfMissing",
+                PrimOp::CreateDirectoryIfMissing,
+            ),
             ("removeFile", PrimOp::RemoveFile),
             ("System.Directory.removeFile", PrimOp::RemoveFile),
             ("removeDirectory", PrimOp::RemoveDirectory),
             ("System.Directory.removeDirectory", PrimOp::RemoveDirectory),
             ("getCurrentDirectory", PrimOp::GetCurrentDirectory),
-            ("System.Directory.getCurrentDirectory", PrimOp::GetCurrentDirectory),
+            (
+                "System.Directory.getCurrentDirectory",
+                PrimOp::GetCurrentDirectory,
+            ),
             ("setCurrentDirectory", PrimOp::SetCurrentDirectory),
-            ("System.Directory.setCurrentDirectory", PrimOp::SetCurrentDirectory),
+            (
+                "System.Directory.setCurrentDirectory",
+                PrimOp::SetCurrentDirectory,
+            ),
         ];
         for (name, op) in io_ops {
             prims.insert(Symbol::intern(name), Value::PrimOp(*op));
@@ -778,7 +793,10 @@ impl Evaluator {
             ("bracket_", PrimOp::ExnBracket_),
             ("Control.Exception.bracket_", PrimOp::ExnBracket_),
             ("bracketOnError", PrimOp::ExnBracketOnError),
-            ("Control.Exception.bracketOnError", PrimOp::ExnBracketOnError),
+            (
+                "Control.Exception.bracketOnError",
+                PrimOp::ExnBracketOnError,
+            ),
             ("finally", PrimOp::ExnFinally),
             ("Control.Exception.finally", PrimOp::ExnFinally),
             ("onException", PrimOp::ExnOnException),
@@ -794,9 +812,15 @@ impl Evaluator {
             ("mask_", PrimOp::ExnMask_),
             ("Control.Exception.mask_", PrimOp::ExnMask_),
             ("uninterruptibleMask", PrimOp::ExnUninterruptibleMask),
-            ("Control.Exception.uninterruptibleMask", PrimOp::ExnUninterruptibleMask),
+            (
+                "Control.Exception.uninterruptibleMask",
+                PrimOp::ExnUninterruptibleMask,
+            ),
             ("uninterruptibleMask_", PrimOp::ExnUninterruptibleMask_),
-            ("Control.Exception.uninterruptibleMask_", PrimOp::ExnUninterruptibleMask_),
+            (
+                "Control.Exception.uninterruptibleMask_",
+                PrimOp::ExnUninterruptibleMask_,
+            ),
             // Control.Concurrent
             ("forkIO", PrimOp::ForkIO),
             ("Control.Concurrent.forkIO", PrimOp::ForkIO),
@@ -914,7 +938,10 @@ impl Evaluator {
             ("countLeadingZeros", PrimOp::BitCountLeadingZeros),
             ("Data.Bits.countLeadingZeros", PrimOp::BitCountLeadingZeros),
             ("countTrailingZeros", PrimOp::BitCountTrailingZeros),
-            ("Data.Bits.countTrailingZeros", PrimOp::BitCountTrailingZeros),
+            (
+                "Data.Bits.countTrailingZeros",
+                PrimOp::BitCountTrailingZeros,
+            ),
             // Data.Proxy
             ("asProxyTypeOf", PrimOp::AsProxyTypeOf),
             ("Data.Proxy.asProxyTypeOf", PrimOp::AsProxyTypeOf),
@@ -1028,7 +1055,10 @@ impl Evaluator {
             Value::Data(DataValue {
                 con: crate::DataCon {
                     name: Symbol::intern("Nothing"),
-                    ty_con: bhc_types::TyCon::new(Symbol::intern("Maybe"), bhc_types::Kind::star_to_star()),
+                    ty_con: bhc_types::TyCon::new(
+                        Symbol::intern("Maybe"),
+                        bhc_types::Kind::star_to_star(),
+                    ),
                     tag: 0,
                     arity: 0,
                 },
@@ -1040,7 +1070,10 @@ impl Evaluator {
             Value::Data(DataValue {
                 con: crate::DataCon {
                     name: Symbol::intern("Just"),
-                    ty_con: bhc_types::TyCon::new(Symbol::intern("Maybe"), bhc_types::Kind::star_to_star()),
+                    ty_con: bhc_types::TyCon::new(
+                        Symbol::intern("Maybe"),
+                        bhc_types::Kind::star_to_star(),
+                    ),
                     tag: 1,
                     arity: 1,
                 },
@@ -1084,7 +1117,10 @@ impl Evaluator {
             Value::Data(DataValue {
                 con: crate::DataCon {
                     name: Symbol::intern("LT"),
-                    ty_con: bhc_types::TyCon::new(Symbol::intern("Ordering"), bhc_types::Kind::Star),
+                    ty_con: bhc_types::TyCon::new(
+                        Symbol::intern("Ordering"),
+                        bhc_types::Kind::Star,
+                    ),
                     tag: 0,
                     arity: 0,
                 },
@@ -1096,7 +1132,10 @@ impl Evaluator {
             Value::Data(DataValue {
                 con: crate::DataCon {
                     name: Symbol::intern("EQ"),
-                    ty_con: bhc_types::TyCon::new(Symbol::intern("Ordering"), bhc_types::Kind::Star),
+                    ty_con: bhc_types::TyCon::new(
+                        Symbol::intern("Ordering"),
+                        bhc_types::Kind::Star,
+                    ),
                     tag: 1,
                     arity: 0,
                 },
@@ -1108,7 +1147,10 @@ impl Evaluator {
             Value::Data(DataValue {
                 con: crate::DataCon {
                     name: Symbol::intern("GT"),
-                    ty_con: bhc_types::TyCon::new(Symbol::intern("Ordering"), bhc_types::Kind::Star),
+                    ty_con: bhc_types::TyCon::new(
+                        Symbol::intern("Ordering"),
+                        bhc_types::Kind::Star,
+                    ),
                     tag: 2,
                     arity: 0,
                 },
@@ -1138,9 +1180,8 @@ impl Evaluator {
         // stack long before the logical max_depth guard fires. The red zone
         // must comfortably exceed the largest frame chain between two
         // consecutive eval() calls.
-        let result = stacker::maybe_grow(1024 * 1024, 32 * 1024 * 1024, || {
-            self.eval_inner(expr, env)
-        });
+        let result =
+            stacker::maybe_grow(1024 * 1024, 32 * 1024 * 1024, || self.eval_inner(expr, env));
 
         // Decrement depth
         *self.depth.borrow_mut() -= 1;
@@ -2748,31 +2789,27 @@ impl Evaluator {
             }
 
             // === Enum operations ===
-            PrimOp::Succ => {
-                match &args[0] {
-                    Value::Int(n) => Ok(Value::Int(n + 1)),
-                    Value::Char(c) => {
-                        let n = u32::from(*c) + 1;
-                        Ok(Value::Char(char::from_u32(n).unwrap_or(*c)))
-                    }
-                    _ => Ok(Value::Int(args[0].as_int().unwrap_or(0) + 1)),
+            PrimOp::Succ => match &args[0] {
+                Value::Int(n) => Ok(Value::Int(n + 1)),
+                Value::Char(c) => {
+                    let n = u32::from(*c) + 1;
+                    Ok(Value::Char(char::from_u32(n).unwrap_or(*c)))
                 }
-            }
+                _ => Ok(Value::Int(args[0].as_int().unwrap_or(0) + 1)),
+            },
 
-            PrimOp::Pred => {
-                match &args[0] {
-                    Value::Int(n) => Ok(Value::Int(n - 1)),
-                    Value::Char(c) => {
-                        let n = u32::from(*c);
-                        if n == 0 {
-                            Err(EvalError::UserError("pred: zero character".into()))
-                        } else {
-                            Ok(Value::Char(char::from_u32(n - 1).unwrap_or(*c)))
-                        }
+            PrimOp::Pred => match &args[0] {
+                Value::Int(n) => Ok(Value::Int(n - 1)),
+                Value::Char(c) => {
+                    let n = u32::from(*c);
+                    if n == 0 {
+                        Err(EvalError::UserError("pred: zero character".into()))
+                    } else {
+                        Ok(Value::Char(char::from_u32(n - 1).unwrap_or(*c)))
                     }
-                    _ => Ok(Value::Int(args[0].as_int().unwrap_or(0) - 1)),
                 }
-            }
+                _ => Ok(Value::Int(args[0].as_int().unwrap_or(0) - 1)),
+            },
 
             PrimOp::ToEnum => {
                 // toEnum for Int is identity; for Char it converts
@@ -2781,14 +2818,12 @@ impl Evaluator {
                 Ok(Value::Int(n))
             }
 
-            PrimOp::FromEnum => {
-                match &args[0] {
-                    Value::Int(n) => Ok(Value::Int(*n)),
-                    Value::Char(c) => Ok(Value::Int(i64::from(u32::from(*c)))),
-                    Value::Data(d) if d.args.is_empty() => Ok(Value::Int(i64::from(d.con.tag))),
-                    _ => Ok(Value::Int(args[0].as_int().unwrap_or(0))),
-                }
-            }
+            PrimOp::FromEnum => match &args[0] {
+                Value::Int(n) => Ok(Value::Int(*n)),
+                Value::Char(c) => Ok(Value::Int(i64::from(u32::from(*c)))),
+                Value::Data(d) if d.args.is_empty() => Ok(Value::Int(i64::from(d.con.tag))),
+                _ => Ok(Value::Int(args[0].as_int().unwrap_or(0))),
+            },
 
             // === Integral operations ===
             PrimOp::Gcd => {
@@ -2812,7 +2847,12 @@ impl Evaluator {
                     Ok(Value::Int(0))
                 } else {
                     fn gcd(mut a: i64, mut b: i64) -> i64 {
-                        while b != 0 { let t = b; b = a % b; a = t; } a
+                        while b != 0 {
+                            let t = b;
+                            b = a % b;
+                            a = t;
+                        }
+                        a
                     }
                     Ok(Value::Int((a / gcd(a.abs(), b.abs())).abs() * b.abs()))
                 }
@@ -2821,7 +2861,9 @@ impl Evaluator {
             PrimOp::Quot => {
                 let a = args[0].as_int().unwrap_or(0);
                 let b = args[1].as_int().unwrap_or(0);
-                if b == 0 { return Err(EvalError::DivisionByZero); }
+                if b == 0 {
+                    return Err(EvalError::DivisionByZero);
+                }
                 // quot truncates towards zero
                 Ok(Value::Int(a / b))
             }
@@ -2829,26 +2871,39 @@ impl Evaluator {
             PrimOp::Rem => {
                 let a = args[0].as_int().unwrap_or(0);
                 let b = args[1].as_int().unwrap_or(0);
-                if b == 0 { return Err(EvalError::DivisionByZero); }
+                if b == 0 {
+                    return Err(EvalError::DivisionByZero);
+                }
                 Ok(Value::Int(a % b))
             }
 
             PrimOp::QuotRem => {
                 let a = args[0].as_int().unwrap_or(0);
                 let b = args[1].as_int().unwrap_or(0);
-                if b == 0 { return Err(EvalError::DivisionByZero); }
+                if b == 0 {
+                    return Err(EvalError::DivisionByZero);
+                }
                 Ok(self.make_pair(Value::Int(a / b), Value::Int(a % b)))
             }
 
             PrimOp::DivMod => {
                 let a = args[0].as_int().unwrap_or(0);
                 let b = args[1].as_int().unwrap_or(0);
-                if b == 0 { return Err(EvalError::DivisionByZero); }
+                if b == 0 {
+                    return Err(EvalError::DivisionByZero);
+                }
                 // Haskell div/mod truncates towards negative infinity
                 let d = a.div_euclid(b);
                 let m = a.rem_euclid(b);
                 // Adjust: Haskell divMod may differ from Euclidean for negative divisors
-                let (d, m) = if b < 0 { (-d - if m != 0 { 1 } else { 0 }, if m != 0 { m + b } else { 0 }) } else { (d, m) };
+                let (d, m) = if b < 0 {
+                    (
+                        -d - if m != 0 { 1 } else { 0 },
+                        if m != 0 { m + b } else { 0 },
+                    )
+                } else {
+                    (d, m)
+                };
                 Ok(self.make_pair(Value::Int(d), Value::Int(m)))
             }
 
@@ -2963,7 +3018,10 @@ impl Evaluator {
                 let xs = self.force_list(args[0].clone())?;
                 let ys = self.force_list(args[1].clone())?;
                 let zs = self.force_list(args[2].clone())?;
-                let result: Vec<Value> = xs.into_iter().zip(ys).zip(zs)
+                let result: Vec<Value> = xs
+                    .into_iter()
+                    .zip(ys)
+                    .zip(zs)
                     .map(|((x, y), z)| self.make_triple(x, y, z))
                     .collect();
                 Ok(Value::from_list(result))
@@ -3037,7 +3095,8 @@ impl Evaluator {
             PrimOp::GetChar => {
                 use std::io::Read;
                 let mut buf = [0u8; 1];
-                std::io::stdin().read_exact(&mut buf)
+                std::io::stdin()
+                    .read_exact(&mut buf)
                     .map_err(|e| EvalError::UserError(format!("getChar failed: {e}")))?;
                 Ok(Value::Char(buf[0] as char))
             }
@@ -3045,7 +3104,8 @@ impl Evaluator {
             PrimOp::GetContents => {
                 use std::io::Read;
                 let mut contents = String::new();
-                std::io::stdin().read_to_string(&mut contents)
+                std::io::stdin()
+                    .read_to_string(&mut contents)
                     .map_err(|e| EvalError::UserError(format!("getContents failed: {e}")))?;
                 Ok(Value::String(contents.into()))
             }
@@ -3069,7 +3129,10 @@ impl Evaluator {
                 use std::io::Write;
                 let path = self.value_to_string(&args[0])?;
                 let contents = self.value_to_string(&args[1])?;
-                let mut file = std::fs::OpenOptions::new().append(true).create(true).open(&path)
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&path)
                     .map_err(|e| EvalError::UserError(format!("{}: {e}", path)))?;
                 file.write_all(contents.as_bytes())
                     .map_err(|e| EvalError::UserError(format!("{}: {e}", path)))?;
@@ -3080,7 +3143,8 @@ impl Evaluator {
                 use std::io::Read;
                 let f = &args[0];
                 let mut input = String::new();
-                std::io::stdin().read_to_string(&mut input)
+                std::io::stdin()
+                    .read_to_string(&mut input)
                     .map_err(|e| EvalError::UserError(format!("interact failed: {e}")))?;
                 let result = self.apply(f.clone(), Value::String(input.into()))?;
                 let output = self.value_to_string(&self.force(result)?)?;
@@ -3106,7 +3170,9 @@ impl Evaluator {
                     x = self.apply(f.clone(), x)?;
                     x = self.force(x)?;
                 }
-                Err(EvalError::UserError("until: iteration limit exceeded".into()))
+                Err(EvalError::UserError(
+                    "until: iteration limit exceeded".into(),
+                ))
             }
 
             PrimOp::AsTypeOf => {
@@ -3139,16 +3205,24 @@ impl Evaluator {
                 let cmp_clone = cmp.clone();
                 let mut err: Option<EvalError> = None;
                 xs.sort_by(|a, b| {
-                    if err.is_some() { return std::cmp::Ordering::Equal; }
-                    match self.apply(cmp_clone.clone(), a.clone())
+                    if err.is_some() {
+                        return std::cmp::Ordering::Equal;
+                    }
+                    match self
+                        .apply(cmp_clone.clone(), a.clone())
                         .and_then(|f| self.apply(f, b.clone()))
                         .and_then(|v| self.force(v))
                     {
                         Ok(v) => self.ordering_value_to_cmp(&v),
-                        Err(e) => { err = Some(e); std::cmp::Ordering::Equal }
+                        Err(e) => {
+                            err = Some(e);
+                            std::cmp::Ordering::Equal
+                        }
                     }
                 });
-                if let Some(e) = err { return Err(e); }
+                if let Some(e) = err {
+                    return Err(e);
+                }
                 Ok(Value::from_list(xs))
             }
 
@@ -3190,7 +3264,10 @@ impl Evaluator {
                     for s in &seen {
                         let r = self.apply(self.apply(eq.clone(), s.clone())?, x.clone())?;
                         let r = self.force(r)?;
-                        if r.as_bool().unwrap_or(false) { found = true; break; }
+                        if r.as_bool().unwrap_or(false) {
+                            found = true;
+                            break;
+                        }
                     }
                     if !found {
                         seen.push(x.clone());
@@ -3226,12 +3303,15 @@ impl Evaluator {
                     let mut group = vec![xs[i].clone()];
                     let mut j = i + 1;
                     while j < xs.len() {
-                        let r = self.apply(self.apply(eq.clone(), xs[i].clone())?, xs[j].clone())?;
+                        let r =
+                            self.apply(self.apply(eq.clone(), xs[i].clone())?, xs[j].clone())?;
                         let r = self.force(r)?;
                         if r.as_bool().unwrap_or(false) {
                             group.push(xs[j].clone());
                             j += 1;
-                        } else { break; }
+                        } else {
+                            break;
+                        }
                     }
                     result.push(Value::from_list(group));
                     i = j;
@@ -3242,10 +3322,14 @@ impl Evaluator {
             PrimOp::Intersperse => {
                 let sep = args[0].clone();
                 let xs = self.force_list(args[1].clone())?;
-                if xs.len() <= 1 { return Ok(Value::from_list(xs)); }
+                if xs.len() <= 1 {
+                    return Ok(Value::from_list(xs));
+                }
                 let mut result = Vec::with_capacity(xs.len() * 2 - 1);
                 for (i, x) in xs.into_iter().enumerate() {
-                    if i > 0 { result.push(sep.clone()); }
+                    if i > 0 {
+                        result.push(sep.clone());
+                    }
                     result.push(x);
                 }
                 Ok(Value::from_list(result))
@@ -3256,7 +3340,9 @@ impl Evaluator {
                 let xss = self.force_list(args[1].clone())?;
                 let mut result = Vec::new();
                 for (i, xs_val) in xss.into_iter().enumerate() {
-                    if i > 0 { result.extend(sep.clone()); }
+                    if i > 0 {
+                        result.extend(sep.clone());
+                    }
                     let xs = self.force_list(xs_val)?;
                     result.extend(xs);
                 }
@@ -3270,13 +3356,17 @@ impl Evaluator {
                     let xs = self.force_list(xs_val)?;
                     rows.push(xs);
                 }
-                if rows.is_empty() { return Ok(Value::from_list(vec![])); }
+                if rows.is_empty() {
+                    return Ok(Value::from_list(vec![]));
+                }
                 let max_len = rows.iter().map(Vec::len).max().unwrap_or(0);
                 let mut result = Vec::new();
                 for col in 0..max_len {
                     let mut column = Vec::new();
                     for row in &rows {
-                        if col < row.len() { column.push(row[col].clone()); }
+                        if col < row.len() {
+                            column.push(row[col].clone());
+                        }
                     }
                     result.push(Value::from_list(column));
                 }
@@ -3292,7 +3382,9 @@ impl Evaluator {
                 for mask in 0..(1u64 << limit) {
                     let mut sub = Vec::new();
                     for (i, x) in xs.iter().enumerate().take(limit) {
-                        if mask & (1 << i) != 0 { sub.push(x.clone()); }
+                        if mask & (1 << i) != 0 {
+                            sub.push(x.clone());
+                        }
                     }
                     result.push(Value::from_list(sub));
                 }
@@ -3302,7 +3394,9 @@ impl Evaluator {
             PrimOp::Permutations => {
                 let xs = self.force_list(args[0].clone())?;
                 if xs.len() > 8 {
-                    return Err(EvalError::UserError("permutations: list too long (max 8)".into()));
+                    return Err(EvalError::UserError(
+                        "permutations: list too long (max 8)".into(),
+                    ));
                 }
                 let mut perms = Vec::new();
                 let mut indices: Vec<usize> = (0..xs.len()).collect();
@@ -3310,7 +3404,9 @@ impl Evaluator {
                     let perm: Vec<Value> = indices.iter().map(|&i| xs[i].clone()).collect();
                     perms.push(Value::from_list(perm));
                     // Next permutation
-                    if !next_permutation(&mut indices) { break; }
+                    if !next_permutation(&mut indices) {
+                        break;
+                    }
                 }
                 Ok(Value::from_list(perms))
             }
@@ -3323,7 +3419,11 @@ impl Evaluator {
                 for x in xs {
                     let r = self.apply(p.clone(), x.clone())?;
                     let r = self.force(r)?;
-                    if r.as_bool().unwrap_or(false) { yes.push(x); } else { no.push(x); }
+                    if r.as_bool().unwrap_or(false) {
+                        yes.push(x);
+                    } else {
+                        no.push(x);
+                    }
                 }
                 Ok(self.make_pair(Value::from_list(yes), Value::from_list(no)))
             }
@@ -3344,9 +3444,13 @@ impl Evaluator {
             PrimOp::StripPrefix => {
                 let prefix = self.force_list(args[0].clone())?;
                 let xs = self.force_list(args[1].clone())?;
-                if xs.len() < prefix.len() { return Ok(self.make_nothing()); }
+                if xs.len() < prefix.len() {
+                    return Ok(self.make_nothing());
+                }
                 for (p, x) in prefix.iter().zip(xs.iter()) {
-                    if !self.values_equal(p, x) { return Ok(self.make_nothing()); }
+                    if !self.values_equal(p, x) {
+                        return Ok(self.make_nothing());
+                    }
                 }
                 let rest: Vec<Value> = xs.into_iter().skip(prefix.len()).collect();
                 Ok(self.make_just(Value::from_list(rest)))
@@ -3355,9 +3459,13 @@ impl Evaluator {
             PrimOp::IsPrefixOf => {
                 let prefix = self.force_list(args[0].clone())?;
                 let xs = self.force_list(args[1].clone())?;
-                if prefix.len() > xs.len() { return Ok(Value::bool(false)); }
+                if prefix.len() > xs.len() {
+                    return Ok(Value::bool(false));
+                }
                 for (p, x) in prefix.iter().zip(xs.iter()) {
-                    if !self.values_equal(p, x) { return Ok(Value::bool(false)); }
+                    if !self.values_equal(p, x) {
+                        return Ok(Value::bool(false));
+                    }
                 }
                 Ok(Value::bool(true))
             }
@@ -3365,10 +3473,14 @@ impl Evaluator {
             PrimOp::IsSuffixOf => {
                 let suffix = self.force_list(args[0].clone())?;
                 let xs = self.force_list(args[1].clone())?;
-                if suffix.len() > xs.len() { return Ok(Value::bool(false)); }
+                if suffix.len() > xs.len() {
+                    return Ok(Value::bool(false));
+                }
                 let offset = xs.len() - suffix.len();
                 for (i, s) in suffix.iter().enumerate() {
-                    if !self.values_equal(s, &xs[offset + i]) { return Ok(Value::bool(false)); }
+                    if !self.values_equal(s, &xs[offset + i]) {
+                        return Ok(Value::bool(false));
+                    }
                 }
                 Ok(Value::bool(true))
             }
@@ -3376,14 +3488,23 @@ impl Evaluator {
             PrimOp::IsInfixOf => {
                 let needle = self.force_list(args[0].clone())?;
                 let haystack = self.force_list(args[1].clone())?;
-                if needle.is_empty() { return Ok(Value::bool(true)); }
-                if needle.len() > haystack.len() { return Ok(Value::bool(false)); }
+                if needle.is_empty() {
+                    return Ok(Value::bool(true));
+                }
+                if needle.len() > haystack.len() {
+                    return Ok(Value::bool(false));
+                }
                 for i in 0..=(haystack.len() - needle.len()) {
                     let mut found = true;
                     for (j, n) in needle.iter().enumerate() {
-                        if !self.values_equal(n, &haystack[i + j]) { found = false; break; }
+                        if !self.values_equal(n, &haystack[i + j]) {
+                            found = false;
+                            break;
+                        }
                     }
-                    if found { return Ok(Value::bool(true)); }
+                    if found {
+                        return Ok(Value::bool(true));
+                    }
                 }
                 Ok(Value::bool(false))
             }
@@ -3413,7 +3534,10 @@ impl Evaluator {
                     if !deleted {
                         let r = self.apply(self.apply(eq.clone(), x.clone())?, item.clone())?;
                         let r = self.force(r)?;
-                        if r.as_bool().unwrap_or(false) { deleted = true; continue; }
+                        if r.as_bool().unwrap_or(false) {
+                            deleted = true;
+                            continue;
+                        }
                     }
                     result.push(item);
                 }
@@ -3442,9 +3566,14 @@ impl Evaluator {
                     for x in &result {
                         let r = self.apply(self.apply(eq.clone(), x.clone())?, y.clone())?;
                         let r = self.force(r)?;
-                        if r.as_bool().unwrap_or(false) { found = true; break; }
+                        if r.as_bool().unwrap_or(false) {
+                            found = true;
+                            break;
+                        }
                     }
-                    if !found { result.push(y); }
+                    if !found {
+                        result.push(y);
+                    }
                 }
                 Ok(Value::from_list(result))
             }
@@ -3452,7 +3581,8 @@ impl Evaluator {
             PrimOp::Intersect => {
                 let xs = self.force_list(args[0].clone())?;
                 let ys = self.force_list(args[1].clone())?;
-                let result: Vec<Value> = xs.into_iter()
+                let result: Vec<Value> = xs
+                    .into_iter()
                     .filter(|x| ys.iter().any(|y| self.values_equal(x, y)))
                     .collect();
                 Ok(Value::from_list(result))
@@ -3468,9 +3598,14 @@ impl Evaluator {
                     for y in &ys {
                         let r = self.apply(self.apply(eq.clone(), x.clone())?, y.clone())?;
                         let r = self.force(r)?;
-                        if r.as_bool().unwrap_or(false) { found = true; break; }
+                        if r.as_bool().unwrap_or(false) {
+                            found = true;
+                            break;
+                        }
                     }
-                    if found { result.push(x); }
+                    if found {
+                        result.push(x);
+                    }
                 }
                 Ok(Value::from_list(result))
             }
@@ -3598,33 +3733,89 @@ impl Evaluator {
             }
 
             // === Data.Char operations ===
-            PrimOp::IsAlpha => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_alphabetic())) }
-            PrimOp::IsAlphaNum => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_alphanumeric())) }
-            PrimOp::IsAscii => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_ascii())) }
-            PrimOp::IsControl => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_control())) }
-            PrimOp::IsDigit => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_ascii_digit())) }
-            PrimOp::IsHexDigit => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_ascii_hexdigit())) }
-            PrimOp::IsLetter => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_alphabetic())) }
-            PrimOp::IsLower => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_lowercase())) }
-            PrimOp::IsNumber => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_numeric())) }
-            PrimOp::IsPrint => { let c = self.as_char(&args[0])?; Ok(Value::bool(!c.is_control())) }
-            PrimOp::IsPunctuation => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_ascii_punctuation())) }
-            PrimOp::IsSpace => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_whitespace())) }
+            PrimOp::IsAlpha => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(c.is_alphabetic()))
+            }
+            PrimOp::IsAlphaNum => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(c.is_alphanumeric()))
+            }
+            PrimOp::IsAscii => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(c.is_ascii()))
+            }
+            PrimOp::IsControl => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(c.is_control()))
+            }
+            PrimOp::IsDigit => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(c.is_ascii_digit()))
+            }
+            PrimOp::IsHexDigit => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(c.is_ascii_hexdigit()))
+            }
+            PrimOp::IsLetter => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(c.is_alphabetic()))
+            }
+            PrimOp::IsLower => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(c.is_lowercase()))
+            }
+            PrimOp::IsNumber => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(c.is_numeric()))
+            }
+            PrimOp::IsPrint => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(!c.is_control()))
+            }
+            PrimOp::IsPunctuation => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(c.is_ascii_punctuation()))
+            }
+            PrimOp::IsSpace => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(c.is_whitespace()))
+            }
             PrimOp::IsSymbol => {
                 let c = self.as_char(&args[0])?;
-                Ok(Value::bool(matches!(c, '$' | '+' | '<' | '=' | '>' | '^' | '`' | '|' | '~' | '¬' | '±' | '×' | '÷')))
+                Ok(Value::bool(matches!(
+                    c,
+                    '$' | '+' | '<' | '=' | '>' | '^' | '`' | '|' | '~' | '¬' | '±' | '×' | '÷'
+                )))
             }
-            PrimOp::IsUpper => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_uppercase())) }
-            PrimOp::ToLower => { let c = self.as_char(&args[0])?; Ok(Value::Char(c.to_lowercase().next().unwrap_or(c))) }
-            PrimOp::ToUpper => { let c = self.as_char(&args[0])?; Ok(Value::Char(c.to_uppercase().next().unwrap_or(c))) }
-            PrimOp::ToTitle => { let c = self.as_char(&args[0])?; Ok(Value::Char(c.to_uppercase().next().unwrap_or(c))) }
+            PrimOp::IsUpper => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(c.is_uppercase()))
+            }
+            PrimOp::ToLower => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::Char(c.to_lowercase().next().unwrap_or(c)))
+            }
+            PrimOp::ToUpper => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::Char(c.to_uppercase().next().unwrap_or(c)))
+            }
+            PrimOp::ToTitle => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::Char(c.to_uppercase().next().unwrap_or(c)))
+            }
             PrimOp::DigitToInt => {
                 let c = self.as_char(&args[0])?;
                 let n = match c {
                     '0'..='9' => (c as i64) - ('0' as i64),
                     'a'..='f' => (c as i64) - ('a' as i64) + 10,
                     'A'..='F' => (c as i64) - ('A' as i64) + 10,
-                    _ => return Err(EvalError::UserError(format!("digitToInt: not a digit: {:?}", c))),
+                    _ => {
+                        return Err(EvalError::UserError(format!(
+                            "digitToInt: not a digit: {:?}",
+                            c
+                        )))
+                    }
                 };
                 Ok(Value::Int(n))
             }
@@ -3633,13 +3824,26 @@ impl Evaluator {
                 let c = match n {
                     0..=9 => char::from(b'0' + n as u8),
                     10..=15 => char::from(b'a' + (n - 10) as u8),
-                    _ => return Err(EvalError::UserError(format!("intToDigit: out of range: {n}"))),
+                    _ => {
+                        return Err(EvalError::UserError(format!(
+                            "intToDigit: out of range: {n}"
+                        )))
+                    }
                 };
                 Ok(Value::Char(c))
             }
-            PrimOp::IsLatin1 => { let c = self.as_char(&args[0])?; Ok(Value::bool((c as u32) <= 255)) }
-            PrimOp::IsAsciiLower => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_ascii_lowercase())) }
-            PrimOp::IsAsciiUpper => { let c = self.as_char(&args[0])?; Ok(Value::bool(c.is_ascii_uppercase())) }
+            PrimOp::IsLatin1 => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool((c as u32) <= 255))
+            }
+            PrimOp::IsAsciiLower => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(c.is_ascii_lowercase()))
+            }
+            PrimOp::IsAsciiUpper => {
+                let c = self.as_char(&args[0])?;
+                Ok(Value::bool(c.is_ascii_uppercase()))
+            }
 
             // === Data.Function operations ===
             PrimOp::On => {
@@ -3680,7 +3884,9 @@ impl Evaluator {
             PrimOp::MaybeToList => {
                 let m = self.force(args[0].clone())?;
                 match &m {
-                    Value::Data(d) if d.con.name.as_str() == "Nothing" => Ok(Value::from_list(vec![])),
+                    Value::Data(d) if d.con.name.as_str() == "Nothing" => {
+                        Ok(Value::from_list(vec![]))
+                    }
                     Value::Data(d) if d.con.name.as_str() == "Just" && d.args.len() == 1 => {
                         Ok(Value::from_list(vec![d.args[0].clone()]))
                     }
@@ -3781,16 +3987,36 @@ impl Evaluator {
             }
 
             // === Math functions ===
-            PrimOp::Sqrt => { let a = args[0].as_double().unwrap_or(0.0); Ok(Value::Double(a.sqrt())) }
-            PrimOp::Exp => { let a = args[0].as_double().unwrap_or(0.0); Ok(Value::Double(a.exp())) }
-            PrimOp::Log => { let a = args[0].as_double().unwrap_or(0.0); Ok(Value::Double(a.ln())) }
-            PrimOp::Sin => { let a = args[0].as_double().unwrap_or(0.0); Ok(Value::Double(a.sin())) }
-            PrimOp::Cos => { let a = args[0].as_double().unwrap_or(0.0); Ok(Value::Double(a.cos())) }
-            PrimOp::Tan => { let a = args[0].as_double().unwrap_or(0.0); Ok(Value::Double(a.tan())) }
+            PrimOp::Sqrt => {
+                let a = args[0].as_double().unwrap_or(0.0);
+                Ok(Value::Double(a.sqrt()))
+            }
+            PrimOp::Exp => {
+                let a = args[0].as_double().unwrap_or(0.0);
+                Ok(Value::Double(a.exp()))
+            }
+            PrimOp::Log => {
+                let a = args[0].as_double().unwrap_or(0.0);
+                Ok(Value::Double(a.ln()))
+            }
+            PrimOp::Sin => {
+                let a = args[0].as_double().unwrap_or(0.0);
+                Ok(Value::Double(a.sin()))
+            }
+            PrimOp::Cos => {
+                let a = args[0].as_double().unwrap_or(0.0);
+                Ok(Value::Double(a.cos()))
+            }
+            PrimOp::Tan => {
+                let a = args[0].as_double().unwrap_or(0.0);
+                Ok(Value::Double(a.tan()))
+            }
             PrimOp::Power => {
                 let base = args[0].as_int().unwrap_or(0);
                 let exp = args[1].as_int().unwrap_or(0);
-                if exp < 0 { return Err(EvalError::UserError("(^): negative exponent".into())); }
+                if exp < 0 {
+                    return Err(EvalError::UserError("(^): negative exponent".into()));
+                }
                 Ok(Value::Int(base.wrapping_pow(exp as u32)))
             }
             PrimOp::Truncate => {
@@ -3818,7 +4044,10 @@ impl Evaluator {
                         return Ok(d.args[0].clone());
                     }
                 }
-                Err(EvalError::TypeError { expected: "pair".into(), got: format!("{pair:?}") })
+                Err(EvalError::TypeError {
+                    expected: "pair".into(),
+                    got: format!("{pair:?}"),
+                })
             }
 
             PrimOp::Snd => {
@@ -3828,7 +4057,10 @@ impl Evaluator {
                         return Ok(d.args[1].clone());
                     }
                 }
-                Err(EvalError::TypeError { expected: "pair".into(), got: format!("{pair:?}") })
+                Err(EvalError::TypeError {
+                    expected: "pair".into(),
+                    got: format!("{pair:?}"),
+                })
             }
 
             PrimOp::MonadBind => {
@@ -3862,9 +4094,7 @@ impl Evaluator {
             // ========================================================
             // Data.Map PrimOps
             // ========================================================
-            PrimOp::MapEmpty => {
-                Ok(Value::Map(Arc::new(BTreeMap::new())))
-            }
+            PrimOp::MapEmpty => Ok(Value::Map(Arc::new(BTreeMap::new()))),
             PrimOp::MapSingleton => {
                 let k = self.force(args[0].clone())?;
                 let v = self.force(args[1].clone())?;
@@ -3876,14 +4106,20 @@ impl Evaluator {
                 let m = self.force(args[0].clone())?;
                 match &m {
                     Value::Map(map) => Ok(Value::bool(map.is_empty())),
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapSize => {
                 let m = self.force(args[0].clone())?;
                 match &m {
                     Value::Map(map) => Ok(Value::Int(map.len() as i64)),
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapMember => {
@@ -3891,7 +4127,10 @@ impl Evaluator {
                 let m = self.force(args[1].clone())?;
                 match &m {
                     Value::Map(map) => Ok(Value::bool(map.contains_key(&OrdValue(k)))),
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapNotMember => {
@@ -3899,7 +4138,10 @@ impl Evaluator {
                 let m = self.force(args[1].clone())?;
                 match &m {
                     Value::Map(map) => Ok(Value::bool(!map.contains_key(&OrdValue(k)))),
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapLookup => {
@@ -3910,7 +4152,10 @@ impl Evaluator {
                         Some(v) => Ok(self.make_just(v.clone())),
                         None => Ok(self.make_nothing()),
                     },
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapFindWithDefault => {
@@ -3919,7 +4164,10 @@ impl Evaluator {
                 let m = self.force(args[2].clone())?;
                 match &m {
                     Value::Map(map) => Ok(map.get(&OrdValue(k)).cloned().unwrap_or(def)),
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapIndex => {
@@ -3930,7 +4178,10 @@ impl Evaluator {
                         Some(v) => Ok(v.clone()),
                         None => Err(EvalError::UserError("Map.!: key not found".into())),
                     },
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapInsert => {
@@ -3943,7 +4194,10 @@ impl Evaluator {
                         new_map.insert(OrdValue(k), v);
                         Ok(Value::Map(Arc::new(new_map)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapInsertWith => {
@@ -3964,7 +4218,10 @@ impl Evaluator {
                         }
                         Ok(Value::Map(Arc::new(new_map)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapDelete => {
@@ -3976,7 +4233,10 @@ impl Evaluator {
                         new_map.remove(&OrdValue(k));
                         Ok(Value::Map(Arc::new(new_map)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapAdjust => {
@@ -3993,7 +4253,10 @@ impl Evaluator {
                         }
                         Ok(Value::Map(Arc::new(new_map)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapUpdate => {
@@ -4017,7 +4280,10 @@ impl Evaluator {
                         }
                         Ok(Value::Map(Arc::new(new_map)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapAlter => {
@@ -4043,7 +4309,10 @@ impl Evaluator {
                         }
                         Ok(Value::Map(Arc::new(new_map)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapUnion => {
@@ -4057,7 +4326,10 @@ impl Evaluator {
                         }
                         Ok(Value::Map(Arc::new(result)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m1:?}"),
+                    }),
                 }
             }
             PrimOp::MapUnionWith => {
@@ -4078,7 +4350,10 @@ impl Evaluator {
                         }
                         Ok(Value::Map(Arc::new(result)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m1:?}"),
+                    }),
                 }
             }
             PrimOp::MapUnionWithKey => {
@@ -4100,7 +4375,10 @@ impl Evaluator {
                         }
                         Ok(Value::Map(Arc::new(result)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m1:?}"),
+                    }),
                 }
             }
             PrimOp::MapUnions => {
@@ -4122,13 +4400,17 @@ impl Evaluator {
                 let m2 = self.force(args[1].clone())?;
                 match (&m1, &m2) {
                     (Value::Map(a), Value::Map(b)) => {
-                        let result: BTreeMap<OrdValue, Value> = a.iter()
+                        let result: BTreeMap<OrdValue, Value> = a
+                            .iter()
                             .filter(|(k, _)| b.contains_key(k))
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
                         Ok(Value::Map(Arc::new(result)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m1:?}"),
+                    }),
                 }
             }
             PrimOp::MapIntersectionWith => {
@@ -4147,7 +4429,10 @@ impl Evaluator {
                         }
                         Ok(Value::Map(Arc::new(result)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m1:?}"),
+                    }),
                 }
             }
             PrimOp::MapDifference => {
@@ -4155,13 +4440,17 @@ impl Evaluator {
                 let m2 = self.force(args[1].clone())?;
                 match (&m1, &m2) {
                     (Value::Map(a), Value::Map(b)) => {
-                        let result: BTreeMap<OrdValue, Value> = a.iter()
+                        let result: BTreeMap<OrdValue, Value> = a
+                            .iter()
                             .filter(|(k, _)| !b.contains_key(k))
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
                         Ok(Value::Map(Arc::new(result)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m1:?}"),
+                    }),
                 }
             }
             PrimOp::MapDifferenceWith => {
@@ -4187,7 +4476,10 @@ impl Evaluator {
                         }
                         Ok(Value::Map(Arc::new(result)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m1:?}"),
+                    }),
                 }
             }
             PrimOp::MapMap => {
@@ -4202,7 +4494,10 @@ impl Evaluator {
                         }
                         Ok(Value::Map(Arc::new(result)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapMapWithKey => {
@@ -4219,7 +4514,10 @@ impl Evaluator {
                         }
                         Ok(Value::Map(Arc::new(result)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapMapKeys => {
@@ -4234,7 +4532,10 @@ impl Evaluator {
                         }
                         Ok(Value::Map(Arc::new(result)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapFilter => {
@@ -4252,7 +4553,10 @@ impl Evaluator {
                         }
                         Ok(Value::Map(Arc::new(result)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapFilterWithKey => {
@@ -4272,7 +4576,10 @@ impl Evaluator {
                         }
                         Ok(Value::Map(Arc::new(result)))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapFoldr => {
@@ -4288,7 +4595,10 @@ impl Evaluator {
                         }
                         Ok(acc)
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapFoldl => {
@@ -4304,7 +4614,10 @@ impl Evaluator {
                         }
                         Ok(acc)
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapFoldrWithKey => {
@@ -4321,7 +4634,10 @@ impl Evaluator {
                         }
                         Ok(acc)
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapFoldlWithKey => {
@@ -4338,7 +4654,10 @@ impl Evaluator {
                         }
                         Ok(acc)
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapKeys => {
@@ -4348,7 +4667,10 @@ impl Evaluator {
                         let keys: Vec<Value> = map.keys().map(|k| k.inner().clone()).collect();
                         Ok(Value::from_list(keys))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapElems => {
@@ -4358,31 +4680,43 @@ impl Evaluator {
                         let vals: Vec<Value> = map.values().cloned().collect();
                         Ok(Value::from_list(vals))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapAssocs | PrimOp::MapToList | PrimOp::MapToAscList => {
                 let m = self.force(args[0].clone())?;
                 match &m {
                     Value::Map(map) => {
-                        let pairs: Vec<Value> = map.iter()
+                        let pairs: Vec<Value> = map
+                            .iter()
                             .map(|(k, v)| self.make_pair(k.inner().clone(), v.clone()))
                             .collect();
                         Ok(Value::from_list(pairs))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapToDescList => {
                 let m = self.force(args[0].clone())?;
                 match &m {
                     Value::Map(map) => {
-                        let pairs: Vec<Value> = map.iter().rev()
+                        let pairs: Vec<Value> = map
+                            .iter()
+                            .rev()
                             .map(|(k, v)| self.make_pair(k.inner().clone(), v.clone()))
                             .collect();
                         Ok(Value::from_list(pairs))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m:?}"),
+                    }),
                 }
             }
             PrimOp::MapFromList => {
@@ -4430,10 +4764,15 @@ impl Evaluator {
                 let m2 = self.force(args[1].clone())?;
                 match (&m1, &m2) {
                     (Value::Map(a), Value::Map(b)) => {
-                        let is_sub = a.iter().all(|(k, v)| b.get(k).map_or(false, |bv| self.values_equal(v, bv)));
+                        let is_sub = a
+                            .iter()
+                            .all(|(k, v)| b.get(k).map_or(false, |bv| self.values_equal(v, bv)));
                         Ok(Value::bool(is_sub))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Map".into(), got: format!("{m1:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Map".into(),
+                        got: format!("{m1:?}"),
+                    }),
                 }
             }
 
@@ -4449,92 +4788,283 @@ impl Evaluator {
             }
             PrimOp::SetNull => {
                 let s = self.force(args[0].clone())?;
-                match &s { Value::Set(set) => Ok(Value::bool(set.is_empty())), _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => Ok(Value::bool(set.is_empty())),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetSize => {
                 let s = self.force(args[0].clone())?;
-                match &s { Value::Set(set) => Ok(Value::Int(set.len() as i64)), _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => Ok(Value::Int(set.len() as i64)),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetMember => {
                 let v = self.force(args[0].clone())?;
                 let s = self.force(args[1].clone())?;
-                match &s { Value::Set(set) => Ok(Value::bool(set.contains(&OrdValue(v)))), _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => Ok(Value::bool(set.contains(&OrdValue(v)))),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetNotMember => {
                 let v = self.force(args[0].clone())?;
                 let s = self.force(args[1].clone())?;
-                match &s { Value::Set(set) => Ok(Value::bool(!set.contains(&OrdValue(v)))), _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => Ok(Value::bool(!set.contains(&OrdValue(v)))),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetInsert => {
                 let v = self.force(args[0].clone())?;
                 let s = self.force(args[1].clone())?;
-                match &s { Value::Set(set) => { let mut ns = (**set).clone(); ns.insert(OrdValue(v)); Ok(Value::Set(Arc::new(ns))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => {
+                        let mut ns = (**set).clone();
+                        ns.insert(OrdValue(v));
+                        Ok(Value::Set(Arc::new(ns)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetDelete => {
                 let v = self.force(args[0].clone())?;
                 let s = self.force(args[1].clone())?;
-                match &s { Value::Set(set) => { let mut ns = (**set).clone(); ns.remove(&OrdValue(v)); Ok(Value::Set(Arc::new(ns))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => {
+                        let mut ns = (**set).clone();
+                        ns.remove(&OrdValue(v));
+                        Ok(Value::Set(Arc::new(ns)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetUnion => {
                 let s1 = self.force(args[0].clone())?;
                 let s2 = self.force(args[1].clone())?;
-                match (&s1, &s2) { (Value::Set(a), Value::Set(b)) => { let r: BTreeSet<OrdValue> = a.union(b).cloned().collect(); Ok(Value::Set(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s1:?}") }) }
+                match (&s1, &s2) {
+                    (Value::Set(a), Value::Set(b)) => {
+                        let r: BTreeSet<OrdValue> = a.union(b).cloned().collect();
+                        Ok(Value::Set(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s1:?}"),
+                    }),
+                }
             }
             PrimOp::SetUnions => {
                 let list = self.force(args[0].clone())?;
                 let sets = self.force_list(list)?;
                 let mut result = BTreeSet::new();
-                for s in sets { let s = self.force(s)?; if let Value::Set(set) = s { for v in set.iter() { result.insert(v.clone()); } } }
+                for s in sets {
+                    let s = self.force(s)?;
+                    if let Value::Set(set) = s {
+                        for v in set.iter() {
+                            result.insert(v.clone());
+                        }
+                    }
+                }
                 Ok(Value::Set(Arc::new(result)))
             }
             PrimOp::SetIntersection => {
                 let s1 = self.force(args[0].clone())?;
                 let s2 = self.force(args[1].clone())?;
-                match (&s1, &s2) { (Value::Set(a), Value::Set(b)) => { let r: BTreeSet<OrdValue> = a.intersection(b).cloned().collect(); Ok(Value::Set(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s1:?}") }) }
+                match (&s1, &s2) {
+                    (Value::Set(a), Value::Set(b)) => {
+                        let r: BTreeSet<OrdValue> = a.intersection(b).cloned().collect();
+                        Ok(Value::Set(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s1:?}"),
+                    }),
+                }
             }
             PrimOp::SetDifference => {
                 let s1 = self.force(args[0].clone())?;
                 let s2 = self.force(args[1].clone())?;
-                match (&s1, &s2) { (Value::Set(a), Value::Set(b)) => { let r: BTreeSet<OrdValue> = a.difference(b).cloned().collect(); Ok(Value::Set(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s1:?}") }) }
+                match (&s1, &s2) {
+                    (Value::Set(a), Value::Set(b)) => {
+                        let r: BTreeSet<OrdValue> = a.difference(b).cloned().collect();
+                        Ok(Value::Set(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s1:?}"),
+                    }),
+                }
             }
             PrimOp::SetIsSubsetOf => {
-                let s1 = self.force(args[0].clone())?; let s2 = self.force(args[1].clone())?;
-                match (&s1, &s2) { (Value::Set(a), Value::Set(b)) => Ok(Value::bool(a.is_subset(b))), _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s1:?}") }) }
+                let s1 = self.force(args[0].clone())?;
+                let s2 = self.force(args[1].clone())?;
+                match (&s1, &s2) {
+                    (Value::Set(a), Value::Set(b)) => Ok(Value::bool(a.is_subset(b))),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s1:?}"),
+                    }),
+                }
             }
             PrimOp::SetIsProperSubsetOf => {
-                let s1 = self.force(args[0].clone())?; let s2 = self.force(args[1].clone())?;
-                match (&s1, &s2) { (Value::Set(a), Value::Set(b)) => Ok(Value::bool(a.is_subset(b) && a.len() < b.len())), _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s1:?}") }) }
+                let s1 = self.force(args[0].clone())?;
+                let s2 = self.force(args[1].clone())?;
+                match (&s1, &s2) {
+                    (Value::Set(a), Value::Set(b)) => {
+                        Ok(Value::bool(a.is_subset(b) && a.len() < b.len()))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s1:?}"),
+                    }),
+                }
             }
             PrimOp::SetMap => {
                 let f = self.force(args[0].clone())?;
                 let s = self.force(args[1].clone())?;
-                match &s { Value::Set(set) => { let mut r = BTreeSet::new(); for v in set.iter() { let nv = self.apply(f.clone(), v.inner().clone())?; r.insert(OrdValue(nv)); } Ok(Value::Set(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => {
+                        let mut r = BTreeSet::new();
+                        for v in set.iter() {
+                            let nv = self.apply(f.clone(), v.inner().clone())?;
+                            r.insert(OrdValue(nv));
+                        }
+                        Ok(Value::Set(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetFilter => {
                 let f = self.force(args[0].clone())?;
                 let s = self.force(args[1].clone())?;
-                match &s { Value::Set(set) => { let mut r = BTreeSet::new(); for v in set.iter() { let keep = self.apply(f.clone(), v.inner().clone())?; let keep = self.force(keep)?; if keep.as_bool() == Some(true) { r.insert(v.clone()); } } Ok(Value::Set(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => {
+                        let mut r = BTreeSet::new();
+                        for v in set.iter() {
+                            let keep = self.apply(f.clone(), v.inner().clone())?;
+                            let keep = self.force(keep)?;
+                            if keep.as_bool() == Some(true) {
+                                r.insert(v.clone());
+                            }
+                        }
+                        Ok(Value::Set(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetPartition => {
                 let f = self.force(args[0].clone())?;
                 let s = self.force(args[1].clone())?;
-                match &s { Value::Set(set) => { let mut yes = BTreeSet::new(); let mut no = BTreeSet::new(); for v in set.iter() { let keep = self.apply(f.clone(), v.inner().clone())?; let keep = self.force(keep)?; if keep.as_bool() == Some(true) { yes.insert(v.clone()); } else { no.insert(v.clone()); } } Ok(self.make_pair(Value::Set(Arc::new(yes)), Value::Set(Arc::new(no)))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => {
+                        let mut yes = BTreeSet::new();
+                        let mut no = BTreeSet::new();
+                        for v in set.iter() {
+                            let keep = self.apply(f.clone(), v.inner().clone())?;
+                            let keep = self.force(keep)?;
+                            if keep.as_bool() == Some(true) {
+                                yes.insert(v.clone());
+                            } else {
+                                no.insert(v.clone());
+                            }
+                        }
+                        Ok(self.make_pair(Value::Set(Arc::new(yes)), Value::Set(Arc::new(no))))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetFoldr => {
-                let f = self.force(args[0].clone())?; let z = self.force(args[1].clone())?; let s = self.force(args[2].clone())?;
-                match &s { Value::Set(set) => { let mut acc = z; for v in set.iter().rev() { let tmp = self.apply(f.clone(), v.inner().clone())?; acc = self.apply(tmp, acc)?; } Ok(acc) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                let f = self.force(args[0].clone())?;
+                let z = self.force(args[1].clone())?;
+                let s = self.force(args[2].clone())?;
+                match &s {
+                    Value::Set(set) => {
+                        let mut acc = z;
+                        for v in set.iter().rev() {
+                            let tmp = self.apply(f.clone(), v.inner().clone())?;
+                            acc = self.apply(tmp, acc)?;
+                        }
+                        Ok(acc)
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetFoldl => {
-                let f = self.force(args[0].clone())?; let z = self.force(args[1].clone())?; let s = self.force(args[2].clone())?;
-                match &s { Value::Set(set) => { let mut acc = z; for v in set.iter() { let tmp = self.apply(f.clone(), acc)?; acc = self.apply(tmp, v.inner().clone())?; } Ok(acc) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                let f = self.force(args[0].clone())?;
+                let z = self.force(args[1].clone())?;
+                let s = self.force(args[2].clone())?;
+                match &s {
+                    Value::Set(set) => {
+                        let mut acc = z;
+                        for v in set.iter() {
+                            let tmp = self.apply(f.clone(), acc)?;
+                            acc = self.apply(tmp, v.inner().clone())?;
+                        }
+                        Ok(acc)
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetToList | PrimOp::SetToAscList | PrimOp::SetElems => {
                 let s = self.force(args[0].clone())?;
-                match &s { Value::Set(set) => { let vals: Vec<Value> = set.iter().map(|v| v.inner().clone()).collect(); Ok(Value::from_list(vals)) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => {
+                        let vals: Vec<Value> = set.iter().map(|v| v.inner().clone()).collect();
+                        Ok(Value::from_list(vals))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetToDescList => {
                 let s = self.force(args[0].clone())?;
-                match &s { Value::Set(set) => { let vals: Vec<Value> = set.iter().rev().map(|v| v.inner().clone()).collect(); Ok(Value::from_list(vals)) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => {
+                        let vals: Vec<Value> =
+                            set.iter().rev().map(|v| v.inner().clone()).collect();
+                        Ok(Value::from_list(vals))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetFromList => {
                 let list = self.force(args[0].clone())?;
@@ -4544,92 +5074,662 @@ impl Evaluator {
             }
             PrimOp::SetFindMin => {
                 let s = self.force(args[0].clone())?;
-                match &s { Value::Set(set) => match set.iter().next() { Some(v) => Ok(v.inner().clone()), None => Err(EvalError::UserError("Set.findMin: empty set".into())) }, _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => match set.iter().next() {
+                        Some(v) => Ok(v.inner().clone()),
+                        None => Err(EvalError::UserError("Set.findMin: empty set".into())),
+                    },
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetFindMax => {
                 let s = self.force(args[0].clone())?;
-                match &s { Value::Set(set) => match set.iter().next_back() { Some(v) => Ok(v.inner().clone()), None => Err(EvalError::UserError("Set.findMax: empty set".into())) }, _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => match set.iter().next_back() {
+                        Some(v) => Ok(v.inner().clone()),
+                        None => Err(EvalError::UserError("Set.findMax: empty set".into())),
+                    },
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetDeleteMin => {
                 let s = self.force(args[0].clone())?;
-                match &s { Value::Set(set) => { let mut ns = (**set).clone(); if let Some(min) = set.iter().next().cloned() { ns.remove(&min); } Ok(Value::Set(Arc::new(ns))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => {
+                        let mut ns = (**set).clone();
+                        if let Some(min) = set.iter().next().cloned() {
+                            ns.remove(&min);
+                        }
+                        Ok(Value::Set(Arc::new(ns)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetDeleteMax => {
                 let s = self.force(args[0].clone())?;
-                match &s { Value::Set(set) => { let mut ns = (**set).clone(); if let Some(max) = set.iter().next_back().cloned() { ns.remove(&max); } Ok(Value::Set(Arc::new(ns))) } _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => {
+                        let mut ns = (**set).clone();
+                        if let Some(max) = set.iter().next_back().cloned() {
+                            ns.remove(&max);
+                        }
+                        Ok(Value::Set(Arc::new(ns)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetLookupMin => {
                 let s = self.force(args[0].clone())?;
-                match &s { Value::Set(set) => match set.iter().next() { Some(v) => Ok(self.make_just(v.inner().clone())), None => Ok(self.make_nothing()) }, _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => match set.iter().next() {
+                        Some(v) => Ok(self.make_just(v.inner().clone())),
+                        None => Ok(self.make_nothing()),
+                    },
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
             PrimOp::SetLookupMax => {
                 let s = self.force(args[0].clone())?;
-                match &s { Value::Set(set) => match set.iter().next_back() { Some(v) => Ok(self.make_just(v.inner().clone())), None => Ok(self.make_nothing()) }, _ => Err(EvalError::TypeError { expected: "Set".into(), got: format!("{s:?}") }) }
+                match &s {
+                    Value::Set(set) => match set.iter().next_back() {
+                        Some(v) => Ok(self.make_just(v.inner().clone())),
+                        None => Ok(self.make_nothing()),
+                    },
+                    _ => Err(EvalError::TypeError {
+                        expected: "Set".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
             }
 
             // ========================================================
             // Data.IntMap PrimOps
             // ========================================================
             PrimOp::IntMapEmpty => Ok(Value::IntMap(Arc::new(BTreeMap::new()))),
-            PrimOp::IntMapSingleton => { let k = self.force(args[0].clone())?.as_int().unwrap_or(0); let v = self.force(args[1].clone())?; let mut m = BTreeMap::new(); m.insert(k, v); Ok(Value::IntMap(Arc::new(m))) }
-            PrimOp::IntMapNull => { let m = self.force(args[0].clone())?; match &m { Value::IntMap(map) => Ok(Value::bool(map.is_empty())), _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapSize => { let m = self.force(args[0].clone())?; match &m { Value::IntMap(map) => Ok(Value::Int(map.len() as i64)), _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapMember => { let k = self.force(args[0].clone())?.as_int().unwrap_or(0); let m = self.force(args[1].clone())?; match &m { Value::IntMap(map) => Ok(Value::bool(map.contains_key(&k))), _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapLookup => { let k = self.force(args[0].clone())?.as_int().unwrap_or(0); let m = self.force(args[1].clone())?; match &m { Value::IntMap(map) => match map.get(&k) { Some(v) => Ok(self.make_just(v.clone())), None => Ok(self.make_nothing()) }, _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapFindWithDefault => { let def = self.force(args[0].clone())?; let k = self.force(args[1].clone())?.as_int().unwrap_or(0); let m = self.force(args[2].clone())?; match &m { Value::IntMap(map) => Ok(map.get(&k).cloned().unwrap_or(def)), _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapInsert => { let k = self.force(args[0].clone())?.as_int().unwrap_or(0); let v = self.force(args[1].clone())?; let m = self.force(args[2].clone())?; match &m { Value::IntMap(map) => { let mut nm = (**map).clone(); nm.insert(k, v); Ok(Value::IntMap(Arc::new(nm))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapInsertWith => { let f = self.force(args[0].clone())?; let k = self.force(args[1].clone())?.as_int().unwrap_or(0); let v = self.force(args[2].clone())?; let m = self.force(args[3].clone())?; match &m { Value::IntMap(map) => { let mut nm = (**map).clone(); if let Some(old) = nm.get(&k).cloned() { let tmp = self.apply(f.clone(), v)?; let nv = self.apply(tmp, old)?; nm.insert(k, nv); } else { nm.insert(k, v); } Ok(Value::IntMap(Arc::new(nm))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapDelete => { let k = self.force(args[0].clone())?.as_int().unwrap_or(0); let m = self.force(args[1].clone())?; match &m { Value::IntMap(map) => { let mut nm = (**map).clone(); nm.remove(&k); Ok(Value::IntMap(Arc::new(nm))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapAdjust => { let f = self.force(args[0].clone())?; let k = self.force(args[1].clone())?.as_int().unwrap_or(0); let m = self.force(args[2].clone())?; match &m { Value::IntMap(map) => { let mut nm = (**map).clone(); if let Some(v) = nm.get(&k).cloned() { let nv = self.apply(f, v)?; nm.insert(k, nv); } Ok(Value::IntMap(Arc::new(nm))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapUnion => { let m1 = self.force(args[0].clone())?; let m2 = self.force(args[1].clone())?; match (&m1, &m2) { (Value::IntMap(a), Value::IntMap(b)) => { let mut r = (**a).clone(); for (k, v) in b.iter() { r.entry(*k).or_insert_with(|| v.clone()); } Ok(Value::IntMap(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m1:?}") }) } }
-            PrimOp::IntMapUnionWith => { let f = self.force(args[0].clone())?; let m1 = self.force(args[1].clone())?; let m2 = self.force(args[2].clone())?; match (&m1, &m2) { (Value::IntMap(a), Value::IntMap(b)) => { let mut r = (**a).clone(); for (k, v) in b.iter() { if let Some(old) = r.get(k).cloned() { let tmp = self.apply(f.clone(), old)?; let nv = self.apply(tmp, v.clone())?; r.insert(*k, nv); } else { r.insert(*k, v.clone()); } } Ok(Value::IntMap(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m1:?}") }) } }
-            PrimOp::IntMapIntersection => { let m1 = self.force(args[0].clone())?; let m2 = self.force(args[1].clone())?; match (&m1, &m2) { (Value::IntMap(a), Value::IntMap(b)) => { let r: BTreeMap<i64, Value> = a.iter().filter(|(k, _)| b.contains_key(k)).map(|(k, v)| (*k, v.clone())).collect(); Ok(Value::IntMap(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m1:?}") }) } }
-            PrimOp::IntMapDifference => { let m1 = self.force(args[0].clone())?; let m2 = self.force(args[1].clone())?; match (&m1, &m2) { (Value::IntMap(a), Value::IntMap(b)) => { let r: BTreeMap<i64, Value> = a.iter().filter(|(k, _)| !b.contains_key(k)).map(|(k, v)| (*k, v.clone())).collect(); Ok(Value::IntMap(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m1:?}") }) } }
-            PrimOp::IntMapMap => { let f = self.force(args[0].clone())?; let m = self.force(args[1].clone())?; match &m { Value::IntMap(map) => { let mut r = BTreeMap::new(); for (k, v) in map.iter() { let nv = self.apply(f.clone(), v.clone())?; r.insert(*k, nv); } Ok(Value::IntMap(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapMapWithKey => { let f = self.force(args[0].clone())?; let m = self.force(args[1].clone())?; match &m { Value::IntMap(map) => { let mut r = BTreeMap::new(); for (k, v) in map.iter() { let tmp = self.apply(f.clone(), Value::Int(*k))?; let nv = self.apply(tmp, v.clone())?; r.insert(*k, nv); } Ok(Value::IntMap(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapFilter => { let f = self.force(args[0].clone())?; let m = self.force(args[1].clone())?; match &m { Value::IntMap(map) => { let mut r = BTreeMap::new(); for (k, v) in map.iter() { let keep = self.apply(f.clone(), v.clone())?; let keep = self.force(keep)?; if keep.as_bool() == Some(true) { r.insert(*k, v.clone()); } } Ok(Value::IntMap(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapFoldr => { let f = self.force(args[0].clone())?; let z = self.force(args[1].clone())?; let m = self.force(args[2].clone())?; match &m { Value::IntMap(map) => { let mut acc = z; for (_, v) in map.iter().rev() { let tmp = self.apply(f.clone(), v.clone())?; acc = self.apply(tmp, acc)?; } Ok(acc) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapFoldlWithKey => { let f = self.force(args[0].clone())?; let z = self.force(args[1].clone())?; let m = self.force(args[2].clone())?; match &m { Value::IntMap(map) => { let mut acc = z; for (k, v) in map.iter() { let tmp1 = self.apply(f.clone(), acc)?; let tmp2 = self.apply(tmp1, Value::Int(*k))?; acc = self.apply(tmp2, v.clone())?; } Ok(acc) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapKeys => { let m = self.force(args[0].clone())?; match &m { Value::IntMap(map) => { let keys: Vec<Value> = map.keys().map(|k| Value::Int(*k)).collect(); Ok(Value::from_list(keys)) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapElems => { let m = self.force(args[0].clone())?; match &m { Value::IntMap(map) => { let vals: Vec<Value> = map.values().cloned().collect(); Ok(Value::from_list(vals)) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapToList | PrimOp::IntMapToAscList => { let m = self.force(args[0].clone())?; match &m { Value::IntMap(map) => { let pairs: Vec<Value> = map.iter().map(|(k, v)| self.make_pair(Value::Int(*k), v.clone())).collect(); Ok(Value::from_list(pairs)) } _ => Err(EvalError::TypeError { expected: "IntMap".into(), got: format!("{m:?}") }) } }
-            PrimOp::IntMapFromList => { let list = self.force(args[0].clone())?; let pairs = self.force_list(list)?; let mut m = BTreeMap::new(); for pair in pairs { let pair = self.force(pair)?; if let Value::Data(ref d) = pair { if d.args.len() >= 2 { let k = self.force(d.args[0].clone())?.as_int().unwrap_or(0); let v = self.force(d.args[1].clone())?; m.insert(k, v); } } } Ok(Value::IntMap(Arc::new(m))) }
+            PrimOp::IntMapSingleton => {
+                let k = self.force(args[0].clone())?.as_int().unwrap_or(0);
+                let v = self.force(args[1].clone())?;
+                let mut m = BTreeMap::new();
+                m.insert(k, v);
+                Ok(Value::IntMap(Arc::new(m)))
+            }
+            PrimOp::IntMapNull => {
+                let m = self.force(args[0].clone())?;
+                match &m {
+                    Value::IntMap(map) => Ok(Value::bool(map.is_empty())),
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapSize => {
+                let m = self.force(args[0].clone())?;
+                match &m {
+                    Value::IntMap(map) => Ok(Value::Int(map.len() as i64)),
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapMember => {
+                let k = self.force(args[0].clone())?.as_int().unwrap_or(0);
+                let m = self.force(args[1].clone())?;
+                match &m {
+                    Value::IntMap(map) => Ok(Value::bool(map.contains_key(&k))),
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapLookup => {
+                let k = self.force(args[0].clone())?.as_int().unwrap_or(0);
+                let m = self.force(args[1].clone())?;
+                match &m {
+                    Value::IntMap(map) => match map.get(&k) {
+                        Some(v) => Ok(self.make_just(v.clone())),
+                        None => Ok(self.make_nothing()),
+                    },
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapFindWithDefault => {
+                let def = self.force(args[0].clone())?;
+                let k = self.force(args[1].clone())?.as_int().unwrap_or(0);
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::IntMap(map) => Ok(map.get(&k).cloned().unwrap_or(def)),
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapInsert => {
+                let k = self.force(args[0].clone())?.as_int().unwrap_or(0);
+                let v = self.force(args[1].clone())?;
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::IntMap(map) => {
+                        let mut nm = (**map).clone();
+                        nm.insert(k, v);
+                        Ok(Value::IntMap(Arc::new(nm)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapInsertWith => {
+                let f = self.force(args[0].clone())?;
+                let k = self.force(args[1].clone())?.as_int().unwrap_or(0);
+                let v = self.force(args[2].clone())?;
+                let m = self.force(args[3].clone())?;
+                match &m {
+                    Value::IntMap(map) => {
+                        let mut nm = (**map).clone();
+                        if let Some(old) = nm.get(&k).cloned() {
+                            let tmp = self.apply(f.clone(), v)?;
+                            let nv = self.apply(tmp, old)?;
+                            nm.insert(k, nv);
+                        } else {
+                            nm.insert(k, v);
+                        }
+                        Ok(Value::IntMap(Arc::new(nm)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapDelete => {
+                let k = self.force(args[0].clone())?.as_int().unwrap_or(0);
+                let m = self.force(args[1].clone())?;
+                match &m {
+                    Value::IntMap(map) => {
+                        let mut nm = (**map).clone();
+                        nm.remove(&k);
+                        Ok(Value::IntMap(Arc::new(nm)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapAdjust => {
+                let f = self.force(args[0].clone())?;
+                let k = self.force(args[1].clone())?.as_int().unwrap_or(0);
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::IntMap(map) => {
+                        let mut nm = (**map).clone();
+                        if let Some(v) = nm.get(&k).cloned() {
+                            let nv = self.apply(f, v)?;
+                            nm.insert(k, nv);
+                        }
+                        Ok(Value::IntMap(Arc::new(nm)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapUnion => {
+                let m1 = self.force(args[0].clone())?;
+                let m2 = self.force(args[1].clone())?;
+                match (&m1, &m2) {
+                    (Value::IntMap(a), Value::IntMap(b)) => {
+                        let mut r = (**a).clone();
+                        for (k, v) in b.iter() {
+                            r.entry(*k).or_insert_with(|| v.clone());
+                        }
+                        Ok(Value::IntMap(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m1:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapUnionWith => {
+                let f = self.force(args[0].clone())?;
+                let m1 = self.force(args[1].clone())?;
+                let m2 = self.force(args[2].clone())?;
+                match (&m1, &m2) {
+                    (Value::IntMap(a), Value::IntMap(b)) => {
+                        let mut r = (**a).clone();
+                        for (k, v) in b.iter() {
+                            if let Some(old) = r.get(k).cloned() {
+                                let tmp = self.apply(f.clone(), old)?;
+                                let nv = self.apply(tmp, v.clone())?;
+                                r.insert(*k, nv);
+                            } else {
+                                r.insert(*k, v.clone());
+                            }
+                        }
+                        Ok(Value::IntMap(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m1:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapIntersection => {
+                let m1 = self.force(args[0].clone())?;
+                let m2 = self.force(args[1].clone())?;
+                match (&m1, &m2) {
+                    (Value::IntMap(a), Value::IntMap(b)) => {
+                        let r: BTreeMap<i64, Value> = a
+                            .iter()
+                            .filter(|(k, _)| b.contains_key(k))
+                            .map(|(k, v)| (*k, v.clone()))
+                            .collect();
+                        Ok(Value::IntMap(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m1:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapDifference => {
+                let m1 = self.force(args[0].clone())?;
+                let m2 = self.force(args[1].clone())?;
+                match (&m1, &m2) {
+                    (Value::IntMap(a), Value::IntMap(b)) => {
+                        let r: BTreeMap<i64, Value> = a
+                            .iter()
+                            .filter(|(k, _)| !b.contains_key(k))
+                            .map(|(k, v)| (*k, v.clone()))
+                            .collect();
+                        Ok(Value::IntMap(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m1:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapMap => {
+                let f = self.force(args[0].clone())?;
+                let m = self.force(args[1].clone())?;
+                match &m {
+                    Value::IntMap(map) => {
+                        let mut r = BTreeMap::new();
+                        for (k, v) in map.iter() {
+                            let nv = self.apply(f.clone(), v.clone())?;
+                            r.insert(*k, nv);
+                        }
+                        Ok(Value::IntMap(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapMapWithKey => {
+                let f = self.force(args[0].clone())?;
+                let m = self.force(args[1].clone())?;
+                match &m {
+                    Value::IntMap(map) => {
+                        let mut r = BTreeMap::new();
+                        for (k, v) in map.iter() {
+                            let tmp = self.apply(f.clone(), Value::Int(*k))?;
+                            let nv = self.apply(tmp, v.clone())?;
+                            r.insert(*k, nv);
+                        }
+                        Ok(Value::IntMap(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapFilter => {
+                let f = self.force(args[0].clone())?;
+                let m = self.force(args[1].clone())?;
+                match &m {
+                    Value::IntMap(map) => {
+                        let mut r = BTreeMap::new();
+                        for (k, v) in map.iter() {
+                            let keep = self.apply(f.clone(), v.clone())?;
+                            let keep = self.force(keep)?;
+                            if keep.as_bool() == Some(true) {
+                                r.insert(*k, v.clone());
+                            }
+                        }
+                        Ok(Value::IntMap(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapFoldr => {
+                let f = self.force(args[0].clone())?;
+                let z = self.force(args[1].clone())?;
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::IntMap(map) => {
+                        let mut acc = z;
+                        for (_, v) in map.iter().rev() {
+                            let tmp = self.apply(f.clone(), v.clone())?;
+                            acc = self.apply(tmp, acc)?;
+                        }
+                        Ok(acc)
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapFoldlWithKey => {
+                let f = self.force(args[0].clone())?;
+                let z = self.force(args[1].clone())?;
+                let m = self.force(args[2].clone())?;
+                match &m {
+                    Value::IntMap(map) => {
+                        let mut acc = z;
+                        for (k, v) in map.iter() {
+                            let tmp1 = self.apply(f.clone(), acc)?;
+                            let tmp2 = self.apply(tmp1, Value::Int(*k))?;
+                            acc = self.apply(tmp2, v.clone())?;
+                        }
+                        Ok(acc)
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapKeys => {
+                let m = self.force(args[0].clone())?;
+                match &m {
+                    Value::IntMap(map) => {
+                        let keys: Vec<Value> = map.keys().map(|k| Value::Int(*k)).collect();
+                        Ok(Value::from_list(keys))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapElems => {
+                let m = self.force(args[0].clone())?;
+                match &m {
+                    Value::IntMap(map) => {
+                        let vals: Vec<Value> = map.values().cloned().collect();
+                        Ok(Value::from_list(vals))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapToList | PrimOp::IntMapToAscList => {
+                let m = self.force(args[0].clone())?;
+                match &m {
+                    Value::IntMap(map) => {
+                        let pairs: Vec<Value> = map
+                            .iter()
+                            .map(|(k, v)| self.make_pair(Value::Int(*k), v.clone()))
+                            .collect();
+                        Ok(Value::from_list(pairs))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntMap".into(),
+                        got: format!("{m:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntMapFromList => {
+                let list = self.force(args[0].clone())?;
+                let pairs = self.force_list(list)?;
+                let mut m = BTreeMap::new();
+                for pair in pairs {
+                    let pair = self.force(pair)?;
+                    if let Value::Data(ref d) = pair {
+                        if d.args.len() >= 2 {
+                            let k = self.force(d.args[0].clone())?.as_int().unwrap_or(0);
+                            let v = self.force(d.args[1].clone())?;
+                            m.insert(k, v);
+                        }
+                    }
+                }
+                Ok(Value::IntMap(Arc::new(m)))
+            }
 
             // ========================================================
             // Data.IntSet PrimOps
             // ========================================================
             PrimOp::IntSetEmpty => Ok(Value::IntSet(Arc::new(BTreeSet::new()))),
-            PrimOp::IntSetSingleton => { let v = self.force(args[0].clone())?.as_int().unwrap_or(0); let mut s = BTreeSet::new(); s.insert(v); Ok(Value::IntSet(Arc::new(s))) }
-            PrimOp::IntSetNull => { let s = self.force(args[0].clone())?; match &s { Value::IntSet(set) => Ok(Value::bool(set.is_empty())), _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
-            PrimOp::IntSetSize => { let s = self.force(args[0].clone())?; match &s { Value::IntSet(set) => Ok(Value::Int(set.len() as i64)), _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
-            PrimOp::IntSetMember => { let v = self.force(args[0].clone())?.as_int().unwrap_or(0); let s = self.force(args[1].clone())?; match &s { Value::IntSet(set) => Ok(Value::bool(set.contains(&v))), _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
-            PrimOp::IntSetInsert => { let v = self.force(args[0].clone())?.as_int().unwrap_or(0); let s = self.force(args[1].clone())?; match &s { Value::IntSet(set) => { let mut ns = (**set).clone(); ns.insert(v); Ok(Value::IntSet(Arc::new(ns))) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
-            PrimOp::IntSetDelete => { let v = self.force(args[0].clone())?.as_int().unwrap_or(0); let s = self.force(args[1].clone())?; match &s { Value::IntSet(set) => { let mut ns = (**set).clone(); ns.remove(&v); Ok(Value::IntSet(Arc::new(ns))) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
-            PrimOp::IntSetUnion => { let s1 = self.force(args[0].clone())?; let s2 = self.force(args[1].clone())?; match (&s1, &s2) { (Value::IntSet(a), Value::IntSet(b)) => { let r: BTreeSet<i64> = a.union(b).copied().collect(); Ok(Value::IntSet(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s1:?}") }) } }
-            PrimOp::IntSetIntersection => { let s1 = self.force(args[0].clone())?; let s2 = self.force(args[1].clone())?; match (&s1, &s2) { (Value::IntSet(a), Value::IntSet(b)) => { let r: BTreeSet<i64> = a.intersection(b).copied().collect(); Ok(Value::IntSet(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s1:?}") }) } }
-            PrimOp::IntSetDifference => { let s1 = self.force(args[0].clone())?; let s2 = self.force(args[1].clone())?; match (&s1, &s2) { (Value::IntSet(a), Value::IntSet(b)) => { let r: BTreeSet<i64> = a.difference(b).copied().collect(); Ok(Value::IntSet(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s1:?}") }) } }
-            PrimOp::IntSetIsSubsetOf => { let s1 = self.force(args[0].clone())?; let s2 = self.force(args[1].clone())?; match (&s1, &s2) { (Value::IntSet(a), Value::IntSet(b)) => Ok(Value::bool(a.is_subset(b))), _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s1:?}") }) } }
-            PrimOp::IntSetFilter => { let f = self.force(args[0].clone())?; let s = self.force(args[1].clone())?; match &s { Value::IntSet(set) => { let mut r = BTreeSet::new(); for v in set.iter() { let keep = self.apply(f.clone(), Value::Int(*v))?; let keep = self.force(keep)?; if keep.as_bool() == Some(true) { r.insert(*v); } } Ok(Value::IntSet(Arc::new(r))) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
-            PrimOp::IntSetFoldr => { let f = self.force(args[0].clone())?; let z = self.force(args[1].clone())?; let s = self.force(args[2].clone())?; match &s { Value::IntSet(set) => { let mut acc = z; for v in set.iter().rev() { let tmp = self.apply(f.clone(), Value::Int(*v))?; acc = self.apply(tmp, acc)?; } Ok(acc) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
-            PrimOp::IntSetToList => { let s = self.force(args[0].clone())?; match &s { Value::IntSet(set) => { let vals: Vec<Value> = set.iter().map(|v| Value::Int(*v)).collect(); Ok(Value::from_list(vals)) } _ => Err(EvalError::TypeError { expected: "IntSet".into(), got: format!("{s:?}") }) } }
-            PrimOp::IntSetFromList => { let list = self.force(args[0].clone())?; let items = self.force_list(list)?; let set: BTreeSet<i64> = items.into_iter().filter_map(|v| v.as_int()).collect(); Ok(Value::IntSet(Arc::new(set))) }
+            PrimOp::IntSetSingleton => {
+                let v = self.force(args[0].clone())?.as_int().unwrap_or(0);
+                let mut s = BTreeSet::new();
+                s.insert(v);
+                Ok(Value::IntSet(Arc::new(s)))
+            }
+            PrimOp::IntSetNull => {
+                let s = self.force(args[0].clone())?;
+                match &s {
+                    Value::IntSet(set) => Ok(Value::bool(set.is_empty())),
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntSet".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntSetSize => {
+                let s = self.force(args[0].clone())?;
+                match &s {
+                    Value::IntSet(set) => Ok(Value::Int(set.len() as i64)),
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntSet".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntSetMember => {
+                let v = self.force(args[0].clone())?.as_int().unwrap_or(0);
+                let s = self.force(args[1].clone())?;
+                match &s {
+                    Value::IntSet(set) => Ok(Value::bool(set.contains(&v))),
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntSet".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntSetInsert => {
+                let v = self.force(args[0].clone())?.as_int().unwrap_or(0);
+                let s = self.force(args[1].clone())?;
+                match &s {
+                    Value::IntSet(set) => {
+                        let mut ns = (**set).clone();
+                        ns.insert(v);
+                        Ok(Value::IntSet(Arc::new(ns)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntSet".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntSetDelete => {
+                let v = self.force(args[0].clone())?.as_int().unwrap_or(0);
+                let s = self.force(args[1].clone())?;
+                match &s {
+                    Value::IntSet(set) => {
+                        let mut ns = (**set).clone();
+                        ns.remove(&v);
+                        Ok(Value::IntSet(Arc::new(ns)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntSet".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntSetUnion => {
+                let s1 = self.force(args[0].clone())?;
+                let s2 = self.force(args[1].clone())?;
+                match (&s1, &s2) {
+                    (Value::IntSet(a), Value::IntSet(b)) => {
+                        let r: BTreeSet<i64> = a.union(b).copied().collect();
+                        Ok(Value::IntSet(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntSet".into(),
+                        got: format!("{s1:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntSetIntersection => {
+                let s1 = self.force(args[0].clone())?;
+                let s2 = self.force(args[1].clone())?;
+                match (&s1, &s2) {
+                    (Value::IntSet(a), Value::IntSet(b)) => {
+                        let r: BTreeSet<i64> = a.intersection(b).copied().collect();
+                        Ok(Value::IntSet(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntSet".into(),
+                        got: format!("{s1:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntSetDifference => {
+                let s1 = self.force(args[0].clone())?;
+                let s2 = self.force(args[1].clone())?;
+                match (&s1, &s2) {
+                    (Value::IntSet(a), Value::IntSet(b)) => {
+                        let r: BTreeSet<i64> = a.difference(b).copied().collect();
+                        Ok(Value::IntSet(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntSet".into(),
+                        got: format!("{s1:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntSetIsSubsetOf => {
+                let s1 = self.force(args[0].clone())?;
+                let s2 = self.force(args[1].clone())?;
+                match (&s1, &s2) {
+                    (Value::IntSet(a), Value::IntSet(b)) => Ok(Value::bool(a.is_subset(b))),
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntSet".into(),
+                        got: format!("{s1:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntSetFilter => {
+                let f = self.force(args[0].clone())?;
+                let s = self.force(args[1].clone())?;
+                match &s {
+                    Value::IntSet(set) => {
+                        let mut r = BTreeSet::new();
+                        for v in set.iter() {
+                            let keep = self.apply(f.clone(), Value::Int(*v))?;
+                            let keep = self.force(keep)?;
+                            if keep.as_bool() == Some(true) {
+                                r.insert(*v);
+                            }
+                        }
+                        Ok(Value::IntSet(Arc::new(r)))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntSet".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntSetFoldr => {
+                let f = self.force(args[0].clone())?;
+                let z = self.force(args[1].clone())?;
+                let s = self.force(args[2].clone())?;
+                match &s {
+                    Value::IntSet(set) => {
+                        let mut acc = z;
+                        for v in set.iter().rev() {
+                            let tmp = self.apply(f.clone(), Value::Int(*v))?;
+                            acc = self.apply(tmp, acc)?;
+                        }
+                        Ok(acc)
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntSet".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntSetToList => {
+                let s = self.force(args[0].clone())?;
+                match &s {
+                    Value::IntSet(set) => {
+                        let vals: Vec<Value> = set.iter().map(|v| Value::Int(*v)).collect();
+                        Ok(Value::from_list(vals))
+                    }
+                    _ => Err(EvalError::TypeError {
+                        expected: "IntSet".into(),
+                        got: format!("{s:?}"),
+                    }),
+                }
+            }
+            PrimOp::IntSetFromList => {
+                let list = self.force(args[0].clone())?;
+                let items = self.force_list(list)?;
+                let set: BTreeSet<i64> = items.into_iter().filter_map(|v| v.as_int()).collect();
+                Ok(Value::IntSet(Arc::new(set)))
+            }
 
             // === System.IO PrimOps ===
-            PrimOp::Stdin => {
-                Ok(Value::Handle(Arc::new(HandleValue::stdin())))
-            }
-            PrimOp::Stdout => {
-                Ok(Value::Handle(Arc::new(HandleValue::stdout())))
-            }
-            PrimOp::Stderr => {
-                Ok(Value::Handle(Arc::new(HandleValue::stderr())))
-            }
+            PrimOp::Stdin => Ok(Value::Handle(Arc::new(HandleValue::stdin()))),
+            PrimOp::Stdout => Ok(Value::Handle(Arc::new(HandleValue::stdout()))),
+            PrimOp::Stderr => Ok(Value::Handle(Arc::new(HandleValue::stderr()))),
             PrimOp::OpenFile => {
                 let path_val = self.force(args[0].clone())?;
                 let mode_val = self.force(args[1].clone())?;
                 let path = match &path_val {
                     Value::String(s) => s.to_string(),
-                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path_val:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".into(),
+                            got: format!("{path_val:?}"),
+                        })
+                    }
                 };
                 // Parse IOMode from Data constructor
                 let (readable, writable, append) = match &mode_val {
@@ -4643,14 +5743,19 @@ impl Evaluator {
                     _ => (true, false, false),
                 };
                 let file = if append {
-                    std::fs::OpenOptions::new().append(true).create(true).open(&path)
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .create(true)
+                        .open(&path)
                 } else if writable {
                     std::fs::File::create(&path)
                 } else {
                     std::fs::File::open(&path)
                 };
                 match file {
-                    Ok(f) => Ok(Value::Handle(Arc::new(HandleValue::from_file(f, readable, writable)))),
+                    Ok(f) => Ok(Value::Handle(Arc::new(HandleValue::from_file(
+                        f, readable, writable,
+                    )))),
                     Err(e) => Err(EvalError::UserError(format!("openFile: {e}"))),
                 }
             }
@@ -4660,9 +5765,23 @@ impl Evaluator {
                     Value::Handle(handle) => {
                         let mut guard = handle.file.lock().unwrap();
                         *guard = None; // Drop the file to close it
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                        Ok(Value::Data(DataValue {
+                            con: crate::DataCon {
+                                name: Symbol::intern("()"),
+                                tag: 0,
+                                ty_con: bhc_types::TyCon::new(
+                                    Symbol::intern("()"),
+                                    bhc_types::Kind::Star,
+                                ),
+                                arity: 0,
+                            },
+                            args: vec![].into(),
+                        }))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Handle".into(),
+                        got: format!("{h:?}"),
+                    }),
                 }
             }
             PrimOp::HGetChar => {
@@ -4672,20 +5791,26 @@ impl Evaluator {
                     Value::Handle(handle) => {
                         if handle.kind == HandleKind::Stdin {
                             let mut buf = [0u8; 1];
-                            std::io::stdin().read_exact(&mut buf).map_err(|e| EvalError::UserError(format!("hGetChar: {e}")))?;
+                            std::io::stdin()
+                                .read_exact(&mut buf)
+                                .map_err(|e| EvalError::UserError(format!("hGetChar: {e}")))?;
                             Ok(Value::Char(buf[0] as char))
                         } else {
                             let mut guard = handle.file.lock().unwrap();
                             if let Some(ref mut f) = *guard {
                                 let mut buf = [0u8; 1];
-                                f.read_exact(&mut buf).map_err(|e| EvalError::UserError(format!("hGetChar: {e}")))?;
+                                f.read_exact(&mut buf)
+                                    .map_err(|e| EvalError::UserError(format!("hGetChar: {e}")))?;
                                 Ok(Value::Char(buf[0] as char))
                             } else {
                                 Err(EvalError::UserError("hGetChar: handle closed".into()))
                             }
                         }
                     }
-                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Handle".into(),
+                        got: format!("{h:?}"),
+                    }),
                 }
             }
             PrimOp::HGetLine => {
@@ -4695,24 +5820,40 @@ impl Evaluator {
                     Value::Handle(handle) => {
                         if handle.kind == HandleKind::Stdin {
                             let mut line = String::new();
-                            std::io::stdin().lock().read_line(&mut line).map_err(|e| EvalError::UserError(format!("hGetLine: {e}")))?;
-                            if line.ends_with('\n') { line.pop(); }
-                            if line.ends_with('\r') { line.pop(); }
+                            std::io::stdin()
+                                .lock()
+                                .read_line(&mut line)
+                                .map_err(|e| EvalError::UserError(format!("hGetLine: {e}")))?;
+                            if line.ends_with('\n') {
+                                line.pop();
+                            }
+                            if line.ends_with('\r') {
+                                line.pop();
+                            }
                             Ok(Value::String(Arc::from(line.as_str())))
                         } else {
                             let mut guard = handle.file.lock().unwrap();
                             if let Some(ref mut f) = *guard {
                                 let mut line = String::new();
-                                std::io::BufReader::new(f).read_line(&mut line).map_err(|e| EvalError::UserError(format!("hGetLine: {e}")))?;
-                                if line.ends_with('\n') { line.pop(); }
-                                if line.ends_with('\r') { line.pop(); }
+                                std::io::BufReader::new(f)
+                                    .read_line(&mut line)
+                                    .map_err(|e| EvalError::UserError(format!("hGetLine: {e}")))?;
+                                if line.ends_with('\n') {
+                                    line.pop();
+                                }
+                                if line.ends_with('\r') {
+                                    line.pop();
+                                }
                                 Ok(Value::String(Arc::from(line.as_str())))
                             } else {
                                 Err(EvalError::UserError("hGetLine: handle closed".into()))
                             }
                         }
                     }
-                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Handle".into(),
+                        got: format!("{h:?}"),
+                    }),
                 }
             }
             PrimOp::HGetContents => {
@@ -4722,20 +5863,28 @@ impl Evaluator {
                     Value::Handle(handle) => {
                         if handle.kind == HandleKind::Stdin {
                             let mut contents = String::new();
-                            std::io::stdin().lock().read_to_string(&mut contents).map_err(|e| EvalError::UserError(format!("hGetContents: {e}")))?;
+                            std::io::stdin()
+                                .lock()
+                                .read_to_string(&mut contents)
+                                .map_err(|e| EvalError::UserError(format!("hGetContents: {e}")))?;
                             Ok(Value::String(Arc::from(contents.as_str())))
                         } else {
                             let mut guard = handle.file.lock().unwrap();
                             if let Some(ref mut f) = *guard {
                                 let mut contents = String::new();
-                                f.read_to_string(&mut contents).map_err(|e| EvalError::UserError(format!("hGetContents: {e}")))?;
+                                f.read_to_string(&mut contents).map_err(|e| {
+                                    EvalError::UserError(format!("hGetContents: {e}"))
+                                })?;
                                 Ok(Value::String(Arc::from(contents.as_str())))
                             } else {
                                 Err(EvalError::UserError("hGetContents: handle closed".into()))
                             }
                         }
                     }
-                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Handle".into(),
+                        got: format!("{h:?}"),
+                    }),
                 }
             }
             PrimOp::HPutChar => {
@@ -4744,7 +5893,12 @@ impl Evaluator {
                 let c = self.force(args[1].clone())?;
                 let ch = match &c {
                     Value::Char(c) => *c,
-                    _ => return Err(EvalError::TypeError { expected: "Char".into(), got: format!("{c:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "Char".into(),
+                            got: format!("{c:?}"),
+                        })
+                    }
                 };
                 match &h {
                     Value::Handle(handle) => {
@@ -4755,14 +5909,29 @@ impl Evaluator {
                         } else {
                             let mut guard = handle.file.lock().unwrap();
                             if let Some(ref mut f) = *guard {
-                                write!(f, "{ch}").map_err(|e| EvalError::UserError(format!("hPutChar: {e}")))?;
+                                write!(f, "{ch}")
+                                    .map_err(|e| EvalError::UserError(format!("hPutChar: {e}")))?;
                             } else {
                                 return Err(EvalError::UserError("hPutChar: handle closed".into()));
                             }
                         }
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                        Ok(Value::Data(DataValue {
+                            con: crate::DataCon {
+                                name: Symbol::intern("()"),
+                                tag: 0,
+                                ty_con: bhc_types::TyCon::new(
+                                    Symbol::intern("()"),
+                                    bhc_types::Kind::Star,
+                                ),
+                                arity: 0,
+                            },
+                            args: vec![].into(),
+                        }))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Handle".into(),
+                        got: format!("{h:?}"),
+                    }),
                 }
             }
             PrimOp::HPutStr => {
@@ -4771,7 +5940,12 @@ impl Evaluator {
                 let s = self.force(args[1].clone())?;
                 let text = match &s {
                     Value::String(s) => s.to_string(),
-                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{s:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".into(),
+                            got: format!("{s:?}"),
+                        })
+                    }
                 };
                 match &h {
                     Value::Handle(handle) => {
@@ -4782,14 +5956,29 @@ impl Evaluator {
                         } else {
                             let mut guard = handle.file.lock().unwrap();
                             if let Some(ref mut f) = *guard {
-                                write!(f, "{text}").map_err(|e| EvalError::UserError(format!("hPutStr: {e}")))?;
+                                write!(f, "{text}")
+                                    .map_err(|e| EvalError::UserError(format!("hPutStr: {e}")))?;
                             } else {
                                 return Err(EvalError::UserError("hPutStr: handle closed".into()));
                             }
                         }
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                        Ok(Value::Data(DataValue {
+                            con: crate::DataCon {
+                                name: Symbol::intern("()"),
+                                tag: 0,
+                                ty_con: bhc_types::TyCon::new(
+                                    Symbol::intern("()"),
+                                    bhc_types::Kind::Star,
+                                ),
+                                arity: 0,
+                            },
+                            args: vec![].into(),
+                        }))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Handle".into(),
+                        got: format!("{h:?}"),
+                    }),
                 }
             }
             PrimOp::HPutStrLn => {
@@ -4798,7 +5987,12 @@ impl Evaluator {
                 let s = self.force(args[1].clone())?;
                 let text = match &s {
                     Value::String(s) => s.to_string(),
-                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{s:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".into(),
+                            got: format!("{s:?}"),
+                        })
+                    }
                 };
                 match &h {
                     Value::Handle(handle) => {
@@ -4809,14 +6003,31 @@ impl Evaluator {
                         } else {
                             let mut guard = handle.file.lock().unwrap();
                             if let Some(ref mut f) = *guard {
-                                writeln!(f, "{text}").map_err(|e| EvalError::UserError(format!("hPutStrLn: {e}")))?;
+                                writeln!(f, "{text}")
+                                    .map_err(|e| EvalError::UserError(format!("hPutStrLn: {e}")))?;
                             } else {
-                                return Err(EvalError::UserError("hPutStrLn: handle closed".into()));
+                                return Err(EvalError::UserError(
+                                    "hPutStrLn: handle closed".into(),
+                                ));
                             }
                         }
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                        Ok(Value::Data(DataValue {
+                            con: crate::DataCon {
+                                name: Symbol::intern("()"),
+                                tag: 0,
+                                ty_con: bhc_types::TyCon::new(
+                                    Symbol::intern("()"),
+                                    bhc_types::Kind::Star,
+                                ),
+                                arity: 0,
+                            },
+                            args: vec![].into(),
+                        }))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Handle".into(),
+                        got: format!("{h:?}"),
+                    }),
                 }
             }
             PrimOp::HPrint => {
@@ -4833,14 +6044,29 @@ impl Evaluator {
                         } else {
                             let mut guard = handle.file.lock().unwrap();
                             if let Some(ref mut f) = *guard {
-                                writeln!(f, "{text}").map_err(|e| EvalError::UserError(format!("hPrint: {e}")))?;
+                                writeln!(f, "{text}")
+                                    .map_err(|e| EvalError::UserError(format!("hPrint: {e}")))?;
                             } else {
                                 return Err(EvalError::UserError("hPrint: handle closed".into()));
                             }
                         }
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                        Ok(Value::Data(DataValue {
+                            con: crate::DataCon {
+                                name: Symbol::intern("()"),
+                                tag: 0,
+                                ty_con: bhc_types::TyCon::new(
+                                    Symbol::intern("()"),
+                                    bhc_types::Kind::Star,
+                                ),
+                                arity: 0,
+                            },
+                            args: vec![].into(),
+                        }))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Handle".into(),
+                        got: format!("{h:?}"),
+                    }),
                 }
             }
             PrimOp::HFlush => {
@@ -4849,18 +6075,37 @@ impl Evaluator {
                 match &h {
                     Value::Handle(handle) => {
                         if handle.kind == HandleKind::Stdout {
-                            std::io::stdout().flush().map_err(|e| EvalError::UserError(format!("hFlush: {e}")))?;
+                            std::io::stdout()
+                                .flush()
+                                .map_err(|e| EvalError::UserError(format!("hFlush: {e}")))?;
                         } else if handle.kind == HandleKind::Stderr {
-                            std::io::stderr().flush().map_err(|e| EvalError::UserError(format!("hFlush: {e}")))?;
+                            std::io::stderr()
+                                .flush()
+                                .map_err(|e| EvalError::UserError(format!("hFlush: {e}")))?;
                         } else {
                             let mut guard = handle.file.lock().unwrap();
                             if let Some(ref mut f) = *guard {
-                                f.flush().map_err(|e| EvalError::UserError(format!("hFlush: {e}")))?;
+                                f.flush()
+                                    .map_err(|e| EvalError::UserError(format!("hFlush: {e}")))?;
                             }
                         }
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                        Ok(Value::Data(DataValue {
+                            con: crate::DataCon {
+                                name: Symbol::intern("()"),
+                                tag: 0,
+                                ty_con: bhc_types::TyCon::new(
+                                    Symbol::intern("()"),
+                                    bhc_types::Kind::Star,
+                                ),
+                                arity: 0,
+                            },
+                            args: vec![].into(),
+                        }))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Handle".into(),
+                        got: format!("{h:?}"),
+                    }),
                 }
             }
             PrimOp::HIsEOF => {
@@ -4883,7 +6128,10 @@ impl Evaluator {
                             }
                         }
                     }
-                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Handle".into(),
+                        got: format!("{h:?}"),
+                    }),
                 }
             }
             PrimOp::HSetBuffering | PrimOp::HGetBuffering => {
@@ -4893,12 +6141,37 @@ impl Evaluator {
                     Value::Handle(_) => {
                         if matches!(op, PrimOp::HGetBuffering) {
                             // Return LineBuffering as default
-                            Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("LineBuffering"), tag: 1, ty_con: bhc_types::TyCon::new(Symbol::intern("BufferMode"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                            Ok(Value::Data(DataValue {
+                                con: crate::DataCon {
+                                    name: Symbol::intern("LineBuffering"),
+                                    tag: 1,
+                                    ty_con: bhc_types::TyCon::new(
+                                        Symbol::intern("BufferMode"),
+                                        bhc_types::Kind::Star,
+                                    ),
+                                    arity: 0,
+                                },
+                                args: vec![].into(),
+                            }))
                         } else {
-                            Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                            Ok(Value::Data(DataValue {
+                                con: crate::DataCon {
+                                    name: Symbol::intern("()"),
+                                    tag: 0,
+                                    ty_con: bhc_types::TyCon::new(
+                                        Symbol::intern("()"),
+                                        bhc_types::Kind::Star,
+                                    ),
+                                    arity: 0,
+                                },
+                                args: vec![].into(),
+                            }))
                         }
                     }
-                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Handle".into(),
+                        got: format!("{h:?}"),
+                    }),
                 }
             }
             PrimOp::HSeek => {
@@ -4911,11 +6184,26 @@ impl Evaluator {
                     Value::Handle(handle) => {
                         let mut guard = handle.file.lock().unwrap();
                         if let Some(ref mut f) = *guard {
-                            f.seek(std::io::SeekFrom::Start(offset as u64)).map_err(|e| EvalError::UserError(format!("hSeek: {e}")))?;
+                            f.seek(std::io::SeekFrom::Start(offset as u64))
+                                .map_err(|e| EvalError::UserError(format!("hSeek: {e}")))?;
                         }
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                        Ok(Value::Data(DataValue {
+                            con: crate::DataCon {
+                                name: Symbol::intern("()"),
+                                tag: 0,
+                                ty_con: bhc_types::TyCon::new(
+                                    Symbol::intern("()"),
+                                    bhc_types::Kind::Star,
+                                ),
+                                arity: 0,
+                            },
+                            args: vec![].into(),
+                        }))
                     }
-                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Handle".into(),
+                        got: format!("{h:?}"),
+                    }),
                 }
             }
             PrimOp::HTell => {
@@ -4925,13 +6213,18 @@ impl Evaluator {
                     Value::Handle(handle) => {
                         let mut guard = handle.file.lock().unwrap();
                         if let Some(ref mut f) = *guard {
-                            let pos = f.stream_position().map_err(|e| EvalError::UserError(format!("hTell: {e}")))?;
+                            let pos = f
+                                .stream_position()
+                                .map_err(|e| EvalError::UserError(format!("hTell: {e}")))?;
                             Ok(Value::Integer(pos as i128))
                         } else {
                             Err(EvalError::UserError("hTell: handle closed".into()))
                         }
                     }
-                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Handle".into(),
+                        got: format!("{h:?}"),
+                    }),
                 }
             }
             PrimOp::HFileSize => {
@@ -4940,13 +6233,18 @@ impl Evaluator {
                     Value::Handle(handle) => {
                         let guard = handle.file.lock().unwrap();
                         if let Some(ref f) = *guard {
-                            let metadata = f.metadata().map_err(|e| EvalError::UserError(format!("hFileSize: {e}")))?;
+                            let metadata = f
+                                .metadata()
+                                .map_err(|e| EvalError::UserError(format!("hFileSize: {e}")))?;
                             Ok(Value::Integer(metadata.len() as i128))
                         } else {
                             Err(EvalError::UserError("hFileSize: handle closed".into()))
                         }
                     }
-                    _ => Err(EvalError::TypeError { expected: "Handle".into(), got: format!("{h:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "Handle".into(),
+                        got: format!("{h:?}"),
+                    }),
                 }
             }
             PrimOp::WithFile => {
@@ -4954,7 +6252,8 @@ impl Evaluator {
                 let mode_val = self.force(args[1].clone())?;
                 let action = self.force(args[2].clone())?;
                 // Open the file
-                let handle_result = self.apply_primop(PrimOp::OpenFile, vec![path_val, mode_val])?;
+                let handle_result =
+                    self.apply_primop(PrimOp::OpenFile, vec![path_val, mode_val])?;
                 // Apply action to handle
                 let result = self.apply(action, handle_result.clone())?;
                 let result = self.force(result)?;
@@ -4977,7 +6276,10 @@ impl Evaluator {
                         let guard = ref_cell.lock().unwrap();
                         Ok(guard.clone())
                     }
-                    _ => Err(EvalError::TypeError { expected: "IORef".into(), got: format!("{r:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "IORef".into(),
+                        got: format!("{r:?}"),
+                    }),
                 }
             }
             PrimOp::WriteIORef => {
@@ -4987,9 +6289,23 @@ impl Evaluator {
                     Value::IORef(ref_cell) => {
                         let mut guard = ref_cell.lock().unwrap();
                         *guard = v;
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                        Ok(Value::Data(DataValue {
+                            con: crate::DataCon {
+                                name: Symbol::intern("()"),
+                                tag: 0,
+                                ty_con: bhc_types::TyCon::new(
+                                    Symbol::intern("()"),
+                                    bhc_types::Kind::Star,
+                                ),
+                                arity: 0,
+                            },
+                            args: vec![].into(),
+                        }))
                     }
-                    _ => Err(EvalError::TypeError { expected: "IORef".into(), got: format!("{r:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "IORef".into(),
+                        got: format!("{r:?}"),
+                    }),
                 }
             }
             PrimOp::ModifyIORef | PrimOp::ModifyIORefStrict => {
@@ -5009,9 +6325,23 @@ impl Evaluator {
                         };
                         let mut guard = ref_cell.lock().unwrap();
                         *guard = new_val;
-                        Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                        Ok(Value::Data(DataValue {
+                            con: crate::DataCon {
+                                name: Symbol::intern("()"),
+                                tag: 0,
+                                ty_con: bhc_types::TyCon::new(
+                                    Symbol::intern("()"),
+                                    bhc_types::Kind::Star,
+                                ),
+                                arity: 0,
+                            },
+                            args: vec![].into(),
+                        }))
                     }
-                    _ => Err(EvalError::TypeError { expected: "IORef".into(), got: format!("{r:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "IORef".into(),
+                        got: format!("{r:?}"),
+                    }),
                 }
             }
             PrimOp::AtomicModifyIORef | PrimOp::AtomicModifyIORefStrict => {
@@ -5038,10 +6368,15 @@ impl Evaluator {
                                 *guard = new_val;
                                 Ok(ret_val)
                             }
-                            _ => Err(EvalError::UserError("atomicModifyIORef: function must return a pair".into())),
+                            _ => Err(EvalError::UserError(
+                                "atomicModifyIORef: function must return a pair".into(),
+                            )),
                         }
                     }
-                    _ => Err(EvalError::TypeError { expected: "IORef".into(), got: format!("{r:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "IORef".into(),
+                        got: format!("{r:?}"),
+                    }),
                 }
             }
 
@@ -5074,7 +6409,10 @@ impl Evaluator {
 
             // === System.Environment PrimOps ===
             PrimOp::GetArgs => {
-                let args_list: Vec<Value> = std::env::args().skip(1).map(|s| Value::String(Arc::from(s.as_str()))).collect();
+                let args_list: Vec<Value> = std::env::args()
+                    .skip(1)
+                    .map(|s| Value::String(Arc::from(s.as_str())))
+                    .collect();
                 Ok(Value::from_list(args_list))
             }
             PrimOp::GetProgName => {
@@ -5085,18 +6423,30 @@ impl Evaluator {
                 let key = self.force(args[0].clone())?;
                 let key_str = match &key {
                     Value::String(s) => s.to_string(),
-                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{key:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".into(),
+                            got: format!("{key:?}"),
+                        })
+                    }
                 };
                 match std::env::var(&key_str) {
                     Ok(val) => Ok(Value::String(Arc::from(val.as_str()))),
-                    Err(_) => Err(EvalError::UserError(format!("getEnv: {key_str}: does not exist"))),
+                    Err(_) => Err(EvalError::UserError(format!(
+                        "getEnv: {key_str}: does not exist"
+                    ))),
                 }
             }
             PrimOp::LookupEnv => {
                 let key = self.force(args[0].clone())?;
                 let key_str = match &key {
                     Value::String(s) => s.to_string(),
-                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{key:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".into(),
+                            got: format!("{key:?}"),
+                        })
+                    }
                 };
                 match std::env::var(&key_str) {
                     Ok(val) => Ok(self.make_just(Value::String(Arc::from(val.as_str())))),
@@ -5108,15 +6458,35 @@ impl Evaluator {
                 let val = self.force(args[1].clone())?;
                 let key_str = match &key {
                     Value::String(s) => s.to_string(),
-                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{key:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".into(),
+                            got: format!("{key:?}"),
+                        })
+                    }
                 };
                 let val_str = match &val {
                     Value::String(s) => s.to_string(),
-                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{val:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".into(),
+                            got: format!("{val:?}"),
+                        })
+                    }
                 };
                 // SAFETY: This is unsafe in Rust but we're in a single-threaded interpreter
-                unsafe { std::env::set_var(&key_str, &val_str); }
-                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                unsafe {
+                    std::env::set_var(&key_str, &val_str);
+                }
+                Ok(Value::Data(DataValue {
+                    con: crate::DataCon {
+                        name: Symbol::intern("()"),
+                        tag: 0,
+                        ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star),
+                        arity: 0,
+                    },
+                    args: vec![].into(),
+                }))
             }
 
             // === System.Directory PrimOps ===
@@ -5124,7 +6494,12 @@ impl Evaluator {
                 let path = self.force(args[0].clone())?;
                 let path_str = match &path {
                     Value::String(s) => s.to_string(),
-                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".into(),
+                            got: format!("{path:?}"),
+                        })
+                    }
                 };
                 Ok(Value::bool(std::path::Path::new(&path_str).is_file()))
             }
@@ -5132,7 +6507,12 @@ impl Evaluator {
                 let path = self.force(args[0].clone())?;
                 let path_str = match &path {
                     Value::String(s) => s.to_string(),
-                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".into(),
+                            got: format!("{path:?}"),
+                        })
+                    }
                 };
                 Ok(Value::bool(std::path::Path::new(&path_str).is_dir()))
             }
@@ -5140,56 +6520,130 @@ impl Evaluator {
                 let path = self.force(args[0].clone())?;
                 let path_str = match &path {
                     Value::String(s) => s.to_string(),
-                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".into(),
+                            got: format!("{path:?}"),
+                        })
+                    }
                 };
-                std::fs::create_dir(&path_str).map_err(|e| EvalError::UserError(format!("createDirectory: {e}")))?;
-                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                std::fs::create_dir(&path_str)
+                    .map_err(|e| EvalError::UserError(format!("createDirectory: {e}")))?;
+                Ok(Value::Data(DataValue {
+                    con: crate::DataCon {
+                        name: Symbol::intern("()"),
+                        tag: 0,
+                        ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star),
+                        arity: 0,
+                    },
+                    args: vec![].into(),
+                }))
             }
             PrimOp::CreateDirectoryIfMissing => {
                 let parents = self.force(args[0].clone())?;
                 let path = self.force(args[1].clone())?;
                 let path_str = match &path {
                     Value::String(s) => s.to_string(),
-                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".into(),
+                            got: format!("{path:?}"),
+                        })
+                    }
                 };
                 let create_parents = parents.as_bool().unwrap_or(false);
                 if create_parents {
-                    std::fs::create_dir_all(&path_str).map_err(|e| EvalError::UserError(format!("createDirectoryIfMissing: {e}")))?;
+                    std::fs::create_dir_all(&path_str).map_err(|e| {
+                        EvalError::UserError(format!("createDirectoryIfMissing: {e}"))
+                    })?;
                 } else if !std::path::Path::new(&path_str).exists() {
-                    std::fs::create_dir(&path_str).map_err(|e| EvalError::UserError(format!("createDirectoryIfMissing: {e}")))?;
+                    std::fs::create_dir(&path_str).map_err(|e| {
+                        EvalError::UserError(format!("createDirectoryIfMissing: {e}"))
+                    })?;
                 }
-                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                Ok(Value::Data(DataValue {
+                    con: crate::DataCon {
+                        name: Symbol::intern("()"),
+                        tag: 0,
+                        ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star),
+                        arity: 0,
+                    },
+                    args: vec![].into(),
+                }))
             }
             PrimOp::RemoveFile => {
                 let path = self.force(args[0].clone())?;
                 let path_str = match &path {
                     Value::String(s) => s.to_string(),
-                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".into(),
+                            got: format!("{path:?}"),
+                        })
+                    }
                 };
-                std::fs::remove_file(&path_str).map_err(|e| EvalError::UserError(format!("removeFile: {e}")))?;
-                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                std::fs::remove_file(&path_str)
+                    .map_err(|e| EvalError::UserError(format!("removeFile: {e}")))?;
+                Ok(Value::Data(DataValue {
+                    con: crate::DataCon {
+                        name: Symbol::intern("()"),
+                        tag: 0,
+                        ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star),
+                        arity: 0,
+                    },
+                    args: vec![].into(),
+                }))
             }
             PrimOp::RemoveDirectory => {
                 let path = self.force(args[0].clone())?;
                 let path_str = match &path {
                     Value::String(s) => s.to_string(),
-                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".into(),
+                            got: format!("{path:?}"),
+                        })
+                    }
                 };
-                std::fs::remove_dir(&path_str).map_err(|e| EvalError::UserError(format!("removeDirectory: {e}")))?;
-                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                std::fs::remove_dir(&path_str)
+                    .map_err(|e| EvalError::UserError(format!("removeDirectory: {e}")))?;
+                Ok(Value::Data(DataValue {
+                    con: crate::DataCon {
+                        name: Symbol::intern("()"),
+                        tag: 0,
+                        ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star),
+                        arity: 0,
+                    },
+                    args: vec![].into(),
+                }))
             }
             PrimOp::GetCurrentDirectory => {
-                let cwd = std::env::current_dir().map_err(|e| EvalError::UserError(format!("getCurrentDirectory: {e}")))?;
+                let cwd = std::env::current_dir()
+                    .map_err(|e| EvalError::UserError(format!("getCurrentDirectory: {e}")))?;
                 Ok(Value::String(Arc::from(cwd.to_string_lossy().as_ref())))
             }
             PrimOp::SetCurrentDirectory => {
                 let path = self.force(args[0].clone())?;
                 let path_str = match &path {
                     Value::String(s) => s.to_string(),
-                    _ => return Err(EvalError::TypeError { expected: "String".into(), got: format!("{path:?}") }),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "String".into(),
+                            got: format!("{path:?}"),
+                        })
+                    }
                 };
-                std::env::set_current_dir(&path_str).map_err(|e| EvalError::UserError(format!("setCurrentDirectory: {e}")))?;
-                Ok(Value::Data(DataValue { con: crate::DataCon { name: Symbol::intern("()"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star), arity: 0 }, args: vec![].into() }))
+                std::env::set_current_dir(&path_str)
+                    .map_err(|e| EvalError::UserError(format!("setCurrentDirectory: {e}")))?;
+                Ok(Value::Data(DataValue {
+                    con: crate::DataCon {
+                        name: Symbol::intern("()"),
+                        tag: 0,
+                        ty_con: bhc_types::TyCon::new(Symbol::intern("()"), bhc_types::Kind::Star),
+                        arity: 0,
+                    },
+                    args: vec![].into(),
+                }))
             }
 
             // ---- Control.Monad ----
@@ -5213,9 +6667,7 @@ impl Evaluator {
                 // guard :: Bool -> [()]  (list monad interpretation)
                 let cond = self.force(args[0].clone())?;
                 match cond.as_bool() {
-                    Some(true) => {
-                        Ok(Value::from_list(vec![Value::unit()]))
-                    }
+                    Some(true) => Ok(Value::from_list(vec![Value::unit()])),
                     _ => Ok(Value::nil()),
                 }
             }
@@ -5360,7 +6812,12 @@ impl Evaluator {
                             bs.push(dv.args[0].clone());
                             cs.push(dv.args[1].clone());
                         }
-                        _ => return Err(EvalError::TypeError { expected: "pair".into(), got: format!("{pair:?}") }),
+                        _ => {
+                            return Err(EvalError::TypeError {
+                                expected: "pair".into(),
+                                got: format!("{pair:?}"),
+                            })
+                        }
                     }
                 }
                 Ok(self.make_pair(Value::from_list(bs), Value::from_list(cs)))
@@ -5417,7 +6874,12 @@ impl Evaluator {
                 // replicateM :: Int -> m a -> m [a]
                 let n = match self.force(args[0].clone())? {
                     Value::Int(n) => n as usize,
-                    other => return Err(EvalError::TypeError { expected: "Int".into(), got: format!("{other:?}") }),
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "Int".into(),
+                            got: format!("{other:?}"),
+                        })
+                    }
                 };
                 let action = args[1].clone();
                 let mut result = Vec::new();
@@ -5430,7 +6892,12 @@ impl Evaluator {
                 // replicateM_ :: Int -> m a -> m ()
                 let n = match self.force(args[0].clone())? {
                     Value::Int(n) => n as usize,
-                    other => return Err(EvalError::TypeError { expected: "Int".into(), got: format!("{other:?}") }),
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "Int".into(),
+                            got: format!("{other:?}"),
+                        })
+                    }
                 };
                 let action = args[1].clone();
                 for _ in 0..n {
@@ -5441,7 +6908,9 @@ impl Evaluator {
             PrimOp::Forever => {
                 // forever :: m a -> m b
                 // In the interpreter, this would loop infinitely.
-                Err(EvalError::UserError("forever: infinite loop (not supported in interpreter)".into()))
+                Err(EvalError::UserError(
+                    "forever: infinite loop (not supported in interpreter)".into(),
+                ))
             }
             PrimOp::Mzero => {
                 // mzero :: MonadPlus m => m a  (empty list for list monad)
@@ -5601,7 +7070,15 @@ impl Evaluator {
                     Ok(v) => {
                         // Right v
                         Ok(Value::Data(DataValue {
-                            con: crate::DataCon { name: Symbol::intern("Right"), tag: 1, ty_con: bhc_types::TyCon::new(Symbol::intern("Either"), bhc_types::Kind::Star), arity: 1 },
+                            con: crate::DataCon {
+                                name: Symbol::intern("Right"),
+                                tag: 1,
+                                ty_con: bhc_types::TyCon::new(
+                                    Symbol::intern("Either"),
+                                    bhc_types::Kind::Star,
+                                ),
+                                arity: 1,
+                            },
                             args: vec![v].into(),
                         }))
                     }
@@ -5609,7 +7086,15 @@ impl Evaluator {
                         // Left (show e)
                         let err_str = Value::String(Arc::from(format!("{e}")));
                         Ok(Value::Data(DataValue {
-                            con: crate::DataCon { name: Symbol::intern("Left"), tag: 0, ty_con: bhc_types::TyCon::new(Symbol::intern("Either"), bhc_types::Kind::Star), arity: 1 },
+                            con: crate::DataCon {
+                                name: Symbol::intern("Left"),
+                                tag: 0,
+                                ty_con: bhc_types::TyCon::new(
+                                    Symbol::intern("Either"),
+                                    bhc_types::Kind::Star,
+                                ),
+                                arity: 1,
+                            },
                             args: vec![err_str].into(),
                         }))
                     }
@@ -5708,7 +7193,9 @@ impl Evaluator {
                         let maybe_b = self.apply(pred_fn, err_str)?;
                         let maybe_b = self.force(maybe_b)?;
                         match &maybe_b {
-                            Value::Data(dv) if dv.con.name.as_str() == "Just" && !dv.args.is_empty() => {
+                            Value::Data(dv)
+                                if dv.con.name.as_str() == "Just" && !dv.args.is_empty() =>
+                            {
                                 self.apply(handler, dv.args[0].clone())
                             }
                             _ => Err(e),
@@ -5756,7 +7243,12 @@ impl Evaluator {
                 // threadDelay :: Int -> IO ()
                 let micros = match self.force(args[0].clone())? {
                     Value::Int(n) => n,
-                    other => return Err(EvalError::TypeError { expected: "Int".into(), got: format!("{other:?}") }),
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "Int".into(),
+                            got: format!("{other:?}"),
+                        })
+                    }
                 };
                 std::thread::sleep(std::time::Duration::from_micros(micros as u64));
                 Ok(Value::unit())
@@ -5782,7 +7274,10 @@ impl Evaluator {
                         let val = r.lock().unwrap().clone();
                         Ok(val)
                     }
-                    _ => Err(EvalError::TypeError { expected: "MVar".into(), got: format!("{mvar:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "MVar".into(),
+                        got: format!("{mvar:?}"),
+                    }),
                 }
             }
             PrimOp::PutMVar => {
@@ -5794,7 +7289,10 @@ impl Evaluator {
                         *r.lock().unwrap() = val;
                         Ok(Value::unit())
                     }
-                    _ => Err(EvalError::TypeError { expected: "MVar".into(), got: format!("{mvar:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "MVar".into(),
+                        got: format!("{mvar:?}"),
+                    }),
                 }
             }
             PrimOp::ReadMVar => {
@@ -5805,7 +7303,10 @@ impl Evaluator {
                         let val = r.lock().unwrap().clone();
                         Ok(val)
                     }
-                    _ => Err(EvalError::TypeError { expected: "MVar".into(), got: format!("{mvar:?}") }),
+                    _ => Err(EvalError::TypeError {
+                        expected: "MVar".into(),
+                        got: format!("{mvar:?}"),
+                    }),
                 }
             }
             PrimOp::ThrowTo => {
@@ -6219,9 +7720,7 @@ impl Evaluator {
                 let a = self.force(args[0].clone())?;
                 let b = self.force(args[1].clone())?;
                 match (&a, &b) {
-                    (Value::Int(x), Value::Int(n)) => {
-                        Ok(Value::Int(x.rotate_left(*n as u32)))
-                    }
+                    (Value::Int(x), Value::Int(n)) => Ok(Value::Int(x.rotate_left(*n as u32))),
                     _ => Err(EvalError::TypeError {
                         expected: "Int".into(),
                         got: format!("{a:?}"),
@@ -6232,9 +7731,7 @@ impl Evaluator {
                 let a = self.force(args[0].clone())?;
                 let b = self.force(args[1].clone())?;
                 match (&a, &b) {
-                    (Value::Int(x), Value::Int(n)) => {
-                        Ok(Value::Int(x.rotate_right(*n as u32)))
-                    }
+                    (Value::Int(x), Value::Int(n)) => Ok(Value::Int(x.rotate_right(*n as u32))),
                     _ => Err(EvalError::TypeError {
                         expected: "Int".into(),
                         got: format!("{a:?}"),
@@ -6342,9 +7839,7 @@ impl Evaluator {
             }
 
             // ---- Data.Void ----
-            PrimOp::Absurd => {
-                Err(EvalError::UserError("absurd: Void value".into()))
-            }
+            PrimOp::Absurd => Err(EvalError::UserError("absurd: Void value".into())),
             PrimOp::Vacuous => {
                 // vacuous :: f Void -> f a (just return the structure)
                 self.force(args[0].clone())
@@ -6656,20 +8151,18 @@ impl Evaluator {
             }
             (Value::Char(x), Value::Char(y)) => x.cmp(y),
             (Value::String(x), Value::String(y)) => x.cmp(y),
-            (Value::Data(x), Value::Data(y)) => {
-                match x.con.tag.cmp(&y.con.tag) {
-                    std::cmp::Ordering::Equal => {
-                        for (ax, ay) in x.args.iter().zip(y.args.iter()) {
-                            let c = self.value_compare(ax, ay);
-                            if c != std::cmp::Ordering::Equal {
-                                return c;
-                            }
+            (Value::Data(x), Value::Data(y)) => match x.con.tag.cmp(&y.con.tag) {
+                std::cmp::Ordering::Equal => {
+                    for (ax, ay) in x.args.iter().zip(y.args.iter()) {
+                        let c = self.value_compare(ax, ay);
+                        if c != std::cmp::Ordering::Equal {
+                            return c;
                         }
-                        std::cmp::Ordering::Equal
                     }
-                    ord => ord,
+                    std::cmp::Ordering::Equal
                 }
-            }
+                ord => ord,
+            },
             _ => std::cmp::Ordering::Equal,
         }
     }
@@ -6846,7 +8339,9 @@ impl Evaluator {
                 let entries: Vec<String> = m
                     .iter()
                     .map(|(k, v)| {
-                        let vs = self.display_value_impl(v, depth + 1).unwrap_or_else(|_| "<error>".to_string());
+                        let vs = self
+                            .display_value_impl(v, depth + 1)
+                            .unwrap_or_else(|_| "<error>".to_string());
                         format!("({}, {})", k, vs)
                     })
                     .collect();

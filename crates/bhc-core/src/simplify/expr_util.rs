@@ -29,9 +29,10 @@ pub fn expr_size(expr: &Expr) -> usize {
         Expr::Let(bind, body, _) => {
             let bind_size = match bind.as_ref() {
                 crate::Bind::NonRec(_, rhs) => 1 + expr_size(rhs),
-                crate::Bind::Rec(binds) => {
-                    binds.iter().map(|(_, rhs)| 1 + expr_size(rhs)).sum::<usize>()
-                }
+                crate::Bind::Rec(binds) => binds
+                    .iter()
+                    .map(|(_, rhs)| 1 + expr_size(rhs))
+                    .sum::<usize>(),
             };
             bind_size + expr_size(body)
         }
@@ -146,9 +147,7 @@ pub fn contains_toplevel_case(expr: &Expr) -> bool {
         Expr::Let(bind, body, _) => {
             let bind_has = match bind.as_ref() {
                 crate::Bind::NonRec(_, rhs) => contains_toplevel_case(rhs),
-                crate::Bind::Rec(pairs) => {
-                    pairs.iter().any(|(_, rhs)| contains_toplevel_case(rhs))
-                }
+                crate::Bind::Rec(pairs) => pairs.iter().any(|(_, rhs)| contains_toplevel_case(rhs)),
             };
             bind_has || contains_toplevel_case(body)
         }
@@ -161,11 +160,11 @@ pub fn contains_toplevel_case(expr: &Expr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Bind, Var};
     use bhc_index::Idx;
     use bhc_intern::Symbol;
     use bhc_span::Span;
     use bhc_types::Ty;
-    use crate::{Bind, Var};
 
     fn mk_var(name: &str, id: u32) -> Var {
         Var::new(Symbol::intern(name), VarId::new(id as usize), Ty::Error)

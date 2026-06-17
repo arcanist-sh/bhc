@@ -362,9 +362,7 @@ impl CppPreprocessor {
             }
 
             if value.is_empty() {
-                self.config
-                    .defines
-                    .insert(name.to_string(), MacroDef::Flag);
+                self.config.defines.insert(name.to_string(), MacroDef::Flag);
             } else {
                 self.config
                     .defines
@@ -493,11 +491,8 @@ impl CppPreprocessor {
                         MacroDef::Function(params, body) => {
                             // Check if followed by '('
                             if i < len && chars[i] == '(' {
-                                if let Some((args, end)) =
-                                    parse_macro_args(&chars, i, len)
-                                {
-                                    let expanded =
-                                        expand_function_macro(params, body, &args);
+                                if let Some((args, end)) = parse_macro_args(&chars, i, len) {
+                                    let expanded = expand_function_macro(params, body, &args);
                                     result.push_str(&expanded);
                                     i = end;
                                 } else {
@@ -665,17 +660,25 @@ fn tokenize_cpp_expr(expr: &str) -> Vec<CppToken> {
         // Integer literals
         if chars[i].is_ascii_digit() {
             let start = i;
-            while i < len && (chars[i].is_ascii_digit() || chars[i] == 'x' || chars[i] == 'X'
-                || (chars[i].is_ascii_hexdigit() && start + 1 < i && (chars[start + 1] == 'x' || chars[start + 1] == 'X')))
+            while i < len
+                && (chars[i].is_ascii_digit()
+                    || chars[i] == 'x'
+                    || chars[i] == 'X'
+                    || (chars[i].is_ascii_hexdigit()
+                        && start + 1 < i
+                        && (chars[start + 1] == 'x' || chars[start + 1] == 'X')))
             {
                 i += 1;
             }
             // Skip trailing L/U/LL suffixes
-            while i < len && (chars[i] == 'L' || chars[i] == 'U' || chars[i] == 'l' || chars[i] == 'u') {
+            while i < len
+                && (chars[i] == 'L' || chars[i] == 'U' || chars[i] == 'l' || chars[i] == 'u')
+            {
                 i += 1;
             }
             let num_str: String = chars[start..i].iter().collect();
-            let num_str = num_str.trim_end_matches(|c: char| c == 'L' || c == 'U' || c == 'l' || c == 'u');
+            let num_str =
+                num_str.trim_end_matches(|c: char| c == 'L' || c == 'U' || c == 'l' || c == 'u');
             let value = if num_str.starts_with("0x") || num_str.starts_with("0X") {
                 i64::from_str_radix(&num_str[2..], 16).unwrap_or(0)
             } else {
@@ -988,7 +991,11 @@ impl<'a> ExprParser<'a> {
                 if has_paren {
                     self.expect(&CppToken::RParen)?;
                 }
-                Ok(if self.defines.contains_key(&name) { 1 } else { 0 })
+                Ok(if self.defines.contains_key(&name) {
+                    1
+                } else {
+                    0
+                })
             }
             Some(CppToken::LParen) => {
                 self.advance();
@@ -1140,38 +1147,59 @@ pub fn default_cpp_config(options: &crate::Options) -> CppConfig {
     // Platform detection
     #[cfg(target_os = "macos")]
     {
-        defines.insert("darwin_HOST_OS".to_string(), MacroDef::Object("1".to_string()));
+        defines.insert(
+            "darwin_HOST_OS".to_string(),
+            MacroDef::Object("1".to_string()),
+        );
         defines.insert("__APPLE__".to_string(), MacroDef::Object("1".to_string()));
     }
 
     #[cfg(target_os = "linux")]
     {
-        defines.insert("linux_HOST_OS".to_string(), MacroDef::Object("1".to_string()));
+        defines.insert(
+            "linux_HOST_OS".to_string(),
+            MacroDef::Object("1".to_string()),
+        );
         defines.insert("__linux__".to_string(), MacroDef::Object("1".to_string()));
     }
 
     #[cfg(target_os = "windows")]
     {
-        defines.insert("mingw32_HOST_OS".to_string(), MacroDef::Object("1".to_string()));
+        defines.insert(
+            "mingw32_HOST_OS".to_string(),
+            MacroDef::Object("1".to_string()),
+        );
         defines.insert("_WIN32".to_string(), MacroDef::Object("1".to_string()));
     }
 
     // Architecture detection
     #[cfg(target_arch = "x86_64")]
     {
-        defines.insert("x86_64_HOST_ARCH".to_string(), MacroDef::Object("1".to_string()));
+        defines.insert(
+            "x86_64_HOST_ARCH".to_string(),
+            MacroDef::Object("1".to_string()),
+        );
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        defines.insert("aarch64_HOST_ARCH".to_string(), MacroDef::Object("1".to_string()));
+        defines.insert(
+            "aarch64_HOST_ARCH".to_string(),
+            MacroDef::Object("1".to_string()),
+        );
     }
 
     // Pointer size
     #[cfg(target_pointer_width = "64")]
     {
-        defines.insert("SIZEOF_HSINT".to_string(), MacroDef::Object("8".to_string()));
-        defines.insert("SIZEOF_HSWORD".to_string(), MacroDef::Object("8".to_string()));
+        defines.insert(
+            "SIZEOF_HSINT".to_string(),
+            MacroDef::Object("8".to_string()),
+        );
+        defines.insert(
+            "SIZEOF_HSWORD".to_string(),
+            MacroDef::Object("8".to_string()),
+        );
     }
 
     // MIN_VERSION macros for common packages.
@@ -1180,32 +1208,52 @@ pub fn default_cpp_config(options: &crate::Options) -> CppConfig {
     defines.insert(
         "MIN_VERSION_base".to_string(),
         MacroDef::Function(
-            vec!["major1".to_string(), "major2".to_string(), "minor".to_string()],
-            "(major1 < 4 || (major1 == 4 && (major2 < 20 || (major2 == 20 && minor <= 0))))".to_string(),
+            vec![
+                "major1".to_string(),
+                "major2".to_string(),
+                "minor".to_string(),
+            ],
+            "(major1 < 4 || (major1 == 4 && (major2 < 20 || (major2 == 20 && minor <= 0))))"
+                .to_string(),
         ),
     );
 
     defines.insert(
         "MIN_VERSION_text".to_string(),
         MacroDef::Function(
-            vec!["major1".to_string(), "major2".to_string(), "minor".to_string()],
-            "(major1 < 2 || (major1 == 2 && (major2 < 1 || (major2 == 1 && minor <= 0))))".to_string(),
+            vec![
+                "major1".to_string(),
+                "major2".to_string(),
+                "minor".to_string(),
+            ],
+            "(major1 < 2 || (major1 == 2 && (major2 < 1 || (major2 == 1 && minor <= 0))))"
+                .to_string(),
         ),
     );
 
     defines.insert(
         "MIN_VERSION_bytestring".to_string(),
         MacroDef::Function(
-            vec!["major1".to_string(), "major2".to_string(), "minor".to_string()],
-            "(major1 < 0 || (major1 == 0 && (major2 < 12 || (major2 == 12 && minor <= 0))))".to_string(),
+            vec![
+                "major1".to_string(),
+                "major2".to_string(),
+                "minor".to_string(),
+            ],
+            "(major1 < 0 || (major1 == 0 && (major2 < 12 || (major2 == 12 && minor <= 0))))"
+                .to_string(),
         ),
     );
 
     defines.insert(
         "MIN_VERSION_containers".to_string(),
         MacroDef::Function(
-            vec!["major1".to_string(), "major2".to_string(), "minor".to_string()],
-            "(major1 < 0 || (major1 == 0 && (major2 < 7 || (major2 == 7 && minor <= 0))))".to_string(),
+            vec![
+                "major1".to_string(),
+                "major2".to_string(),
+                "minor".to_string(),
+            ],
+            "(major1 < 0 || (major1 == 0 && (major2 < 7 || (major2 == 7 && minor <= 0))))"
+                .to_string(),
         ),
     );
 
@@ -1440,8 +1488,13 @@ mod tests {
         defines.insert(
             "MIN_VERSION_base".to_string(),
             MacroDef::Function(
-                vec!["major1".to_string(), "major2".to_string(), "minor".to_string()],
-                "(major1 < 4 || (major1 == 4 && (major2 < 20 || (major2 == 20 && minor <= 0))))".to_string(),
+                vec![
+                    "major1".to_string(),
+                    "major2".to_string(),
+                    "minor".to_string(),
+                ],
+                "(major1 < 4 || (major1 == 4 && (major2 < 20 || (major2 == 20 && minor <= 0))))"
+                    .to_string(),
             ),
         );
         let config = CppConfig { defines };

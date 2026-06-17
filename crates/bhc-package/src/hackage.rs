@@ -532,10 +532,16 @@ mod tests {
         // These should be skipped in dependency resolution
         let builtins = ["base", "ghc-prim", "rts"];
         for pkg in builtins {
-            assert!(
-                ["base", "ghc-prim", "ghc-bignum", "integer-gmp", "integer-simple", "rts", "template-haskell"]
-                    .contains(&pkg)
-            );
+            assert!([
+                "base",
+                "ghc-prim",
+                "ghc-bignum",
+                "integer-gmp",
+                "integer-simple",
+                "rts",
+                "template-haskell"
+            ]
+            .contains(&pkg));
         }
     }
 }

@@ -125,8 +125,16 @@ pub fn lower_pat_to_alt_with_fallthrough(
                     }
                     _ => {
                         // Complex sub-pattern: need nested case
-                        let sub_alt = lower_pat_to_alt_with_fallthrough(ctx, sub_pat, inner_rhs.clone(), span, fallthrough.clone())?;
-                        let default_rhs = fallthrough.clone().unwrap_or_else(|| make_pattern_error(span));
+                        let sub_alt = lower_pat_to_alt_with_fallthrough(
+                            ctx,
+                            sub_pat,
+                            inner_rhs.clone(),
+                            span,
+                            fallthrough.clone(),
+                        )?;
+                        let default_rhs = fallthrough
+                            .clone()
+                            .unwrap_or_else(|| make_pattern_error(span));
                         let default_alt = Alt {
                             con: AltCon::Default,
                             binders: vec![],
@@ -151,7 +159,12 @@ pub fn lower_pat_to_alt_with_fallthrough(
             // Look up the constructor metadata from the context
             let (con_name, type_name, tag, existential_dict_count) =
                 if let Some(info) = ctx.lookup_constructor(def_ref.def_id) {
-                    (info.name, info.type_name, info.tag, info.existential_dict_count)
+                    (
+                        info.name,
+                        info.type_name,
+                        info.tag,
+                        info.existential_dict_count,
+                    )
                 } else if let Some(var) = ctx.lookup_var(def_ref.def_id) {
                     // Fallback for constructors not in the map - use name-based lookup
                     let tag = get_constructor_tag(var.name.as_str(), def_ref.def_id.index() as u32);
@@ -272,8 +285,16 @@ pub fn lower_pat_to_alt_with_fallthrough(
                             binders.push(binder);
                         }
                         _ => {
-                            let sub_alt = lower_pat_to_alt_with_fallthrough(ctx, &fp.pat, inner_rhs.clone(), span, fallthrough.clone())?;
-                            let default_rhs = fallthrough.clone().unwrap_or_else(|| make_pattern_error(span));
+                            let sub_alt = lower_pat_to_alt_with_fallthrough(
+                                ctx,
+                                &fp.pat,
+                                inner_rhs.clone(),
+                                span,
+                                fallthrough.clone(),
+                            )?;
+                            let default_rhs = fallthrough
+                                .clone()
+                                .unwrap_or_else(|| make_pattern_error(span));
                             let default_alt = Alt {
                                 con: AltCon::Default,
                                 binders: vec![],
@@ -320,8 +341,11 @@ pub fn lower_pat_to_alt_with_fallthrough(
             };
 
             // Create a nested case for the inner pattern
-            let inner_alt = lower_pat_to_alt_with_fallthrough(ctx, inner_pat, rhs, span, fallthrough.clone())?;
-            let default_rhs = fallthrough.clone().unwrap_or_else(|| make_pattern_error(span));
+            let inner_alt =
+                lower_pat_to_alt_with_fallthrough(ctx, inner_pat, rhs, span, fallthrough.clone())?;
+            let default_rhs = fallthrough
+                .clone()
+                .unwrap_or_else(|| make_pattern_error(span));
             let default_alt = Alt {
                 con: AltCon::Default,
                 binders: vec![],
@@ -520,9 +544,10 @@ pub fn compile_match_to_expr(
 ) -> LowerResult<core::Expr> {
     // Check for view patterns or guards — these need special handling and
     // bypass the decision tree algorithm.
-    let has_view = value_def.equations.iter().any(|eq| {
-        eq.pats.iter().any(|p| matches!(p, Pat::View(_, _, _)))
-    });
+    let has_view = value_def
+        .equations
+        .iter()
+        .any(|eq| eq.pats.iter().any(|p| matches!(p, Pat::View(_, _, _))));
     let has_guards = value_def.equations.iter().any(|eq| !eq.guards.is_empty());
 
     if has_view || has_guards {
@@ -532,8 +557,7 @@ pub fn compile_match_to_expr(
             core::Expr::Var(args[0].clone(), value_def.span)
         } else {
             // Multi-arg: create a tuple scrutinee
-            let tuple_con_name =
-                Symbol::intern(&format!("({})", ",".repeat(args.len() - 1)));
+            let tuple_con_name = Symbol::intern(&format!("({})", ",".repeat(args.len() - 1)));
             let mut expr = core::Expr::Var(
                 Var {
                     name: tuple_con_name,
@@ -599,14 +623,14 @@ fn expand_equation_or_patterns(
     eq: &hir::Equation,
 ) -> Vec<(Vec<hir::Pat>, Option<hir::Expr>, hir::Expr)> {
     // For each pattern position, flatten or-patterns
-    let flattened: Vec<Vec<hir::Pat>> = eq
-        .pats
-        .iter()
-        .map(flatten_nested_or_patterns)
-        .collect();
+    let flattened: Vec<Vec<hir::Pat>> = eq.pats.iter().map(flatten_nested_or_patterns).collect();
 
     if flattened.is_empty() {
-        return vec![(vec![], eq.guards.first().map(|g| g.cond.clone()), eq.rhs.clone())];
+        return vec![(
+            vec![],
+            eq.guards.first().map(|g| g.cond.clone()),
+            eq.rhs.clone(),
+        )];
     }
 
     // Cross product of all expanded patterns
@@ -640,12 +664,7 @@ fn pat_head(ctx: &LowerContext, pat: &hir::Pat) -> PatHead {
                     .map(|v| v.name)
                     .unwrap_or_else(|| Symbol::intern("Con"));
                 let tag = get_constructor_tag(name.as_str(), def_ref.def_id.index() as u32);
-                PatHead::Con(
-                    Symbol::intern("DataType"),
-                    name,
-                    tag,
-                    sub_pats.len() as u32,
-                )
+                PatHead::Con(Symbol::intern("DataType"), name, tag, sub_pats.len() as u32)
             }
         }
         Pat::RecordCon(def_ref, field_pats, _) => {
@@ -763,9 +782,10 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
     }
 
     // Check if first row is all wildcards/vars (match success)
-    let all_wild = matrix.rows[0].pats.iter().all(|p| {
-        matches!(pat_head(ctx, p), PatHead::Wild)
-    });
+    let all_wild = matrix.rows[0]
+        .pats
+        .iter()
+        .all(|p| matches!(pat_head(ctx, p), PatHead::Wild));
 
     if all_wild || matrix.rows[0].pats.is_empty() {
         // Register variable bindings for variables in the first row
@@ -838,13 +858,7 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
 
                 // Create fresh variables for constructor fields
                 let field_vars: Vec<Var> = (0..*arity)
-                    .map(|i| {
-                        ctx.fresh_var(
-                            &format!("_pat{}_{}", col, i),
-                            Ty::Error,
-                            row_span,
-                        )
-                    })
+                    .map(|i| ctx.fresh_var(&format!("_pat{}_{}", col, i), Ty::Error, row_span))
                     .collect();
 
                 // Register variable bindings for wild/var rows participating
@@ -859,15 +873,8 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                 }
 
                 // Build sub-matrix: specialize for this constructor
-                let sub_matrix = specialize_matrix(
-                    ctx,
-                    &matrix,
-                    col,
-                    head,
-                    &field_vars,
-                    group_rows,
-                    row_span,
-                );
+                let sub_matrix =
+                    specialize_matrix(ctx, &matrix, col, head, &field_vars, group_rows, row_span);
 
                 let sub_tree = build_decision_tree(ctx, sub_matrix, row_span);
                 branches.push((AltCon::DataCon(con), field_vars, sub_tree));
@@ -900,15 +907,8 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                 }
 
                 // Literal branches have no field variables
-                let sub_matrix = specialize_matrix(
-                    ctx,
-                    &matrix,
-                    col,
-                    head,
-                    &[],
-                    group_rows,
-                    row_span,
-                );
+                let sub_matrix =
+                    specialize_matrix(ctx, &matrix, col, head, &[], group_rows, row_span);
                 let sub_tree = build_decision_tree(ctx, sub_matrix, row_span);
                 branches.push((AltCon::Lit(core_lit), vec![], sub_tree));
             }
@@ -1074,7 +1074,12 @@ fn tree_to_core(ctx: &mut LowerContext, tree: DecisionTree) -> LowerResult<core:
 
             if let Some(guard_expr) = guard {
                 let core_guard = lower_expr(ctx, &guard_expr)?;
-                Ok(make_if(core_guard, core_rhs, make_pattern_error(span), span))
+                Ok(make_if(
+                    core_guard,
+                    core_rhs,
+                    make_pattern_error(span),
+                    span,
+                ))
             } else {
                 Ok(core_rhs)
             }
@@ -1196,8 +1201,7 @@ fn check_exhaustiveness_tree(ctx: &mut LowerContext, tree: &DecisionTree, func_n
                         .collect();
 
                     if !missing.is_empty() {
-                        let missing_names: Vec<&str> =
-                            missing.iter().map(|s| s.as_str()).collect();
+                        let missing_names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
                         ctx.warn(format!(
                             "warning: Pattern match(es) are non-exhaustive in '{}'\n\
                              Patterns not matched: {}",
@@ -1301,8 +1305,7 @@ fn compile_equations_linear(
             compile_guarded_rhs(ctx, &eq.guards, &eq.rhs, eq.span)?
         };
 
-        let remaining_alts =
-            compile_equations_linear(ctx, &equations[1..], args, span)?;
+        let remaining_alts = compile_equations_linear(ctx, &equations[1..], args, span)?;
 
         let fallthrough_expr = if let Some(arg) = args.first() {
             core::Expr::Case(
@@ -1364,11 +1367,8 @@ fn compile_equations_linear(
         if !existential_classes.is_empty() {
             ctx.push_dict_scope();
             for class_name in &existential_classes {
-                let dict_var = ctx.fresh_var(
-                    &format!("$dict_{}", class_name.as_str()),
-                    Ty::Error,
-                    span,
-                );
+                let dict_var =
+                    ctx.fresh_var(&format!("$dict_{}", class_name.as_str()), Ty::Error, span);
                 ctx.register_dict(*class_name, dict_var);
             }
         }
@@ -1398,8 +1398,7 @@ fn compile_equations_linear(
         }
 
         if equations.len() > 1 {
-            let remaining =
-                compile_equations_linear(ctx, &equations[1..], args, span)?;
+            let remaining = compile_equations_linear(ctx, &equations[1..], args, span)?;
             alts.extend(remaining);
         } else {
             alts.push(Alt {
@@ -2230,11 +2229,11 @@ mod tests {
         let tree = build_decision_tree(&mut ctx, matrix, Span::default());
         check_exhaustiveness_tree(&mut ctx, &tree, "f");
         let warnings = ctx.take_warnings();
+        assert!(!warnings.is_empty(), "Should warn about missing False");
         assert!(
-            !warnings.is_empty(),
-            "Should warn about missing False"
+            warnings[0].contains("False"),
+            "Warning should mention False"
         );
-        assert!(warnings[0].contains("False"), "Warning should mention False");
     }
 
     #[test]
@@ -2252,10 +2251,7 @@ mod tests {
         let tree = build_decision_tree(&mut ctx, matrix, Span::default());
         check_overlap(&mut ctx, &tree, 2, "f");
         let warnings = ctx.take_warnings();
-        assert!(
-            !warnings.is_empty(),
-            "Should warn about redundant equation"
-        );
+        assert!(!warnings.is_empty(), "Should warn about redundant equation");
         assert!(
             warnings[0].contains("redundant"),
             "Warning should say redundant"
@@ -2326,10 +2322,7 @@ mod tests {
         let tree = build_decision_tree(&mut ctx, matrix, Span::default());
         check_overlap(&mut ctx, &tree, 2, "f");
         let warnings = ctx.take_warnings();
-        assert!(
-            warnings.is_empty(),
-            "No equations should be redundant"
-        );
+        assert!(warnings.is_empty(), "No equations should be redundant");
     }
 
     #[test]

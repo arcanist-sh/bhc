@@ -286,9 +286,10 @@ impl<'src> Parser<'src> {
         })?;
 
         match &tok.node.kind.clone() {
-            TokenKind::Ident(sym) if sym.as_str() == "lazy"
-                && self.pos + 1 < self.tokens.len()
-                && self.tokens[self.pos + 1].node.kind == TokenKind::LBrace =>
+            TokenKind::Ident(sym)
+                if sym.as_str() == "lazy"
+                    && self.pos + 1 < self.tokens.len()
+                    && self.tokens[self.pos + 1].node.kind == TokenKind::LBrace =>
             {
                 return self.parse_lazy_expr();
             }
@@ -726,8 +727,7 @@ impl<'src> Parser<'src> {
                 // Check for hole after comma in middle of tuple
                 if self.check(&TokenKind::Comma) || self.check(&TokenKind::RParen) {
                     // Switch to tuple section parser, adding None for the hole
-                    let mut elements: Vec<Option<Expr>> =
-                        exprs.into_iter().map(Some).collect();
+                    let mut elements: Vec<Option<Expr>> = exprs.into_iter().map(Some).collect();
                     elements.push(None);
                     return self.parse_tuple_section(start, elements);
                 }
@@ -1041,7 +1041,13 @@ impl<'src> Parser<'src> {
                         span: fb.span,
                     });
                 }
-                Ok(Pat::QualRecord(module_name, con, field_pats, has_wildcard, span))
+                Ok(Pat::QualRecord(
+                    module_name,
+                    con,
+                    field_pats,
+                    has_wildcard,
+                    span,
+                ))
             }
             _ => Err(ParseError::Unexpected {
                 found: "expression".to_string(),
@@ -1170,12 +1176,7 @@ impl<'src> Parser<'src> {
                 None => continue,
             };
             let span = start.to(grhs.body.span());
-            result = Expr::If(
-                Box::new(cond),
-                Box::new(grhs.body),
-                Box::new(result),
-                span,
-            );
+            result = Expr::If(Box::new(cond), Box::new(grhs.body), Box::new(result), span);
         }
 
         Ok(result)

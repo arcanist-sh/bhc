@@ -34,12 +34,7 @@ pub fn try_constant_fold(expr: &Expr) -> Option<Expr> {
     None
 }
 
-fn try_fold_binary(
-    op: &str,
-    arg1: &Expr,
-    arg2: &Expr,
-    span: bhc_span::Span,
-) -> Option<Expr> {
+fn try_fold_binary(op: &str, arg1: &Expr, arg2: &Expr, span: bhc_span::Span) -> Option<Expr> {
     match (arg1, arg2) {
         (Expr::Lit(Literal::Int(a), ty, _), Expr::Lit(Literal::Int(b), _, _)) => {
             let result = match op {
@@ -80,19 +75,17 @@ fn try_fold_binary(
             };
             Some(Expr::Lit(Literal::Float(result), ty.clone(), span))
         }
-        (Expr::Lit(Literal::String(a), ty, _), Expr::Lit(Literal::String(b), _, _)) => {
-            match op {
-                "++" => {
-                    let result = format!("{}{}", a.as_str(), b.as_str());
-                    Some(Expr::Lit(
-                        Literal::String(Symbol::intern(&result)),
-                        ty.clone(),
-                        span,
-                    ))
-                }
-                _ => None,
+        (Expr::Lit(Literal::String(a), ty, _), Expr::Lit(Literal::String(b), _, _)) => match op {
+            "++" => {
+                let result = format!("{}{}", a.as_str(), b.as_str());
+                Some(Expr::Lit(
+                    Literal::String(Symbol::intern(&result)),
+                    ty.clone(),
+                    span,
+                ))
             }
-        }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -100,21 +93,15 @@ fn try_fold_binary(
 fn try_fold_unary(op: &str, arg: &Expr, span: bhc_span::Span) -> Option<Expr> {
     match arg {
         Expr::Lit(Literal::Int(n), ty, _) => match op {
-            "negate" | "GHC.Num.negate" => {
-                Some(Expr::Lit(Literal::Int(-n), ty.clone(), span))
-            }
+            "negate" | "GHC.Num.negate" => Some(Expr::Lit(Literal::Int(-n), ty.clone(), span)),
             _ => None,
         },
         Expr::Lit(Literal::Double(n), ty, _) => match op {
-            "negate" | "GHC.Num.negate" => {
-                Some(Expr::Lit(Literal::Double(-n), ty.clone(), span))
-            }
+            "negate" | "GHC.Num.negate" => Some(Expr::Lit(Literal::Double(-n), ty.clone(), span)),
             _ => None,
         },
         Expr::Lit(Literal::Float(n), ty, _) => match op {
-            "negate" | "GHC.Num.negate" => {
-                Some(Expr::Lit(Literal::Float(-n), ty.clone(), span))
-            }
+            "negate" | "GHC.Num.negate" => Some(Expr::Lit(Literal::Float(-n), ty.clone(), span)),
             _ => None,
         },
         _ => None,
@@ -124,11 +111,11 @@ fn try_fold_unary(op: &str, arg: &Expr, span: bhc_span::Span) -> Option<Expr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Var, VarId};
     use bhc_index::Idx;
     use bhc_intern::Symbol;
     use bhc_span::Span;
     use bhc_types::Ty;
-    use crate::{Var, VarId};
 
     fn mk_var(name: &str, id: u32) -> Var {
         Var::new(Symbol::intern(name), VarId::new(id as usize), Ty::Error)
@@ -211,11 +198,7 @@ mod tests {
 
     #[test]
     fn test_no_fold_for_variables() {
-        let e = mk_binop(
-            "+",
-            Expr::Var(mk_var("x", 1), Span::default()),
-            mk_int(2),
-        );
+        let e = mk_binop("+", Expr::Var(mk_var("x", 1), Span::default()), mk_int(2));
         let result = try_constant_fold(&e);
         assert!(result.is_none());
     }

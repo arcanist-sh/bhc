@@ -272,11 +272,11 @@ impl LowerContext {
             ("LT", "Ordering", 0),   // Ordering constructors
             ("EQ", "Ordering", 0),
             ("GT", "Ordering", 0),
-            ("[]", "List", 0),       // DefId 15 - list nil
-            (":", "List", 2),        // DefId 16 - list cons
-            ("()", "Unit", 0),       // DefId 17 - unit
-            ("(,)", "Tuple2", 2),    // DefId 18 - pair constructor
-            ("(,,)", "Tuple3", 3),   // DefId 19 - triple constructor
+            ("[]", "List", 0),     // DefId 15 - list nil
+            (":", "List", 2),      // DefId 16 - list cons
+            ("()", "Unit", 0),     // DefId 17 - unit
+            ("(,)", "Tuple2", 2),  // DefId 18 - pair constructor
+            ("(,,)", "Tuple3", 3), // DefId 19 - triple constructor
             ("(,,,)", "Tuple4", 4),
             ("(,,,,)", "Tuple5", 5),
             ("(,,,,,)", "Tuple6", 6),
@@ -1323,9 +1323,7 @@ impl LowerContext {
         }
 
         // E.17: Ordering ADT - compare at fixed DefId
-        let e17_builtins: &[(usize, &str)] = &[
-            (10900, "compare"),
-        ];
+        let e17_builtins: &[(usize, &str)] = &[(10900, "compare")];
 
         for &(id, name) in e17_builtins {
             let sym = Symbol::intern(name);
@@ -1466,11 +1464,8 @@ impl LowerContext {
         }
 
         // E.25: String type class methods at fixed DefIds
-        let e25_string_builtins: &[(usize, &str)] = &[
-            (11300, "fromString"),
-            (11301, "read"),
-            (11302, "readMaybe"),
-        ];
+        let e25_string_builtins: &[(usize, &str)] =
+            &[(11300, "fromString"), (11301, "read"), (11302, "readMaybe")];
 
         for &(id, name) in e25_string_builtins {
             let sym = Symbol::intern(name);

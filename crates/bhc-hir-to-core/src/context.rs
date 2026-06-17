@@ -587,11 +587,8 @@ impl LowerContext {
         }
 
         // MonadTrans/MonadIO class methods + IO MonadIO instance (DefIds 10010-10012)
-        let class_methods: [(usize, &str); 3] = [
-            (10010, "lift"),
-            (10011, "liftIO"),
-            (10012, "IO.liftIO"),
-        ];
+        let class_methods: [(usize, &str); 3] =
+            [(10010, "lift"), (10011, "liftIO"), (10012, "IO.liftIO")];
         for (method_id, name) in class_methods {
             let def_id = DefId::new(method_id);
             let var = Var {
@@ -882,7 +879,11 @@ impl LowerContext {
                 (80, "fromInteger"),
             ],
         );
-        self.register_builtin_instance("Fractional", &rational_ty, &[(21, "/"), (81, "fromRational")]);
+        self.register_builtin_instance(
+            "Fractional",
+            &rational_ty,
+            &[(21, "/"), (81, "fromRational")],
+        );
         self.register_builtin_instance("Show", &rational_ty, &[(92, "show")]);
 
         // === Register Functor class ===
@@ -1305,9 +1306,7 @@ impl LowerContext {
 
         // 3. If not in scope, try to construct from an instance
         // (only works for concrete types — all args must be concrete)
-        if !constraint.args.is_empty()
-            && constraint.args.iter().all(|ty| !has_type_variables(ty))
-        {
+        if !constraint.args.is_empty() && constraint.args.iter().all(|ty| !has_type_variables(ty)) {
             // Create a DictContext with var_map so method_reference uses correct names
             let mut dict_ctx =
                 DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
@@ -1906,26 +1905,43 @@ impl LowerContext {
                                 let class_name = clause.class;
                                 match &clause.strategy {
                                     bhc_hir::DerivingStrategy::Stock
-                                    | bhc_hir::DerivingStrategy::Default => {
-                                        deriv_ctx.derive_for_data(data_def, class_name)
-                                            .or_else(|| self.try_derive_any_class(
-                                                data_def.name, &data_def.params, class_name, data_def.span,
-                                            ))
-                                    }
+                                    | bhc_hir::DerivingStrategy::Default => deriv_ctx
+                                        .derive_for_data(data_def, class_name)
+                                        .or_else(|| {
+                                            self.try_derive_any_class(
+                                                data_def.name,
+                                                &data_def.params,
+                                                class_name,
+                                                data_def.span,
+                                            )
+                                        }),
                                     bhc_hir::DerivingStrategy::Anyclass
-                                    | bhc_hir::DerivingStrategy::Via(_) => {
-                                        self.try_derive_any_class(
-                                            data_def.name, &data_def.params, class_name, data_def.span,
-                                        ).or_else(|| deriv_ctx.derive_empty_instance(
-                                            data_def.name, &data_def.params, class_name,
-                                        ))
-                                    }
+                                    | bhc_hir::DerivingStrategy::Via(_) => self
+                                        .try_derive_any_class(
+                                            data_def.name,
+                                            &data_def.params,
+                                            class_name,
+                                            data_def.span,
+                                        )
+                                        .or_else(|| {
+                                            deriv_ctx.derive_empty_instance(
+                                                data_def.name,
+                                                &data_def.params,
+                                                class_name,
+                                            )
+                                        }),
                                     bhc_hir::DerivingStrategy::Newtype => {
                                         // Newtype strategy on a data type: fall back to stock
-                                        deriv_ctx.derive_for_data(data_def, class_name)
-                                            .or_else(|| self.try_derive_any_class(
-                                                data_def.name, &data_def.params, class_name, data_def.span,
-                                            ))
+                                        deriv_ctx.derive_for_data(data_def, class_name).or_else(
+                                            || {
+                                                self.try_derive_any_class(
+                                                    data_def.name,
+                                                    &data_def.params,
+                                                    class_name,
+                                                    data_def.span,
+                                                )
+                                            },
+                                        )
                                     }
                                 }
                             })
@@ -1976,34 +1992,62 @@ impl LowerContext {
                                 match &clause.strategy {
                                     bhc_hir::DerivingStrategy::Stock => {
                                         // Stock: use built-in newtype derivation
-                                        deriv_ctx.derive_for_newtype(newtype_def, class_name)
-                                            .or_else(|| self.try_derive_any_class(
-                                                newtype_def.name, &newtype_def.params, class_name, newtype_def.span,
-                                            ))
+                                        deriv_ctx
+                                            .derive_for_newtype(newtype_def, class_name)
+                                            .or_else(|| {
+                                                self.try_derive_any_class(
+                                                    newtype_def.name,
+                                                    &newtype_def.params,
+                                                    class_name,
+                                                    newtype_def.span,
+                                                )
+                                            })
                                     }
                                     bhc_hir::DerivingStrategy::Newtype
                                     | bhc_hir::DerivingStrategy::Via(_) => {
                                         // GND / DerivingVia: empty instance (inner type's
                                         // dictionary works directly since newtypes are erased)
-                                        deriv_ctx.derive_empty_instance(
-                                            newtype_def.name, &newtype_def.params, class_name,
-                                        ).or_else(|| self.try_derive_any_class(
-                                            newtype_def.name, &newtype_def.params, class_name, newtype_def.span,
-                                        ))
+                                        deriv_ctx
+                                            .derive_empty_instance(
+                                                newtype_def.name,
+                                                &newtype_def.params,
+                                                class_name,
+                                            )
+                                            .or_else(|| {
+                                                self.try_derive_any_class(
+                                                    newtype_def.name,
+                                                    &newtype_def.params,
+                                                    class_name,
+                                                    newtype_def.span,
+                                                )
+                                            })
                                     }
-                                    bhc_hir::DerivingStrategy::Anyclass => {
-                                        self.try_derive_any_class(
-                                            newtype_def.name, &newtype_def.params, class_name, newtype_def.span,
-                                        ).or_else(|| deriv_ctx.derive_empty_instance(
-                                            newtype_def.name, &newtype_def.params, class_name,
-                                        ))
-                                    }
+                                    bhc_hir::DerivingStrategy::Anyclass => self
+                                        .try_derive_any_class(
+                                            newtype_def.name,
+                                            &newtype_def.params,
+                                            class_name,
+                                            newtype_def.span,
+                                        )
+                                        .or_else(|| {
+                                            deriv_ctx.derive_empty_instance(
+                                                newtype_def.name,
+                                                &newtype_def.params,
+                                                class_name,
+                                            )
+                                        }),
                                     bhc_hir::DerivingStrategy::Default => {
                                         // Default heuristic: try stock first, then anyclass
-                                        deriv_ctx.derive_for_newtype(newtype_def, class_name)
-                                            .or_else(|| self.try_derive_any_class(
-                                                newtype_def.name, &newtype_def.params, class_name, newtype_def.span,
-                                            ))
+                                        deriv_ctx
+                                            .derive_for_newtype(newtype_def, class_name)
+                                            .or_else(|| {
+                                                self.try_derive_any_class(
+                                                    newtype_def.name,
+                                                    &newtype_def.params,
+                                                    class_name,
+                                                    newtype_def.span,
+                                                )
+                                            })
                                     }
                                 }
                             })
@@ -2052,12 +2096,10 @@ impl LowerContext {
                         } else {
                             // Instance has user-class constraints — wrap method body
                             // with dict lambdas so dictionary construction can apply them.
-                            if let Some(bind) =
-                                self.lower_instance_method_with_constraints(
-                                    method_def,
-                                    &inst_constraints,
-                                )?
-                            {
+                            if let Some(bind) = self.lower_instance_method_with_constraints(
+                                method_def,
+                                &inst_constraints,
+                            )? {
                                 bindings.push(bind);
                             }
                         }
@@ -2068,12 +2110,10 @@ impl LowerContext {
                 }
                 Item::Foreign(foreign) => {
                     // Use the var pre-registered in the first pass
-                    let var = self.lookup_var(foreign.id)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            let ty = foreign.ty.ty.clone();
-                            self.named_var(foreign.name, ty)
-                        });
+                    let var = self.lookup_var(foreign.id).cloned().unwrap_or_else(|| {
+                        let ty = foreign.ty.ty.clone();
+                        self.named_var(foreign.name, ty)
+                    });
 
                     // Map calling convention
                     let convention = match foreign.convention {
@@ -2109,9 +2149,8 @@ impl LowerContext {
                     for other_item in &module.items {
                         match other_item {
                             Item::Data(data_def) if data_def.name == type_name => {
-                                if let Some(derived) = deriv_ctx
-                                    .derive_for_data(data_def, class_name)
-                                    .or_else(|| {
+                                if let Some(derived) =
+                                    deriv_ctx.derive_for_data(data_def, class_name).or_else(|| {
                                         self.try_derive_any_class(
                                             data_def.name,
                                             &data_def.params,
@@ -2155,8 +2194,10 @@ impl LowerContext {
                     // Pattern synonyms are fully handled during AST→HIR lowering.
                     // No Core bindings needed.
                 }
-                Item::TypeFamily(_) | Item::TypeFamilyInst(_)
-                | Item::DataFamily(_) | Item::DataFamilyInst(_) => {
+                Item::TypeFamily(_)
+                | Item::TypeFamilyInst(_)
+                | Item::DataFamily(_)
+                | Item::DataFamilyInst(_) => {
                     // Type/data families are purely type-level; no Core bindings needed.
                     // Data family instance constructors are handled through the normal
                     // constructor registration path during codegen.
@@ -2485,13 +2526,19 @@ fn type_name_for_instance(ty: &Ty) -> String {
     match ty {
         Ty::Con(con) => con.name.as_str().to_string(),
         Ty::App(f, a) => {
-            format!("{}_{}", type_name_for_instance(f), type_name_for_instance(a))
+            format!(
+                "{}_{}",
+                type_name_for_instance(f),
+                type_name_for_instance(a)
+            )
         }
         Ty::List(elem) => format!("List_{}", type_name_for_instance(elem)),
         Ty::Var(tv) => format!("v{}", tv.id),
         Ty::Fun(from, to) => {
             format!(
-                "Fun_{}_{}", type_name_for_instance(from), type_name_for_instance(to)
+                "Fun_{}_{}",
+                type_name_for_instance(from),
+                type_name_for_instance(to)
             )
         }
         Ty::Tuple(elems) => {

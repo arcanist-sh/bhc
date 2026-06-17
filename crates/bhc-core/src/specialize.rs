@@ -218,11 +218,11 @@ fn is_tuple_constructor(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Alt, AltCon, CoreModule, Literal, Var, VarId};
     use bhc_index::Idx;
     use bhc_intern::Symbol;
     use bhc_span::Span;
     use bhc_types::Ty;
-    use crate::{Alt, AltCon, CoreModule, Literal, Var, VarId};
 
     fn mk_var(name: &str, id: u32) -> Var {
         Var::new(Symbol::intern(name), VarId::new(id as usize), Ty::Error)
@@ -412,10 +412,7 @@ mod tests {
     fn test_unknown_dict_unchanged() {
         // $sel_0 unknown_var
         let sel_call = mk_app(mk_var_expr("$sel_0", 0), mk_var_expr("unknown", 99));
-        let mut module = mk_module(vec![Bind::NonRec(
-            mk_var("test", 100),
-            Box::new(sel_call),
-        )]);
+        let mut module = mk_module(vec![Bind::NonRec(mk_var("test", 100), Box::new(sel_call))]);
 
         let count = specialize_dictionaries(&mut module);
         assert_eq!(count, 0);
@@ -471,21 +468,14 @@ mod tests {
         let tuple = mk_tuple2(mk_var_expr("a", 10), mk_var_expr("b", 11));
         let sel_call = mk_app(mk_var_expr("$sel_0", 0), tuple);
 
-        let mut module = mk_module(vec![Bind::NonRec(
-            mk_var("test", 100),
-            Box::new(sel_call),
-        )]);
+        let mut module = mk_module(vec![Bind::NonRec(mk_var("test", 100), Box::new(sel_call))]);
         let count = specialize_dictionaries(&mut module);
 
         assert_eq!(count, 1);
 
         // Result should be "a" (VarId 10)
         if let Bind::NonRec(_, rhs) = &module.bindings[0] {
-            assert!(
-                is_var_with_id(rhs, 10),
-                "expected a (id=10), got {:?}",
-                rhs
-            );
+            assert!(is_var_with_id(rhs, 10), "expected a (id=10), got {:?}", rhs);
         }
     }
 
@@ -554,7 +544,10 @@ mod tests {
 
         // First $sel_0 on $dOrd fires (extracting Eq dict), then the extracted
         // value is a tuple, so the second $sel_0 fires too
-        assert!(count >= 1, "expected at least 1 specialization, got {count}");
+        assert!(
+            count >= 1,
+            "expected at least 1 specialization, got {count}"
+        );
     }
 
     // --------------------------------------------------------
@@ -595,10 +588,7 @@ mod tests {
             Span::default(),
         );
 
-        let mut module = mk_module(vec![Bind::NonRec(
-            mk_var("test", 100),
-            Box::new(case_expr),
-        )]);
+        let mut module = mk_module(vec![Bind::NonRec(mk_var("test", 100), Box::new(case_expr))]);
         let count = specialize_dictionaries(&mut module);
 
         assert_eq!(count, 1);

@@ -87,11 +87,7 @@ fn desugar_body_with_wheres(
                         }
                     };
                     return Some(hir::Binding {
-                        pat: hir::Pat::Var(
-                            nested_fb.name.name,
-                            nested_def_id,
-                            nested_fb.span,
-                        ),
+                        pat: hir::Pat::Var(nested_fb.name.name, nested_def_id, nested_fb.span),
                         sig: None,
                         rhs: nested_rhs,
                         span: nested_fb.span,
@@ -104,9 +100,8 @@ fn desugar_body_with_wheres(
                     for p in &clause.pats {
                         bind_pattern(ctx, p);
                     }
-                    let pats: Vec<hir::Pat> = clause.pats.iter()
-                        .map(|p| lower_pat(ctx, p))
-                        .collect();
+                    let pats: Vec<hir::Pat> =
+                        clause.pats.iter().map(|p| lower_pat(ctx, p)).collect();
                     let body = match &clause.rhs {
                         ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
                         ast::Rhs::Guarded(guards, _) => {
@@ -116,11 +111,7 @@ fn desugar_body_with_wheres(
                     ctx.exit_scope();
                     let lam = hir::Expr::Lam(pats, Box::new(body), nested_fb.span);
                     return Some(hir::Binding {
-                        pat: hir::Pat::Var(
-                            nested_fb.name.name,
-                            nested_def_id,
-                            nested_fb.span,
-                        ),
+                        pat: hir::Pat::Var(nested_fb.name.name, nested_def_id, nested_fb.span),
                         sig: None,
                         rhs: lam,
                         span: nested_fb.span,
@@ -307,7 +298,14 @@ fn desugar_let_decls(
                     .expect("do-let binding should be bound");
                 let pat = hir::Pat::Var(fun_bind.name.name, def_id, fun_bind.span);
                 let rhs = if !clause.wheres.is_empty() {
-                    desugar_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fun_bind.span, lower_expr, lower_pat)
+                    desugar_body_with_wheres(
+                        ctx,
+                        &clause.rhs,
+                        &clause.wheres,
+                        fun_bind.span,
+                        lower_expr,
+                        lower_pat,
+                    )
                 } else {
                     match &clause.rhs {
                         ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
@@ -342,7 +340,14 @@ fn desugar_let_decls(
                 }
 
                 let rhs_body = if !clause.wheres.is_empty() {
-                    desugar_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fun_bind.span, lower_expr, lower_pat)
+                    desugar_body_with_wheres(
+                        ctx,
+                        &clause.rhs,
+                        &clause.wheres,
+                        fun_bind.span,
+                        lower_expr,
+                        lower_pat,
+                    )
                 } else {
                     match &clause.rhs {
                         ast::Rhs::Simple(e, _) => lower_expr(ctx, e),

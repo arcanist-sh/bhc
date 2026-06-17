@@ -135,11 +135,11 @@ fn count_expr(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Var;
     use bhc_index::Idx;
     use bhc_intern::Symbol;
     use bhc_span::Span;
     use bhc_types::Ty;
-    use crate::Var;
 
     fn mk_var(name: &str, id: u32) -> Var {
         Var::new(Symbol::intern(name), VarId::new(id as usize), Ty::Error)
@@ -158,11 +158,7 @@ mod tests {
         // let x = 1 in 2  -- x is dead
         let binds = vec![Bind::NonRec(mk_var("x", 1), Box::new(mk_int(1)))];
         let body = mk_int(2);
-        let full = Expr::Let(
-            Box::new(binds[0].clone()),
-            Box::new(body),
-            Span::default(),
-        );
+        let full = Expr::Let(Box::new(binds[0].clone()), Box::new(body), Span::default());
         let occs = analyze_occurrences(&full);
         assert_eq!(occs.get(&VarId::new(1)).copied(), None);
     }
@@ -201,9 +197,6 @@ mod tests {
             Span::default(),
         );
         let occs = analyze_occurrences(&lam);
-        assert_eq!(
-            occs.get(&VarId::new(1)).copied(),
-            Some(OccCount::OnceInLam)
-        );
+        assert_eq!(occs.get(&VarId::new(1)).copied(), Some(OccCount::OnceInLam));
     }
 }

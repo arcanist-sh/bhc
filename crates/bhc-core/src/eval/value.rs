@@ -36,19 +36,39 @@ pub struct HandleValue {
 impl HandleValue {
     /// Create a handle for stdin.
     pub fn stdin() -> Self {
-        Self { kind: HandleKind::Stdin, file: Mutex::new(None), readable: true, writable: false }
+        Self {
+            kind: HandleKind::Stdin,
+            file: Mutex::new(None),
+            readable: true,
+            writable: false,
+        }
     }
     /// Create a handle for stdout.
     pub fn stdout() -> Self {
-        Self { kind: HandleKind::Stdout, file: Mutex::new(None), readable: false, writable: true }
+        Self {
+            kind: HandleKind::Stdout,
+            file: Mutex::new(None),
+            readable: false,
+            writable: true,
+        }
     }
     /// Create a handle for stderr.
     pub fn stderr() -> Self {
-        Self { kind: HandleKind::Stderr, file: Mutex::new(None), readable: false, writable: true }
+        Self {
+            kind: HandleKind::Stderr,
+            file: Mutex::new(None),
+            readable: false,
+            writable: true,
+        }
     }
     /// Create a file handle.
     pub fn from_file(file: std::fs::File, readable: bool, writable: bool) -> Self {
-        Self { kind: HandleKind::File, file: Mutex::new(Some(file)), readable, writable }
+        Self {
+            kind: HandleKind::File,
+            file: Mutex::new(Some(file)),
+            readable,
+            writable,
+        }
     }
 }
 
@@ -272,9 +292,7 @@ impl fmt::Display for Value {
                 if name == "[]" || name == ":" {
                     if let Some(elems) = self.as_list() {
                         // Check if it's a string (list of Char)
-                        if !elems.is_empty()
-                            && elems.iter().all(|e| matches!(e, Value::Char(_)))
-                        {
+                        if !elems.is_empty() && elems.iter().all(|e| matches!(e, Value::Char(_))) {
                             let s: std::string::String = elems
                                 .iter()
                                 .map(|e| match e {
@@ -607,20 +625,18 @@ impl Ord for OrdValue {
             (Value::Double(a), Value::Double(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
             (Value::Char(a), Value::Char(b)) => a.cmp(b),
             (Value::String(a), Value::String(b)) => a.cmp(b),
-            (Value::Data(a), Value::Data(b)) => {
-                match a.con.tag.cmp(&b.con.tag) {
-                    Ordering::Equal => {
-                        for (ax, bx) in a.args.iter().zip(b.args.iter()) {
-                            let c = OrdValue(ax.clone()).cmp(&OrdValue(bx.clone()));
-                            if c != Ordering::Equal {
-                                return c;
-                            }
+            (Value::Data(a), Value::Data(b)) => match a.con.tag.cmp(&b.con.tag) {
+                Ordering::Equal => {
+                    for (ax, bx) in a.args.iter().zip(b.args.iter()) {
+                        let c = OrdValue(ax.clone()).cmp(&OrdValue(bx.clone()));
+                        if c != Ordering::Equal {
+                            return c;
                         }
-                        a.args.len().cmp(&b.args.len())
                     }
-                    ord => ord,
+                    a.args.len().cmp(&b.args.len())
                 }
-            }
+                ord => ord,
+            },
             _ => Ordering::Equal,
         }
     }
@@ -2467,7 +2483,9 @@ impl PrimOp {
             "modifyIORef" | "Data.IORef.modifyIORef" => Some(Self::ModifyIORef),
             "modifyIORef'" | "Data.IORef.modifyIORef'" => Some(Self::ModifyIORefStrict),
             "atomicModifyIORef" | "Data.IORef.atomicModifyIORef" => Some(Self::AtomicModifyIORef),
-            "atomicModifyIORef'" | "Data.IORef.atomicModifyIORef'" => Some(Self::AtomicModifyIORefStrict),
+            "atomicModifyIORef'" | "Data.IORef.atomicModifyIORef'" => {
+                Some(Self::AtomicModifyIORefStrict)
+            }
             // System.Exit
             "exitSuccess" | "System.Exit.exitSuccess" => Some(Self::ExitSuccess),
             "exitFailure" | "System.Exit.exitFailure" => Some(Self::ExitFailure),
@@ -2480,13 +2498,21 @@ impl PrimOp {
             "setEnv" | "System.Environment.setEnv" => Some(Self::SetEnv),
             // System.Directory
             "doesFileExist" | "System.Directory.doesFileExist" => Some(Self::DoesFileExist),
-            "doesDirectoryExist" | "System.Directory.doesDirectoryExist" => Some(Self::DoesDirectoryExist),
+            "doesDirectoryExist" | "System.Directory.doesDirectoryExist" => {
+                Some(Self::DoesDirectoryExist)
+            }
             "createDirectory" | "System.Directory.createDirectory" => Some(Self::CreateDirectory),
-            "createDirectoryIfMissing" | "System.Directory.createDirectoryIfMissing" => Some(Self::CreateDirectoryIfMissing),
+            "createDirectoryIfMissing" | "System.Directory.createDirectoryIfMissing" => {
+                Some(Self::CreateDirectoryIfMissing)
+            }
             "removeFile" | "System.Directory.removeFile" => Some(Self::RemoveFile),
             "removeDirectory" | "System.Directory.removeDirectory" => Some(Self::RemoveDirectory),
-            "getCurrentDirectory" | "System.Directory.getCurrentDirectory" => Some(Self::GetCurrentDirectory),
-            "setCurrentDirectory" | "System.Directory.setCurrentDirectory" => Some(Self::SetCurrentDirectory),
+            "getCurrentDirectory" | "System.Directory.getCurrentDirectory" => {
+                Some(Self::GetCurrentDirectory)
+            }
+            "setCurrentDirectory" | "System.Directory.setCurrentDirectory" => {
+                Some(Self::SetCurrentDirectory)
+            }
             // Misc Prelude
             "otherwise" => Some(Self::Otherwise),
             "until" => Some(Self::Until),
@@ -2581,11 +2607,15 @@ impl PrimOp {
             "snd" => Some(Self::Snd),
             // Data.Map (qualified)
             "Data.Map.empty" | "Data.Map.Strict.empty" | "Map.empty" => Some(Self::MapEmpty),
-            "Data.Map.singleton" | "Data.Map.Strict.singleton" | "Map.singleton" => Some(Self::MapSingleton),
+            "Data.Map.singleton" | "Data.Map.Strict.singleton" | "Map.singleton" => {
+                Some(Self::MapSingleton)
+            }
             "Data.Map.null" | "Data.Map.Strict.null" | "Map.null" => Some(Self::MapNull),
             "Data.Map.size" | "Data.Map.Strict.size" | "Map.size" => Some(Self::MapSize),
             "Data.Map.member" | "Data.Map.Strict.member" | "Map.member" => Some(Self::MapMember),
-            "Data.Map.notMember" | "Data.Map.Strict.notMember" | "Map.notMember" => Some(Self::MapNotMember),
+            "Data.Map.notMember" | "Data.Map.Strict.notMember" | "Map.notMember" => {
+                Some(Self::MapNotMember)
+            }
             "Data.Map.lookup" | "Data.Map.Strict.lookup" | "Map.lookup" => Some(Self::MapLookup),
             "Data.Map.findWithDefault" | "Map.findWithDefault" => Some(Self::MapFindWithDefault),
             "Data.Map.!" | "Map.!" => Some(Self::MapIndex),
@@ -2616,7 +2646,9 @@ impl PrimOp {
             "Data.Map.elems" | "Map.elems" => Some(Self::MapElems),
             "Data.Map.assocs" | "Map.assocs" => Some(Self::MapAssocs),
             "Data.Map.toList" | "Map.toList" => Some(Self::MapToList),
-            "Data.Map.fromList" | "Data.Map.Strict.fromList" | "Map.fromList" => Some(Self::MapFromList),
+            "Data.Map.fromList" | "Data.Map.Strict.fromList" | "Map.fromList" => {
+                Some(Self::MapFromList)
+            }
             "Data.Map.fromListWith" | "Map.fromListWith" => Some(Self::MapFromListWith),
             "Data.Map.toAscList" | "Map.toAscList" => Some(Self::MapToAscList),
             "Data.Map.toDescList" | "Map.toDescList" => Some(Self::MapToDescList),
@@ -2653,13 +2685,17 @@ impl PrimOp {
             "Data.Set.lookupMin" | "Set.lookupMin" => Some(Self::SetLookupMin),
             "Data.Set.lookupMax" | "Set.lookupMax" => Some(Self::SetLookupMax),
             // Data.IntMap (qualified)
-            "Data.IntMap.empty" | "Data.IntMap.Strict.empty" | "IntMap.empty" => Some(Self::IntMapEmpty),
+            "Data.IntMap.empty" | "Data.IntMap.Strict.empty" | "IntMap.empty" => {
+                Some(Self::IntMapEmpty)
+            }
             "Data.IntMap.singleton" | "IntMap.singleton" => Some(Self::IntMapSingleton),
             "Data.IntMap.null" | "IntMap.null" => Some(Self::IntMapNull),
             "Data.IntMap.size" | "IntMap.size" => Some(Self::IntMapSize),
             "Data.IntMap.member" | "IntMap.member" => Some(Self::IntMapMember),
             "Data.IntMap.lookup" | "IntMap.lookup" => Some(Self::IntMapLookup),
-            "Data.IntMap.findWithDefault" | "IntMap.findWithDefault" => Some(Self::IntMapFindWithDefault),
+            "Data.IntMap.findWithDefault" | "IntMap.findWithDefault" => {
+                Some(Self::IntMapFindWithDefault)
+            }
             "Data.IntMap.insert" | "IntMap.insert" => Some(Self::IntMapInsert),
             "Data.IntMap.insertWith" | "IntMap.insertWith" => Some(Self::IntMapInsertWith),
             "Data.IntMap.delete" | "IntMap.delete" => Some(Self::IntMapDelete),
@@ -2741,8 +2777,12 @@ impl PrimOp {
             "evaluate" | "Control.Exception.evaluate" => Some(Self::ExnEvaluate),
             "mask" | "Control.Exception.mask" => Some(Self::ExnMask),
             "mask_" | "Control.Exception.mask_" => Some(Self::ExnMask_),
-            "uninterruptibleMask" | "Control.Exception.uninterruptibleMask" => Some(Self::ExnUninterruptibleMask),
-            "uninterruptibleMask_" | "Control.Exception.uninterruptibleMask_" => Some(Self::ExnUninterruptibleMask_),
+            "uninterruptibleMask" | "Control.Exception.uninterruptibleMask" => {
+                Some(Self::ExnUninterruptibleMask)
+            }
+            "uninterruptibleMask_" | "Control.Exception.uninterruptibleMask_" => {
+                Some(Self::ExnUninterruptibleMask_)
+            }
             // Control.Concurrent
             "forkIO" | "Control.Concurrent.forkIO" => Some(Self::ForkIO),
             "threadDelay" | "Control.Concurrent.threadDelay" => Some(Self::ThreadDelay),
@@ -2752,7 +2792,9 @@ impl PrimOp {
             "takeMVar" | "Control.Concurrent.MVar.takeMVar" => Some(Self::TakeMVar),
             "putMVar" | "Control.Concurrent.MVar.putMVar" => Some(Self::PutMVar),
             "readMVar" | "Control.Concurrent.MVar.readMVar" => Some(Self::ReadMVar),
-            "throwTo" | "Control.Concurrent.throwTo" | "Control.Exception.throwTo" => Some(Self::ThrowTo),
+            "throwTo" | "Control.Concurrent.throwTo" | "Control.Exception.throwTo" => {
+                Some(Self::ThrowTo)
+            }
             "killThread" | "Control.Concurrent.killThread" => Some(Self::KillThread),
             // Data.Ord
             "comparing" | "Data.Ord.comparing" => Some(Self::Comparing),
@@ -2763,8 +2805,12 @@ impl PrimOp {
             "foldr'" | "Data.Foldable.foldr'" => Some(Self::FoldrStrict),
             "foldl1" | "Data.Foldable.foldl1" => Some(Self::Foldl1),
             "foldr1" | "Data.Foldable.foldr1" => Some(Self::Foldr1),
-            "maximumBy" | "Data.Foldable.maximumBy" | "Data.List.maximumBy" => Some(Self::MaximumBy),
-            "minimumBy" | "Data.Foldable.minimumBy" | "Data.List.minimumBy" => Some(Self::MinimumBy),
+            "maximumBy" | "Data.Foldable.maximumBy" | "Data.List.maximumBy" => {
+                Some(Self::MaximumBy)
+            }
+            "minimumBy" | "Data.Foldable.minimumBy" | "Data.List.minimumBy" => {
+                Some(Self::MinimumBy)
+            }
             "asum" | "Data.Foldable.asum" => Some(Self::Asum),
             "traverse_" | "Data.Foldable.traverse_" => Some(Self::Traverse_),
             "for_" | "Data.Foldable.for_" => Some(Self::For_),
@@ -2799,7 +2845,9 @@ impl PrimOp {
             "popCount" | "Data.Bits.popCount" => Some(Self::BitPopCount),
             "zeroBits" | "Data.Bits.zeroBits" => Some(Self::BitZeroBits),
             "countLeadingZeros" | "Data.Bits.countLeadingZeros" => Some(Self::BitCountLeadingZeros),
-            "countTrailingZeros" | "Data.Bits.countTrailingZeros" => Some(Self::BitCountTrailingZeros),
+            "countTrailingZeros" | "Data.Bits.countTrailingZeros" => {
+                Some(Self::BitCountTrailingZeros)
+            }
             // Data.Proxy
             "asProxyTypeOf" | "Data.Proxy.asProxyTypeOf" => Some(Self::AsProxyTypeOf),
             // Data.Void

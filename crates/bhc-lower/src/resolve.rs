@@ -241,8 +241,7 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
                     let (arity, field_names) = match &con.fields {
                         ast::ConFields::Positional(fields) => (fields.len(), None),
                         ast::ConFields::Record(fields) => {
-                            let names: Vec<Symbol> =
-                                fields.iter().map(|f| f.name.name).collect();
+                            let names: Vec<Symbol> = fields.iter().map(|f| f.name.name).collect();
                             (fields.len(), Some(names))
                         }
                     };
@@ -302,8 +301,7 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
                 let (arity, field_names) = match &newtype_decl.constr.fields {
                     ast::ConFields::Positional(fields) => (fields.len(), None),
                     ast::ConFields::Record(fields) => {
-                        let names: Vec<Symbol> =
-                            fields.iter().map(|f| f.name.name).collect();
+                        let names: Vec<Symbol> = fields.iter().map(|f| f.name.name).collect();
                         (fields.len(), Some(names))
                     }
                 };
@@ -402,8 +400,7 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
                     let (arity, field_names) = match &con.fields {
                         ast::ConFields::Positional(fields) => (fields.len(), None),
                         ast::ConFields::Record(fields) => {
-                            let names: Vec<Symbol> =
-                                fields.iter().map(|f| f.name.name).collect();
+                            let names: Vec<Symbol> = fields.iter().map(|f| f.name.name).collect();
                             (fields.len(), Some(names))
                         }
                     };
@@ -421,12 +418,7 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
                     if let ast::ConFields::Record(fields) = &con.fields {
                         for field in fields {
                             let field_def_id = ctx.fresh_def_id();
-                            ctx.define(
-                                field_def_id,
-                                field.name.name,
-                                DefKind::Value,
-                                field.span,
-                            );
+                            ctx.define(field_def_id, field.name.name, DefKind::Value, field.span);
                             ctx.bind_value(field.name.name, field_def_id);
                         }
                     }
@@ -450,7 +442,9 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
                 }
             }
 
-            ast::Decl::Fixity(_) | ast::Decl::InstanceDecl(_) | ast::Decl::PragmaDecl(_)
+            ast::Decl::Fixity(_)
+            | ast::Decl::InstanceDecl(_)
+            | ast::Decl::PragmaDecl(_)
             | ast::Decl::StandaloneDeriving(_) => {
                 // These don't introduce new names
             }

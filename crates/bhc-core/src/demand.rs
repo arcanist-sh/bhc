@@ -168,11 +168,7 @@ fn peel_lambdas(expr: &Expr) -> (Vec<VarId>, &Expr) {
 /// `tracked` is the set of variables we care about (function parameters).
 /// `env` provides demand signatures for known functions.
 #[allow(clippy::only_used_in_recursion)]
-fn analyze_expr(
-    expr: &Expr,
-    tracked: &FxHashSet<VarId>,
-    env: &DemandResult,
-) -> FxHashSet<VarId> {
+fn analyze_expr(expr: &Expr, tracked: &FxHashSet<VarId>, env: &DemandResult) -> FxHashSet<VarId> {
     match expr {
         // Variable reference: if it's one of our tracked params, it's demanded
         Expr::Var(v, _) => {
@@ -186,8 +182,11 @@ fn analyze_expr(
         // Literals, lambdas, and lazy blocks demand nothing. Lambda is
         // WHNF — evaluating `\y -> x + y` does NOT evaluate x. Lazy
         // blocks stop demand propagation.
-        Expr::Lit(_, _, _) | Expr::Type(_, _) | Expr::Coercion(_, _)
-        | Expr::Lam(_, _, _) | Expr::Lazy(_, _) => FxHashSet::default(),
+        Expr::Lit(_, _, _)
+        | Expr::Type(_, _)
+        | Expr::Coercion(_, _)
+        | Expr::Lam(_, _, _)
+        | Expr::Lazy(_, _) => FxHashSet::default(),
 
         // Application: f is always strict; a is strict if f is a known-strict op
         Expr::App(f, a, _) => {
@@ -286,19 +285,39 @@ fn is_strict_application(f: &Expr) -> bool {
 fn is_strict_op(name: &str) -> bool {
     matches!(
         name,
-        "+"  | "-"  | "*"  | "/"
-        | "div" | "mod" | "rem" | "quot"
-        | "negate" | "abs" | "signum"
-        | "==" | "/=" | "<" | "<=" | ">" | ">="
-        | "&&" | "||" | "not"
-        | "seq"
-        | "even" | "odd"
-        | "gcd" | "lcm"
-        | "show"
-        | "min" | "max"
-        | "succ" | "pred"
-        | "toInteger" | "fromIntegral" | "fromInteger"
-        | "compare"
+        "+" | "-"
+            | "*"
+            | "/"
+            | "div"
+            | "mod"
+            | "rem"
+            | "quot"
+            | "negate"
+            | "abs"
+            | "signum"
+            | "=="
+            | "/="
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "&&"
+            | "||"
+            | "not"
+            | "seq"
+            | "even"
+            | "odd"
+            | "gcd"
+            | "lcm"
+            | "show"
+            | "min"
+            | "max"
+            | "succ"
+            | "pred"
+            | "toInteger"
+            | "fromIntegral"
+            | "fromInteger"
+            | "compare"
     )
 }
 
@@ -335,8 +354,12 @@ fn is_used_strict_in(var_id: VarId, expr: &Expr) -> bool {
             };
             in_bind || is_used_strict_in(var_id, body)
         }
-        Expr::Lam(_, _, _) | Expr::Lazy(_, _)
-        | Expr::Var(_, _) | Expr::Lit(_, _, _) | Expr::Type(_, _) | Expr::Coercion(_, _) => false,
+        Expr::Lam(_, _, _)
+        | Expr::Lazy(_, _)
+        | Expr::Var(_, _)
+        | Expr::Lit(_, _, _)
+        | Expr::Type(_, _)
+        | Expr::Coercion(_, _) => false,
         Expr::TyLam(_, e, _) | Expr::TyApp(e, _, _) | Expr::Cast(e, _, _) => {
             is_used_strict_in(var_id, e)
         }
@@ -365,11 +388,11 @@ fn join_into(target: &mut FxHashSet<VarId>, other: &FxHashSet<VarId>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Alt, AltCon, Literal, Var};
     use bhc_index::Idx;
     use bhc_intern::Symbol;
     use bhc_span::Span;
     use bhc_types::Ty;
-    use crate::{Alt, AltCon, Literal, Var};
 
     fn mk_var(name: &str, id: u32) -> Var {
         Var::new(Symbol::intern(name), VarId::new(id as usize), Ty::Error)
@@ -482,7 +505,11 @@ mod tests {
     // --------------------------------------------------------
     #[test]
     fn test_lazy_when_not_in_all_branches() {
-        let body = mk_if(mk_var_expr("b", 3), mk_var_expr("x", 1), mk_var_expr("y", 2));
+        let body = mk_if(
+            mk_var_expr("b", 3),
+            mk_var_expr("x", 1),
+            mk_var_expr("y", 2),
+        );
         let func = mk_lam("x", 1, mk_lam("y", 2, mk_lam("b", 3, body)));
         let bindings = mk_module(vec![Bind::NonRec(mk_var("f", 100), Box::new(func))]);
         let result = analyze_module(&bindings);
@@ -603,7 +630,7 @@ mod tests {
         let result = analyze_module(&bindings);
         let sig = result.get(&VarId::new(100)).unwrap();
         assert_eq!(sig.args[0], Demand::Strict); // n is scrutinee via ==
-        // acc: strict in both branches (returned in True, used in + in False)
+                                                 // acc: strict in both branches (returned in True, used in + in False)
     }
 
     // --------------------------------------------------------
@@ -656,8 +683,8 @@ mod tests {
         let result = analyze_module(&bindings);
         let sig = result.get(&VarId::new(100)).unwrap();
         assert_eq!(sig.args[0], Demand::Strict); // x is scrutinee
-        // y is used in both branches (returned in alt 0, used in + in default)
-        // The analysis sees y as demanded in both branches → Strict
+                                                 // y is used in both branches (returned in alt 0, used in + in default)
+                                                 // The analysis sees y as demanded in both branches → Strict
         assert_eq!(sig.args[1], Demand::Strict);
     }
 

@@ -33,17 +33,17 @@ fn subst_expr(expr: Expr, subst: &FxHashMap<VarId, Expr>) -> Expr {
             }
         }
         Expr::Lit(_, _, _) | Expr::Type(_, _) | Expr::Coercion(_, _) => expr,
-        Expr::App(f, a, span) => {
-            Expr::App(Box::new(subst_expr(*f, subst)), Box::new(subst_expr(*a, subst)), span)
-        }
+        Expr::App(f, a, span) => Expr::App(
+            Box::new(subst_expr(*f, subst)),
+            Box::new(subst_expr(*a, subst)),
+            span,
+        ),
         Expr::TyApp(f, ty, span) => Expr::TyApp(Box::new(subst_expr(*f, subst)), ty, span),
         Expr::Lam(x, body, span) => {
             let (new_x, new_subst) = handle_binder(x, subst);
             Expr::Lam(new_x, Box::new(subst_expr(*body, &new_subst)), span)
         }
-        Expr::TyLam(tv, body, span) => {
-            Expr::TyLam(tv, Box::new(subst_expr(*body, subst)), span)
-        }
+        Expr::TyLam(tv, body, span) => Expr::TyLam(tv, Box::new(subst_expr(*body, subst)), span),
         Expr::Let(bind, body, span) => {
             let (new_bind, new_subst) = subst_bind(*bind, subst);
             Expr::Let(
@@ -80,10 +80,8 @@ fn handle_binder(binder: Var, subst: &FxHashMap<VarId, Expr>) -> (Var, FxHashMap
     }
 
     // Check if the binder would capture any free variable in substitution values
-    let subst_free: rustc_hash::FxHashSet<VarId> = new_subst
-        .values()
-        .flat_map(|e| free_var_ids(e))
-        .collect();
+    let subst_free: rustc_hash::FxHashSet<VarId> =
+        new_subst.values().flat_map(|e| free_var_ids(e)).collect();
 
     if subst_free.contains(&binder.id) {
         // Alpha-rename the binder to avoid capture
@@ -122,10 +120,8 @@ fn subst_bind(bind: Bind, subst: &FxHashMap<VarId, Expr>) -> (Bind, FxHashMap<Va
             }
 
             // Check for capture
-            let subst_free: rustc_hash::FxHashSet<VarId> = body_subst
-                .values()
-                .flat_map(|e| free_var_ids(e))
-                .collect();
+            let subst_free: rustc_hash::FxHashSet<VarId> =
+                body_subst.values().flat_map(|e| free_var_ids(e)).collect();
 
             let mut rename_map: FxHashMap<VarId, Var> = FxHashMap::default();
             for (x, _) in &binds {
@@ -133,10 +129,7 @@ fn subst_bind(bind: Bind, subst: &FxHashMap<VarId, Expr>) -> (Bind, FxHashMap<Va
                     let fresh_id = fresh_var_id();
                     let fresh_name = Symbol::intern(&format!("${}", fresh_id.index()));
                     let new_x = Var::new(fresh_name, fresh_id, x.ty.clone());
-                    body_subst.insert(
-                        x.id,
-                        Expr::Var(new_x.clone(), bhc_span::Span::default()),
-                    );
+                    body_subst.insert(x.id, Expr::Var(new_x.clone(), bhc_span::Span::default()));
                     rename_map.insert(x.id, new_x.clone());
                     new_vars.push(new_x);
                 } else {
@@ -179,10 +172,8 @@ fn subst_alt(alt: Alt, subst: &FxHashMap<VarId, Expr>) -> Alt {
         };
     }
 
-    let subst_free: rustc_hash::FxHashSet<VarId> = alt_subst
-        .values()
-        .flat_map(|e| free_var_ids(e))
-        .collect();
+    let subst_free: rustc_hash::FxHashSet<VarId> =
+        alt_subst.values().flat_map(|e| free_var_ids(e)).collect();
 
     let mut new_binders = Vec::with_capacity(alt.binders.len());
     for b in alt.binders {

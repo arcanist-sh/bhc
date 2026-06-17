@@ -466,7 +466,10 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
         }
 
         let total = passed + failed + skipped;
-        println!("\n{} passed, {} failed, {} skipped (of {} modules)", passed, failed, skipped, total);
+        println!(
+            "\n{} passed, {} failed, {} skipped (of {} modules)",
+            passed, failed, skipped, total
+        );
 
         if failed > 0 {
             anyhow::bail!("Type checking failed");
@@ -640,13 +643,7 @@ fn start_repl(cli: &Cli) -> Result<()> {
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .status()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to start bhci at {}: {}",
-                bhci_exe.display(),
-                e
-            )
-        })?;
+        .map_err(|e| anyhow::anyhow!("Failed to start bhci at {}: {}", bhci_exe.display(), e))?;
 
     std::process::exit(status.code().unwrap_or(1));
 }

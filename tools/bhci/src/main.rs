@@ -179,15 +179,65 @@ impl ReplState {
 
 /// Well-known Prelude names for tab-completion.
 const PRELUDE_NAMES: &[&str] = &[
-    "map", "filter", "foldr", "foldl", "head", "tail", "null", "length",
-    "reverse", "concat", "sum", "product", "maximum", "minimum", "zip",
-    "take", "drop", "takeWhile", "dropWhile", "elem", "notElem",
-    "putStrLn", "print", "show", "readFile", "writeFile",
-    "True", "False", "Nothing", "Just", "Left", "Right",
-    "not", "and", "or", "any", "all", "id", "const", "flip", "even", "odd",
-    "div", "mod", "abs", "negate", "fromIntegral",
-    "error", "undefined", "otherwise",
-    "if", "then", "else", "let", "in", "where", "case", "of", "do",
+    "map",
+    "filter",
+    "foldr",
+    "foldl",
+    "head",
+    "tail",
+    "null",
+    "length",
+    "reverse",
+    "concat",
+    "sum",
+    "product",
+    "maximum",
+    "minimum",
+    "zip",
+    "take",
+    "drop",
+    "takeWhile",
+    "dropWhile",
+    "elem",
+    "notElem",
+    "putStrLn",
+    "print",
+    "show",
+    "readFile",
+    "writeFile",
+    "True",
+    "False",
+    "Nothing",
+    "Just",
+    "Left",
+    "Right",
+    "not",
+    "and",
+    "or",
+    "any",
+    "all",
+    "id",
+    "const",
+    "flip",
+    "even",
+    "odd",
+    "div",
+    "mod",
+    "abs",
+    "negate",
+    "fromIntegral",
+    "error",
+    "undefined",
+    "otherwise",
+    "if",
+    "then",
+    "else",
+    "let",
+    "in",
+    "where",
+    "case",
+    "of",
+    "do",
 ];
 
 /// Rustyline helper for completion and hints
@@ -792,11 +842,21 @@ fn contains_top_level_in(s: &str) -> bool {
     while i + 1 < bytes.len() {
         let c = bytes[i];
         if in_str {
-            if c == b'\\' { i += 2; continue; }
-            if c == b'"' { in_str = false; }
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_str = false;
+            }
         } else if in_char {
-            if c == b'\\' { i += 2; continue; }
-            if c == b'\'' { in_char = false; }
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'\'' {
+                in_char = false;
+            }
         } else {
             match c {
                 b'"' => in_str = true,
@@ -962,9 +1022,7 @@ fn eval_let_binding(state: &mut ReplState, name: &str, expr_str: &str) {
             let sym = bhc_intern::Symbol::intern(name);
             state.evaluator.set_named_binding(sym, value.clone());
 
-            state
-                .bindings
-                .push((name.to_string(), ty, value, None));
+            state.bindings.push((name.to_string(), ty, value, None));
 
             update_completion_identifiers(state);
         }
@@ -1005,7 +1063,8 @@ fn type_from_value(value: &Value) -> String {
                 return format!("[{elem}]");
             }
             // Tuple constructors are named "(,)", "(,,)", etc.
-            if name.starts_with('(') && name.ends_with(')')
+            if name.starts_with('(')
+                && name.ends_with(')')
                 && name.chars().skip(1).take(name.len() - 2).all(|c| c == ',')
             {
                 let parts: Vec<String> = d.args.iter().map(type_from_value).collect();
@@ -1057,7 +1116,12 @@ fn evaluate_expr(state: &mut ReplState, expr: &AstExpr) -> Result<Value, String>
     for (name, _, _, _) in &state.bindings {
         let sym = bhc_intern::Symbol::intern(name);
         let def_id = lower_ctx.fresh_def_id();
-        lower_ctx.define(def_id, sym, bhc_lower::DefKind::Value, bhc_span::Span::default());
+        lower_ctx.define(
+            def_id,
+            sym,
+            bhc_lower::DefKind::Value,
+            bhc_span::Span::default(),
+        );
         lower_ctx.bind_value(sym, def_id);
     }
 
@@ -1121,10 +1185,7 @@ fn evaluate_expr(state: &mut ReplState, expr: &AstExpr) -> Result<Value, String>
 /// Wrap an AST expression in a synthetic module for lowering.
 ///
 /// Creates: `module REPL where { it = <expr> }`
-fn wrap_expr_as_module(
-    expr: &AstExpr,
-    imports: &[bhc_ast::ImportDecl],
-) -> bhc_ast::Module {
+fn wrap_expr_as_module(expr: &AstExpr, imports: &[bhc_ast::ImportDecl]) -> bhc_ast::Module {
     use bhc_ast::{Clause, Decl, FunBind, ModuleName, Rhs};
     use bhc_intern::Ident;
     use bhc_span::Span;
@@ -1431,7 +1492,13 @@ fn load_file(state: &mut ReplState, path: &PathBuf) -> Result<(), ReplError> {
     let module_name = module
         .name
         .as_ref()
-        .map(|n| n.parts.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("."))
+        .map(|n| {
+            n.parts
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(".")
+        })
         .unwrap_or_else(|| "Main".to_string());
 
     // 1. Lower AST → HIR
@@ -1502,9 +1569,7 @@ fn load_file(state: &mut ReplState, path: &PathBuf) -> Result<(), ReplError> {
                             .map(|(_, t)| t.clone())
                             .unwrap_or_else(|| Ty::Error);
 
-                        state
-                            .bindings
-                            .push((name.clone(), ty, value, None));
+                        state.bindings.push((name.clone(), ty, value, None));
                         state.loaded_binding_names.push(name);
                         def_count += 1;
                     }
@@ -1533,9 +1598,7 @@ fn load_file(state: &mut ReplState, path: &PathBuf) -> Result<(), ReplError> {
                                 .map(|(_, t)| t.clone())
                                 .unwrap_or_else(|| Ty::Error);
 
-                            state
-                                .bindings
-                                .push((name.clone(), ty, value, None));
+                            state.bindings.push((name.clone(), ty, value, None));
                             state.loaded_binding_names.push(name);
                             def_count += 1;
                         }
@@ -1550,7 +1613,10 @@ fn load_file(state: &mut ReplState, path: &PathBuf) -> Result<(), ReplError> {
 
     state.loaded_files.push(path.clone());
     state.modules_in_scope.insert(module_name.clone());
-    println!("Ok, {} definitions loaded from module {}.", def_count, module_name);
+    println!(
+        "Ok, {} definitions loaded from module {}.",
+        def_count, module_name
+    );
 
     Ok(())
 }
@@ -1565,14 +1631,18 @@ fn reload_modules(state: &mut ReplState) {
     let files: Vec<PathBuf> = state.loaded_files.clone();
 
     // Clear evaluator named bindings for loaded file definitions
-    let symbols: Vec<_> = state.loaded_binding_names.iter()
+    let symbols: Vec<_> = state
+        .loaded_binding_names
+        .iter()
         .map(|n| bhc_intern::Symbol::intern(n))
         .collect();
     state.evaluator.remove_named_bindings(&symbols);
 
     // Clear bindings that came from loaded files
     let loaded_names: HashSet<String> = state.loaded_binding_names.drain(..).collect();
-    state.bindings.retain(|(name, _, _, _)| !loaded_names.contains(name));
+    state
+        .bindings
+        .retain(|(name, _, _, _)| !loaded_names.contains(name));
     state.loaded_types.clear();
     state.loaded_files.clear();
     state.accumulated_imports.clear();
@@ -1601,7 +1671,11 @@ fn browse_module(state: &ReplState, module: Option<&str>) {
         }
 
         // Show loaded types not already shown as bindings
-        let binding_names: HashSet<&str> = state.bindings.iter().map(|(n, _, _, _)| n.as_str()).collect();
+        let binding_names: HashSet<&str> = state
+            .bindings
+            .iter()
+            .map(|(n, _, _, _)| n.as_str())
+            .collect();
         let extra_types: Vec<_> = state
             .loaded_types
             .iter()

@@ -253,7 +253,10 @@ mod tests {
     #[test]
     fn test_display_let() {
         let x = mk_var("x");
-        let bind = Bind::NonRec(x.clone(), Box::new(Expr::Lit(Literal::Int(1), Ty::Error, Span::default())));
+        let bind = Bind::NonRec(
+            x.clone(),
+            Box::new(Expr::Lit(Literal::Int(1), Ty::Error, Span::default())),
+        );
         let body = Expr::Var(x, Span::default());
         let expr = Expr::Let(Box::new(bind), Box::new(body), Span::default());
         assert_eq!(format!("{expr}"), "let x = 1 in x");

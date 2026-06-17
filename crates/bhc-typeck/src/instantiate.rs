@@ -56,11 +56,7 @@ pub fn instantiate(ctx: &mut TyCtxt, scheme: &Scheme) -> Ty {
                 .iter()
                 .map(|t| substitute(t, &subst))
                 .collect();
-            ctx.emit_constraint_multi(
-                constraint.class,
-                substituted_args,
-                constraint.span,
-            );
+            ctx.emit_constraint_multi(constraint.class, substituted_args, constraint.span);
         }
     }
 

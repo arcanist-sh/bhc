@@ -92,11 +92,11 @@ fn should_inline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Literal, Var};
     use bhc_index::Idx;
     use bhc_intern::Symbol;
     use bhc_span::Span;
     use bhc_types::Ty;
-    use crate::{Literal, Var};
 
     fn mk_var(name: &str, id: u32) -> Var {
         Var::new(Symbol::intern(name), VarId::new(id as usize), Ty::Error)
@@ -113,10 +113,7 @@ mod tests {
     #[test]
     fn test_inline_cheap_multi_use() {
         // let x = y in ... (x used Many times) => inline because y is cheap
-        let bindings = vec![Bind::NonRec(
-            mk_var("x", 1),
-            Box::new(mk_var_expr("y", 2)),
-        )];
+        let bindings = vec![Bind::NonRec(mk_var("x", 1), Box::new(mk_var_expr("y", 2)))];
         let mut occs = FxHashMap::default();
         occs.insert(VarId::new(1), OccCount::Many);
 

@@ -55,7 +55,8 @@ impl<'src> Parser<'src> {
                 }
                 // Qualified constructor operators like `Seq.:>` in infix patterns
                 TokenKind::QualConOperator(qual, sym) => {
-                    let qualified_name = Symbol::intern(&format!("{}.{}", qual.as_str(), sym.as_str()));
+                    let qualified_name =
+                        Symbol::intern(&format!("{}.{}", qual.as_str(), sym.as_str()));
                     let op = Ident::new(qualified_name);
                     self.advance();
                     let rhs = self.parse_infix_pattern()?;
@@ -502,7 +503,13 @@ impl<'src> Parser<'src> {
 
         let end = self.expect(&TokenKind::RBrace)?;
         let span = start.to(end.span);
-        Ok(Pat::QualRecord(module_name, con, fields, has_wildcard, span))
+        Ok(Pat::QualRecord(
+            module_name,
+            con,
+            fields,
+            has_wildcard,
+            span,
+        ))
     }
 
     /// Parse a field pattern: `field = pat`, `Mod.field = pat`, or `field` (punning)

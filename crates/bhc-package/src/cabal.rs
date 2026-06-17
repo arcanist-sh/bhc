@@ -265,8 +265,7 @@ impl<'a> CabalParser<'a> {
                         lib.other_modules.extend(self.parse_module_list(value));
                     }
                     "hs-source-dirs" => {
-                        lib.hs_source_dirs
-                            .extend(self.parse_path_list(value));
+                        lib.hs_source_dirs.extend(self.parse_path_list(value));
                     }
                     "build-depends" => {
                         lib.build_depends.extend(self.parse_dependencies(value)?);
@@ -582,7 +581,10 @@ executable filepath-tests
         assert_eq!(cabal.name, "filepath");
         assert_eq!(cabal.version.major, 1);
         assert_eq!(cabal.version.minor, 4);
-        assert_eq!(cabal.synopsis, Some("Library for manipulating FilePaths in a cross platform way.".to_string()));
+        assert_eq!(
+            cabal.synopsis,
+            Some("Library for manipulating FilePaths in a cross platform way.".to_string())
+        );
     }
 
     #[test]
@@ -592,7 +594,9 @@ executable filepath-tests
 
         assert_eq!(lib.exposed_modules.len(), 3);
         assert!(lib.exposed_modules.contains(&"System.FilePath".to_string()));
-        assert!(lib.exposed_modules.contains(&"System.FilePath.Posix".to_string()));
+        assert!(lib
+            .exposed_modules
+            .contains(&"System.FilePath.Posix".to_string()));
     }
 
     #[test]

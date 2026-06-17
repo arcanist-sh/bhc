@@ -214,7 +214,11 @@ pub fn find_module_file(name: &str, search_paths: &[Utf8PathBuf]) -> Option<Utf8
 /// - If there is an export list, only explicitly listed items are exported.
 /// - For data types, constructors and record fields may be exported depending
 ///   on the export specification.
-pub fn collect_exports(module: &ast::Module, ctx: &mut LowerContext, cache: &ModuleCache) -> ModuleExports {
+pub fn collect_exports(
+    module: &ast::Module,
+    ctx: &mut LowerContext,
+    cache: &ModuleCache,
+) -> ModuleExports {
     let module_name = module.name.as_ref().map_or_else(
         || Symbol::intern("Main"),
         |n| {
@@ -284,16 +288,24 @@ pub fn collect_exports(module: &ast::Module, ctx: &mut LowerContext, cache: &Mod
                             let type_name = ident.name;
                             for cached_exports in cache.all_exports() {
                                 // Check if this cached module has class methods for this type
-                                if let Some(methods) = cached_exports.class_methods.get(&type_name) {
+                                if let Some(methods) = cached_exports.class_methods.get(&type_name)
+                                {
                                     for method_name in methods {
                                         if !exports.values.contains_key(method_name) {
                                             let m_def_id = ctx.fresh_def_id();
-                                            ctx.define(m_def_id, *method_name, DefKind::Value, *span);
+                                            ctx.define(
+                                                m_def_id,
+                                                *method_name,
+                                                DefKind::Value,
+                                                *span,
+                                            );
                                             exports.values.insert(*method_name, m_def_id);
                                         }
                                     }
                                     // Also copy the class_methods entry for transitive re-exports
-                                    exports.class_methods.entry(type_name)
+                                    exports
+                                        .class_methods
+                                        .entry(type_name)
                                         .or_insert_with(|| methods.clone());
                                     break;
                                 }
@@ -316,12 +328,7 @@ pub fn collect_exports(module: &ast::Module, ctx: &mut LowerContext, cache: &Mod
                                     && !exports.constructors.contains_key(&con_ident.name)
                                 {
                                     let con_def_id = ctx.fresh_def_id();
-                                    ctx.define(
-                                        con_def_id,
-                                        con_ident.name,
-                                        DefKind::Value,
-                                        *span,
-                                    );
+                                    ctx.define(con_def_id, con_ident.name, DefKind::Value, *span);
                                     exports.values.insert(con_ident.name, con_def_id);
                                 }
                             }
@@ -996,7 +1003,10 @@ fn preprocess_cpp(source: &str) -> String {
                     }
                 }
                 output.push('\n');
-            } else if directive == "else" || directive.starts_with("else ") || directive.starts_with("else/") {
+            } else if directive == "else"
+                || directive.starts_with("else ")
+                || directive.starts_with("else/")
+            {
                 let parent_active = if condition_stack.len() > 1 {
                     condition_stack[..condition_stack.len() - 1]
                         .iter()
@@ -1014,7 +1024,10 @@ fn preprocess_cpp(source: &str) -> String {
                     }
                 }
                 output.push('\n');
-            } else if directive == "endif" || directive.starts_with("endif ") || directive.starts_with("endif/") {
+            } else if directive == "endif"
+                || directive.starts_with("endif ")
+                || directive.starts_with("endif/")
+            {
                 condition_stack.pop();
                 output.push('\n');
             } else if directive.starts_with("define ") && is_active(&condition_stack) {
@@ -1080,9 +1093,7 @@ fn eval_simple_cpp_expr(expr: &str, defines: &FxHashSet<String>) -> bool {
     if let Some(rest) = expr.strip_prefix("defined") {
         let rest = rest.trim();
         let name = if rest.starts_with('(') {
-            rest.trim_start_matches('(')
-                .trim_end_matches(')')
-                .trim()
+            rest.trim_start_matches('(').trim_end_matches(')').trim()
         } else {
             rest.split_whitespace().next().unwrap_or("")
         };

@@ -211,14 +211,26 @@ pub fn type_check_module_full(
         // type String = [Char]
         ctx.type_aliases.insert(
             Symbol::intern("String"),
-            (vec![], Ty::List(Box::new(Ty::Con(bhc_types::TyCon::new(Symbol::intern("Char"), Kind::Star))))),
+            (
+                vec![],
+                Ty::List(Box::new(Ty::Con(bhc_types::TyCon::new(
+                    Symbol::intern("Char"),
+                    Kind::Star,
+                )))),
+            ),
         );
 
         // type ShowS = String -> String
-        let string_ty = Ty::List(Box::new(Ty::Con(bhc_types::TyCon::new(Symbol::intern("Char"), Kind::Star))));
+        let string_ty = Ty::List(Box::new(Ty::Con(bhc_types::TyCon::new(
+            Symbol::intern("Char"),
+            Kind::Star,
+        ))));
         ctx.type_aliases.insert(
             Symbol::intern("ShowS"),
-            (vec![], Ty::Fun(Box::new(string_ty.clone()), Box::new(string_ty.clone()))),
+            (
+                vec![],
+                Ty::Fun(Box::new(string_ty.clone()), Box::new(string_ty.clone())),
+            ),
         );
 
         // type ReadS a = String -> [(a, String)]
@@ -226,14 +238,15 @@ pub fn type_check_module_full(
         let list_pair = Ty::List(Box::new(pair));
         ctx.type_aliases.insert(
             Symbol::intern("ReadS"),
-            (vec![a.clone()], Ty::Fun(Box::new(string_ty.clone()), Box::new(list_pair))),
+            (
+                vec![a.clone()],
+                Ty::Fun(Box::new(string_ty.clone()), Box::new(list_pair)),
+            ),
         );
 
         // type FilePath = String
-        ctx.type_aliases.insert(
-            Symbol::intern("FilePath"),
-            (vec![], string_ty),
-        );
+        ctx.type_aliases
+            .insert(Symbol::intern("FilePath"), (vec![], string_ty));
 
         // Pandoc type aliases (from pandoc-types)
         let text_ty = Ty::Con(bhc_types::TyCon::new(Symbol::intern("Text"), Kind::Star));
@@ -243,11 +256,14 @@ pub fn type_check_module_full(
         // a different mechanism — data types vs type aliases don't conflict).
         ctx.type_aliases.insert(
             Symbol::intern("Attr"),
-            (vec![], Ty::Tuple(vec![
-                text_ty.clone(),
-                Ty::List(Box::new(text_ty.clone())),
-                Ty::List(Box::new(Ty::Tuple(vec![text_ty.clone(), text_ty.clone()]))),
-            ])),
+            (
+                vec![],
+                Ty::Tuple(vec![
+                    text_ty.clone(),
+                    Ty::List(Box::new(text_ty.clone())),
+                    Ty::List(Box::new(Ty::Tuple(vec![text_ty.clone(), text_ty.clone()]))),
+                ]),
+            ),
         );
 
         // type Target = (Text, Text)
@@ -259,33 +275,60 @@ pub fn type_check_module_full(
         // type ColSpec = (Alignment, ColWidth)
         ctx.type_aliases.insert(
             Symbol::intern("ColSpec"),
-            (vec![], Ty::Tuple(vec![
-                Ty::Con(bhc_types::TyCon::new(Symbol::intern("Alignment"), Kind::Star)),
-                Ty::Con(bhc_types::TyCon::new(Symbol::intern("ColWidth"), Kind::Star)),
-            ])),
+            (
+                vec![],
+                Ty::Tuple(vec![
+                    Ty::Con(bhc_types::TyCon::new(
+                        Symbol::intern("Alignment"),
+                        Kind::Star,
+                    )),
+                    Ty::Con(bhc_types::TyCon::new(
+                        Symbol::intern("ColWidth"),
+                        Kind::Star,
+                    )),
+                ]),
+            ),
         );
 
         // type ListAttributes = (Int, ListNumberStyle, ListNumberDelim)
         ctx.type_aliases.insert(
             Symbol::intern("ListAttributes"),
-            (vec![], Ty::Tuple(vec![
-                Ty::Con(bhc_types::TyCon::new(Symbol::intern("Int"), Kind::Star)),
-                Ty::Con(bhc_types::TyCon::new(Symbol::intern("ListNumberStyle"), Kind::Star)),
-                Ty::Con(bhc_types::TyCon::new(Symbol::intern("ListNumberDelim"), Kind::Star)),
-            ])),
+            (
+                vec![],
+                Ty::Tuple(vec![
+                    Ty::Con(bhc_types::TyCon::new(Symbol::intern("Int"), Kind::Star)),
+                    Ty::Con(bhc_types::TyCon::new(
+                        Symbol::intern("ListNumberStyle"),
+                        Kind::Star,
+                    )),
+                    Ty::Con(bhc_types::TyCon::new(
+                        Symbol::intern("ListNumberDelim"),
+                        Kind::Star,
+                    )),
+                ]),
+            ),
         );
 
         // type ShortCaption = [Inline]
         ctx.type_aliases.insert(
             Symbol::intern("ShortCaption"),
-            (vec![], Ty::List(Box::new(Ty::Con(bhc_types::TyCon::new(Symbol::intern("Inline"), Kind::Star))))),
+            (
+                vec![],
+                Ty::List(Box::new(Ty::Con(bhc_types::TyCon::new(
+                    Symbol::intern("Inline"),
+                    Kind::Star,
+                )))),
+            ),
         );
 
         // Many is a newtype: newtype Many a = Many (Seq a)
         // But for type-checking purposes, we treat Blocks/Inlines as [Block]/[Inline]
         // since BHC doesn't have a real Seq type. The Many newtype is isomorphic to lists
         // in our simplified model.
-        let many_con = bhc_types::TyCon::new(Symbol::intern("Many"), Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)));
+        let many_con = bhc_types::TyCon::new(
+            Symbol::intern("Many"),
+            Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+        );
         let a_alias = TyVar::new_star(0xFFFE_0001);
 
         // type Blocks = Many Block  (treated as [Block])

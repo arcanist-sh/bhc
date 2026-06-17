@@ -27,10 +27,10 @@ use rustc_hash::FxHashMap;
 use bhc_intern::Symbol;
 use bhc_span::Span;
 
+use crate::demand::{Demand, DemandResult};
 use crate::simplify::expr_util::fresh_var_id;
 use crate::simplify::subst::substitute;
 use crate::{Alt, AltCon, Bind, CoreModule, Expr, Var, VarId};
-use crate::demand::{Demand, DemandResult};
 
 /// Apply worker/wrapper transformation to a Core module.
 ///
@@ -74,19 +74,13 @@ pub fn apply_worker_wrapper(module: &mut CoreModule, demands: &DemandResult) -> 
 /// Check if a binding should be skipped (protected names).
 fn should_skip(var: &Var) -> bool {
     let name = var.name.as_str();
-    name == "main"
-        || name.starts_with('$')
-        || name.starts_with("bhc_")
-        || name.contains("::")
+    name == "main" || name.starts_with('$') || name.starts_with("bhc_") || name.contains("::")
 }
 
 /// Transform a single function by wrapping strict args in case expressions.
 ///
 /// Returns true if the transformation was applied.
-fn transform_function(
-    expr: &mut Box<Expr>,
-    sig: &crate::demand::DemandSig,
-) -> bool {
+fn transform_function(expr: &mut Box<Expr>, sig: &crate::demand::DemandSig) -> bool {
     // Peel off lambda parameters
     let mut params: Vec<(Var, Span)> = Vec::new();
     let mut current = expr.as_mut();
@@ -144,10 +138,7 @@ fn transform_function(
         let fresh_name = Symbol::intern(&format!("{}$ww", param.name.as_str()));
         let fresh_var = Var::new(fresh_name, fresh_id, param.ty.clone());
 
-        subst_map.insert(
-            param.id,
-            Expr::Var(fresh_var.clone(), Span::default()),
-        );
+        subst_map.insert(param.id, Expr::Var(fresh_var.clone(), Span::default()));
         case_wrappers.push(((*param).clone(), fresh_var));
     }
 
@@ -211,9 +202,9 @@ fn put_body(expr: &mut Expr, new_body: Expr) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bhc_index::Idx;
     use crate::demand::DemandSig;
     use crate::{CoreModule, Literal};
+    use bhc_index::Idx;
     use bhc_types::Ty;
 
     fn mk_var(name: &str, id: u32) -> Var {

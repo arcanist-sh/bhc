@@ -205,11 +205,11 @@ pub fn try_case_of_case(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DataCon, Var, VarId};
     use bhc_index::Idx;
     use bhc_intern::Symbol;
     use bhc_span::Span;
-    use bhc_types::{Ty, TyCon, Kind};
-    use crate::{DataCon, Var, VarId};
+    use bhc_types::{Kind, Ty, TyCon};
 
     fn mk_var(name: &str, id: u32) -> Var {
         Var::new(Symbol::intern(name), VarId::new(id as usize), Ty::Error)
@@ -380,8 +380,7 @@ mod tests {
             rhs: mk_int(99),
         }];
 
-        let result =
-            try_case_of_case(&inner_case, &outer_alts, &Ty::Error, Span::default(), 100);
+        let result = try_case_of_case(&inner_case, &outer_alts, &Ty::Error, Span::default(), 100);
         assert!(result.is_some());
         // Result should be: case b of { True -> case 1 of ...; False -> case 0 of ... }
         if let Expr::Case(scrut, alts, _, _) = result.unwrap() {

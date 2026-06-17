@@ -357,7 +357,7 @@ pub fn infer_expr(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             // Look up which constructor(s) this field belongs to
             if let Some(infos) = ctx.field_name_to_con.get(field_name).cloned() {
                 let (_, field_def_id) = infos[0]; // Take first match
-                // Look up the accessor function's type scheme
+                                                  // Look up the accessor function's type scheme
                 if let Some(scheme) = ctx.env.lookup_def_id(field_def_id).cloned() {
                     let accessor_ty = ctx.instantiate(&scheme);
                     // accessor_ty is: RecordType -> FieldType
@@ -389,13 +389,9 @@ pub fn infer_expr(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                         std::collections::HashMap::new();
 
                     for con_id in &con_ids {
-                        if let Some(field_defs) =
-                            ctx.get_con_fields(*con_id).map(|f| f.to_vec())
-                        {
+                        if let Some(field_defs) = ctx.get_con_fields(*con_id).map(|f| f.to_vec()) {
                             // Instantiate the constructor type to get fresh types
-                            if let Some(info) =
-                                ctx.env.lookup_data_con_by_id(*con_id).cloned()
-                            {
+                            if let Some(info) = ctx.env.lookup_data_con_by_id(*con_id).cloned() {
                                 let con_ty = ctx.instantiate(&info.scheme);
 
                                 // Extract field types from instantiated constructor
@@ -408,9 +404,7 @@ pub fn infer_expr(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                                 // Unify result type with record_ty to propagate type args
                                 ctx.unify(current, &record_ty, *span);
 
-                                for ((name, _), ty) in
-                                    field_defs.iter().zip(field_types.iter())
-                                {
+                                for ((name, _), ty) in field_defs.iter().zip(field_types.iter()) {
                                     all_field_types.insert(*name, ty.clone());
                                 }
                             }
@@ -496,11 +490,7 @@ pub fn infer_expr(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                         .iter()
                         .map(|t| substitute(t, &subst))
                         .collect();
-                    ctx.emit_constraint_multi(
-                        constraint.class,
-                        substituted_args,
-                        constraint.span,
-                    );
+                    ctx.emit_constraint_multi(constraint.class, substituted_args, constraint.span);
                 }
 
                 substitute(&scheme.ty, &subst)

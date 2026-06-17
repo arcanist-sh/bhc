@@ -269,8 +269,10 @@ mod tests {
         let kind = TypeConverter::convert_kind(&crate::Kind::Type);
         assert_eq!(kind, Kind::Star);
 
-        let fun_kind =
-            TypeConverter::convert_kind(&crate::Kind::Fun(Box::new(crate::Kind::Type), Box::new(crate::Kind::Type)));
+        let fun_kind = TypeConverter::convert_kind(&crate::Kind::Fun(
+            Box::new(crate::Kind::Type),
+            Box::new(crate::Kind::Type),
+        ));
         assert!(matches!(fun_kind, Kind::Arrow(_, _)));
     }
 

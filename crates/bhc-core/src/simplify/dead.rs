@@ -50,11 +50,11 @@ pub fn filter_dead_rec(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Var;
     use bhc_index::Idx;
     use bhc_intern::Symbol;
     use bhc_span::Span;
     use bhc_types::Ty;
-    use crate::Var;
 
     fn mk_var(name: &str, id: u32) -> Var {
         Var::new(Symbol::intern(name), VarId::new(id as usize), Ty::Error)

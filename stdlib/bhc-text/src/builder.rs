@@ -288,5 +288,4 @@ mod tests {
         let bytes = unsafe { builder_bytes(b) };
         assert_eq!(bytes, b"0a");
     }
-
 }

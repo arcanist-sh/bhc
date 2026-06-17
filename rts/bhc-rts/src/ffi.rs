@@ -762,7 +762,11 @@ fn rational_make_normalized(num: i64, denom: i64) -> *mut u8 {
     if denom == 0 {
         panic!("Rational: zero denominator");
     }
-    let (n, d) = if denom < 0 { (-num, -denom) } else { (num, denom) };
+    let (n, d) = if denom < 0 {
+        (-num, -denom)
+    } else {
+        (num, denom)
+    };
     let g = bhc_gcd(n.abs(), d);
     let n = n / g;
     let d = d / g;
@@ -873,7 +877,13 @@ pub extern "C" fn bhc_rational_abs(r: *mut u8) -> *mut u8 {
 #[no_mangle]
 pub extern "C" fn bhc_rational_signum(r: *mut u8) -> *mut u8 {
     let n = rational_parts(r).0;
-    let s = if n > 0 { 1 } else if n < 0 { -1 } else { 0 };
+    let s = if n > 0 {
+        1
+    } else if n < 0 {
+        -1
+    } else {
+        0
+    };
     rational_make_normalized(s, 1)
 }
 
@@ -882,7 +892,11 @@ pub extern "C" fn bhc_rational_signum(r: *mut u8) -> *mut u8 {
 pub extern "C" fn bhc_rational_eq(a: *mut u8, b: *mut u8) -> i64 {
     let (an, ad) = rational_parts(a);
     let (bn, bd) = rational_parts(b);
-    if an == bn && ad == bd { 1 } else { 0 }
+    if an == bn && ad == bd {
+        1
+    } else {
+        0
+    }
 }
 
 /// Rational comparison: -1/0/1 via cross-multiplication
@@ -963,7 +977,9 @@ pub unsafe extern "C" fn bhc_write_ioref(ref_ptr: *mut u8, val: *const u8) {
     if ref_ptr.is_null() {
         rts_abort("writeIORef on null reference");
     }
-    unsafe { *(ref_ptr as *mut *const u8) = val; }
+    unsafe {
+        *(ref_ptr as *mut *const u8) = val;
+    }
 }
 
 /// Show Int - returns a heap-allocated string
@@ -1573,7 +1589,11 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
             3 => {
                 // Bool: ADT with tag 0=False, 1=True
                 let tag = *(ptr as *const i64);
-                if tag != 0 { "True".to_string() } else { "False".to_string() }
+                if tag != 0 {
+                    "True".to_string()
+                } else {
+                    "False".to_string()
+                }
             }
             4 => {
                 // Char: stored as u32 via int-to-ptr
@@ -1672,7 +1692,11 @@ pub extern "C" fn bhc_show_maybe(maybe_ptr: *const u8, elem_type_tag: i64) -> *m
 
 /// Show Either - "Left <val>" or "Right <val>"
 #[no_mangle]
-pub extern "C" fn bhc_show_either(either_ptr: *const u8, left_type_tag: i64, right_type_tag: i64) -> *mut c_char {
+pub extern "C" fn bhc_show_either(
+    either_ptr: *const u8,
+    left_type_tag: i64,
+    right_type_tag: i64,
+) -> *mut c_char {
     let tag = unsafe { *(either_ptr as *const i64) };
     let shown = if tag == 0 {
         let val = unsafe { *(either_ptr.add(8) as *const *const u8) };
@@ -1687,10 +1711,16 @@ pub extern "C" fn bhc_show_either(either_ptr: *const u8, left_type_tag: i64, rig
 
 /// Show Tuple2 - "(fst,snd)"
 #[no_mangle]
-pub extern "C" fn bhc_show_tuple2(tuple_ptr: *const u8, fst_type_tag: i64, snd_type_tag: i64) -> *mut c_char {
+pub extern "C" fn bhc_show_tuple2(
+    tuple_ptr: *const u8,
+    fst_type_tag: i64,
+    snd_type_tag: i64,
+) -> *mut c_char {
     let fst = unsafe { *(tuple_ptr.add(8) as *const *const u8) };
     let snd = unsafe { *(tuple_ptr.add(16) as *const *const u8) };
-    let shown = format!("({},{})", unsafe { show_elem(fst, fst_type_tag) }, unsafe { show_elem(snd, snd_type_tag) });
+    let shown = format!("({},{})", unsafe { show_elem(fst, fst_type_tag) }, unsafe {
+        show_elem(snd, snd_type_tag)
+    });
     let c_string = CString::new(shown).unwrap();
     c_string.into_raw()
 }
@@ -1741,7 +1771,11 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
             3 => {
                 // Bool: ADT with tag 0=False, 1=True
                 let tag = *(ptr as *const i64);
-                if tag != 0 { "True".to_string() } else { "False".to_string() }
+                if tag != 0 {
+                    "True".to_string()
+                } else {
+                    "False".to_string()
+                }
             }
             4 => {
                 // Char: stored as u32 via int-to-ptr
@@ -1996,7 +2030,13 @@ pub extern "C" fn bhc_isEOF() -> i64 {
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
     match handle.fill_buf() {
-        Ok(buf) => if buf.is_empty() { 1 } else { 0 },
+        Ok(buf) => {
+            if buf.is_empty() {
+                1
+            } else {
+                0
+            }
+        }
         Err(_) => 1,
     }
 }
@@ -2035,9 +2075,7 @@ pub extern "C" fn bhc_readFile(path: *const c_char) -> *mut c_char {
     }
     let path_str = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
     match std::fs::read_to_string(path_str) {
-        Ok(contents) => {
-            CString::new(contents).map_or(ptr::null_mut(), |cs| cs.into_raw())
-        }
+        Ok(contents) => CString::new(contents).map_or(ptr::null_mut(), |cs| cs.into_raw()),
         Err(e) => {
             // Throw an IOException with the error message as payload
             let msg = format!("{}: {}", path_str, e);
@@ -2151,9 +2189,7 @@ fn collect_list_strings(list: *const u8) -> Vec<String> {
         }
         let head = unsafe { *(cur.add(8) as *const *const c_char) };
         if !head.is_null() {
-            let s = unsafe { CStr::from_ptr(head) }
-                .to_str()
-                .unwrap_or("");
+            let s = unsafe { CStr::from_ptr(head) }.to_str().unwrap_or("");
             parts.push(s.to_string());
         }
         cur = unsafe { *(cur.add(16) as *const *const u8) };
@@ -2460,7 +2496,13 @@ pub extern "C" fn bhc_catch(
     handler_fn: extern "C" fn(*mut u8, *mut u8) -> *mut u8,
     handler_env: *mut u8,
 ) -> *mut u8 {
-    bhc_catch_typed(action_fn, action_env, handler_fn, handler_env, EXC_TAG_SOME_EXCEPTION)
+    bhc_catch_typed(
+        action_fn,
+        action_env,
+        handler_fn,
+        handler_env,
+        EXC_TAG_SOME_EXCEPTION,
+    )
 }
 
 /// Force a value to Weak Head Normal Form.
@@ -2767,10 +2809,7 @@ pub extern "C" fn bhc_uninterruptible_mask_with_restore(
 /// Called as a BHC closure: `restore_fn(inner_io_closure, self_closure)`.
 /// Temporarily restores the masking state to the saved value, runs the
 /// inner IO action, then re-sets the masking state.
-extern "C" fn bhc_restore_fn(
-    inner_io: *mut u8,
-    restore_closure: *mut u8,
-) -> *mut u8 {
+extern "C" fn bhc_restore_fn(inner_io: *mut u8, restore_closure: *mut u8) -> *mut u8 {
     // Extract saved state from restore closure env[0]
     let saved_state = unsafe {
         let closure = restore_closure as *const *mut u8;
@@ -2977,7 +3016,7 @@ pub unsafe extern "C" fn bhc_hGetLine(handle: *mut u8) -> *mut c_char {
             let mut bytes_read = 0usize;
             loop {
                 match f.read(&mut buf) {
-                    Ok(0) => break,       // EOF
+                    Ok(0) => break, // EOF
                     Ok(_) => {
                         bytes_read += 1;
                         if buf[0] == b'\n' {
@@ -3130,7 +3169,11 @@ pub extern "C" fn bhc_hIsOpen(handle: *mut u8) -> c_int {
         return 1; // std handles are always open
     }
     if let Some(bh) = get_bhc_handle(handle) {
-        if bh.closed { 0 } else { 1 }
+        if bh.closed {
+            0
+        } else {
+            1
+        }
     } else {
         0
     }
@@ -3143,7 +3186,11 @@ pub extern "C" fn bhc_hIsClosed(handle: *mut u8) -> c_int {
         return 0;
     }
     if let Some(bh) = get_bhc_handle(handle) {
-        if bh.closed { 1 } else { 0 }
+        if bh.closed {
+            1
+        } else {
+            0
+        }
     } else {
         1
     }
@@ -3160,7 +3207,11 @@ pub extern "C" fn bhc_hIsReadable(handle: *mut u8) -> c_int {
         return 0;
     }
     if let Some(bh) = get_bhc_handle(handle) {
-        if bh.readable { 1 } else { 0 }
+        if bh.readable {
+            1
+        } else {
+            0
+        }
     } else {
         0
     }
@@ -3177,7 +3228,11 @@ pub extern "C" fn bhc_hIsWritable(handle: *mut u8) -> c_int {
         return 1;
     }
     if let Some(bh) = get_bhc_handle(handle) {
-        if bh.writable { 1 } else { 0 }
+        if bh.writable {
+            1
+        } else {
+            0
+        }
     } else {
         0
     }
@@ -3485,7 +3540,10 @@ pub unsafe extern "C" fn bhc_take_extension(path: *const c_char) -> *mut c_char 
         Ok(s) => s,
         Err(_) => return CString::new("").unwrap_or_default().into_raw(),
     };
-    let result = match std::path::Path::new(path_str).extension().and_then(|s| s.to_str()) {
+    let result = match std::path::Path::new(path_str)
+        .extension()
+        .and_then(|s| s.to_str())
+    {
         Some(ext) => format!(".{}", ext),
         None => String::new(),
     };
@@ -3796,7 +3854,11 @@ pub extern "C" fn bhc_integer_gcd(a: *const u8, b: *const u8) -> *mut u8 {
 pub extern "C" fn bhc_integer_eq(a: *const u8, b: *const u8) -> i64 {
     let a = unsafe { &*(a as *const BigInt) };
     let b = unsafe { &*(b as *const BigInt) };
-    if a == b { 1 } else { 0 }
+    if a == b {
+        1
+    } else {
+        0
+    }
 }
 
 /// Less-than comparison for two BigInts.
@@ -3804,7 +3866,11 @@ pub extern "C" fn bhc_integer_eq(a: *const u8, b: *const u8) -> i64 {
 pub extern "C" fn bhc_integer_lt(a: *const u8, b: *const u8) -> i64 {
     let a = unsafe { &*(a as *const BigInt) };
     let b = unsafe { &*(b as *const BigInt) };
-    if a < b { 1 } else { 0 }
+    if a < b {
+        1
+    } else {
+        0
+    }
 }
 
 /// Less-than-or-equal comparison for two BigInts.
@@ -3812,7 +3878,11 @@ pub extern "C" fn bhc_integer_lt(a: *const u8, b: *const u8) -> i64 {
 pub extern "C" fn bhc_integer_le(a: *const u8, b: *const u8) -> i64 {
     let a = unsafe { &*(a as *const BigInt) };
     let b = unsafe { &*(b as *const BigInt) };
-    if a <= b { 1 } else { 0 }
+    if a <= b {
+        1
+    } else {
+        0
+    }
 }
 
 /// Greater-than comparison for two BigInts.
@@ -3820,7 +3890,11 @@ pub extern "C" fn bhc_integer_le(a: *const u8, b: *const u8) -> i64 {
 pub extern "C" fn bhc_integer_gt(a: *const u8, b: *const u8) -> i64 {
     let a = unsafe { &*(a as *const BigInt) };
     let b = unsafe { &*(b as *const BigInt) };
-    if a > b { 1 } else { 0 }
+    if a > b {
+        1
+    } else {
+        0
+    }
 }
 
 /// Greater-than-or-equal comparison for two BigInts.
@@ -3828,7 +3902,11 @@ pub extern "C" fn bhc_integer_gt(a: *const u8, b: *const u8) -> i64 {
 pub extern "C" fn bhc_integer_ge(a: *const u8, b: *const u8) -> i64 {
     let a = unsafe { &*(a as *const BigInt) };
     let b = unsafe { &*(b as *const BigInt) };
-    if a >= b { 1 } else { 0 }
+    if a >= b {
+        1
+    } else {
+        0
+    }
 }
 
 /// Compare two BigInts, returning Ordering tag (0=LT, 1=EQ, 2=GT).
@@ -4085,10 +4163,14 @@ mod tests {
         }
         static mut HANDLER_CALLED: bool = false;
         extern "C" fn handler(_env: *mut u8) -> *mut u8 {
-            unsafe { HANDLER_CALLED = true; }
+            unsafe {
+                HANDLER_CALLED = true;
+            }
             ptr::null_mut()
         }
-        unsafe { HANDLER_CALLED = false; }
+        unsafe {
+            HANDLER_CALLED = false;
+        }
         let result = bhc_on_exception(action, ptr::null_mut(), handler, ptr::null_mut());
         assert_eq!(result, BHC_EXCEPTION_SENTINEL);
         assert!(unsafe { HANDLER_CALLED });
@@ -4105,18 +4187,25 @@ mod tests {
             10usize as *mut u8
         }
         extern "C" fn release(_env: *mut u8, _resource: *mut u8) -> *mut u8 {
-            unsafe { RELEASED = true; }
+            unsafe {
+                RELEASED = true;
+            }
             ptr::null_mut()
         }
         extern "C" fn use_fn(_env: *mut u8, resource: *mut u8) -> *mut u8 {
             // Return resource + 32
             ((resource as usize) + 32) as *mut u8
         }
-        unsafe { RELEASED = false; }
+        unsafe {
+            RELEASED = false;
+        }
         let result = bhc_bracket(
-            acquire, ptr::null_mut(),
-            release, ptr::null_mut(),
-            use_fn, ptr::null_mut(),
+            acquire,
+            ptr::null_mut(),
+            release,
+            ptr::null_mut(),
+            use_fn,
+            ptr::null_mut(),
         );
         assert_eq!(result as usize, 42);
         assert!(unsafe { RELEASED });
@@ -4129,18 +4218,25 @@ mod tests {
             10usize as *mut u8
         }
         extern "C" fn release(_env: *mut u8, _resource: *mut u8) -> *mut u8 {
-            unsafe { RELEASED = true; }
+            unsafe {
+                RELEASED = true;
+            }
             ptr::null_mut()
         }
         extern "C" fn use_fn(_env: *mut u8, _resource: *mut u8) -> *mut u8 {
             let exc = bhc_make_some_exception(EXC_TAG_SOME_EXCEPTION, 77usize as *mut u8);
             bhc_throw(exc)
         }
-        unsafe { RELEASED = false; }
+        unsafe {
+            RELEASED = false;
+        }
         let result = bhc_bracket(
-            acquire, ptr::null_mut(),
-            release, ptr::null_mut(),
-            use_fn, ptr::null_mut(),
+            acquire,
+            ptr::null_mut(),
+            release,
+            ptr::null_mut(),
+            use_fn,
+            ptr::null_mut(),
         );
         assert_eq!(result, BHC_EXCEPTION_SENTINEL);
         // Release must have been called even though use threw
@@ -4161,7 +4257,13 @@ mod tests {
             exc
         }
         // Catch IOException — should match
-        let result = bhc_catch_typed(action, ptr::null_mut(), handler, ptr::null_mut(), EXC_TAG_IO_EXCEPTION);
+        let result = bhc_catch_typed(
+            action,
+            ptr::null_mut(),
+            handler,
+            ptr::null_mut(),
+            EXC_TAG_IO_EXCEPTION,
+        );
         assert_eq!(result as usize, 88);
     }
 
@@ -4175,7 +4277,13 @@ mod tests {
             99usize as *mut u8
         }
         // Catch ErrorCall — should NOT match IOException
-        let result = bhc_catch_typed(action, ptr::null_mut(), handler, ptr::null_mut(), EXC_TAG_ERROR_CALL);
+        let result = bhc_catch_typed(
+            action,
+            ptr::null_mut(),
+            handler,
+            ptr::null_mut(),
+            EXC_TAG_ERROR_CALL,
+        );
         assert_eq!(result, BHC_EXCEPTION_SENTINEL);
         // Exception should be re-thrown in TLS
         let exc = BHC_EXCEPTION.with(|cell| cell.replace(None));
@@ -4192,7 +4300,13 @@ mod tests {
             exc
         }
         // Catch all (tag=0) — should match any exception type
-        let result = bhc_catch_typed(action, ptr::null_mut(), handler, ptr::null_mut(), EXC_TAG_SOME_EXCEPTION);
+        let result = bhc_catch_typed(
+            action,
+            ptr::null_mut(),
+            handler,
+            ptr::null_mut(),
+            EXC_TAG_SOME_EXCEPTION,
+        );
         assert_eq!(result as usize, 55);
     }
 

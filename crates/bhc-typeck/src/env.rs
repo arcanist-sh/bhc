@@ -490,11 +490,7 @@ impl TypeEnv {
     }
 
     /// Try to match a single type family equation against arguments.
-    fn try_match_family_equation(
-        &self,
-        eq: &TypeFamilyEquation,
-        args: &[Ty],
-    ) -> Option<Ty> {
+    fn try_match_family_equation(&self, eq: &TypeFamilyEquation, args: &[Ty]) -> Option<Ty> {
         if eq.args.len() != args.len() {
             return None;
         }
@@ -561,11 +557,7 @@ impl TypeEnv {
     }
 
     /// Register an instance for an open type family.
-    pub fn register_type_family_instance(
-        &mut self,
-        family_name: Symbol,
-        eqn: TypeFamilyEquation,
-    ) {
+    pub fn register_type_family_instance(&mut self, family_name: Symbol, eqn: TypeFamilyEquation) {
         self.type_family_instances
             .entry(family_name)
             .or_default()
@@ -1238,10 +1230,13 @@ mod tests {
         assert!(env.reduce_type_family(f, &[int_ty.clone()]).is_none());
 
         // Register instance: type instance Size Int = Int
-        env.register_type_family_instance(f, TypeFamilyEquation {
-            args: vec![int_ty.clone()],
-            rhs: int_ty.clone(),
-        });
+        env.register_type_family_instance(
+            f,
+            TypeFamilyEquation {
+                args: vec![int_ty.clone()],
+                rhs: int_ty.clone(),
+            },
+        );
 
         // Now should reduce
         let result = env.reduce_type_family(f, &[int_ty.clone()]);

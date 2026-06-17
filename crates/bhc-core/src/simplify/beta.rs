@@ -4,7 +4,7 @@
 
 use crate::Expr;
 
-use super::expr_util::{contains_toplevel_case, is_cheap, expr_size};
+use super::expr_util::{contains_toplevel_case, expr_size, is_cheap};
 use super::occurrence::analyze_occurrences;
 use super::subst::substitute_single;
 
@@ -53,9 +53,7 @@ pub fn try_beta_reduce(fun: &Expr, arg: &Expr, inline_threshold: usize) -> Optio
                 // Used multiple times — only inline cheap args (handled above)
                 None
             }
-            Some(super::occurrence::OccCount::Dead) => {
-                Some(*body.clone())
-            }
+            Some(super::occurrence::OccCount::Dead) => Some(*body.clone()),
         }
     } else {
         None
@@ -65,11 +63,11 @@ pub fn try_beta_reduce(fun: &Expr, arg: &Expr, inline_threshold: usize) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Literal, Var, VarId};
     use bhc_index::Idx;
     use bhc_intern::Symbol;
     use bhc_span::Span;
     use bhc_types::Ty;
-    use crate::{Literal, Var, VarId};
 
     fn mk_var(name: &str, id: u32) -> Var {
         Var::new(Symbol::intern(name), VarId::new(id as usize), Ty::Error)
@@ -86,7 +84,11 @@ mod tests {
     #[test]
     fn test_beta_reduce_cheap_arg() {
         // (\x -> x) 42 => 42
-        let lam = Expr::Lam(mk_var("x", 1), Box::new(mk_var_expr("x", 1)), Span::default());
+        let lam = Expr::Lam(
+            mk_var("x", 1),
+            Box::new(mk_var_expr("x", 1)),
+            Span::default(),
+        );
         let arg = mk_int(42);
         let result = try_beta_reduce(&lam, &arg, 20);
         assert!(result.is_some());

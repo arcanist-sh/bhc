@@ -94,11 +94,8 @@ pub fn generate_interface(
                     .iter()
                     .map(|p| p.name.name.as_str().to_string())
                     .collect();
-                let supers: Vec<Constraint> = cls
-                    .context
-                    .iter()
-                    .map(convert_ast_constraint)
-                    .collect();
+                let supers: Vec<Constraint> =
+                    cls.context.iter().map(convert_ast_constraint).collect();
                 // Extract method signatures from class body declarations
                 let methods: Vec<ClassMethod> = cls
                     .methods
@@ -128,11 +125,8 @@ pub fn generate_interface(
                 });
             }
             bhc_ast::Decl::InstanceDecl(inst) => {
-                let constraints: Vec<Constraint> = inst
-                    .context
-                    .iter()
-                    .map(convert_ast_constraint)
-                    .collect();
+                let constraints: Vec<Constraint> =
+                    inst.context.iter().map(convert_ast_constraint).collect();
                 let types = vec![convert_ast_type(&inst.ty)];
                 iface.add_instance(ExportedInstance {
                     class: inst.class.name.as_str().to_string(),

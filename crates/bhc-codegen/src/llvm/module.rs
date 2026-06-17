@@ -111,7 +111,9 @@ impl<'ctx> LlvmModule<'ctx> {
         // uses the Haskell "main" as the entry point, bypassing RTS init/shutdown.
         let hs_name = haskell_main.get_name().to_str().unwrap_or("");
         if hs_name == "main" {
-            haskell_main.as_global_value().set_name("__bhc_haskell_main");
+            haskell_main
+                .as_global_value()
+                .set_name("__bhc_haskell_main");
         }
 
         let i32_type = self.type_mapper.i32_type();

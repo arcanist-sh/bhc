@@ -582,9 +582,7 @@ impl<'a> WasmLowering<'a> {
             }
 
             // IO: return / pure - just evaluate the argument
-            Some("return" | "pure" | "GHC.Base.return" | "GHC.Base.pure")
-                if args.len() == 1 =>
-            {
+            Some("return" | "pure" | "GHC.Base.return" | "GHC.Base.pure") if args.len() == 1 => {
                 self.lower_expr(&args[0], instrs, locals, local_count, false)?;
             }
 
@@ -596,9 +594,7 @@ impl<'a> WasmLowering<'a> {
             }
 
             // Fused sum/enumFromTo: sum (enumFromTo lo hi) => loop accumulation
-            Some("sum" | "Prelude.sum" | "Data.List.sum" | "GHC.List.sum")
-                if args.len() == 1 =>
-            {
+            Some("sum" | "Prelude.sum" | "Data.List.sum" | "GHC.List.sum") if args.len() == 1 => {
                 if let Some((lo_expr, hi_expr)) = extract_enum_from_to(&args[0]) {
                     // Emit a loop: acc = 0; for i = lo to hi: acc += i
                     let acc_local = *local_count;
@@ -661,8 +657,7 @@ impl<'a> WasmLowering<'a> {
 
             // User-defined function call
             Some(name) => {
-                if let Some(&func_idx) = self.func_map.get(&func_expr_symbol(func_expr).unwrap())
-                {
+                if let Some(&func_idx) = self.func_map.get(&func_expr_symbol(func_expr).unwrap()) {
                     // Push arguments
                     for arg in &args {
                         self.lower_expr(arg, instrs, locals, local_count, false)?;

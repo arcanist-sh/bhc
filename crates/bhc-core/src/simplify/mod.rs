@@ -151,13 +151,9 @@ pub fn simplify_module(module: &mut CoreModule, config: &SimplifyConfig) -> Simp
                     let name = var.name.as_str();
 
                     // Top-level dead binding elimination (export-aware)
-                    if !is_inline_protected(name)
-                        && !is_exported(name, &config.exported_names)
-                    {
-                        if matches!(
-                            occs.get(&var.id),
-                            None | Some(occurrence::OccCount::Dead)
-                        ) && expr_util::is_cheap(&rhs)
+                    if !is_inline_protected(name) && !is_exported(name, &config.exported_names) {
+                        if matches!(occs.get(&var.id), None | Some(occurrence::OccCount::Dead))
+                            && expr_util::is_cheap(&rhs)
                         {
                             total_stats.dead_bindings += 1;
                             changed = true;
@@ -166,8 +162,7 @@ pub fn simplify_module(module: &mut CoreModule, config: &SimplifyConfig) -> Simp
                     }
 
                     let mut stats = SimplifyStats::default();
-                    let new_rhs =
-                        simplify_expr(*rhs, &inline_env, config, &mut stats);
+                    let new_rhs = simplify_expr(*rhs, &inline_env, config, &mut stats);
                     if stats.has_changes() {
                         changed = true;
                     }
@@ -205,8 +200,7 @@ pub fn simplify_module(module: &mut CoreModule, config: &SimplifyConfig) -> Simp
                         .into_iter()
                         .map(|(v, rhs)| {
                             let mut stats = SimplifyStats::default();
-                            let new_rhs =
-                                simplify_expr(*rhs, &inline_env, config, &mut stats);
+                            let new_rhs = simplify_expr(*rhs, &inline_env, config, &mut stats);
                             if stats.has_changes() {
                                 changed = true;
                             }
@@ -235,10 +229,7 @@ pub fn simplify_module(module: &mut CoreModule, config: &SimplifyConfig) -> Simp
 /// `$instance_*`, `$sel_*`, etc.), RTS functions (`bhc_*`), and
 /// qualified names containing `::`.
 fn is_inline_protected(name: &str) -> bool {
-    name == "main"
-        || name.starts_with('$')
-        || name.starts_with("bhc_")
-        || name.contains("::")
+    name == "main" || name.starts_with('$') || name.starts_with("bhc_") || name.contains("::")
 }
 
 /// Check if a binding name is exported from the module.
@@ -382,11 +373,7 @@ fn simplify_expr(
                         })
                         .collect();
                     let new_body = simplify_expr(*body, inline_env, config, stats);
-                    Expr::Let(
-                        Box::new(Bind::Rec(new_pairs)),
-                        Box::new(new_body),
-                        span,
-                    )
+                    Expr::Let(Box::new(Bind::Rec(new_pairs)), Box::new(new_body), span)
                 }
             }
         }
@@ -447,12 +434,12 @@ fn simplify_expr(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AltCon, DataCon, Literal, Var};
     use bhc_index::Idx;
     use bhc_intern::Symbol;
     use bhc_span::Span;
     use bhc_types::Ty;
-    use crate::{AltCon, DataCon, Literal, Var};
-    use bhc_types::{TyCon, Kind};
+    use bhc_types::{Kind, TyCon};
 
     fn mk_var(name: &str, id: u32) -> Var {
         Var::new(Symbol::intern(name), VarId::new(id as usize), Ty::Error)
@@ -555,7 +542,11 @@ mod tests {
     #[test]
     fn test_simplify_beta_reduction() {
         // main = (\x -> x) 42
-        let lam = Expr::Lam(mk_var("x", 10), Box::new(mk_var_expr("x", 10)), Span::default());
+        let lam = Expr::Lam(
+            mk_var("x", 10),
+            Box::new(mk_var_expr("x", 10)),
+            Span::default(),
+        );
         let app = Expr::App(Box::new(lam), Box::new(mk_int(42)), Span::default());
         let mut module = mk_module(vec![Bind::NonRec(mk_var("main", 1), Box::new(app))]);
         let config = SimplifyConfig::default();

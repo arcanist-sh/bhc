@@ -161,10 +161,7 @@ pub unsafe extern "C" fn bhc_list_sort_by(cmp_fn: *mut u8, list: *mut u8) -> *mu
 pub unsafe extern "C" fn bhc_list_nub(list: *mut u8) -> *mut u8 {
     let vec = list_to_vec(list);
     let mut seen = HashSet::new();
-    let deduped: Vec<*mut u8> = vec
-        .into_iter()
-        .filter(|&e| seen.insert(e as i64))
-        .collect();
+    let deduped: Vec<*mut u8> = vec.into_iter().filter(|&e| seen.insert(e as i64)).collect();
     vec_to_list(&deduped)
 }
 
@@ -283,7 +280,9 @@ pub unsafe extern "C" fn bhc_list_nub_by(eq_fn: *mut u8, list: *mut u8) -> *mut 
     let vec = list_to_vec(list);
     let mut result: Vec<*mut u8> = Vec::new();
     for &elem in &vec {
-        let already = result.iter().any(|&kept| call_eq_closure(eq_fn, kept, elem));
+        let already = result
+            .iter()
+            .any(|&kept| call_eq_closure(eq_fn, kept, elem));
         if !already {
             result.push(elem);
         }
@@ -345,11 +344,7 @@ pub unsafe extern "C" fn bhc_list_delete_by(
 /// `unionBy eq xs ys = xs ++ [y | y <- ys, not (any (eq y) xs')]`
 /// where `xs'` grows as elements from `ys` are added.
 #[no_mangle]
-pub unsafe extern "C" fn bhc_list_union_by(
-    eq_fn: *mut u8,
-    xs: *mut u8,
-    ys: *mut u8,
-) -> *mut u8 {
+pub unsafe extern "C" fn bhc_list_union_by(eq_fn: *mut u8, xs: *mut u8, ys: *mut u8) -> *mut u8 {
     let xs_vec = list_to_vec(xs);
     let ys_vec = list_to_vec(ys);
     let mut result = xs_vec.clone();
@@ -384,10 +379,7 @@ pub unsafe extern "C" fn bhc_list_intersect_by(
 ///
 /// Elements are compared as `i64` (pointer cast).
 #[no_mangle]
-pub unsafe extern "C" fn bhc_list_strip_prefix(
-    prefix: *mut u8,
-    list: *mut u8,
-) -> *mut u8 {
+pub unsafe extern "C" fn bhc_list_strip_prefix(prefix: *mut u8, list: *mut u8) -> *mut u8 {
     let mut p = prefix;
     let mut l = list;
     loop {
@@ -417,7 +409,10 @@ pub unsafe extern "C" fn bhc_list_strip_prefix(
 pub unsafe extern "C" fn bhc_list_insert(val: *mut u8, list: *mut u8) -> *mut u8 {
     let vec = list_to_vec(list);
     let v = val as i64;
-    let pos = vec.iter().position(|&e| (e as i64) > v).unwrap_or(vec.len());
+    let pos = vec
+        .iter()
+        .position(|&e| (e as i64) > v)
+        .unwrap_or(vec.len());
     let mut result = vec;
     result.insert(pos, val);
     vec_to_list(&result)
@@ -429,11 +424,7 @@ pub unsafe extern "C" fn bhc_list_insert(val: *mut u8, list: *mut u8) -> *mut u8
 /// The closure returns a 2-tuple `(new_acc, y)`. Returns `(final_acc, ys)`.
 /// `f` is a 2-arg closure: `fn(env, acc, x) -> tuple`.
 #[no_mangle]
-pub unsafe extern "C" fn bhc_list_map_accum_l(
-    f: *mut u8,
-    acc: *mut u8,
-    list: *mut u8,
-) -> *mut u8 {
+pub unsafe extern "C" fn bhc_list_map_accum_l(f: *mut u8, acc: *mut u8, list: *mut u8) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
         std::mem::transmute(*(f as *const *mut u8));
 
@@ -457,11 +448,7 @@ pub unsafe extern "C" fn bhc_list_map_accum_l(
 /// The closure returns a 2-tuple `(new_acc, y)`. Returns `(final_acc, ys)`.
 /// `f` is a 2-arg closure: `fn(env, acc, x) -> tuple`.
 #[no_mangle]
-pub unsafe extern "C" fn bhc_list_map_accum_r(
-    f: *mut u8,
-    acc: *mut u8,
-    list: *mut u8,
-) -> *mut u8 {
+pub unsafe extern "C" fn bhc_list_map_accum_r(f: *mut u8, acc: *mut u8, list: *mut u8) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
         std::mem::transmute(*(f as *const *mut u8));
 
@@ -580,10 +567,7 @@ mod tests {
             let c = make_list(&[5, 6]);
             let lists = vec_to_list(&[a, b, c]);
             let result = bhc_list_transpose(lists);
-            assert_eq!(
-                collect_nested(result),
-                vec![vec![1, 3, 5], vec![2, 4, 6]]
-            );
+            assert_eq!(collect_nested(result), vec![vec![1, 3, 5], vec![2, 4, 6]]);
         }
     }
 
@@ -595,10 +579,7 @@ mod tests {
             let b = make_list(&[4]);
             let lists = vec_to_list(&[a, b]);
             let result = bhc_list_transpose(lists);
-            assert_eq!(
-                collect_nested(result),
-                vec![vec![1, 4], vec![2], vec![3]]
-            );
+            assert_eq!(collect_nested(result), vec![vec![1, 4], vec![2], vec![3]]);
         }
     }
 }

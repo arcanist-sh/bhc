@@ -282,14 +282,10 @@ pub extern "C" fn bhc_text_append(a: *const u8, b: *const u8) -> *mut u8 {
 
     if a_bytes.is_empty() && !b.is_null() {
         // Return b as-is (slice view)
-        return unsafe {
-            alloc_text_slice(text_data_ptr(b), text_offset(b), text_byte_len(b))
-        };
+        return unsafe { alloc_text_slice(text_data_ptr(b), text_offset(b), text_byte_len(b)) };
     }
     if b_bytes.is_empty() && !a.is_null() {
-        return unsafe {
-            alloc_text_slice(text_data_ptr(a), text_offset(a), text_byte_len(a))
-        };
+        return unsafe { alloc_text_slice(text_data_ptr(a), text_offset(a), text_byte_len(a)) };
     }
 
     let mut combined = Vec::with_capacity(a_bytes.len() + b_bytes.len());
@@ -513,7 +509,11 @@ pub extern "C" fn bhc_text_is_infix_of(needle: *const u8, haystack: *const u8) -
         n_bytes.as_ptr(),
         n_bytes.len(),
     );
-    if result >= 0 { 1 } else { 0 }
+    if result >= 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // ============================================================
@@ -675,9 +675,7 @@ pub extern "C" fn bhc_text_char_at(text: *const u8, index: i64) -> i64 {
     }
     unsafe {
         let s = text_as_str(text);
-        s.chars()
-            .nth(index as usize)
-            .map_or(0, |c| c as i64)
+        s.chars().nth(index as usize).map_or(0, |c| c as i64)
     }
 }
 
@@ -712,7 +710,7 @@ pub extern "C" fn bhc_text_decode_utf8(bs: *const u8) -> *mut u8 {
     }
     unsafe {
         let bytes = text_bytes(bs); // same layout as text
-        // Validate UTF-8 and either pass through or lossy-convert
+                                    // Validate UTF-8 and either pass through or lossy-convert
         match str::from_utf8(bytes) {
             Ok(_) => {
                 // Valid UTF-8, create Text from same bytes
@@ -967,7 +965,11 @@ pub extern "C" fn bhc_text_replace(
     }
     unsafe {
         let h = text_as_str(haystack);
-        let n = if needle.is_null() { "" } else { text_as_str(needle) };
+        let n = if needle.is_null() {
+            ""
+        } else {
+            text_as_str(needle)
+        };
         let r = if replacement.is_null() {
             ""
         } else {

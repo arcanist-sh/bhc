@@ -271,8 +271,7 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
 
                 // Try to resolve the dictionary
                 if let Some(dict_expr) = ctx.resolve_dictionary(constraint, def_ref.span) {
-                    result =
-                        core::Expr::App(Box::new(result), Box::new(dict_expr), def_ref.span);
+                    result = core::Expr::App(Box::new(result), Box::new(dict_expr), def_ref.span);
                 } else {
                     // Dictionary not available - generate an error expression
                     let error_msg = format!(
@@ -281,8 +280,7 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                         format_constraint(constraint)
                     );
                     let error_expr = make_error_expr(&error_msg, def_ref.span);
-                    result =
-                        core::Expr::App(Box::new(result), Box::new(error_expr), def_ref.span);
+                    result = core::Expr::App(Box::new(result), Box::new(error_expr), def_ref.span);
                 }
             }
             return Ok(result);
@@ -545,9 +543,7 @@ fn lower_app(
                 }
 
                 // Case 1b: No dict in scope — resolve via instance lookup
-                if (is_user || is_monad_family)
-                    && ctx.lookup_dict(class_name).is_none()
-                {
+                if (is_user || is_monad_family) && ctx.lookup_dict(class_name).is_none() {
                     let param_count = ctx.class_param_count(class_name);
 
                     if param_count > 1 && is_user {
@@ -557,19 +553,18 @@ fn lower_app(
                         if let Some(arg_ty) = try_infer_arg_type(ctx, x) {
                             let mut types_for_resolution = vec![arg_ty];
                             // Search instances to complete the type list
-                            if let Some(instances) =
-                                ctx.class_registry().instances.get(&class_name)
+                            if let Some(instances) = ctx.class_registry().instances.get(&class_name)
                             {
                                 for inst in &*instances {
                                     if inst.instance_types.len() >= param_count {
-                                        let all_match =
-                                            types_for_resolution.iter().enumerate().all(
-                                                |(i, ty)| {
-                                                    inst.instance_types
-                                                        .get(i)
-                                                        .map_or(false, |it| it == ty)
-                                                },
-                                            );
+                                        let all_match = types_for_resolution
+                                            .iter()
+                                            .enumerate()
+                                            .all(|(i, ty)| {
+                                                inst.instance_types
+                                                    .get(i)
+                                                    .map_or(false, |it| it == ty)
+                                            });
                                         if all_match {
                                             types_for_resolution =
                                                 inst.instance_types[..param_count].to_vec();
@@ -579,14 +574,12 @@ fn lower_app(
                                 }
                             }
                             if types_for_resolution.len() >= param_count {
-                                if let Some(method_expr) =
-                                    ctx.resolve_method_at_concrete_types(
-                                        method_name,
-                                        class_name,
-                                        &types_for_resolution,
-                                        span,
-                                    )
-                                {
+                                if let Some(method_expr) = ctx.resolve_method_at_concrete_types(
+                                    method_name,
+                                    class_name,
+                                    &types_for_resolution,
+                                    span,
+                                ) {
                                     let x_core = lower_expr(ctx, x)?;
                                     return Ok(core::Expr::App(
                                         Box::new(method_expr),
@@ -599,15 +592,14 @@ fn lower_app(
                         // Fall through to Case 3 if we couldn't resolve
                     } else {
                         // Single-param class: resolve at concrete type from argument
-                        let inferred = try_infer_arg_type(ctx, x)
-                            .or_else(|| {
-                                // Fallback: use monad context stack for >>=/>>/return/pure
-                                if is_monad_family {
-                                    ctx.current_monad_type().cloned()
-                                } else {
-                                    None
-                                }
-                            });
+                        let inferred = try_infer_arg_type(ctx, x).or_else(|| {
+                            // Fallback: use monad context stack for >>=/>>/return/pure
+                            if is_monad_family {
+                                ctx.current_monad_type().cloned()
+                            } else {
+                                None
+                            }
+                        });
                         if let Some(concrete_ty) = inferred {
                             // For monad-family builtin classes, skip if the concrete type
                             // is a builtin monad — let codegen handle the fast path
@@ -638,8 +630,8 @@ fn lower_app(
                                         && !is_user
                                         && LowerContext::is_builtin_monad_type(&applied_ty))
                                     {
-                                        if let Some(method_expr) =
-                                            ctx.resolve_method_at_concrete_type(
+                                        if let Some(method_expr) = ctx
+                                            .resolve_method_at_concrete_type(
                                                 method_name,
                                                 class_name,
                                                 &applied_ty,
@@ -666,8 +658,8 @@ fn lower_app(
             // dictionary dispatch. When inside a do-block for a user-defined monad,
             // resolve it via the Applicative dictionary using the monad context stack.
             {
-                let is_return_or_pure = method_name.as_str() == "return"
-                    || method_name.as_str() == "pure";
+                let is_return_or_pure =
+                    method_name.as_str() == "return" || method_name.as_str() == "pure";
                 if is_return_or_pure {
                     if let Some(monad_ty) = ctx.current_monad_type().cloned() {
                         if !LowerContext::is_builtin_monad_type(&monad_ty) {
@@ -695,15 +687,13 @@ fn lower_app(
             if let Some(scheme) = ctx.lookup_scheme(def_ref.def_id) {
                 let has_unresolved = scheme.constraints.iter().any(|c| {
                     // Only user-defined classes (not builtins like Show/Eq/Ord/Num)
-                    ctx.is_user_class(c.class)
-                        && c.args.iter().any(has_type_variables)
+                    ctx.is_user_class(c.class) && c.args.iter().any(has_type_variables)
                 });
                 if has_unresolved {
                     if let Some(concrete_ty) = try_infer_arg_type(ctx, x) {
                         // Resolve dictionaries with the concrete type substituted in
                         let constraints = scheme.constraints.clone();
-                        let mut result =
-                            core::Expr::Var(var.clone(), def_ref.span);
+                        let mut result = core::Expr::Var(var.clone(), def_ref.span);
 
                         for constraint in &constraints {
                             if ctx.is_user_class(constraint.class)
@@ -758,25 +748,16 @@ fn lower_app(
                             let mut result = method_expr;
                             for arg in &collected_args {
                                 let arg_core = lower_expr(ctx, arg)?;
-                                result = core::Expr::App(
-                                    Box::new(result),
-                                    Box::new(arg_core),
-                                    span,
-                                );
+                                result =
+                                    core::Expr::App(Box::new(result), Box::new(arg_core), span);
                             }
                             let x_core = lower_expr(ctx, x)?;
-                            return Ok(core::Expr::App(
-                                Box::new(result),
-                                Box::new(x_core),
-                                span,
-                            ));
+                            return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
                         }
                     }
                 }
 
-                if (is_user || is_monad_family)
-                    && ctx.lookup_dict(class_name).is_none()
-                {
+                if (is_user || is_monad_family) && ctx.lookup_dict(class_name).is_none() {
                     let param_count = ctx.class_param_count(class_name);
 
                     if param_count > 1 && is_user {
@@ -802,19 +783,18 @@ fn lower_app(
                         if types_for_resolution.len() < param_count
                             && !types_for_resolution.is_empty()
                         {
-                            if let Some(instances) =
-                                ctx.class_registry().instances.get(&class_name)
+                            if let Some(instances) = ctx.class_registry().instances.get(&class_name)
                             {
                                 for inst in instances {
                                     if inst.instance_types.len() >= param_count {
-                                        let all_match =
-                                            types_for_resolution.iter().enumerate().all(
-                                                |(i, ty)| {
-                                                    inst.instance_types
-                                                        .get(i)
-                                                        .map_or(false, |it| it == ty)
-                                                },
-                                            );
+                                        let all_match = types_for_resolution
+                                            .iter()
+                                            .enumerate()
+                                            .all(|(i, ty)| {
+                                                inst.instance_types
+                                                    .get(i)
+                                                    .map_or(false, |it| it == ty)
+                                            });
                                         if all_match {
                                             types_for_resolution =
                                                 inst.instance_types[..param_count].to_vec();
@@ -836,11 +816,8 @@ fn lower_app(
                                 let mut result = method_expr;
                                 for arg in &collected_args {
                                     let arg_core = lower_expr(ctx, arg)?;
-                                    result = core::Expr::App(
-                                        Box::new(result),
-                                        Box::new(arg_core),
-                                        span,
-                                    );
+                                    result =
+                                        core::Expr::App(Box::new(result), Box::new(arg_core), span);
                                 }
                                 let x_core = lower_expr(ctx, x)?;
                                 return Ok(core::Expr::App(
@@ -859,24 +836,19 @@ fn lower_app(
                             .iter()
                             .find_map(|arg| try_infer_arg_type(ctx, arg));
                         let inferred_x = try_infer_arg_type(ctx, x);
-                        let inferred = inferred_args
-                            .or(inferred_x)
-                            .or_else(|| {
-                                // Fallback: use monad context stack for nested >>=/>>/return
-                                if is_monad_family {
-                                    ctx.current_monad_type().cloned()
-                                } else {
-                                    None
-                                }
-                            });
+                        let inferred = inferred_args.or(inferred_x).or_else(|| {
+                            // Fallback: use monad context stack for nested >>=/>>/return
+                            if is_monad_family {
+                                ctx.current_monad_type().cloned()
+                            } else {
+                                None
+                            }
+                        });
                         if let Some(concrete_ty) = inferred {
                             // For monad-family builtin classes, skip if the concrete type
                             // is a builtin monad — let codegen handle the fast path
                             let is_builtin_m = LowerContext::is_builtin_monad_type(&concrete_ty);
-                            if is_monad_family
-                                && !is_user
-                                && is_builtin_m
-                            {
+                            if is_monad_family && !is_user && is_builtin_m {
                                 // Fall through to codegen fast path
                             } else {
                                 let resolved = ctx.resolve_method_at_concrete_type(
@@ -913,19 +885,18 @@ fn lower_app(
                                     ));
                                 }
                                 // Fallback: try applied type for parameterized instances
-                                let applied = try_infer_applied_type(ctx, x)
-                                    .or_else(|| {
-                                        collected_args
-                                            .iter()
-                                            .find_map(|arg| try_infer_applied_type(ctx, arg))
-                                    });
+                                let applied = try_infer_applied_type(ctx, x).or_else(|| {
+                                    collected_args
+                                        .iter()
+                                        .find_map(|arg| try_infer_applied_type(ctx, arg))
+                                });
                                 if let Some(applied_ty) = applied {
                                     if !(is_monad_family
                                         && !is_user
                                         && LowerContext::is_builtin_monad_type(&applied_ty))
                                     {
-                                        if let Some(method_expr) =
-                                            ctx.resolve_method_at_concrete_type(
+                                        if let Some(method_expr) = ctx
+                                            .resolve_method_at_concrete_type(
                                                 method_name,
                                                 class_name,
                                                 &applied_ty,
@@ -967,16 +938,17 @@ fn lower_app(
 
             // Case 3b: Head is a constrained function with unresolved type-variable constraints
             if let Some(scheme) = ctx.lookup_scheme(head_def_ref.def_id) {
-                let has_unresolved = scheme.constraints.iter().any(|c| {
-                    ctx.is_user_class(c.class)
-                        && c.args.iter().any(has_type_variables)
-                });
+                let has_unresolved = scheme
+                    .constraints
+                    .iter()
+                    .any(|c| ctx.is_user_class(c.class) && c.args.iter().any(has_type_variables));
                 if has_unresolved {
                     // Try to infer concrete type from x or collected args
-                    let inferred = try_infer_arg_type(ctx, x)
-                        .or_else(|| {
-                            collected_args.iter().find_map(|arg| try_infer_arg_type(ctx, arg))
-                        });
+                    let inferred = try_infer_arg_type(ctx, x).or_else(|| {
+                        collected_args
+                            .iter()
+                            .find_map(|arg| try_infer_arg_type(ctx, arg))
+                    });
                     if let Some(concrete_ty) = inferred {
                         let constraints = scheme.constraints.clone();
                         // Build from the head var (not lowered f, to avoid double resolution)
@@ -1006,11 +978,7 @@ fn lower_app(
                         // Apply collected args, then x
                         for arg in &collected_args {
                             let arg_core = lower_expr(ctx, arg)?;
-                            result = core::Expr::App(
-                                Box::new(result),
-                                Box::new(arg_core),
-                                span,
-                            );
+                            result = core::Expr::App(Box::new(result), Box::new(arg_core), span);
                         }
                         let x_core = lower_expr(ctx, x)?;
                         return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
@@ -1031,14 +999,8 @@ fn lower_app(
                 if let Some(arg_ty) = try_infer_arg_type(ctx, x) {
                     for class_name in &info.existential_classes {
                         let constraint = Constraint::new(*class_name, arg_ty.clone(), span);
-                        if let Some(dict_expr) =
-                            ctx.resolve_dictionary(&constraint, def_ref.span)
-                        {
-                            result = core::Expr::App(
-                                Box::new(result),
-                                Box::new(dict_expr),
-                                span,
-                            );
+                        if let Some(dict_expr) = ctx.resolve_dictionary(&constraint, def_ref.span) {
+                            result = core::Expr::App(Box::new(result), Box::new(dict_expr), span);
                         }
                     }
                 }
@@ -1077,9 +1039,7 @@ fn lower_type_app(
             if let Some(class_name) = ctx.is_class_method(method_name) {
                 let is_user = ctx.is_user_class(class_name);
                 let is_monad_family = ctx.is_monad_family_class(class_name);
-                if is_user
-                    || (is_monad_family && !LowerContext::is_builtin_monad_type(ty))
-                {
+                if is_user || (is_monad_family && !LowerContext::is_builtin_monad_type(ty)) {
                     if let Some(method_expr) =
                         ctx.resolve_method_at_concrete_type(method_name, class_name, ty, span)
                     {
@@ -1350,11 +1310,8 @@ fn lower_case(
                 ctx.push_dict_scope();
                 let mut dict_binders = Vec::new();
                 for class_name in &existential_classes {
-                    let dict_var = ctx.fresh_var(
-                        &format!("$dict_{}", class_name.as_str()),
-                        Ty::Error,
-                        span,
-                    );
+                    let dict_var =
+                        ctx.fresh_var(&format!("$dict_{}", class_name.as_str()), Ty::Error, span);
                     ctx.register_dict(*class_name, dict_var.clone());
                     dict_binders.push(dict_var);
                 }
@@ -1398,11 +1355,8 @@ fn lower_case(
             ctx.push_dict_scope();
             let mut dict_binders = Vec::new();
             for class_name in &existential_classes {
-                let dict_var = ctx.fresh_var(
-                    &format!("$dict_{}", class_name.as_str()),
-                    Ty::Error,
-                    span,
-                );
+                let dict_var =
+                    ctx.fresh_var(&format!("$dict_{}", class_name.as_str()), Ty::Error, span);
                 ctx.register_dict(*class_name, dict_var.clone());
                 dict_binders.push(dict_var);
             }
@@ -1459,11 +1413,7 @@ fn lower_case(
     );
 
     let bind = core::Bind::NonRec(scrut_var, Box::new(scrutinee_core));
-    Ok(core::Expr::Let(
-        Box::new(bind),
-        Box::new(case_expr),
-        span,
-    ))
+    Ok(core::Expr::Let(Box::new(bind), Box::new(case_expr), span))
 }
 
 /// Get the existential class names for a constructor pattern.
@@ -1486,12 +1436,12 @@ fn get_existential_classes(ctx: &LowerContext, pat: &hir::Pat) -> Vec<Symbol> {
 /// within a constructor pattern. These require fallthrough support.
 fn has_complex_subpatterns(pat: &hir::Pat) -> bool {
     match pat {
-        hir::Pat::Con(_, sub_pats, _) => {
-            sub_pats.iter().any(|p| !matches!(p, hir::Pat::Var(..) | hir::Pat::Wild(_)))
-        }
-        hir::Pat::RecordCon(_, fields, _) => {
-            fields.iter().any(|fp| !matches!(&fp.pat, hir::Pat::Var(..) | hir::Pat::Wild(_)))
-        }
+        hir::Pat::Con(_, sub_pats, _) => sub_pats
+            .iter()
+            .any(|p| !matches!(p, hir::Pat::Var(..) | hir::Pat::Wild(_))),
+        hir::Pat::RecordCon(_, fields, _) => fields
+            .iter()
+            .any(|fp| !matches!(&fp.pat, hir::Pat::Var(..) | hir::Pat::Wild(_))),
         _ => false,
     }
 }

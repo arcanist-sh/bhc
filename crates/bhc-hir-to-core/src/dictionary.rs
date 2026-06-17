@@ -331,10 +331,7 @@ impl<'a> DictContext<'a> {
     }
 
     /// Create a new dictionary context with a variable map for name resolution.
-    pub fn new_with_var_map(
-        registry: &'a ClassRegistry,
-        var_map: FxHashMap<DefId, Var>,
-    ) -> Self {
+    pub fn new_with_var_map(registry: &'a ClassRegistry, var_map: FxHashMap<DefId, Var>) -> Self {
         Self {
             registry,
             fresh_counter: 1000,
@@ -491,14 +488,13 @@ impl<'a> DictContext<'a> {
             for method_name in &class.methods {
                 if let Some(&method_def_id) = instance.methods.get(method_name) {
                     let method_ref = self.method_reference(method_def_id, span);
-                    partial_fields
-                        .push(apply_constraint_dicts(method_ref, &constraint_dicts, span));
-                } else {
-                    partial_fields.push(core::Expr::Lit(
-                        core::Literal::Int(0),
-                        Ty::Error,
+                    partial_fields.push(apply_constraint_dicts(
+                        method_ref,
+                        &constraint_dicts,
                         span,
                     ));
+                } else {
+                    partial_fields.push(core::Expr::Lit(core::Literal::Int(0), Ty::Error, span));
                 }
             }
 
@@ -513,8 +509,7 @@ impl<'a> DictContext<'a> {
             for method_name in &class.methods {
                 if let Some(&method_def_id) = instance.methods.get(method_name) {
                     let method_ref = self.method_reference(method_def_id, span);
-                    final_fields
-                        .push(apply_constraint_dicts(method_ref, &constraint_dicts, span));
+                    final_fields.push(apply_constraint_dicts(method_ref, &constraint_dicts, span));
                 } else if let Some(&default_def_id) = class.defaults.get(method_name) {
                     // Apply the default function to the partial dict.
                     // Default is `\$dClass -> body`, so `default partial_dict`
@@ -546,24 +541,23 @@ impl<'a> DictContext<'a> {
             // No defaults needed — straightforward dictionary construction
             let mut fields = super_fields;
             for method_name in &class.methods {
-                let method_expr =
-                    if let Some(&method_def_id) = instance.methods.get(method_name) {
-                        let method_ref = self.method_reference(method_def_id, span);
-                        apply_constraint_dicts(method_ref, &constraint_dicts, span)
-                    } else {
-                        let error_msg = format!(
-                            "No implementation for method '{}' in instance {} {}",
-                            method_name.as_str(),
-                            instance.class.as_str(),
-                            instance
-                                .instance_types
-                                .iter()
-                                .map(|t| format!("{:?}", t))
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        );
-                        make_error_expr(&error_msg, span)
-                    };
+                let method_expr = if let Some(&method_def_id) = instance.methods.get(method_name) {
+                    let method_ref = self.method_reference(method_def_id, span);
+                    apply_constraint_dicts(method_ref, &constraint_dicts, span)
+                } else {
+                    let error_msg = format!(
+                        "No implementation for method '{}' in instance {} {}",
+                        method_name.as_str(),
+                        instance.class.as_str(),
+                        instance
+                            .instance_types
+                            .iter()
+                            .map(|t| format!("{:?}", t))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                    make_error_expr(&error_msg, span)
+                };
                 fields.push(method_expr);
             }
             Some(make_dict(fields, span))

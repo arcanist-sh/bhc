@@ -448,9 +448,8 @@ impl Compiler {
         // Move object to odir if configured
         let final_object_path = if let Some(ref odir) = self.session.options.output_object_dir {
             let dest = odir.join(format!("{}.o", unit.module_name));
-            std::fs::create_dir_all(odir.as_std_path()).map_err(|e| {
-                CompileError::CodegenError(format!("failed to create odir: {}", e))
-            })?;
+            std::fs::create_dir_all(odir.as_std_path())
+                .map_err(|e| CompileError::CodegenError(format!("failed to create odir: {}", e)))?;
             std::fs::rename(&object_path, dest.as_std_path())
                 .or_else(|_| std::fs::copy(&object_path, dest.as_std_path()).map(|_| ()))
                 .map_err(|e| {
@@ -458,20 +457,13 @@ impl Compiler {
                 })?;
             dest
         } else {
-            Utf8PathBuf::from(
-                object_path
-                    .to_str()
-                    .unwrap_or_default(),
-            )
+            Utf8PathBuf::from(object_path.to_str().unwrap_or_default())
         };
 
         // Generate interface file if hidir is configured
         if let Some(ref hidir) = self.session.options.output_interface_dir {
-            let iface = bhc_interface::generate::generate_interface(
-                &unit.module_name,
-                &ast,
-                &typed,
-            );
+            let iface =
+                bhc_interface::generate::generate_interface(&unit.module_name, &ast, &typed);
             let iface_path = bhc_interface::interface_path(hidir, &unit.module_name);
             if let Some(parent) = iface_path.parent() {
                 std::fs::create_dir_all(parent.as_std_path()).map_err(|e| {
@@ -680,12 +672,11 @@ impl Compiler {
             let runtime_indices = wasm_module.add_runtime_functions();
 
             // Lower Core IR to WASM functions
-            let main_idx = bhc_wasm::core_lower::lower_core_module(
-                &core,
-                &mut wasm_module,
-                &runtime_indices,
-            )
-            .map_err(|e| CompileError::CodegenError(format!("Core IR to WASM failed: {}", e)))?;
+            let main_idx =
+                bhc_wasm::core_lower::lower_core_module(&core, &mut wasm_module, &runtime_indices)
+                    .map_err(|e| {
+                        CompileError::CodegenError(format!("Core IR to WASM failed: {}", e))
+                    })?;
 
             // Add _start entry point (calls main, then proc_exit)
             wasm_module.add_start_function(main_idx, runtime_indices.proc_exit_idx);
@@ -860,9 +851,10 @@ impl Compiler {
         if options.extensions.iter().any(|e| e == "CPP") {
             return true;
         }
-        source.lines().take(50).any(|line| {
-            line.contains("LANGUAGE") && line.contains("CPP")
-        })
+        source
+            .lines()
+            .take(50)
+            .any(|line| line.contains("LANGUAGE") && line.contains("CPP"))
     }
 
     /// Parse a compilation unit into an AST.
@@ -889,9 +881,7 @@ impl Compiler {
         }
 
         match maybe_module {
-            Some(module) => {
-                Ok(module)
-            },
+            Some(module) => Ok(module),
             None => Err(CompileError::ParseError(diagnostics.len())),
         }
     }
@@ -1063,9 +1053,7 @@ impl Compiler {
             });
             let config = bhc_core::simplify::SimplifyConfig {
                 exported_names,
-                ..bhc_core::simplify::SimplifyConfig::from_opt_level(
-                    self.session.options.opt_level,
-                )
+                ..bhc_core::simplify::SimplifyConfig::from_opt_level(self.session.options.opt_level)
             };
             let stats = bhc_core::simplify::simplify_module(&mut core, &config);
             debug!(
@@ -1087,8 +1075,7 @@ impl Compiler {
                     | bhc_session::Profile::Realtime
             ) {
                 let demands = bhc_core::demand::analyze_module(&core.bindings);
-                let ww_count =
-                    bhc_core::worker_wrapper::apply_worker_wrapper(&mut core, &demands);
+                let ww_count = bhc_core::worker_wrapper::apply_worker_wrapper(&mut core, &demands);
 
                 if ww_count > 0 {
                     debug!(
@@ -1389,7 +1376,8 @@ impl Compiler {
             }
         }
 
-        let exports = Self::build_module_exports_from_hir(module_name, &hir, &lower_ctx, Some(registry));
+        let exports =
+            Self::build_module_exports_from_hir(module_name, &hir, &lower_ctx, Some(registry));
 
         if module_name == "Text.Pandoc.Shared" {
             let has_es = exports.values.keys().any(|k| k.as_str() == "extractSpaces");
@@ -1434,10 +1422,8 @@ impl Compiler {
         for item in &hir.items {
             if let bhc_hir::Item::Data(data_def) = item {
                 for (tag, con) in data_def.cons.iter().enumerate() {
-                    con_type_info.insert(
-                        con.id,
-                        (data_def.name, data_def.params.len(), tag as u32),
-                    );
+                    con_type_info
+                        .insert(con.id, (data_def.name, data_def.params.len(), tag as u32));
                 }
             }
             if let bhc_hir::Item::Newtype(newtype_def) = item {
@@ -1448,10 +1434,7 @@ impl Compiler {
             }
             if let bhc_hir::Item::DataFamilyInst(inst) = item {
                 for (tag, con) in inst.cons.iter().enumerate() {
-                    con_type_info.insert(
-                        con.id,
-                        (inst.family_name, inst.args.len(), tag as u32),
-                    );
+                    con_type_info.insert(con.id, (inst.family_name, inst.args.len(), tag as u32));
                 }
             }
         }
@@ -1459,8 +1442,8 @@ impl Compiler {
         // Build set of exported names from the module's explicit export list.
         // If `hir.exports` is None, export everything. If Some, only export listed items.
         let export_filter: Option<(
-            rustc_hash::FxHashSet<Symbol>,  // exported value/type names
-            rustc_hash::FxHashSet<Symbol>,  // exported constructor names (from Type(..))
+            rustc_hash::FxHashSet<Symbol>, // exported value/type names
+            rustc_hash::FxHashSet<Symbol>, // exported constructor names (from Type(..))
         )> = hir.exports.as_ref().map(|export_list| {
             let mut names = rustc_hash::FxHashSet::default();
             let mut con_names = rustc_hash::FxHashSet::default();
@@ -1559,7 +1542,9 @@ impl Compiler {
                                             }
                                         }
                                         // Also search for class methods
-                                        if let Some(methods) = compiled.exports.class_methods.get(&export.name) {
+                                        if let Some(methods) =
+                                            compiled.exports.class_methods.get(&export.name)
+                                        {
                                             for method_name in methods {
                                                 names.insert(*method_name);
                                             }
@@ -1583,7 +1568,9 @@ impl Compiler {
         // Export values, types, and constructors from the lowering context
         for def_info in lower_ctx.defs.values() {
             match def_info.kind {
-                bhc_lower::DefKind::Value | bhc_lower::DefKind::StubValue | bhc_lower::DefKind::ImportedValue => {
+                bhc_lower::DefKind::Value
+                | bhc_lower::DefKind::StubValue
+                | bhc_lower::DefKind::ImportedValue => {
                     // Check export filter.
                     // Some imported stub names are stored as qualified (e.g. "Text.Parsec.many1")
                     // due to has_typed_sigs.  We must also check the unqualified portion
@@ -1613,7 +1600,9 @@ impl Compiler {
                     };
                     exports.values.insert(export_name, def_info.id);
                 }
-                bhc_lower::DefKind::Type | bhc_lower::DefKind::StubType | bhc_lower::DefKind::Class => {
+                bhc_lower::DefKind::Type
+                | bhc_lower::DefKind::StubType
+                | bhc_lower::DefKind::Class => {
                     let tname_str = def_info.name.as_str();
                     let uq_type = if let Some(dot_pos) = tname_str.rfind('.') {
                         Some(Symbol::intern(&tname_str[dot_pos + 1..]))
@@ -1624,7 +1613,11 @@ impl Compiler {
                         if names.contains(&def_info.name) {
                             def_info.name
                         } else if let Some(uq) = uq_type {
-                            if names.contains(&uq) { uq } else { continue; }
+                            if names.contains(&uq) {
+                                uq
+                            } else {
+                                continue;
+                            }
                         } else {
                             continue;
                         }
@@ -1645,7 +1638,11 @@ impl Compiler {
                         if con_names.contains(&def_info.name) || names.contains(&def_info.name) {
                             def_info.name
                         } else if let Some(uq) = uq_con {
-                            if con_names.contains(&uq) || names.contains(&uq) { uq } else { continue; }
+                            if con_names.contains(&uq) || names.contains(&uq) {
+                                uq
+                            } else {
+                                continue;
+                            }
                         } else {
                             continue;
                         }
@@ -1653,31 +1650,29 @@ impl Compiler {
                         uq_con.unwrap_or(def_info.name)
                     };
                     // Look up the actual type constructor name and tag from HIR data defs
-                    let (type_con_name, type_param_count, tag) =
-                        if let Some((name, params, tag)) = con_type_info.get(&def_info.id) {
-                            (*name, *params, *tag)
-                        } else if let Some(info) =
-                            def_info.type_con_name.zip(def_info.type_param_count)
-                        {
-                            (info.0, info.1, 0)
-                        } else {
-                            // Fallback: use constructor's own name (should not happen)
-                            (def_info.name, 0, 0)
-                        };
+                    let (type_con_name, type_param_count, tag) = if let Some((name, params, tag)) =
+                        con_type_info.get(&def_info.id)
+                    {
+                        (*name, *params, *tag)
+                    } else if let Some(info) = def_info.type_con_name.zip(def_info.type_param_count)
+                    {
+                        (info.0, info.1, 0)
+                    } else {
+                        // Fallback: use constructor's own name (should not happen)
+                        (def_info.name, 0, 0)
+                    };
                     let arity = def_info.arity.unwrap_or_else(|| {
                         // Try to get arity from HIR con def fields
                         hir.items
                             .iter()
                             .filter_map(|item| {
                                 if let bhc_hir::Item::Data(data_def) = item {
-                                    data_def
-                                        .cons
-                                        .iter()
-                                        .find(|c| c.id == def_info.id)
-                                        .map(|c| match &c.fields {
+                                    data_def.cons.iter().find(|c| c.id == def_info.id).map(|c| {
+                                        match &c.fields {
                                             bhc_hir::ConFields::Positional(fs) => fs.len(),
                                             bhc_hir::ConFields::Named(fs) => fs.len(),
-                                        })
+                                        }
+                                    })
                                 } else {
                                     None
                                 }
@@ -1685,24 +1680,23 @@ impl Compiler {
                             .next()
                             .unwrap_or(0)
                     });
-                    let field_names = def_info.field_names.clone().or_else(|| {
-                        hir.items.iter().find_map(|item| {
-                            if let bhc_hir::Item::Data(data_def) = item {
-                                data_def
-                                    .cons
-                                    .iter()
-                                    .find(|c| c.id == def_info.id)
-                                    .and_then(|c| match &c.fields {
-                                        bhc_hir::ConFields::Named(fs) => {
-                                            Some(fs.iter().map(|f| f.name).collect())
-                                        }
-                                        _ => None,
-                                    })
-                            } else {
-                                None
-                            }
-                        })
-                    });
+                    let field_names =
+                        def_info.field_names.clone().or_else(|| {
+                            hir.items.iter().find_map(|item| {
+                                if let bhc_hir::Item::Data(data_def) = item {
+                                    data_def.cons.iter().find(|c| c.id == def_info.id).and_then(
+                                        |c| match &c.fields {
+                                            bhc_hir::ConFields::Named(fs) => {
+                                                Some(fs.iter().map(|f| f.name).collect())
+                                            }
+                                            _ => None,
+                                        },
+                                    )
+                                } else {
+                                    None
+                                }
+                            })
+                        });
                     let is_newtype = hir.items.iter().any(|item| {
                         if let bhc_hir::Item::Newtype(nt) = item {
                             nt.con.id == def_info.id
@@ -1767,9 +1761,8 @@ impl Compiler {
             if let bhc_hir::Item::Class(class_def) = item {
                 // Only include if the class is exported
                 if exports.types.contains_key(&class_def.name) {
-                    let method_names: Vec<Symbol> = class_def.methods.iter()
-                        .map(|m| m.name)
-                        .collect();
+                    let method_names: Vec<Symbol> =
+                        class_def.methods.iter().map(|m| m.name).collect();
                     if !method_names.is_empty() {
                         exports.class_methods.insert(class_def.name, method_names);
                     }
@@ -1781,7 +1774,9 @@ impl Compiler {
         if let Some(reg) = registry {
             for compiled in reg.modules.values() {
                 for (class_name, methods) in &compiled.exports.class_methods {
-                    if exports.types.contains_key(class_name) && !exports.class_methods.contains_key(class_name) {
+                    if exports.types.contains_key(class_name)
+                        && !exports.class_methods.contains_key(class_name)
+                    {
                         exports.class_methods.insert(*class_name, methods.clone());
                     }
                 }
@@ -1794,10 +1789,7 @@ impl Compiler {
     /// Build stub module exports directly from the AST (no lowering needed).
     /// Used for pre-registering cyclic module exports so mutually-recursive
     /// modules can see each other's names during lowering.
-    fn build_module_exports_from_ast(
-        module_name: &str,
-        ast: &bhc_ast::Module,
-    ) -> ModuleExports {
+    fn build_module_exports_from_ast(module_name: &str, ast: &bhc_ast::Module) -> ModuleExports {
         use bhc_index::Idx;
         use bhc_lower::loader::ConstructorInfo as LowerConInfo;
 
@@ -1969,7 +1961,12 @@ impl Compiler {
 
         // Phase 4: Type check HIR with imported type aliases
         let mut typed_module: Option<TypedModule> = None;
-        let type_errors = match bhc_typeck::type_check_module_full(&hir, file_id, Some(&lower_ctx.defs), &imported_aliases) {
+        let type_errors = match bhc_typeck::type_check_module_full(
+            &hir,
+            file_id,
+            Some(&lower_ctx.defs),
+            &imported_aliases,
+        ) {
             Ok(typed) => {
                 typed_module = Some(typed);
                 None
@@ -1977,7 +1974,11 @@ impl Compiler {
             Err(diagnostics) => {
                 eprintln!("Type errors:");
                 for (i, diag) in diagnostics.iter().enumerate() {
-                    let span_info = diag.labels.first().map(|l| format!(" [span {:?}]", l.span)).unwrap_or_default();
+                    let span_info = diag
+                        .labels
+                        .first()
+                        .map(|l| format!(" [span {:?}]", l.span))
+                        .unwrap_or_default();
                     eprintln!("  {}: {}{}", i + 1, diag.message, span_info);
                 }
                 Some(diagnostics.len())
@@ -1988,7 +1989,8 @@ impl Compiler {
         // We build exports even if type checking failed, since exports come from
         // the HIR (which parsed and lowered successfully). This allows downstream
         // modules to still be checked rather than being skipped entirely.
-        let exports = Self::build_module_exports_from_hir(module_name, &hir, &lower_ctx, Some(registry));
+        let exports =
+            Self::build_module_exports_from_hir(module_name, &hir, &lower_ctx, Some(registry));
 
         // Extract inferred type schemes for exported values so downstream
         // modules can type-check against correct signatures.
@@ -2080,11 +2082,7 @@ impl Compiler {
                             type_name: con_info.type_con_name,
                             tag: con_info.tag,
                             arity: con_info.arity as u32,
-                            field_names: con_info
-                                .field_names
-                                .as_ref()
-                                .cloned()
-                                .unwrap_or_default(),
+                            field_names: con_info.field_names.as_ref().cloned().unwrap_or_default(),
                             is_newtype: con_info.is_newtype,
                             existential_dict_count: 0,
                             existential_classes: vec![],
@@ -2333,9 +2331,10 @@ impl Compiler {
                     let con_name = Symbol::intern(&con.name);
                     let fresh_con_id = ctx.fresh_def_id();
 
-                    let field_names = con.field_names.as_ref().map(|names| {
-                        names.iter().map(|n| Symbol::intern(n)).collect::<Vec<_>>()
-                    });
+                    let field_names = con
+                        .field_names
+                        .as_ref()
+                        .map(|names| names.iter().map(|n| Symbol::intern(n)).collect::<Vec<_>>());
 
                     ctx.define_constructor_with_type(
                         fresh_con_id,
@@ -3041,9 +3040,7 @@ impl Compiler {
 
             let (obj_path, compiled_info) =
                 self.compile_unit_for_multimodule(unit, mod_name, &registry)?;
-            registry
-                .modules
-                .insert(mod_name.clone(), compiled_info);
+            registry.modules.insert(mod_name.clone(), compiled_info);
 
             // In compile-only mode, move .o to odir and generate .bhi
             if self.session.options.compile_only {
@@ -3073,11 +3070,8 @@ impl Compiler {
                     if let Ok(ast) = self.parse(&unit2, file_id) {
                         let (hir, lower_ctx) = self.lower_with_registry(&ast, &registry)?;
                         let typed = self.type_check(&hir, file_id, &lower_ctx)?;
-                        let iface = bhc_interface::generate::generate_interface(
-                            mod_name,
-                            &ast,
-                            &typed,
-                        );
+                        let iface =
+                            bhc_interface::generate::generate_interface(mod_name, &ast, &typed);
                         let iface_path = bhc_interface::interface_path(hidir, mod_name);
                         if let Some(parent) = iface_path.parent() {
                             std::fs::create_dir_all(parent.as_std_path()).ok();
@@ -3097,7 +3091,10 @@ impl Compiler {
 
         // In compile-only mode, return per-module outputs
         if self.session.options.compile_only {
-            info!(modules = ordered.len(), "multi-module compile-only complete");
+            info!(
+                modules = ordered.len(),
+                "multi-module compile-only complete"
+            );
             return Ok(compile_outputs);
         }
 
@@ -3220,8 +3217,7 @@ impl Compiler {
                 }
 
                 // Try to find the module file
-                if let Some(found) =
-                    bhc_lower::loader::find_module_file(&module_name, search_paths)
+                if let Some(found) = bhc_lower::loader::find_module_file(&module_name, search_paths)
                 {
                     if !visited.contains(&found) {
                         visited.insert(found.clone());
@@ -3283,13 +3279,9 @@ impl Compiler {
         if result.len() != n {
             // Circular dependency detected — break the cycle by processing
             // remaining modules in order of fewest unresolved deps first.
-            let mut remaining: Vec<usize> = (0..n)
-                .filter(|i| in_degree[*i] > 0)
-                .collect();
-            let cycle_names: Vec<String> = remaining
-                .iter()
-                .map(|i| modules[*i].1.clone())
-                .collect();
+            let mut remaining: Vec<usize> = (0..n).filter(|i| in_degree[*i] > 0).collect();
+            let cycle_names: Vec<String> =
+                remaining.iter().map(|i| modules[*i].1.clone()).collect();
             eprintln!(
                 "warning: circular module dependency involving: {}",
                 cycle_names.join(", ")
@@ -3807,8 +3799,7 @@ impl Compiler {
                     let (ref cpath, ref cmod_name, _) = module_info[cidx];
                     if let Ok(unit) = CompilationUnit::from_path(cpath.clone()) {
                         if let Ok(ast) = self.parse(&unit, file_id) {
-                            let exports =
-                                Self::build_module_exports_from_ast(cmod_name, &ast);
+                            let exports = Self::build_module_exports_from_ast(cmod_name, &ast);
                             registry.modules.insert(
                                 cmod_name.clone(),
                                 CompiledModuleInfo {
@@ -3829,8 +3820,7 @@ impl Compiler {
                 let missing: Vec<&str> = imports
                     .iter()
                     .filter(|imp| {
-                        !local_names.contains(imp.as_str())
-                            && !builtins.contains(imp.as_str())
+                        !local_names.contains(imp.as_str()) && !builtins.contains(imp.as_str())
                     })
                     .map(|s| s.as_str())
                     .collect();
@@ -3921,10 +3911,7 @@ impl Compiler {
     }
 
     /// Recursively collect all `.hs` files under a directory.
-    fn collect_hs_files(
-        dir: &std::path::Path,
-        out: &mut Vec<Utf8PathBuf>,
-    ) -> CompileResult<()> {
+    fn collect_hs_files(dir: &std::path::Path, out: &mut Vec<Utf8PathBuf>) -> CompileResult<()> {
         let entries = std::fs::read_dir(dir).map_err(|e| CompileError::SourceReadError {
             path: Utf8PathBuf::from(dir.to_string_lossy().as_ref()),
             source: e,
@@ -4474,10 +4461,7 @@ mod tests {
     /// with type schemes from a ModuleInterface.
     #[test]
     fn test_interface_to_module_exports_preserves_types() {
-        use bhc_interface::{
-            ExportedValue, ModuleInterface, TypeSignature,
-            Type as IfaceType,
-        };
+        use bhc_interface::{ExportedValue, ModuleInterface, Type as IfaceType, TypeSignature};
 
         // Create a mock interface for module "Lib" with:
         //   add :: Int -> Int -> Int
@@ -4536,13 +4520,19 @@ mod tests {
         );
 
         let id_def_id = exports.values[&Symbol::intern("identity")];
-        let id_info = ctx.lookup_def(id_def_id).expect("identity should have DefInfo");
+        let id_info = ctx
+            .lookup_def(id_def_id)
+            .expect("identity should have DefInfo");
         assert!(
             id_info.type_scheme.is_some(),
             "identity should have a type scheme from the interface"
         );
         let id_scheme = id_info.type_scheme.as_ref().unwrap();
-        assert_eq!(id_scheme.vars.len(), 1, "identity is polymorphic with 1 var");
+        assert_eq!(
+            id_scheme.vars.len(),
+            1,
+            "identity is polymorphic with 1 var"
+        );
         assert!(
             format!("{:?}", id_scheme.ty).contains("Fun"),
             "identity should be a function type, got: {:?}",
@@ -4554,9 +4544,8 @@ mod tests {
     #[test]
     fn test_interface_roundtrip_with_types() {
         use bhc_interface::{
-            ExportedValue, ModuleInterface, TypeSignature,
-            Type as IfaceType, ExportedType, Kind as IfaceKind,
-            TypeDefinition, DataConstructor,
+            DataConstructor, ExportedType, ExportedValue, Kind as IfaceKind, ModuleInterface,
+            Type as IfaceType, TypeDefinition, TypeSignature,
         };
         use tempfile::TempDir;
 
@@ -4602,10 +4591,13 @@ mod tests {
         let hidir = Utf8PathBuf::from_path_buf(temp_dir.path().to_path_buf()).unwrap();
         let iface_path = bhc_interface::interface_path(&hidir, "MyLib");
         std::fs::create_dir_all(iface_path.parent().unwrap().as_std_path()).unwrap();
-        iface.write_to_file(&iface_path).expect("failed to write interface");
+        iface
+            .write_to_file(&iface_path)
+            .expect("failed to write interface");
 
         // Read it back
-        let loaded = ModuleInterface::read_from_file(&iface_path).expect("failed to read interface");
+        let loaded =
+            ModuleInterface::read_from_file(&iface_path).expect("failed to read interface");
 
         // Convert to module exports
         let mut ctx = bhc_lower::LowerContext::new();

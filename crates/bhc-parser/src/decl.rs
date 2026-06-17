@@ -672,9 +672,7 @@ impl<'src> Parser<'src> {
             TokenKind::Foreign => self.parse_foreign_decl_with_doc(doc),
             TokenKind::Infix | TokenKind::Infixl | TokenKind::Infixr => self.parse_fixity_decl(),
             TokenKind::Deriving => self.parse_standalone_deriving(),
-            TokenKind::Ident(sym) if sym.as_str() == "pattern" => {
-                self.parse_pattern_synonym()
-            }
+            TokenKind::Ident(sym) if sym.as_str() == "pattern" => self.parse_pattern_synonym(),
             TokenKind::Ident(_) => {
                 // Could be type signature or binding
                 self.parse_value_decl_with_doc(doc)
@@ -1285,8 +1283,14 @@ impl<'src> Parser<'src> {
                         self.advance();
                         // Successfully parsed infix: `a :+: b`
                         let op_name = Ident::new(op_sym);
-                        let lhs_var = TyVar { name: Ident::new(lhs_sym), span: lhs_span };
-                        let rhs_var = TyVar { name: Ident::new(rhs_sym), span: rhs_span };
+                        let lhs_var = TyVar {
+                            name: Ident::new(lhs_sym),
+                            span: lhs_span,
+                        };
+                        let rhs_var = TyVar {
+                            name: Ident::new(rhs_sym),
+                            span: rhs_span,
+                        };
                         (op_name, vec![lhs_var, rhs_var])
                     } else {
                         // Not infix pattern, backtrack
@@ -1777,11 +1781,9 @@ impl<'src> Parser<'src> {
             PatSynDir::Unidirectional
         } else {
             return Err(ParseError::Unexpected {
-                found: self
-                    .current()
-                    .map_or("end of input".to_string(), |t| {
-                        t.node.kind.description().to_string()
-                    }),
+                found: self.current().map_or("end of input".to_string(), |t| {
+                    t.node.kind.description().to_string()
+                }),
                 expected: "'=' or '<-' in pattern synonym".to_string(),
                 span: self.current_span(),
             });
@@ -1800,7 +1802,6 @@ impl<'src> Parser<'src> {
             span,
         }))
     }
-
 
     /// Parse a type alias.
     #[allow(dead_code)]
@@ -2022,10 +2023,7 @@ impl<'src> Parser<'src> {
 
         // Parse type argument patterns (stop at = or where)
         let mut args = Vec::new();
-        while !self.check(&TokenKind::Eq)
-            && !self.check(&TokenKind::Where)
-            && !self.at_eof()
-        {
+        while !self.check(&TokenKind::Eq) && !self.check(&TokenKind::Where) && !self.at_eof() {
             args.push(self.parse_atype()?);
         }
 

@@ -138,7 +138,10 @@ fn subst_tyvar(ty: &Ty, var_id: u32, replacement: &Ty) -> Ty {
             if vars.iter().any(|v| v.id == var_id) {
                 ty.clone()
             } else {
-                Ty::Forall(vars.clone(), Box::new(subst_tyvar(body, var_id, replacement)))
+                Ty::Forall(
+                    vars.clone(),
+                    Box::new(subst_tyvar(body, var_id, replacement)),
+                )
             }
         }
         Ty::Nat(_) | Ty::TyList(_) => ty.clone(),
@@ -283,13 +286,31 @@ fn are_compatible_type_aliases(name1: &str, name2: &str) -> bool {
     }
 
     // Integer and Int should be compatible in check mode
-    let is_integer_like = |s: &str| matches!(s, "Int" | "Integer" | "Word" | "Int64" | "Word8" | "Word16" | "Word32" | "Word64" | "Int8" | "Int16" | "Int32" | "CInt" | "CSize");
+    let is_integer_like = |s: &str| {
+        matches!(
+            s,
+            "Int"
+                | "Integer"
+                | "Word"
+                | "Int64"
+                | "Word8"
+                | "Word16"
+                | "Word32"
+                | "Word64"
+                | "Int8"
+                | "Int16"
+                | "Int32"
+                | "CInt"
+                | "CSize"
+        )
+    };
     if is_integer_like(n1) && is_integer_like(n2) {
         return true;
     }
 
     // Float/Double should be compatible
-    let is_float_like = |s: &str| matches!(s, "Float" | "Double" | "CDouble" | "CFloat" | "Rational");
+    let is_float_like =
+        |s: &str| matches!(s, "Float" | "Double" | "CDouble" | "CFloat" | "Rational");
     if is_float_like(n1) && is_float_like(n2) {
         return true;
     }

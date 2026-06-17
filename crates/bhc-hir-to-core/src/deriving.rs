@@ -106,7 +106,9 @@ impl DerivingContext {
             "Traversable" => self.derive_traversable_newtype(newtype_def),
             "Read" => self.derive_read_newtype(newtype_def),
             "Generic" => self.derive_generic_newtype(newtype_def),
-            "NFData" => self.derive_empty_instance(newtype_def.name, &newtype_def.params, class_name),
+            "NFData" => {
+                self.derive_empty_instance(newtype_def.name, &newtype_def.params, class_name)
+            }
             _ => None,
         }
     }
@@ -190,10 +192,16 @@ impl DerivingContext {
                 arity: 1,
             };
             let field_var = self.fresh_var("f", Ty::Error);
-            let inner = self.wrap_m1(self.wrap_m1(self.wrap_m1(
-                self.wrap_k1(core::Expr::Var(field_var.clone(), span), span),
+            let inner = self.wrap_m1(
+                self.wrap_m1(
+                    self.wrap_m1(
+                        self.wrap_k1(core::Expr::Var(field_var.clone(), span), span),
+                        span,
+                    ),
+                    span,
+                ),
                 span,
-            ), span), span);
+            );
             let alt = Alt {
                 con: AltCon::DataCon(data_con),
                 binders: vec![field_var],
@@ -216,32 +224,57 @@ impl DerivingContext {
 
             // Innermost: case x2 of { K1 x3 -> NT x3 }
             let x3 = self.fresh_var("x3", Ty::Error);
-            let nt_expr = self.apply_constructor(data_con, vec![core::Expr::Var(x3.clone(), span)], span);
+            let nt_expr =
+                self.apply_constructor(data_con, vec![core::Expr::Var(x3.clone(), span)], span);
             let k1_con = self.make_generics_data_con("K1", 0, 1);
             let x2 = self.fresh_var("x2", Ty::Error);
-            let k1_case = self.make_case(core::Expr::Var(x2.clone(), span), vec![
-                Alt { con: AltCon::DataCon(k1_con), binders: vec![x3], rhs: nt_expr },
-            ], span);
+            let k1_case = self.make_case(
+                core::Expr::Var(x2.clone(), span),
+                vec![Alt {
+                    con: AltCon::DataCon(k1_con),
+                    binders: vec![x3],
+                    rhs: nt_expr,
+                }],
+                span,
+            );
 
             // case x1 of { M1 x2 -> ... }
             let m1_con_s = self.make_generics_data_con("M1", 0, 1);
             let x1 = self.fresh_var("x1", Ty::Error);
-            let m1_case_2 = self.make_case(core::Expr::Var(x1.clone(), span), vec![
-                Alt { con: AltCon::DataCon(m1_con_s), binders: vec![x2], rhs: k1_case },
-            ], span);
+            let m1_case_2 = self.make_case(
+                core::Expr::Var(x1.clone(), span),
+                vec![Alt {
+                    con: AltCon::DataCon(m1_con_s),
+                    binders: vec![x2],
+                    rhs: k1_case,
+                }],
+                span,
+            );
 
             // case x0 of { M1 x1 -> ... }
             let m1_con_c = self.make_generics_data_con("M1", 0, 1);
             let x0 = self.fresh_var("x0", Ty::Error);
-            let m1_case_1 = self.make_case(core::Expr::Var(x0.clone(), span), vec![
-                Alt { con: AltCon::DataCon(m1_con_c), binders: vec![x1], rhs: m1_case_2 },
-            ], span);
+            let m1_case_1 = self.make_case(
+                core::Expr::Var(x0.clone(), span),
+                vec![Alt {
+                    con: AltCon::DataCon(m1_con_c),
+                    binders: vec![x1],
+                    rhs: m1_case_2,
+                }],
+                span,
+            );
 
             // Outer: case rep of { M1 x0 -> ... }
             let m1_con_d = self.make_generics_data_con("M1", 0, 1);
-            let body = self.make_case(core::Expr::Var(rep_var.clone(), span), vec![
-                Alt { con: AltCon::DataCon(m1_con_d), binders: vec![x0], rhs: m1_case_1 },
-            ], span);
+            let body = self.make_case(
+                core::Expr::Var(rep_var.clone(), span),
+                vec![Alt {
+                    con: AltCon::DataCon(m1_con_d),
+                    binders: vec![x0],
+                    rhs: m1_case_1,
+                }],
+                span,
+            );
 
             core::Expr::Lam(rep_var, Box::new(body), span)
         };
@@ -480,7 +513,8 @@ impl DerivingContext {
 
         // Right branch: R1 contains constructors [start+mid, start+count)
         let right_var = self.fresh_var("right", Ty::Error);
-        let right_body = self.build_to_sum_match(data_def, &right_var, start + mid, count - mid, span);
+        let right_body =
+            self.build_to_sum_match(data_def, &right_var, start + mid, count - mid, span);
         let r1_con = self.make_generics_data_con("R1", 1, 1);
         let right_alt = Alt {
             con: AltCon::DataCon(r1_con),
@@ -530,11 +564,7 @@ impl DerivingContext {
             rhs: product_decode,
         };
 
-        self.make_case(
-            core::Expr::Var(scrutinee.clone(), span),
-            vec![m1_alt],
-            span,
-        )
+        self.make_case(core::Expr::Var(scrutinee.clone(), span), vec![m1_alt], span)
     }
 
     /// Decode a product representation and apply the original constructor.
@@ -558,11 +588,7 @@ impl DerivingContext {
                 binders: vec![],
                 rhs: con_expr,
             };
-            return self.make_case(
-                core::Expr::Var(scrutinee.clone(), span),
-                vec![u1_alt],
-                span,
-            );
+            return self.make_case(core::Expr::Var(scrutinee.clone(), span), vec![u1_alt], span);
         }
 
         // Build field variable list and nested case expressions
@@ -1724,11 +1750,7 @@ impl DerivingContext {
             Box::new(core::Expr::Var(var.clone(), span)),
             span,
         );
-        core::Expr::App(
-            Box::new(app1),
-            Box::new(self.make_string(s, span)),
-            span,
-        )
+        core::Expr::App(Box::new(app1), Box::new(self.make_string(s, span)), span)
     }
 
     /// Make an if-then-else expression (case on Bool).
@@ -2892,7 +2914,10 @@ mod tests {
                 },
             ],
             is_gadt: false,
-            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Eq") }],
+            deriving: vec![bhc_hir::DerivingClause {
+                strategy: bhc_hir::DerivingStrategy::Default,
+                class: Symbol::intern("Eq"),
+            }],
             span: Span::default(),
         };
 
@@ -2926,7 +2951,10 @@ mod tests {
                 span: Span::default(),
             }],
             is_gadt: false,
-            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Eq") }],
+            deriving: vec![bhc_hir::DerivingClause {
+                strategy: bhc_hir::DerivingStrategy::Default,
+                class: Symbol::intern("Eq"),
+            }],
             span: Span::default(),
         };
 
@@ -2977,7 +3005,10 @@ mod tests {
                 },
             ],
             is_gadt: false,
-            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Ord") }],
+            deriving: vec![bhc_hir::DerivingClause {
+                strategy: bhc_hir::DerivingStrategy::Default,
+                class: Symbol::intern("Ord"),
+            }],
             span: Span::default(),
         };
 
@@ -3019,7 +3050,10 @@ mod tests {
                 },
             ],
             is_gadt: false,
-            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Show") }],
+            deriving: vec![bhc_hir::DerivingClause {
+                strategy: bhc_hir::DerivingStrategy::Default,
+                class: Symbol::intern("Show"),
+            }],
             span: Span::default(),
         };
 
@@ -3070,7 +3104,10 @@ mod tests {
                 },
             ],
             is_gadt: false,
-            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Enum") }],
+            deriving: vec![bhc_hir::DerivingClause {
+                strategy: bhc_hir::DerivingStrategy::Default,
+                class: Symbol::intern("Enum"),
+            }],
             span: Span::default(),
         };
 
@@ -3121,7 +3158,10 @@ mod tests {
                 },
             ],
             is_gadt: false,
-            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Enum") }],
+            deriving: vec![bhc_hir::DerivingClause {
+                strategy: bhc_hir::DerivingStrategy::Default,
+                class: Symbol::intern("Enum"),
+            }],
             span: Span::default(),
         };
 
@@ -3168,7 +3208,10 @@ mod tests {
                 },
             ],
             is_gadt: false,
-            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Bounded") }],
+            deriving: vec![bhc_hir::DerivingClause {
+                strategy: bhc_hir::DerivingStrategy::Default,
+                class: Symbol::intern("Bounded"),
+            }],
             span: Span::default(),
         };
 
@@ -3207,7 +3250,10 @@ mod tests {
                 span: Span::default(),
             }],
             is_gadt: false,
-            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Functor") }],
+            deriving: vec![bhc_hir::DerivingClause {
+                strategy: bhc_hir::DerivingStrategy::Default,
+                class: Symbol::intern("Functor"),
+            }],
             span: Span::default(),
         };
 
@@ -3241,7 +3287,10 @@ mod tests {
                 span: Span::default(),
             }],
             is_gadt: false,
-            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Functor") }],
+            deriving: vec![bhc_hir::DerivingClause {
+                strategy: bhc_hir::DerivingStrategy::Default,
+                class: Symbol::intern("Functor"),
+            }],
             span: Span::default(),
         };
 
@@ -3268,7 +3317,10 @@ mod tests {
                 span: Span::default(),
             }],
             is_gadt: false,
-            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Foldable") }],
+            deriving: vec![bhc_hir::DerivingClause {
+                strategy: bhc_hir::DerivingStrategy::Default,
+                class: Symbol::intern("Foldable"),
+            }],
             span: Span::default(),
         };
 
@@ -3302,7 +3354,10 @@ mod tests {
                 span: Span::default(),
             }],
             is_gadt: false,
-            deriving: vec![bhc_hir::DerivingClause { strategy: bhc_hir::DerivingStrategy::Default, class: Symbol::intern("Traversable") }],
+            deriving: vec![bhc_hir::DerivingClause {
+                strategy: bhc_hir::DerivingStrategy::Default,
+                class: Symbol::intern("Traversable"),
+            }],
             span: Span::default(),
         };
 

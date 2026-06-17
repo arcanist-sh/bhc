@@ -226,7 +226,10 @@ mod tests {
                 Ty::Var(a_var.clone()),
                 Span::default(),
             )],
-            ty: Ty::Fun(Box::new(Ty::Var(a_var.clone())), Box::new(Ty::Var(a_var.clone()))),
+            ty: Ty::Fun(
+                Box::new(Ty::Var(a_var.clone())),
+                Box::new(Ty::Var(a_var.clone())),
+            ),
         };
 
         // Create the HIR value definition
@@ -538,7 +541,10 @@ mod tests {
                 Ty::Var(a_var.clone()),
                 Span::default(),
             )],
-            ty: Ty::Fun(Box::new(Ty::Var(a_var.clone())), Box::new(Ty::Var(a_var.clone()))),
+            ty: Ty::Fun(
+                Box::new(Ty::Var(a_var.clone())),
+                Box::new(Ty::Var(a_var.clone())),
+            ),
         };
 
         // double x = x (simplified - just returns x)
@@ -685,11 +691,7 @@ mod tests {
                     // The body should contain at least 1 application:
                     // `double` applied to `y` (dictionary passing happens
                     // at a higher level via the outer lambda parameter).
-                    assert!(
-                        apps >= 1,
-                        "Expected at least 1 application, got {}",
-                        apps
-                    );
+                    assert!(apps >= 1, "Expected at least 1 application, got {}", apps);
                 } else {
                     panic!("Expected inner lambda for y parameter");
                 }

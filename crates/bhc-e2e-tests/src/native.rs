@@ -69,7 +69,11 @@ pub fn compile_native(
 }
 
 /// Run a native executable and capture its output.
-pub fn run_native(exe_path: &Path, timeout: Duration, work_dir: Option<&Path>) -> Result<ExecutionOutput, E2EError> {
+pub fn run_native(
+    exe_path: &Path,
+    timeout: Duration,
+    work_dir: Option<&Path>,
+) -> Result<ExecutionOutput, E2EError> {
     let start = Instant::now();
 
     // Make executable (Unix)
@@ -172,7 +176,11 @@ mod tests {
     fn test_timeout_detection() {
         // This test verifies the timeout mechanism works
         // by attempting to run a non-existent binary
-        let result = run_native(Path::new("/nonexistent/binary"), Duration::from_secs(1), None);
+        let result = run_native(
+            Path::new("/nonexistent/binary"),
+            Duration::from_secs(1),
+            None,
+        );
         assert!(result.is_err());
     }
 }

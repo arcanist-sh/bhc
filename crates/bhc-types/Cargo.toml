@@ -3,6 +3,7 @@ name = "bhc-types"
 description = "Type system, type inference, and type representations for BHC"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

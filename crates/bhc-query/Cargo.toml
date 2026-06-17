@@ -3,6 +3,7 @@ name = "bhc-query"
 description = "Query-based compilation system for BHC (salsa-like incremental compilation)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

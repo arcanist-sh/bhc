@@ -157,6 +157,9 @@ impl HotArena {
     /// Allocate a value in the arena.
     ///
     /// The value is moved into the arena and a mutable reference is returned.
+    // Returning `&mut` from `&self` is the arena contract: interior bump-pointer
+    // mutation hands out exclusive references to fresh, non-overlapping storage.
+    #[allow(clippy::mut_from_ref)]
     pub fn alloc<T>(&self, value: T) -> AllocResult<&mut T> {
         let layout = Layout::new::<T>();
         let ptr = self.alloc_raw(layout)?;
@@ -172,6 +175,7 @@ impl HotArena {
     /// Allocate a slice in the arena.
     ///
     /// Returns a mutable slice initialized with the given values.
+    #[allow(clippy::mut_from_ref)] // arena contract: see `alloc`
     pub fn alloc_slice<T: Copy>(&self, values: &[T]) -> AllocResult<&mut [T]> {
         if values.is_empty() {
             return Ok(&mut []);
@@ -195,6 +199,7 @@ impl HotArena {
     /// The returned slice is `MaybeUninit<T>`, so reading elements before
     /// initializing them is a compile-time obligation rather than UB-by-
     /// convention.
+    #[allow(clippy::mut_from_ref)] // arena contract: see `alloc`
     pub fn alloc_slice_uninit<T>(&self, len: usize) -> AllocResult<&mut [MaybeUninit<T>]> {
         if len == 0 {
             return Ok(&mut []);
@@ -216,6 +221,7 @@ impl HotArena {
     /// Allocate a zeroed slice in the arena.
     ///
     /// `T: Zeroable` guarantees the all-zero byte pattern is a valid `T`.
+    #[allow(clippy::mut_from_ref)] // arena contract: see `alloc`
     pub fn alloc_slice_zeroed<T: Zeroable>(&self, len: usize) -> AllocResult<&mut [T]> {
         if len == 0 {
             return Ok(&mut []);

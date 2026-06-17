@@ -3,6 +3,7 @@ name = "bhc-rts"
 description = "Core Runtime System for the Basel Haskell Compiler"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

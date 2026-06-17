@@ -3,6 +3,7 @@ name = "bhc-macros"
 description = "Procedural macros for BHC"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

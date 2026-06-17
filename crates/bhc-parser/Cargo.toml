@@ -3,6 +3,7 @@ name = "bhc-parser"
 description = "Parser for Haskell 2026 source code"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

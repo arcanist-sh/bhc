@@ -3,6 +3,7 @@ name = "bhc-index"
 description = "Typed indices for efficient and safe indexing"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

@@ -3,6 +3,7 @@ name = "bhc-ast"
 description = "Abstract syntax tree definitions for BHC"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

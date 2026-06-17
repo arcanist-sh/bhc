@@ -3,6 +3,7 @@ name = "bhc-rts-scheduler"
 description = "Work-stealing task scheduler for the BHC Runtime System"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

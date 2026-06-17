@@ -1,0 +1,23 @@
+[package]
+name = "bhc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bhc-parser = { path = "../crates/bhc-parser" }
+bhc-span = { path = "../crates/bhc-span" }
+
+# Detach from the main workspace so fuzzing stays opt-in
+[workspace]
+
+[[bin]]
+name = "parse_module"
+path = "fuzz_targets/parse_module.rs"
+test = false
+doc = false
+bench = false

@@ -3,6 +3,7 @@ name = "bhc-package"
 description = "Package management and manifest parsing for BHC"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

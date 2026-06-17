@@ -3,6 +3,7 @@ name = "bhc-tensor-ir"
 description = "Tensor IR for numeric optimization in BHC"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

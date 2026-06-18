@@ -124,7 +124,7 @@ fn test_float_literal() {
     let module = module_with_items(vec![Item::Value(value_def(
         0,
         "x",
-        Expr::Lit(Lit::Float(3.14), Span::DUMMY),
+        Expr::Lit(Lit::Float(2.5), Span::DUMMY),
     ))]);
 
     let result = type_check_module(&module, FileId::new(0));

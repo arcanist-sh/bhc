@@ -888,7 +888,7 @@ mod tests {
         let v = Value::i64(42);
         assert_eq!(v.ty(), LoopType::Scalar(ScalarType::Int(64)));
 
-        let f = Value::f64(3.14);
+        let f = Value::f64(2.5);
         assert_eq!(f.ty(), LoopType::Scalar(ScalarType::Float(64)));
     }
 

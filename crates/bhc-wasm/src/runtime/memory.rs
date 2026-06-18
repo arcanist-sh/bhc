@@ -365,10 +365,10 @@ mod tests {
         let layout = MemoryLayout::default_for_size(16);
         let mut mem = LinearMemory::new(layout);
 
-        let offset = mem.alloc_f32(3.14).unwrap();
+        let offset = mem.alloc_f32(2.5).unwrap();
         assert_eq!(offset, 0);
 
-        let offset2 = mem.alloc_f64(2.718).unwrap();
+        let offset2 = mem.alloc_f64(1.5).unwrap();
         assert_eq!(offset2, 8); // Aligned to 8 bytes
     }
 

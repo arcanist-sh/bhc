@@ -291,7 +291,7 @@ fn test_linear_memory() {
     let offset1 = mem.alloc_i32(42).unwrap();
     assert_eq!(offset1, 0); // First allocation at start
 
-    let offset2 = mem.alloc_f64(3.14159).unwrap();
+    let offset2 = mem.alloc_f64(2.5).unwrap();
     assert!(offset2 >= 8); // Should be aligned to 8 bytes
 
     // Check data segments were created

@@ -1074,12 +1074,12 @@ mod tests {
     #[test]
     fn test_lower_literal_float() {
         let ctx = LowerContext::new();
-        let lit = Literal::Double(3.14);
+        let lit = Literal::Double(2.5);
         let result = ctx.lower_lit(&lit, &Ty::Error);
 
         match result {
             LowerResult::Scalar(ScalarValue::Float(f)) => {
-                assert!((f - 3.14).abs() < f64::EPSILON);
+                assert!((f - 2.5).abs() < f64::EPSILON);
             }
             _ => panic!("Expected scalar float"),
         }

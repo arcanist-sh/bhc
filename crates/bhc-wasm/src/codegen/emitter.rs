@@ -720,12 +720,12 @@ mod tests {
         let mut emitter = WasmEmitter::new(mapping, 0);
 
         emitter
-            .emit_value(&Value::FloatConst(3.14, ScalarType::Float(64)))
+            .emit_value(&Value::FloatConst(2.5, ScalarType::Float(64)))
             .unwrap();
         let instrs = emitter.finish();
 
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], WasmInstr::F64Const(f) if (f - 3.14).abs() < 0.001));
+        assert!(matches!(instrs[0], WasmInstr::F64Const(f) if (f - 2.5).abs() < 0.001));
     }
 
     #[test]

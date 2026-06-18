@@ -52,3 +52,8 @@ tempfile = { workspace = true }
 [dev-dependencies]
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
+
+[lints.clippy]
+# The driver's error enum aggregates every phase's error type; boxing it would
+# churn every Result signature for a micro-optimization. Accept the size.
+result_large_err = "allow"

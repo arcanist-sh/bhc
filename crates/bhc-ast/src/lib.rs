@@ -495,15 +495,16 @@ pub struct ModuleName {
     pub span: Span,
 }
 
-impl ModuleName {
-    /// Get the fully qualified name as a string.
-    #[must_use]
-    pub fn to_string(&self) -> String {
-        self.parts
+impl std::fmt::Display for ModuleName {
+    /// Get the fully qualified name as a dotted string (e.g. `Data.Map`).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let joined = self
+            .parts
             .iter()
             .map(|s| s.as_str())
             .collect::<Vec<_>>()
-            .join(".")
+            .join(".");
+        f.write_str(&joined)
     }
 }
 

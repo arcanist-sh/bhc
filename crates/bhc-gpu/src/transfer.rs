@@ -58,6 +58,8 @@ pub struct TransferHandle {
     /// Transfer status.
     status: Arc<AtomicUsize>,
     /// Stream this transfer is on.
+    // WIP GPU backend: stream association recorded but not yet read by the scheduler.
+    #[allow(dead_code)]
     stream_handle: u64,
 }
 
@@ -133,6 +135,8 @@ impl TransferHandle {
     }
 
     /// Mark the transfer as failed.
+    // WIP GPU backend: failure path not yet triggered by the transfer executor.
+    #[allow(dead_code)]
     pub(crate) fn mark_failed(&self) {
         self.status
             .store(TransferStatus::Failed as usize, Ordering::SeqCst);
@@ -160,14 +164,19 @@ pub struct Transfer {
     /// Size in bytes.
     pub size: usize,
     /// Source pointer.
+    // WIP GPU backend: endpoints stored for the transfer record but not yet read.
+    #[allow(dead_code)]
     src: TransferPtr,
     /// Destination pointer.
+    #[allow(dead_code)]
     dst: TransferPtr,
     /// Handle for status updates.
     handle: TransferHandle,
 }
 
 /// Pointer that can be either host or device.
+// WIP GPU backend: payloads carried for the transfer record but not yet read.
+#[allow(dead_code)]
 #[derive(Debug)]
 enum TransferPtr {
     Host(*const u8),

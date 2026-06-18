@@ -169,10 +169,10 @@ fn parse_annotation(para: &str) -> Option<(String, String)> {
     ];
 
     for ann in &annotations {
-        if para.starts_with(ann) {
-            let rest = para[ann.len()..].trim();
-            if rest.starts_with(':') {
-                let value = rest[1..].trim().to_string();
+        if let Some(rest) = para.strip_prefix(ann) {
+            let rest = rest.trim();
+            if let Some(value) = rest.strip_prefix(':') {
+                let value = value.trim().to_string();
                 return Some((ann.to_string(), value));
             }
         }

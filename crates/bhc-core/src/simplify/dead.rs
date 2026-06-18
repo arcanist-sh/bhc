@@ -16,10 +16,7 @@ pub fn try_eliminate_dead_nonrec(
     _body: &Expr,
     occs: &FxHashMap<VarId, OccCount>,
 ) -> bool {
-    match occs.get(&var_id) {
-        None | Some(OccCount::Dead) => true,
-        _ => false,
-    }
+    matches!(occs.get(&var_id), None | Some(OccCount::Dead))
 }
 
 /// Filter dead entries from a recursive binding group.

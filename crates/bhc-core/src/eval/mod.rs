@@ -8191,6 +8191,9 @@ impl Evaluator {
     }
 
     /// Create a Left value.
+    // Kept for symmetry with the other Either/sum-type constructors used by the
+    // interpreter's primitive helpers; not currently called from any primop.
+    #[allow(dead_code)]
     fn make_left(&self, a: Value) -> Value {
         use bhc_types::{Kind, TyCon};
         Value::Data(DataValue {
@@ -8205,6 +8208,9 @@ impl Evaluator {
     }
 
     /// Create a Right value.
+    // Kept for symmetry with the other Either/sum-type constructors used by the
+    // interpreter's primitive helpers; not currently called from any primop.
+    #[allow(dead_code)]
     fn make_right(&self, a: Value) -> Value {
         use bhc_types::{Kind, TyCon};
         Value::Data(DataValue {
@@ -8394,7 +8400,7 @@ fn numeric_fallback(
 
 /// Generate the next permutation of indices in lexicographic order.
 /// Returns false when all permutations have been exhausted.
-fn next_permutation(indices: &mut Vec<usize>) -> bool {
+fn next_permutation(indices: &mut [usize]) -> bool {
     let n = indices.len();
     if n <= 1 {
         return false;

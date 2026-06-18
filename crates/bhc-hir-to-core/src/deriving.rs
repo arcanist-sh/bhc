@@ -2830,6 +2830,8 @@ impl DerivingContext {
     }
 
     /// Make a `f <*> x` expression.
+    // WIP lowering: applicative-style deriving helper not yet used.
+    #[allow(dead_code)]
     fn make_ap(&self, f: core::Expr, x: core::Expr, span: Span) -> core::Expr {
         let ap_var = Var {
             name: Symbol::intern("<*>"),

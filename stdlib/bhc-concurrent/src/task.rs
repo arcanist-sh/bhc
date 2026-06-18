@@ -125,6 +125,9 @@ impl<T> Task<T> {
     }
 
     /// Store a result value
+    // Counterpart to `take_result`, used by the task test suite; retained as
+    // part of the internal Task API for result population.
+    #[allow(dead_code)]
     pub(crate) fn set_result(&self, value: T) {
         let mut guard = self.inner.result.lock().unwrap();
         *guard = Some(value);

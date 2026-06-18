@@ -406,7 +406,10 @@ fn extract_constructor_result_type(
 
     // Apply substitution to the result type
     let concrete_result = subst.apply(result_ty);
-    // Only return if we got something more specific than the original
+    // WIP lowering: the branch condition is retained intentionally as a marker
+    // for where the "more specific than the original" check will diverge once
+    // the fallback path is implemented; both arms currently agree.
+    #[allow(clippy::if_same_then_else)]
     if concrete_result != *result_ty || !matches!(result_ty, Ty::App(_, _)) {
         Some(concrete_result)
     } else {
@@ -1825,15 +1828,6 @@ fn make_pattern_error(span: Span) -> core::Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bhc_hir::DefId;
-    use bhc_index::Idx;
-
-    fn make_def_ref(id: usize) -> DefRef {
-        DefRef {
-            def_id: DefId::new(id),
-            span: Span::default(),
-        }
-    }
 
     #[test]
     fn test_lower_literal() {

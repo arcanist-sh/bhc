@@ -401,6 +401,8 @@ pub struct WasmModule {
     /// WASM configuration.
     wasm_config: WasmConfig,
     /// Target specification.
+    // Retained for WIP wasm backend; will be read when target-specific emission lands.
+    #[allow(dead_code)]
     target: TargetSpec,
     /// Function type definitions.
     types: Vec<WasmFuncType>,

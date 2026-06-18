@@ -845,13 +845,6 @@ mod tests {
         if let bhc_core::Bind::NonRec(_, expr) = test_bind.unwrap() {
             // Check that the expression involves dictionary/method handling
             // It should be a Let binding for the dictionary, then method selection
-            fn has_let(e: &bhc_core::Expr) -> bool {
-                match e {
-                    bhc_core::Expr::Let(_, _, _) => true,
-                    bhc_core::Expr::App(f, x, _) => has_let(f) || has_let(x),
-                    _ => false,
-                }
-            }
 
             // For now, just verify it compiles and produces some expression
             // A more thorough test would check the exact structure

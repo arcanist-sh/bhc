@@ -623,6 +623,8 @@ fn kernel_function_name(kernel: &Kernel) -> String {
 }
 
 /// Get the data type from a tensor operation.
+// WIP GPU backend: dtype inference helper not yet consumed by active lowering.
+#[allow(dead_code)]
 fn get_op_dtype(op: &TensorOp, kernel: &Kernel) -> DType {
     match op {
         TensorOp::Unary(_, ref_)

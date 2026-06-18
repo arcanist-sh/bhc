@@ -132,6 +132,9 @@ pub struct FusibleOp {
 /// These patterns correspond to the guaranteed fusion patterns from H26-SPEC Section 8.
 #[derive(Clone, Debug)]
 #[allow(missing_docs)]
+// Variants carry inlined operands by design so a fused pattern is a single
+// self-contained value; boxing would change the public enum layout/API.
+#[allow(clippy::large_enum_variant)]
 pub enum FusionPattern {
     /// Pattern 1: `map f (map g x)` - composable maps fused to single traversal.
     MapMap {
@@ -2559,12 +2562,12 @@ mod tests {
         // Verify all variants can be pattern matched
         for act in activations {
             match act {
-                FusedActivation::Relu => assert!(true),
-                FusedActivation::Gelu => assert!(true),
-                FusedActivation::GeluFast => assert!(true),
-                FusedActivation::Silu => assert!(true),
-                FusedActivation::Sigmoid => assert!(true),
-                FusedActivation::Tanh => assert!(true),
+                FusedActivation::Relu
+                | FusedActivation::Gelu
+                | FusedActivation::GeluFast
+                | FusedActivation::Silu
+                | FusedActivation::Sigmoid
+                | FusedActivation::Tanh => {}
             }
         }
     }

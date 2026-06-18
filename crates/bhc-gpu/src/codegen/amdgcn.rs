@@ -329,14 +329,13 @@ pub fn generate_elementwise_kernel(
              global_load_dword v4, v2, s[2:3]\n\
              s_waitcnt vmcnt(0)\n\
              \n\
-             ; {op_name}\n\
+             ; {op:?}\n\
              {op_code}\n\
              \n\
              ; Store result\n\
              global_store_dword v2, v5, s[6:7]\n\
              \n\
              s_endpgm\n",
-        op_name = format!("{:?}", op),
         op_code = match op {
             BinaryOp::Add => "v_add_f32 v5, v3, v4",
             BinaryOp::Sub => "v_sub_f32 v5, v3, v4",

@@ -22,6 +22,8 @@ pub struct WasmEmitter {
     /// Next local variable index.
     next_local: u32,
     /// Number of function parameters.
+    // Retained for WIP wasm backend; will be read when parameter-aware lowering lands.
+    #[allow(dead_code)]
     param_count: u32,
 }
 
@@ -681,13 +683,12 @@ fn is_i32x4(ty: &LoopType) -> bool {
 
 /// Check if a type is signed.
 fn is_signed(ty: &LoopType) -> bool {
-    match ty {
-        LoopType::Scalar(ScalarType::Int(_)) => true,
-        _ => false,
-    }
+    matches!(ty, LoopType::Scalar(ScalarType::Int(_)))
 }
 
 /// Check if this is a reinterpret cast (not a conversion).
+// Retained for WIP wasm backend; will be used once reinterpret casts are tracked.
+#[allow(dead_code)]
 fn is_reinterpret(_from: &LoopType, _to: &LoopType) -> bool {
     // In the current implementation, we don't track this
     // A proper implementation would check if the cast is marked as reinterpret
@@ -697,8 +698,7 @@ fn is_reinterpret(_from: &LoopType, _to: &LoopType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bhc_index::Idx;
-    
+
 
     #[test]
     fn test_emit_int_constants() {

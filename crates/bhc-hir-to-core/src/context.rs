@@ -535,8 +535,9 @@ impl LowerContext {
             "otherwise",
         ];
 
-        let mut id = 18; // Start after constructors
-        for name in operators {
+        // Start after constructors (id 18).
+        for (offset, name) in operators.into_iter().enumerate() {
+            let id = 18 + offset;
             let def_id = DefId::new(id);
             let var = Var {
                 name: Symbol::intern(name),
@@ -544,7 +545,6 @@ impl LowerContext {
                 ty: Ty::Error, // Types resolved during evaluation
             };
             self.var_map.insert(def_id, var);
-            id += 1;
         }
 
         // IO monad method implementations (DefIds 150-154)

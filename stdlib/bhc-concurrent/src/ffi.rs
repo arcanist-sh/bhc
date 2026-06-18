@@ -21,6 +21,9 @@ use std::time::Duration;
 
 /// Opaque handle to a scope for FFI.
 pub struct ScopeHandle {
+    // Held to keep the borrowed scope pointer alive across the FFI boundary;
+    // never read directly (callers receive the raw `*const Scope`).
+    #[allow(dead_code)]
     scope: *const Scope,
 }
 
@@ -29,6 +32,9 @@ pub struct TaskHandle {
     // We store a boxed closure result
     result: *mut c_void,
     completed: bool,
+    // Records whether the task produced no result; reserved for the
+    // cancellation signalling planned in `bhc_cancel`.
+    #[allow(dead_code)]
     cancelled: bool,
 }
 

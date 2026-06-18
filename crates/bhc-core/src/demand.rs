@@ -695,7 +695,7 @@ mod tests {
     fn test_non_function_no_sig() {
         let bindings = mk_module(vec![Bind::NonRec(mk_var("x", 100), Box::new(mk_int(42)))]);
         let result = analyze_module(&bindings);
-        assert!(result.get(&VarId::new(100)).is_none());
+        assert!(!result.contains_key(&VarId::new(100)));
     }
 
     // --------------------------------------------------------

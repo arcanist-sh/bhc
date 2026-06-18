@@ -15,9 +15,13 @@ use crate::{DataCon, Expr, Var};
 /// The kind of a file handle (System.IO).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandleKind {
+    /// Standard input stream.
     Stdin,
+    /// Standard output stream.
     Stdout,
+    /// Standard error stream.
     Stderr,
+    /// A handle backed by a regular file on disk.
     File,
 }
 

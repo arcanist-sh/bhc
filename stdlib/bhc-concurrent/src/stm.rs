@@ -220,7 +220,6 @@ struct WriteEntry {
 
 /// Type-erased TVar operations for the transaction log.
 trait TVarOps: Send + Sync {
-    fn id(&self) -> TVarId;
     fn version(&self) -> u64;
     fn commit(&self, value: Box<dyn Any + Send + Sync>);
     fn register_waiter(&self, condvar: Arc<Condvar>);
@@ -228,10 +227,6 @@ trait TVarOps: Send + Sync {
 }
 
 impl<T: Clone + Send + Sync + 'static> TVarOps for TVar<T> {
-    fn id(&self) -> TVarId {
-        self.id
-    }
-
     fn version(&self) -> u64 {
         TVar::version(self)
     }

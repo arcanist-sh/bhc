@@ -650,9 +650,11 @@ mod tests {
     #[test]
     fn test_lower_marks_vectorizable() {
         let kernel = make_test_kernel();
-        let mut config = LowerConfig::default();
-        config.enable_vectorization = true;
-        config.vectorize_threshold = 4;
+        let config = LowerConfig {
+            enable_vectorization: true,
+            vectorize_threshold: 4,
+            ..Default::default()
+        };
 
         let loop_ir = lower_kernel(&kernel, config).unwrap();
 

@@ -7545,8 +7545,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             _ => {
                 // Check for field selector pattern: $sel_N
-                if name.starts_with("$sel_") {
-                    if let Ok(field_index) = name[5..].parse::<u32>() {
+                if let Some(index_str) = name.strip_prefix("$sel_") {
+                    if let Ok(field_index) = index_str.parse::<u32>() {
                         return self.lower_builtin_field_selector(args[0], field_index);
                     }
                 }
@@ -15202,6 +15202,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Get the element type from a list type.
+    // Type-inspection helper retained for list-handling lowering paths.
+    #[allow(dead_code)]
     fn list_elem_type<'t>(&self, ty: &'t Ty) -> Option<&'t Ty> {
         match ty {
             Ty::List(elem) => Some(elem),
@@ -15220,6 +15222,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Convert a type to a show type tag for RTS functions.
     /// 0=Int, 1=Double, 2=Float, 3=Bool, 4=Char, 5=String
+    // Retained for RTS show dispatch; not currently called on all paths.
+    #[allow(dead_code)]
     fn type_to_show_tag(&self, ty: &Ty) -> i64 {
         if self.is_char_type(ty) {
             return 4;
@@ -15914,6 +15918,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// `body_name` is a unique name for the closure function.
     /// `num_captures` is how many captured values there are.
     /// `build_body` receives (builder, env_ptr, arg) and should build the body + return.
+    // Monad-transformer closure helper retained for transformer lowering paths.
+    #[allow(dead_code)]
     fn build_transformer_closure(
         &mut self,
         body_name: &str,
@@ -23693,6 +23699,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Infer the show type tag for an element from expression structure.
     /// Returns: 0=Int, 1=Double, 2=Float, 3=Bool, 4=Char, 5=String
+    // Show-tag inference helper retained for container show lowering.
+    #[allow(dead_code)]
     fn infer_elem_tag_from_expr(&self, expr: &Expr) -> i64 {
         // First try type info
         let ty = expr.ty();
@@ -23715,6 +23723,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Get the first element of a Cons-list expression for type inference.
+    // Retained for list show-tag inference.
+    #[allow(dead_code)]
     fn get_list_head_expr<'e>(&self, expr: &'e Expr) -> Option<&'e Expr> {
         match expr {
             // App(App((:), head), tail)
@@ -23735,6 +23745,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Infer element type tag for a list expression.
+    // Retained for list show-tag inference.
+    #[allow(dead_code)]
     fn infer_list_elem_tag(&self, list_expr: &Expr) -> i64 {
         // Try to get the head element and infer its type
         if let Some(head) = self.get_list_head_expr(list_expr) {
@@ -23744,6 +23756,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Infer the value type tag for a Maybe/Just expression.
+    // Retained for Maybe show-tag inference.
+    #[allow(dead_code)]
     fn infer_maybe_elem_tag(&self, maybe_expr: &Expr) -> i64 {
         // Just x → infer from x
         if let Expr::App(f, arg, _) = maybe_expr {
@@ -23757,6 +23771,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Infer the left/right type tags for an Either expression.
+    // Retained for Either show-tag inference.
+    #[allow(dead_code)]
     fn infer_either_tags(&self, either_expr: &Expr) -> (i64, i64) {
         if let Expr::App(f, arg, _) = either_expr {
             if let Expr::Var(var, _) = f.as_ref() {
@@ -23771,6 +23787,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Infer the fst/snd type tags for a tuple expression.
+    // Retained for tuple show-tag inference.
+    #[allow(dead_code)]
     fn infer_tuple_tags(&self, tuple_expr: &Expr) -> (i64, i64) {
         // App(App((,), fst), snd)
         if let Expr::App(f, snd, _) = tuple_expr {
@@ -37733,6 +37751,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower container operations that need higher-order functions (stub).
     /// Covers: update, alter, unions (remaining unimplemented operations).
+    // Stub for not-yet-dispatched container operations.
+    #[allow(dead_code)]
     fn lower_builtin_container_ho_stub(
         &mut self,
         args: &[&Expr],
@@ -41632,17 +41652,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         // If it looks like a constructor (starts with uppercase), return None
-        // to indicate we don't have metadata yet (might be registered later)
-        if name
-            .chars()
-            .next()
-            .map(|c| c.is_uppercase())
-            .unwrap_or(false)
-        {
-            None
-        } else {
-            None
-        }
+        // to indicate we don't have metadata yet (might be registered later).
+        // Non-constructor names also have no metadata, so return None either way.
+        None
     }
 
     // ========================================================================
@@ -41971,6 +41983,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// - Case expressions: pattern matching
     /// - Let expressions: nested bindings
     /// - PrimOp: primitive operations
+    ///
     /// Check if an expression should be thunked in a let-binding.
     ///
     /// WHNF (Weak Head Normal Form) expressions don't need thunking:
@@ -42761,6 +42774,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Check if a type contains unresolved type variables or errors.
+    // Type-inference predicate retained for monomorphization paths.
+    #[allow(dead_code)]
     fn type_needs_inference(&self, ty: &Ty) -> bool {
         match ty {
             Ty::Error => true,
@@ -42818,6 +42833,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Declare a function from a Core variable.
+    // Alternate function-declaration path retained for incremental lowering.
+    #[allow(dead_code)]
     fn declare_function(&self, var: &Var) -> CodegenResult<FunctionValue<'ctx>> {
         let fn_type = self.lower_function_type(&var.ty)?;
         let name = self.mangle_name(var.name.as_str());
@@ -46183,8 +46200,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             _ => {
                 // Check for field selector pattern: $sel_N
-                if name.starts_with("$sel_") {
-                    if let Ok(field_index) = name[5..].parse::<u32>() {
+                if let Some(index_str) = name.strip_prefix("$sel_") {
+                    if let Ok(field_index) = index_str.parse::<u32>() {
                         let tuple_ptr = args[0].into_pointer_value();
                         let tm = self.type_mapper();
                         let field_offset = 1 + field_index;
@@ -48490,6 +48507,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower a recursive function that was lifted from a let binding.
+    // Retained for let-lifted recursive function lowering.
+    #[allow(dead_code)]
     fn lower_recursive_function(&mut self, var: &Var, expr: &Expr) -> CodegenResult<()> {
         let fn_val = self.functions.get(&var.id).copied().ok_or_else(|| {
             CodegenError::Internal(format!(
@@ -50357,6 +50376,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Convert a Core type to an LLVM basic type (for function return).
+    // Type-lowering helper retained for return-type handling paths.
+    #[allow(dead_code)]
     fn lower_basic_type(&self, ty: &Ty) -> CodegenResult<Option<BasicTypeEnum<'ctx>>> {
         let tm = self.type_mapper();
         match ty {
@@ -50446,6 +50467,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Convert a Core type to an LLVM type (for arguments).
+    // Type-lowering helper retained for argument-type handling paths.
+    #[allow(dead_code)]
     fn lower_type(&self, ty: &Ty) -> CodegenResult<BasicTypeEnum<'ctx>> {
         self.lower_basic_type(ty)?.ok_or_else(|| {
             CodegenError::TypeError("cannot lower void type to basic type".to_string())

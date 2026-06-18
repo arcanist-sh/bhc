@@ -1140,22 +1140,13 @@ fn generate_atomic_reduce(
 
     match reduce_op {
         ReduceOp::Sum | ReduceOp::Mean => {
-            // PTX atomic add for floats
-            if dtype == DType::Float32 || dtype == DType::Float64 {
-                writeln!(
-                    code,
-                    "    atom.global.add.{} %red_tmp{}, [%red_addr{}], %red_val{};",
-                    ty, idx, idx, idx
-                )
-                .unwrap();
-            } else {
-                writeln!(
-                    code,
-                    "    atom.global.add.{} %red_tmp{}, [%red_addr{}], %red_val{};",
-                    ty, idx, idx, idx
-                )
-                .unwrap();
-            }
+            // PTX atomic add (same instruction for float and integer dtypes today).
+            writeln!(
+                code,
+                "    atom.global.add.{} %red_tmp{}, [%red_addr{}], %red_val{};",
+                ty, idx, idx, idx
+            )
+            .unwrap();
         }
         ReduceOp::Max => {
             writeln!(

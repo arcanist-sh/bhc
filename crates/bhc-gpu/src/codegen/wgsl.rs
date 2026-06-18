@@ -100,6 +100,8 @@ fn generate_binary_op(op: BinaryOp, left: &str, right: &str, dtype: DType) -> St
 }
 
 /// Generate reduction identity value.
+// WIP GPU backend: WGSL reduction codegen not yet wired to this helper.
+#[allow(dead_code)]
 fn reduce_identity(op: ReduceOp, dtype: DType) -> String {
     let ty = dtype_to_wgsl(dtype);
     match op {

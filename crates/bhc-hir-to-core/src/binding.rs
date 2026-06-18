@@ -147,6 +147,8 @@ fn preregister_pattern_nested(ctx: &mut LowerContext, pat: &Pat) -> LowerResult<
 ///
 /// This analyzes the bindings for mutual recursion and creates appropriate
 /// `Rec` or `NonRec` binding groups.
+// WIP lowering: not yet wired into the main lowering path; exercised by tests.
+#[allow(dead_code)]
 pub fn lower_bindings(
     ctx: &mut LowerContext,
     bindings: &[Binding],
@@ -167,6 +169,8 @@ pub fn lower_bindings(
 }
 
 /// Lower a single binding, checking for self-recursion.
+// WIP lowering: only reachable from the not-yet-wired `lower_bindings`.
+#[allow(dead_code)]
 fn lower_single_binding(ctx: &mut LowerContext, binding: &Binding) -> LowerResult<Bind> {
     let (var, names) = extract_binding_info(ctx, &binding.pat)?;
 
@@ -185,6 +189,8 @@ fn lower_single_binding(ctx: &mut LowerContext, binding: &Binding) -> LowerResul
 }
 
 /// Lower a group of bindings, grouping mutually recursive ones.
+// WIP lowering: only reachable from the not-yet-wired `lower_bindings`.
+#[allow(dead_code)]
 fn lower_binding_group(
     ctx: &mut LowerContext,
     bindings: &[Binding],
@@ -246,6 +252,8 @@ fn lower_binding_group(
 ///
 /// Returns the main variable and all names bound by the pattern.
 /// If the variable was pre-registered (via `preregister_bindings`), reuses that.
+// WIP lowering: only reachable from the not-yet-wired `lower_bindings`.
+#[allow(dead_code)]
 fn extract_binding_info(ctx: &mut LowerContext, pat: &Pat) -> LowerResult<(Var, Vec<Symbol>)> {
     match pat {
         Pat::Var(name, def_id, _span) => {
@@ -414,6 +422,8 @@ fn collect_free_vars_impl(
 /// into strongly connected components (SCCs). Each SCC becomes a `Rec`
 /// binding if it has more than one element or if it's self-recursive,
 /// otherwise it becomes a `NonRec` binding.
+// WIP lowering: SCC analysis not yet wired into the main lowering path.
+#[allow(dead_code)]
 pub fn analyze_bindings(bindings: &[Binding]) -> Vec<Vec<usize>> {
     // For simplicity, treat all bindings as one group
     // A proper implementation would use Tarjan's SCC algorithm

@@ -494,6 +494,12 @@ impl Default for NoGcGuard {
 }
 
 #[cfg(test)]
+// `static mut BUFFER` test fixtures are passed to `init(&'static mut [u8])`, which
+// requires a `&mut` to the static; the `&raw mut` form would not satisfy the API.
+#[allow(static_mut_refs)]
+// `alloc`/`StaticAllocator::alloc` return `NonNull`; the explicit null assertions
+// are intentional smoke checks even though the pointer can never be null.
+#[allow(useless_ptr_null_checks)]
 mod tests {
     use super::*;
 

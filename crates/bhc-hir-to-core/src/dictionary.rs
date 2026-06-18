@@ -193,7 +193,7 @@ impl ClassRegistry {
     /// Returns the instance info and the substitution binding type variables.
     #[must_use]
     pub fn resolve_instance(&self, class: Symbol, ty: &Ty) -> Option<(&InstanceInfo, Subst)> {
-        self.resolve_instance_multi(class, &[ty.clone()])
+        self.resolve_instance_multi(class, std::slice::from_ref(ty))
     }
 
     /// Resolve an instance for a class with multiple type arguments.
@@ -978,7 +978,7 @@ mod tests {
         // Test that wrong number of args fails
         let wrong_arity = registry.resolve_instance_multi(
             Symbol::intern("Convert"),
-            &[int_ty.clone()], // Only one arg instead of two
+            std::slice::from_ref(&int_ty), // Only one arg instead of two
         );
         assert!(wrong_arity.is_none());
     }
@@ -1006,7 +1006,8 @@ mod tests {
 
         // Different lengths don't match
         assert!(
-            types_match_multi(&[int_ty.clone(), string_ty.clone()], &[int_ty.clone()]).is_none()
+            types_match_multi(&[int_ty.clone(), string_ty.clone()], std::slice::from_ref(&int_ty))
+                .is_none()
         );
 
         // Empty matches empty

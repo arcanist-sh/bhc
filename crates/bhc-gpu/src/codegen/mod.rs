@@ -87,6 +87,8 @@ fn dtype_to_gpu_type(dtype: DType) -> &'static str {
 }
 
 /// Data type to register width in bits.
+// WIP GPU backend: register-width helper not yet used by active codegen paths.
+#[allow(dead_code)]
 fn dtype_reg_width(dtype: DType) -> u32 {
     match dtype {
         DType::Bool => 1,

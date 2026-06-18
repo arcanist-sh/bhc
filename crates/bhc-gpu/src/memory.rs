@@ -180,7 +180,8 @@ impl Drop for DeviceAlloc {
                 DeviceKind::Rocm => {
                     let _ = crate::runtime::rocm::free(self.ptr);
                 }
-                DeviceKind::Mock | _ => {
+                // Mock and any non-feature-gated kinds fall through here.
+                _ => {
                     // Mock device: no actual deallocation
                 }
             }
@@ -243,6 +244,8 @@ impl<T: FfiSafe> DeviceBuffer<T> {
     /// # Safety
     ///
     /// The caller must ensure the buffer is properly initialized before use.
+    // WIP GPU backend: uninitialized-buffer allocation path not yet used by callers.
+    #[allow(dead_code)]
     pub(crate) unsafe fn uninit(len: usize, device: DeviceId, kind: DeviceKind) -> GpuResult<Self> {
         let size = len * std::mem::size_of::<T>();
         let ptr = allocate_device_memory(size, device, kind)?;
@@ -500,7 +503,8 @@ fn allocate_device_memory(
         #[cfg(feature = "rocm")]
         DeviceKind::Rocm => crate::runtime::rocm::malloc(size),
 
-        DeviceKind::Mock | _ => {
+        // Mock and any non-feature-gated kinds fall through here.
+        _ => {
             // Mock allocation: use host memory.
             // The global allocator must not be called with a zero-size layout
             if size == 0 {
@@ -526,11 +530,16 @@ fn allocate_device_memory(
 pub struct DeviceMemoryPool {
     device: DeviceId,
     device_kind: DeviceKind,
+    // WIP GPU backend: sub-allocation bookkeeping not yet read by active pool logic.
+    #[allow(dead_code)]
     block_size: usize,
+    #[allow(dead_code)]
     blocks: parking_lot::Mutex<Vec<PoolBlock>>,
     stats: DeviceAllocStats,
 }
 
+// WIP GPU backend: pool-block fields tracked but not yet read by allocation logic.
+#[allow(dead_code)]
 struct PoolBlock {
     ptr: DevicePtr,
     size: usize,

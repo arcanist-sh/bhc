@@ -23,7 +23,7 @@
 //! });
 //! ```
 
-use crate::task::{Task, TaskHandle, TaskState};
+use crate::task::{Task, TaskState};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -286,10 +286,7 @@ impl<T> SpawnHandle<T> {
     /// Wait for the task to complete and get the result
     pub fn join(mut self) -> Option<T> {
         if let Some(handle) = self.join_handle.take() {
-            match handle.join() {
-                Ok(result) => result,
-                Err(_) => None,
-            }
+            handle.join().unwrap_or_default()
         } else {
             None
         }

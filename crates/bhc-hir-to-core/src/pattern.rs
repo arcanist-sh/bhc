@@ -508,6 +508,9 @@ enum DecisionTree {
     /// Leaf: matched successfully.
     Leaf {
         /// Variable bindings from pattern matching.
+        // WIP lowering: bindings are currently registered via the context; this
+        // field will carry them explicitly once decision-tree codegen uses it.
+        #[allow(dead_code)]
         bindings: Vec<(VarId, core::Expr)>,
         /// Guard condition (if any).
         guard: Option<hir::Expr>,

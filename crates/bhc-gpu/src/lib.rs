@@ -259,6 +259,8 @@ pub struct GpuBackend {
     /// Available devices.
     devices: Vec<DeviceInfo>,
     /// Module cache for compiled kernels.
+    // WIP GPU backend: populated on construction, kernel-cache lookups not yet wired.
+    #[allow(dead_code)]
     module_cache: parking_lot::RwLock<FxHashMap<u64, Arc<kernel::CompiledModule>>>,
 }
 
@@ -311,6 +313,8 @@ pub struct GpuCodegenContext {
 pub struct GpuCodegenModule {
     name: String,
     code: String,
+    // WIP GPU backend: retained for module emission once device-specific lowering lands.
+    #[allow(dead_code)]
     device_kind: DeviceKind,
 }
 

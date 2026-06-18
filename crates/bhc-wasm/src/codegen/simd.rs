@@ -79,88 +79,76 @@ impl SimdLowering {
 
     /// Horizontal reduction for f32x4.
     fn reduce_f32x4(&self, op: ReduceOp) -> WasmResult<Vec<WasmInstr>> {
-        let mut instrs = Vec::new();
-
         // v = [a, b, c, d]
         // We need to compute op(a, b, c, d)
-
-        // Step 1: Shuffle high half to low half
-        // temp1 = [c, d, c, d]
-        instrs.push(WasmInstr::I8x16Shuffle([
-            8, 9, 10, 11, // c (bytes 8-11)
-            12, 13, 14, 15, // d (bytes 12-15)
-            8, 9, 10, 11, // c
-            12, 13, 14, 15, // d
-        ]));
-
-        // Step 2: Add low and high halves
-        // temp2 = [a+c, b+d, _, _]
-        instrs.push(self.reduce_op_instr_f32x4(op)?);
-
-        // Step 3: Shuffle element 1 to element 0
-        // temp3 = [b+d, _, _, _]
-        // Need to duplicate the vector first for shuffle
-        instrs.push(WasmInstr::I8x16Shuffle([
-            4, 5, 6, 7, // b+d (bytes 4-7)
-            0, 1, 2, 3, // a+c
-            0, 1, 2, 3, // _
-            0, 1, 2, 3, // _
-        ]));
-
-        // Step 4: Add again
-        // result = [a+b+c+d, _, _, _]
-        instrs.push(self.reduce_op_instr_f32x4(op)?);
-
-        // Step 5: Extract lane 0
-        instrs.push(WasmInstr::F32x4ExtractLane(0));
+        let instrs = vec![
+            // Step 1: Shuffle high half to low half
+            // temp1 = [c, d, c, d]
+            WasmInstr::I8x16Shuffle([
+                8, 9, 10, 11, // c (bytes 8-11)
+                12, 13, 14, 15, // d (bytes 12-15)
+                8, 9, 10, 11, // c
+                12, 13, 14, 15, // d
+            ]),
+            // Step 2: Add low and high halves
+            // temp2 = [a+c, b+d, _, _]
+            self.reduce_op_instr_f32x4(op)?,
+            // Step 3: Shuffle element 1 to element 0
+            // temp3 = [b+d, _, _, _]
+            // Need to duplicate the vector first for shuffle
+            WasmInstr::I8x16Shuffle([
+                4, 5, 6, 7, // b+d (bytes 4-7)
+                0, 1, 2, 3, // a+c
+                0, 1, 2, 3, // _
+                0, 1, 2, 3, // _
+            ]),
+            // Step 4: Add again
+            // result = [a+b+c+d, _, _, _]
+            self.reduce_op_instr_f32x4(op)?,
+            // Step 5: Extract lane 0
+            WasmInstr::F32x4ExtractLane(0),
+        ];
 
         Ok(instrs)
     }
 
     /// Horizontal reduction for f64x2.
     fn reduce_f64x2(&self, op: ReduceOp) -> WasmResult<Vec<WasmInstr>> {
-        let mut instrs = Vec::new();
-
         // v = [a, b]
-        // Shuffle to get [b, a]
-        instrs.push(WasmInstr::I8x16Shuffle([
-            8, 9, 10, 11, 12, 13, 14, 15, // b (bytes 8-15)
-            0, 1, 2, 3, 4, 5, 6, 7, // a (bytes 0-7)
-        ]));
-
-        // Add to get [a+b, a+b]
-        instrs.push(self.reduce_op_instr_f64x2(op)?);
-
-        // Extract lane 0
-        instrs.push(WasmInstr::F64x2ExtractLane(0));
+        let instrs = vec![
+            // Shuffle to get [b, a]
+            WasmInstr::I8x16Shuffle([
+                8, 9, 10, 11, 12, 13, 14, 15, // b (bytes 8-15)
+                0, 1, 2, 3, 4, 5, 6, 7, // a (bytes 0-7)
+            ]),
+            // Add to get [a+b, a+b]
+            self.reduce_op_instr_f64x2(op)?,
+            // Extract lane 0
+            WasmInstr::F64x2ExtractLane(0),
+        ];
 
         Ok(instrs)
     }
 
     /// Horizontal reduction for i32x4.
     fn reduce_i32x4(&self, op: ReduceOp) -> WasmResult<Vec<WasmInstr>> {
-        let mut instrs = Vec::new();
-
         // Similar pattern to f32x4
-
-        // Step 1: Shuffle high half to low
-        instrs.push(WasmInstr::I8x16Shuffle([
-            8, 9, 10, 11, 12, 13, 14, 15, 8, 9, 10, 11, 12, 13, 14, 15,
-        ]));
-
-        // Step 2: Reduce
-        instrs.push(self.reduce_op_instr_i32x4(op)?);
-
-        // Step 3: Shuffle element 1 to 0
-        instrs.push(WasmInstr::I8x16Shuffle([
-            4, 5, 6, 7, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3,
-        ]));
-
-        // Step 4: Final reduce
-        instrs.push(self.reduce_op_instr_i32x4(op)?);
-
-        // Step 5: Extract lane 0
-        instrs.push(WasmInstr::I32x4ExtractLane(0));
+        let instrs = vec![
+            // Step 1: Shuffle high half to low
+            WasmInstr::I8x16Shuffle([
+                8, 9, 10, 11, 12, 13, 14, 15, 8, 9, 10, 11, 12, 13, 14, 15,
+            ]),
+            // Step 2: Reduce
+            self.reduce_op_instr_i32x4(op)?,
+            // Step 3: Shuffle element 1 to 0
+            WasmInstr::I8x16Shuffle([
+                4, 5, 6, 7, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3,
+            ]),
+            // Step 4: Final reduce
+            self.reduce_op_instr_i32x4(op)?,
+            // Step 5: Extract lane 0
+            WasmInstr::I32x4ExtractLane(0),
+        ];
 
         Ok(instrs)
     }
@@ -173,18 +161,16 @@ impl SimdLowering {
         match op {
             ReduceOp::Add | ReduceOp::And | ReduceOp::Or | ReduceOp::Xor => {
                 // These work with i64x2
-                let mut instrs = Vec::new();
-
-                // Shuffle to get [b, a]
-                instrs.push(WasmInstr::I8x16Shuffle([
-                    8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7,
-                ]));
-
-                // Reduce
-                instrs.push(self.reduce_op_instr_i64x2(op)?);
-
-                // Extract lane 0
-                instrs.push(WasmInstr::I64x2ExtractLane(0));
+                let instrs = vec![
+                    // Shuffle to get [b, a]
+                    WasmInstr::I8x16Shuffle([
+                        8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7,
+                    ]),
+                    // Reduce
+                    self.reduce_op_instr_i64x2(op)?,
+                    // Extract lane 0
+                    WasmInstr::I64x2ExtractLane(0),
+                ];
 
                 Ok(instrs)
             }
@@ -308,8 +294,6 @@ impl SimdLowering {
         // Input stack: [a, b, c]
         // Output: a * b + c
 
-        let mut instrs = Vec::new();
-
         // We need a temporary to save c
         // This is handled by the caller who manages locals
 
@@ -321,8 +305,8 @@ impl SimdLowering {
         // After add: [a*b+c]
 
         // The actual instruction emission is:
-        instrs.push(WasmInstr::Comment("FMA: a * b + c (lowered)".to_string()));
         // local.set and local.get are handled by emitter
+        let instrs = vec![WasmInstr::Comment("FMA: a * b + c (lowered)".to_string())];
 
         Ok(instrs)
     }
@@ -384,6 +368,8 @@ impl SimdLowering {
 }
 
 /// SIMD lowering strategies for different operation types.
+// Retained for WIP wasm backend; strategy selection is not yet wired into emission.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SimdStrategy {
     /// Use native SIMD instructions.
@@ -396,6 +382,8 @@ pub enum SimdStrategy {
     Unsupported,
 }
 
+// Retained for WIP wasm backend; strategy selection is not yet wired into emission.
+#[allow(dead_code)]
 impl SimdStrategy {
     /// Determine the best strategy for a vector operation.
     pub fn for_binary(scalar_ty: ScalarType, width: u8, simd_enabled: bool) -> Self {

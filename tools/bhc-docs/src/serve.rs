@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use axum::{routing::get_service, Router};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 
@@ -109,10 +109,10 @@ async fn watch_and_rebuild(source: Option<PathBuf>, output: PathBuf) -> Result<(
     Ok(())
 }
 
-fn rebuild(source: &PathBuf, output: &PathBuf) -> Result<()> {
+fn rebuild(source: &Path, output: &Path) -> Result<()> {
     crate::build::run(crate::build::BuildConfig {
-        input: source.clone(),
-        output: output.clone(),
+        input: source.to_path_buf(),
+        output: output.to_path_buf(),
         format: crate::build::Format::Html,
         playground: false,
         base_url: None,

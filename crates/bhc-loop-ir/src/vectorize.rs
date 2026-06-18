@@ -280,7 +280,7 @@ impl VectorizePass {
     fn vectorize_stmt(
         &self,
         stmt: &mut Stmt,
-        loop_info: &mut Vec<LoopMetadata>,
+        loop_info: &mut [LoopMetadata],
         report: &mut VectorizeReport,
     ) -> Result<(), VectorizeError> {
         if let Stmt::Loop(lp) = stmt {
@@ -303,7 +303,7 @@ impl VectorizePass {
         &self,
         lp: &mut Loop,
         info: &VectorizationInfo,
-        loop_info: &mut Vec<LoopMetadata>,
+        loop_info: &mut [LoopMetadata],
         report: &mut VectorizeReport,
     ) -> Result<(), VectorizeError> {
         let width = info.recommended_width;

@@ -197,6 +197,9 @@ impl BuiltinTable {
 /// Result of lowering - either a tensor reference or indicates
 /// the expression doesn't lower to tensor ops.
 #[derive(Debug, Clone)]
+// Variants hold inline payloads by design; boxing the large variant would
+// change this public enum's API and add an allocation on the hot lowering path.
+#[allow(clippy::large_enum_variant)]
 pub enum LowerResult {
     /// Expression lowered to a tensor.
     Tensor(TensorRef),

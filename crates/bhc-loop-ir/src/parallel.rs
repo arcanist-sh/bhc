@@ -233,7 +233,7 @@ impl ParallelPass {
     fn parallelize_stmt(
         &self,
         stmt: &mut Stmt,
-        loop_info: &mut Vec<LoopMetadata>,
+        loop_info: &mut [LoopMetadata],
         report: &mut ParallelReport,
     ) -> Result<(), ParallelError> {
         if let Stmt::Loop(lp) = stmt {
@@ -251,7 +251,7 @@ impl ParallelPass {
         &self,
         lp: &mut Loop,
         info: &ParallelInfo,
-        loop_info: &mut Vec<LoopMetadata>,
+        loop_info: &mut [LoopMetadata],
         report: &mut ParallelReport,
     ) -> Result<(), ParallelError> {
         // Update loop metadata
@@ -761,9 +761,10 @@ mod tests {
 
     #[test]
     fn test_deterministic_vs_dynamic_strategy() {
-        let mut config = ParallelConfig::default();
-
-        config.deterministic = true;
+        let mut config = ParallelConfig {
+            deterministic: true,
+            ..Default::default()
+        };
         let (ir, loop_id) = make_parallelizable_loop(10000);
         let mut pass_det = ParallelPass::new(config.clone());
         let analysis = pass_det.analyze(&ir);

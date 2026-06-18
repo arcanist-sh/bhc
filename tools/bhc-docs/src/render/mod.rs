@@ -16,8 +16,11 @@ use std::path::Path;
 /// Output format for documentation.
 #[derive(Debug, Clone, Copy)]
 pub enum Format {
+    /// Self-contained HTML documentation.
     Html,
+    /// Markdown documentation.
     Markdown,
+    /// Machine-readable JSON documentation.
     Json,
 }
 

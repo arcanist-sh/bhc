@@ -853,6 +853,9 @@ pub unsafe extern "C" fn bhc_pinned_realloc(
 }
 
 #[cfg(test)]
+// `PinnedAllocator::allocate` returns `NonNull`; the explicit null assertions are
+// intentional smoke checks even though the pointer can never be null.
+#[allow(useless_ptr_null_checks)]
 mod tests {
     use super::*;
 

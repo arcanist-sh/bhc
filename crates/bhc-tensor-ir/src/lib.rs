@@ -58,11 +58,11 @@
 //!
 //! ## Main Types
 //!
-//! - [`TensorOp`]: Tensor operations
-//! - [`TensorMeta`]: Metadata (shape, stride, dtype)
-//! - [`Kernel`]: A fused computation unit
-//! - [`Shape`]: Tensor dimensions
-//! - [`DType`]: Element types
+//! - [`TensorOp`][]: Tensor operations
+//! - [`TensorMeta`][]: Metadata (shape, stride, dtype)
+//! - [`Kernel`][]: A fused computation unit
+//! - [`Shape`][]: Tensor dimensions
+//! - [`DType`][]: Element types
 //!
 //! ## See Also
 //!

@@ -46,6 +46,11 @@ fn is_sentinel(handle: *mut u8) -> bool {
 ///
 /// `path` is a null-terminated C string (codegen converts `[Char]` path).
 /// Returns a BhcText pointer containing the file's UTF-8 bytes.
+///
+/// # Safety
+///
+/// `path` must either be null or point to a valid null-terminated C string
+/// that remains valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_text_read_file(path: *const c_char) -> *mut u8 {
     if path.is_null() {
@@ -64,6 +69,12 @@ pub unsafe extern "C" fn bhc_text_read_file(path: *const c_char) -> *mut u8 {
 /// Write Text to a file (create/truncate).
 ///
 /// `path` is a null-terminated C string. `text` is a BhcText pointer.
+///
+/// # Safety
+///
+/// `path` must either be null or point to a valid null-terminated C string.
+/// `text` must either be null or point to a valid BhcText allocation, both
+/// remaining valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_text_write_file(path: *const c_char, text: *const u8) {
     if path.is_null() {
@@ -84,6 +95,12 @@ pub unsafe extern "C" fn bhc_text_write_file(path: *const c_char, text: *const u
 /// Append Text to a file.
 ///
 /// `path` is a null-terminated C string. `text` is a BhcText pointer.
+///
+/// # Safety
+///
+/// `path` must either be null or point to a valid null-terminated C string.
+/// `text` must either be null or point to a valid BhcText allocation, both
+/// remaining valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_text_append_file(path: *const c_char, text: *const u8) {
     if path.is_null() {
@@ -116,6 +133,12 @@ pub unsafe extern "C" fn bhc_text_append_file(path: *const c_char, text: *const 
 /// Read all remaining contents from a handle as Text.
 ///
 /// `handle` is a BHC handle pointer (sentinel or BhcHandle).
+///
+/// # Safety
+///
+/// `handle` must be a valid BHC handle: either one of the sentinel values
+/// (1=stdin, 2=stdout, 3=stderr), null, or a pointer to a live `BhcHandle`
+/// that remains valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_text_h_get_contents(handle: *mut u8) -> *mut u8 {
     let h = handle as usize;
@@ -138,6 +161,12 @@ pub unsafe extern "C" fn bhc_text_h_get_contents(handle: *mut u8) -> *mut u8 {
 /// Read a line from a handle as Text (without trailing newline).
 ///
 /// `handle` is a BHC handle pointer (sentinel or BhcHandle).
+///
+/// # Safety
+///
+/// `handle` must be a valid BHC handle: either one of the sentinel values
+/// (1=stdin, 2=stdout, 3=stderr), null, or a pointer to a live `BhcHandle`
+/// that remains valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_text_h_get_line(handle: *mut u8) -> *mut u8 {
     let h = handle as usize;
@@ -173,6 +202,13 @@ pub unsafe extern "C" fn bhc_text_h_get_line(handle: *mut u8) -> *mut u8 {
 /// Write Text bytes to a handle.
 ///
 /// `handle` is a BHC handle pointer. `text` is a BhcText pointer.
+///
+/// # Safety
+///
+/// `handle` must be a valid BHC handle: either one of the sentinel values
+/// (1=stdin, 2=stdout, 3=stderr), null, or a pointer to a live `BhcHandle`.
+/// `text` must either be null or point to a valid BhcText allocation. Both
+/// must remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_text_h_put_str(handle: *mut u8, text: *const u8) {
     let bytes = if text.is_null() {
@@ -199,6 +235,13 @@ pub unsafe extern "C" fn bhc_text_h_put_str(handle: *mut u8, text: *const u8) {
 /// Write Text bytes + newline to a handle.
 ///
 /// `handle` is a BHC handle pointer. `text` is a BhcText pointer.
+///
+/// # Safety
+///
+/// `handle` must be a valid BHC handle: either one of the sentinel values
+/// (1=stdin, 2=stdout, 3=stderr), null, or a pointer to a live `BhcHandle`.
+/// `text` must either be null or point to a valid BhcText allocation. Both
+/// must remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_text_h_put_str_ln(handle: *mut u8, text: *const u8) {
     let bytes = if text.is_null() {

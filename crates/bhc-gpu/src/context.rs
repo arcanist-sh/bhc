@@ -177,7 +177,8 @@ impl GpuContext {
             #[cfg(feature = "rocm")]
             DeviceKind::Rocm => crate::runtime::rocm::set_device(device.id),
 
-            DeviceKind::Mock | _ => Ok(()),
+            // Mock and any non-feature-gated kinds fall through here.
+            _ => Ok(()),
         }
     }
 
@@ -230,7 +231,8 @@ impl GpuContext {
                 Ok(stream)
             }
 
-            DeviceKind::Mock | _ => {
+            // Mock and any non-feature-gated kinds fall through here.
+            _ => {
                 // Mock: just use incrementing handles
                 let stream = Stream::new(handle, name.clone(), self.device.id);
                 self.streams.write().insert(name, stream.clone());
@@ -262,7 +264,8 @@ impl GpuContext {
                 crate::runtime::rocm::memset(buf.as_ptr(), 0, buf.size_bytes())?;
             }
 
-            DeviceKind::Mock | _ => {
+            // Mock and any non-feature-gated kinds fall through here.
+            _ => {
                 // Mock: zero host memory
                 unsafe {
                     std::ptr::write_bytes(buf.as_ptr().as_raw() as *mut u8, 0, buf.size_bytes());
@@ -308,7 +311,8 @@ impl GpuContext {
                 size,
             ),
 
-            DeviceKind::Mock | _ => {
+            // Mock and any non-feature-gated kinds fall through here.
+            _ => {
                 // Mock: direct memcpy
                 unsafe {
                     std::ptr::copy_nonoverlapping(
@@ -353,7 +357,8 @@ impl GpuContext {
                 size,
             ),
 
-            DeviceKind::Mock | _ => {
+            // Mock and any non-feature-gated kinds fall through here.
+            _ => {
                 // Mock: direct memcpy
                 unsafe {
                     std::ptr::copy_nonoverlapping(
@@ -408,7 +413,8 @@ impl GpuContext {
                 crate::runtime::rocm::memcpy_device_to_device(dst.as_ptr(), src.as_ptr(), size)
             }
 
-            DeviceKind::Mock | _ => {
+            // Mock and any non-feature-gated kinds fall through here.
+            _ => {
                 // Mock: direct memcpy
                 unsafe {
                     std::ptr::copy_nonoverlapping(
@@ -486,7 +492,8 @@ impl GpuContext {
                 args,
             ),
 
-            DeviceKind::Mock | _ => {
+            // Mock and any non-feature-gated kinds fall through here.
+            _ => {
                 // Mock: just log the launch (args and stream unused in mock mode)
                 let _ = (args, stream);
                 tracing::debug!(
@@ -514,7 +521,8 @@ impl GpuContext {
             #[cfg(feature = "rocm")]
             DeviceKind::Rocm => crate::runtime::rocm::synchronize_stream(stream.handle),
 
-            DeviceKind::Mock | _ => {
+            // Mock and any non-feature-gated kinds fall through here.
+            _ => {
                 let _ = stream;
                 Ok(())
             }
@@ -530,7 +538,8 @@ impl GpuContext {
             #[cfg(feature = "rocm")]
             DeviceKind::Rocm => crate::runtime::rocm::device_synchronize(),
 
-            DeviceKind::Mock | _ => Ok(()),
+            // Mock and any non-feature-gated kinds fall through here.
+            _ => Ok(()),
         }
     }
 
@@ -544,7 +553,8 @@ impl GpuContext {
             #[cfg(feature = "rocm")]
             DeviceKind::Rocm => crate::runtime::rocm::memory_info().unwrap_or((0, 0)),
 
-            DeviceKind::Mock | _ => (self.device.memory_total, self.device.memory_total),
+            // Mock and any non-feature-gated kinds fall through here.
+            _ => (self.device.memory_total, self.device.memory_total),
         }
     }
 

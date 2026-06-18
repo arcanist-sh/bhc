@@ -44,6 +44,8 @@ pub struct LoopLowering<'ctx, 'm> {
     /// Mapping from buffer IDs to LLVM pointers.
     buffers: FxHashMap<BufferId, PointerValue<'ctx>>,
     /// Counter for generating unique names.
+    // Kept for the `unique_name` helper used by in-progress Loop IR lowering paths.
+    #[allow(dead_code)]
     name_counter: u32,
     /// Current function being generated.
     current_fn: Option<FunctionValue<'ctx>>,
@@ -64,6 +66,8 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
     }
 
     /// Generate a unique name.
+    // Utility for naming generated LLVM values; not yet wired into every lowering path.
+    #[allow(dead_code)]
     fn unique_name(&mut self, prefix: &str) -> String {
         let name = format!("{}_{}", prefix, self.name_counter);
         self.name_counter += 1;

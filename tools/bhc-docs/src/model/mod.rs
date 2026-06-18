@@ -177,9 +177,15 @@ pub struct ConstructorDoc {
 #[serde(tag = "kind")]
 pub enum FieldsDoc {
     /// Positional fields.
-    Positional { types: Vec<String> },
+    Positional {
+        /// Rendered type of each positional field, in order.
+        types: Vec<String>,
+    },
     /// Record fields.
-    Record { fields: Vec<FieldDoc> },
+    Record {
+        /// Named record fields.
+        fields: Vec<FieldDoc>,
+    },
 }
 
 /// A record field.
@@ -337,23 +343,39 @@ pub struct TypeSignature {
 #[serde(tag = "kind")]
 pub enum TypeExpr {
     /// Type variable.
-    Var { name: String },
+    Var {
+        /// Name of the type variable.
+        name: String,
+    },
     /// Type constructor.
-    Con { name: String },
+    Con {
+        /// Name of the type constructor.
+        name: String,
+    },
     /// Type application.
     App {
+        /// The function (constructor) being applied.
         func: Box<TypeExpr>,
+        /// The argument the function is applied to.
         arg: Box<TypeExpr>,
     },
     /// Function type.
     Arrow {
+        /// The argument (domain) type.
         from: Box<TypeExpr>,
+        /// The result (codomain) type.
         to: Box<TypeExpr>,
     },
     /// Tuple type.
-    Tuple { elements: Vec<TypeExpr> },
+    Tuple {
+        /// The element types of the tuple, in order.
+        elements: Vec<TypeExpr>,
+    },
     /// List type.
-    List { elem: Box<TypeExpr> },
+    List {
+        /// The element type of the list.
+        elem: Box<TypeExpr>,
+    },
 }
 
 /// Source location for linking to source code.

@@ -164,6 +164,12 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      # The driver's compile-to-executable E2E tests link against the BHC
+      # runtime/stdlib static libs (libbhc_rts.a, ...) in target/debug. Build
+      # the workspace first so those archives exist before coverage runs them.
+      - name: Build BHC runtime static libraries
+        run: cargo build --workspace
+
       - name: Generate coverage
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info
 

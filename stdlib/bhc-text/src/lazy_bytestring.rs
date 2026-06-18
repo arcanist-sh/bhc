@@ -630,7 +630,7 @@ pub extern "C" fn bhc_lazy_bs_char8_lines(lazy: *const u8) -> *mut u8 {
         let bytes = flatten_to_bytes(lazy);
         let mut lines: Vec<&[u8]> = bytes.split(|&b| b == b'\n').collect();
         // Remove trailing empty element if input ends with \n
-        if lines.last().map_or(false, |l| l.is_empty()) {
+        if lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
         }
         // Build cons-list from end

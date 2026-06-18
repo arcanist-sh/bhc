@@ -698,7 +698,7 @@ fn is_reinterpret(_from: &LoopType, _to: &LoopType) -> bool {
 mod tests {
     use super::*;
     use bhc_index::Idx;
-    use bhc_loop_ir::ValueId;
+    
 
     #[test]
     fn test_emit_int_constants() {

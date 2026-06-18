@@ -29,7 +29,7 @@ type RtsSet = BTreeSet<i64>;
 /// Create an empty map.
 #[no_mangle]
 pub extern "C" fn bhc_map_empty() -> *mut u8 {
-    let m: Box<RtsMap> = Box::new(BTreeMap::new());
+    let m: Box<RtsMap> = Box::default();
     Box::into_raw(m) as *mut u8
 }
 

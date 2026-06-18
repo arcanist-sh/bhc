@@ -6,37 +6,37 @@
 /// Check if character is a letter
 #[no_mangle]
 pub extern "C" fn bhc_char_is_alpha(c: u32) -> bool {
-    char::from_u32(c).map_or(false, |c| c.is_alphabetic())
+    char::from_u32(c).is_some_and(|c| c.is_alphabetic())
 }
 
 /// Check if character is a digit
 #[no_mangle]
 pub extern "C" fn bhc_char_is_digit(c: u32) -> bool {
-    char::from_u32(c).map_or(false, |c| c.is_ascii_digit())
+    char::from_u32(c).is_some_and(|c| c.is_ascii_digit())
 }
 
 /// Check if character is alphanumeric
 #[no_mangle]
 pub extern "C" fn bhc_char_is_alphanumeric(c: u32) -> bool {
-    char::from_u32(c).map_or(false, |c| c.is_alphanumeric())
+    char::from_u32(c).is_some_and(|c| c.is_alphanumeric())
 }
 
 /// Check if character is whitespace
 #[no_mangle]
 pub extern "C" fn bhc_char_is_space(c: u32) -> bool {
-    char::from_u32(c).map_or(false, |c| c.is_whitespace())
+    char::from_u32(c).is_some_and(|c| c.is_whitespace())
 }
 
 /// Check if character is uppercase
 #[no_mangle]
 pub extern "C" fn bhc_char_is_upper(c: u32) -> bool {
-    char::from_u32(c).map_or(false, |c| c.is_uppercase())
+    char::from_u32(c).is_some_and(|c| c.is_uppercase())
 }
 
 /// Check if character is lowercase
 #[no_mangle]
 pub extern "C" fn bhc_char_is_lower(c: u32) -> bool {
-    char::from_u32(c).map_or(false, |c| c.is_lowercase())
+    char::from_u32(c).is_some_and(|c| c.is_lowercase())
 }
 
 /// Convert to uppercase
@@ -79,7 +79,7 @@ pub extern "C" fn bhc_char_int_to_digit(n: i32) -> u32 {
 /// Get character's Unicode general category
 #[no_mangle]
 pub extern "C" fn bhc_char_is_print(c: u32) -> bool {
-    char::from_u32(c).map_or(false, |c| !c.is_control())
+    char::from_u32(c).is_some_and(|c| !c.is_control())
 }
 
 /// Check if ASCII
@@ -91,37 +91,37 @@ pub extern "C" fn bhc_char_is_ascii(c: u32) -> bool {
 /// Check if character is a control character
 #[no_mangle]
 pub extern "C" fn bhc_char_is_control(c: u32) -> bool {
-    char::from_u32(c).map_or(false, |c| c.is_control())
+    char::from_u32(c).is_some_and(|c| c.is_control())
 }
 
 /// Check if character is a hex digit
 #[no_mangle]
 pub extern "C" fn bhc_char_is_hex_digit(c: u32) -> bool {
-    char::from_u32(c).map_or(false, |c| c.is_ascii_hexdigit())
+    char::from_u32(c).is_some_and(|c| c.is_ascii_hexdigit())
 }
 
 /// Check if character is a letter (alias for is_alpha)
 #[no_mangle]
 pub extern "C" fn bhc_char_is_letter(c: u32) -> bool {
-    char::from_u32(c).map_or(false, |c| c.is_alphabetic())
+    char::from_u32(c).is_some_and(|c| c.is_alphabetic())
 }
 
 /// Check if character is a number
 #[no_mangle]
 pub extern "C" fn bhc_char_is_number(c: u32) -> bool {
-    char::from_u32(c).map_or(false, |c| c.is_numeric())
+    char::from_u32(c).is_some_and(|c| c.is_numeric())
 }
 
 /// Check if character is punctuation
 #[no_mangle]
 pub extern "C" fn bhc_char_is_punctuation(c: u32) -> bool {
-    char::from_u32(c).map_or(false, |c| c.is_ascii_punctuation())
+    char::from_u32(c).is_some_and(|c| c.is_ascii_punctuation())
 }
 
 /// Check if character is a symbol
 #[no_mangle]
 pub extern "C" fn bhc_char_is_symbol(c: u32) -> bool {
-    char::from_u32(c).map_or(false, |c| {
+    char::from_u32(c).is_some_and(|c| {
         matches!(
             c,
             '$' | '+'

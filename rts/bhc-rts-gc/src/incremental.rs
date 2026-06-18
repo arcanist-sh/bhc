@@ -674,7 +674,7 @@ mod tests {
         marker.start_cycle(std::iter::once(make_ptr(0x1000)));
 
         // Drain gray set
-        while let Some(_) = marker.mark_increment(|_| Vec::new()) {
+        while marker.mark_increment(|_| Vec::new()).is_some() {
             if marker.gray_set_size() == 0 {
                 break;
             }

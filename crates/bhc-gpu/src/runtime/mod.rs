@@ -31,7 +31,7 @@ pub mod cuda;
 #[cfg(feature = "rocm")]
 pub mod rocm;
 
-use crate::device::{DeviceId, DeviceInfo, DeviceKind};
+use crate::device::{DeviceId, DeviceInfo};
 use crate::memory::DevicePtr;
 use crate::GpuResult;
 

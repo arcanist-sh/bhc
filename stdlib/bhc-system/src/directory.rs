@@ -326,10 +326,8 @@ pub fn list_directory<P: AsRef<Path>>(path: P) -> DirResult<Vec<String>> {
     })?;
 
     let mut names = Vec::new();
-    for entry in entries {
-        if let Ok(entry) = entry {
-            names.push(entry.file_name().to_string_lossy().to_string());
-        }
+    for entry in entries.flatten() {
+        names.push(entry.file_name().to_string_lossy().to_string());
     }
     Ok(names)
 }
@@ -343,29 +341,27 @@ pub fn list_directory_entries<P: AsRef<Path>>(path: P) -> DirResult<Vec<DirEntry
     })?;
 
     let mut result = Vec::new();
-    for entry in entries {
-        if let Ok(entry) = entry {
-            let file_type = entry
-                .file_type()
-                .map(|ft| {
-                    if ft.is_dir() {
-                        FileType::Directory
-                    } else if ft.is_symlink() {
-                        FileType::Symlink
-                    } else if ft.is_file() {
-                        FileType::File
-                    } else {
-                        FileType::Other
-                    }
-                })
-                .unwrap_or(FileType::Other);
+    for entry in entries.flatten() {
+        let file_type = entry
+            .file_type()
+            .map(|ft| {
+                if ft.is_dir() {
+                    FileType::Directory
+                } else if ft.is_symlink() {
+                    FileType::Symlink
+                } else if ft.is_file() {
+                    FileType::File
+                } else {
+                    FileType::Other
+                }
+            })
+            .unwrap_or(FileType::Other);
 
-            result.push(DirEntry {
-                name: entry.file_name().to_string_lossy().to_string(),
-                path: entry.path().to_string_lossy().to_string(),
-                file_type,
-            });
-        }
+        result.push(DirEntry {
+            name: entry.file_name().to_string_lossy().to_string(),
+            path: entry.path().to_string_lossy().to_string(),
+            file_type,
+        });
     }
     Ok(result)
 }
@@ -467,34 +463,32 @@ pub fn walk_directory<P: AsRef<Path>>(path: P) -> DirResult<Vec<DirEntry>> {
             kind: DirErrorKind::Other,
             message: e.to_string(),
             path: Some(path.to_string_lossy().to_string()),
-        })? {
-            if let Ok(entry) = entry {
-                let file_type = entry
-                    .file_type()
-                    .map(|ft| {
-                        if ft.is_dir() {
-                            FileType::Directory
-                        } else if ft.is_symlink() {
-                            FileType::Symlink
-                        } else if ft.is_file() {
-                            FileType::File
-                        } else {
-                            FileType::Other
-                        }
-                    })
-                    .unwrap_or(FileType::Other);
+        })?.flatten() {
+            let file_type = entry
+                .file_type()
+                .map(|ft| {
+                    if ft.is_dir() {
+                        FileType::Directory
+                    } else if ft.is_symlink() {
+                        FileType::Symlink
+                    } else if ft.is_file() {
+                        FileType::File
+                    } else {
+                        FileType::Other
+                    }
+                })
+                .unwrap_or(FileType::Other);
 
-                let dir_entry = DirEntry {
-                    name: entry.file_name().to_string_lossy().to_string(),
-                    path: entry.path().to_string_lossy().to_string(),
-                    file_type,
-                };
+            let dir_entry = DirEntry {
+                name: entry.file_name().to_string_lossy().to_string(),
+                path: entry.path().to_string_lossy().to_string(),
+                file_type,
+            };
 
-                entries.push(dir_entry);
+            entries.push(dir_entry);
 
-                if file_type == FileType::Directory {
-                    walk_recursive(&entry.path(), entries)?;
-                }
+            if file_type == FileType::Directory {
+                walk_recursive(&entry.path(), entries)?;
             }
         }
         Ok(())

@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn test_dead_variable() {
         // let x = 1 in 2  -- x is dead
-        let binds = vec![Bind::NonRec(mk_var("x", 1), Box::new(mk_int(1)))];
+        let binds = [Bind::NonRec(mk_var("x", 1), Box::new(mk_int(1)))];
         let body = mk_int(2);
         let full = Expr::Let(Box::new(binds[0].clone()), Box::new(body), Span::default());
         let occs = analyze_occurrences(&full);

@@ -45,12 +45,12 @@ pub unsafe extern "C" fn bhc_with_scope(
     callback: unsafe extern "C" fn(*const c_void, *const c_void) -> *mut c_void,
     user_data: *const c_void,
 ) -> *mut c_void {
-    let result = with_scope(|scope| {
+    
+    with_scope(|scope| {
         let scope_ptr = scope as *const Scope as *const c_void;
         // SAFETY: callback is provided by BHC runtime
         unsafe { callback(scope_ptr, user_data) }
-    });
-    result
+    })
 }
 
 /// Run a function within a scope with a deadline.

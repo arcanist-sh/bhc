@@ -68,43 +68,41 @@ pub fn format_matmul_diagram(
         let k2 = &right_dims[0];
         let n = &right_dims[1];
 
-        lines.push(format!("    ┌─────────┐   ┌─────────┐   ┌─────────┐"));
-        lines.push(format!("    │         │   │         │   │         │"));
+        lines.push("    ┌─────────┐   ┌─────────┐   ┌─────────┐".to_string());
+        lines.push("    │         │   │         │   │         │".to_string());
         lines.push(format!(
             "    │  {m:^5}  │ × │  {k2:^5}  │ → │  {m:^5}  │",
             m = m,
             k2 = k2
         ));
-        lines.push(format!("    │    ×    │   │    ×    │   │    ×    │"));
+        lines.push("    │    ×    │   │    ×    │   │    ×    │".to_string());
         lines.push(format!(
             "    │  {k1:^5}  │   │  {n:^5}  │   │  {n:^5}  │",
             k1 = k1,
             n = n
         ));
-        lines.push(format!("    │         │   │         │   │         │"));
-        lines.push(format!("    └─────────┘   └─────────┘   └─────────┘"));
+        lines.push("    │         │   │         │   │         │".to_string());
+        lines.push("    └─────────┘   └─────────┘   └─────────┘".to_string());
         lines.push(String::new());
-        lines.push(format!("         ↑              ↑"));
-        lines.push(format!("         │              │"));
+        lines.push("         ↑              ↑".to_string());
+        lines.push("         │              │".to_string());
         lines.push(format!(
             "         └── k = {}    k = {} ──┘",
             inner_left_str, inner_right_str
         ));
-        lines.push(format!("                  ↑"));
-        lines.push(format!("        These dimensions must match!"));
+        lines.push("                  ↑".to_string());
+        lines.push("        These dimensions must match!".to_string());
     } else {
         // Non-standard shapes
-        lines.push(format!("    Inner dimensions:"));
+        lines.push("    Inner dimensions:".to_string());
         lines.push(format!("      Left columns:  {}", inner_left_str));
         lines.push(format!("      Right rows:    {}", inner_right_str));
-        lines.push(format!("                     ↑"));
-        lines.push(format!("           Must be equal for matmul"));
+        lines.push("                     ↑".to_string());
+        lines.push("           Must be equal for matmul".to_string());
     }
 
     lines.push(String::new());
-    lines.push(format!(
-        "  Hint: For A × B, columns of A must equal rows of B"
-    ));
+    lines.push("  Hint: For A × B, columns of A must equal rows of B".to_string());
 
     lines.join("\n")
 }
@@ -133,12 +131,10 @@ pub fn format_broadcast_diagram(
     let max_rank = dims1.len().max(dims2.len());
 
     // Pad shorter shape with "1" on the left (broadcasting semantics)
-    let padded1: Vec<String> = std::iter::repeat("1".to_string())
-        .take(max_rank.saturating_sub(dims1.len()))
+    let padded1: Vec<String> = std::iter::repeat_n("1".to_string(), max_rank.saturating_sub(dims1.len()))
         .chain(dims1.iter().cloned())
         .collect();
-    let padded2: Vec<String> = std::iter::repeat("1".to_string())
-        .take(max_rank.saturating_sub(dims2.len()))
+    let padded2: Vec<String> = std::iter::repeat_n("1".to_string(), max_rank.saturating_sub(dims2.len()))
         .chain(dims2.iter().cloned())
         .collect();
 
@@ -338,12 +334,12 @@ pub fn format_transpose_suggestion(found_shape: &TyList, expected_shape: &TyList
             m, n, p, q
         ));
         lines.push(String::new());
-        lines.push(format!("    ┌─────────┐              ┌─────────┐"));
+        lines.push("    ┌─────────┐              ┌─────────┐".to_string());
         lines.push(format!(
             "    │  {} × {} │   transpose  │  {} × {} │",
             m, n, n, m
         ));
-        lines.push(format!("    └─────────┘      →       └─────────┘"));
+        lines.push("    └─────────┘      →       └─────────┘".to_string());
         lines.push(String::new());
         lines.push("  Hint: Try using `transpose` on the tensor".to_string());
     } else {

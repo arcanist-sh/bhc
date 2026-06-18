@@ -477,7 +477,7 @@ fn main() -> Result<()> {
 fn inspect_ir(
     file: &PathBuf,
     stage: Option<IrStage>,
-    format: OutputFormat,
+    _format: OutputFormat,
     function: Option<&str>,
     show_types: bool,
     show_locations: bool,
@@ -822,44 +822,44 @@ fn format_shapes(shapes: &[Vec<String>]) -> String {
 }
 
 fn highlight_hir_line(line: &str) -> String {
-    let line = line
+    
+    line
         .replace("let ", &"let ".purple().to_string())
         .replace("in ", &"in ".purple().to_string())
         .replace("case ", &"case ".purple().to_string())
         .replace("of ", &"of ".purple().to_string())
-        .replace(" -> ", &" -> ".cyan().to_string());
-    line
+        .replace(" -> ", &" -> ".cyan().to_string())
 }
 
 fn highlight_core_line(line: &str) -> String {
-    let line = line
+    
+    line
         .replace("let ", &"let ".purple().to_string())
         .replace("letrec ", &"letrec ".purple().to_string())
         .replace("case ", &"case ".purple().to_string())
         .replace("of ", &"of ".purple().to_string())
         .replace("Lam ", &"λ ".blue().to_string())
-        .replace("App ", &"@ ".cyan().to_string());
-    line
+        .replace("App ", &"@ ".cyan().to_string())
 }
 
 fn highlight_tensor_line(line: &str) -> String {
-    let line = line
+    
+    line
         .replace("map ", &"map ".yellow().to_string())
         .replace("zipWith ", &"zipWith ".yellow().to_string())
         .replace("fold ", &"fold ".yellow().to_string())
         .replace("reduce ", &"reduce ".yellow().to_string())
         .replace("matmul ", &"matmul ".magenta().to_string())
-        .replace("FUSED", &"FUSED".green().bold().to_string());
-    line
+        .replace("FUSED", &"FUSED".green().bold().to_string())
 }
 
 fn highlight_loop_line(line: &str) -> String {
-    let line = line
+    
+    line
         .replace("for ", &"for ".purple().to_string())
         .replace("parallel ", &"parallel ".cyan().bold().to_string())
         .replace("simd ", &"simd ".magenta().bold().to_string())
-        .replace("kernel ", &"kernel ".yellow().bold().to_string());
-    line
+        .replace("kernel ", &"kernel ".yellow().bold().to_string())
 }
 
 // ============================================================================
@@ -1888,7 +1888,7 @@ fn pretty_print(file: &PathBuf, stage: Option<IrStage>, width: usize, indent: us
     let content =
         fs::read_to_string(file).with_context(|| format!("Failed to read {}", file.display()))?;
 
-    let stage = stage.unwrap_or_else(|| detect_stage(file));
+    let _stage = stage.unwrap_or_else(|| detect_stage(file));
 
     println!("{}", "Pretty Print".bold().cyan());
     println!("{}", "═".repeat(width.min(70)));
@@ -2015,17 +2015,15 @@ fn validate_ir(
                 }
             }
         }
-        IrStage::Loop => {
-            if check_invariants {
+        IrStage::Loop
+            if check_invariants
                 // Check for unvectorized loops
-                if content.contains("for ")
+                && content.contains("for ")
                     && !content.contains("simd")
                     && !content.contains("parallel")
-                {
+                => {
                     warnings.push("Found non-vectorized, non-parallel loop".to_string());
                 }
-            }
-        }
         _ => {}
     }
 

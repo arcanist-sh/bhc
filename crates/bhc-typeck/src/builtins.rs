@@ -3691,7 +3691,7 @@ impl Builtins {
             // Accumulating maps
             ("mapAccumL", {
                 // mapAccumL :: (acc -> x -> (acc, y)) -> acc -> [x] -> (acc, [y])
-                let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
+                let _list_b = Ty::List(Box::new(Ty::Var(b.clone())));
                 let pair_ab = Ty::Tuple(vec![Ty::Var(a.clone()), Ty::Var(b.clone())]);
                 let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
                 let pair_ac = Ty::Tuple(vec![
@@ -8214,7 +8214,7 @@ impl Builtins {
     /// with the sequential allocation used by `register_primitive_ops`.
     fn register_transformer_ops(&self, env: &mut TypeEnv) {
         let a = TyVar::new_star(BUILTIN_TYVAR_A);
-        let b = TyVar::new_star(BUILTIN_TYVAR_B);
+        let _b = TyVar::new_star(BUILTIN_TYVAR_B);
         let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
         let m = TyVar::new(BUILTIN_TYVAR_M, m_kind.clone());
         let r_var = TyVar::new_star(BUILTIN_TYVAR_R);
@@ -8614,7 +8614,7 @@ impl Builtins {
         );
 
         // ExceptT e m ()
-        let except_t_e_m_unit = Ty::App(
+        let _except_t_e_m_unit = Ty::App(
             Box::new(Ty::App(
                 Box::new(Ty::App(
                     Box::new(Ty::Con(except_t_con.clone())),
@@ -9114,7 +9114,7 @@ impl Builtins {
         };
 
         // Helper to build transformer types: T x m a
-        let transformer_type = |con_name: Symbol, x: &TyVar, m_var: &TyVar, a_var: &TyVar| -> Ty {
+        let _transformer_type = |con_name: Symbol, x: &TyVar, m_var: &TyVar, a_var: &TyVar| -> Ty {
             let con = TyCon::new(
                 con_name,
                 Kind::Arrow(

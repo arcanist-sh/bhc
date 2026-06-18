@@ -370,7 +370,7 @@ mod vec2f64_tests {
     fn test_precision() {
         // Test that f64 preserves more precision than f32
         let a = Vec2F64::new(1.0 + 1e-15, 1.0);
-        let b = Vec2F64::new(1e-15, 1e-15);
+        let _b = Vec2F64::new(1e-15, 1e-15);
         let c = a.sub(Vec2F64::new(1.0, 1.0));
         assert!(c.get(0) > 0.0, "f64 should preserve small differences");
     }

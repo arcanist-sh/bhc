@@ -205,7 +205,7 @@ mod tests {
         let analysis = Arc::new(AnalysisEngine::new());
         let config = Arc::new(Config::default());
 
-        let handler = RequestHandler::new(docs, analysis, config);
+        let _handler = RequestHandler::new(docs, analysis, config);
         // Just verify it compiles
     }
 }

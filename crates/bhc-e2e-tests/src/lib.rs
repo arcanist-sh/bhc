@@ -66,8 +66,10 @@ impl std::fmt::Display for Backend {
 /// Compilation profiles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum Profile {
     /// Default lazy evaluation.
+    #[default]
     Default,
     /// Strict numeric operations with fusion.
     Numeric,
@@ -129,11 +131,6 @@ fn default_timeout() -> u64 {
     30
 }
 
-impl Default for Profile {
-    fn default() -> Self {
-        Profile::Default
-    }
-}
 
 impl E2ETestCase {
     /// Load a test case from a fixture directory.
@@ -154,7 +151,7 @@ impl E2ETestCase {
         for entry in std::fs::read_dir(fixture_path)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "hs") {
+            if path.extension().is_some_and(|e| e == "hs") {
                 hs_files.push(path);
             }
         }
@@ -171,10 +168,10 @@ impl E2ETestCase {
         hs_files.sort_by(|a, b| {
             let a_is_main = a
                 .file_stem()
-                .map_or(false, |s| s.eq_ignore_ascii_case("main"));
+                .is_some_and(|s| s.eq_ignore_ascii_case("main"));
             let b_is_main = b
                 .file_stem()
-                .map_or(false, |s| s.eq_ignore_ascii_case("main"));
+                .is_some_and(|s| s.eq_ignore_ascii_case("main"));
             match (a_is_main, b_is_main) {
                 (true, false) => std::cmp::Ordering::Greater,
                 (false, true) => std::cmp::Ordering::Less,

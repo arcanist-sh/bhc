@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn test_linspace() {
         let arr = UArray::<f64>::linspace(0.0, 1.0, 5);
-        let expected = vec![0.0, 0.25, 0.5, 0.75, 1.0];
+        let expected = [0.0, 0.25, 0.5, 0.75, 1.0];
         for (a, b) in arr.to_vec().iter().zip(expected.iter()) {
             assert!((a - b).abs() < 1e-10);
         }

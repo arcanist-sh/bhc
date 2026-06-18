@@ -73,7 +73,7 @@ fn symbol_hover(word: &str, symbol: &Symbol, position: Position) -> Option<Hover
             kind: MarkupKind::Markdown,
             value: content,
         }),
-        range: Some(symbol.selection_range.clone()),
+        range: Some(symbol.selection_range),
     })
 }
 

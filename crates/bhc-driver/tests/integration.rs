@@ -3,7 +3,7 @@
 //! These tests verify end-to-end compilation and execution of Haskell code.
 
 use bhc_core::eval::Value;
-use bhc_driver::{CompileError, Compiler, CompilerBuilder};
+use bhc_driver::{CompileError, Compiler};
 
 /// Helper to compile and run source code, returning the value
 fn run_source(source: &str) -> Result<Value, CompileError> {

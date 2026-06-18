@@ -64,7 +64,7 @@ impl LoopIRLowerer {
 
         // Assign parameter indices
         self.next_local = 0;
-        for (i, param) in ir.params.iter().enumerate() {
+        for (i, _param) in ir.params.iter().enumerate() {
             // Parameters have indices based on their position
             self.next_local = (i + 1) as u32;
             // Map param value to its index
@@ -289,7 +289,7 @@ impl LoopIRLowerer {
                 func.emit(WasmInstr::F32x4ReplaceLane(*lane));
             }
 
-            Op::VecReduce(reduce_op, val) => {
+            Op::VecReduce(_reduce_op, val) => {
                 // Vector reduction - extract lanes and combine
                 self.emit_value(func, val)?;
                 // For now, emit a simple horizontal add for f32x4

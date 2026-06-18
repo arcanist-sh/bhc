@@ -219,13 +219,13 @@ pub fn analyze_kernel(kernel: &Kernel) -> GpuSuitability {
 
     let bottleneck = if arithmetic_intensity > 10.0 {
         Bottleneck::Compute
-    } else if total_parallelism.map_or(false, |p| p < 1000) {
+    } else if total_parallelism.is_some_and(|p| p < 1000) {
         Bottleneck::Latency
     } else {
         Bottleneck::Memory
     };
 
-    let suitable = cpu_fallback_ops.is_empty() && total_parallelism.map_or(false, |p| p >= 1000);
+    let suitable = cpu_fallback_ops.is_empty() && total_parallelism.is_some_and(|p| p >= 1000);
 
     GpuSuitability {
         suitable,
@@ -364,7 +364,7 @@ pub fn compute_launch_config(
     let block_size = determine_block_size(kernel, device, config);
 
     // Calculate grid size
-    let grid_size = (total_elements as u32 + block_size - 1) / block_size;
+    let grid_size = (total_elements as u32).div_ceil(block_size);
 
     // Cap grid size at device maximum
     let max_grid_size = device.max_grid_dim.0;

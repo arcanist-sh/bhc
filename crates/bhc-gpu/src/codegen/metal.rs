@@ -27,7 +27,7 @@
 //! }
 //! ```
 
-use super::{dtype_to_gpu_type, KernelParams};
+use super::KernelParams;
 use crate::device::DeviceInfo;
 use crate::kernel::CompiledModule;
 use crate::GpuResult;
@@ -175,19 +175,19 @@ fn generate_unary_op(code: &mut String, op: UnaryOp, dtype: DType, _idx: usize) 
 
     let result = match op {
         UnaryOp::Neg => "-val".to_string(),
-        UnaryOp::Abs => format!("abs(val)"),
-        UnaryOp::Sqrt => format!("sqrt(val)"),
-        UnaryOp::Exp => format!("exp(val)"),
-        UnaryOp::Log => format!("log(val)"),
-        UnaryOp::Sin => format!("sin(val)"),
-        UnaryOp::Cos => format!("cos(val)"),
-        UnaryOp::Tan => format!("tan(val)"),
-        UnaryOp::Tanh => format!("tanh(val)"),
-        UnaryOp::Sigmoid => format!("1.0 / (1.0 + exp(-val))"),
+        UnaryOp::Abs => "abs(val)".to_string(),
+        UnaryOp::Sqrt => "sqrt(val)".to_string(),
+        UnaryOp::Exp => "exp(val)".to_string(),
+        UnaryOp::Log => "log(val)".to_string(),
+        UnaryOp::Sin => "sin(val)".to_string(),
+        UnaryOp::Cos => "cos(val)".to_string(),
+        UnaryOp::Tan => "tan(val)".to_string(),
+        UnaryOp::Tanh => "tanh(val)".to_string(),
+        UnaryOp::Sigmoid => "1.0 / (1.0 + exp(-val))".to_string(),
         UnaryOp::Relu => format!("max(val, ({})0)", ty),
-        UnaryOp::Floor => format!("floor(val)"),
-        UnaryOp::Ceil => format!("ceil(val)"),
-        UnaryOp::Round => format!("round(val)"),
+        UnaryOp::Floor => "floor(val)".to_string(),
+        UnaryOp::Ceil => "ceil(val)".to_string(),
+        UnaryOp::Round => "round(val)".to_string(),
         _ => "val".to_string(),
     };
 

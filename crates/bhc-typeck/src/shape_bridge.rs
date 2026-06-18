@@ -183,7 +183,7 @@ pub fn extract_static_dims(ty_list: &TyList) -> Option<Vec<usize>> {
 /// Checks if a type-level shape is fully static (all dimensions known).
 pub fn is_static_shape(ty_list: &TyList) -> bool {
     ty_list.is_ground()
-        && ty_list.to_vec().map_or(false, |tys| {
+        && ty_list.to_vec().is_some_and(|tys| {
             tys.iter().all(|ty| matches!(ty, Ty::Nat(TyNat::Lit(_))))
         })
 }

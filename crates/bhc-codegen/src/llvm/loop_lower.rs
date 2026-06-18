@@ -12,8 +12,8 @@ use crate::{CodegenError, CodegenResult};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_loop_ir::{
-    AccessPattern, Alloc, AllocSize, BinOp, Body, CmpOp, IfStmt, Loop, LoopAttrs, LoopIR, LoopType,
-    MemRef, Op, Param, ReduceOp, ScalarType, Stmt, UnOp, Value, ValueId,
+    Alloc, AllocSize, BinOp, Body, CmpOp, IfStmt, Loop, LoopIR, LoopType,
+    MemRef, Op, ReduceOp, ScalarType, Stmt, UnOp, Value, ValueId,
 };
 use bhc_tensor_ir::{AllocRegion, BufferId};
 use inkwell::builder::Builder;
@@ -21,7 +21,7 @@ use inkwell::context::Context;
 use inkwell::intrinsics::Intrinsic;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, VectorType};
 use inkwell::values::{
-    BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue, VectorValue,
+    BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue, VectorValue,
 };
 use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
@@ -90,7 +90,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
         self.builder.position_at_end(entry);
 
         // Bind parameters
-        for (i, param) in ir.params.iter().enumerate() {
+        for (i, _param) in ir.params.iter().enumerate() {
             let llvm_param = function
                 .get_nth_param(i as u32)
                 .ok_or_else(|| CodegenError::Internal(format!("Missing parameter {}", i)))?;
@@ -108,17 +108,16 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
         self.lower_body(&ir.body)?;
 
         // Add implicit void return if needed
-        if ir.return_ty.is_void() {
-            if self
+        if ir.return_ty.is_void()
+            && self
                 .builder
                 .get_insert_block()
-                .map_or(true, |b| b.get_terminator().is_none())
+                .is_none_or(|b| b.get_terminator().is_none())
             {
                 self.builder
                     .build_return(None)
                     .map_err(|e| CodegenError::LlvmError(e.to_string()))?;
             }
-        }
 
         // Verify the function
         if function.verify(true) {
@@ -176,7 +175,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                 };
                 Ok(vec_ty)
             }
-            LoopType::Ptr(inner) => {
+            LoopType::Ptr(_inner) => {
                 let ptr_ty = self.llvm_ctx.ptr_type(AddressSpace::default());
                 Ok(ptr_ty.into())
             }
@@ -216,7 +215,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
         let elem_ty = self.scalar_type_to_llvm(alloc.elem_ty)?;
 
         // Compute the size
-        let size = match &alloc.size {
+        let _size = match &alloc.size {
             AllocSize::Static(n) => self.llvm_ctx.i64_type().const_int(*n as u64, false),
             AllocSize::Dynamic(vid) => {
                 let val = self.get_value(*vid)?;
@@ -438,7 +437,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
         if self
             .builder
             .get_insert_block()
-            .map_or(true, |b| b.get_terminator().is_none())
+            .is_none_or(|b| b.get_terminator().is_none())
         {
             self.builder
                 .build_unconditional_branch(merge_block)
@@ -453,7 +452,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
         if self
             .builder
             .get_insert_block()
-            .map_or(true, |b| b.get_terminator().is_none())
+            .is_none_or(|b| b.get_terminator().is_none())
         {
             self.builder
                 .build_unconditional_branch(merge_block)
@@ -550,7 +549,7 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
             Op::Fma(a, b, c) => self.lower_fma(a, b, c),
             Op::PtrAdd(ptr, offset) => self.lower_ptr_add(ptr, offset),
             Op::GetPtr(buffer, index) => self.lower_get_ptr(*buffer, index),
-            Op::Phi(entries) => {
+            Op::Phi(_entries) => {
                 // Phi nodes are handled specially during loop lowering
                 Err(CodegenError::Internal(
                     "Phi nodes should be lowered in loop context".to_string(),
@@ -1721,8 +1720,8 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
             _ => {
                 // Fall back to mul + add
                 let mul = self.lower_binary(BinOp::Mul, a, b)?;
-                let mul_val = match mul {
-                    BasicValueEnum::FloatValue(f) => Value::FloatConst(0.0, ScalarType::F64), // placeholder
+                let _mul_val = match mul {
+                    BasicValueEnum::FloatValue(_f) => Value::FloatConst(0.0, ScalarType::F64), // placeholder
                     _ => return Err(CodegenError::TypeError("FMA requires floats".to_string())),
                 };
                 // This is a simplified fallback; in practice we'd need proper handling

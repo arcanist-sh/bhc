@@ -659,7 +659,7 @@ mod tests {
         );
         let mut module = mk_module(vec![Bind::NonRec(mk_var("main", 3), Box::new(let_expr))]);
         let config = SimplifyConfig::default();
-        let stats = simplify_module(&mut module, &config);
+        let _stats = simplify_module(&mut module, &config);
         // The recursive binding should still be present
         if let Bind::NonRec(_, rhs) = &module.bindings[0] {
             assert!(matches!(rhs.as_ref(), Expr::Let(_, _, _)));

@@ -769,7 +769,7 @@ mod accuracy_tests {
         let x: Vec<f64> = (0..n).map(|i| (i as f64) * 0.001).collect();
         let y: Vec<f64> = (0..n).map(|i| 1.0 - (i as f64) * 0.001).collect();
 
-        let result = p.ddot(n as i32, &x, 1, &y, 1);
+        let result = p.ddot(n, &x, 1, &y, 1);
 
         // Verify against simple loop computation
         let expected: f64 = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum();

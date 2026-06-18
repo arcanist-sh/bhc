@@ -175,7 +175,7 @@ pub fn lower_module_with_defs_and_constructors(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bhc_hir::{Equation, Expr, Item, Lit, Pat, ValueDef};
+    use bhc_hir::{Equation, Expr, Item, Pat, ValueDef};
     use bhc_index::Idx;
     use bhc_intern::Symbol;
     use bhc_types::{Constraint, Kind, Ty, TyCon, TyVar};
@@ -350,8 +350,8 @@ mod tests {
         //   myNeq :: a -> a -> Bool
 
         let class_def_id = DefId::new(300);
-        let my_eq_method_id = DefId::new(301);
-        let my_neq_method_id = DefId::new(302);
+        let _my_eq_method_id = DefId::new(301);
+        let _my_neq_method_id = DefId::new(302);
         let a_var = TyVar::new(0, Kind::Star);
 
         let class_def = bhc_hir::ClassDef {
@@ -1035,8 +1035,8 @@ mod tests {
         use bhc_types::{Kind, TyVar};
 
         let class_def_id = DefId::new(500);
-        let my_eq_method_def_id = DefId::new(501);
-        let my_neq_method_def_id = DefId::new(502);
+        let _my_eq_method_def_id = DefId::new(501);
+        let _my_neq_method_def_id = DefId::new(502);
         let my_neq_default_def_id = DefId::new(503);
         let x_def_id = DefId::new(504);
         let y_def_id = DefId::new(505);

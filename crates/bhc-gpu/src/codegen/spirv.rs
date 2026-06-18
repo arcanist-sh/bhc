@@ -23,7 +23,7 @@
 //! OpExecutionMode %main LocalSize 256 1 1
 //! ```
 
-use super::{dtype_to_gpu_type, KernelParams};
+use super::KernelParams;
 use crate::device::DeviceInfo;
 use crate::kernel::CompiledModule;
 use crate::GpuResult;
@@ -695,7 +695,7 @@ fn dtype_to_spirv_type(dtype: DType) -> &'static str {
 
 /// Generate an elementwise kernel.
 pub fn generate_elementwise_kernel(
-    params: &KernelParams,
+    _params: &KernelParams,
     op_code: &str,
     dtype: DType,
 ) -> GpuResult<String> {

@@ -351,7 +351,7 @@ impl TypeEnv {
     pub fn register_instance(&mut self, info: InstanceInfo) {
         self.instances
             .entry(info.class)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(info);
     }
 

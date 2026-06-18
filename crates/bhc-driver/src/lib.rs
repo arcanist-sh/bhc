@@ -1501,13 +1501,13 @@ impl Compiler {
                                 if let Some(compiled) = reg.modules.get(export.name.as_str()) {
                                     is_module_reexport = true;
                                     // Re-export ALL values, types, and constructors from this module
-                                    for (&name, _) in &compiled.exports.values {
+                                    for &name in compiled.exports.values.keys() {
                                         names.insert(name);
                                     }
-                                    for (&name, _) in &compiled.exports.types {
+                                    for &name in compiled.exports.types.keys() {
                                         names.insert(name);
                                     }
-                                    for (&name, _) in &compiled.exports.constructors {
+                                    for &name in compiled.exports.constructors.keys() {
                                         con_names.insert(name);
                                     }
                                 }
@@ -1517,8 +1517,8 @@ impl Compiler {
                                 // This is a re-exported type — search for its constructors
                                 // First try lower_ctx.defs
                                 for def_info in lower_ctx.defs.values() {
-                                    if def_info.kind == bhc_lower::DefKind::Constructor {
-                                        if def_info.type_con_name == Some(export.name) {
+                                    if def_info.kind == bhc_lower::DefKind::Constructor
+                                        && def_info.type_con_name == Some(export.name) {
                                             con_names.insert(def_info.name);
                                             if let Some(ref fns) = def_info.field_names {
                                                 for fname in fns {
@@ -1526,7 +1526,6 @@ impl Compiler {
                                                 }
                                             }
                                         }
-                                    }
                                 }
                                 // Then search registry for re-exported constructors and class methods
                                 if let Some(reg) = registry {
@@ -1576,11 +1575,7 @@ impl Compiler {
                     // due to has_typed_sigs.  We must also check the unqualified portion
                     // against the filter so that re-exports of external names work correctly.
                     let name_str = def_info.name.as_str();
-                    let unqualified_name = if let Some(dot_pos) = name_str.rfind('.') {
-                        Some(Symbol::intern(&name_str[dot_pos + 1..]))
-                    } else {
-                        None
-                    };
+                    let unqualified_name = name_str.rfind('.').map(|dot_pos| Symbol::intern(&name_str[dot_pos + 1..]));
                     let export_name = if let Some((ref names, ref con_names)) = export_filter {
                         if names.contains(&def_info.name) || con_names.contains(&def_info.name) {
                             def_info.name
@@ -1604,11 +1599,7 @@ impl Compiler {
                 | bhc_lower::DefKind::StubType
                 | bhc_lower::DefKind::Class => {
                     let tname_str = def_info.name.as_str();
-                    let uq_type = if let Some(dot_pos) = tname_str.rfind('.') {
-                        Some(Symbol::intern(&tname_str[dot_pos + 1..]))
-                    } else {
-                        None
-                    };
+                    let uq_type = tname_str.rfind('.').map(|dot_pos| Symbol::intern(&tname_str[dot_pos + 1..]));
                     let export_type_name = if let Some((ref names, _)) = export_filter {
                         if names.contains(&def_info.name) {
                             def_info.name
@@ -1629,11 +1620,7 @@ impl Compiler {
                 bhc_lower::DefKind::Constructor | bhc_lower::DefKind::StubConstructor => {
                     // Check export filter: constructor must be in con_names set
                     let cname_str = def_info.name.as_str();
-                    let uq_con = if let Some(dot_pos) = cname_str.rfind('.') {
-                        Some(Symbol::intern(&cname_str[dot_pos + 1..]))
-                    } else {
-                        None
-                    };
+                    let uq_con = cname_str.rfind('.').map(|dot_pos| Symbol::intern(&cname_str[dot_pos + 1..]));
                     let export_con_name = if let Some((ref names, ref con_names)) = export_filter {
                         if con_names.contains(&def_info.name) || names.contains(&def_info.name) {
                             def_info.name
@@ -1807,11 +1794,11 @@ impl Compiler {
                 bhc_ast::Decl::TypeSig(sig) => {
                     for name_ident in &sig.names {
                         let name = name_ident.name;
-                        if !exports.values.contains_key(&name) {
+                        exports.values.entry(name).or_insert_with(|| {
                             let id = bhc_hir::DefId::new(next_id);
                             next_id += 1;
-                            exports.values.insert(name, id);
-                        }
+                            id
+                        });
                     }
                 }
                 bhc_ast::Decl::DataDecl(data) => {
@@ -1953,7 +1940,7 @@ impl Compiler {
 
         // Phase 3: Collect type aliases from imported modules
         let mut imported_aliases = Vec::new();
-        for (_mod_name, info) in &registry.modules {
+        for info in registry.modules.values() {
             for (name, params, ty) in &info.type_aliases {
                 imported_aliases.push((*name, params.clone(), ty.clone()));
             }
@@ -2056,7 +2043,7 @@ impl Compiler {
         .into_iter()
         .collect();
 
-        for (_mod_name, info) in &registry.modules {
+        for info in registry.modules.values() {
             for (&con_name, con_info) in &info.exports.constructors {
                 // Skip builtins and constructors with broken metadata
                 if builtins.contains(con_name.as_str()) {
@@ -2864,7 +2851,7 @@ impl Compiler {
             .options
             .target_triple
             .as_ref()
-            .map_or(false, |t| t.contains("wasm"))
+            .is_some_and(|t| t.contains("wasm"))
     }
 
     /// Check if the target is GPU (CUDA or ROCm).
@@ -2875,7 +2862,7 @@ impl Compiler {
             .options
             .target_triple
             .as_ref()
-            .map_or(false, |t| {
+            .is_some_and(|t| {
                 t.contains("cuda")
                     || t.contains("nvptx")
                     || t.contains("amdgcn")

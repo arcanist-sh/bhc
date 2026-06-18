@@ -217,18 +217,16 @@ pub fn reduce_broadcast(left: &TyList, right: &TyList) -> ReductionResult {
     let mut result = Vec::with_capacity(max_len);
 
     // Pad the shorter shape with implicit 1s
-    let left_padded: Vec<_> = std::iter::repeat(Ty::Nat(TyNat::Lit(1)))
-        .take(max_len - left_dims.len())
-        .chain(left_dims.into_iter())
+    let left_padded: Vec<_> = std::iter::repeat_n(Ty::Nat(TyNat::Lit(1)), max_len - left_dims.len())
+        .chain(left_dims)
         .collect();
 
-    let right_padded: Vec<_> = std::iter::repeat(Ty::Nat(TyNat::Lit(1)))
-        .take(max_len - right_dims.len())
-        .chain(right_dims.into_iter())
+    let right_padded: Vec<_> = std::iter::repeat_n(Ty::Nat(TyNat::Lit(1)), max_len - right_dims.len())
+        .chain(right_dims)
         .collect();
 
     // Compare dimensions pairwise
-    for (l, r) in left_padded.into_iter().zip(right_padded.into_iter()) {
+    for (l, r) in left_padded.into_iter().zip(right_padded) {
         match broadcast_dims(&l, &r) {
             Some(dim) => result.push(dim),
             None => {

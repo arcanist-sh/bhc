@@ -130,17 +130,14 @@ impl VectorizePass {
 
     /// Analyze a statement for vectorization.
     fn analyze_stmt(&mut self, stmt: &Stmt, loop_info: &[LoopMetadata]) {
-        match stmt {
-            Stmt::Loop(lp) => {
-                let info = self.analyze_loop(lp, loop_info);
-                self.analysis.insert(lp.id, info);
+        if let Stmt::Loop(lp) = stmt {
+            let info = self.analyze_loop(lp, loop_info);
+            self.analysis.insert(lp.id, info);
 
-                // Recursively analyze nested loops
-                for inner_stmt in &lp.body.stmts {
-                    self.analyze_stmt(inner_stmt, loop_info);
-                }
+            // Recursively analyze nested loops
+            for inner_stmt in &lp.body.stmts {
+                self.analyze_stmt(inner_stmt, loop_info);
             }
-            _ => {}
         }
     }
 
@@ -231,12 +228,11 @@ impl VectorizePass {
                 Stmt::Store(mem_ref, _) => {
                     patterns.push(mem_ref.access.clone());
                 }
-                Stmt::Loop(inner) => {
+                Stmt::Loop(inner)
                     // Check if inner loop has reduction attribute
-                    if inner.attrs.contains(LoopAttrs::REDUCTION) {
+                    if inner.attrs.contains(LoopAttrs::REDUCTION) => {
                         has_reduction = true;
                     }
-                }
                 _ => {}
             }
         }
@@ -287,20 +283,17 @@ impl VectorizePass {
         loop_info: &mut Vec<LoopMetadata>,
         report: &mut VectorizeReport,
     ) -> Result<(), VectorizeError> {
-        match stmt {
-            Stmt::Loop(lp) => {
-                if let Some(info) = self.analysis.get(&lp.id) {
-                    if info.vectorizable {
-                        self.vectorize_loop(lp, info, loop_info, report)?;
-                    }
-                }
-
-                // Recursively vectorize nested loops
-                for inner_stmt in &mut lp.body.stmts {
-                    self.vectorize_stmt(inner_stmt, loop_info, report)?;
+        if let Stmt::Loop(lp) = stmt {
+            if let Some(info) = self.analysis.get(&lp.id) {
+                if info.vectorizable {
+                    self.vectorize_loop(lp, info, loop_info, report)?;
                 }
             }
-            _ => {}
+
+            // Recursively vectorize nested loops
+            for inner_stmt in &mut lp.body.stmts {
+                self.vectorize_stmt(inner_stmt, loop_info, report)?;
+            }
         }
         Ok(())
     }
@@ -340,11 +333,8 @@ impl VectorizePass {
     /// Transform scalar operations in a body to vector operations.
     fn vectorize_body(&self, body: &mut Body, width: u8) -> Result<(), VectorizeError> {
         for stmt in &mut body.stmts {
-            match stmt {
-                Stmt::Assign(_, op) => {
-                    *op = self.vectorize_op(op, width)?;
-                }
-                _ => {}
+            if let Stmt::Assign(_, op) = stmt {
+                *op = self.vectorize_op(op, width)?;
             }
         }
         Ok(())

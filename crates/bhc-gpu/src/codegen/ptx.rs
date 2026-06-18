@@ -711,7 +711,7 @@ fn generate_zipwith_op(
     let elem_size = dtype_element_size(dtype);
 
     // Load first input
-    if params.inputs.len() >= 1 {
+    if !params.inputs.is_empty() {
         let input_a = &params.inputs[0];
         writeln!(code, "    // Load first input").unwrap();
         writeln!(

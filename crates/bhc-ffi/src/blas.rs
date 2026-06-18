@@ -265,7 +265,7 @@ impl BlasProvider for FallbackBlas {
         if x.len() != y.len() {
             return Err(BlasError::DimensionMismatch {
                 operation: "ddot",
-                expected: format!("vectors of same length"),
+                expected: "vectors of same length".to_string(),
                 actual: format!("x.len={}, y.len={}", x.len(), y.len()),
             });
         }
@@ -284,7 +284,7 @@ impl BlasProvider for FallbackBlas {
         if x.len() != y.len() {
             return Err(BlasError::DimensionMismatch {
                 operation: "sdot",
-                expected: format!("vectors of same length"),
+                expected: "vectors of same length".to_string(),
                 actual: format!("x.len={}, y.len={}", x.len(), y.len()),
             });
         }
@@ -322,7 +322,7 @@ impl BlasProvider for FallbackBlas {
         if x.len() != y.len() {
             return Err(BlasError::DimensionMismatch {
                 operation: "daxpy",
-                expected: format!("vectors of same length"),
+                expected: "vectors of same length".to_string(),
                 actual: format!("x.len={}, y.len={}", x.len(), y.len()),
             });
         }
@@ -342,7 +342,7 @@ impl BlasProvider for FallbackBlas {
         if x.len() != y.len() {
             return Err(BlasError::DimensionMismatch {
                 operation: "saxpy",
-                expected: format!("vectors of same length"),
+                expected: "vectors of same length".to_string(),
                 actual: format!("x.len={}, y.len={}", x.len(), y.len()),
             });
         }

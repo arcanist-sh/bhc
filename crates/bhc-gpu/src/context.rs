@@ -291,7 +291,7 @@ impl GpuContext {
             dst.len()
         );
 
-        let size = src.len() * std::mem::size_of::<T>();
+        let size = std::mem::size_of_val(src);
 
         match self.device.kind {
             #[cfg(feature = "cuda")]

@@ -146,17 +146,14 @@ impl ParallelPass {
 
     /// Analyze a statement for parallelization.
     fn analyze_stmt(&mut self, stmt: &Stmt, loop_info: &[LoopMetadata]) {
-        match stmt {
-            Stmt::Loop(lp) => {
-                let info = self.analyze_loop(lp, loop_info);
-                self.analysis.insert(lp.id, info);
+        if let Stmt::Loop(lp) = stmt {
+            let info = self.analyze_loop(lp, loop_info);
+            self.analysis.insert(lp.id, info);
 
-                // Recursively analyze nested loops (but typically only outermost is parallelized)
-                for inner_stmt in &lp.body.stmts {
-                    self.analyze_stmt(inner_stmt, loop_info);
-                }
+            // Recursively analyze nested loops (but typically only outermost is parallelized)
+            for inner_stmt in &lp.body.stmts {
+                self.analyze_stmt(inner_stmt, loop_info);
             }
-            _ => {}
         }
     }
 
@@ -210,7 +207,7 @@ impl ParallelPass {
         info.parallelizable = true;
         info.reason = None;
         info.chunk_size = chunk_size;
-        info.num_chunks = (trip_count + chunk_size - 1) / chunk_size;
+        info.num_chunks = trip_count.div_ceil(chunk_size);
         info.is_reduction = is_reduction;
         info.strategy = if self.config.deterministic {
             ParallelStrategy::Static
@@ -239,15 +236,12 @@ impl ParallelPass {
         loop_info: &mut Vec<LoopMetadata>,
         report: &mut ParallelReport,
     ) -> Result<(), ParallelError> {
-        match stmt {
-            Stmt::Loop(lp) => {
-                if let Some(info) = self.analysis.get(&lp.id) {
-                    if info.parallelizable {
-                        self.parallelize_loop(lp, info, loop_info, report)?;
-                    }
+        if let Stmt::Loop(lp) = stmt {
+            if let Some(info) = self.analysis.get(&lp.id) {
+                if info.parallelizable {
+                    self.parallelize_loop(lp, info, loop_info, report)?;
                 }
             }
-            _ => {}
         }
         Ok(())
     }
@@ -303,7 +297,7 @@ impl ParallelPass {
 fn compute_chunk_size(trip_count: usize, worker_count: usize) -> usize {
     // Simple static chunking: divide evenly among workers
     // Round up to ensure all iterations are covered
-    (trip_count + worker_count - 1) / worker_count
+    trip_count.div_ceil(worker_count)
 }
 
 /// Report of parallelization results.
@@ -420,7 +414,7 @@ impl Range {
         }
 
         let total = self.len();
-        let chunk_size = (total + num_chunks - 1) / num_chunks;
+        let chunk_size = total.div_ceil(num_chunks);
 
         let mut chunks = Vec::with_capacity(num_chunks);
         let mut current = self.start;

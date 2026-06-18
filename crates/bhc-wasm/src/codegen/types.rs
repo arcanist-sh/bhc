@@ -196,7 +196,7 @@ fn scalar_size(scalar: ScalarType) -> usize {
     match scalar {
         ScalarType::Bool => 1,
         ScalarType::Int(bits) | ScalarType::UInt(bits) | ScalarType::Float(bits) => {
-            (bits as usize + 7) / 8
+            (bits as usize).div_ceil(8)
         }
     }
 }

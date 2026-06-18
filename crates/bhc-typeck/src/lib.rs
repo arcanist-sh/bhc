@@ -76,7 +76,6 @@ use bhc_hir::{DefId, HirId, Module};
 use bhc_intern::Symbol;
 use bhc_span::FileId;
 use bhc_types::{Scheme, Ty};
-use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 
 /// The result of type checking a module.
@@ -324,7 +323,7 @@ pub fn type_check_module_full(
         // But for type-checking purposes, we treat Blocks/Inlines as [Block]/[Inline]
         // since BHC doesn't have a real Seq type. The Many newtype is isomorphic to lists
         // in our simplified model.
-        let many_con = bhc_types::TyCon::new(
+        let _many_con = bhc_types::TyCon::new(
             Symbol::intern("Many"),
             Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
         );

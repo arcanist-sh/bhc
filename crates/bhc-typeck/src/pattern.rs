@@ -259,8 +259,8 @@ fn infer_lit_type(ctx: &mut TyCtxt, lit: &Lit) -> Ty {
         Lit::String(_) => {
             if ctx.overloaded_strings {
                 // With OverloadedStrings, string patterns have type `IsString a => a`
-                let ty = ctx.fresh_ty();
-                ty
+                
+                ctx.fresh_ty()
             } else {
                 ctx.builtins.string_ty.clone()
             }

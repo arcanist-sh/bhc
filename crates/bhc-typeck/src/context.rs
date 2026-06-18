@@ -581,7 +581,7 @@ impl TyCtxt {
         match class_name {
             // E.63: Generic/NFData satisfied by any concrete type
             "Generic" | "NFData" if args.len() == 1 => {
-                return !matches!(&args[0], Ty::Var(_));
+                !matches!(&args[0], Ty::Var(_))
             }
             // Monad IO is always satisfied; also State, Reader, Writer, RWS
             "Monad" if args.len() == 1 => {
@@ -922,7 +922,7 @@ impl TyCtxt {
 
                     // Find matching instances
                     if let Some(instances) = self.env.lookup_instances(constraint.class) {
-                        for inst in instances.clone() {
+                        for inst in instances {
                             // Check if this instance matches on the "from" positions
                             let inst_matches = fundep.from.iter().all(|&i| {
                                 match (args.get(i), inst.types.get(i)) {
@@ -1761,7 +1761,7 @@ impl TyCtxt {
 
                         // Build the constructor type: b1 -> b2 -> ... -> bm -> ResultType
                         // Build from inside out: result <- bm <- bm-1 <- ... <- b1
-                        let mut field_types: Vec<Ty> = field_type_params
+                        let field_types: Vec<Ty> = field_type_params
                             .iter()
                             .map(|tv| Ty::Var(tv.clone()))
                             .collect();
@@ -1792,7 +1792,7 @@ impl TyCtxt {
                         // Combine all type parameters: result params + field params
                         let all_params: Vec<TyVar> = result_type_params
                             .into_iter()
-                            .chain(field_type_params.into_iter())
+                            .chain(field_type_params)
                             .collect();
 
                         Scheme::poly(all_params, con_ty)
@@ -1883,13 +1883,12 @@ impl TyCtxt {
             // Normalize ByteString variant module names so they share type signatures,
             // EXCEPT for Char8-specific functions that need Char instead of Word8/Int.
             let normalized_name;
-            let is_char8 = raw_name.starts_with("Data.ByteString.Char8.")
+            let _is_char8 = raw_name.starts_with("Data.ByteString.Char8.")
                 || raw_name.starts_with("Data.ByteString.Lazy.Char8.");
             let name =
-                if raw_name.starts_with("Data.ByteString.Char8.") {
+                if let Some(fn_name) = raw_name.strip_prefix("Data.ByteString.Char8.") {
                     // Char8 functions that use Char where strict ByteString uses Word8/Int
                     // are handled separately below — don't normalize them.
-                    let fn_name = &raw_name["Data.ByteString.Char8.".len()..];
                     match fn_name {
                         "pack" | "unpack" | "head" | "last" | "singleton" | "cons" | "snoc"
                         | "uncons" | "map" | "filter" | "elem" | "notElem" | "find"
@@ -1901,8 +1900,7 @@ impl TyCtxt {
                             normalized_name.as_str()
                         }
                     }
-                } else if raw_name.starts_with("Data.ByteString.Lazy.Char8.") {
-                    let fn_name = &raw_name["Data.ByteString.Lazy.Char8.".len()..];
+                } else if let Some(fn_name) = raw_name.strip_prefix("Data.ByteString.Lazy.Char8.") {
                     match fn_name {
                         "pack" | "unpack" | "head" | "last" | "singleton" | "cons" | "snoc"
                         | "uncons" | "map" | "filter" | "elem" | "notElem" | "find"

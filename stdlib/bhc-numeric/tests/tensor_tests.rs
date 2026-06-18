@@ -9,7 +9,7 @@
 //! - Broadcasting semantics
 //! - Index calculations and strides
 
-use bhc_numeric::tensor::{Layout, Shape, Tensor};
+use bhc_numeric::tensor::{Shape, Tensor};
 
 // ============================================================
 // Shape Tests

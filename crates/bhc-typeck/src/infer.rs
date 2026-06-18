@@ -14,7 +14,6 @@
 
 use bhc_hir::{Binding, CaseAlt, Expr, Lit};
 use bhc_intern::Symbol;
-use bhc_span::Span;
 use bhc_types::{Scheme, Ty};
 use rustc_hash::FxHashMap;
 
@@ -449,7 +448,7 @@ pub fn infer_expr(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             resolved_ty
         }
 
-        Expr::TypeApp(inner, ty_arg, span) => {
+        Expr::TypeApp(inner, ty_arg, _span) => {
             // Explicit type application: f @Int
             // Collect all nested type applications to handle f @A @B
             let mut type_args = vec![ty_arg];

@@ -11,7 +11,7 @@ pub fn document_symbols(analysis: &AnalysisResult) -> Vec<DocumentSymbol> {
     analysis
         .symbols
         .iter()
-        .map(|s| symbol_to_document_symbol(s))
+        .map(symbol_to_document_symbol)
         .collect()
 }
 
@@ -24,8 +24,8 @@ fn symbol_to_document_symbol(symbol: &Symbol) -> DocumentSymbol {
         kind: symbol.kind.into(),
         tags: None,
         deprecated: None,
-        range: symbol.range.clone(),
-        selection_range: symbol.selection_range.clone(),
+        range: symbol.range,
+        selection_range: symbol.selection_range,
         children: if symbol.children.is_empty() {
             None
         } else {
@@ -33,7 +33,7 @@ fn symbol_to_document_symbol(symbol: &Symbol) -> DocumentSymbol {
                 symbol
                     .children
                     .iter()
-                    .map(|c| symbol_to_document_symbol(c))
+                    .map(symbol_to_document_symbol)
                     .collect(),
             )
         },
@@ -130,7 +130,7 @@ fn symbol_to_workspace_symbol(symbol: &Symbol, uri: &Uri) -> WorkspaceSymbol {
         container_name: None,
         location: lsp_types::OneOf::Left(Location {
             uri: uri.clone(),
-            range: symbol.selection_range.clone(),
+            range: symbol.selection_range,
         }),
         data: None,
     }
@@ -160,7 +160,7 @@ impl SymbolOutline {
         let symbols = analysis
             .symbols
             .iter()
-            .map(|s| Self::symbol_to_outline(s))
+            .map(Self::symbol_to_outline)
             .collect();
 
         Self { symbols }
@@ -174,7 +174,7 @@ impl SymbolOutline {
             children: symbol
                 .children
                 .iter()
-                .map(|c| Self::symbol_to_outline(c))
+                .map(Self::symbol_to_outline)
                 .collect(),
         }
     }
@@ -205,7 +205,7 @@ impl SymbolOutline {
 pub fn symbol_path(analysis: &AnalysisResult, line: u32) -> Vec<String> {
     let mut path = Vec::new();
 
-    fn find_containing<'a>(symbols: &'a [Symbol], line: u32, path: &mut Vec<String>) -> bool {
+    fn find_containing(symbols: &[Symbol], line: u32, path: &mut Vec<String>) -> bool {
         for symbol in symbols {
             if symbol.range.start.line <= line && symbol.range.end.line >= line {
                 path.push(symbol.name.clone());

@@ -722,7 +722,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     fn apply_lift_for_layer(
         &mut self,
         inner_val: BasicValueEnum<'ctx>,
-        native_layer: TransformerLayer,
+        _native_layer: TransformerLayer,
         outer_layer: TransformerLayer,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         // The inner_val is already a closure representing the inner transformer's action.
@@ -1440,7 +1440,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     pub fn is_newtype_constructor(&self, name: &str) -> bool {
         self.constructor_metadata
             .get(name)
-            .map_or(false, |meta| meta.is_newtype)
+            .is_some_and(|meta| meta.is_newtype)
     }
 
     /// Declare external RTS functions.
@@ -6097,11 +6097,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             _ => {
                 // Check for field selector pattern: $sel_N where N is a digit
-                if name.starts_with("$sel_") {
-                    if let Ok(_) = name[5..].parse::<usize>() {
+                if name.starts_with("$sel_")
+                    && name[5..].parse::<usize>().is_ok() {
                         return Some(1); // Field selectors take one argument (the tuple/dict)
                     }
-                }
                 None
             }
         }
@@ -8378,7 +8377,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Use select: if src empty, use list_ptr (reset); else use current src
         let list_as_basic: BasicValueEnum = list_ptr.into();
-        let src_as_basic: BasicValueEnum = c_src.as_basic_value().into();
+        let src_as_basic: BasicValueEnum = c_src.as_basic_value();
         let actual_src = self
             .builder()
             .build_select(s_empty, list_as_basic, src_as_basic, "actual_src")
@@ -15922,7 +15921,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ) -> CodegenResult<PointerValue<'ctx>> {
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
-        let num_captures = captures.len() as u32;
+        let _num_captures = captures.len() as u32;
 
         // Create the closure function: (ptr env, ptr arg) -> ptr
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
@@ -16261,7 +16260,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// When in ReaderT-over-StateT context:
     /// ask = closure \(env, reader_env, state) -> (reader_env, state)
     fn lower_builtin_ask(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let ptr_type = self.type_mapper().ptr_type();
+        let _ptr_type = self.type_mapper().ptr_type();
         // Check if we're in a ReaderT-over-StateT context
         if self.transformer_stack.is_reader_t_over_state_t() {
             // Nested: \(_env, reader_env, state) -> (reader_env, state)
@@ -16458,7 +16457,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(x_expr)?
             .ok_or_else(|| CodegenError::Internal("ReaderT.pure: x has no value".to_string()))?;
 
-        let ptr_type = self.type_mapper().ptr_type();
+        let _ptr_type = self.type_mapper().ptr_type();
 
         // ReaderT-over-StateT: return (x, s) pair
         if self.transformer_stack.is_reader_t_over_state_t() {
@@ -17003,7 +17002,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             CodegenError::Internal("ReaderT.lift: action has no value".to_string())
         })?;
 
-        let ptr_type = self.type_mapper().ptr_type();
+        let _ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_reader_t_lift";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -17219,7 +17218,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// For nested transformers (StOvRt): \(_env, s, _reader_env) -> (s, s)
     /// For nested transformers (RtOvSt): \(_env, _reader_env, s) -> (s, s)
     fn lower_builtin_get(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let ptr_type = self.type_mapper().ptr_type();
+        let _ptr_type = self.type_mapper().ptr_type();
 
         // ReaderT-over-StateT: state is at param 2
         if self.transformer_stack.is_reader_t_over_state_t() {
@@ -17487,7 +17486,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(x_expr)?
             .ok_or_else(|| CodegenError::Internal("StateT.pure: x has no value".to_string()))?;
 
-        let ptr_type = self.type_mapper().ptr_type();
+        let _ptr_type = self.type_mapper().ptr_type();
         let is_nested = self.transformer_stack.is_state_t_over_reader_t();
         let fn_name = if is_nested {
             "bhc_state_t_pure_nested"
@@ -17939,7 +17938,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             CodegenError::Internal("StateT.lift: action has no value".to_string())
         })?;
 
-        let ptr_type = self.type_mapper().ptr_type();
+        let _ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_state_t_lift";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -18008,22 +18007,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     fn extract_inner_monad_from_state_t(&self, ty: &Ty) -> Option<TransformerLayer> {
         // StateT s m a = App(App(App(Con(StateT), s), m), a)
         // We need to get `m` and determine its transformer layer
-        match ty {
-            Ty::App(inner, _result_type) => {
-                // inner = App(App(Con(StateT), s), m)
-                if let Ty::App(inner2, monad_arg) = inner.as_ref() {
-                    // inner2 = App(Con(StateT), s)
-                    if let Ty::App(con, _param) = inner2.as_ref() {
-                        if let Ty::Con(tycon) = con.as_ref() {
-                            if tycon.name.as_str() == "StateT" {
-                                // monad_arg is the inner monad `m`
-                                return self.get_transformer_layer_from_type(monad_arg);
-                            }
+        if let Ty::App(inner, _result_type) = ty {
+            // inner = App(App(Con(StateT), s), m)
+            if let Ty::App(inner2, monad_arg) = inner.as_ref() {
+                // inner2 = App(Con(StateT), s)
+                if let Ty::App(con, _param) = inner2.as_ref() {
+                    if let Ty::Con(tycon) = con.as_ref() {
+                        if tycon.name.as_str() == "StateT" {
+                            // monad_arg is the inner monad `m`
+                            return self.get_transformer_layer_from_type(monad_arg);
                         }
                     }
                 }
             }
-            _ => {}
         }
         None
     }
@@ -18033,19 +18029,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// For `ReaderT r m a`, returns the transformer layer of `m`.
     fn extract_inner_monad_from_reader_t(&self, ty: &Ty) -> Option<TransformerLayer> {
         // ReaderT r m a = App(App(App(Con(ReaderT), r), m), a)
-        match ty {
-            Ty::App(inner, _result_type) => {
-                if let Ty::App(inner2, monad_arg) = inner.as_ref() {
-                    if let Ty::App(con, _param) = inner2.as_ref() {
-                        if let Ty::Con(tycon) = con.as_ref() {
-                            if tycon.name.as_str() == "ReaderT" {
-                                return self.get_transformer_layer_from_type(monad_arg);
-                            }
+        if let Ty::App(inner, _result_type) = ty {
+            if let Ty::App(inner2, monad_arg) = inner.as_ref() {
+                if let Ty::App(con, _param) = inner2.as_ref() {
+                    if let Ty::Con(tycon) = con.as_ref() {
+                        if tycon.name.as_str() == "ReaderT" {
+                            return self.get_transformer_layer_from_type(monad_arg);
                         }
                     }
                 }
             }
-            _ => {}
         }
         None
     }
@@ -18369,7 +18362,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(x_expr)?
             .ok_or_else(|| CodegenError::Internal("ExceptT.pure: x has no value".to_string()))?;
 
-        let ptr_type = self.type_mapper().ptr_type();
+        let _ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_except_t_pure";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -18412,7 +18405,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(e_expr)?
             .ok_or_else(|| CodegenError::Internal("throwE: e has no value".to_string()))?;
 
-        let ptr_type = self.type_mapper().ptr_type();
+        let _ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_except_t_throw";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -18823,7 +18816,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(io_expr)?
             .ok_or_else(|| CodegenError::Internal("ExceptT.lift: io has no value".to_string()))?;
 
-        let ptr_type = self.type_mapper().ptr_type();
+        let _ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_except_t_lift";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -19925,7 +19918,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         m_val: BasicValueEnum<'ctx>,
         k_val: BasicValueEnum<'ctx>,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let ptr_type = self.type_mapper().ptr_type();
+        let _ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_except_t_bind";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -19950,7 +19943,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         m1_val: BasicValueEnum<'ctx>,
         m2_val: BasicValueEnum<'ctx>,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let ptr_type = self.type_mapper().ptr_type();
+        let _ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_except_t_then";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -20048,7 +20041,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(x_expr)?
             .ok_or_else(|| CodegenError::Internal("WriterT.pure: x has no value".to_string()))?;
 
-        let ptr_type = self.type_mapper().ptr_type();
+        let _ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_writer_t_pure";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -20407,7 +20400,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(io_expr)?
             .ok_or_else(|| CodegenError::Internal("WriterT.lift: io has no value".to_string()))?;
 
-        let ptr_type = self.type_mapper().ptr_type();
+        let _ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_writer_t_lift";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -22942,7 +22935,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("{}: extend failed: {:?}", name, e)))?;
 
         // Allocate a Bool ADT: 8-byte tag followed by no fields
-        let ptr_type = self.type_mapper().ptr_type();
+        let _ptr_type = self.type_mapper().ptr_type();
         let alloc_fn = self
             .functions
             .get(&VarId::new(1000005))
@@ -27930,7 +27923,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .get_insert_block()
             .and_then(|b| b.get_parent())
             .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
-        let entry_block = self
+        let _entry_block = self
             .builder()
             .get_insert_block()
             .ok_or_else(|| CodegenError::Internal("no current block".to_string()))?;
@@ -28677,7 +28670,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .get_insert_block()
             .and_then(|b| b.get_parent())
             .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
-        let entry_block = self
+        let _entry_block = self
             .builder()
             .get_insert_block()
             .ok_or_else(|| CodegenError::Internal("no current block".to_string()))?;
@@ -33025,7 +33018,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // Walk the list, comparing each char
             let mut current_list = list_ptr;
-            let mut all_matched = true;
+            let _all_matched = true;
             let chars: Vec<char> = con_name.chars().collect();
 
             for (i, ch) in chars.iter().enumerate() {
@@ -37743,7 +37736,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     fn lower_builtin_container_ho_stub(
         &mut self,
         args: &[&Expr],
-        name: &str,
+        _name: &str,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // Evaluate all arguments (for side effects / forcing)
         for arg in args {
@@ -41154,11 +41147,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                                 | "signum"
                                 | "gcd"
                                 | "lcm"
-                        ) {
-                            if self.is_integer_expr(inner_arg) || self.is_integer_expr(arg) {
+                        )
+                            && (self.is_integer_expr(inner_arg) || self.is_integer_expr(arg)) {
                                 return true;
                             }
-                        }
                     }
                 }
                 // Check type annotation
@@ -41371,11 +41363,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             return true;
                         }
                         // Unary ops that preserve Rational type
-                        if matches!(name, "negate" | "abs" | "signum" | "recip") {
-                            if self.is_rational_expr(arg) {
+                        if matches!(name, "negate" | "abs" | "signum" | "recip")
+                            && self.is_rational_expr(arg) {
                                 return true;
                             }
-                        }
                         // Check return type
                         if let Ty::Fun(_, result) = &var.ty {
                             if self.is_rational_type(result) {
@@ -41391,11 +41382,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             if name == "%" {
                                 return true;
                             }
-                            if matches!(name, "+" | "-" | "*" | "/" | "negate" | "abs" | "signum") {
-                                if self.is_rational_expr(inner_arg) || self.is_rational_expr(arg) {
+                            if matches!(name, "+" | "-" | "*" | "/" | "negate" | "abs" | "signum")
+                                && (self.is_rational_expr(inner_arg) || self.is_rational_expr(arg)) {
                                     return true;
                                 }
-                            }
                         }
                         false
                     }
@@ -43497,7 +43487,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
-        let i64_type = tm.i64_type();
+        let _i64_type = tm.i64_type();
 
         // Create a unique name for the wrapper function
         let wrapper_name = format!(
@@ -46266,7 +46256,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         args: &[BasicValueEnum<'ctx>],
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let tm = self.type_mapper();
-        let ptr_type = tm.ptr_type();
+        let _ptr_type = tm.ptr_type();
 
         match name {
             // Data.Sequence
@@ -47546,7 +47536,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("failed to build bool op: {:?}", e)))?;
 
         // Extend to i64 (0 or 1)
-        let tag = self
+        let _tag = self
             .builder()
             .build_int_z_extend(bool_result, self.type_mapper().i64_type(), "bool_ext")
             .map_err(|e| CodegenError::Internal(format!("failed to extend bool: {:?}", e)))?;
@@ -48258,7 +48248,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // E.45: If callee expects Integer at this position and we have an Int value,
                 // promote to Integer via bhc_integer_from_i64 instead of int_to_ptr
                 let ptr_val = if val.is_int_value()
-                    && callee_ty.map_or(false, |ty| self.is_integer_param_at(ty, i))
+                    && callee_ty.is_some_and(|ty| self.is_integer_param_at(ty, i))
                 {
                     self.promote_to_integer(val)?.into_pointer_value()
                 } else {
@@ -48691,7 +48681,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Check if there are remaining LLVM parameters that weren't bound to lambdas.
         // This happens for definitions like `add5 = add 5` where the body is not a lambda
         // but the type implies it takes arguments. We need to eta-expand at codegen.
-        let total_params = fn_val.count_params() as u32;
+        let total_params = fn_val.count_params();
         let remaining_params: Vec<_> = (param_idx..total_params)
             .filter_map(|i| fn_val.get_nth_param(i))
             .collect();
@@ -49544,7 +49534,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?
             .get_parent()
             .ok_or_else(|| CodegenError::Internal("no parent function".to_string()))?;
-        let existing_blocks: Vec<_> = current_fn.get_basic_block_iter().collect();
+        let _existing_blocks: Vec<_> = current_fn.get_basic_block_iter().collect();
 
         // For constructor patterns, scrutinee must be a pointer (ADT value)
         let scrut_ptr = match scrut_val {
@@ -50123,7 +50113,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     Ty::Error
                 }
             }
-            Ty::App(con_ty, arg_ty) => {
+            Ty::App(_con_ty, arg_ty) => {
                 // For type applications like `Maybe Int`, we need to look up
                 // the constructor's field types and substitute type arguments.
                 // For now, just propagate the argument type for single-arg constructors.
@@ -50908,7 +50898,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(seq_expr)?
             .ok_or_else(|| CodegenError::Internal("seq_to_list: no seq".to_string()))?;
         let seq_ptr = self.value_to_ptr(seq)?;
-        let tm = self.type_mapper().clone();
+        let tm = self.type_mapper();
 
         // Get element count
         let count_fn = self
@@ -51020,7 +51010,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("seq_from_list: no list".to_string()))?;
         let list_ptr = self.value_to_ptr(list)?;
-        let tm = self.type_mapper().clone();
+        let tm = self.type_mapper();
 
         // Start with empty seq
         let empty_fn = self
@@ -51125,7 +51115,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(seq_expr)?
             .ok_or_else(|| CodegenError::Internal("seq_viewl: no seq".to_string()))?;
         let seq_ptr = self.value_to_ptr(seq)?;
-        let tm = self.type_mapper().clone();
+        let tm = self.type_mapper();
 
         // Get tag (0=empty, 1=non-empty)
         let tag_fn = self
@@ -51231,7 +51221,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(seq_expr)?
             .ok_or_else(|| CodegenError::Internal("seq_viewr: no seq".to_string()))?;
         let seq_ptr = self.value_to_ptr(seq)?;
-        let tm = self.type_mapper().clone();
+        let tm = self.type_mapper();
 
         let tag_fn = self
             .functions
@@ -51342,7 +51332,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("seq_filter: no seq".to_string()))?;
         let pred_ptr = self.value_to_ptr(pred)?;
         let seq_ptr = self.value_to_ptr(seq)?;
-        let tm = self.type_mapper().clone();
+        let tm = self.type_mapper();
 
         // Get count
         let count_fn = self
@@ -51529,9 +51519,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 /// Lower a Core module to an LLVM module.
 ///
 /// The module reference `'m` can be shorter than the context lifetime `'ctx`.
-pub fn lower_core_module<'ctx, 'm>(
+pub fn lower_core_module<'ctx>(
     ctx: &'ctx LlvmContext,
-    module: &'m LlvmModule<'ctx>,
+    module: &LlvmModule<'ctx>,
     core_module: &CoreModule,
 ) -> CodegenResult<()> {
     let mut lowering = Lowering::new(ctx, module);
@@ -51544,9 +51534,9 @@ pub fn lower_core_module<'ctx, 'm>(
 /// symbols from already-compiled modules. Functions are declared with
 /// module-qualified names (e.g., `Helper.double`) and extern declarations are
 /// added for cross-module references.
-pub fn lower_core_module_multimodule<'ctx, 'm>(
+pub fn lower_core_module_multimodule<'ctx>(
     ctx: &'ctx LlvmContext,
-    module: &'m LlvmModule<'ctx>,
+    module: &LlvmModule<'ctx>,
     core_module: &CoreModule,
     module_name: &str,
     imported_symbols: &[CompiledSymbol],
@@ -51562,9 +51552,9 @@ pub fn lower_core_module_multimodule<'ctx, 'm>(
 }
 
 /// Lower a Core module to LLVM IR in multi-module mode, with imported constructor metadata.
-pub fn lower_core_module_multimodule_with_constructors<'ctx, 'm>(
+pub fn lower_core_module_multimodule_with_constructors<'ctx>(
     ctx: &'ctx LlvmContext,
-    module: &'m LlvmModule<'ctx>,
+    module: &LlvmModule<'ctx>,
     core_module: &CoreModule,
     module_name: &str,
     imported_symbols: &[CompiledSymbol],
@@ -51586,7 +51576,7 @@ pub fn lower_core_module_multimodule_with_constructors<'ctx, 'm>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
 
     // Tests would go here
 }

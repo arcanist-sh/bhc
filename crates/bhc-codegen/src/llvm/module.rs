@@ -190,7 +190,7 @@ impl<'ctx> LlvmModule<'ctx> {
             .write_to_file(&self.module, file_type, path)
             .map_err(|e| CodegenError::OutputError {
                 path: path.display().to_string(),
-                source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                source: std::io::Error::other(e.to_string()),
             })
     }
 }
@@ -212,7 +212,7 @@ impl<'ctx> LlvmModule<'ctx> {
                 let mut fn_val = self.module.get_first_function();
                 while let Some(f) = fn_val {
                     // Try to verify each function individually
-                    let name = f.get_name().to_str().unwrap_or("<unknown>");
+                    let _name = f.get_name().to_str().unwrap_or("<unknown>");
                     if f.count_basic_blocks() > 0 {
                         // Can't verify individual functions easily, so just list them
                         let _bb_count = f.count_basic_blocks();
@@ -252,7 +252,7 @@ impl<'ctx> LlvmModule<'ctx> {
                     .print_to_file(path)
                     .map_err(|e| CodegenError::OutputError {
                         path: path.display().to_string(),
-                        source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                        source: std::io::Error::other(e.to_string()),
                     })
             }
             CodegenOutputType::LlvmBitcode => {
@@ -261,8 +261,7 @@ impl<'ctx> LlvmModule<'ctx> {
                 } else {
                     Err(CodegenError::OutputError {
                         path: path.display().to_string(),
-                        source: std::io::Error::new(
-                            std::io::ErrorKind::Other,
+                        source: std::io::Error::other(
                             "failed to write bitcode",
                         ),
                     })

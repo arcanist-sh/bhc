@@ -450,71 +450,71 @@ impl<'a> WasmLowering<'a> {
         match func_name {
             // Arithmetic primitives
             Some("+" | "plus#" | "plusInt#" | "GHC.Num.+") if args.len() == 2 => {
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
-                self.lower_expr(&args[1], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32Add);
             }
             Some("-" | "minus#" | "minusInt#" | "GHC.Num.-") if args.len() == 2 => {
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
-                self.lower_expr(&args[1], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32Sub);
             }
             Some("*" | "times#" | "timesInt#" | "GHC.Num.*") if args.len() == 2 => {
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
-                self.lower_expr(&args[1], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32Mul);
             }
             Some("div" | "divInt#" | "GHC.Real.div") if args.len() == 2 => {
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
-                self.lower_expr(&args[1], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32DivS);
             }
             Some("mod" | "modInt#" | "GHC.Real.mod") if args.len() == 2 => {
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
-                self.lower_expr(&args[1], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32RemS);
             }
             Some("negate" | "negateInt#" | "GHC.Num.negate") if args.len() == 1 => {
                 instrs.push(WasmInstr::I32Const(0));
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32Sub);
             }
 
             // Comparison primitives
             Some("==" | "eqInt#" | "GHC.Classes.==") if args.len() == 2 => {
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
-                self.lower_expr(&args[1], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32Eq);
             }
             Some("/=" | "neInt#" | "GHC.Classes./=") if args.len() == 2 => {
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
-                self.lower_expr(&args[1], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32Ne);
             }
             Some("<" | "ltInt#" | "GHC.Classes.<") if args.len() == 2 => {
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
-                self.lower_expr(&args[1], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32LtS);
             }
             Some("<=" | "leInt#" | "GHC.Classes.<=") if args.len() == 2 => {
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
-                self.lower_expr(&args[1], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32LeS);
             }
             Some(">" | "gtInt#" | "GHC.Classes.>") if args.len() == 2 => {
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
-                self.lower_expr(&args[1], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32GtS);
             }
             Some(">=" | "geInt#" | "GHC.Classes.>=") if args.len() == 2 => {
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
-                self.lower_expr(&args[1], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32GeS);
             }
 
             // IO: putStrLn "..." => print_str_ln(offset, len)
             Some("putStrLn" | "System.IO.putStrLn" | "GHC.IO.putStrLn") if args.len() == 1 => {
-                if let Some(s) = extract_string_literal(&args[0]) {
+                if let Some(s) = extract_string_literal(args[0]) {
                     let (offset, len) = self.intern_string(s);
                     instrs.push(WasmInstr::I32Const(offset as i32));
                     instrs.push(WasmInstr::I32Const(len as i32));
@@ -522,7 +522,7 @@ impl<'a> WasmLowering<'a> {
                 } else {
                     // Dynamic string - we don't handle this yet
                     tracing::warn!("putStrLn with non-literal argument");
-                    self.lower_expr(&args[0], instrs, locals, local_count, false)?;
+                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
                     instrs.push(WasmInstr::Drop);
                 }
                 // IO action returns a dummy value
@@ -531,13 +531,13 @@ impl<'a> WasmLowering<'a> {
 
             // IO: putStr "..." => print_str(offset, len)
             Some("putStr" | "System.IO.putStr" | "GHC.IO.putStr") if args.len() == 1 => {
-                if let Some(s) = extract_string_literal(&args[0]) {
+                if let Some(s) = extract_string_literal(args[0]) {
                     let (offset, len) = self.intern_string(s);
                     instrs.push(WasmInstr::I32Const(offset as i32));
                     instrs.push(WasmInstr::I32Const(len as i32));
                     instrs.push(WasmInstr::Call(self.runtime.print_str_idx));
                 } else {
-                    self.lower_expr(&args[0], instrs, locals, local_count, false)?;
+                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
                     instrs.push(WasmInstr::Drop);
                 }
                 instrs.push(WasmInstr::I32Const(0));
@@ -545,7 +545,7 @@ impl<'a> WasmLowering<'a> {
 
             // IO: print x => print_i32(x) + newline
             Some("print" | "System.IO.print" | "GHC.Show.print") if args.len() == 1 => {
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::Call(self.runtime.print_i32_idx));
                 instrs.push(WasmInstr::I32Const(0));
             }
@@ -553,19 +553,19 @@ impl<'a> WasmLowering<'a> {
             // IO: >> (sequence) - evaluate both sides for effects
             Some(">>" | "GHC.Base.>>") if args.len() == 2 => {
                 // Evaluate first action, drop result
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::Drop);
                 // Evaluate second action, keep result
-                self.lower_expr(&args[1], instrs, locals, local_count, is_main)?;
+                self.lower_expr(args[1], instrs, locals, local_count, is_main)?;
             }
 
             // IO: >>= (bind) - evaluate first, pass result to second
             Some(">>=" | "GHC.Base.>>=") if args.len() == 2 => {
                 // Check if the second argument is a lambda: >>= \x -> body
-                let second = peel_type_abstractions(&args[1]);
+                let second = peel_type_abstractions(args[1]);
                 if let Expr::Lam(var, body, _) = second {
                     // Evaluate the first action
-                    self.lower_expr(&args[0], instrs, locals, local_count, false)?;
+                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
                     // Bind result to the lambda parameter
                     let param_local = *local_count;
                     *local_count += 1;
@@ -575,27 +575,27 @@ impl<'a> WasmLowering<'a> {
                     self.lower_expr(body, instrs, locals, local_count, is_main)?;
                 } else {
                     // No lambda — just sequence (drop first result, evaluate second)
-                    self.lower_expr(&args[0], instrs, locals, local_count, false)?;
+                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
                     instrs.push(WasmInstr::Drop);
-                    self.lower_expr(&args[1], instrs, locals, local_count, is_main)?;
+                    self.lower_expr(args[1], instrs, locals, local_count, is_main)?;
                 }
             }
 
             // IO: return / pure - just evaluate the argument
             Some("return" | "pure" | "GHC.Base.return" | "GHC.Base.pure") if args.len() == 1 => {
-                self.lower_expr(&args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
             }
 
             // IO: catch - execute the action, ignore the handler
             Some("catch" | "Control.Exception.catch" | "GHC.IO.catch") if args.len() == 2 => {
                 // Simple implementation: just run the first argument (the IO action).
                 // The exception handler (args[1]) is never invoked since we don't throw.
-                self.lower_expr(&args[0], instrs, locals, local_count, is_main)?;
+                self.lower_expr(args[0], instrs, locals, local_count, is_main)?;
             }
 
             // Fused sum/enumFromTo: sum (enumFromTo lo hi) => loop accumulation
             Some("sum" | "Prelude.sum" | "Data.List.sum" | "GHC.List.sum") if args.len() == 1 => {
-                if let Some((lo_expr, hi_expr)) = extract_enum_from_to(&args[0]) {
+                if let Some((lo_expr, hi_expr)) = extract_enum_from_to(args[0]) {
                     // Emit a loop: acc = 0; for i = lo to hi: acc += i
                     let acc_local = *local_count;
                     *local_count += 1;
@@ -649,7 +649,7 @@ impl<'a> WasmLowering<'a> {
                 } else {
                     // Can't handle non-enumFromTo sum arguments
                     tracing::warn!("sum with non-enumFromTo argument, using 0");
-                    self.lower_expr(&args[0], instrs, locals, local_count, false)?;
+                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
                     instrs.push(WasmInstr::Drop);
                     instrs.push(WasmInstr::I32Const(0));
                 }

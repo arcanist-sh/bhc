@@ -113,7 +113,7 @@ fn generate_kernel_code(
     writeln!(code, "{}:", params.name).unwrap();
 
     // Determine wavefront size
-    let wave_size =
+    let _wave_size =
         if device.arch_name().starts_with("gfx10") || device.arch_name().starts_with("gfx11") {
             32
         } else {

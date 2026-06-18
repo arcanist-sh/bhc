@@ -4,7 +4,7 @@
 //! standalone WASM execution with wasmtime, wasmer, or other WASI runtimes.
 
 use crate::codegen::{
-    WasmExport, WasmExportKind, WasmFunc, WasmFuncType, WasmGlobal, WasmImport, WasmImportKind,
+    WasmFunc, WasmFuncType, WasmGlobal, WasmImport, WasmImportKind,
 };
 use crate::{WasmInstr, WasmType};
 

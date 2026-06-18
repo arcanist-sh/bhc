@@ -32,7 +32,7 @@ fn find_definition_in_symbol(name: &str, symbol: &Symbol, uri: &Uri) -> Option<L
     if symbol.name == name {
         return Some(Location {
             uri: uri.clone(),
-            range: symbol.selection_range.clone(),
+            range: symbol.selection_range,
         });
     }
 
@@ -102,7 +102,7 @@ pub fn find_symbols_matching(analysis: &AnalysisResult, pattern: &str, uri: &Uri
         if symbol.name.to_lowercase().contains(pattern) {
             locations.push(Location {
                 uri: uri.clone(),
-                range: symbol.selection_range.clone(),
+                range: symbol.selection_range,
             });
         }
 

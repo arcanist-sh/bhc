@@ -274,7 +274,7 @@ impl DeviceInfo {
     /// Calculate grid size for a given problem size and block size.
     #[must_use]
     pub fn grid_size_for(&self, problem_size: usize, block_size: u32) -> u32 {
-        let grid = (problem_size as u32 + block_size - 1) / block_size;
+        let grid = (problem_size as u32).div_ceil(block_size);
         grid.min(self.max_grid_dim.0)
     }
 }

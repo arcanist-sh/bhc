@@ -157,7 +157,7 @@ impl GpuKernel {
         let block_size = self.recommended_config.block_size.unwrap_or(256);
         let block_size = block_size.min(device.max_threads_per_block);
 
-        let grid_size = (problem_size as u32 + block_size - 1) / block_size;
+        let grid_size = (problem_size as u32).div_ceil(block_size);
         let grid_size = grid_size.min(device.max_grid_dim.0);
 
         LaunchConfig {
@@ -228,7 +228,7 @@ impl LaunchConfig {
     /// Create a 1D launch configuration for a given number of elements.
     #[must_use]
     pub fn for_elements(n: usize, block_size: u32) -> Self {
-        let grid_size = ((n as u32) + block_size - 1) / block_size;
+        let grid_size = (n as u32).div_ceil(block_size);
         Self {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -239,8 +239,8 @@ impl LaunchConfig {
     /// Create a 2D launch configuration.
     #[must_use]
     pub fn for_2d(width: usize, height: usize, block_x: u32, block_y: u32) -> Self {
-        let grid_x = ((width as u32) + block_x - 1) / block_x;
-        let grid_y = ((height as u32) + block_y - 1) / block_y;
+        let grid_x = (width as u32).div_ceil(block_x);
+        let grid_y = (height as u32).div_ceil(block_y);
         Self {
             grid_dim: (grid_x, grid_y, 1),
             block_dim: (block_x, block_y, 1),

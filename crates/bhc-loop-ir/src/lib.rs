@@ -223,7 +223,7 @@ impl ScalarType {
     pub const fn size_bytes(self) -> usize {
         match self {
             Self::Bool => 1,
-            Self::Int(bits) | Self::UInt(bits) | Self::Float(bits) => (bits as usize + 7) / 8,
+            Self::Int(bits) | Self::UInt(bits) | Self::Float(bits) => (bits as usize).div_ceil(8),
         }
     }
 
@@ -343,6 +343,7 @@ impl LoopType {
 
 /// Target architecture for vectorization decisions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum TargetArch {
     /// x86_64 with SSE instructions (128-bit).
     X86_64Sse,
@@ -353,28 +354,12 @@ pub enum TargetArch {
     /// x86_64 with AVX2 instructions (256-bit).
     X86_64Avx2,
     /// aarch64 with NEON instructions (128-bit).
+    #[default]
     Aarch64Neon,
     /// Generic target (no vectorization).
     Generic,
 }
 
-impl Default for TargetArch {
-    fn default() -> Self {
-        // Default to AVX for x86_64, NEON for aarch64
-        #[cfg(target_arch = "x86_64")]
-        {
-            Self::X86_64Avx2
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            Self::Aarch64Neon
-        }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        {
-            Self::Generic
-        }
-    }
-}
 
 /// A memory allocation.
 #[derive(Clone, Debug, Serialize, Deserialize)]

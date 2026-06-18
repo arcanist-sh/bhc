@@ -215,7 +215,7 @@ impl TransferQueue {
         stream: &Stream,
     ) -> GpuResult<TransferHandle> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let size = src.len() * std::mem::size_of::<T>();
+        let size = std::mem::size_of_val(src);
 
         let handle = TransferHandle::new(id, stream.handle);
 

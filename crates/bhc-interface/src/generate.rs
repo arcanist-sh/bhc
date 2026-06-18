@@ -49,7 +49,7 @@ pub fn generate_interface(
                 let constructors: Vec<DataConstructor> = data
                     .constrs
                     .iter()
-                    .map(|con| convert_con_decl(con))
+                    .map(convert_con_decl)
                     .collect();
                 let kind = params_to_kind(params.len());
                 iface.add_type(ExportedType {

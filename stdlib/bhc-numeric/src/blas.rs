@@ -804,7 +804,7 @@ impl BlasProviderF32 for SimdRustBlas {
 fn simd_ddot_avx(x: &[f64], y: &[f64], n: usize) -> f64 {
     use std::arch::x86_64::*;
 
-    let mut sum = 0.0;
+    let mut sum;
     let chunks = n / 4;
 
     unsafe {
@@ -837,7 +837,7 @@ fn simd_ddot_avx(x: &[f64], y: &[f64], n: usize) -> f64 {
 fn simd_dnrm2_avx(x: &[f64], n: usize) -> f64 {
     use std::arch::x86_64::*;
 
-    let mut sum = 0.0;
+    let mut sum;
     let chunks = n / 4;
 
     unsafe {
@@ -856,8 +856,8 @@ fn simd_dnrm2_avx(x: &[f64], n: usize) -> f64 {
         sum = _mm_cvtsd_f64(result);
     }
 
-    for i in (chunks * 4)..n {
-        sum += x[i] * x[i];
+    for &xi in &x[chunks * 4..n] {
+        sum += xi * xi;
     }
 
     sum.sqrt()

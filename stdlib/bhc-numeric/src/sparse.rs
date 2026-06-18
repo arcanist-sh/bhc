@@ -171,6 +171,8 @@ pub fn spmv_f64(matrix: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
 /// SIMD-accelerated row dot product for f64.
 #[cfg(target_arch = "x86_64")]
 fn spmv_row_simd_f64(col_indices: &[usize], values: &[f64], x: &[f64]) -> f64 {
+    // Only used by the AVX path below, which is gated on the same target feature.
+    #[cfg(target_feature = "avx")]
     use std::arch::x86_64::*;
 
     let len = values.len();
@@ -278,6 +280,8 @@ pub fn spmv_f32(matrix: &CsrMatrix<f32>, x: &[f32], y: &mut [f32]) {
 /// SIMD-accelerated row dot product for f32.
 #[cfg(target_arch = "x86_64")]
 fn spmv_row_simd_f32(col_indices: &[usize], values: &[f32], x: &[f32]) -> f32 {
+    // Only used by the AVX path below, which is gated on the same target feature.
+    #[cfg(target_feature = "avx")]
     use std::arch::x86_64::*;
 
     let len = values.len();

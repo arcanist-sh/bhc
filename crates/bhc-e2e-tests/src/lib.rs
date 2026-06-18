@@ -178,7 +178,16 @@ impl E2ETestCase {
             }
         });
 
-        let expected_path = fixture_path.join("expected.txt");
+        // A fixture may provide a platform-specific `expected.<os>.txt` (os is
+        // one of macos/linux/windows) that overrides the default `expected.txt`.
+        // This is needed for fixtures whose output depends on the build host,
+        // e.g. CPP `*_HOST_OS` detection.
+        let os_expected_path = fixture_path.join(format!("expected.{}.txt", std::env::consts::OS));
+        let expected_path = if os_expected_path.exists() {
+            os_expected_path
+        } else {
+            fixture_path.join("expected.txt")
+        };
         let expected_stdout = if expected_path.exists() {
             std::fs::read_to_string(&expected_path).map_err(|e| {
                 E2EError::InvalidFixture(format!("Failed to read expected.txt: {}", e))

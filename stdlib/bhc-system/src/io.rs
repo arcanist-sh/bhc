@@ -160,11 +160,7 @@ impl Handle {
                 .create(true)
                 .truncate(true)
                 .open(&path)?,
-            OpenMode::Append => OpenOptions::new()
-                
-                .create(true)
-                .append(true)
-                .open(&path)?,
+            OpenMode::Append => OpenOptions::new().create(true).append(true).open(&path)?,
             OpenMode::ReadWrite => OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -443,22 +439,14 @@ pub fn write_file_bytes<P: AsRef<Path>>(path: P, contents: &[u8]) -> IoResult<()
 
 /// Append a string to a file (creates if doesn't exist)
 pub fn append_file<P: AsRef<Path>>(path: P, contents: &str) -> IoResult<()> {
-    let mut file = OpenOptions::new()
-        
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(contents.as_bytes())?;
     Ok(())
 }
 
 /// Append bytes to a file (creates if doesn't exist)
 pub fn append_file_bytes<P: AsRef<Path>>(path: P, contents: &[u8]) -> IoResult<()> {
-    let mut file = OpenOptions::new()
-        
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(contents)?;
     Ok(())
 }

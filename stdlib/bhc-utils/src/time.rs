@@ -637,7 +637,6 @@ impl DateTime {
         days += (self.date.day - 1) as i64;
 
         // To seconds
-        
 
         days * 86400
             + self.time.hour as i64 * 3600

@@ -580,9 +580,7 @@ impl TyCtxt {
 
         match class_name {
             // E.63: Generic/NFData satisfied by any concrete type
-            "Generic" | "NFData" if args.len() == 1 => {
-                !matches!(&args[0], Ty::Var(_))
-            }
+            "Generic" | "NFData" if args.len() == 1 => !matches!(&args[0], Ty::Var(_)),
             // Monad IO is always satisfied; also State, Reader, Writer, RWS
             "Monad" if args.len() == 1 => {
                 if let Ty::Con(tycon) = &args[0] {
@@ -5533,16 +5531,14 @@ impl TyCtxt {
                         ),
                     )
                 }
-                "Text.DocLayout.$$" | "Text.DocLayout.<>"
-                | "Text.DocLayout.<+>" | "Text.DocLayout.</>" | "Text.DocLayout.$+$" => {
-                    Scheme::poly(
-                        vec![a.clone()],
-                        Ty::fun(
-                            Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                        ),
-                    )
-                }
+                "Text.DocLayout.$$" | "Text.DocLayout.<>" | "Text.DocLayout.<+>"
+                | "Text.DocLayout.</>" | "Text.DocLayout.$+$" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        Ty::Var(a.clone()),
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                    ),
+                ),
                 "Text.DocLayout.vcat"
                 | "Text.DocLayout.hcat"
                 | "Text.DocLayout.hsep"

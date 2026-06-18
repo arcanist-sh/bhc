@@ -699,7 +699,6 @@ fn is_reinterpret(_from: &LoopType, _to: &LoopType) -> bool {
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_emit_int_constants() {
         let mapping = LoopTypeMapping::default();

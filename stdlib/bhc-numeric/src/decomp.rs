@@ -1259,8 +1259,10 @@ mod tests {
         let x = lu.solve(&b);
 
         // Verify A*x = b
-        let ax = [a[(0, 0)] * x[0] + a[(0, 1)] * x[1],
-            a[(1, 0)] * x[0] + a[(1, 1)] * x[1]];
+        let ax = [
+            a[(0, 0)] * x[0] + a[(0, 1)] * x[1],
+            a[(1, 0)] * x[0] + a[(1, 1)] * x[1],
+        ];
 
         assert!(approx_eq(ax[0], b[0], 1e-10));
         assert!(approx_eq(ax[1], b[1], 1e-10));
@@ -1365,8 +1367,10 @@ mod tests {
         let x = qr.solve(&b);
 
         // Verify A*x = b
-        let ax = [a[(0, 0)] * x[0] + a[(0, 1)] * x[1],
-            a[(1, 0)] * x[0] + a[(1, 1)] * x[1]];
+        let ax = [
+            a[(0, 0)] * x[0] + a[(0, 1)] * x[1],
+            a[(1, 0)] * x[0] + a[(1, 1)] * x[1],
+        ];
 
         assert!(approx_eq(ax[0], b[0], 1e-10));
         assert!(approx_eq(ax[1], b[1], 1e-10));
@@ -1408,8 +1412,10 @@ mod tests {
         let x = chol.solve(&b);
 
         // Verify A*x = b
-        let ax = [a[(0, 0)] * x[0] + a[(0, 1)] * x[1],
-            a[(1, 0)] * x[0] + a[(1, 1)] * x[1]];
+        let ax = [
+            a[(0, 0)] * x[0] + a[(0, 1)] * x[1],
+            a[(1, 0)] * x[0] + a[(1, 1)] * x[1],
+        ];
 
         assert!(approx_eq(ax[0], b[0], 1e-10));
         assert!(approx_eq(ax[1], b[1], 1e-10));
@@ -1563,9 +1569,11 @@ mod tests {
         let x = svd_result.solve(&b);
 
         // Verify A*x is close to b in least squares sense
-        let _ax = [a[(0, 0)] * x[0] + a[(0, 1)] * x[1],
+        let _ax = [
+            a[(0, 0)] * x[0] + a[(0, 1)] * x[1],
             a[(1, 0)] * x[0] + a[(1, 1)] * x[1],
-            a[(2, 0)] * x[0] + a[(2, 1)] * x[1]];
+            a[(2, 0)] * x[0] + a[(2, 1)] * x[1],
+        ];
 
         // For overdetermined system, we check that x minimizes ||Ax - b||
         // The solution should be approximately x = [1, 2]

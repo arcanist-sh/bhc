@@ -822,9 +822,7 @@ fn format_shapes(shapes: &[Vec<String>]) -> String {
 }
 
 fn highlight_hir_line(line: &str) -> String {
-    
-    line
-        .replace("let ", &"let ".purple().to_string())
+    line.replace("let ", &"let ".purple().to_string())
         .replace("in ", &"in ".purple().to_string())
         .replace("case ", &"case ".purple().to_string())
         .replace("of ", &"of ".purple().to_string())
@@ -832,9 +830,7 @@ fn highlight_hir_line(line: &str) -> String {
 }
 
 fn highlight_core_line(line: &str) -> String {
-    
-    line
-        .replace("let ", &"let ".purple().to_string())
+    line.replace("let ", &"let ".purple().to_string())
         .replace("letrec ", &"letrec ".purple().to_string())
         .replace("case ", &"case ".purple().to_string())
         .replace("of ", &"of ".purple().to_string())
@@ -843,9 +839,7 @@ fn highlight_core_line(line: &str) -> String {
 }
 
 fn highlight_tensor_line(line: &str) -> String {
-    
-    line
-        .replace("map ", &"map ".yellow().to_string())
+    line.replace("map ", &"map ".yellow().to_string())
         .replace("zipWith ", &"zipWith ".yellow().to_string())
         .replace("fold ", &"fold ".yellow().to_string())
         .replace("reduce ", &"reduce ".yellow().to_string())
@@ -854,9 +848,7 @@ fn highlight_tensor_line(line: &str) -> String {
 }
 
 fn highlight_loop_line(line: &str) -> String {
-    
-    line
-        .replace("for ", &"for ".purple().to_string())
+    line.replace("for ", &"for ".purple().to_string())
         .replace("parallel ", &"parallel ".cyan().bold().to_string())
         .replace("simd ", &"simd ".magenta().bold().to_string())
         .replace("kernel ", &"kernel ".yellow().bold().to_string())
@@ -2017,10 +2009,10 @@ fn validate_ir(
                 // Check for unvectorized loops
                 && content.contains("for ")
                     && !content.contains("simd")
-                    && !content.contains("parallel")
-                => {
-                    warnings.push("Found non-vectorized, non-parallel loop".to_string());
-                }
+                    && !content.contains("parallel") =>
+        {
+            warnings.push("Found non-vectorized, non-parallel loop".to_string());
+        }
         _ => {}
     }
 

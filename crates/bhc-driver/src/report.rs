@@ -338,13 +338,15 @@ fn classify_fusion_pattern(ops: &[bhc_intern::Symbol]) -> String {
     if op_names
         .iter()
         .any(|op| op.contains("sum") || op.contains("reduce"))
-        && op_names.iter().any(|op| op.contains("map")) {
-            return "sum/map".to_string();
-        }
+        && op_names.iter().any(|op| op.contains("map"))
+    {
+        return "sum/map".to_string();
+    }
     if op_names.iter().any(|op| op.contains("zipWith"))
-        && op_names.iter().filter(|op| op.contains("map")).count() >= 2 {
-            return "zipWith/map/map".to_string();
-        }
+        && op_names.iter().filter(|op| op.contains("map")).count() >= 2
+    {
+        return "zipWith/map/map".to_string();
+    }
     if op_names.iter().any(|op| op.contains("softmax")) {
         return "softmax".to_string();
     }

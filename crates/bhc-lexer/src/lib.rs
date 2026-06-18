@@ -387,9 +387,10 @@ impl<'src> Lexer<'src> {
             if self.starts_with("--") && self.is_line_comment() {
                 // Check for doc comment
                 if (self.starts_with("-- |") || self.starts_with("-- ^"))
-                    && self.config.preserve_doc_comments {
-                        break; // Let the main lexer handle it
-                    }
+                    && self.config.preserve_doc_comments
+                {
+                    break; // Let the main lexer handle it
+                }
                 // Regular comment - skip to end of line
                 while let Some(c) = self.peek() {
                     if c == '\n' {
@@ -2191,14 +2192,13 @@ class ExtensionClass a where
 
         // Pipe should appear as-is, no VirtualLBrace after it
         for (i, k) in kinds.iter().enumerate() {
-            if *k == TokenKind::Pipe
-                && i + 1 < kinds.len() {
-                    assert_ne!(
-                        kinds[i + 1],
-                        TokenKind::VirtualLBrace,
-                        "Guard pipe should not start a layout block"
-                    );
-                }
+            if *k == TokenKind::Pipe && i + 1 < kinds.len() {
+                assert_ne!(
+                    kinds[i + 1],
+                    TokenKind::VirtualLBrace,
+                    "Guard pipe should not start a layout block"
+                );
+            }
         }
     }
 

@@ -663,7 +663,8 @@ fn pat_head(ctx: &LowerContext, pat: &hir::Pat) -> PatHead {
             } else {
                 // Fallback: use name-based lookup
                 let name = ctx
-                    .lookup_var(def_ref.def_id).map_or_else(|| Symbol::intern("Con"), |v| v.name);
+                    .lookup_var(def_ref.def_id)
+                    .map_or_else(|| Symbol::intern("Con"), |v| v.name);
                 let tag = get_constructor_tag(name.as_str(), def_ref.def_id.index() as u32);
                 PatHead::Con(Symbol::intern("DataType"), name, tag, sub_pats.len() as u32)
             }
@@ -673,7 +674,8 @@ fn pat_head(ctx: &LowerContext, pat: &hir::Pat) -> PatHead {
                 PatHead::Con(info.type_name, info.name, info.tag, info.arity)
             } else {
                 let name = ctx
-                    .lookup_var(def_ref.def_id).map_or_else(|| Symbol::intern("Con"), |v| v.name);
+                    .lookup_var(def_ref.def_id)
+                    .map_or_else(|| Symbol::intern("Con"), |v| v.name);
                 let tag = get_constructor_tag(name.as_str(), def_ref.def_id.index() as u32);
                 PatHead::Con(
                     Symbol::intern("DataType"),
@@ -862,9 +864,10 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                 // is removed by specialization, we must bind it to the scrutinee.
                 for row in group_rows {
                     if col < row.pats.len()
-                        && matches!(pat_head(ctx, &row.pats[col]), PatHead::Wild) {
-                            register_wildcard_bindings(ctx, &row.pats[col], &scrutinee);
-                        }
+                        && matches!(pat_head(ctx, &row.pats[col]), PatHead::Wild)
+                    {
+                        register_wildcard_bindings(ctx, &row.pats[col], &scrutinee);
+                    }
                 }
 
                 // Build sub-matrix: specialize for this constructor
@@ -895,9 +898,10 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                 // literal group (same logic as constructor groups above).
                 for row in group_rows {
                     if col < row.pats.len()
-                        && matches!(pat_head(ctx, &row.pats[col]), PatHead::Wild) {
-                            register_wildcard_bindings(ctx, &row.pats[col], &scrutinee);
-                        }
+                        && matches!(pat_head(ctx, &row.pats[col]), PatHead::Wild)
+                    {
+                        register_wildcard_bindings(ctx, &row.pats[col], &scrutinee);
+                    }
                 }
 
                 // Literal branches have no field variables

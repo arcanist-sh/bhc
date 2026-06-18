@@ -313,12 +313,12 @@ pub fn collect_exports(
                                 for (con_name, con_info) in &cached_exports.constructors {
                                     if con_info.type_con_name == type_name
                                         && !exports.values.contains_key(con_name)
-                                            && !exports.constructors.contains_key(con_name)
-                                        {
-                                            let c_def_id = ctx.fresh_def_id();
-                                            ctx.define(c_def_id, *con_name, DefKind::Value, *span);
-                                            exports.values.insert(*con_name, c_def_id);
-                                        }
+                                        && !exports.constructors.contains_key(con_name)
+                                    {
+                                        let c_def_id = ctx.fresh_def_id();
+                                        ctx.define(c_def_id, *con_name, DefKind::Value, *span);
+                                        exports.values.insert(*con_name, c_def_id);
+                                    }
                                 }
                             }
                         } else {
@@ -655,7 +655,9 @@ pub fn load_module(
 
     // Only fail if module couldn't be parsed at all (match driver behavior —
     // diagnostics may include non-fatal warnings that don't prevent parsing)
-    let module = if let Some(m) = module { m } else {
+    let module = if let Some(m) = module {
+        m
+    } else {
         cache.end_loading(sym);
         let messages: Vec<_> = diagnostics.iter().map(|d| d.message.clone()).collect();
         return Err(LoadError::ParseError {
@@ -821,10 +823,9 @@ pub fn register_imported_names(
         ctx.bind_value(qualified, def_id);
 
         // For non-qualified imports, also bind the unqualified name
-        if !import.qualified
-            && ctx.lookup_value(name).is_none() {
-                ctx.bind_value(name, def_id);
-            }
+        if !import.qualified && ctx.lookup_value(name).is_none() {
+            ctx.bind_value(name, def_id);
+        }
     }
 
     // Register types
@@ -833,10 +834,9 @@ pub fn register_imported_names(
         ctx.register_qualified_name(qualified, name);
         ctx.bind_type(qualified, def_id);
 
-        if !import.qualified
-            && ctx.lookup_type(name).is_none() {
-                ctx.bind_type(name, def_id);
-            }
+        if !import.qualified && ctx.lookup_type(name).is_none() {
+            ctx.bind_type(name, def_id);
+        }
     }
 
     // Register constructors
@@ -845,10 +845,9 @@ pub fn register_imported_names(
         ctx.register_qualified_name(qualified, name);
         ctx.bind_constructor(qualified, info.def_id);
 
-        if !import.qualified
-            && ctx.lookup_constructor(name).is_none() {
-                ctx.bind_constructor(name, info.def_id);
-            }
+        if !import.qualified && ctx.lookup_constructor(name).is_none() {
+            ctx.bind_constructor(name, info.def_id);
+        }
     }
 }
 

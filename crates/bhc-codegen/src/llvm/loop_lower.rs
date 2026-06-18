@@ -12,8 +12,8 @@ use crate::{CodegenError, CodegenResult};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_loop_ir::{
-    Alloc, AllocSize, BinOp, Body, CmpOp, IfStmt, Loop, LoopIR, LoopType,
-    MemRef, Op, ReduceOp, ScalarType, Stmt, UnOp, Value, ValueId,
+    Alloc, AllocSize, BinOp, Body, CmpOp, IfStmt, Loop, LoopIR, LoopType, MemRef, Op, ReduceOp,
+    ScalarType, Stmt, UnOp, Value, ValueId,
 };
 use bhc_tensor_ir::{AllocRegion, BufferId};
 use inkwell::builder::Builder;
@@ -117,11 +117,11 @@ impl<'ctx, 'm> LoopLowering<'ctx, 'm> {
                 .builder
                 .get_insert_block()
                 .is_none_or(|b| b.get_terminator().is_none())
-            {
-                self.builder
-                    .build_return(None)
-                    .map_err(|e| CodegenError::LlvmError(e.to_string()))?;
-            }
+        {
+            self.builder
+                .build_return(None)
+                .map_err(|e| CodegenError::LlvmError(e.to_string()))?;
+        }
 
         // Verify the function
         if function.verify(true) {

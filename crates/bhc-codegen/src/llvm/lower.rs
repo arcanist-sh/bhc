@@ -6097,10 +6097,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             _ => {
                 // Check for field selector pattern: $sel_N where N is a digit
-                if name.starts_with("$sel_")
-                    && name[5..].parse::<usize>().is_ok() {
-                        return Some(1); // Field selectors take one argument (the tuple/dict)
-                    }
+                if name.starts_with("$sel_") && name[5..].parse::<usize>().is_ok() {
+                    return Some(1); // Field selectors take one argument (the tuple/dict)
+                }
                 None
             }
         }
@@ -41167,10 +41166,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                                 | "signum"
                                 | "gcd"
                                 | "lcm"
-                        )
-                            && (self.is_integer_expr(inner_arg) || self.is_integer_expr(arg)) {
-                                return true;
-                            }
+                        ) && (self.is_integer_expr(inner_arg) || self.is_integer_expr(arg))
+                        {
+                            return true;
+                        }
                     }
                 }
                 // Check type annotation
@@ -41384,9 +41383,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         }
                         // Unary ops that preserve Rational type
                         if matches!(name, "negate" | "abs" | "signum" | "recip")
-                            && self.is_rational_expr(arg) {
-                                return true;
-                            }
+                            && self.is_rational_expr(arg)
+                        {
+                            return true;
+                        }
                         // Check return type
                         if let Ty::Fun(_, result) = &var.ty {
                             if self.is_rational_type(result) {
@@ -41403,9 +41403,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                                 return true;
                             }
                             if matches!(name, "+" | "-" | "*" | "/" | "negate" | "abs" | "signum")
-                                && (self.is_rational_expr(inner_arg) || self.is_rational_expr(arg)) {
-                                    return true;
-                                }
+                                && (self.is_rational_expr(inner_arg) || self.is_rational_expr(arg))
+                            {
+                                return true;
+                            }
                         }
                         false
                     }
@@ -51599,7 +51600,6 @@ pub fn lower_core_module_multimodule_with_constructors<'ctx>(
 
 #[cfg(test)]
 mod tests {
-    
 
     // Tests would go here
 }

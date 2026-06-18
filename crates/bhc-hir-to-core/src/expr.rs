@@ -299,7 +299,8 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
     match expr {
         Expr::Con(def_ref) => {
             // Look up the constructor's data type
-            ctx.lookup_constructor(def_ref.def_id).map(|con_info| Ty::Con(TyCon::new(con_info.type_name, Kind::Star)))
+            ctx.lookup_constructor(def_ref.def_id)
+                .map(|con_info| Ty::Con(TyCon::new(con_info.type_name, Kind::Star)))
         }
         Expr::Var(def_ref) => {
             // Look up the type of this variable from the type checker.
@@ -558,10 +559,7 @@ fn lower_app(
                                         let all_match = types_for_resolution
                                             .iter()
                                             .enumerate()
-                                            .all(|(i, ty)| {
-                                                inst.instance_types
-                                                    .get(i) == Some(ty)
-                                            });
+                                            .all(|(i, ty)| inst.instance_types.get(i) == Some(ty));
                                         if all_match {
                                             types_for_resolution =
                                                 inst.instance_types[..param_count].to_vec();
@@ -787,10 +785,7 @@ fn lower_app(
                                         let all_match = types_for_resolution
                                             .iter()
                                             .enumerate()
-                                            .all(|(i, ty)| {
-                                                inst.instance_types
-                                                    .get(i) == Some(ty)
-                                            });
+                                            .all(|(i, ty)| inst.instance_types.get(i) == Some(ty));
                                         if all_match {
                                             types_for_resolution =
                                                 inst.instance_types[..param_count].to_vec();
@@ -1218,8 +1213,6 @@ fn lower_let_bindings(
     body: core::Expr,
     span: Span,
 ) -> LowerResult<core::Expr> {
-    
-
     // Process bindings from right to left, wrapping the body
     let mut result = body;
 

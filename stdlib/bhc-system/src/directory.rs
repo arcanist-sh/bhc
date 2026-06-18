@@ -459,11 +459,14 @@ pub fn copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> DirResult<u64> {
 /// Walk a directory recursively
 pub fn walk_directory<P: AsRef<Path>>(path: P) -> DirResult<Vec<DirEntry>> {
     fn walk_recursive(path: &Path, entries: &mut Vec<DirEntry>) -> DirResult<()> {
-        for entry in fs::read_dir(path).map_err(|e| DirError {
-            kind: DirErrorKind::Other,
-            message: e.to_string(),
-            path: Some(path.to_string_lossy().to_string()),
-        })?.flatten() {
+        for entry in fs::read_dir(path)
+            .map_err(|e| DirError {
+                kind: DirErrorKind::Other,
+                message: e.to_string(),
+                path: Some(path.to_string_lossy().to_string()),
+            })?
+            .flatten()
+        {
             let file_type = entry
                 .file_type()
                 .map(|ft| {

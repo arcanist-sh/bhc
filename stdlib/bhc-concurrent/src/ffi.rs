@@ -51,7 +51,6 @@ pub unsafe extern "C" fn bhc_with_scope(
     callback: unsafe extern "C" fn(*const c_void, *const c_void) -> *mut c_void,
     user_data: *const c_void,
 ) -> *mut c_void {
-    
     with_scope(|scope| {
         let scope_ptr = scope as *const Scope as *const c_void;
         // SAFETY: callback is provided by BHC runtime

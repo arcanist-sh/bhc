@@ -611,12 +611,11 @@ impl PublishCommand {
         let package_dir = manifest_path.parent().unwrap();
 
         // Check for uncommitted changes
-        if !self.allow_dirty
-            && is_git_dirty(package_dir) {
-                return Err(CommandError::PublishFailed(
-                    "uncommitted changes. Use --allow-dirty to override".to_string(),
-                ));
-            }
+        if !self.allow_dirty && is_git_dirty(package_dir) {
+            return Err(CommandError::PublishFailed(
+                "uncommitted changes. Use --allow-dirty to override".to_string(),
+            ));
+        }
 
         // Build tarball
         let tarball = self.build_tarball(package_dir, &manifest)?;

@@ -503,11 +503,8 @@ fn infer_output_meta(op: &TensorOp) -> TensorMeta {
         TensorOp::Transpose(perm, t) => {
             // Permute dimensions
             let old_dims = t.meta.shape.dims();
-            let new_dims: SmallVec<[crate::Dim; 4]> = perm
-                .as_slice()
-                .iter()
-                .map(|&i| old_dims[i])
-                .collect();
+            let new_dims: SmallVec<[crate::Dim; 4]> =
+                perm.as_slice().iter().map(|&i| old_dims[i]).collect();
             // Note: Transpose creates strided layout, not contiguous
             let shape = Shape::new(new_dims);
             TensorMeta {
@@ -1168,15 +1165,16 @@ fn try_detect_activation(
                     }
                 }
             }
-            TensorOp::Map(sigmoid_fn, inner_ref) if is_sigmoid_fn(&sigmoid_fn.name)
-                && inner_ref.id == x_ref.id => {
-                    return Some((
-                        FusionPattern::Silu {
-                            input: x_ref.clone(),
-                        },
-                        vec![consumer_idx, sigmoid_producer],
-                    ));
-                }
+            TensorOp::Map(sigmoid_fn, inner_ref)
+                if is_sigmoid_fn(&sigmoid_fn.name) && inner_ref.id == x_ref.id =>
+            {
+                return Some((
+                    FusionPattern::Silu {
+                        input: x_ref.clone(),
+                    },
+                    vec![consumer_idx, sigmoid_producer],
+                ));
+            }
             _ => {}
         }
     }
@@ -1634,10 +1632,7 @@ fn create_fused_group(
             // Output shape: [batch, out_features]
             let output_id = ctx.fresh_tensor_id();
             let w_dims = weight.meta.shape.dims();
-            let out_dim = w_dims
-                .last()
-                .copied()
-                .unwrap_or(crate::Dim::Static(1));
+            let out_dim = w_dims.last().copied().unwrap_or(crate::Dim::Static(1));
             let in_dims = input.meta.shape.dims();
             let mut out_shape: SmallVec<[crate::Dim; 4]> = in_dims.iter().copied().collect();
             if let Some(last) = out_shape.last_mut() {

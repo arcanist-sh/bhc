@@ -349,10 +349,7 @@ impl TypeEnv {
 
     /// Register a type class instance.
     pub fn register_instance(&mut self, info: InstanceInfo) {
-        self.instances
-            .entry(info.class)
-            .or_default()
-            .push(info);
+        self.instances.entry(info.class).or_default().push(info);
     }
 
     /// Look up all instances for a class.
@@ -1227,7 +1224,9 @@ mod tests {
         env.register_type_family(info);
 
         // No instances yet — should return None
-        assert!(env.reduce_type_family(f, std::slice::from_ref(&int_ty)).is_none());
+        assert!(env
+            .reduce_type_family(f, std::slice::from_ref(&int_ty))
+            .is_none());
 
         // Register instance: type instance Size Int = Int
         env.register_type_family_instance(

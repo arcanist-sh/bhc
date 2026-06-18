@@ -499,24 +499,22 @@ fn parse_dependency_spec(spec: &str) -> (&str, Option<&str>) {
 
     // Find where the version constraint starts
     // It typically starts with a comparison operator or version number
-    let constraint_start = spec
-        .find(['>', '<', '=', '^'])
-        .or_else(|| {
-            // Also check for version numbers after space
-            spec.find(' ').and_then(|space_pos| {
-                let after_space = &spec[space_pos + 1..];
-                if after_space
-                    .chars()
-                    .next()
-                    .map(|c| c.is_ascii_digit())
-                    .unwrap_or(false)
-                {
-                    Some(space_pos)
-                } else {
-                    None
-                }
-            })
-        });
+    let constraint_start = spec.find(['>', '<', '=', '^']).or_else(|| {
+        // Also check for version numbers after space
+        spec.find(' ').and_then(|space_pos| {
+            let after_space = &spec[space_pos + 1..];
+            if after_space
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+            {
+                Some(space_pos)
+            } else {
+                None
+            }
+        })
+    });
 
     match constraint_start {
         Some(pos) => {

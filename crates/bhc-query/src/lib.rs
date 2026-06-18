@@ -295,10 +295,7 @@ impl QueryDatabase for SimpleDatabase {
     }
 
     fn record_dependency(&self, from: QueryId, to: QueryId) {
-        self.dependencies
-            .entry(from)
-            .or_default()
-            .push(to);
+        self.dependencies.entry(from).or_default().push(to);
     }
 }
 

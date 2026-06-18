@@ -677,8 +677,7 @@ fn tokenize_cpp_expr(expr: &str) -> Vec<CppToken> {
                 i += 1;
             }
             let num_str: String = chars[start..i].iter().collect();
-            let num_str =
-                num_str.trim_end_matches(['L', 'U', 'l', 'u']);
+            let num_str = num_str.trim_end_matches(['L', 'U', 'l', 'u']);
             let value = if num_str.starts_with("0x") || num_str.starts_with("0X") {
                 i64::from_str_radix(&num_str[2..], 16).unwrap_or(0)
             } else {

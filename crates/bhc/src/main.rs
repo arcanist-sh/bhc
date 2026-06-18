@@ -510,7 +510,7 @@ fn run_file(file: &Path, _args: &[String], cli: &Cli) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to create compiler: {}", e))?;
 
     // Convert path
-    let path = Utf8PathBuf::from_path_buf(file.clone())
+    let path = Utf8PathBuf::from_path_buf(file.to_path_buf())
         .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in path"))?;
 
     // Run the file

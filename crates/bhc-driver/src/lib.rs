@@ -1516,14 +1516,15 @@ impl Compiler {
                                 // First try lower_ctx.defs
                                 for def_info in lower_ctx.defs.values() {
                                     if def_info.kind == bhc_lower::DefKind::Constructor
-                                        && def_info.type_con_name == Some(export.name) {
-                                            con_names.insert(def_info.name);
-                                            if let Some(ref fns) = def_info.field_names {
-                                                for fname in fns {
-                                                    names.insert(*fname);
-                                                }
+                                        && def_info.type_con_name == Some(export.name)
+                                    {
+                                        con_names.insert(def_info.name);
+                                        if let Some(ref fns) = def_info.field_names {
+                                            for fname in fns {
+                                                names.insert(*fname);
                                             }
                                         }
+                                    }
                                 }
                                 // Then search registry for re-exported constructors and class methods
                                 if let Some(reg) = registry {
@@ -1573,7 +1574,9 @@ impl Compiler {
                     // due to has_typed_sigs.  We must also check the unqualified portion
                     // against the filter so that re-exports of external names work correctly.
                     let name_str = def_info.name.as_str();
-                    let unqualified_name = name_str.rfind('.').map(|dot_pos| Symbol::intern(&name_str[dot_pos + 1..]));
+                    let unqualified_name = name_str
+                        .rfind('.')
+                        .map(|dot_pos| Symbol::intern(&name_str[dot_pos + 1..]));
                     let export_name = if let Some((ref names, ref con_names)) = export_filter {
                         if names.contains(&def_info.name) || con_names.contains(&def_info.name) {
                             def_info.name
@@ -1597,7 +1600,9 @@ impl Compiler {
                 | bhc_lower::DefKind::StubType
                 | bhc_lower::DefKind::Class => {
                     let tname_str = def_info.name.as_str();
-                    let uq_type = tname_str.rfind('.').map(|dot_pos| Symbol::intern(&tname_str[dot_pos + 1..]));
+                    let uq_type = tname_str
+                        .rfind('.')
+                        .map(|dot_pos| Symbol::intern(&tname_str[dot_pos + 1..]));
                     let export_type_name = if let Some((ref names, _)) = export_filter {
                         if names.contains(&def_info.name) {
                             def_info.name
@@ -1618,7 +1623,9 @@ impl Compiler {
                 bhc_lower::DefKind::Constructor | bhc_lower::DefKind::StubConstructor => {
                     // Check export filter: constructor must be in con_names set
                     let cname_str = def_info.name.as_str();
-                    let uq_con = cname_str.rfind('.').map(|dot_pos| Symbol::intern(&cname_str[dot_pos + 1..]));
+                    let uq_con = cname_str
+                        .rfind('.')
+                        .map(|dot_pos| Symbol::intern(&cname_str[dot_pos + 1..]));
                     let export_con_name = if let Some((ref names, ref con_names)) = export_filter {
                         if con_names.contains(&def_info.name) || names.contains(&def_info.name) {
                             def_info.name

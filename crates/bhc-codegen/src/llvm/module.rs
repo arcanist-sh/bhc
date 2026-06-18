@@ -261,9 +261,7 @@ impl<'ctx> LlvmModule<'ctx> {
                 } else {
                     Err(CodegenError::OutputError {
                         path: path.display().to_string(),
-                        source: std::io::Error::other(
-                            "failed to write bitcode",
-                        ),
+                        source: std::io::Error::other("failed to write bitcode"),
                     })
                 }
             }

@@ -135,15 +135,11 @@ impl SimdLowering {
         // Similar pattern to f32x4
         let instrs = vec![
             // Step 1: Shuffle high half to low
-            WasmInstr::I8x16Shuffle([
-                8, 9, 10, 11, 12, 13, 14, 15, 8, 9, 10, 11, 12, 13, 14, 15,
-            ]),
+            WasmInstr::I8x16Shuffle([8, 9, 10, 11, 12, 13, 14, 15, 8, 9, 10, 11, 12, 13, 14, 15]),
             // Step 2: Reduce
             self.reduce_op_instr_i32x4(op)?,
             // Step 3: Shuffle element 1 to 0
-            WasmInstr::I8x16Shuffle([
-                4, 5, 6, 7, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3,
-            ]),
+            WasmInstr::I8x16Shuffle([4, 5, 6, 7, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]),
             // Step 4: Final reduce
             self.reduce_op_instr_i32x4(op)?,
             // Step 5: Extract lane 0
@@ -163,9 +159,7 @@ impl SimdLowering {
                 // These work with i64x2
                 let instrs = vec![
                     // Shuffle to get [b, a]
-                    WasmInstr::I8x16Shuffle([
-                        8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7,
-                    ]),
+                    WasmInstr::I8x16Shuffle([8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7]),
                     // Reduce
                     self.reduce_op_instr_i64x2(op)?,
                     // Extract lane 0

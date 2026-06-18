@@ -175,10 +175,7 @@ impl ClassRegistry {
 
     /// Register a type class instance.
     pub fn register_instance(&mut self, info: InstanceInfo) {
-        self.instances
-            .entry(info.class)
-            .or_default()
-            .push(info);
+        self.instances.entry(info.class).or_default().push(info);
     }
 
     /// Look up a class by name.
@@ -1005,10 +1002,11 @@ mod tests {
         .is_none());
 
         // Different lengths don't match
-        assert!(
-            types_match_multi(&[int_ty.clone(), string_ty.clone()], std::slice::from_ref(&int_ty))
-                .is_none()
-        );
+        assert!(types_match_multi(
+            &[int_ty.clone(), string_ty.clone()],
+            std::slice::from_ref(&int_ty)
+        )
+        .is_none());
 
         // Empty matches empty
         assert!(types_match_multi(&[], &[]).is_some());

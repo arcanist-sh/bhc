@@ -131,12 +131,14 @@ pub fn format_broadcast_diagram(
     let max_rank = dims1.len().max(dims2.len());
 
     // Pad shorter shape with "1" on the left (broadcasting semantics)
-    let padded1: Vec<String> = std::iter::repeat_n("1".to_string(), max_rank.saturating_sub(dims1.len()))
-        .chain(dims1.iter().cloned())
-        .collect();
-    let padded2: Vec<String> = std::iter::repeat_n("1".to_string(), max_rank.saturating_sub(dims2.len()))
-        .chain(dims2.iter().cloned())
-        .collect();
+    let padded1: Vec<String> =
+        std::iter::repeat_n("1".to_string(), max_rank.saturating_sub(dims1.len()))
+            .chain(dims1.iter().cloned())
+            .collect();
+    let padded2: Vec<String> =
+        std::iter::repeat_n("1".to_string(), max_rank.saturating_sub(dims2.len()))
+            .chain(dims2.iter().cloned())
+            .collect();
 
     // Calculate column widths
     let col_widths: Vec<usize> = (0..max_rank)

@@ -786,7 +786,6 @@ fn rational_make_normalized(num: i64, denom: i64) -> *mut u8 {
 /// Construct a Rational from numerator and denominator, normalizing via GCD.
 #[no_mangle]
 pub extern "C" fn bhc_rational_make(num: i64, denom: i64) -> *mut u8 {
-    
     rational_make_normalized(num, denom)
 }
 
@@ -4529,7 +4528,6 @@ mod tests {
 
     #[test]
     fn test_open_close_file() {
-        
         // Create a temp file
         let tmp = std::env::temp_dir().join("bhc_test_open_close.txt");
         std::fs::write(&tmp, "hello").unwrap();

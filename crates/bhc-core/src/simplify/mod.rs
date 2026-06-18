@@ -151,14 +151,15 @@ pub fn simplify_module(module: &mut CoreModule, config: &SimplifyConfig) -> Simp
                     let name = var.name.as_str();
 
                     // Top-level dead binding elimination (export-aware)
-                    if !is_inline_protected(name) && !is_exported(name, &config.exported_names)
+                    if !is_inline_protected(name)
+                        && !is_exported(name, &config.exported_names)
                         && matches!(occs.get(&var.id), None | Some(occurrence::OccCount::Dead))
-                            && expr_util::is_cheap(&rhs)
-                        {
-                            total_stats.dead_bindings += 1;
-                            changed = true;
-                            continue;
-                        }
+                        && expr_util::is_cheap(&rhs)
+                    {
+                        total_stats.dead_bindings += 1;
+                        changed = true;
+                        continue;
+                    }
 
                     let mut stats = SimplifyStats::default();
                     let new_rhs = simplify_expr(*rhs, &inline_env, config, &mut stats);

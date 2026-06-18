@@ -2900,10 +2900,7 @@ impl Evaluator {
                 let m = a.rem_euclid(b);
                 // Adjust: Haskell divMod may differ from Euclidean for negative divisors
                 let (d, m) = if b < 0 {
-                    (
-                        -d - i64::from(m != 0),
-                        if m != 0 { m + b } else { 0 },
-                    )
+                    (-d - i64::from(m != 0), if m != 0 { m + b } else { 0 })
                 } else {
                     (d, m)
                 };
@@ -8276,7 +8273,11 @@ impl Evaluator {
                 Ok(format!("<partial {op:?} applied to {} args>", args.len()))
             }
             Value::UArrayInt(arr) => {
-                let elements: Vec<String> = arr.as_slice().iter().map(std::string::ToString::to_string).collect();
+                let elements: Vec<String> = arr
+                    .as_slice()
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
                 Ok(format!("[{}]", elements.join(", ")))
             }
             Value::UArrayDouble(arr) => {

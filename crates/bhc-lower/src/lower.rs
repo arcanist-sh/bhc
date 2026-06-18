@@ -6685,10 +6685,7 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                 // (starts with uppercase). Otherwise `.:` would incorrectly split into
                 // qualifier="" and operator ":" which starts with ':'.
                 let before_dot = &op_name_str[..dot_pos];
-                let is_qualified = before_dot
-                    .chars()
-                    .next()
-                    .is_some_and(char::is_uppercase);
+                let is_qualified = before_dot.chars().next().is_some_and(char::is_uppercase);
                 if is_qualified {
                     // Qualified name - check the part after the last dot
                     op_name_str[dot_pos + 1..]
@@ -6962,22 +6959,11 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
             hir::Expr::Case(Box::new(s), hir_alts, *span)
         }
 
-        ast::Expr::Do(stmts, span) => desugar::desugar_do(
-            ctx,
-            stmts,
-            *span,
-            lower_expr,
-            lower_pat,
-        ),
+        ast::Expr::Do(stmts, span) => desugar::desugar_do(ctx, stmts, *span, lower_expr, lower_pat),
 
-        ast::Expr::ListComp(expr, stmts, span) => desugar::desugar_list_comp(
-            ctx,
-            expr,
-            stmts,
-            *span,
-            lower_expr,
-            lower_pat,
-        ),
+        ast::Expr::ListComp(expr, stmts, span) => {
+            desugar::desugar_list_comp(ctx, expr, stmts, *span, lower_expr, lower_pat)
+        }
 
         ast::Expr::Tuple(exprs, span) => {
             let es: Vec<hir::Expr> = exprs.iter().map(|e| lower_expr(ctx, e)).collect();
@@ -7000,7 +6986,9 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                 let con_ref = ctx.def_ref(def_id, *span);
                 let mut hir_fields = Vec::with_capacity(fields.len());
                 for f in fields {
-                    let value = if let Some(e) = &f.value { lower_expr(ctx, e) } else {
+                    let value = if let Some(e) = &f.value {
+                        lower_expr(ctx, e)
+                    } else {
                         // Punning: Foo { x } means Foo { x = x }
                         let name = f.name.name;
                         if let Some(def_id) = ctx.lookup_value(name) {
@@ -7046,7 +7034,9 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                 let con_ref = ctx.def_ref(def_id, *span);
                 let mut hir_fields = Vec::with_capacity(fields.len());
                 for f in fields {
-                    let value = if let Some(e) = &f.value { lower_expr(ctx, e) } else {
+                    let value = if let Some(e) = &f.value {
+                        lower_expr(ctx, e)
+                    } else {
                         // Punning: Foo { x } means Foo { x = x }
                         let name = f.name.name;
                         if let Some(def_id) = ctx.lookup_value(name) {
@@ -7341,7 +7331,9 @@ fn lower_pat(ctx: &mut LowerContext, pat: &ast::Pat) -> hir::Pat {
                 let con_ref = ctx.def_ref(def_id, *span);
                 let mut hir_field_pats: Vec<hir::FieldPat> = Vec::with_capacity(fields.len());
                 for f in fields {
-                    let pat = if let Some(p) = &f.pat { lower_pat(ctx, p) } else {
+                    let pat = if let Some(p) = &f.pat {
+                        lower_pat(ctx, p)
+                    } else {
                         // Punned field: Foo { x } binds x
                         let field_def_id = ctx
                             .lookup_value(f.name.name)
@@ -7412,7 +7404,9 @@ fn lower_pat(ctx: &mut LowerContext, pat: &ast::Pat) -> hir::Pat {
                 let con_ref = ctx.def_ref(def_id, *span);
                 let mut hir_field_pats: Vec<hir::FieldPat> = Vec::with_capacity(fields.len());
                 for f in fields {
-                    let pat = if let Some(p) = &f.pat { lower_pat(ctx, p) } else {
+                    let pat = if let Some(p) = &f.pat {
+                        lower_pat(ctx, p)
+                    } else {
                         // Punned field: Foo { x } binds x
                         let field_def_id = ctx
                             .lookup_value(f.name.name)
@@ -7439,7 +7433,9 @@ fn lower_pat(ctx: &mut LowerContext, pat: &ast::Pat) -> hir::Pat {
                 let con_ref = ctx.def_ref(def_id, *span);
                 let mut hir_field_pats: Vec<hir::FieldPat> = Vec::with_capacity(fields.len());
                 for f in fields {
-                    let pat = if let Some(p) = &f.pat { lower_pat(ctx, p) } else {
+                    let pat = if let Some(p) = &f.pat {
+                        lower_pat(ctx, p)
+                    } else {
                         let field_def_id = ctx
                             .lookup_value(f.name.name)
                             .expect("punned field should be bound");
@@ -8214,10 +8210,7 @@ fn lower_type_family_decl(
         .map(|p| bhc_types::TyVar::new_star(p.name.name.as_u32()))
         .collect();
 
-    let kind = tf
-        .kind
-        .as_ref()
-        .map_or(bhc_types::Kind::Star, lower_kind);
+    let kind = tf.kind.as_ref().map_or(bhc_types::Kind::Star, lower_kind);
 
     let family_kind = match tf.family_kind {
         ast::TypeFamilyKind::Open => hir::TypeFamilyKind::Open,
@@ -8273,10 +8266,7 @@ fn lower_data_family_decl(
         .map(|p| bhc_types::TyVar::new_star(p.name.name.as_u32()))
         .collect();
 
-    let kind = df
-        .kind
-        .as_ref()
-        .map_or(bhc_types::Kind::Star, lower_kind);
+    let kind = df.kind.as_ref().map_or(bhc_types::Kind::Star, lower_kind);
 
     Ok(hir::DataFamilyDef {
         id: def_id,

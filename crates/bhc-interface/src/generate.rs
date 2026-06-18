@@ -46,11 +46,8 @@ pub fn generate_interface(
                     .iter()
                     .map(|p| p.name.name.as_str().to_string())
                     .collect();
-                let constructors: Vec<DataConstructor> = data
-                    .constrs
-                    .iter()
-                    .map(convert_con_decl)
-                    .collect();
+                let constructors: Vec<DataConstructor> =
+                    data.constrs.iter().map(convert_con_decl).collect();
                 let kind = params_to_kind(params.len());
                 iface.add_type(ExportedType {
                     name: data.name.name.as_str().to_string(),

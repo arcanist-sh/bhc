@@ -3,9 +3,7 @@
 //! This module provides WASI imports and runtime functions needed for
 //! standalone WASM execution with wasmtime, wasmer, or other WASI runtimes.
 
-use crate::codegen::{
-    WasmFunc, WasmFuncType, WasmGlobal, WasmImport, WasmImportKind,
-};
+use crate::codegen::{WasmFunc, WasmFuncType, WasmGlobal, WasmImport, WasmImportKind};
 use crate::{WasmInstr, WasmType};
 
 /// Generate the standard WASI imports needed for basic I/O.

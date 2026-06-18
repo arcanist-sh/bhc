@@ -341,8 +341,7 @@ impl LoopType {
 }
 
 /// Target architecture for vectorization decisions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum TargetArch {
     /// x86_64 with SSE instructions (128-bit).
     X86_64Sse,
@@ -358,7 +357,6 @@ pub enum TargetArch {
     /// Generic target (no vectorization).
     Generic,
 }
-
 
 /// A memory allocation.
 #[derive(Clone, Debug, Serialize, Deserialize)]

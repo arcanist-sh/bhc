@@ -131,7 +131,6 @@ fn default_timeout() -> u64 {
     30
 }
 
-
 impl E2ETestCase {
     /// Load a test case from a fixture directory.
     ///

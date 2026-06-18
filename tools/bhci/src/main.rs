@@ -123,7 +123,8 @@ struct ReplOptions {
     multiline: bool,
     /// Show warnings
     warnings: bool,
-    /// Verbose mode
+    /// Verbose mode (configured from the CLI flag; not yet wired into REPL output)
+    #[allow(dead_code)]
     verbose: bool,
 }
 
@@ -141,8 +142,10 @@ impl Default for ReplOptions {
 
 impl ReplState {
     fn new(profile: Profile, verbose: bool) -> Self {
-        let mut options = ReplOptions::default();
-        options.verbose = verbose;
+        let options = ReplOptions {
+            verbose,
+            ..Default::default()
+        };
 
         let source_map = SourceMap::new();
         let file_id = FileId(0);

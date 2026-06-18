@@ -533,7 +533,6 @@ impl Compiler {
         // Phase 4: Tensor IR (if Numeric profile)
         // Store loop_irs for potential WASM codegen
         let mut loop_irs_for_wasm: Vec<bhc_loop_ir::LoopIR> = Vec::new();
-        let mut fusion_report_for_wasm: Option<fusion::KernelReport> = None;
         // Store Tensor IR kernels for GPU codegen
         let mut tensor_kernels_for_gpu: Vec<bhc_tensor_ir::Kernel> = Vec::new();
 
@@ -551,9 +550,8 @@ impl Compiler {
             // Store kernels for GPU codegen
             tensor_kernels_for_gpu = kernels.clone();
 
-            // Generate fusion report (may be used for comprehensive report)
+            // Generate fusion report (used for the comprehensive report below)
             let fusion_report = fusion::generate_kernel_report(&fusion_ctx);
-            fusion_report_for_wasm = Some(fusion_report.clone());
 
             debug!(
                 module = %unit.module_name,
@@ -824,7 +822,7 @@ impl Compiler {
         {
             self.callbacks
                 .on_phase_start(CompilePhase::Link, &unit.module_name);
-            self.link(&[object_path.clone()], &output_path)?;
+            self.link(std::slice::from_ref(&object_path), &output_path)?;
             self.callbacks
                 .on_phase_complete(CompilePhase::Link, &unit.module_name);
         } else {

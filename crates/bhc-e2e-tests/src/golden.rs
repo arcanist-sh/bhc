@@ -102,6 +102,7 @@ fn normalize_output(s: &str) -> String {
 }
 
 /// Load a golden file from disk.
+#[allow(dead_code)] // golden-test helper, used by snapshot-update workflows
 pub fn load_golden(path: &std::path::Path) -> Result<String, GoldenError> {
     if !path.exists() {
         return Err(GoldenError::NotFound(path.display().to_string()));
@@ -112,6 +113,7 @@ pub fn load_golden(path: &std::path::Path) -> Result<String, GoldenError> {
 /// Update a golden file with new content.
 ///
 /// This is used when intentionally updating expected outputs.
+#[allow(dead_code)] // golden-test helper, used by snapshot-update workflows
 pub fn update_golden(path: &std::path::Path, content: &str) -> Result<(), GoldenError> {
     let normalized = normalize_output(content);
     std::fs::write(path, format!("{}\n", normalized))?;

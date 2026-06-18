@@ -6591,12 +6591,12 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
             // Use the qualified name resolution which handles aliases
             if let Some(def_id) = ctx.resolve_qualified_var(qualifier, name) {
                 // Warn if this is a stub
-                let qual_name = format!("{}.{}", module_name.to_string(), name.as_str());
+                let qual_name = format!("{}.{}", module_name, name.as_str());
                 ctx.warn_if_stub(def_id, &qual_name, *span);
                 hir::Expr::Var(ctx.def_ref(def_id, *span))
             } else {
                 // Fall back to creating a placeholder with the full qualified name
-                let qual_name = format!("{}.{}", module_name.to_string(), name.as_str());
+                let qual_name = format!("{}.{}", module_name, name.as_str());
                 let qual_sym = Symbol::intern(&qual_name);
                 ctx.error(crate::LowerError::UnboundVar {
                     name: qual_name,
@@ -6648,12 +6648,12 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
             // Use the qualified constructor resolution which handles aliases
             if let Some(def_id) = ctx.resolve_qualified_constructor(qualifier, name) {
                 // Warn if this is a stub
-                let qual_name = format!("{}.{}", module_name.to_string(), name.as_str());
+                let qual_name = format!("{}.{}", module_name, name.as_str());
                 ctx.warn_if_stub(def_id, &qual_name, *span);
                 hir::Expr::Con(ctx.def_ref(def_id, *span))
             } else {
                 // Fall back to creating a placeholder with the full qualified name
-                let qual_name = format!("{}.{}", module_name.to_string(), name.as_str());
+                let qual_name = format!("{}.{}", module_name, name.as_str());
                 let qual_sym = Symbol::intern(&qual_name);
                 ctx.error(crate::LowerError::UnboundCon {
                     name: qual_name,
@@ -7080,7 +7080,7 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                 }
                 hir::Expr::Record(con_ref, hir_fields, *span)
             } else {
-                let qual_name = format!("{}.{}", module_name.to_string(), con_name.as_str());
+                let qual_name = format!("{}.{}", module_name, con_name.as_str());
                 ctx.error(crate::LowerError::UnboundCon {
                     name: qual_name,
                     span: *span,
@@ -7390,7 +7390,7 @@ fn lower_pat(ctx: &mut LowerContext, pat: &ast::Pat) -> hir::Pat {
                 hir::Pat::Con(con_ref, hir_pats, *span)
             } else {
                 // Fall back to creating a placeholder with the full qualified name
-                let qual_name = format!("{}.{}", module_name.to_string(), con_name.as_str());
+                let qual_name = format!("{}.{}", module_name, con_name.as_str());
                 let qual_sym = Symbol::intern(&qual_name);
                 ctx.error(crate::LowerError::UnboundCon {
                     name: qual_name,
@@ -7428,7 +7428,7 @@ fn lower_pat(ctx: &mut LowerContext, pat: &ast::Pat) -> hir::Pat {
                 hir::Pat::RecordCon(con_ref, hir_field_pats, *span)
             } else {
                 // Fall back to creating a placeholder with the full qualified name
-                let qual_name = format!("{}.{}", module_name.to_string(), con_name.as_str());
+                let qual_name = format!("{}.{}", module_name, con_name.as_str());
                 let qual_sym = Symbol::intern(&qual_name);
                 ctx.error(crate::LowerError::UnboundCon {
                     name: qual_name,
@@ -7629,7 +7629,7 @@ pub(crate) fn lower_type(ctx: &mut LowerContext, ty: &ast::Type) -> bhc_types::T
         ast::Type::QualCon(module_name, ident, _) => {
             // Qualified type constructor like M.Map
             // Create a qualified name symbol by combining module and name
-            let qual_name = format!("{}.{}", module_name.to_string(), ident.name.as_str());
+            let qual_name = format!("{}.{}", module_name, ident.name.as_str());
             let symbol = Symbol::intern(&qual_name);
             bhc_types::Ty::Con(bhc_types::TyCon::new(symbol, bhc_types::Kind::Star))
         }

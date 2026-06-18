@@ -98,6 +98,9 @@ struct VersionConstraint {
 }
 
 /// State of a package in the resolution process.
+// `Pending`/`Failed` are part of the resolver's state model but not yet
+// produced by the current resolution path.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 enum PackageState {
     /// Package is being explored.
@@ -157,7 +160,8 @@ impl From<DependencySource> for LockedSource {
 pub struct Resolution {
     /// Resolved packages.
     packages: BTreeMap<String, ResolvedDep>,
-    /// Root package name.
+    /// Root package name (retained for diagnostics; not yet read).
+    #[allow(dead_code)]
     root: String,
 }
 

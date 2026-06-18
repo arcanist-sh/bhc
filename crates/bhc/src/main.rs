@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -489,7 +489,7 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
 }
 
 /// Run a Haskell program
-fn run_file(file: &PathBuf, _args: &[String], cli: &Cli) -> Result<()> {
+fn run_file(file: &Path, _args: &[String], cli: &Cli) -> Result<()> {
     use bhc_driver::CompilerBuilder;
     use camino::Utf8PathBuf;
 

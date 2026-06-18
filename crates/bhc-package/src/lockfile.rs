@@ -160,6 +160,9 @@ impl Lockfile {
     }
 
     /// Convert to TOML string.
+    // Intentional named serializer producing lockfile TOML, not a human-facing
+    // `Display` rendering.
+    #[allow(clippy::inherent_to_string)]
     #[must_use]
     pub fn to_string(&self) -> String {
         let mut output = String::new();

@@ -1158,10 +1158,8 @@ mod tests {
         let gc = GarbageCollector::with_default_config();
 
         let layout = Layout::new::<[u64; 10]>();
-        let ptr = gc.alloc(layout, false).unwrap();
-
-        // Verify we got a valid pointer
-        assert!(!ptr.as_ptr().is_null());
+        // alloc returns a NonNull on success; unwrap verifies allocation succeeded.
+        let _ptr = gc.alloc(layout, false).unwrap();
     }
 
     #[test]
@@ -1169,9 +1167,8 @@ mod tests {
         let gc = GarbageCollector::with_default_config();
 
         let layout = Layout::new::<[u64; 10]>();
-        let ptr = gc.alloc_pinned(layout).unwrap();
-
-        assert!(!ptr.as_ptr().is_null());
+        // alloc_pinned returns a NonNull on success; unwrap verifies success.
+        let _ptr = gc.alloc_pinned(layout).unwrap();
     }
 
     #[test]

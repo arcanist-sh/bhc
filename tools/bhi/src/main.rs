@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// Basel Haskell Inspector - IR and kernel report viewer
@@ -666,7 +666,7 @@ fn print_filtered(content: &str, filter: Option<&str>) {
     }
 }
 
-fn detect_stage(file: &PathBuf) -> IrStage {
+fn detect_stage(file: &Path) -> IrStage {
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
         "ast" => IrStage::Ast,
@@ -1188,12 +1188,9 @@ fn analyze_memory(file: &PathBuf, heap_only: bool, arena: bool, by_site: bool) -
         );
     }
     println!(
-        "  Heap:            {} ({})",
+        "  Heap:            {} ({:.1}%)",
         format_bytes(summary.heap_allocated),
-        format!(
-            "{:.1}%",
-            (summary.heap_allocated as f64 / summary.total_allocated as f64) * 100.0
-        )
+        (summary.heap_allocated as f64 / summary.total_allocated as f64) * 100.0
     );
     if summary.pinned_allocated > 0 {
         println!(

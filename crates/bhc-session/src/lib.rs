@@ -386,7 +386,6 @@ impl Session {
 pub type SessionRef = Arc<Session>;
 
 /// Create a shared session reference.
-#[must_use]
 pub fn create_session(options: Options) -> Result<SessionRef, SessionError> {
     Ok(Arc::new(Session::new(options)?))
 }

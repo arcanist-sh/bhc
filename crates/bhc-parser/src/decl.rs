@@ -1128,11 +1128,10 @@ impl<'src> Parser<'src> {
     /// This includes operators like `-->` and backtick-quoted identifiers like `` `elem` ``.
     #[allow(dead_code)]
     fn is_infix_op_start(&self) -> bool {
-        match self.current_kind() {
-            Some(TokenKind::Operator(_)) | Some(TokenKind::ConOperator(_)) => true,
-            Some(TokenKind::Backtick) => true,
-            _ => false,
-        }
+        matches!(
+            self.current_kind(),
+            Some(TokenKind::Operator(_) | TokenKind::ConOperator(_) | TokenKind::Backtick)
+        )
     }
 
     /// Check if the current token starts a constructor operator (starts with `:`)
@@ -1144,11 +1143,10 @@ impl<'src> Parser<'src> {
     /// Check if the current token starts a variable operator (doesn't start with `:`)
     /// This indicates an infix function binding like `x --> y = expr`
     fn is_infix_var_op_start(&self) -> bool {
-        match self.current_kind() {
-            Some(TokenKind::Operator(_)) => true,
-            Some(TokenKind::Backtick) => true,
-            _ => false,
-        }
+        matches!(
+            self.current_kind(),
+            Some(TokenKind::Operator(_) | TokenKind::Backtick)
+        )
     }
 
     /// Parse an infix operator for bindings.

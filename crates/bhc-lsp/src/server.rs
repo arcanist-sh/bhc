@@ -125,6 +125,9 @@ impl Server {
             params.client_info.as_ref().map(|i| &i.name)
         );
 
+        // root_uri is deprecated in the LSP spec in favor of workspace_folders,
+        // but we still read it for diagnostic logging / older-client compatibility.
+        #[allow(deprecated)]
         if let Some(ref root) = params.root_uri {
             info!("Root URI: {:?}", root);
         }

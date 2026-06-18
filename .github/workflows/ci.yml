@@ -177,7 +177,10 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           files: lcov.info
-          fail_ci_if_error: true
+          # Don't fail the job on Codecov upload/auth hiccups (no token
+          # configured); coverage generation itself is the gating signal.
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   bench:
     name: Benchmarks

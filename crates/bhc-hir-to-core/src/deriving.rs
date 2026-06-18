@@ -46,6 +46,7 @@ pub struct DerivingContext {
 
 impl DerivingContext {
     /// Create a new deriving context.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             fresh_counter: 50000, // Start above all fixed DefId ranges (highest is ~11273)
@@ -56,7 +57,7 @@ impl DerivingContext {
     fn fresh_var(&mut self, prefix: &str, ty: Ty) -> Var {
         let n = self.fresh_counter;
         self.fresh_counter += 1;
-        let name = Symbol::intern(&format!("{}_{}", prefix, n));
+        let name = Symbol::intern(&format!("{prefix}_{n}"));
         Var {
             name,
             id: VarId::new(n as usize),
@@ -331,7 +332,7 @@ impl DerivingContext {
 
             // Bind field variables
             let fields: Vec<Var> = (0..field_count)
-                .map(|i| self.fresh_var(&format!("f{}", i), Ty::Error))
+                .map(|i| self.fresh_var(&format!("f{i}"), Ty::Error))
                 .collect();
 
             // Build the product representation for this constructor's fields
@@ -390,7 +391,7 @@ impl DerivingContext {
     ///
     /// 0 fields: U1
     /// 1 field:  M1(K1(field))
-    /// N fields: balanced :*: tree of M1(K1(field_i))
+    /// N fields: balanced :*: tree of `M1(K1(field_i))`
     fn build_from_product(&self, fields: &[Var], span: Span) -> core::Expr {
         if fields.is_empty() {
             // U1 (no fields)
@@ -417,7 +418,7 @@ impl DerivingContext {
             return leaves[0].clone();
         }
         // Split at midpoint: left-biased ((n+1)/2)
-        let mid = (leaves.len() + 1) / 2;
+        let mid = leaves.len().div_ceil(2);
         let left = self.build_product_tree(&leaves[..mid], span);
         let right = self.build_product_tree(&leaves[mid..], span);
         self.wrap_product(left, right, span)
@@ -470,7 +471,7 @@ impl DerivingContext {
         if total <= 1 {
             return inner;
         }
-        let mid = (total + 1) / 2;
+        let mid = total.div_ceil(2);
         if index < mid {
             // Left branch
             let wrapped = self.wrap_in_sum_path(inner, index, mid, span);
@@ -499,7 +500,7 @@ impl DerivingContext {
             return self.build_to_constructor(data_def, start, scrutinee, span);
         }
 
-        let mid = (count + 1) / 2;
+        let mid = count.div_ceil(2);
 
         // Left branch: L1 contains constructors [start, start+mid)
         let left_var = self.fresh_var("left", Ty::Error);
@@ -653,7 +654,7 @@ impl DerivingContext {
         }
 
         // Multiple fields: case scrutinee of { :*: left right -> ... }
-        let mid = (fields.len() + 1) / 2;
+        let mid = fields.len().div_ceil(2);
         let left_var = self.fresh_var("pl", Ty::Error);
         let right_var = self.fresh_var("pr", Ty::Error);
 
@@ -685,7 +686,7 @@ impl DerivingContext {
         )
     }
 
-    /// Make a DataCon for a GHC.Generics representation type.
+    /// Make a `DataCon` for a GHC.Generics representation type.
     fn make_generics_data_con(&self, name: &str, tag: u32, arity: u32) -> DataCon {
         let type_name = match name {
             "L1" | "R1" => ":+:",
@@ -704,9 +705,9 @@ impl DerivingContext {
     // Empty instance derivation (NFData)
     // =========================================================================
 
-    /// Derive an empty instance (no bindings) for classes like NFData.
+    /// Derive an empty instance (no bindings) for classes like `NFData`.
     ///
-    /// NFData is a no-op since BHC evaluates strictly by default.
+    /// `NFData` is a no-op since BHC evaluates strictly by default.
     pub fn derive_empty_instance(
         &mut self,
         type_name: Symbol,
@@ -876,12 +877,12 @@ impl DerivingContext {
 
             // Generate fresh variables for x's fields
             let x_fields: Vec<Var> = (0..field_count)
-                .map(|i| self.fresh_var(&format!("x{}", i), Ty::Error))
+                .map(|i| self.fresh_var(&format!("x{i}"), Ty::Error))
                 .collect();
 
             // Generate fresh variables for y's fields
             let y_fields: Vec<Var> = (0..field_count)
-                .map(|i| self.fresh_var(&format!("y{}", i), Ty::Error))
+                .map(|i| self.fresh_var(&format!("y{i}"), Ty::Error))
                 .collect();
 
             // Generate the comparison: x0 == y0 && x1 == y1 && ...
@@ -1203,7 +1204,7 @@ impl DerivingContext {
             };
 
             let x_fields: Vec<Var> = (0..x_field_count)
-                .map(|i| self.fresh_var(&format!("x{}", i), Ty::Error))
+                .map(|i| self.fresh_var(&format!("x{i}"), Ty::Error))
                 .collect();
 
             let mut inner_alts = Vec::new();
@@ -1222,7 +1223,7 @@ impl DerivingContext {
                 };
 
                 let y_fields: Vec<Var> = (0..y_field_count)
-                    .map(|i| self.fresh_var(&format!("y{}", i), Ty::Error))
+                    .map(|i| self.fresh_var(&format!("y{i}"), Ty::Error))
                     .collect();
 
                 let result = if x_idx < y_idx {
@@ -1465,7 +1466,7 @@ impl DerivingContext {
             };
 
             let fields: Vec<Var> = (0..field_count)
-                .map(|i| self.fresh_var(&format!("f{}", i), Ty::Error))
+                .map(|i| self.fresh_var(&format!("f{i}"), Ty::Error))
                 .collect();
 
             let show_expr = if field_count == 0 {
@@ -2090,7 +2091,7 @@ impl DerivingContext {
                 let binders: Vec<Var> = field_types
                     .iter()
                     .enumerate()
-                    .map(|(i, _)| self.fresh_var(&format!("a{}", i), Ty::Error))
+                    .map(|(i, _)| self.fresh_var(&format!("a{i}"), Ty::Error))
                     .collect();
 
                 // Build the result: apply f to fields that contain the type param
@@ -2283,7 +2284,7 @@ impl DerivingContext {
                 let binders: Vec<Var> = field_types
                     .iter()
                     .enumerate()
-                    .map(|(i, _)| self.fresh_var(&format!("a{}", i), Ty::Error))
+                    .map(|(i, _)| self.fresh_var(&format!("a{i}"), Ty::Error))
                     .collect();
 
                 // Collect fields that contain the type parameter (in reverse for foldr)
@@ -2478,7 +2479,7 @@ impl DerivingContext {
                 let binders: Vec<Var> = field_types
                     .iter()
                     .enumerate()
-                    .map(|(i, _)| self.fresh_var(&format!("a{}", i), Ty::Error))
+                    .map(|(i, _)| self.fresh_var(&format!("a{i}"), Ty::Error))
                     .collect();
 
                 let data_con = DataCon {
@@ -2534,7 +2535,7 @@ impl DerivingContext {
     /// Instead of `pure Con <*> f a0 <*> f a1` (which requires partial application
     /// of multi-field constructors — incompatible with BHC's flat calling convention),
     /// we generate: `let r0 = f a0 in let r1 = f a1 in pure (Con r0 r1 a2)`
-    /// where r_i are fresh vars for param fields and a_i are originals for non-param fields.
+    /// where `r_i` are fresh vars for param fields and `a_i` are originals for non-param fields.
     fn build_traversal(
         &mut self,
         data_con: DataCon,
@@ -2553,7 +2554,7 @@ impl DerivingContext {
         let mut result_vars: Vec<(Option<Var>, &Var)> = Vec::new();
         for (i, (field_var, field_ty)) in binders.iter().zip(field_types.iter()).enumerate() {
             if self.type_contains_param(field_ty, type_param) {
-                let r_var = self.fresh_var(&format!("r{}", i), Ty::Error);
+                let r_var = self.fresh_var(&format!("r{i}"), Ty::Error);
                 result_vars.push((Some(r_var), field_var));
             } else {
                 result_vars.push((None, field_var));
@@ -2688,7 +2689,7 @@ impl DerivingContext {
         let data_con = DataCon {
             name: Symbol::intern(if value { "True" } else { "False" }),
             ty_con: bool_con.clone(),
-            tag: if value { 1 } else { 0 },
+            tag: u32::from(value),
             arity: 0,
         };
         let var = Var {
@@ -2794,7 +2795,7 @@ impl DerivingContext {
         }
     }
 
-    /// Check if a TyList contains a type variable.
+    /// Check if a `TyList` contains a type variable.
     fn tylist_contains_param(&self, list: &bhc_types::TyList, param: &TyVar) -> bool {
         use bhc_types::TyList;
         match list {

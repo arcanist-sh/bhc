@@ -386,11 +386,10 @@ impl<'src> Lexer<'src> {
             // but "-->" would be an operator.
             if self.starts_with("--") && self.is_line_comment() {
                 // Check for doc comment
-                if self.starts_with("-- |") || self.starts_with("-- ^") {
-                    if self.config.preserve_doc_comments {
+                if (self.starts_with("-- |") || self.starts_with("-- ^"))
+                    && self.config.preserve_doc_comments {
                         break; // Let the main lexer handle it
                     }
-                }
                 // Regular comment - skip to end of line
                 while let Some(c) = self.peek() {
                     if c == '\n' {
@@ -1808,11 +1807,11 @@ mod tests {
         assert_eq!(kinds[5], TokenKind::Eq);
 
         // VirtualSemi between declarations at same indentation
-        let has_semi = kinds.iter().any(|k| *k == TokenKind::VirtualSemi);
+        let has_semi = kinds.contains(&TokenKind::VirtualSemi);
         assert!(has_semi, "Should have VirtualSemi between decls");
 
         // VirtualRBrace at end (or before Eof)
-        let has_rbrace = kinds.iter().any(|k| *k == TokenKind::VirtualRBrace);
+        let has_rbrace = kinds.contains(&TokenKind::VirtualRBrace);
         assert!(has_rbrace, "Should have VirtualRBrace at end");
     }
 
@@ -1827,7 +1826,7 @@ mod tests {
         assert_eq!(kinds[of_idx + 1], TokenKind::VirtualLBrace);
 
         // Should have VirtualSemi between alternatives
-        let has_semi = kinds.iter().any(|k| *k == TokenKind::VirtualSemi);
+        let has_semi = kinds.contains(&TokenKind::VirtualSemi);
         assert!(has_semi, "Should have VirtualSemi between case alts");
     }
 
@@ -1895,7 +1894,7 @@ mod tests {
         assert_eq!(kinds[do_idx + 1], TokenKind::VirtualLBrace);
 
         // Should have VirtualSemi between statements
-        let has_semi = kinds.iter().any(|k| *k == TokenKind::VirtualSemi);
+        let has_semi = kinds.contains(&TokenKind::VirtualSemi);
         assert!(has_semi, "Should have VirtualSemi between do statements");
     }
 
@@ -1906,13 +1905,13 @@ mod tests {
         let kinds = lex_kinds(src);
 
         // Should have LBrace and RBrace (explicit)
-        let has_lbrace = kinds.iter().any(|k| *k == TokenKind::LBrace);
-        let has_rbrace = kinds.iter().any(|k| *k == TokenKind::RBrace);
+        let has_lbrace = kinds.contains(&TokenKind::LBrace);
+        let has_rbrace = kinds.contains(&TokenKind::RBrace);
         assert!(has_lbrace, "Should have explicit LBrace");
         assert!(has_rbrace, "Should have explicit RBrace");
 
         // Should have semicolons
-        let has_semi = kinds.iter().any(|k| *k == TokenKind::Semi);
+        let has_semi = kinds.contains(&TokenKind::Semi);
         assert!(has_semi, "Should have explicit semicolons");
     }
 
@@ -2154,9 +2153,7 @@ class ExtensionClass a where
         // Find `in` position - there should be a VirtualRBrace somewhere before it
         // (possibly with a VirtualSemi between the VirtualRBrace and In, which is fine)
         let in_idx = kinds.iter().position(|k| *k == TokenKind::In).unwrap();
-        let has_rbrace_before_in = kinds[..in_idx]
-            .iter()
-            .any(|k| *k == TokenKind::VirtualRBrace);
+        let has_rbrace_before_in = kinds[..in_idx].contains(&TokenKind::VirtualRBrace);
         assert!(
             has_rbrace_before_in,
             "Should have VirtualRBrace before 'in' to close let block"
@@ -2194,15 +2191,14 @@ class ExtensionClass a where
 
         // Pipe should appear as-is, no VirtualLBrace after it
         for (i, k) in kinds.iter().enumerate() {
-            if *k == TokenKind::Pipe {
-                if i + 1 < kinds.len() {
+            if *k == TokenKind::Pipe
+                && i + 1 < kinds.len() {
                     assert_ne!(
                         kinds[i + 1],
                         TokenKind::VirtualLBrace,
                         "Guard pipe should not start a layout block"
                     );
                 }
-            }
         }
     }
 
@@ -2247,9 +2243,7 @@ class ExtensionClass a where
         );
 
         // Should have VirtualSemi between `a = 1` and `b = 2` (same column)
-        let semi_after_where = kinds[where_idx..]
-            .iter()
-            .any(|k| *k == TokenKind::VirtualSemi);
+        let semi_after_where = kinds[where_idx..].contains(&TokenKind::VirtualSemi);
         assert!(
             semi_after_where,
             "Should have VirtualSemi between where bindings at same column"
@@ -2290,7 +2284,7 @@ class ExtensionClass a where
         println!("No-module-header tokens: {:?}", kinds);
 
         // Should have VirtualSemi between the two declarations
-        let has_semi = kinds.iter().any(|k| *k == TokenKind::VirtualSemi);
+        let has_semi = kinds.contains(&TokenKind::VirtualSemi);
         assert!(
             has_semi,
             "Should have VirtualSemi between top-level decls without module header"

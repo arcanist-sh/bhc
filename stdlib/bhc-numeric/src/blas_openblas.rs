@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn test_provider_name() {
         let p = OpenBlasProvider;
-        assert_eq!(p.name(), "OpenBLAS");
+        assert_eq!(BlasProviderF32::name(&p), "OpenBLAS");
     }
 
     #[test]

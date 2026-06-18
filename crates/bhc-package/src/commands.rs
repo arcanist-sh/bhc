@@ -611,13 +611,12 @@ impl PublishCommand {
         let package_dir = manifest_path.parent().unwrap();
 
         // Check for uncommitted changes
-        if !self.allow_dirty {
-            if is_git_dirty(package_dir) {
+        if !self.allow_dirty
+            && is_git_dirty(package_dir) {
                 return Err(CommandError::PublishFailed(
                     "uncommitted changes. Use --allow-dirty to override".to_string(),
                 ));
             }
-        }
 
         // Build tarball
         let tarball = self.build_tarball(package_dir, &manifest)?;
@@ -875,7 +874,7 @@ pub struct PackageInfo {
 
 /// Convert a package name to a module name.
 fn to_module_name(name: &str) -> String {
-    name.split(|c| c == '-' || c == '_')
+    name.split(['-', '_'])
         .map(|part| {
             let mut chars = part.chars();
             match chars.next() {

@@ -9,6 +9,7 @@ use crate::{Alt, Bind, Expr, Var, VarId};
 use super::expr_util::{free_var_ids, fresh_var_id};
 
 /// Substitute multiple variables simultaneously with capture avoidance.
+#[must_use]
 pub fn substitute(expr: Expr, subst: &FxHashMap<VarId, Expr>) -> Expr {
     if subst.is_empty() {
         return expr;
@@ -17,6 +18,7 @@ pub fn substitute(expr: Expr, subst: &FxHashMap<VarId, Expr>) -> Expr {
 }
 
 /// Substitute a single variable in an expression with capture avoidance.
+#[must_use]
 pub fn substitute_single(expr: Expr, var_id: VarId, replacement: &Expr) -> Expr {
     let mut subst = FxHashMap::default();
     subst.insert(var_id, replacement.clone());
@@ -81,7 +83,7 @@ fn handle_binder(binder: Var, subst: &FxHashMap<VarId, Expr>) -> (Var, FxHashMap
 
     // Check if the binder would capture any free variable in substitution values
     let subst_free: rustc_hash::FxHashSet<VarId> =
-        new_subst.values().flat_map(|e| free_var_ids(e)).collect();
+        new_subst.values().flat_map(free_var_ids).collect();
 
     if subst_free.contains(&binder.id) {
         // Alpha-rename the binder to avoid capture
@@ -121,7 +123,7 @@ fn subst_bind(bind: Bind, subst: &FxHashMap<VarId, Expr>) -> (Bind, FxHashMap<Va
 
             // Check for capture
             let subst_free: rustc_hash::FxHashSet<VarId> =
-                body_subst.values().flat_map(|e| free_var_ids(e)).collect();
+                body_subst.values().flat_map(free_var_ids).collect();
 
             let mut rename_map: FxHashMap<VarId, Var> = FxHashMap::default();
             for (x, _) in &binds {
@@ -173,7 +175,7 @@ fn subst_alt(alt: Alt, subst: &FxHashMap<VarId, Expr>) -> Alt {
     }
 
     let subst_free: rustc_hash::FxHashSet<VarId> =
-        alt_subst.values().flat_map(|e| free_var_ids(e)).collect();
+        alt_subst.values().flat_map(free_var_ids).collect();
 
     let mut new_binders = Vec::with_capacity(alt.binders.len());
     for b in alt.binders {

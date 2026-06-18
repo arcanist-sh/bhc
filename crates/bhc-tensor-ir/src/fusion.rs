@@ -272,15 +272,15 @@ pub enum FusionPattern {
     /// Compiles to: Fused attention kernel with optional memory-efficient
     /// tiling for long sequences.
     Attention {
-        /// Query tensor [batch, heads, seq_len, head_dim].
+        /// Query tensor [batch, heads, `seq_len`, `head_dim`].
         query: TensorRef,
-        /// Key tensor [batch, heads, seq_len, head_dim].
+        /// Key tensor [batch, heads, `seq_len`, `head_dim`].
         key: TensorRef,
-        /// Value tensor [batch, heads, seq_len, head_dim].
+        /// Value tensor [batch, heads, `seq_len`, `head_dim`].
         value: TensorRef,
         /// Optional attention mask.
         mask: Option<TensorRef>,
-        /// Scale factor (typically 1/sqrt(head_dim)).
+        /// Scale factor (typically `1/sqrt(head_dim)`).
         scale: f64,
         /// Whether to use causal (autoregressive) masking.
         causal: bool,
@@ -333,7 +333,7 @@ pub enum FusionPattern {
 /// Activation functions that can be fused with linear operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FusedActivation {
-    /// ReLU: max(0, x)
+    /// `ReLU`: max(0, x)
     Relu,
     /// GELU (standard)
     Gelu,
@@ -455,7 +455,7 @@ fn infer_output_meta(op: &TensorOp) -> TensorMeta {
         }
         TensorOp::Reduce(_, axis, t) => {
             // Remove the reduced axis
-            let mut dims: SmallVec<[crate::Dim; 4]> = t.meta.shape.dims().iter().cloned().collect();
+            let mut dims: SmallVec<[crate::Dim; 4]> = t.meta.shape.dims().iter().copied().collect();
             if let Some(idx) = axis.normalize(dims.len()) {
                 dims.remove(idx);
             }
@@ -490,7 +490,7 @@ fn infer_output_meta(op: &TensorOp) -> TensorMeta {
                         let count = ((stop - start) / step) as usize;
                         new_dims.push(crate::Dim::Static(count));
                     } else {
-                        new_dims.push(dim.clone());
+                        new_dims.push(*dim);
                     }
                 }
             }
@@ -503,7 +503,7 @@ fn infer_output_meta(op: &TensorOp) -> TensorMeta {
             let new_dims: SmallVec<[crate::Dim; 4]> = perm
                 .as_slice()
                 .iter()
-                .map(|&i| old_dims[i].clone())
+                .map(|&i| old_dims[i])
                 .collect();
             // Note: Transpose creates strided layout, not contiguous
             let shape = Shape::new(new_dims);
@@ -531,8 +531,8 @@ fn infer_output_meta(op: &TensorOp) -> TensorMeta {
             let a_dims = a.meta.shape.dims();
             let b_dims = b.meta.shape.dims();
             if a_dims.len() >= 2 && b_dims.len() >= 2 {
-                let m = a_dims[a_dims.len() - 2].clone();
-                let n = b_dims[b_dims.len() - 1].clone();
+                let m = a_dims[a_dims.len() - 2];
+                let n = b_dims[b_dims.len() - 1];
                 TensorMeta::new_contiguous(a.meta.dtype, Shape::new([m, n]))
                     .unwrap_or_else(|| a.meta.clone())
             } else {
@@ -548,14 +548,14 @@ fn infer_output_meta(op: &TensorOp) -> TensorMeta {
                 .shape
                 .dims()
                 .first()
-                .cloned()
+                .copied()
                 .unwrap_or(crate::Dim::Static(1));
             let n = b
                 .meta
                 .shape
                 .dims()
                 .first()
-                .cloned()
+                .copied()
                 .unwrap_or(crate::Dim::Static(1));
             TensorMeta::new_contiguous(a.meta.dtype, Shape::new([m, n]))
                 .unwrap_or_else(|| a.meta.clone())
@@ -718,13 +718,13 @@ fn find_fusion_pattern(
         let left_producer = find_producer(ops, left_ref.id);
         let right_producer = find_producer(ops, right_ref.id);
 
-        let left_is_fusible_map = left_producer.map_or(false, |idx| {
+        let left_is_fusible_map = left_producer.is_some_and(|idx| {
             !ops[idx].fused
                 && ctx.ref_count(left_ref.id) == 1
                 && matches!(&ops[idx].op, TensorOp::Map(_, _))
         });
 
-        let right_is_fusible_map = right_producer.map_or(false, |idx| {
+        let right_is_fusible_map = right_producer.is_some_and(|idx| {
             !ops[idx].fused
                 && ctx.ref_count(right_ref.id) == 1
                 && matches!(&ops[idx].op, TensorOp::Map(_, _))
@@ -938,7 +938,7 @@ fn try_detect_softmax(
 
 /// Detects the layer normalization pattern.
 ///
-/// LayerNorm is:
+/// `LayerNorm` is:
 /// 1. Compute mean: mu = mean(x)
 /// 2. Compute variance: var = mean((x - mu)^2)
 /// 3. Normalize: (x - mu) / sqrt(var + eps)
@@ -1096,7 +1096,7 @@ fn try_detect_attention(
             .shape
             .dims()
             .last()
-            .and_then(|d| d.static_value())
+            .and_then(super::Dim::static_value)
             .unwrap_or(64) as f64;
         let inferred_scale = 1.0 / head_dim.sqrt();
 
@@ -1118,7 +1118,7 @@ fn try_detect_attention(
     None
 }
 
-/// Detects GELU or SiLU activation patterns.
+/// Detects GELU or `SiLU` activation patterns.
 fn try_detect_activation(
     ctx: &FusionContext,
     ops: &[FusibleOp],
@@ -1165,8 +1165,8 @@ fn try_detect_activation(
                     }
                 }
             }
-            TensorOp::Map(sigmoid_fn, inner_ref) if is_sigmoid_fn(&sigmoid_fn.name) => {
-                if inner_ref.id == x_ref.id {
+            TensorOp::Map(sigmoid_fn, inner_ref) if is_sigmoid_fn(&sigmoid_fn.name)
+                && inner_ref.id == x_ref.id => {
                     return Some((
                         FusionPattern::Silu {
                             input: x_ref.clone(),
@@ -1174,7 +1174,6 @@ fn try_detect_activation(
                         vec![consumer_idx, sigmoid_producer],
                     ));
                 }
-            }
             _ => {}
         }
     }
@@ -1358,7 +1357,7 @@ fn create_fused_group(
             let output_shape = if axis.is_some() {
                 // Reduce along axis
                 let mut dims: SmallVec<[crate::Dim; 4]> =
-                    input.meta.shape.dims().iter().cloned().collect();
+                    input.meta.shape.dims().iter().copied().collect();
                 if let Some(idx) = axis.and_then(|a| a.normalize(dims.len())) {
                     dims.remove(idx);
                 }
@@ -1515,7 +1514,7 @@ fn create_fused_group(
             };
             // LayerNorm kernel: single-pass Welford algorithm
             let layernorm_fn = MapFn {
-                name: Symbol::intern(&format!("layernorm_welford_eps{:.0e}", epsilon)),
+                name: Symbol::intern(&format!("layernorm_welford_eps{epsilon:.0e}")),
                 span: bhc_span::Span::DUMMY,
             };
             let mut inputs = vec![input.clone()];
@@ -1543,7 +1542,7 @@ fn create_fused_group(
                 meta: input.meta.clone(),
             };
             let rmsnorm_fn = MapFn {
-                name: Symbol::intern(&format!("rmsnorm_eps{:.0e}", epsilon)),
+                name: Symbol::intern(&format!("rmsnorm_eps{epsilon:.0e}")),
                 span: bhc_span::Span::DUMMY,
             };
             let mut inputs = vec![input.clone()];
@@ -1573,9 +1572,9 @@ fn create_fused_group(
             };
             // Fused attention kernel with optional mask and causal mode
             let _attention_name = if *causal {
-                format!("fused_attention_causal_scale{:.4}", scale)
+                format!("fused_attention_causal_scale{scale:.4}")
             } else {
-                format!("fused_attention_scale{:.4}", scale)
+                format!("fused_attention_scale{scale:.4}")
             };
             let mut inputs = vec![query.clone(), key.clone(), value.clone()];
             if let Some(m) = mask {
@@ -1634,10 +1633,10 @@ fn create_fused_group(
             let w_dims = weight.meta.shape.dims();
             let out_dim = w_dims
                 .last()
-                .cloned()
-                .unwrap_or_else(|| crate::Dim::Static(1));
+                .copied()
+                .unwrap_or(crate::Dim::Static(1));
             let in_dims = input.meta.shape.dims();
-            let mut out_shape: SmallVec<[crate::Dim; 4]> = in_dims.iter().cloned().collect();
+            let mut out_shape: SmallVec<[crate::Dim; 4]> = in_dims.iter().copied().collect();
             if let Some(last) = out_shape.last_mut() {
                 *last = out_dim;
             }
@@ -1657,7 +1656,7 @@ fn create_fused_group(
                 None => "",
             };
             let has_bias = if bias.is_some() { "_bias" } else { "" };
-            let _ = format!("fused_linear{}{}", has_bias, act_suffix);
+            let _ = format!("fused_linear{has_bias}{act_suffix}");
 
             let mut inputs = vec![input.clone(), weight.clone()];
             if let Some(b) = bias {
@@ -2294,7 +2293,7 @@ mod tests {
     /// 1. map f (map g x)
     /// 2. zipWith f (map g a) (map h b)
     /// 3. sum (map f x)
-    /// 4. foldl' op z (map f x) - (tested via ReduceMap pattern)
+    /// 4. foldl' op z (map f x) - (tested via `ReduceMap` pattern)
     #[test]
     fn test_m2_all_guaranteed_patterns_fuse() {
         // Pattern 1: map f (map g x)
@@ -2397,7 +2396,7 @@ mod tests {
     // ML Fusion Pattern Tests (H26-SPEC Section 8.2)
     // ========================================================================
 
-    /// Test that SiLU pattern (x * sigmoid(x)) is detected and fused.
+    /// Test that `SiLU` pattern (x * sigmoid(x)) is detected and fused.
     #[test]
     fn test_silu_pattern_fusion() {
         // Build: x * sigmoid(x)
@@ -2442,7 +2441,7 @@ mod tests {
         );
     }
 
-    /// Test that fused linear with ReLU is detected.
+    /// Test that fused linear with `ReLU` is detected.
     #[test]
     fn test_fused_linear_relu_pattern() {
         // Build: relu(matmul(x, w) + b)
@@ -2545,7 +2544,7 @@ mod tests {
         assert!(!is_softmax_fn(&Symbol::intern("sigmoid")));
     }
 
-    /// Test FusedActivation enum completeness.
+    /// Test `FusedActivation` enum completeness.
     #[test]
     fn test_fused_activation_variants() {
         let activations = vec![

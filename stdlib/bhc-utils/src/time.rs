@@ -271,15 +271,15 @@ impl Date {
     ///
     /// Panics if the date is invalid.
     pub fn new(year: i32, month: u8, day: u8) -> Self {
-        assert!(month >= 1 && month <= 12, "Invalid month: {}", month);
-        assert!(day >= 1 && day <= 31, "Invalid day: {}", day);
+        assert!((1..=12).contains(&month), "Invalid month: {}", month);
+        assert!((1..=31).contains(&day), "Invalid day: {}", day);
         // Basic validation - could be more thorough
         Date { year, month, day }
     }
 
     /// Try to create a new date, returning None if invalid
     pub fn try_new(year: i32, month: u8, day: u8) -> Option<Self> {
-        if month < 1 || month > 12 || day < 1 || day > 31 {
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
             return None;
         }
 
@@ -637,12 +637,12 @@ impl DateTime {
         days += (self.date.day - 1) as i64;
 
         // To seconds
-        let secs = days * 86400
+        
+
+        days * 86400
             + self.time.hour as i64 * 3600
             + self.time.minute as i64 * 60
-            + self.time.second as i64;
-
-        secs
+            + self.time.second as i64
     }
 }
 

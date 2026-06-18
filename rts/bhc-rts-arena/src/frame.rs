@@ -51,10 +51,9 @@
 //! ```
 
 use crate::HotArena;
-use bhc_rts_alloc::{Alignment, AllocResult, AllocStats};
+use bhc_rts_alloc::{Alignment, AllocResult};
 use std::alloc::Layout;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Statistics for frame arena usage.
@@ -236,7 +235,7 @@ impl FrameArena {
 
         match self.arena.alloc_slice(values) {
             Ok(slice) => {
-                self.current_frame_bytes += std::mem::size_of::<T>() * values.len();
+                self.current_frame_bytes += std::mem::size_of_val(values);
                 self.current_frame_allocs += 1;
                 Ok(slice)
             }

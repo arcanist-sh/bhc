@@ -101,7 +101,7 @@ pub fn lower_expr(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<core:
             if let Expr::Lit(Lit::Int(n), _) = expr.as_ref() {
                 if matches!(ty, Ty::Con(tc) if tc.name.as_str() == "Integer") {
                     return Ok(core::Expr::Lit(
-                        Literal::Integer(*n as i128),
+                        Literal::Integer(*n),
                         Ty::Con(TyCon::new(Symbol::intern("Integer"), Kind::Star)),
                         *span,
                     ));
@@ -112,13 +112,12 @@ pub fn lower_expr(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<core:
                 if let Expr::Var(def_ref) = f.as_ref() {
                     let is_negate = ctx
                         .lookup_var(def_ref.def_id)
-                        .map(|v| v.name.as_str() == "negate")
-                        .unwrap_or(false);
+                        .is_some_and(|v| v.name.as_str() == "negate");
                     if is_negate {
                         if let Expr::Lit(Lit::Int(n), _) = arg.as_ref() {
                             if matches!(ty, Ty::Con(tc) if tc.name.as_str() == "Integer") {
                                 return Ok(core::Expr::Lit(
-                                    Literal::Integer(-(*n as i128)),
+                                    Literal::Integer(-*n),
                                     Ty::Con(TyCon::new(Symbol::intern("Integer"), Kind::Star)),
                                     *span,
                                 ));
@@ -300,11 +299,7 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
     match expr {
         Expr::Con(def_ref) => {
             // Look up the constructor's data type
-            if let Some(con_info) = ctx.lookup_constructor(def_ref.def_id) {
-                Some(Ty::Con(TyCon::new(con_info.type_name, Kind::Star)))
-            } else {
-                None
-            }
+            ctx.lookup_constructor(def_ref.def_id).map(|con_info| Ty::Con(TyCon::new(con_info.type_name, Kind::Star)))
         }
         Expr::Var(def_ref) => {
             // Look up the type of this variable from the type checker.
@@ -482,7 +477,7 @@ fn try_infer_applied_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
 ///
 /// Given `App(App(Var(f), a1), a2)`, returns `Some((f_def_ref, [a1, a2]))`.
 /// Arguments are returned in application order (inside-out).
-fn peel_app_chain<'a>(expr: &'a hir::Expr) -> Option<(&'a DefRef, Vec<&'a hir::Expr>)> {
+fn peel_app_chain(expr: &hir::Expr) -> Option<(&DefRef, Vec<&hir::Expr>)> {
     let mut args = Vec::new();
     let mut current = expr;
 
@@ -555,15 +550,14 @@ fn lower_app(
                             // Search instances to complete the type list
                             if let Some(instances) = ctx.class_registry().instances.get(&class_name)
                             {
-                                for inst in &*instances {
+                                for inst in instances {
                                     if inst.instance_types.len() >= param_count {
                                         let all_match = types_for_resolution
                                             .iter()
                                             .enumerate()
                                             .all(|(i, ty)| {
                                                 inst.instance_types
-                                                    .get(i)
-                                                    .map_or(false, |it| it == ty)
+                                                    .get(i) == Some(ty)
                                             });
                                         if all_match {
                                             types_for_resolution =
@@ -764,7 +758,7 @@ fn lower_app(
                         // Multi-param class: collect types from all arguments (user classes only)
                         // For `combine Red Circle`, collected_args=[Red], x=Circle
                         // We need types from each arg: [Color, Shape]
-                        let mut all_args: Vec<&hir::Expr> = collected_args.to_vec();
+                        let mut all_args: Vec<&hir::Expr> = collected_args.clone();
                         all_args.push(x);
 
                         let mut concrete_types: Vec<Ty> = Vec::new();
@@ -792,8 +786,7 @@ fn lower_app(
                                             .enumerate()
                                             .all(|(i, ty)| {
                                                 inst.instance_types
-                                                    .get(i)
-                                                    .map_or(false, |it| it == ty)
+                                                    .get(i) == Some(ty)
                                             });
                                         if all_match {
                                             types_for_resolution =
@@ -1199,7 +1192,7 @@ fn lower_let(
     body: &hir::Expr,
     span: Span,
 ) -> LowerResult<core::Expr> {
-    use crate::binding::{lower_bindings, preregister_bindings};
+    use crate::binding::preregister_bindings;
 
     // First, pre-register all binding variables so they're available
     // when lowering the body (and for recursive references in RHSes)
@@ -1222,7 +1215,7 @@ fn lower_let_bindings(
     body: core::Expr,
     span: Span,
 ) -> LowerResult<core::Expr> {
-    use crate::binding::lower_bindings;
+    
 
     // Process bindings from right to left, wrapping the body
     let mut result = body;
@@ -1621,7 +1614,7 @@ fn lower_field_access(
         let mut result_var = None;
 
         for i in 0..info.total_fields {
-            let var_name = format!("$field_{}", i);
+            let var_name = format!("$field_{i}");
             let var = ctx.fresh_var(&var_name, Ty::Error, span);
             if i == info.field_index {
                 result_var = Some(var.clone());
@@ -1721,7 +1714,7 @@ fn lower_record_update(
         // Create binder variables for all fields
         let mut binders = Vec::with_capacity(info.total_fields);
         for i in 0..info.total_fields {
-            let var_name = format!("$old_{}", i);
+            let var_name = format!("$old_{i}");
             let var = ctx.fresh_var(&var_name, Ty::Error, span);
             binders.push(var);
         }

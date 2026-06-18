@@ -157,6 +157,7 @@ impl EscapeContext {
 /// let analysis = analyze_escape(&expr);
 /// assert!(analysis.escapes(x_var_id));
 /// ```
+#[must_use]
 pub fn analyze_escape(expr: &Expr) -> EscapeAnalysis {
     let mut ctx = EscapeContext::new();
     let mut result = EscapeAnalysis::new();

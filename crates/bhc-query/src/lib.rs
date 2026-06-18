@@ -32,13 +32,11 @@
 #![warn(missing_docs)]
 
 use dashmap::DashMap;
-use parking_lot::{Mutex, RwLock};
 use rustc_hash::FxHasher;
-use std::any::{Any, TypeId};
+use std::any::TypeId;
 use std::fmt::Debug;
 use std::hash::{BuildHasherDefault, Hash};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 /// A revision number tracking database state changes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -299,7 +297,7 @@ impl QueryDatabase for SimpleDatabase {
     fn record_dependency(&self, from: QueryId, to: QueryId) {
         self.dependencies
             .entry(from)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(to);
     }
 }

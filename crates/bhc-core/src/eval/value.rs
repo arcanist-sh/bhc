@@ -35,6 +35,7 @@ pub struct HandleValue {
 
 impl HandleValue {
     /// Create a handle for stdin.
+    #[must_use]
     pub fn stdin() -> Self {
         Self {
             kind: HandleKind::Stdin,
@@ -44,6 +45,7 @@ impl HandleValue {
         }
     }
     /// Create a handle for stdout.
+    #[must_use]
     pub fn stdout() -> Self {
         Self {
             kind: HandleKind::Stdout,
@@ -53,6 +55,7 @@ impl HandleValue {
         }
     }
     /// Create a handle for stderr.
+    #[must_use]
     pub fn stderr() -> Self {
         Self {
             kind: HandleKind::Stderr,
@@ -62,6 +65,7 @@ impl HandleValue {
         }
     }
     /// Create a file handle.
+    #[must_use]
     pub fn from_file(file: std::fs::File, readable: bool, writable: bool) -> Self {
         Self {
             kind: HandleKind::File,
@@ -134,16 +138,16 @@ pub enum Value {
     /// An unboxed double array.
     UArrayDouble(UArray<f64>),
 
-    /// An ordered map (Data.Map) backed by BTreeMap.
+    /// An ordered map (Data.Map) backed by `BTreeMap`.
     Map(Arc<BTreeMap<OrdValue, Value>>),
 
-    /// An ordered set (Data.Set) backed by BTreeSet.
+    /// An ordered set (Data.Set) backed by `BTreeSet`.
     Set(Arc<BTreeSet<OrdValue>>),
 
-    /// An integer-keyed map (Data.IntMap) backed by BTreeMap<i64, Value>.
+    /// An integer-keyed map (Data.IntMap) backed by `BTreeMap`<i64, Value>.
     IntMap(Arc<BTreeMap<i64, Value>>),
 
-    /// An integer set (Data.IntSet) backed by BTreeSet<i64>.
+    /// An integer set (Data.IntSet) backed by `BTreeSet`<i64>.
     IntSet(Arc<BTreeSet<i64>>),
 
     /// A file handle (System.IO).
@@ -431,7 +435,7 @@ impl Value {
             con: DataCon {
                 name,
                 ty_con: TyCon::new(Symbol::intern("Bool"), Kind::Star),
-                tag: if b { 1 } else { 0 },
+                tag: u32::from(b),
                 arity: 0,
             },
             args: Vec::new().into(),
@@ -512,7 +516,7 @@ impl Value {
             .fold(Self::nil(), |acc, v| Self::cons(v, acc))
     }
 
-    /// Creates an integer UArray from a list of int values.
+    /// Creates an integer `UArray` from a list of int values.
     #[must_use]
     pub fn uarray_int_from_list(list: &Self) -> Option<Self> {
         let values = list.as_list()?;
@@ -520,7 +524,7 @@ impl Value {
         Some(Self::UArrayInt(UArray::from_vec(ints?)))
     }
 
-    /// Creates a double UArray from a list of double values.
+    /// Creates a double `UArray` from a list of double values.
     #[must_use]
     pub fn uarray_double_from_list(list: &Self) -> Option<Self> {
         let values = list.as_list()?;
@@ -528,7 +532,7 @@ impl Value {
         Some(Self::UArrayDouble(UArray::from_vec(doubles?)))
     }
 
-    /// Converts a UArray to a list value.
+    /// Converts a `UArray` to a list value.
     #[must_use]
     pub fn uarray_to_list(&self) -> Option<Self> {
         match self {
@@ -544,7 +548,7 @@ impl Value {
         }
     }
 
-    /// Returns the UArray as an integer array, if applicable.
+    /// Returns the `UArray` as an integer array, if applicable.
     #[must_use]
     pub fn as_uarray_int(&self) -> Option<&UArray<i64>> {
         match self {
@@ -553,7 +557,7 @@ impl Value {
         }
     }
 
-    /// Returns the UArray as a double array, if applicable.
+    /// Returns the `UArray` as a double array, if applicable.
     #[must_use]
     pub fn as_uarray_double(&self) -> Option<&UArray<f64>> {
         match self {
@@ -573,11 +577,13 @@ pub struct OrdValue(pub Value);
 
 impl OrdValue {
     /// Extract the inner Value.
+    #[must_use]
     pub fn into_inner(self) -> Value {
         self.0
     }
 
     /// Borrow the inner Value.
+    #[must_use]
     pub fn inner(&self) -> &Value {
         &self.0
     }
@@ -797,7 +803,7 @@ pub enum PrimOp {
     // Comparison
     /// Integer equality.
     EqInt,
-    /// Integer inequality. Polymorphic, like EqInt; result is the negation.
+    /// Integer inequality. Polymorphic, like `EqInt`; result is the negation.
     NeqInt,
     /// Integer less-than.
     LtInt,
@@ -844,19 +850,19 @@ pub enum PrimOp {
     Error,
 
     // UArray operations
-    /// Create an integer UArray from a list.
+    /// Create an integer `UArray` from a list.
     UArrayFromList,
-    /// Convert a UArray back to a list.
+    /// Convert a `UArray` back to a list.
     UArrayToList,
-    /// Map a function over a UArray.
+    /// Map a function over a `UArray`.
     UArrayMap,
-    /// Zip two UArrays with a function.
+    /// Zip two `UArrays` with a function.
     UArrayZipWith,
-    /// Fold over a UArray.
+    /// Fold over a `UArray`.
     UArrayFold,
-    /// Sum all elements in a UArray.
+    /// Sum all elements in a `UArray`.
     UArraySum,
-    /// Get the length of a UArray.
+    /// Get the length of a `UArray`.
     UArrayLength,
     /// Create a range [start..end).
     UArrayRange,
@@ -1012,9 +1018,9 @@ pub enum PrimOp {
     IoReturn,
 
     // Polymorphic monad operations (dispatch based on first argument type)
-    /// Polymorphic bind (>>=): dispatches to IoBind or ListBind based on first arg.
+    /// Polymorphic bind (>>=): dispatches to `IoBind` or `ListBind` based on first arg.
     MonadBind,
-    /// Polymorphic then (>>): dispatches to IoThen or ListThen based on first arg.
+    /// Polymorphic then (>>): dispatches to `IoThen` or `ListThen` based on first arg.
     MonadThen,
 
     // Prelude: Enum operations
@@ -1066,11 +1072,11 @@ pub enum PrimOp {
     Unzip3,
 
     // Prelude: Show helpers
-    /// showString :: String -> ShowS
+    /// showString :: String -> `ShowS`
     ShowString,
-    /// showChar :: Char -> ShowS
+    /// showChar :: Char -> `ShowS`
     ShowChar,
-    /// showParen :: Bool -> ShowS -> ShowS
+    /// showParen :: Bool -> `ShowS` -> `ShowS`
     ShowParen,
 
     // Prelude: IO operations
@@ -1078,11 +1084,11 @@ pub enum PrimOp {
     GetChar,
     /// getContents :: IO String
     GetContents,
-    /// readFile :: FilePath -> IO String
+    /// readFile :: `FilePath` -> IO String
     ReadFile,
-    /// writeFile :: FilePath -> String -> IO ()
+    /// writeFile :: `FilePath` -> String -> IO ()
     WriteFile,
-    /// appendFile :: FilePath -> String -> IO ()
+    /// appendFile :: `FilePath` -> String -> IO ()
     AppendFile,
     /// interact :: (String -> String) -> IO ()
     Interact,
@@ -1094,7 +1100,7 @@ pub enum PrimOp {
     Stdout,
     /// stderr :: Handle
     Stderr,
-    /// openFile :: FilePath -> IOMode -> IO Handle
+    /// openFile :: `FilePath` -> `IOMode` -> IO Handle
     OpenFile,
     /// hClose :: Handle -> IO ()
     HClose,
@@ -1116,33 +1122,33 @@ pub enum PrimOp {
     HFlush,
     /// hIsEOF :: Handle -> IO Bool
     HIsEOF,
-    /// hSetBuffering :: Handle -> BufferMode -> IO ()
+    /// hSetBuffering :: Handle -> `BufferMode` -> IO ()
     HSetBuffering,
-    /// hGetBuffering :: Handle -> IO BufferMode
+    /// hGetBuffering :: Handle -> IO `BufferMode`
     HGetBuffering,
-    /// hSeek :: Handle -> SeekMode -> Integer -> IO ()
+    /// hSeek :: Handle -> `SeekMode` -> Integer -> IO ()
     HSeek,
     /// hTell :: Handle -> IO Integer
     HTell,
     /// hFileSize :: Handle -> IO Integer
     HFileSize,
-    /// withFile :: FilePath -> IOMode -> (Handle -> IO r) -> IO r
+    /// withFile :: `FilePath` -> `IOMode` -> (Handle -> IO r) -> IO r
     WithFile,
 
     // Data.IORef operations
-    /// newIORef :: a -> IO (IORef a)
+    /// newIORef :: a -> IO (`IORef` a)
     NewIORef,
-    /// readIORef :: IORef a -> IO a
+    /// readIORef :: `IORef` a -> IO a
     ReadIORef,
-    /// writeIORef :: IORef a -> a -> IO ()
+    /// writeIORef :: `IORef` a -> a -> IO ()
     WriteIORef,
-    /// modifyIORef :: IORef a -> (a -> a) -> IO ()
+    /// modifyIORef :: `IORef` a -> (a -> a) -> IO ()
     ModifyIORef,
-    /// modifyIORef' :: IORef a -> (a -> a) -> IO ()
+    /// modifyIORef' :: `IORef` a -> (a -> a) -> IO ()
     ModifyIORefStrict,
-    /// atomicModifyIORef :: IORef a -> (a -> (a, b)) -> IO b
+    /// atomicModifyIORef :: `IORef` a -> (a -> (a, b)) -> IO b
     AtomicModifyIORef,
-    /// atomicModifyIORef' :: IORef a -> (a -> (a, b)) -> IO b
+    /// atomicModifyIORef' :: `IORef` a -> (a -> (a, b)) -> IO b
     AtomicModifyIORefStrict,
 
     // System.Exit operations
@@ -1150,7 +1156,7 @@ pub enum PrimOp {
     ExitSuccess,
     /// exitFailure :: IO a
     ExitFailure,
-    /// exitWith :: ExitCode -> IO a
+    /// exitWith :: `ExitCode` -> IO a
     ExitWith,
 
     // System.Environment operations
@@ -1166,21 +1172,21 @@ pub enum PrimOp {
     SetEnv,
 
     // System.Directory operations
-    /// doesFileExist :: FilePath -> IO Bool
+    /// doesFileExist :: `FilePath` -> IO Bool
     DoesFileExist,
-    /// doesDirectoryExist :: FilePath -> IO Bool
+    /// doesDirectoryExist :: `FilePath` -> IO Bool
     DoesDirectoryExist,
-    /// createDirectory :: FilePath -> IO ()
+    /// createDirectory :: `FilePath` -> IO ()
     CreateDirectory,
-    /// createDirectoryIfMissing :: Bool -> FilePath -> IO ()
+    /// createDirectoryIfMissing :: Bool -> `FilePath` -> IO ()
     CreateDirectoryIfMissing,
-    /// removeFile :: FilePath -> IO ()
+    /// removeFile :: `FilePath` -> IO ()
     RemoveFile,
-    /// removeDirectory :: FilePath -> IO ()
+    /// removeDirectory :: `FilePath` -> IO ()
     RemoveDirectory,
     /// getCurrentDirectory :: IO String
     GetCurrentDirectory,
-    /// setCurrentDirectory :: FilePath -> IO ()
+    /// setCurrentDirectory :: `FilePath` -> IO ()
     SetCurrentDirectory,
 
     // ---- Control.Monad ----
@@ -1188,7 +1194,7 @@ pub enum PrimOp {
     MonadWhen,
     /// unless :: Bool -> IO () -> IO ()
     MonadUnless,
-    /// guard :: Bool -> [()]  (for list monad / MonadPlus)
+    /// guard :: Bool -> [()]  (for list monad / `MonadPlus`)
     MonadGuard,
     /// void :: Functor f => f a -> f ()
     MonadVoid,
@@ -1224,13 +1230,13 @@ pub enum PrimOp {
     ReplicateM_,
     /// forever :: Monad m => m a -> m b
     Forever,
-    /// mzero :: MonadPlus m => m a
+    /// mzero :: `MonadPlus` m => m a
     Mzero,
-    /// mplus :: MonadPlus m => m a -> m a -> m a
+    /// mplus :: `MonadPlus` m => m a -> m a -> m a
     Mplus,
-    /// msum :: MonadPlus m => [m a] -> m a
+    /// msum :: `MonadPlus` m => [m a] -> m a
     Msum,
-    /// mfilter :: MonadPlus m => (a -> Bool) -> m a -> m a
+    /// mfilter :: `MonadPlus` m => (a -> Bool) -> m a -> m a
     Mfilter,
     /// (>=>) :: Monad m => (a -> m b) -> (b -> m c) -> a -> m c
     KleisliCompose,
@@ -1248,13 +1254,13 @@ pub enum PrimOp {
     Optional,
 
     // ---- Control.Exception ----
-    /// catch :: IO a -> (SomeException -> IO a) -> IO a
+    /// catch :: IO a -> (`SomeException` -> IO a) -> IO a
     ExnCatch,
-    /// try :: IO a -> IO (Either SomeException a)
+    /// try :: IO a -> IO (Either `SomeException` a)
     ExnTry,
-    /// throw :: SomeException -> a
+    /// throw :: `SomeException` -> a
     ExnThrow,
-    /// throwIO :: SomeException -> IO a
+    /// throwIO :: `SomeException` -> IO a
     ExnThrowIO,
     /// bracket :: IO a -> (a -> IO b) -> (a -> IO c) -> IO c
     ExnBracket,
@@ -1266,9 +1272,9 @@ pub enum PrimOp {
     ExnFinally,
     /// onException :: IO a -> IO b -> IO a
     ExnOnException,
-    /// handle :: (SomeException -> IO a) -> IO a -> IO a
+    /// handle :: (`SomeException` -> IO a) -> IO a -> IO a
     ExnHandle,
-    /// handleJust :: (SomeException -> Maybe b) -> (b -> IO a) -> IO a -> IO a
+    /// handleJust :: (`SomeException` -> Maybe b) -> (b -> IO a) -> IO a -> IO a
     ExnHandleJust,
     /// evaluate :: a -> IO a
     ExnEvaluate,
@@ -1282,25 +1288,25 @@ pub enum PrimOp {
     ExnUninterruptibleMask_,
 
     // ---- Control.Concurrent ----
-    /// forkIO :: IO () -> IO ThreadId
+    /// forkIO :: IO () -> IO `ThreadId`
     ForkIO,
     /// threadDelay :: Int -> IO ()
     ThreadDelay,
-    /// myThreadId :: IO ThreadId
+    /// myThreadId :: IO `ThreadId`
     MyThreadId,
-    /// newMVar :: a -> IO (MVar a)
+    /// newMVar :: a -> IO (`MVar` a)
     NewMVar,
-    /// newEmptyMVar :: IO (MVar a)
+    /// newEmptyMVar :: IO (`MVar` a)
     NewEmptyMVar,
-    /// takeMVar :: MVar a -> IO a
+    /// takeMVar :: `MVar` a -> IO a
     TakeMVar,
-    /// putMVar :: MVar a -> a -> IO ()
+    /// putMVar :: `MVar` a -> a -> IO ()
     PutMVar,
-    /// readMVar :: MVar a -> IO a
+    /// readMVar :: `MVar` a -> IO a
     ReadMVar,
-    /// throwTo :: ThreadId -> SomeException -> IO ()
+    /// throwTo :: `ThreadId` -> `SomeException` -> IO ()
     ThrowTo,
-    /// killThread :: ThreadId -> IO ()
+    /// killThread :: `ThreadId` -> IO ()
     KillThread,
 
     // ---- Data.Ord ----
@@ -1348,7 +1354,7 @@ pub enum PrimOp {
     Mconcat,
 
     // ---- Data.String ----
-    /// fromString :: String -> a (IsString class)
+    /// fromString :: String -> a (`IsString` class)
     FromString,
 
     // ---- Data.Bits ----
@@ -1386,9 +1392,9 @@ pub enum PrimOp {
     BitPopCount,
     /// zeroBits :: Bits a => a
     BitZeroBits,
-    /// countLeadingZeros :: FiniteBits a => a -> Int
+    /// countLeadingZeros :: `FiniteBits` a => a -> Int
     BitCountLeadingZeros,
-    /// countTrailingZeros :: FiniteBits a => a -> Int
+    /// countTrailingZeros :: `FiniteBits` a => a -> Int
     BitCountTrailingZeros,
 
     // ---- Data.Proxy ----
@@ -1570,13 +1576,13 @@ pub enum PrimOp {
     Tan,
     /// (^) :: (Num a, Integral b) => a -> b -> a
     Power,
-    /// truncate :: (RealFrac a, Integral b) => a -> b
+    /// truncate :: (`RealFrac` a, Integral b) => a -> b
     Truncate,
-    /// round :: (RealFrac a, Integral b) => a -> b
+    /// round :: (`RealFrac` a, Integral b) => a -> b
     Round,
-    /// ceiling :: (RealFrac a, Integral b) => a -> b
+    /// ceiling :: (`RealFrac` a, Integral b) => a -> b
     Ceiling,
-    /// floor :: (RealFrac a, Integral b) => a -> b
+    /// floor :: (`RealFrac` a, Integral b) => a -> b
     Floor,
 
     // Prelude: fst/snd
@@ -1738,89 +1744,89 @@ pub enum PrimOp {
     // ========================================================
     // Data.IntMap PrimOps
     // ========================================================
-    /// Data.IntMap.empty :: IntMap v
+    /// Data.IntMap.empty :: `IntMap` v
     IntMapEmpty,
-    /// Data.IntMap.singleton :: Int -> v -> IntMap v
+    /// Data.IntMap.singleton :: Int -> v -> `IntMap` v
     IntMapSingleton,
-    /// Data.IntMap.null :: IntMap v -> Bool
+    /// Data.IntMap.null :: `IntMap` v -> Bool
     IntMapNull,
-    /// Data.IntMap.size :: IntMap v -> Int
+    /// Data.IntMap.size :: `IntMap` v -> Int
     IntMapSize,
-    /// Data.IntMap.member :: Int -> IntMap v -> Bool
+    /// Data.IntMap.member :: Int -> `IntMap` v -> Bool
     IntMapMember,
-    /// Data.IntMap.lookup :: Int -> IntMap v -> Maybe v
+    /// Data.IntMap.lookup :: Int -> `IntMap` v -> Maybe v
     IntMapLookup,
-    /// Data.IntMap.findWithDefault :: v -> Int -> IntMap v -> v
+    /// Data.IntMap.findWithDefault :: v -> Int -> `IntMap` v -> v
     IntMapFindWithDefault,
-    /// Data.IntMap.insert :: Int -> v -> IntMap v -> IntMap v
+    /// Data.IntMap.insert :: Int -> v -> `IntMap` v -> `IntMap` v
     IntMapInsert,
-    /// Data.IntMap.insertWith :: (v -> v -> v) -> Int -> v -> IntMap v -> IntMap v
+    /// Data.IntMap.insertWith :: (v -> v -> v) -> Int -> v -> `IntMap` v -> `IntMap` v
     IntMapInsertWith,
-    /// Data.IntMap.delete :: Int -> IntMap v -> IntMap v
+    /// Data.IntMap.delete :: Int -> `IntMap` v -> `IntMap` v
     IntMapDelete,
-    /// Data.IntMap.adjust :: (v -> v) -> Int -> IntMap v -> IntMap v
+    /// Data.IntMap.adjust :: (v -> v) -> Int -> `IntMap` v -> `IntMap` v
     IntMapAdjust,
-    /// Data.IntMap.union :: IntMap v -> IntMap v -> IntMap v
+    /// Data.IntMap.union :: `IntMap` v -> `IntMap` v -> `IntMap` v
     IntMapUnion,
-    /// Data.IntMap.unionWith :: (v -> v -> v) -> IntMap v -> IntMap v -> IntMap v
+    /// Data.IntMap.unionWith :: (v -> v -> v) -> `IntMap` v -> `IntMap` v -> `IntMap` v
     IntMapUnionWith,
-    /// Data.IntMap.intersection :: IntMap v -> IntMap w -> IntMap v
+    /// Data.IntMap.intersection :: `IntMap` v -> `IntMap` w -> `IntMap` v
     IntMapIntersection,
-    /// Data.IntMap.difference :: IntMap v -> IntMap w -> IntMap v
+    /// Data.IntMap.difference :: `IntMap` v -> `IntMap` w -> `IntMap` v
     IntMapDifference,
-    /// Data.IntMap.map :: (a -> b) -> IntMap a -> IntMap b
+    /// Data.IntMap.map :: (a -> b) -> `IntMap` a -> `IntMap` b
     IntMapMap,
-    /// Data.IntMap.mapWithKey :: (Int -> a -> b) -> IntMap a -> IntMap b
+    /// Data.IntMap.mapWithKey :: (Int -> a -> b) -> `IntMap` a -> `IntMap` b
     IntMapMapWithKey,
-    /// Data.IntMap.filter :: (a -> Bool) -> IntMap a -> IntMap a
+    /// Data.IntMap.filter :: (a -> Bool) -> `IntMap` a -> `IntMap` a
     IntMapFilter,
-    /// Data.IntMap.foldr :: (a -> b -> b) -> b -> IntMap a -> b
+    /// Data.IntMap.foldr :: (a -> b -> b) -> b -> `IntMap` a -> b
     IntMapFoldr,
-    /// Data.IntMap.foldlWithKey :: (a -> Int -> b -> a) -> a -> IntMap b -> a
+    /// Data.IntMap.foldlWithKey :: (a -> Int -> b -> a) -> a -> `IntMap` b -> a
     IntMapFoldlWithKey,
-    /// Data.IntMap.keys :: IntMap v -> [Int]
+    /// Data.IntMap.keys :: `IntMap` v -> [Int]
     IntMapKeys,
-    /// Data.IntMap.elems :: IntMap v -> [v]
+    /// Data.IntMap.elems :: `IntMap` v -> [v]
     IntMapElems,
-    /// Data.IntMap.toList :: IntMap v -> [(Int, v)]
+    /// Data.IntMap.toList :: `IntMap` v -> [(Int, v)]
     IntMapToList,
-    /// Data.IntMap.fromList :: [(Int, v)] -> IntMap v
+    /// Data.IntMap.fromList :: [(Int, v)] -> `IntMap` v
     IntMapFromList,
-    /// Data.IntMap.toAscList :: IntMap v -> [(Int, v)]
+    /// Data.IntMap.toAscList :: `IntMap` v -> [(Int, v)]
     IntMapToAscList,
 
     // ========================================================
     // Data.IntSet PrimOps
     // ========================================================
-    /// Data.IntSet.empty :: IntSet
+    /// Data.IntSet.empty :: `IntSet`
     IntSetEmpty,
-    /// Data.IntSet.singleton :: Int -> IntSet
+    /// Data.IntSet.singleton :: Int -> `IntSet`
     IntSetSingleton,
-    /// Data.IntSet.null :: IntSet -> Bool
+    /// Data.IntSet.null :: `IntSet` -> Bool
     IntSetNull,
-    /// Data.IntSet.size :: IntSet -> Int
+    /// Data.IntSet.size :: `IntSet` -> Int
     IntSetSize,
-    /// Data.IntSet.member :: Int -> IntSet -> Bool
+    /// Data.IntSet.member :: Int -> `IntSet` -> Bool
     IntSetMember,
-    /// Data.IntSet.insert :: Int -> IntSet -> IntSet
+    /// Data.IntSet.insert :: Int -> `IntSet` -> `IntSet`
     IntSetInsert,
-    /// Data.IntSet.delete :: Int -> IntSet -> IntSet
+    /// Data.IntSet.delete :: Int -> `IntSet` -> `IntSet`
     IntSetDelete,
-    /// Data.IntSet.union :: IntSet -> IntSet -> IntSet
+    /// Data.IntSet.union :: `IntSet` -> `IntSet` -> `IntSet`
     IntSetUnion,
-    /// Data.IntSet.intersection :: IntSet -> IntSet -> IntSet
+    /// Data.IntSet.intersection :: `IntSet` -> `IntSet` -> `IntSet`
     IntSetIntersection,
-    /// Data.IntSet.difference :: IntSet -> IntSet -> IntSet
+    /// Data.IntSet.difference :: `IntSet` -> `IntSet` -> `IntSet`
     IntSetDifference,
-    /// Data.IntSet.isSubsetOf :: IntSet -> IntSet -> Bool
+    /// Data.IntSet.isSubsetOf :: `IntSet` -> `IntSet` -> Bool
     IntSetIsSubsetOf,
-    /// Data.IntSet.filter :: (Int -> Bool) -> IntSet -> IntSet
+    /// Data.IntSet.filter :: (Int -> Bool) -> `IntSet` -> `IntSet`
     IntSetFilter,
-    /// Data.IntSet.foldr :: (Int -> b -> b) -> b -> IntSet -> b
+    /// Data.IntSet.foldr :: (Int -> b -> b) -> b -> `IntSet` -> b
     IntSetFoldr,
-    /// Data.IntSet.toList :: IntSet -> [Int]
+    /// Data.IntSet.toList :: `IntSet` -> [Int]
     IntSetToList,
-    /// Data.IntSet.fromList :: [Int] -> IntSet
+    /// Data.IntSet.fromList :: [Int] -> `IntSet`
     IntSetFromList,
 
     // Dictionary operations (generated by type class desugaring)

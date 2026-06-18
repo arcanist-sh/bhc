@@ -662,7 +662,7 @@ impl SvdResult {
         let k = self.singular_values.len();
 
         // Compute Σ^+ (inverse of non-zero singular values)
-        let tol = 1e-10 * self.singular_values.get(0).copied().unwrap_or(0.0);
+        let tol = 1e-10 * self.singular_values.first().copied().unwrap_or(0.0);
         let sigma_inv: Vec<f64> = self
             .singular_values
             .iter()
@@ -695,7 +695,7 @@ impl SvdResult {
         let k = self.singular_values.len();
         assert_eq!(b.len(), m, "b must have length equal to number of rows");
 
-        let tol = 1e-10 * self.singular_values.get(0).copied().unwrap_or(0.0);
+        let tol = 1e-10 * self.singular_values.first().copied().unwrap_or(0.0);
 
         // x = V * Σ^+ * U^T * b
         // Step 1: y = U^T * b
@@ -1065,7 +1065,7 @@ fn chase_zero_row(
 
         if k < q - 1 {
             f = -s * e[k];
-            e[k] = c * e[k];
+            e[k] *= c;
         }
 
         // Apply to U
@@ -1145,7 +1145,7 @@ fn implicit_qr_step(
 
         if k < q - 2 {
             z = -s * e[k + 1];
-            e[k + 1] = c * e[k + 1];
+            e[k + 1] *= c;
         }
 
         // Apply to U
@@ -1159,7 +1159,7 @@ fn implicit_qr_step(
         x = e[k];
         if k < q - 2 {
             z = e[k + 1] * (-s);
-            e[k + 1] = e[k + 1] * c;
+            e[k + 1] *= c;
         }
     }
 }

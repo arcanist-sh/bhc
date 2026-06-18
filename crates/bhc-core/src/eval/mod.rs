@@ -118,7 +118,7 @@ pub struct Evaluator {
     io_output: RefCell<String>,
     /// Name-based binding map for REPL persistence.
     /// When the REPL evaluates `let x = 5`, it stores `("x", Value::Int(5))`.
-    /// Subsequent evaluations can reference `x` even though they have different VarIds.
+    /// Subsequent evaluations can reference `x` even though they have different `VarIds`.
     named_bindings: RefCell<HashMap<Symbol, Value>>,
 }
 
@@ -198,7 +198,7 @@ impl Evaluator {
     /// Stores a named binding for REPL persistence.
     ///
     /// Named bindings are looked up by `Symbol` (name) rather than `VarId`,
-    /// allowing values from previous evaluations (with different VarIds)
+    /// allowing values from previous evaluations (with different `VarIds`)
     /// to be referenced by name in subsequent expressions.
     pub fn set_named_binding(&self, name: Symbol, value: Value) {
         self.named_bindings.borrow_mut().insert(name, value);
@@ -1407,7 +1407,7 @@ impl Evaluator {
                 (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(a.wrapping_add(*b))),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
                 (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a + b)),
-                _ => numeric_fallback(&args, |a, b| a.wrapping_add(b), |a, b| a + b),
+                _ => numeric_fallback(&args, i64::wrapping_add, |a, b| a + b),
             },
 
             PrimOp::SubInt => match (&args[0], &args[1]) {
@@ -1415,7 +1415,7 @@ impl Evaluator {
                 (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(a.wrapping_sub(*b))),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
                 (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a - b)),
-                _ => numeric_fallback(&args, |a, b| a.wrapping_sub(b), |a, b| a - b),
+                _ => numeric_fallback(&args, i64::wrapping_sub, |a, b| a - b),
             },
 
             PrimOp::MulInt => match (&args[0], &args[1]) {
@@ -1423,7 +1423,7 @@ impl Evaluator {
                 (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(a.wrapping_mul(*b))),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
                 (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a * b)),
-                _ => numeric_fallback(&args, |a, b| a.wrapping_mul(b), |a, b| a * b),
+                _ => numeric_fallback(&args, i64::wrapping_mul, |a, b| a * b),
             },
 
             PrimOp::DivInt => {
@@ -1529,9 +1529,7 @@ impl Evaluator {
                             Ok(Value::bool(false))
                         } else {
                             // Same constructor: recursively compare all fields
-                            if a.args.len() != b.args.len() {
-                                Ok(Value::bool(false))
-                            } else {
+                            if a.args.len() == b.args.len() {
                                 for (fa, fb) in a.args.iter().zip(b.args.iter()) {
                                     let fa = self.force(fa.clone())?;
                                     let fb = self.force(fb.clone())?;
@@ -1541,6 +1539,8 @@ impl Evaluator {
                                     }
                                 }
                                 Ok(Value::bool(true))
+                            } else {
+                                Ok(Value::bool(false))
                             }
                         }
                     }
@@ -2072,7 +2072,7 @@ impl Evaluator {
 
                 let pairs: Vec<Value> = xs
                     .into_iter()
-                    .zip(ys.into_iter())
+                    .zip(ys)
                     .map(|(x, y)| {
                         use bhc_types::{Kind, TyCon};
                         Value::Data(DataValue {
@@ -2096,7 +2096,7 @@ impl Evaluator {
                 let ys = self.force_list(args[2].clone())?;
 
                 let mut result = Vec::new();
-                for (x, y) in xs.into_iter().zip(ys.into_iter()) {
+                for (x, y) in xs.into_iter().zip(ys) {
                     let r = self.apply(self.apply(f.clone(), x)?, y)?;
                     result.push(self.force(r)?);
                 }
@@ -2193,7 +2193,7 @@ impl Evaluator {
                 let n = n as usize;
                 xs.into_iter()
                     .nth(n)
-                    .ok_or_else(|| EvalError::UserError(format!("(!!): index {} too large", n)))
+                    .ok_or_else(|| EvalError::UserError(format!("(!!): index {n} too large")))
             }
 
             PrimOp::Replicate => {
@@ -2205,7 +2205,7 @@ impl Evaluator {
                 let x = args[1].clone();
 
                 let n = n.max(0) as usize;
-                let result: Vec<Value> = std::iter::repeat(x).take(n).collect();
+                let result: Vec<Value> = std::iter::repeat_n(x, n).collect();
                 Ok(Value::from_list(result))
             }
 
@@ -2318,11 +2318,11 @@ impl Evaluator {
                 for (i, x) in xs.iter().enumerate() {
                     let pred_result = self.apply(p.clone(), x.clone())?;
                     let pred_forced = self.force(pred_result)?;
-                    if !pred_forced.as_bool().unwrap_or(false) {
-                        prefix.push(x.clone());
-                    } else {
+                    if pred_forced.as_bool().unwrap_or(false) {
                         rest_start = i;
                         break;
+                    } else {
+                        prefix.push(x.clone());
                     }
                     rest_start = i + 1;
                 }
@@ -2362,7 +2362,7 @@ impl Evaluator {
             PrimOp::Repeat => {
                 // repeat x - infinite list of x (truncated to 1000)
                 let x = args[0].clone();
-                let result: Vec<Value> = std::iter::repeat(x).take(1000).collect();
+                let result: Vec<Value> = std::iter::repeat_n(x, 1000).collect();
                 Ok(Value::from_list(result))
             }
 
@@ -2420,21 +2420,18 @@ impl Evaluator {
 
             PrimOp::Product => {
                 // product xs
-                match &args[0] {
-                    Value::UArrayInt(arr) => {
-                        let p: i64 = arr.as_slice().iter().product();
-                        Ok(Value::Int(p))
-                    }
-                    _ => {
-                        let list = self.force_list(args[0].clone())?;
-                        let mut acc: i64 = 1;
-                        for x in list {
-                            if let Some(n) = x.as_int() {
-                                acc = acc.wrapping_mul(n);
-                            }
+                if let Value::UArrayInt(arr) = &args[0] {
+                    let p: i64 = arr.as_slice().iter().product();
+                    Ok(Value::Int(p))
+                } else {
+                    let list = self.force_list(args[0].clone())?;
+                    let mut acc: i64 = 1;
+                    for x in list {
+                        if let Some(n) = x.as_int() {
+                            acc = acc.wrapping_mul(n);
                         }
-                        Ok(Value::Int(acc))
                     }
+                    Ok(Value::Int(acc))
                 }
             }
 
@@ -2898,7 +2895,7 @@ impl Evaluator {
                 // Adjust: Haskell divMod may differ from Euclidean for negative divisors
                 let (d, m) = if b < 0 {
                     (
-                        -d - if m != 0 { 1 } else { 0 },
+                        -d - i64::from(m != 0),
                         if m != 0 { m + b } else { 0 },
                     )
                 } else {
@@ -3085,7 +3082,7 @@ impl Evaluator {
                 if b {
                     // Wrap in parens
                     let inner = self.value_to_string(&args[1])?;
-                    Ok(Value::String(format!("({})", inner).into()))
+                    Ok(Value::String(format!("({inner})").into()))
                 } else {
                     Ok(args[1].clone())
                 }
@@ -3113,7 +3110,7 @@ impl Evaluator {
             PrimOp::ReadFile => {
                 let path = self.value_to_string(&args[0])?;
                 let contents = std::fs::read_to_string(&path)
-                    .map_err(|e| EvalError::UserError(format!("{}: {e}", path)))?;
+                    .map_err(|e| EvalError::UserError(format!("{path}: {e}")))?;
                 Ok(Value::String(contents.into()))
             }
 
@@ -3121,7 +3118,7 @@ impl Evaluator {
                 let path = self.value_to_string(&args[0])?;
                 let contents = self.value_to_string(&args[1])?;
                 std::fs::write(&path, &contents)
-                    .map_err(|e| EvalError::UserError(format!("{}: {e}", path)))?;
+                    .map_err(|e| EvalError::UserError(format!("{path}: {e}")))?;
                 Ok(Value::unit())
             }
 
@@ -3133,9 +3130,9 @@ impl Evaluator {
                     .append(true)
                     .create(true)
                     .open(&path)
-                    .map_err(|e| EvalError::UserError(format!("{}: {e}", path)))?;
+                    .map_err(|e| EvalError::UserError(format!("{path}: {e}")))?;
                 file.write_all(contents.as_bytes())
-                    .map_err(|e| EvalError::UserError(format!("{}: {e}", path)))?;
+                    .map_err(|e| EvalError::UserError(format!("{path}: {e}")))?;
                 Ok(Value::unit())
             }
 
@@ -3812,8 +3809,7 @@ impl Evaluator {
                     'A'..='F' => (c as i64) - ('A' as i64) + 10,
                     _ => {
                         return Err(EvalError::UserError(format!(
-                            "digitToInt: not a digit: {:?}",
-                            c
+                            "digitToInt: not a digit: {c:?}"
                         )))
                     }
                 };
@@ -4766,7 +4762,7 @@ impl Evaluator {
                     (Value::Map(a), Value::Map(b)) => {
                         let is_sub = a
                             .iter()
-                            .all(|(k, v)| b.get(k).map_or(false, |bv| self.values_equal(v, bv)));
+                            .all(|(k, v)| b.get(k).is_some_and(|bv| self.values_equal(v, bv)));
                         Ok(Value::bool(is_sub))
                     }
                     _ => Err(EvalError::TypeError {
@@ -6216,7 +6212,7 @@ impl Evaluator {
                             let pos = f
                                 .stream_position()
                                 .map_err(|e| EvalError::UserError(format!("hTell: {e}")))?;
-                            Ok(Value::Integer(pos as i128))
+                            Ok(Value::Integer(i128::from(pos)))
                         } else {
                             Err(EvalError::UserError("hTell: handle closed".into()))
                         }
@@ -6236,7 +6232,7 @@ impl Evaluator {
                             let metadata = f
                                 .metadata()
                                 .map_err(|e| EvalError::UserError(format!("hFileSize: {e}")))?;
-                            Ok(Value::Integer(metadata.len() as i128))
+                            Ok(Value::Integer(i128::from(metadata.len())))
                         } else {
                             Err(EvalError::UserError("hFileSize: handle closed".into()))
                         }
@@ -6393,10 +6389,10 @@ impl Evaluator {
                     Value::Data(d) => match d.con.name.as_str() {
                         "ExitSuccess" => std::process::exit(0),
                         "ExitFailure" => {
-                            let n = if !d.args.is_empty() {
-                                self.force(d.args[0].clone())?.as_int().unwrap_or(1) as i32
-                            } else {
+                            let n = if d.args.is_empty() {
                                 1
+                            } else {
+                                self.force(d.args[0].clone())?.as_int().unwrap_or(1) as i32
                             };
                             std::process::exit(n);
                         }
@@ -6828,7 +6824,7 @@ impl Evaluator {
                 let xs = self.force_list(args[1].clone())?;
                 let ys = self.force_list(args[2].clone())?;
                 let mut result = Vec::new();
-                for (x, y) in xs.into_iter().zip(ys.into_iter()) {
+                for (x, y) in xs.into_iter().zip(ys) {
                     let tmp = self.apply(f.clone(), x)?;
                     let val = self.apply(tmp, y)?;
                     result.push(self.force(val)?);
@@ -6840,7 +6836,7 @@ impl Evaluator {
                 let f = args[0].clone();
                 let xs = self.force_list(args[1].clone())?;
                 let ys = self.force_list(args[2].clone())?;
-                for (x, y) in xs.into_iter().zip(ys.into_iter()) {
+                for (x, y) in xs.into_iter().zip(ys) {
                     let tmp = self.apply(f.clone(), x)?;
                     let _ = self.apply(tmp, y)?;
                 }
@@ -7410,27 +7406,24 @@ impl Evaluator {
                 if results.is_empty() {
                     return Ok(Value::String("".into()));
                 }
-                match &results[0] {
-                    Value::String(_) => {
-                        let mut s = String::new();
-                        for r in results {
-                            if let Value::String(ref rs) = r {
-                                s.push_str(rs);
-                            }
+                if let Value::String(_) = &results[0] {
+                    let mut s = String::new();
+                    for r in results {
+                        if let Value::String(ref rs) = r {
+                            s.push_str(rs);
                         }
-                        Ok(Value::String(s.into()))
                     }
-                    _ => {
-                        let mut all = Vec::new();
-                        for r in results {
-                            if self.is_list_value(&r) {
-                                all.extend(self.force_list(r)?);
-                            } else {
-                                all.push(r);
-                            }
+                    Ok(Value::String(s.into()))
+                } else {
+                    let mut all = Vec::new();
+                    for r in results {
+                        if self.is_list_value(&r) {
+                            all.extend(self.force_list(r)?);
+                        } else {
+                            all.push(r);
                         }
-                        Ok(Value::from_list(all))
                     }
+                    Ok(Value::from_list(all))
                 }
             }
             PrimOp::FoldrStrict => {
@@ -7612,29 +7605,26 @@ impl Evaluator {
                     return Ok(Value::nil());
                 }
                 let first = self.force(list[0].clone())?;
-                match &first {
-                    Value::String(_) => {
-                        let mut s = String::new();
-                        for item in list {
-                            let item = self.force(item)?;
-                            if let Value::String(ref rs) = item {
-                                s.push_str(rs);
-                            }
+                if let Value::String(_) = &first {
+                    let mut s = String::new();
+                    for item in list {
+                        let item = self.force(item)?;
+                        if let Value::String(ref rs) = item {
+                            s.push_str(rs);
                         }
-                        Ok(Value::String(s.into()))
                     }
-                    _ => {
-                        let mut all = Vec::new();
-                        for item in list {
-                            let item = self.force(item)?;
-                            if self.is_list_value(&item) {
-                                all.extend(self.force_list(item)?);
-                            } else {
-                                all.push(item);
-                            }
+                    Ok(Value::String(s.into()))
+                } else {
+                    let mut all = Vec::new();
+                    for item in list {
+                        let item = self.force(item)?;
+                        if self.is_list_value(&item) {
+                            all.extend(self.force_list(item)?);
+                        } else {
+                            all.push(item);
                         }
-                        Ok(Value::from_list(all))
                     }
+                    Ok(Value::from_list(all))
                 }
             }
 
@@ -7803,7 +7793,7 @@ impl Evaluator {
             PrimOp::BitPopCount => {
                 let a = self.force(args[0].clone())?;
                 match &a {
-                    Value::Int(x) => Ok(Value::Int(x.count_ones() as i64)),
+                    Value::Int(x) => Ok(Value::Int(i64::from(x.count_ones()))),
                     _ => Err(EvalError::TypeError {
                         expected: "Int".into(),
                         got: format!("{a:?}"),
@@ -7814,7 +7804,7 @@ impl Evaluator {
             PrimOp::BitCountLeadingZeros => {
                 let a = self.force(args[0].clone())?;
                 match &a {
-                    Value::Int(x) => Ok(Value::Int(x.leading_zeros() as i64)),
+                    Value::Int(x) => Ok(Value::Int(i64::from(x.leading_zeros()))),
                     _ => Err(EvalError::TypeError {
                         expected: "Int".into(),
                         got: format!("{a:?}"),
@@ -7824,7 +7814,7 @@ impl Evaluator {
             PrimOp::BitCountTrailingZeros => {
                 let a = self.force(args[0].clone())?;
                 match &a {
-                    Value::Int(x) => Ok(Value::Int(x.trailing_zeros() as i64)),
+                    Value::Int(x) => Ok(Value::Int(i64::from(x.trailing_zeros()))),
                     _ => Err(EvalError::TypeError {
                         expected: "Int".into(),
                         got: format!("{a:?}"),
@@ -8167,7 +8157,7 @@ impl Evaluator {
         }
     }
 
-    /// Convert an Ordering data constructor value to std::cmp::Ordering.
+    /// Convert an Ordering data constructor value to `std::cmp::Ordering`.
     fn ordering_value_to_cmp(&self, v: &Value) -> std::cmp::Ordering {
         match v {
             Value::Data(d) => match d.con.name.as_str() {
@@ -8222,7 +8212,7 @@ impl Evaluator {
         })
     }
 
-    /// Create an Ordering value (LT, EQ, or GT) from std::cmp::Ordering.
+    /// Create an Ordering value (LT, EQ, or GT) from `std::cmp::Ordering`.
     fn make_ordering(&self, ord: std::cmp::Ordering) -> Value {
         use bhc_types::{Kind, TyCon};
         let (name, tag) = match ord {
@@ -8274,7 +8264,7 @@ impl Evaluator {
                 Ok(format!("<partial {op:?} applied to {} args>", args.len()))
             }
             Value::UArrayInt(arr) => {
-                let elements: Vec<String> = arr.as_slice().iter().map(|n| n.to_string()).collect();
+                let elements: Vec<String> = arr.as_slice().iter().map(std::string::ToString::to_string).collect();
                 Ok(format!("[{}]", elements.join(", ")))
             }
             Value::UArrayDouble(arr) => {
@@ -8323,7 +8313,7 @@ impl Evaluator {
                     .map(|(k, v)| {
                         let ks = self.display_value_impl(&k.0, depth + 1)?;
                         let vs = self.display_value_impl(v, depth + 1)?;
-                        Ok(format!("({}, {})", ks, vs))
+                        Ok(format!("({ks}, {vs})"))
                     })
                     .collect();
                 Ok(format!("fromList [{}]", entries?.join(", ")))
@@ -8342,13 +8332,13 @@ impl Evaluator {
                         let vs = self
                             .display_value_impl(v, depth + 1)
                             .unwrap_or_else(|_| "<error>".to_string());
-                        format!("({}, {})", k, vs)
+                        format!("({k}, {vs})")
                     })
                     .collect();
                 Ok(format!("fromList [{}]", entries.join(", ")))
             }
             Value::IntSet(s) => {
-                let entries: Vec<String> = s.iter().map(|v| v.to_string()).collect();
+                let entries: Vec<String> = s.iter().map(std::string::ToString::to_string).collect();
                 Ok(format!("fromList [{}]", entries.join(", ")))
             }
             Value::Handle(h) => Ok(format!("<handle {:?}>", h.kind)),
@@ -8360,7 +8350,7 @@ impl Evaluator {
         }
     }
 
-    /// Parses a dictionary selector name like "$sel_0", "$sel_1", etc.
+    /// Parses a dictionary selector name like "$`sel_0`", "$`sel_1`", etc.
     /// Returns the field index if the name matches the pattern.
     fn parse_selector_name(name: &str) -> Option<usize> {
         name.strip_prefix("$sel_")

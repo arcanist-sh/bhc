@@ -25,7 +25,7 @@
 
 use bhc_session::OutputType;
 use bhc_target::{Os, TargetSpec};
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8PathBuf;
 use std::process::Command;
 use thiserror::Error;
 use tracing::{debug, info, instrument};
@@ -396,11 +396,8 @@ impl SystemLinker {
         args.push(format!("/OUT:{}", config.output_path));
 
         // Output type
-        match config.output_type {
-            LinkOutputType::DynamicLib => {
-                args.push("/DLL".to_string());
-            }
-            _ => {}
+        if config.output_type == LinkOutputType::DynamicLib {
+            args.push("/DLL".to_string());
         }
 
         // Object files

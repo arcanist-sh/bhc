@@ -101,7 +101,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
             // Process sub-patterns from right to left
             // For complex sub-patterns, we need to wrap the RHS in nested cases
             for (i, sub_pat) in sub_pats.iter().enumerate().rev() {
-                let binder_name = format!("pat_{}", i);
+                let binder_name = format!("pat_{i}");
                 let binder = ctx.fresh_var(&binder_name, Ty::Error, span);
 
                 match sub_pat {
@@ -184,12 +184,12 @@ pub fn lower_pat_to_alt_with_fallthrough(
             // Use pre-created dict binders if available (shared with dict scope),
             // otherwise create fresh ones.
             if existential_dict_count > 0 {
-                let dict_binders = if !ctx.existential_dict_binders.is_empty() {
-                    std::mem::take(&mut ctx.existential_dict_binders)
-                } else {
+                let dict_binders = if ctx.existential_dict_binders.is_empty() {
                     (0..existential_dict_count)
-                        .map(|i| ctx.fresh_var(&format!("$edict_{}", i), Ty::Error, span))
+                        .map(|i| ctx.fresh_var(&format!("$edict_{i}"), Ty::Error, span))
                         .collect()
+                } else {
+                    std::mem::take(&mut ctx.existential_dict_binders)
                 };
                 let mut combined = dict_binders;
                 combined.append(&mut binders);
@@ -239,7 +239,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
                 };
 
             // Build a map from field name to its pattern
-            let mut field_map: std::collections::HashMap<Symbol, &hir::FieldPat> =
+            let field_map: std::collections::HashMap<Symbol, &hir::FieldPat> =
                 field_pats.iter().map(|fp| (fp.name, fp)).collect();
 
             // Determine the arity - use canonical fields if available, otherwise pattern count
@@ -263,7 +263,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
 
             // Process fields from right to left to build nested cases correctly
             for (i, field_name) in field_order.iter().enumerate().rev() {
-                let binder_name = format!("field_{}", i);
+                let binder_name = format!("field_{i}");
                 let binder = ctx.fresh_var(&binder_name, Ty::Error, span);
 
                 if let Some(fp) = field_map.get(field_name) {
@@ -453,7 +453,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
 /// which don't implement `Eq`/`Ord`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum PatHead {
-    /// Constructor with (type_name, con_name, tag, arity).
+    /// Constructor with (`type_name`, `con_name`, tag, arity).
     Con(Symbol, Symbol, u32, u32),
     /// Literal, represented as a string key for grouping.
     Lit(String),
@@ -474,8 +474,8 @@ fn hir_lit_to_core(lit: &hir::Lit) -> Literal {
 /// Create a string key for a literal (for grouping).
 fn literal_key(lit: &hir::Lit) -> String {
     match lit {
-        hir::Lit::Int(n) => format!("Int:{}", n),
-        hir::Lit::Float(f) => format!("Float:{}", f),
+        hir::Lit::Int(n) => format!("Int:{n}"),
+        hir::Lit::Float(f) => format!("Float:{f}"),
         hir::Lit::Char(c) => format!("Char:{}", *c as u32),
         hir::Lit::String(s) => format!("Str:{}", s.as_str()),
     }
@@ -522,7 +522,7 @@ enum DecisionTree {
     Switch {
         /// Variable to scrutinize.
         scrutinee: Var,
-        /// One branch per constructor: (AltCon, bound vars, sub-tree).
+        /// One branch per constructor: (`AltCon`, bound vars, sub-tree).
         branches: Vec<(AltCon, Vec<Var>, DecisionTree)>,
         /// Default branch (for wildcards / uncovered constructors).
         default: Option<Box<DecisionTree>>,
@@ -660,9 +660,7 @@ fn pat_head(ctx: &LowerContext, pat: &hir::Pat) -> PatHead {
             } else {
                 // Fallback: use name-based lookup
                 let name = ctx
-                    .lookup_var(def_ref.def_id)
-                    .map(|v| v.name)
-                    .unwrap_or_else(|| Symbol::intern("Con"));
+                    .lookup_var(def_ref.def_id).map_or_else(|| Symbol::intern("Con"), |v| v.name);
                 let tag = get_constructor_tag(name.as_str(), def_ref.def_id.index() as u32);
                 PatHead::Con(Symbol::intern("DataType"), name, tag, sub_pats.len() as u32)
             }
@@ -672,9 +670,7 @@ fn pat_head(ctx: &LowerContext, pat: &hir::Pat) -> PatHead {
                 PatHead::Con(info.type_name, info.name, info.tag, info.arity)
             } else {
                 let name = ctx
-                    .lookup_var(def_ref.def_id)
-                    .map(|v| v.name)
-                    .unwrap_or_else(|| Symbol::intern("Con"));
+                    .lookup_var(def_ref.def_id).map_or_else(|| Symbol::intern("Con"), |v| v.name);
                 let tag = get_constructor_tag(name.as_str(), def_ref.def_id.index() as u32);
                 PatHead::Con(
                     Symbol::intern("DataType"),
@@ -714,7 +710,7 @@ fn pat_sub_patterns(ctx: &LowerContext, pat: &hir::Pat, arity: u32, span: Span) 
                     .map(|name| {
                         field_map
                             .get(name)
-                            .cloned()
+                            .copied()
                             .cloned()
                             .unwrap_or(Pat::Wild(span))
                     })
@@ -824,20 +820,17 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
             PatHead::Wild
         };
 
-        match &head {
-            PatHead::Wild => {
-                default_rows.push(row);
-                // Wildcards also participate in all constructor groups
-                for (_, group) in groups.iter_mut() {
-                    group.push(row);
-                }
+        if head == PatHead::Wild {
+            default_rows.push(row);
+            // Wildcards also participate in all constructor groups
+            for group in groups.values_mut() {
+                group.push(row);
             }
-            _ => {
-                groups.entry(head.clone()).or_default().push(row);
-                // Also add existing default rows to this new group
-                for dr in &default_rows {
-                    groups.get_mut(&head).unwrap().push(dr);
-                }
+        } else {
+            groups.entry(head.clone()).or_default().push(row);
+            // Also add existing default rows to this new group
+            for dr in &default_rows {
+                groups.get_mut(&head).unwrap().push(dr);
             }
         }
     }
@@ -858,18 +851,17 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
 
                 // Create fresh variables for constructor fields
                 let field_vars: Vec<Var> = (0..*arity)
-                    .map(|i| ctx.fresh_var(&format!("_pat{}_{}", col, i), Ty::Error, row_span))
+                    .map(|i| ctx.fresh_var(&format!("_pat{col}_{i}"), Ty::Error, row_span))
                     .collect();
 
                 // Register variable bindings for wild/var rows participating
                 // in this constructor group. When a Var pattern at column `col`
                 // is removed by specialization, we must bind it to the scrutinee.
                 for row in group_rows {
-                    if col < row.pats.len() {
-                        if matches!(pat_head(ctx, &row.pats[col]), PatHead::Wild) {
+                    if col < row.pats.len()
+                        && matches!(pat_head(ctx, &row.pats[col]), PatHead::Wild) {
                             register_wildcard_bindings(ctx, &row.pats[col], &scrutinee);
                         }
-                    }
                 }
 
                 // Build sub-matrix: specialize for this constructor
@@ -899,11 +891,10 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                 // Register variable bindings for wild/var rows in this
                 // literal group (same logic as constructor groups above).
                 for row in group_rows {
-                    if col < row.pats.len() {
-                        if matches!(pat_head(ctx, &row.pats[col]), PatHead::Wild) {
+                    if col < row.pats.len()
+                        && matches!(pat_head(ctx, &row.pats[col]), PatHead::Wild) {
                             register_wildcard_bindings(ctx, &row.pats[col], &scrutinee);
                         }
-                    }
                 }
 
                 // Literal branches have no field variables
@@ -918,7 +909,9 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
 
     // Build default branch from rows that match anything at this column.
     // Register variable bindings for patterns being removed from column `col`.
-    let default = if !default_rows.is_empty() {
+    let default = if default_rows.is_empty() {
+        None
+    } else {
         for row in &default_rows {
             if col < row.pats.len() {
                 register_wildcard_bindings(ctx, &row.pats[col], &scrutinee);
@@ -926,8 +919,6 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
         }
         let sub_matrix = default_matrix(ctx, &matrix, col, &default_rows, row_span);
         Some(Box::new(build_decision_tree(ctx, sub_matrix, row_span)))
-    } else {
-        None
     };
 
     DecisionTree::Switch {
@@ -946,7 +937,7 @@ fn specialize_matrix(
     ctx: &LowerContext,
     matrix: &MatchMatrix,
     col: usize,
-    head: &PatHead,
+    _head: &PatHead,
     field_vars: &[Var],
     group_rows: &[&ClauseRow],
     span: Span,
@@ -1006,7 +997,7 @@ fn default_matrix(
     matrix: &MatchMatrix,
     col: usize,
     default_rows: &[&ClauseRow],
-    span: Span,
+    _span: Span,
 ) -> MatchMatrix {
     // Remove the matched column
     let new_scrutinees: Vec<Var> = matrix
@@ -1166,18 +1157,17 @@ fn tree_to_core(ctx: &mut LowerContext, tree: DecisionTree) -> LowerResult<core:
 /// Check the decision tree for non-exhaustive patterns and emit warnings.
 fn check_exhaustiveness_tree(ctx: &mut LowerContext, tree: &DecisionTree, func_name: &str) {
     match tree {
-        DecisionTree::Fail(span) => {
+        DecisionTree::Fail(_span) => {
             ctx.warn(format!(
-                "warning: Pattern match(es) are non-exhaustive in '{}'\n\
-                 Patterns not matched: (could not determine missing patterns)",
-                func_name
+                "warning: Pattern match(es) are non-exhaustive in '{func_name}'\n\
+                 Patterns not matched: (could not determine missing patterns)"
             ));
         }
         DecisionTree::Switch {
-            scrutinee,
+            scrutinee: _,
             branches,
             default,
-            span,
+            span: _,
         } => {
             // Check if all constructors of the type are covered
             let covered_cons: Vec<Symbol> = branches
@@ -1414,7 +1404,7 @@ fn compile_equations_linear(
 
 /// Bind pattern variables in the context so they can be referenced in the RHS.
 ///
-/// For a variable pattern like `x`, this registers the HIR DefId to map to
+/// For a variable pattern like `x`, this registers the HIR `DefId` to map to
 /// the corresponding Core variable (either the arg variable or a fresh one).
 pub fn bind_pattern_vars(ctx: &mut LowerContext, pat: &hir::Pat, arg_var: Option<&Var>) {
     match pat {
@@ -1466,7 +1456,7 @@ pub fn bind_pattern_vars(ctx: &mut LowerContext, pat: &hir::Pat, arg_var: Option
             }
             bind_pattern_vars(ctx, inner_pat, None);
         }
-        Pat::Or(left, right, _) => {
+        Pat::Or(left, _right, _) => {
             // Or-patterns: both branches should bind the same variables
             bind_pattern_vars(ctx, left, arg_var);
             // Note: right should bind the same vars, but we skip for now
@@ -1486,7 +1476,7 @@ pub fn bind_pattern_vars(ctx: &mut LowerContext, pat: &hir::Pat, arg_var: Option
 
 /// Compile a guarded RHS into nested conditionals.
 ///
-/// In Haskell, guards on the same equation are ANDed together:
+/// In Haskell, guards on the same equation are `ANDed` together:
 /// ```haskell
 /// f x | g1, g2 = e  -- means: if g1 && g2 then e
 /// ```
@@ -1532,7 +1522,7 @@ fn compile_tuple_pattern(
     let mut inner_rhs = rhs;
 
     for (i, pat) in pats.iter().enumerate().rev() {
-        let binder_name = format!("arg{}", i);
+        let binder_name = format!("arg{i}");
         let binder = ctx.fresh_var(&binder_name, Ty::Error, span);
 
         match pat {
@@ -1624,7 +1614,7 @@ fn make_if(cond: core::Expr, then_br: core::Expr, else_br: core::Expr, span: Spa
 ///
 /// For builtin types (Bool, Maybe, Either, List, Unit), we use fixed tags
 /// that match what the LLVM codegen expects. For user-defined types,
-/// we fall back to the DefId index.
+/// we fall back to the `DefId` index.
 fn get_constructor_tag(name: &str, fallback: u32) -> u32 {
     match name {
         // Bool constructors

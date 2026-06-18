@@ -523,7 +523,7 @@ pub enum UnaryOp {
     Tanh,
     /// Sigmoid.
     Sigmoid,
-    /// ReLU.
+    /// `ReLU`.
     Relu,
     /// Ceiling.
     Ceil,
@@ -806,7 +806,7 @@ pub enum AllocRegion {
 pub enum DeviceTarget {
     /// NVIDIA GPU (CUDA).
     Cuda(u32),
-    /// AMD GPU (ROCm).
+    /// AMD GPU (`ROCm`).
     Rocm(u32),
     /// Any available GPU.
     Any,

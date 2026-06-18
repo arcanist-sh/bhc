@@ -500,7 +500,7 @@ fn parse_dependency_spec(spec: &str) -> (&str, Option<&str>) {
     // Find where the version constraint starts
     // It typically starts with a comparison operator or version number
     let constraint_start = spec
-        .find(|c: char| c == '>' || c == '<' || c == '=' || c == '^')
+        .find(['>', '<', '=', '^'])
         .or_else(|| {
             // Also check for version numbers after space
             spec.find(' ').and_then(|space_pos| {

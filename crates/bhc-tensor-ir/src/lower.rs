@@ -274,6 +274,7 @@ impl LowerContext {
     }
 
     /// Looks up the tensor for a variable.
+    #[must_use]
     pub fn lookup_tensor(&self, var_id: VarId) -> Option<&TensorRef> {
         self.var_tensors.get(&var_id)
     }
@@ -339,7 +340,7 @@ impl LowerContext {
         let (func, args) = collect_app_args(f, arg);
 
         // Try to match known patterns
-        if let Some(result) = self.try_lower_builtin(&func, &args, span) {
+        if let Some(result) = self.try_lower_builtin(func, &args, span) {
             return result;
         }
 
@@ -852,10 +853,10 @@ fn compute_slice_output_shape(slice: &SliceSpec, input_shape: &Shape) -> Shape {
             // For explicit slicing, compute new dimension
             (Dim::Static(n), start, stop, step) => {
                 let s = start.unwrap_or(0) as usize;
-                let e = stop.map(|x| x as usize).unwrap_or(*n);
+                let e = stop.map_or(*n, |x| x as usize);
                 let st = step.unsigned_abs() as usize;
                 let st = if st == 0 { 1 } else { st };
-                let new_size = (e.saturating_sub(s) + st - 1) / st;
+                let new_size = e.saturating_sub(s).div_ceil(st);
                 Dim::Static(new_size)
             }
             // Dynamic dimensions with slicing become dynamic
@@ -955,6 +956,7 @@ fn compute_broadcast_strides(source: &TensorMeta, target_shape: &Shape) -> Strid
 /// Lowers a Core module to Tensor IR operations.
 ///
 /// This is the main entry point for lowering.
+#[must_use]
 pub fn lower_module(module: &bhc_core::CoreModule) -> Vec<TensorOp> {
     let mut ctx = LowerContext::new();
 
@@ -1178,7 +1180,7 @@ mod tests {
         let slice = make_identity_slice(3);
 
         assert_eq!(slice.ranges.len(), 3);
-        for r in slice.ranges.iter() {
+        for r in &slice.ranges {
             assert_eq!(r.start, None);
             assert_eq!(r.stop, None);
             assert_eq!(r.step, 1);

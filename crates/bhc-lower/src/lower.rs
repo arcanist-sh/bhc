@@ -3,7 +3,7 @@
 //! This module contains the core lowering logic that transforms surface AST
 //! into HIR by:
 //!
-//! 1. Resolving names (identifiers -> DefIds)
+//! 1. Resolving names (identifiers -> `DefIds`)
 //! 2. Desugaring syntactic constructs
 //! 3. Building HIR nodes
 
@@ -64,7 +64,7 @@ pub fn lower_module_with_cache(
     // 1. The module is the Prelude itself
     // 2. The module has {-# LANGUAGE NoImplicitPrelude #-}
     // 3. The module already explicitly imports Prelude
-    let module_name_str = module.name.as_ref().map(|n| n.to_string());
+    let module_name_str = module.name.as_ref().map(bhc_ast::ModuleName::to_string);
     let is_prelude_module = module_name_str.as_deref() == Some("Prelude")
         || module_name_str.as_deref() == Some("BHC.Prelude");
 
@@ -210,13 +210,13 @@ pub fn lower_module_with_cache(
     }
 
     // Lower imports
-    let imports = module.imports.iter().map(|imp| lower_import(imp)).collect();
+    let imports = module.imports.iter().map(lower_import).collect();
 
     // Lower exports
     let exports = module
         .exports
         .as_ref()
-        .map(|exps| exps.iter().map(|exp| lower_export(exp)).collect());
+        .map(|exps| exps.iter().map(lower_export).collect());
 
     // Check for errors
     if ctx.has_errors() {
@@ -5366,7 +5366,7 @@ fn register_standard_module_exports(
 
     // For non-qualified imports, we should override existing bindings
     // (e.g., `import Data.Set (fromList)` should override OverloadedLists' fromList).
-    let is_unqualified_import = import_decl.map_or(false, |imp| !imp.qualified);
+    let is_unqualified_import = import_decl.is_some_and(|imp| !imp.qualified);
 
     // Build a set of explicitly imported names, if the import has an explicit list.
     // This prevents `import Data.Text (Text)` from overriding Prelude's `foldr` etc.
@@ -5433,7 +5433,7 @@ fn register_standard_module_exports(
         let is_constructor = export
             .chars()
             .next()
-            .map_or(false, |c| c.is_uppercase() || c == ':');
+            .is_some_and(|c| c.is_uppercase() || c == ':');
 
         // Only use fully-qualified names for modules that have explicit type
         // signatures in the type checker's register_lowered_builtins.
@@ -5477,14 +5477,14 @@ fn register_standard_module_exports(
         );
 
         // Register qualified name under the alias: e.g. T.pack -> pack
-        let aliased_qualified = Symbol::intern(&format!("{}.{}", qualifier, export));
+        let aliased_qualified = Symbol::intern(&format!("{qualifier}.{export}"));
         if has_typed_sigs {
             // For modules with typed sigs, create a direct value binding for
             // qualified names (e.g., T.groupBy -> DefId named "Data.Text.groupBy").
             // This prevents T.groupBy from resolving to the Prelude's groupBy.
             if ctx.lookup_value(aliased_qualified).is_none() {
                 let qual_def_id = ctx.fresh_def_id();
-                let qual_def_name = Symbol::intern(&format!("{}.{}", module_name, export));
+                let qual_def_name = Symbol::intern(&format!("{module_name}.{export}"));
                 if is_constructor {
                     ctx.define(
                         qual_def_id,
@@ -5504,7 +5504,7 @@ fn register_standard_module_exports(
             }
             // Also register under the full module name if different from alias
             if qualifier != module_name {
-                let full_qualified = Symbol::intern(&format!("{}.{}", module_name, export));
+                let full_qualified = Symbol::intern(&format!("{module_name}.{export}"));
                 if ctx.lookup_value(full_qualified).is_none() {
                     // Re-use the aliased DefId
                     if let Some(def_id) = ctx.lookup_value(aliased_qualified) {
@@ -5519,7 +5519,7 @@ fn register_standard_module_exports(
             // that name. Only fall back to the unqualified indirect mapping
             // when no such binding exists; otherwise the alias would resolve to
             // an unqualified stub that panics at runtime.
-            let full_qualified = Symbol::intern(&format!("{}.{}", module_name, export));
+            let full_qualified = Symbol::intern(&format!("{module_name}.{export}"));
             let prelude_bound = ctx.lookup_value(full_qualified);
             if ctx.lookup_value(aliased_qualified).is_none() {
                 if let Some(def_id) = prelude_bound {
@@ -5543,7 +5543,7 @@ fn register_standard_module_exports(
         // Data.Text (Text) would override Prelude's foldr/map/etc. with Data.Text's versions.
         let is_explicitly_imported = explicit_imports
             .as_ref()
-            .map_or(true, |names| names.contains(export));
+            .is_none_or(|names| names.contains(export));
         if !is_explicitly_imported {
             // Skip unqualified registration — this name wasn't in the explicit import list.
             // Qualified names (e.g., T.foldr) are still registered above.
@@ -5551,7 +5551,7 @@ fn register_standard_module_exports(
             // No existing binding — create a stub for this imported name.
             let def_id = ctx.fresh_def_id();
             let def_name = if has_typed_sigs {
-                Symbol::intern(&format!("{}.{}", module_name, export))
+                Symbol::intern(&format!("{module_name}.{export}"))
             } else {
                 unqualified
             };
@@ -5567,10 +5567,10 @@ fn register_standard_module_exports(
             // (which causes LLVM "referring to argument in another function" errors).
             // Preserve the existing DefKind so builtins keep their codegen support.
             let existing_def_id = ctx.lookup_value(unqualified).unwrap();
-            let existing_kind = ctx.defs.get(&existing_def_id).map(|info| info.kind.clone());
+            let existing_kind = ctx.defs.get(&existing_def_id).map(|info| info.kind);
             let def_id = ctx.fresh_def_id();
             let def_name = if has_typed_sigs {
-                Symbol::intern(&format!("{}.{}", module_name, export))
+                Symbol::intern(&format!("{module_name}.{export}"))
             } else {
                 unqualified
             };
@@ -5601,12 +5601,12 @@ fn register_standard_module_exports(
                 ctx.bind_constructor(unqualified, def_id);
 
                 // Also register qualified constructor names
-                let aliased_qual_sym = Symbol::intern(&format!("{}.{}", qualifier, export));
+                let aliased_qual_sym = Symbol::intern(&format!("{qualifier}.{export}"));
                 if ctx.lookup_constructor(aliased_qual_sym).is_none() {
                     ctx.bind_constructor(aliased_qual_sym, def_id);
                 }
                 if qualifier != module_name {
-                    let full_qual_sym = Symbol::intern(&format!("{}.{}", module_name, export));
+                    let full_qual_sym = Symbol::intern(&format!("{module_name}.{export}"));
                     if ctx.lookup_constructor(full_qual_sym).is_none() {
                         ctx.bind_constructor(full_qual_sym, def_id);
                     }
@@ -5739,7 +5739,7 @@ fn extract_type_name(ty: &ast::Type) -> Symbol {
 /// Substitute pattern synonym arguments into the RHS pattern.
 ///
 /// For `pattern Succ n = Add n One` used as `Succ x`:
-/// - syn_args = ["n"], syn_pat = `Add n One`, actual_args = [Pat::Var("x")]
+/// - `syn_args` = ["n"], `syn_pat` = `Add n One`, `actual_args` = [`Pat::Var("x`")]
 /// - Result: `Add x One` (substitute `n` → `x` in the pattern)
 fn substitute_pattern_synonym(
     syn_pat: &ast::Pat,
@@ -5763,7 +5763,7 @@ fn substitute_pattern_synonym(
 fn pat_to_expr(pat: &ast::Pat, span: Span) -> ast::Expr {
     match pat {
         ast::Pat::Con(ident, args, _) => {
-            let mut result = ast::Expr::Con(ident.clone(), span);
+            let mut result = ast::Expr::Con(*ident, span);
             for arg in args {
                 let arg_expr = pat_to_expr(arg, span);
                 result = ast::Expr::App(Box::new(result), Box::new(arg_expr), span);
@@ -5771,7 +5771,7 @@ fn pat_to_expr(pat: &ast::Pat, span: Span) -> ast::Expr {
             result
         }
         ast::Pat::Lit(lit, _) => ast::Expr::Lit(lit.clone(), span),
-        ast::Pat::Var(ident, _) => ast::Expr::Var(ident.clone(), span),
+        ast::Pat::Var(ident, _) => ast::Expr::Var(*ident, span),
         ast::Pat::Tuple(pats, _) => {
             let exprs: Vec<ast::Expr> = pats.iter().map(|p| pat_to_expr(p, span)).collect();
             ast::Expr::Tuple(exprs, span)
@@ -5787,7 +5787,7 @@ fn pat_to_expr(pat: &ast::Pat, span: Span) -> ast::Expr {
         ast::Pat::Infix(lhs, op, rhs, _) => {
             let l = pat_to_expr(lhs, span);
             let r = pat_to_expr(rhs, span);
-            ast::Expr::Infix(Box::new(l), op.clone(), Box::new(r), span)
+            ast::Expr::Infix(Box::new(l), *op, Box::new(r), span)
         }
         ast::Pat::Wildcard(_) => {
             // Wildcards in expression position shouldn't happen for bidirectional synonyms
@@ -5810,12 +5810,12 @@ fn subst_pat(pat: &ast::Pat, subst: &FxHashMap<Symbol, &ast::Pat>, span: Span) -
         }
         ast::Pat::Con(ident, pats, s) => {
             let new_pats = pats.iter().map(|p| subst_pat(p, subst, span)).collect();
-            ast::Pat::Con(ident.clone(), new_pats, *s)
+            ast::Pat::Con(*ident, new_pats, *s)
         }
         ast::Pat::Infix(lhs, op, rhs, s) => {
             let l = subst_pat(lhs, subst, span);
             let r = subst_pat(rhs, subst, span);
-            ast::Pat::Infix(Box::new(l), op.clone(), Box::new(r), *s)
+            ast::Pat::Infix(Box::new(l), *op, Box::new(r), *s)
         }
         ast::Pat::Tuple(pats, s) => {
             let new_pats = pats.iter().map(|p| subst_pat(p, subst, span)).collect();
@@ -5827,7 +5827,7 @@ fn subst_pat(pat: &ast::Pat, subst: &FxHashMap<Symbol, &ast::Pat>, span: Span) -
         }
         ast::Pat::As(name, inner, s) => {
             let new_inner = subst_pat(inner, subst, span);
-            ast::Pat::As(name.clone(), Box::new(new_inner), *s)
+            ast::Pat::As(*name, Box::new(new_inner), *s)
         }
         ast::Pat::Paren(inner, s) => {
             let new_inner = subst_pat(inner, subst, span);
@@ -5847,7 +5847,7 @@ fn ensure_tuple_constructor(ctx: &mut LowerContext, arity: usize, span: Span) ->
         return id;
     }
     // Register on-the-fly for large tuples beyond the builtins
-    let type_name = Symbol::intern(&format!("Tuple{}", arity));
+    let type_name = Symbol::intern(&format!("Tuple{arity}"));
     let id = ctx.fresh_def_id();
     ctx.define_constructor_with_type(id, tuple_sym, span, arity, type_name, arity, None);
     id
@@ -6007,8 +6007,8 @@ fn lower_fun_bind(ctx: &mut LowerContext, fun_bind: &ast::FunBind) -> LowerResul
     })
 }
 
-/// Lower an instance method binding with a specific DefId.
-/// Unlike `lower_fun_bind`, this takes a pre-assigned DefId rather than looking
+/// Lower an instance method binding with a specific `DefId`.
+/// Unlike `lower_fun_bind`, this takes a pre-assigned `DefId` rather than looking
 /// it up by name, since instance methods should NOT overwrite the builtin
 /// method binding (e.g. `show` should still resolve to the polymorphic builtin
 /// inside the method body).
@@ -6093,7 +6093,9 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
         };
 
         // Wrap in let if there are where bindings
-        let final_rhs = if !clause.wheres.is_empty() {
+        let final_rhs = if clause.wheres.is_empty() {
+            rhs
+        } else {
             let bindings: Vec<hir::Binding> = clause
                 .wheres
                 .iter()
@@ -6123,7 +6125,9 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                         // For simple bindings (no parameters)
                         if fb.clauses.len() == 1 && fb.clauses[0].pats.is_empty() {
                             let inner_clause = &fb.clauses[0];
-                            let rhs_expr = if !inner_clause.wheres.is_empty() {
+                            let rhs_expr = if inner_clause.wheres.is_empty() {
+                                lower_rhs(ctx, &inner_clause.rhs)
+                            } else {
                                 // Handle nested where bindings
                                 ctx.enter_scope();
                                 for nested_decl in &inner_clause.wheres {
@@ -6193,8 +6197,6 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                     .collect();
                                 ctx.exit_scope();
                                 hir::Expr::Let(nested_bindings, Box::new(body), fb.span)
-                            } else {
-                                lower_rhs(ctx, &inner_clause.rhs)
                             };
                             return Some(hir::Binding {
                                 pat: hir::Pat::Var(fb.name.name, def_id, fb.span),
@@ -6219,7 +6221,9 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                             }
 
                             // Handle nested where bindings
-                            let body = if !clause.wheres.is_empty() {
+                            let body = if clause.wheres.is_empty() {
+                                lower_rhs(ctx, &clause.rhs)
+                            } else {
                                 ctx.enter_scope();
                                 // Pre-bind nested where names
                                 for nested_decl in &clause.wheres {
@@ -6290,8 +6294,6 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                     .collect();
                                 ctx.exit_scope();
                                 hir::Expr::Let(nested_bindings, Box::new(rhs_expr), fb.span)
-                            } else {
-                                lower_rhs(ctx, &clause.rhs)
                             };
 
                             ctx.exit_scope();
@@ -6313,7 +6315,7 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                             let mut param_names = Vec::new();
                             let mut param_pats = Vec::new();
                             for i in 0..arity {
-                                let name = Symbol::intern(&format!("_arg{}", i));
+                                let name = Symbol::intern(&format!("_arg{i}"));
                                 let param_def_id = ctx.fresh_def_id();
                                 ctx.define(param_def_id, name, DefKind::Value, fb.span);
                                 ctx.bind_value(name, param_def_id);
@@ -6348,7 +6350,9 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                 };
 
                                 // Handle per-clause where bindings
-                                let body = if !clause.wheres.is_empty() {
+                                let body = if clause.wheres.is_empty() {
+                                    lower_rhs(ctx, &clause.rhs)
+                                } else {
                                     ctx.enter_scope();
                                     // Pre-bind where names
                                     for wd in &clause.wheres {
@@ -6445,8 +6449,6 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                         .collect();
                                     ctx.exit_scope();
                                     hir::Expr::Let(wbs, Box::new(rhs_expr), clause.span)
-                                } else {
-                                    lower_rhs(ctx, &clause.rhs)
                                 };
                                 ctx.exit_scope();
                                 alts.push(hir::CaseAlt {
@@ -6500,8 +6502,6 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
             } else {
                 hir::Expr::Let(bindings, Box::new(rhs), clause.span)
             }
-        } else {
-            rhs
         };
 
         Ok(hir::Equation {
@@ -6735,26 +6735,26 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                 let is_qualified = before_dot
                     .chars()
                     .next()
-                    .map_or(false, |c| c.is_uppercase());
+                    .is_some_and(char::is_uppercase);
                 if is_qualified {
                     // Qualified name - check the part after the last dot
                     op_name_str[dot_pos + 1..]
                         .chars()
                         .next()
-                        .map_or(false, |c| c.is_uppercase() || c == ':')
+                        .is_some_and(|c| c.is_uppercase() || c == ':')
                 } else {
                     // Not a real qualifier (e.g. `.:` operator) - check first char
                     op_name_str
                         .chars()
                         .next()
-                        .map_or(false, |c| c.is_uppercase() || c == ':')
+                        .is_some_and(|c| c.is_uppercase() || c == ':')
                 }
             } else {
                 // Unqualified name - check the first character
                 op_name_str
                     .chars()
                     .next()
-                    .map_or(false, |c| c.is_uppercase() || c == ':')
+                    .is_some_and(|c| c.is_uppercase() || c == ':')
             };
             let op_expr = if is_con {
                 // Constructor
@@ -6867,10 +6867,10 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                         // Simple binding (no parameters): let x = expr
                         if fb.clauses.len() == 1 && fb.clauses[0].pats.is_empty() {
                             let clause = &fb.clauses[0];
-                            let rhs_expr = if !clause.wheres.is_empty() {
-                                lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fb.span)
-                            } else {
+                            let rhs_expr = if clause.wheres.is_empty() {
                                 lower_rhs(ctx, &clause.rhs)
+                            } else {
+                                lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fb.span)
                             };
                             return Some(hir::Binding {
                                 pat: hir::Pat::Var(fb.name.name, def_id, fb.span),
@@ -6891,10 +6891,10 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                             for p in &clause.pats {
                                 pats.push(lower_pat(ctx, p));
                             }
-                            let body_expr = if !clause.wheres.is_empty() {
-                                lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fb.span)
-                            } else {
+                            let body_expr = if clause.wheres.is_empty() {
                                 lower_rhs(ctx, &clause.rhs)
+                            } else {
+                                lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, fb.span)
                             };
                             ctx.exit_scope();
                             let lam = hir::Expr::Lam(pats, Box::new(body_expr), fb.span);
@@ -6913,7 +6913,7 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                             let mut param_names = Vec::new();
                             let mut param_pats = Vec::new();
                             for i in 0..arity {
-                                let name = Symbol::intern(&format!("_arg{}", i));
+                                let name = Symbol::intern(&format!("_arg{i}"));
                                 let param_def_id = ctx.fresh_def_id();
                                 ctx.define(param_def_id, name, DefKind::Value, fb.span);
                                 ctx.bind_value(name, param_def_id);
@@ -6940,15 +6940,15 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                                         fb.span,
                                     )
                                 };
-                                let clause_body = if !clause.wheres.is_empty() {
+                                let clause_body = if clause.wheres.is_empty() {
+                                    lower_rhs(ctx, &clause.rhs)
+                                } else {
                                     lower_body_with_wheres(
                                         ctx,
                                         &clause.rhs,
                                         &clause.wheres,
                                         fb.span,
                                     )
-                                } else {
-                                    lower_rhs(ctx, &clause.rhs)
                                 };
                                 ctx.exit_scope();
                                 alts.push(hir::CaseAlt {
@@ -7013,8 +7013,8 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
             ctx,
             stmts,
             *span,
-            |ctx, e| lower_expr(ctx, e),
-            |ctx, p| lower_pat(ctx, p),
+            lower_expr,
+            lower_pat,
         ),
 
         ast::Expr::ListComp(expr, stmts, span) => desugar::desugar_list_comp(
@@ -7022,8 +7022,8 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
             expr,
             stmts,
             *span,
-            |ctx, e| lower_expr(ctx, e),
-            |ctx, p| lower_pat(ctx, p),
+            lower_expr,
+            lower_pat,
         ),
 
         ast::Expr::Tuple(exprs, span) => {
@@ -7047,16 +7047,13 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                 let con_ref = ctx.def_ref(def_id, *span);
                 let mut hir_fields = Vec::with_capacity(fields.len());
                 for f in fields {
-                    let value = match &f.value {
-                        Some(e) => lower_expr(ctx, e),
-                        None => {
-                            // Punning: Foo { x } means Foo { x = x }
-                            let name = f.name.name;
-                            if let Some(def_id) = ctx.lookup_value(name) {
-                                hir::Expr::Var(ctx.def_ref(def_id, f.span))
-                            } else {
-                                hir::Expr::Error(f.span)
-                            }
+                    let value = if let Some(e) = &f.value { lower_expr(ctx, e) } else {
+                        // Punning: Foo { x } means Foo { x = x }
+                        let name = f.name.name;
+                        if let Some(def_id) = ctx.lookup_value(name) {
+                            hir::Expr::Var(ctx.def_ref(def_id, f.span))
+                        } else {
+                            hir::Expr::Error(f.span)
                         }
                     };
                     hir_fields.push(hir::FieldExpr {
@@ -7096,16 +7093,13 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                 let con_ref = ctx.def_ref(def_id, *span);
                 let mut hir_fields = Vec::with_capacity(fields.len());
                 for f in fields {
-                    let value = match &f.value {
-                        Some(e) => lower_expr(ctx, e),
-                        None => {
-                            // Punning: Foo { x } means Foo { x = x }
-                            let name = f.name.name;
-                            if let Some(def_id) = ctx.lookup_value(name) {
-                                hir::Expr::Var(ctx.def_ref(def_id, f.span))
-                            } else {
-                                hir::Expr::Error(f.span)
-                            }
+                    let value = if let Some(e) = &f.value { lower_expr(ctx, e) } else {
+                        // Punning: Foo { x } means Foo { x = x }
+                        let name = f.name.name;
+                        if let Some(def_id) = ctx.lookup_value(name) {
+                            hir::Expr::Var(ctx.def_ref(def_id, f.span))
+                        } else {
+                            hir::Expr::Error(f.span)
                         }
                     };
                     hir_fields.push(hir::FieldExpr {
@@ -7217,7 +7211,9 @@ fn lower_alt(ctx: &mut LowerContext, alt: &ast::Alt) -> hir::CaseAlt {
         let rhs_expr = lower_rhs(ctx, &alt.rhs);
 
         // Wrap in let if there are where bindings
-        let final_rhs = if !alt.wheres.is_empty() {
+        let final_rhs = if alt.wheres.is_empty() {
+            rhs_expr
+        } else {
             let bindings: Vec<hir::Binding> = alt
                 .wheres
                 .iter()
@@ -7288,8 +7284,6 @@ fn lower_alt(ctx: &mut LowerContext, alt: &ast::Alt) -> hir::CaseAlt {
 
             ctx.exit_scope();
             hir::Expr::Let(bindings, Box::new(rhs_expr), alt.span)
-        } else {
-            rhs_expr
         };
 
         hir::CaseAlt {
@@ -7394,15 +7388,12 @@ fn lower_pat(ctx: &mut LowerContext, pat: &ast::Pat) -> hir::Pat {
                 let con_ref = ctx.def_ref(def_id, *span);
                 let mut hir_field_pats: Vec<hir::FieldPat> = Vec::with_capacity(fields.len());
                 for f in fields {
-                    let pat = match &f.pat {
-                        Some(p) => lower_pat(ctx, p),
-                        None => {
-                            // Punned field: Foo { x } binds x
-                            let field_def_id = ctx
-                                .lookup_value(f.name.name)
-                                .expect("punned field should be bound");
-                            hir::Pat::Var(f.name.name, field_def_id, f.span)
-                        }
+                    let pat = if let Some(p) = &f.pat { lower_pat(ctx, p) } else {
+                        // Punned field: Foo { x } binds x
+                        let field_def_id = ctx
+                            .lookup_value(f.name.name)
+                            .expect("punned field should be bound");
+                        hir::Pat::Var(f.name.name, field_def_id, f.span)
                     };
                     hir_field_pats.push(hir::FieldPat {
                         name: f.name.name,
@@ -7468,15 +7459,12 @@ fn lower_pat(ctx: &mut LowerContext, pat: &ast::Pat) -> hir::Pat {
                 let con_ref = ctx.def_ref(def_id, *span);
                 let mut hir_field_pats: Vec<hir::FieldPat> = Vec::with_capacity(fields.len());
                 for f in fields {
-                    let pat = match &f.pat {
-                        Some(p) => lower_pat(ctx, p),
-                        None => {
-                            // Punned field: Foo { x } binds x
-                            let field_def_id = ctx
-                                .lookup_value(f.name.name)
-                                .expect("punned field should be bound");
-                            hir::Pat::Var(f.name.name, field_def_id, f.span)
-                        }
+                    let pat = if let Some(p) = &f.pat { lower_pat(ctx, p) } else {
+                        // Punned field: Foo { x } binds x
+                        let field_def_id = ctx
+                            .lookup_value(f.name.name)
+                            .expect("punned field should be bound");
+                        hir::Pat::Var(f.name.name, field_def_id, f.span)
                     };
                     hir_field_pats.push(hir::FieldPat {
                         name: f.name.name,
@@ -7498,14 +7486,11 @@ fn lower_pat(ctx: &mut LowerContext, pat: &ast::Pat) -> hir::Pat {
                 let con_ref = ctx.def_ref(def_id, *span);
                 let mut hir_field_pats: Vec<hir::FieldPat> = Vec::with_capacity(fields.len());
                 for f in fields {
-                    let pat = match &f.pat {
-                        Some(p) => lower_pat(ctx, p),
-                        None => {
-                            let field_def_id = ctx
-                                .lookup_value(f.name.name)
-                                .expect("punned field should be bound");
-                            hir::Pat::Var(f.name.name, field_def_id, f.span)
-                        }
+                    let pat = if let Some(p) = &f.pat { lower_pat(ctx, p) } else {
+                        let field_def_id = ctx
+                            .lookup_value(f.name.name)
+                            .expect("punned field should be bound");
+                        hir::Pat::Var(f.name.name, field_def_id, f.span)
                     };
                     hir_field_pats.push(hir::FieldPat {
                         name: f.name.name,
@@ -7551,7 +7536,7 @@ fn desugar_list_pat(ctx: &mut LowerContext, pats: &[ast::Pat], span: Span) -> hi
 
     pats.iter()
         .rev()
-        .fold(hir::Pat::Con(nil_ref.clone(), vec![], span), |acc, p| {
+        .fold(hir::Pat::Con(nil_ref, vec![], span), |acc, p| {
             let cons_def = ctx.lookup_constructor(cons_sym).unwrap_or_else(|| {
                 let id = ctx.fresh_def_id();
                 ctx.define(id, cons_sym, DefKind::Constructor, span);
@@ -7566,7 +7551,7 @@ fn desugar_list_pat(ctx: &mut LowerContext, pats: &[ast::Pat], span: Span) -> hi
 /// Lower a literal.
 fn lower_lit(lit: &ast::Lit) -> hir::Lit {
     match lit {
-        ast::Lit::Int(n) => hir::Lit::Int(*n as i128),
+        ast::Lit::Int(n) => hir::Lit::Int(i128::from(*n)),
         ast::Lit::Float(f) => hir::Lit::Float(*f),
         ast::Lit::Char(c) => hir::Lit::Char(*c),
         ast::Lit::String(s) => hir::Lit::String(Symbol::intern(s)),
@@ -8280,8 +8265,7 @@ fn lower_type_family_decl(
     let kind = tf
         .kind
         .as_ref()
-        .map(lower_kind)
-        .unwrap_or(bhc_types::Kind::Star);
+        .map_or(bhc_types::Kind::Star, lower_kind);
 
     let family_kind = match tf.family_kind {
         ast::TypeFamilyKind::Open => hir::TypeFamilyKind::Open,
@@ -8340,8 +8324,7 @@ fn lower_data_family_decl(
     let kind = df
         .kind
         .as_ref()
-        .map(lower_kind)
-        .unwrap_or(bhc_types::Kind::Star);
+        .map_or(bhc_types::Kind::Star, lower_kind);
 
     Ok(hir::DataFamilyDef {
         id: def_id,
@@ -8357,13 +8340,13 @@ fn lower_data_instance_decl(
     ctx: &mut LowerContext,
     di: &ast::DataInstanceDecl,
 ) -> hir::DataFamilyInstance {
-    let cons: Vec<hir::ConDef> = if !di.gadt_constrs.is_empty() {
+    let cons: Vec<hir::ConDef> = if di.gadt_constrs.is_empty() {
+        di.constrs.iter().map(|c| lower_con_def(ctx, c)).collect()
+    } else {
         di.gadt_constrs
             .iter()
             .map(|c| lower_gadt_con_def(ctx, c))
             .collect()
-    } else {
-        di.constrs.iter().map(|c| lower_con_def(ctx, c)).collect()
     };
 
     let deriving: Vec<hir::DerivingClause> = di
@@ -8384,7 +8367,7 @@ fn lower_data_instance_decl(
     }
 }
 
-/// Lower an AST kind to a bhc_types kind.
+/// Lower an AST kind to a `bhc_types` kind.
 fn lower_kind(kind: &ast::Kind) -> bhc_types::Kind {
     match kind {
         ast::Kind::Star => bhc_types::Kind::Star,
@@ -8414,8 +8397,7 @@ fn lower_assoc_type(ctx: &mut LowerContext, assoc: &ast::AssocType) -> hir::Asso
     let kind = assoc
         .kind
         .as_ref()
-        .map(lower_kind)
-        .unwrap_or(bhc_types::Kind::Star);
+        .map_or(bhc_types::Kind::Star, lower_kind);
 
     // Convert optional default type
     let default = assoc.default.as_ref().map(|ty| lower_type(ctx, ty));
@@ -8570,7 +8552,7 @@ fn lower_class_decl(ctx: &mut LowerContext, class: &ast::ClassDecl) -> LowerResu
 /// This function decomposes the spine into `[Int, String]` based on the
 /// expected parameter count.
 ///
-/// For single-param classes (param_count=1), returns the type as-is in a vec.
+/// For single-param classes (`param_count=1`), returns the type as-is in a vec.
 fn flatten_instance_type(ty: &ast::Type, param_count: usize) -> Vec<&ast::Type> {
     if param_count <= 1 {
         return vec![ty];
@@ -8580,15 +8562,12 @@ fn flatten_instance_type(ty: &ast::Type, param_count: usize) -> Vec<&ast::Type> 
     let mut spine = Vec::new();
     let mut current = ty;
     loop {
-        match current {
-            ast::Type::App(f, x, _) => {
-                spine.push(x.as_ref());
-                current = f.as_ref();
-            }
-            _ => {
-                spine.push(current);
-                break;
-            }
+        if let ast::Type::App(f, x, _) = current {
+            spine.push(x.as_ref());
+            current = f.as_ref();
+        } else {
+            spine.push(current);
+            break;
         }
     }
     // spine is in reverse order (rightmost arg first), so reverse it

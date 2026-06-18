@@ -15,6 +15,7 @@ use super::subst::substitute;
 ///
 /// Returns `Some(simplified)` if the scrutinee is a known constructor or literal,
 /// `None` otherwise.
+#[must_use]
 pub fn try_case_of_known(scrutinee: &Expr, alts: &[Alt]) -> Option<Expr> {
     match scrutinee {
         Expr::Lit(lit, _, _) => try_case_of_literal(scrutinee, lit, alts),
@@ -157,6 +158,7 @@ fn try_case_of_constructor(
 /// ```
 ///
 /// Only fires when the total duplicated code is within the budget.
+#[must_use]
 pub fn try_case_of_case(
     scrutinee: &Expr,
     outer_alts: &[Alt],

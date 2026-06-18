@@ -9,7 +9,6 @@
 //! ensure stable symbol names for linking.
 
 use std::ffi::{c_char, c_int, CStr, CString};
-use std::panic::AssertUnwindSafe;
 use std::ptr;
 use std::sync::atomic::{AtomicI64, AtomicPtr, Ordering};
 
@@ -189,7 +188,7 @@ pub unsafe extern "C" fn bhc_free(ptr: *mut u8, size: usize) {
     // Size-0 "allocations" are dangling sentinels from bhc_alloc; there is
     // nothing to deallocate (and dealloc with a zero-size layout is UB)
     if !ptr.is_null() && size > 0 {
-        if let Some(layout) = std::alloc::Layout::from_size_align(size, 8).ok() {
+        if let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) {
             unsafe { std::alloc::dealloc(ptr, layout) };
         }
     }
@@ -787,8 +786,8 @@ fn rational_make_normalized(num: i64, denom: i64) -> *mut u8 {
 /// Construct a Rational from numerator and denominator, normalizing via GCD.
 #[no_mangle]
 pub extern "C" fn bhc_rational_make(num: i64, denom: i64) -> *mut u8 {
-    let result = rational_make_normalized(num, denom);
-    result
+    
+    rational_make_normalized(num, denom)
 }
 
 /// Read a Rational's (numerator, denominator), aborting on null.
@@ -2378,9 +2377,9 @@ pub extern "C" fn bhc_show_exception(exc: *mut u8) -> *mut u8 {
     };
 
     let msg = match tag {
-        EXC_TAG_IO_EXCEPTION => format!("{}", payload_str),
-        EXC_TAG_ERROR_CALL => format!("{}", payload_str),
-        _ => format!("{}", payload_str),
+        EXC_TAG_IO_EXCEPTION => payload_str.to_string(),
+        EXC_TAG_ERROR_CALL => payload_str.to_string(),
+        _ => payload_str.to_string(),
     };
 
     CString::new(msg)
@@ -4273,7 +4272,7 @@ mod tests {
             let exc = bhc_make_some_exception(EXC_TAG_IO_EXCEPTION, 88usize as *mut u8);
             bhc_throw(exc)
         }
-        extern "C" fn handler(_env: *mut u8, exc: *mut u8) -> *mut u8 {
+        extern "C" fn handler(_env: *mut u8, _exc: *mut u8) -> *mut u8 {
             99usize as *mut u8
         }
         // Catch ErrorCall — should NOT match IOException
@@ -4356,7 +4355,7 @@ mod tests {
 
     #[test]
     fn test_open_close_file() {
-        use std::io::Write;
+        
         // Create a temp file
         let tmp = std::env::temp_dir().join("bhc_test_open_close.txt");
         std::fs::write(&tmp, "hello").unwrap();

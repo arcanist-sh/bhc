@@ -435,7 +435,7 @@ mod tests {
 
         for _ in 0..1000 {
             let n = rng.range(1, 6);
-            assert!(n >= 1 && n <= 6);
+            assert!((1..=6).contains(&n));
         }
     }
 
@@ -445,7 +445,7 @@ mod tests {
 
         for _ in 0..1000 {
             let f = rng.next_f64();
-            assert!(f >= 0.0 && f < 1.0);
+            assert!((0.0..1.0).contains(&f));
         }
     }
 
@@ -595,7 +595,7 @@ mod tests {
 
         for _ in 0..1000 {
             let f = rng.range_f64(10.0, 20.0);
-            assert!(f >= 10.0 && f < 20.0);
+            assert!((10.0..20.0).contains(&f));
         }
     }
 }

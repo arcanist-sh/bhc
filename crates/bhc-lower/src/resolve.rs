@@ -73,7 +73,7 @@ pub fn resolve_constructor(ctx: &mut LowerContext, name: Symbol, span: Span) -> 
 
 /// Bind a pattern, adding all bound variables to the current scope.
 ///
-/// Returns the list of newly bound (name, DefId) pairs.
+/// Returns the list of newly bound (name, `DefId`) pairs.
 pub fn bind_pattern(ctx: &mut LowerContext, pat: &ast::Pat) -> Vec<(Symbol, DefId)> {
     let mut bindings = Vec::new();
     collect_pattern_bindings(ctx, pat, &mut bindings);

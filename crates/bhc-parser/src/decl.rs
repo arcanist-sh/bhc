@@ -888,7 +888,7 @@ impl<'src> Parser<'src> {
         // Check for multi-name type signature: `a, b, c :: Type`
         if self.check(&TokenKind::Comma) || self.check(&TokenKind::DoubleColon) {
             // Collect all names for a potential type signature
-            let mut names = vec![name.clone()];
+            let mut names = vec![name];
             while self.eat(&TokenKind::Comma) {
                 names.push(self.parse_var_or_op()?);
             }
@@ -928,7 +928,7 @@ impl<'src> Parser<'src> {
                 // Rewind and parse as pattern binding
                 let pat_start = start;
                 // Build the infix pattern: name op pat
-                let left_pat = Pat::Var(name.clone(), start);
+                let left_pat = Pat::Var(name, start);
                 let op = self.parse_infix_op()?;
                 let right_pat = self.parse_pattern()?;
                 let pat_span = pat_start.to(right_pat.span());
@@ -963,7 +963,7 @@ impl<'src> Parser<'src> {
                 }));
             } else if self.is_infix_var_op_start() {
                 // Variable operator: this is an infix function binding like `x --> y = ...`
-                let first_pat = Pat::Var(name.clone(), start);
+                let first_pat = Pat::Var(name, start);
                 let op_name = self.parse_infix_op()?;
                 let second_pat = self.parse_pattern()?;
                 pats.push(first_pat);
@@ -1731,7 +1731,7 @@ impl<'src> Parser<'src> {
     /// Extract the class name from a type (e.g., `MonadState XState` -> `MonadState`)
     fn type_to_class_name(&self, ty: &Type) -> Ident {
         match ty {
-            Type::Con(name, _) => name.clone(),
+            Type::Con(name, _) => *name,
             Type::App(f, _, _) => self.type_to_class_name(f),
             Type::Paren(inner, _) => self.type_to_class_name(inner),
             _ => Ident::from_str("<unknown>"),

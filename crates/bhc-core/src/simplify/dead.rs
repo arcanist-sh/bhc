@@ -10,6 +10,7 @@ use super::occurrence::OccCount;
 
 /// Remove a dead non-recursive binding, returning just the body.
 /// Returns `Some(body)` if the binding is dead, `None` if it's live.
+#[must_use]
 pub fn try_eliminate_dead_nonrec(
     var_id: VarId,
     _body: &Expr,
@@ -24,6 +25,7 @@ pub fn try_eliminate_dead_nonrec(
 /// Filter dead entries from a recursive binding group.
 /// Returns `None` if all entries survive, `Some(filtered)` if any were removed.
 /// If all entries are dead, returns `Some(vec![])`.
+#[must_use]
 pub fn filter_dead_rec(
     binds: &[(crate::Var, Box<Expr>)],
     _body: &Expr,

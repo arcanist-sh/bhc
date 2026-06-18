@@ -188,7 +188,7 @@ fn lower_single_binding(ctx: &mut LowerContext, binding: &Binding) -> LowerResul
 fn lower_binding_group(
     ctx: &mut LowerContext,
     bindings: &[Binding],
-    span: Span,
+    _span: Span,
 ) -> LowerResult<Bind> {
     // Extract all binding names and their variables
     let mut all_vars = Vec::with_capacity(bindings.len());

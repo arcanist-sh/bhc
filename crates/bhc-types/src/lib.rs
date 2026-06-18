@@ -413,7 +413,7 @@ impl Ty {
         }
     }
 
-    /// Returns the type-level list if this is a TyList variant.
+    /// Returns the type-level list if this is a `TyList` variant.
     #[must_use]
     pub fn as_ty_list(&self) -> Option<&TyList> {
         match self {

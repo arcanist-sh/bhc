@@ -1,7 +1,7 @@
 //! Environment for variable bindings during evaluation.
 //!
 //! The environment maps variable IDs to their values. It uses a persistent
-//! data structure (im::HashMap) for efficient cloning when creating closures.
+//! data structure (`im::HashMap`) for efficient cloning when creating closures.
 
 use im::HashMap;
 
@@ -66,7 +66,7 @@ impl Env {
         self.bindings.is_empty()
     }
 
-    /// Returns all VarIds in the environment (for debugging).
+    /// Returns all `VarIds` in the environment (for debugging).
     pub fn keys(&self) -> impl Iterator<Item = &VarId> {
         self.bindings.keys()
     }

@@ -18,6 +18,7 @@ use super::occurrence::OccCount;
 /// - **Always inline**: cheap expressions (variables, literals) regardless of use count
 /// - **Consider**: multi-use when `expr_size(rhs) <= threshold`
 /// - **Never**: recursive bindings
+#[must_use]
 pub fn build_inline_env(
     bindings: &[Bind],
     occs: &FxHashMap<VarId, OccCount>,

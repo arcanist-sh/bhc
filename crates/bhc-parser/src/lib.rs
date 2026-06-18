@@ -1721,7 +1721,7 @@ instance Collection [a] where
         for entry in std::fs::read_dir(xmonad_dir).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "hs") {
+            if path.extension().is_some_and(|ext| ext == "hs") {
                 let src = std::fs::read_to_string(&path).unwrap();
                 let file_id = crate::FileId::new(0);
                 let (_, diagnostics) = parse_module(&src, file_id);

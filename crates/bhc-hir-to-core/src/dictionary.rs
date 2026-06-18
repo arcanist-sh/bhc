@@ -64,7 +64,7 @@ pub struct ClassInfo {
     pub method_types: FxHashMap<Symbol, Scheme>,
     /// Superclass names.
     pub superclasses: Vec<Symbol>,
-    /// Default method implementations (method name -> DefId).
+    /// Default method implementations (method name -> `DefId`).
     pub defaults: FxHashMap<Symbol, DefId>,
     /// Associated type declarations.
     pub assoc_types: Vec<AssocTypeInfo>,
@@ -78,7 +78,7 @@ pub struct InstanceInfo {
     /// The instance types (e.g., `[Int]` for `instance Eq Int`,
     /// or `[Int, String]` for `instance Convert Int String`).
     pub instance_types: Vec<Ty>,
-    /// Method implementations (method name -> DefId).
+    /// Method implementations (method name -> `DefId`).
     pub methods: FxHashMap<Symbol, DefId>,
     /// Superclass instance types for resolving superclass dictionaries.
     pub superclass_instances: Vec<Ty>,
@@ -91,6 +91,7 @@ pub struct InstanceInfo {
 
 impl InstanceInfo {
     /// Create a new single-parameter instance (most common case).
+    #[must_use]
     pub fn new_single(class: Symbol, instance_type: Ty, methods: FxHashMap<Symbol, DefId>) -> Self {
         Self {
             class,
@@ -103,6 +104,7 @@ impl InstanceInfo {
     }
 
     /// Create a new multi-parameter instance.
+    #[must_use]
     pub fn new_multi(
         class: Symbol,
         instance_types: Vec<Ty>,
@@ -119,6 +121,7 @@ impl InstanceInfo {
     }
 
     /// Create a new instance with associated types.
+    #[must_use]
     pub fn new_with_assoc_types(
         class: Symbol,
         instance_types: Vec<Ty>,
@@ -136,11 +139,13 @@ impl InstanceInfo {
     }
 
     /// Get the first instance type (for backward compatibility with single-param classes).
+    #[must_use]
     pub fn first_type(&self) -> Option<&Ty> {
         self.instance_types.first()
     }
 
     /// Look up an associated type implementation.
+    #[must_use]
     pub fn lookup_assoc_type(&self, name: Symbol) -> Option<&Ty> {
         self.assoc_type_impls.get(&name)
     }
@@ -172,7 +177,7 @@ impl ClassRegistry {
     pub fn register_instance(&mut self, info: InstanceInfo) {
         self.instances
             .entry(info.class)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(info);
     }
 
@@ -312,7 +317,7 @@ pub struct DictContext<'a> {
     /// Cache of already-constructed dictionaries (class, type) -> Var.
     dict_cache: FxHashMap<(Symbol, String), Var>,
     /// Optional variable map for looking up registered variable names.
-    /// When set, method_reference uses the registered name instead of the
+    /// When set, `method_reference` uses the registered name instead of the
     /// instance method name, which is important for instance methods that
     /// have been renamed (e.g., `$instance_describe_Color`).
     var_map: Option<FxHashMap<DefId, Var>>,
@@ -320,6 +325,7 @@ pub struct DictContext<'a> {
 
 impl<'a> DictContext<'a> {
     /// Create a new dictionary context.
+    #[must_use]
     pub fn new(registry: &'a ClassRegistry) -> Self {
         Self {
             registry,
@@ -331,6 +337,7 @@ impl<'a> DictContext<'a> {
     }
 
     /// Create a new dictionary context with a variable map for name resolution.
+    #[must_use]
     pub fn new_with_var_map(registry: &'a ClassRegistry, var_map: FxHashMap<DefId, Var>) -> Self {
         Self {
             registry,
@@ -528,7 +535,7 @@ impl<'a> DictContext<'a> {
                         instance
                             .instance_types
                             .iter()
-                            .map(|t| format!("{:?}", t))
+                            .map(|t| format!("{t:?}"))
                             .collect::<Vec<_>>()
                             .join(" ")
                     );
@@ -552,7 +559,7 @@ impl<'a> DictContext<'a> {
                         instance
                             .instance_types
                             .iter()
-                            .map(|t| format!("{:?}", t))
+                            .map(|t| format!("{t:?}"))
                             .collect::<Vec<_>>()
                             .join(" ")
                     );
@@ -588,7 +595,7 @@ impl<'a> DictContext<'a> {
         core::Expr::Var(var, span)
     }
 
-    /// Map transformer instance method DefIds to qualified names for codegen.
+    /// Map transformer instance method `DefIds` to qualified names for codegen.
     fn transformer_method_name(&self, def_id: DefId) -> Option<Symbol> {
         let name = match def_id.index() {
             // Identity instances
@@ -633,7 +640,7 @@ impl<'a> DictContext<'a> {
         Some(Symbol::intern(name))
     }
 
-    /// Find the method name for a given DefId by searching all registered instances.
+    /// Find the method name for a given `DefId` by searching all registered instances.
     fn find_method_name(&self, def_id: DefId) -> Option<Symbol> {
         for instances in self.registry.instances.values() {
             for instance in instances {
@@ -668,6 +675,7 @@ impl<'a> DictContext<'a> {
 /// * `method_name` - The method to extract
 /// * `registry` - The class registry
 /// * `span` - Source span
+#[must_use]
 pub fn select_method(
     dict_var: &Var,
     class: Symbol,
@@ -682,7 +690,7 @@ pub fn select_method(
     let superclass_count = class_info.superclasses.len();
     let method_index = class_info.methods.iter().position(|m| *m == method_name)?;
 
-    let total_fields = superclass_count + class_info.methods.len();
+    let _total_fields = superclass_count + class_info.methods.len();
 
     // Note: even for single-method classes, the dictionary is always a proper
     // tuple (padded by make_dict), so $sel_0 is always used.
@@ -702,6 +710,7 @@ pub fn select_method(
 /// * `superclass` - The superclass to extract
 /// * `registry` - The class registry
 /// * `span` - Source span
+#[must_use]
 pub fn select_superclass(
     dict_var: &Var,
     class: Symbol,
@@ -814,7 +823,7 @@ fn make_error_expr(msg: &str, span: Span) -> core::Expr {
 fn make_field_selector(dict_var: &Var, field_index: usize, span: Span) -> core::Expr {
     // For now, create a simple selector function application
     // A more complete implementation would generate proper case expressions
-    let selector_name = Symbol::intern(&format!("$sel_{}", field_index));
+    let selector_name = Symbol::intern(&format!("$sel_{field_index}"));
     let selector_var = Var {
         name: selector_name,
         id: VarId::new(field_index),

@@ -15,6 +15,7 @@ use super::subst::substitute_single;
 /// Reduces `(\x -> body) arg` to `body[arg/x]` when:
 /// - `arg` is cheap (variable or literal), OR
 /// - `x` is used at most once in `body`
+#[must_use]
 pub fn try_beta_reduce(fun: &Expr, arg: &Expr, inline_threshold: usize) -> Option<Expr> {
     if let Expr::Lam(x, body, _) = fun {
         // Always safe to substitute cheap args (no work duplication)
@@ -34,10 +35,10 @@ pub fn try_beta_reduce(fun: &Expr, arg: &Expr, inline_threshold: usize) -> Optio
             Some(super::occurrence::OccCount::Once) => {
                 // Used exactly once, not under lambda — safe to inline
                 // unless the arg contains a Case (creates LLVM terminators)
-                if !contains_toplevel_case(arg) {
-                    Some(substitute_single(*body.clone(), x.id, arg))
-                } else {
+                if contains_toplevel_case(arg) {
                     None
+                } else {
+                    Some(substitute_single(*body.clone(), x.id, arg))
                 }
             }
             Some(super::occurrence::OccCount::OnceInLam) => {

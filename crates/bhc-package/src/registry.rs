@@ -144,8 +144,7 @@ pub struct RegistryConfig {
 impl Default for RegistryConfig {
     fn default() -> Self {
         let cache_dir = dirs::cache_dir()
-            .map(|p| Utf8PathBuf::try_from(p).ok())
-            .flatten()
+            .and_then(|p| Utf8PathBuf::try_from(p).ok())
             .unwrap_or_else(|| Utf8PathBuf::from(".cache"))
             .join("bhc")
             .join("registry");

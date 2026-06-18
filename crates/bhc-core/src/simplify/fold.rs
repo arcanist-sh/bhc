@@ -8,10 +8,11 @@ use crate::{Expr, Literal};
 
 /// Attempt to fold a primitive operation applied to literal arguments.
 ///
-/// Recognizes patterns like `PrimOp arg1 arg2` where the PrimOp is a known
+/// Recognizes patterns like `PrimOp arg1 arg2` where the `PrimOp` is a known
 /// arithmetic operation and both arguments are literals.
 ///
 /// Returns `Some(folded_literal)` on success, `None` if not foldable.
+#[must_use]
 pub fn try_constant_fold(expr: &Expr) -> Option<Expr> {
     // Pattern: App(App(Var(op), lit1), lit2) for binary ops
     if let Expr::App(inner_app, arg2, span) = expr {

@@ -972,7 +972,7 @@ impl GarbageCollector {
     pub fn is_incremental_marking(&self) -> bool {
         self.incremental_marker
             .as_ref()
-            .map_or(false, |m| m.is_marking())
+            .is_some_and(|m| m.is_marking())
     }
 
     /// Finish an incremental collection cycle.

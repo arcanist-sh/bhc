@@ -244,7 +244,7 @@ impl Hackage {
         validate_component(name, "name")?;
         validate_component(version, "version")?;
 
-        let pkg_path = self.package_path(name, version);
+        let _pkg_path = self.package_path(name, version);
 
         // Check cache first
         if self.is_cached(name, version) {

@@ -299,12 +299,12 @@ pub fn span_to_range(file: &SourceFile, span: bhc_span::Span) -> LspRange {
     LspRange {
         start: LspPosition {
             // LSP uses 0-indexed lines
-            line: start_loc.line.saturating_sub(1) as u32,
-            character: start_loc.col.saturating_sub(1) as u32,
+            line: start_loc.line.saturating_sub(1),
+            character: start_loc.col.saturating_sub(1),
         },
         end: LspPosition {
-            line: end_loc.line.saturating_sub(1) as u32,
-            character: end_loc.col.saturating_sub(1) as u32,
+            line: end_loc.line.saturating_sub(1),
+            character: end_loc.col.saturating_sub(1),
         },
     }
 }

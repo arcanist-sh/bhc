@@ -276,7 +276,7 @@ pub enum Pat {
     Wild(Span),
 
     /// Variable pattern: `x`.
-    /// The DefId is the definition ID assigned during lowering.
+    /// The `DefId` is the definition ID assigned during lowering.
     Var(Symbol, DefId, Span),
 
     /// Literal pattern: `42`, `'a'`.
@@ -291,7 +291,7 @@ pub enum Pat {
     RecordCon(DefRef, Vec<FieldPat>, Span),
 
     /// As-pattern: `x@pat`.
-    /// The DefId is the definition ID assigned during lowering for the bound variable.
+    /// The `DefId` is the definition ID assigned during lowering for the bound variable.
     As(Symbol, DefId, Box<Pat>, Span),
 
     /// Or-pattern: `pat1 | pat2` (for view patterns).
@@ -444,11 +444,11 @@ pub enum DerivingStrategy {
     Default,
     /// `stock` — use built-in derivation (Eq, Ord, Show, etc.).
     Stock,
-    /// `newtype` — GeneralizedNewtypeDeriving.
+    /// `newtype` — `GeneralizedNewtypeDeriving`.
     Newtype,
-    /// `anyclass` — DeriveAnyClass (empty instance with defaults).
+    /// `anyclass` — `DeriveAnyClass` (empty instance with defaults).
     Anyclass,
-    /// `via SomeType` — DerivingVia.
+    /// `via SomeType` — `DerivingVia`.
     Via(Ty),
 }
 
@@ -845,22 +845,22 @@ pub struct Module {
     pub items: Vec<Item>,
     /// Source span.
     pub span: Span,
-    /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
+    /// Whether {-# LANGUAGE `OverloadedStrings` #-} is enabled.
     pub overloaded_strings: bool,
-    /// Whether {-# LANGUAGE ScopedTypeVariables #-} is enabled.
+    /// Whether {-# LANGUAGE `ScopedTypeVariables` #-} is enabled.
     pub scoped_type_variables: bool,
-    /// Whether {-# LANGUAGE GeneralizedNewtypeDeriving #-} is enabled.
+    /// Whether {-# LANGUAGE `GeneralizedNewtypeDeriving` #-} is enabled.
     pub generalized_newtype_deriving: bool,
-    /// Whether {-# LANGUAGE FlexibleInstances #-} is enabled.
+    /// Whether {-# LANGUAGE `FlexibleInstances` #-} is enabled.
     pub flexible_instances: bool,
-    /// Whether {-# LANGUAGE FlexibleContexts #-} is enabled.
+    /// Whether {-# LANGUAGE `FlexibleContexts` #-} is enabled.
     pub flexible_contexts: bool,
     /// Whether {-# LANGUAGE GADTs #-} is enabled.
     pub gadts: bool,
-    /// Whether {-# LANGUAGE StrictData #-} is enabled.
+    /// Whether {-# LANGUAGE `StrictData` #-} is enabled.
     /// Note: BHC is already strict-by-default, so this is a no-op semantically.
     pub strict_data: bool,
-    /// Whether {-# LANGUAGE OverloadedLists #-} is enabled.
+    /// Whether {-# LANGUAGE `OverloadedLists` #-} is enabled.
     pub overloaded_lists: bool,
 }
 

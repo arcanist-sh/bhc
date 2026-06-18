@@ -8,8 +8,8 @@ use rustc_hash::FxHashSet;
 use crate::{Expr, VarId};
 
 /// Counter for generating fresh variable IDs.
-/// Starts at 2,000,000 to avoid collision with all existing VarId ranges:
-/// builtins 0-95, LowerContext 100+, fixed DefIds 10000-11273,
+/// Starts at 2,000,000 to avoid collision with all existing `VarId` ranges:
+/// builtins 0-95, `LowerContext` 100+, fixed `DefIds` 10000-11273,
 /// deriving 50000+, RTS 1000000+.
 static FRESH_COUNTER: AtomicU32 = AtomicU32::new(2_000_000);
 
@@ -20,6 +20,7 @@ pub fn fresh_var_id() -> VarId {
 }
 
 /// Count the number of AST nodes in an expression (for inlining budget).
+#[must_use]
 pub fn expr_size(expr: &Expr) -> usize {
     match expr {
         Expr::Var(_, _) | Expr::Lit(_, _, _) | Expr::Type(_, _) | Expr::Coercion(_, _) => 1,
@@ -48,6 +49,7 @@ pub fn expr_size(expr: &Expr) -> usize {
 }
 
 /// Collect the set of free variable IDs in an expression.
+#[must_use]
 pub fn free_var_ids(expr: &Expr) -> FxHashSet<VarId> {
     let mut free = FxHashSet::default();
     let mut bound = FxHashSet::default();
@@ -124,6 +126,7 @@ fn collect_free_ids(expr: &Expr, free: &mut FxHashSet<VarId>, bound: &mut FxHash
 
 /// Returns true if the expression is "cheap" (safe to duplicate without work duplication).
 /// Cheap expressions: variables, literals, types, coercions.
+#[must_use]
 pub fn is_cheap(expr: &Expr) -> bool {
     matches!(
         expr,
@@ -135,6 +138,7 @@ pub fn is_cheap(expr: &Expr) -> bool {
 /// not nested under a lambda or lazy. Expressions with top-level case create
 /// LLVM basic block terminators when lowered, making them unsafe to inline into
 /// arbitrary positions (e.g., function arguments).
+#[must_use]
 pub fn contains_toplevel_case(expr: &Expr) -> bool {
     match expr {
         Expr::Case(_, _, _, _) => true,

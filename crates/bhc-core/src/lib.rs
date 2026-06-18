@@ -502,7 +502,7 @@ pub struct CoreModule {
     pub exports: Vec<ForeignExport>,
     /// Foreign imports (C functions imported via FFI).
     pub foreign_imports: Vec<ForeignImport>,
-    /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
+    /// Whether {-# LANGUAGE `OverloadedStrings` #-} is enabled.
     pub overloaded_strings: bool,
     /// Constructor metadata for all data types defined in this module.
     /// Used by codegen to recognize constructors used as values.

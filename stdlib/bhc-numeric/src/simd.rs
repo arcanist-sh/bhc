@@ -198,7 +198,7 @@ impl Vec4F32 {
             let r = vaddq_f32(a, b);
             let mut result = Self::zero();
             vst1q_f32(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         // Scalar fallback. Active on x86_64 too so that the function still
         // has a return path when `is_x86_feature_detected!` returns false
@@ -237,7 +237,7 @@ impl Vec4F32 {
             let r = vsubq_f32(a, b);
             let mut result = Self::zero();
             vst1q_f32(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         // Scalar fallback. Active on x86_64 too so that the function still
         // has a return path when `is_x86_feature_detected!` returns false
@@ -276,7 +276,7 @@ impl Vec4F32 {
             let r = vmulq_f32(a, b);
             let mut result = Self::zero();
             vst1q_f32(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         // Scalar fallback. Active on x86_64 too so that the function still
         // has a return path when `is_x86_feature_detected!` returns false
@@ -315,7 +315,7 @@ impl Vec4F32 {
             let r = vdivq_f32(a, b);
             let mut result = Self::zero();
             vst1q_f32(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         // Scalar fallback. Active on x86_64 too so that the function still
         // has a return path when `is_x86_feature_detected!` returns false
@@ -354,7 +354,7 @@ impl Vec4F32 {
             let r = vminq_f32(a, b);
             let mut result = Self::zero();
             vst1q_f32(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         // Scalar fallback. Active on x86_64 too so that the function still
         // has a return path when `is_x86_feature_detected!` returns false
@@ -393,7 +393,7 @@ impl Vec4F32 {
             let r = vmaxq_f32(a, b);
             let mut result = Self::zero();
             vst1q_f32(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         // Scalar fallback. Active on x86_64 too so that the function still
         // has a return path when `is_x86_feature_detected!` returns false
@@ -430,7 +430,7 @@ impl Vec4F32 {
             let r = vsqrtq_f32(a);
             let mut result = Self::zero();
             vst1q_f32(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         // Scalar fallback. Active on x86_64 too so that the function still
         // has a return path when `is_x86_feature_detected!` returns false
@@ -457,7 +457,7 @@ impl Vec4F32 {
             let r = vabsq_f32(a);
             let mut result = Self::zero();
             vst1q_f32(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         #[cfg(not(target_arch = "aarch64"))]
         Self {
@@ -479,7 +479,7 @@ impl Vec4F32 {
             let r = vnegq_f32(a);
             let mut result = Self::zero();
             vst1q_f32(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         #[cfg(not(target_arch = "aarch64"))]
         Self {
@@ -510,7 +510,7 @@ impl Vec4F32 {
             let r = vfmaq_f32(cv, av, bv);
             let mut result = Self::zero();
             vst1q_f32(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         // Scalar fallback. Active on x86_64 too so that the function still
         // has a return path when `is_x86_feature_detected!` returns false
@@ -770,7 +770,7 @@ impl Vec2F64 {
             let r = vaddq_f64(a, b);
             let mut result = Self::zero();
             vst1q_f64(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         // Scalar fallback. Active on x86_64 too so that the function still
         // has a return path when `is_x86_feature_detected!` returns false
@@ -804,7 +804,7 @@ impl Vec2F64 {
             let r = vsubq_f64(a, b);
             let mut result = Self::zero();
             vst1q_f64(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         // Scalar fallback. Active on x86_64 too so that the function still
         // has a return path when `is_x86_feature_detected!` returns false
@@ -838,7 +838,7 @@ impl Vec2F64 {
             let r = vmulq_f64(a, b);
             let mut result = Self::zero();
             vst1q_f64(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         // Scalar fallback. Active on x86_64 too so that the function still
         // has a return path when `is_x86_feature_detected!` returns false
@@ -872,7 +872,7 @@ impl Vec2F64 {
             let r = vdivq_f64(a, b);
             let mut result = Self::zero();
             vst1q_f64(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         // Scalar fallback. Active on x86_64 too so that the function still
         // has a return path when `is_x86_feature_detected!` returns false
@@ -908,7 +908,7 @@ impl Vec2F64 {
             let r = vfmaq_f64(cv, av, bv);
             let mut result = Self::zero();
             vst1q_f64(result.data.as_mut_ptr(), r);
-            return result;
+            result
         }
         // Scalar fallback. Active on x86_64 too so that the function still
         // has a return path when `is_x86_feature_detected!` returns false
@@ -924,7 +924,7 @@ impl Vec2F64 {
     pub fn sum(self) -> f64 {
         #[cfg(target_arch = "aarch64")]
         unsafe {
-            return vaddvq_f64(vld1q_f64(self.data.as_ptr()));
+            vaddvq_f64(vld1q_f64(self.data.as_ptr()))
         }
         #[cfg(not(target_arch = "aarch64"))]
         {
@@ -1377,7 +1377,7 @@ pub extern "C" fn bhc_simd_saxpy(a: f32, x: *const f32, y: *mut f32, len: usize)
     }
 
     for i in (chunks * 8)..len {
-        y_slice[i] = a * x_slice[i] + y_slice[i];
+        y_slice[i] += a * x_slice[i];
     }
 }
 

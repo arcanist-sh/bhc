@@ -291,7 +291,7 @@ impl<'src> Parser<'src> {
                     && self.pos + 1 < self.tokens.len()
                     && self.tokens[self.pos + 1].node.kind == TokenKind::LBrace =>
             {
-                return self.parse_lazy_expr();
+                self.parse_lazy_expr()
             }
             TokenKind::Ident(sym) => {
                 let ident = Ident::new(*sym);
@@ -530,7 +530,7 @@ impl<'src> Parser<'src> {
 
             // (`op` x) desugars to (\y -> y `op` x)
             let y = Ident::from_str("$section_arg");
-            let y_pat = Pat::Var(y.clone(), Span::DUMMY);
+            let y_pat = Pat::Var(y, Span::DUMMY);
             let y_expr = Expr::Var(y, Span::DUMMY);
             let body = Expr::Infix(Box::new(y_expr), func, Box::new(rhs), span);
             return Ok(Expr::Lam(vec![y_pat], Box::new(body), span));
@@ -566,7 +566,7 @@ impl<'src> Parser<'src> {
                 // Left section: `(x +)` desugars to `(\y -> x + y)`
                 let span = start.to(self.tokens[self.pos - 1].span);
                 let y = Ident::from_str("$section_arg");
-                let y_pat = Pat::Var(y.clone(), Span::DUMMY);
+                let y_pat = Pat::Var(y, Span::DUMMY);
                 let y_expr = Expr::Var(y, Span::DUMMY);
                 let body = Expr::Infix(Box::new(first), op, Box::new(y_expr), span);
                 return Ok(Expr::Lam(vec![y_pat], Box::new(body), span));
@@ -644,7 +644,7 @@ impl<'src> Parser<'src> {
             if self.eat(&TokenKind::RParen) {
                 let span = start.to(self.tokens[self.pos - 1].span);
                 let y = Ident::from_str("$section_arg");
-                let y_pat = Pat::Var(y.clone(), Span::DUMMY);
+                let y_pat = Pat::Var(y, Span::DUMMY);
                 let y_expr = Expr::Var(y, Span::DUMMY);
                 let body = Expr::Infix(Box::new(first), func, Box::new(y_expr), span);
                 return Ok(Expr::Lam(vec![y_pat], Box::new(body), span));
@@ -794,7 +794,7 @@ impl<'src> Parser<'src> {
                 None => {
                     let name = Ident::from_str(&format!("$tsec_{}", hole_idx));
                     hole_idx += 1;
-                    params.push(Pat::Var(name.clone(), Span::DUMMY));
+                    params.push(Pat::Var(name, Span::DUMMY));
                     tuple_exprs.push(Expr::Var(name, Span::DUMMY));
                 }
             }
@@ -1069,7 +1069,7 @@ impl<'src> Parser<'src> {
 
             // Lambda-case desugars to \x -> case x of { ... }
             let x = Ident::from_str("$lambdacase_arg");
-            let x_pat = Pat::Var(x.clone(), Span::DUMMY);
+            let x_pat = Pat::Var(x, Span::DUMMY);
             let x_expr = Expr::Var(x, Span::DUMMY);
             let case_expr = Expr::Case(Box::new(x_expr), alts, span);
             return Ok(Expr::Lam(vec![x_pat], Box::new(case_expr), span));
@@ -1597,7 +1597,7 @@ impl<'src> Parser<'src> {
 
         // Desugar (+ x) to (\y -> y + x)
         let y = Ident::from_str("$section_arg");
-        let y_pat = Pat::Var(y.clone(), Span::DUMMY);
+        let y_pat = Pat::Var(y, Span::DUMMY);
         let y_expr = Expr::Var(y, Span::DUMMY);
         let body = Expr::Infix(Box::new(y_expr), op, Box::new(arg), span);
         Ok(Expr::Lam(vec![y_pat], Box::new(body), span))

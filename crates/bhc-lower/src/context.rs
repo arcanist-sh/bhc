@@ -61,6 +61,7 @@ pub enum DefKind {
 
 impl DefKind {
     /// Returns true if this definition kind is a stub (placeholder for external package).
+    #[must_use]
     pub fn is_stub(self) -> bool {
         matches!(
             self,
@@ -135,16 +136,19 @@ impl Scope {
     }
 
     /// Looks up a value in this scope only (not parents).
+    #[must_use]
     pub fn lookup_value_local(&self, name: Symbol) -> Option<DefId> {
         self.values.get(&name).copied()
     }
 
     /// Looks up a type in this scope only (not parents).
+    #[must_use]
     pub fn lookup_type_local(&self, name: Symbol) -> Option<DefId> {
         self.types.get(&name).copied()
     }
 
     /// Looks up a constructor in this scope only (not parents).
+    #[must_use]
     pub fn lookup_constructor_local(&self, name: Symbol) -> Option<DefId> {
         self.constructors.get(&name).copied()
     }
@@ -155,9 +159,9 @@ pub type DefMap = IndexMap<DefId, DefInfo>;
 
 /// The lowering context, holding all state needed during lowering.
 pub struct LowerContext {
-    /// Next DefId to allocate.
+    /// Next `DefId` to allocate.
     next_def_id: u32,
-    /// Next HirId to allocate.
+    /// Next `HirId` to allocate.
     next_hir_id: u32,
     /// Next scope ID to allocate.
     next_scope_id: u32,
@@ -192,6 +196,7 @@ impl Default for LowerContext {
 
 impl LowerContext {
     /// Creates a new lowering context.
+    #[must_use]
     pub fn new() -> Self {
         // Create root scope
         let root_scope = Scope::new(ScopeId::new(0), None);
@@ -213,6 +218,7 @@ impl LowerContext {
     }
 
     /// Creates a new lowering context with builtins pre-defined.
+    #[must_use]
     pub fn with_builtins() -> Self {
         let mut ctx = Self::new();
         ctx.define_builtins();
@@ -2270,30 +2276,33 @@ impl LowerContext {
     }
 
     /// Creates a `DefRef` for a definition.
+    #[must_use]
     pub fn def_ref(&self, def_id: DefId, span: Span) -> DefRef {
         DefRef { def_id, span }
     }
 
     /// Checks if a definition is a stub (external package placeholder).
+    #[must_use]
     pub fn is_stub(&self, def_id: DefId) -> bool {
         self.defs
             .get(&def_id)
-            .map(|info| info.kind.is_stub())
-            .unwrap_or(false)
+            .is_some_and(|info| info.kind.is_stub())
     }
 
-    /// Gets the DefKind for a definition.
+    /// Gets the `DefKind` for a definition.
+    #[must_use]
     pub fn def_kind(&self, def_id: DefId) -> Option<DefKind> {
         self.defs.get(&def_id).map(|info| info.kind)
     }
 
-    /// Gets the full DefInfo for a definition.
+    /// Gets the full `DefInfo` for a definition.
     #[must_use]
     pub fn lookup_def(&self, def_id: DefId) -> Option<&DefInfo> {
         self.defs.get(&def_id)
     }
 
     /// Gets the field names for a record constructor, if any.
+    #[must_use]
     pub fn get_constructor_field_names(&self, def_id: DefId) -> Option<Vec<Symbol>> {
         self.defs
             .get(&def_id)
@@ -2323,16 +2332,19 @@ impl LowerContext {
     }
 
     /// Gets the current scope.
+    #[must_use]
     pub fn current_scope(&self) -> &Scope {
         &self.scopes[self.current_scope.index()]
     }
 
     /// Gets the current scope ID (for debugging).
+    #[must_use]
     pub fn current_scope_id(&self) -> ScopeId {
         self.current_scope
     }
 
     /// Gets all scopes (for debugging).
+    #[must_use]
     pub fn all_scopes(&self) -> &[Scope] {
         &self.scopes
     }
@@ -2385,6 +2397,7 @@ impl LowerContext {
     }
 
     /// Looks up a value, searching parent scopes.
+    #[must_use]
     pub fn lookup_value(&self, name: Symbol) -> Option<DefId> {
         let mut scope_id = Some(self.current_scope);
         while let Some(id) = scope_id {
@@ -2398,6 +2411,7 @@ impl LowerContext {
     }
 
     /// Looks up a type, searching parent scopes.
+    #[must_use]
     pub fn lookup_type(&self, name: Symbol) -> Option<DefId> {
         let mut scope_id = Some(self.current_scope);
         while let Some(id) = scope_id {
@@ -2411,6 +2425,7 @@ impl LowerContext {
     }
 
     /// Looks up a constructor, searching parent scopes.
+    #[must_use]
     pub fn lookup_constructor(&self, name: Symbol) -> Option<DefId> {
         let mut scope_id = Some(self.current_scope);
         while let Some(id) = scope_id {
@@ -2429,6 +2444,7 @@ impl LowerContext {
     }
 
     /// Returns true if any errors were recorded.
+    #[must_use]
     pub fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
@@ -2456,7 +2472,8 @@ impl LowerContext {
 
     /// Resolves a qualified variable reference like `M.lookup`.
     ///
-    /// Returns the DefId if found, or None if not resolvable.
+    /// Returns the `DefId` if found, or None if not resolvable.
+    #[must_use]
     pub fn resolve_qualified_var(&self, qualifier: Symbol, name: Symbol) -> Option<DefId> {
         // First, try direct lookup of "Qualifier.name" as registered during import processing.
         // This handles cases where multiple modules share the same qualifier alias
@@ -2505,7 +2522,8 @@ impl LowerContext {
 
     /// Resolves a qualified constructor reference like `M.Just`.
     ///
-    /// Returns the DefId if found, or None if not resolvable.
+    /// Returns the `DefId` if found, or None if not resolvable.
+    #[must_use]
     pub fn resolve_qualified_constructor(&self, qualifier: Symbol, name: Symbol) -> Option<DefId> {
         // First, try direct lookup of "Qualifier.Name" as registered during import processing.
         let aliased_name = Symbol::intern(&format!("{}.{}", qualifier.as_str(), name.as_str()));
@@ -2555,6 +2573,7 @@ impl LowerContext {
     /// Looks up a type signature for a function.
     ///
     /// Returns the AST type if a signature was declared, or None otherwise.
+    #[must_use]
     pub fn lookup_type_signature(&self, name: Symbol) -> Option<&ast::Type> {
         self.type_signatures.get(&name)
     }
@@ -2567,6 +2586,7 @@ impl LowerContext {
     }
 
     /// Looks up the number of type parameters for a class.
+    #[must_use]
     pub fn lookup_class_param_count(&self, class_name: Symbol) -> Option<usize> {
         self.class_param_counts.get(&class_name).copied()
     }
@@ -2577,6 +2597,7 @@ impl LowerContext {
     }
 
     /// Look up a pattern synonym definition.
+    #[must_use]
     pub fn lookup_pattern_synonym(&self, name: Symbol) -> Option<&(Vec<Symbol>, ast::Pat)> {
         self.pattern_synonyms.get(&name)
     }

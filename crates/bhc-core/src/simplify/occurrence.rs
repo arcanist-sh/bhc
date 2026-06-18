@@ -22,6 +22,7 @@ pub enum OccCount {
 }
 
 /// Analyze variable occurrences across a list of top-level bindings.
+#[must_use]
 pub fn analyze_module_occurrences(bindings: &[Bind]) -> FxHashMap<VarId, OccCount> {
     let mut counts: FxHashMap<VarId, u32> = FxHashMap::default();
     let mut in_lam: FxHashMap<VarId, bool> = FxHashMap::default();
@@ -59,6 +60,7 @@ pub fn analyze_module_occurrences(bindings: &[Bind]) -> FxHashMap<VarId, OccCoun
 }
 
 /// Analyze variable occurrences within a single expression.
+#[must_use]
 pub fn analyze_occurrences(expr: &Expr) -> FxHashMap<VarId, OccCount> {
     let mut counts: FxHashMap<VarId, u32> = FxHashMap::default();
     let mut in_lam: FxHashMap<VarId, bool> = FxHashMap::default();

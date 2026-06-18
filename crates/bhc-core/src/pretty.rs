@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use crate::{Alt, AltCon, Bind, Coercion, CoreModule, DataCon, Expr, Literal, Var};
+use crate::{Alt, AltCon, Bind, CoreModule, DataCon, Expr, Literal, Var};
 
 impl fmt::Display for CoreModule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -11,7 +11,6 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
 use syntect::highlighting::ThemeSet;
-use syntect::html::highlighted_html_for_string;
 use syntect::parsing::SyntaxSet;
 use tera::{Context, Tera};
 

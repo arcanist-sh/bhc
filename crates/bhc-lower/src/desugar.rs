@@ -297,7 +297,14 @@ fn desugar_let_decls(
                     .lookup_value(fun_bind.name.name)
                     .expect("do-let binding should be bound");
                 let pat = hir::Pat::Var(fun_bind.name.name, def_id, fun_bind.span);
-                let rhs = if !clause.wheres.is_empty() {
+                let rhs = if clause.wheres.is_empty() {
+                    match &clause.rhs {
+                        ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
+                        ast::Rhs::Guarded(guards, _) => {
+                            desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
+                        }
+                    }
+                } else {
                     desugar_body_with_wheres(
                         ctx,
                         &clause.rhs,
@@ -306,13 +313,6 @@ fn desugar_let_decls(
                         lower_expr,
                         lower_pat,
                     )
-                } else {
-                    match &clause.rhs {
-                        ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
-                        ast::Rhs::Guarded(guards, _) => {
-                            desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
-                        }
-                    }
                 };
 
                 bindings.push(hir::Binding {
@@ -339,7 +339,14 @@ fn desugar_let_decls(
                     bind_pattern(ctx, p);
                 }
 
-                let rhs_body = if !clause.wheres.is_empty() {
+                let rhs_body = if clause.wheres.is_empty() {
+                    match &clause.rhs {
+                        ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
+                        ast::Rhs::Guarded(guards, _) => {
+                            desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
+                        }
+                    }
+                } else {
                     desugar_body_with_wheres(
                         ctx,
                         &clause.rhs,
@@ -348,13 +355,6 @@ fn desugar_let_decls(
                         lower_expr,
                         lower_pat,
                     )
-                } else {
-                    match &clause.rhs {
-                        ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
-                        ast::Rhs::Guarded(guards, _) => {
-                            desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
-                        }
-                    }
                 };
 
                 // Wrap in lambdas for each parameter
@@ -585,7 +585,7 @@ fn desugar_guards_with_body(
 }
 
 /// Desugar a sequence of guards into nested if/case expressions.
-/// (Legacy version - kept for compatibility, use desugar_guards_with_body for new code)
+/// (Legacy version - kept for compatibility, use `desugar_guards_with_body` for new code)
 #[allow(dead_code)]
 fn desugar_guards(
     ctx: &mut LowerContext,
@@ -758,7 +758,7 @@ mod tests {
                         }
                     }
                     ast::Expr::Lit(ast::Lit::Int(n), span) => {
-                        hir::Expr::Lit(hir::Lit::Int(*n as i128), *span)
+                        hir::Expr::Lit(hir::Lit::Int(i128::from(*n)), *span)
                     }
                     ast::Expr::App(f, arg, span) => {
                         // Simplified: just lower f and arg directly
@@ -795,8 +795,7 @@ mod tests {
         // Result should be a Let expression wrapping the body
         assert!(
             matches!(result, hir::Expr::Let(_, _, _)),
-            "expected Let expression, got {:?}",
-            result
+            "expected Let expression, got {result:?}"
         );
     }
 }

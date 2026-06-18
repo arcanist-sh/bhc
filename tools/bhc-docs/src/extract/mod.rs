@@ -56,7 +56,7 @@ pub fn extract_module(module: &Module, path: &Path, source: &str) -> Result<Modu
                 .into_owned()
         });
 
-    let doc = module.doc.as_ref().map(|d| extract_doc_content(d));
+    let doc = module.doc.as_ref().map(extract_doc_content);
 
     let mut items = Vec::new();
     let mut type_sigs: std::collections::HashMap<String, TypeSig> =
@@ -292,7 +292,7 @@ fn extract_class(class: &ClassDecl, path: &Path, source: &str) -> ClassDoc {
             .iter()
             .map(|p| p.name.name.as_str().to_string())
             .collect(),
-        superclasses: class.context.iter().map(|c| format_constraint(c)).collect(),
+        superclasses: class.context.iter().map(format_constraint).collect(),
         fundeps: class
             .fundeps
             .iter()
@@ -313,7 +313,7 @@ fn extract_instance(inst: &InstanceDecl, path: &Path, source: &str) -> InstanceD
     InstanceDoc {
         class: inst.class.name.as_str().to_string(),
         ty: format_type(&inst.ty),
-        context: inst.context.iter().map(|c| format_constraint(c)).collect(),
+        context: inst.context.iter().map(format_constraint).collect(),
         doc: inst.doc.as_ref().map(extract_doc_content),
         source: Some(make_source_location(path, source, inst.span)),
     }

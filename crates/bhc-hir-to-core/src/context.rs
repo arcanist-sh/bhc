@@ -51,7 +51,7 @@ pub struct ConstructorInfo {
 pub struct FieldSelectorInfo {
     /// The field name.
     pub field_name: Symbol,
-    /// The constructor's DefId.
+    /// The constructor's `DefId`.
     pub con_id: DefId,
     /// The constructor's name.
     pub con_name: Symbol,
@@ -71,17 +71,17 @@ pub struct LowerContext {
     /// Counter for generating fresh variable names.
     fresh_counter: u32,
 
-    /// Mapping from HIR DefIds to Core variables.
+    /// Mapping from HIR `DefIds` to Core variables.
     var_map: FxHashMap<DefId, Var>,
 
-    /// Type schemes from the type checker (DefId -> Scheme).
+    /// Type schemes from the type checker (`DefId` -> Scheme).
     type_schemes: TypeSchemeMap,
 
-    /// Constructor metadata (DefId -> ConstructorInfo).
-    /// This maps constructor DefIds to their metadata including tag and type.
+    /// Constructor metadata (`DefId` -> `ConstructorInfo`).
+    /// This maps constructor `DefIds` to their metadata including tag and type.
     constructor_map: FxHashMap<DefId, ConstructorInfo>,
 
-    /// Field selector metadata (field name -> FieldSelectorInfo).
+    /// Field selector metadata (field name -> `FieldSelectorInfo`).
     /// This maps field names to their selector information for generating field access code.
     field_selector_map: FxHashMap<Symbol, FieldSelectorInfo>,
 
@@ -104,7 +104,7 @@ pub struct LowerContext {
     /// Accumulated warnings (non-fatal diagnostics).
     warnings: Vec<String>,
 
-    /// Whether GeneralizedNewtypeDeriving is enabled for the current module.
+    /// Whether `GeneralizedNewtypeDeriving` is enabled for the current module.
     pub generalized_newtype_deriving: bool,
 
     /// Collected foreign import declarations for the Core module.
@@ -154,11 +154,11 @@ impl LowerContext {
     /// Look up the type for a definition from the type checker.
     ///
     /// Returns the monomorphic type from the scheme, or `Ty::Error` if not found.
+    #[must_use]
     pub fn lookup_type(&self, def_id: DefId) -> Ty {
         self.type_schemes
             .get(&def_id)
-            .map(|scheme| scheme.ty.clone())
-            .unwrap_or(Ty::Error)
+            .map_or(Ty::Error, |scheme| scheme.ty.clone())
     }
 
     /// Look up the full type scheme for a definition, including constraints.
@@ -390,7 +390,7 @@ impl LowerContext {
 
     /// Register builtin operators and constructors.
     ///
-    /// DefIds must match the allocation order in bhc-lower and bhc-typeck.
+    /// `DefIds` must match the allocation order in bhc-lower and bhc-typeck.
     fn register_builtins(&mut self) {
         // DefIds 0-8: Types (not values, skip)
         // DefIds 9-14: Data constructors (True, False, Nothing, Just, Left, Right)
@@ -1029,7 +1029,7 @@ impl LowerContext {
         self.register_builtin_instance("MonadIO", &state_t_ty, &[(10048, "liftIO")]);
     }
 
-    /// Helper to register a builtin instance with method DefIds.
+    /// Helper to register a builtin instance with method `DefIds`.
     fn register_builtin_instance(
         &mut self,
         class_name: &str,
@@ -1064,16 +1064,16 @@ impl LowerContext {
         self.class_registry.register_instance(instance_info);
     }
 
-    /// Register builtins using DefIds from the lowering pass.
+    /// Register builtins using `DefIds` from the lowering pass.
     ///
-    /// This replaces the hardcoded DefIds with the actual DefIds assigned
+    /// This replaces the hardcoded `DefIds` with the actual `DefIds` assigned
     /// during AST-to-HIR lowering, ensuring consistency across passes.
     pub fn register_lowered_builtins(&mut self, defs: &crate::DefMap) {
         // Clear the existing hardcoded builtins
         self.var_map.clear();
 
         // Register all definitions from the lowering pass
-        for (_def_id, def_info) in defs.iter() {
+        for (_def_id, def_info) in defs {
             let var = Var {
                 name: def_info.name,
                 id: VarId::new(def_info.id.index()),
@@ -1146,6 +1146,7 @@ impl LowerContext {
     /// Get all constructors for a given type name.
     ///
     /// Returns a vector of `(tag, name, arity)` tuples sorted by tag.
+    #[must_use]
     pub fn constructors_for_type_name(&self, type_name: Symbol) -> Vec<(u32, Symbol, u32)> {
         let mut cons: Vec<(u32, Symbol, u32)> = self
             .constructor_map
@@ -1174,13 +1175,14 @@ impl LowerContext {
         self.constructor_map.insert(def_id, info);
     }
 
-    /// Look up constructor metadata for a given DefId.
+    /// Look up constructor metadata for a given `DefId`.
     #[must_use]
     pub fn lookup_constructor(&self, def_id: DefId) -> Option<&ConstructorInfo> {
         self.constructor_map.get(&def_id)
     }
 
-    /// Look up constructor info by name (for decision tree lowering where DefId isn't available).
+    /// Look up constructor info by name (for decision tree lowering where `DefId` isn't available).
+    #[must_use]
     pub fn lookup_constructor_by_name(&self, name: Symbol) -> Option<&ConstructorInfo> {
         self.constructor_map.values().find(|info| info.name == name)
     }
@@ -1252,6 +1254,7 @@ impl LowerContext {
     /// Get all dictionary variables that match the given constraints.
     ///
     /// Returns dictionary variables in the same order as the constraints.
+    #[must_use]
     pub fn lookup_dicts_for_constraints(&self, constraints: &[Constraint]) -> Vec<Option<Var>> {
         constraints
             .iter()
@@ -1418,11 +1421,11 @@ impl LowerContext {
     }
 
     /// Get the parameter count for a class (1 for single-param, 2+ for multi-param).
+    #[must_use]
     pub fn class_param_count(&self, class_name: Symbol) -> usize {
         self.class_registry
             .lookup_class(class_name)
-            .map(|c| c.param_count)
-            .unwrap_or(1)
+            .map_or(1, |c| c.param_count)
     }
 
     /// Select a method via superclass dictionary extraction.
@@ -1478,6 +1481,7 @@ impl LowerContext {
     ///
     /// Given a dictionary variable and a method name, returns an expression
     /// that extracts that method from the dictionary.
+    #[must_use]
     pub fn select_method_from_dict(
         &self,
         dict_var: &Var,
@@ -1503,7 +1507,7 @@ impl LowerContext {
 
     /// Check if a class belongs to the monad family (Functor, Applicative, Monad).
     ///
-    /// These classes use codegen fast paths for builtin monads (IO, StateT, etc.)
+    /// These classes use codegen fast paths for builtin monads (IO, `StateT`, etc.)
     /// but need dictionary dispatch for user-defined monads. This is distinct from
     /// `is_user_class` because these classes ARE builtin but their instances can be
     /// user-defined.
@@ -1515,7 +1519,7 @@ impl LowerContext {
 
     /// Check if a type is a builtin monad that uses codegen fast paths.
     ///
-    /// Returns true for IO, StateT, ReaderT, ExceptT, WriterT, and Identity
+    /// Returns true for IO, `StateT`, `ReaderT`, `ExceptT`, `WriterT`, and Identity
     /// (all of which have hardcoded codegen). Returns false for user-defined
     /// monads that need dictionary dispatch.
     #[must_use]
@@ -1530,12 +1534,7 @@ impl LowerContext {
         };
         matches!(
             type_name,
-            Some("IO")
-                | Some("StateT")
-                | Some("ReaderT")
-                | Some("ExceptT")
-                | Some("WriterT")
-                | Some("Identity")
+            Some("IO" | "StateT" | "ReaderT" | "ExceptT" | "WriterT" | "Identity")
         )
     }
 
@@ -1602,7 +1601,7 @@ impl LowerContext {
             && self.class_registry.lookup_class(class_name).is_some()
     }
 
-    /// Try to derive an instance for a user-defined typeclass (DeriveAnyClass).
+    /// Try to derive an instance for a user-defined typeclass (`DeriveAnyClass`).
     ///
     /// Creates an empty instance (no method bindings) that relies entirely on
     /// default method implementations from the class definition. This mirrors
@@ -2213,7 +2212,7 @@ impl LowerContext {
         // Print any warnings (non-fatal diagnostics)
         let warnings = self.take_warnings();
         for warning in &warnings {
-            eprintln!("{}", warning);
+            eprintln!("{warning}");
         }
 
         // Collect constructor metadata for codegen
@@ -2469,7 +2468,7 @@ impl LowerContext {
         let args: Vec<Var> = (0..arity)
             .map(|i| {
                 let ty = param_types.get(i).cloned().unwrap_or(Ty::Error);
-                self.fresh_var(&format!("arg{}", i), ty, value_def.span)
+                self.fresh_var(&format!("arg{i}"), ty, value_def.span)
             })
             .collect();
 

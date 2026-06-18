@@ -40,13 +40,13 @@ impl<T: PartialEq> PartialEq for UArray<T> {
 }
 
 impl<T: Clone> UArray<T> {
-    /// Creates a new UArray from a vector.
+    /// Creates a new `UArray` from a vector.
     #[must_use]
     pub fn from_vec(data: Vec<T>) -> Self {
         Self { data: data.into() }
     }
 
-    /// Creates a new UArray from a slice.
+    /// Creates a new `UArray` from a slice.
     #[must_use]
     pub fn from_slice(data: &[T]) -> Self {
         Self {
@@ -166,6 +166,7 @@ impl<T: Clone + Add<Output = T> + Default> UArray<T> {
     /// let arr = UArray::from_vec(vec![1, 2, 3, 4, 5]);
     /// assert_eq!(arr.sum(), 15);
     /// ```
+    #[must_use]
     pub fn sum(&self) -> T {
         self.fold(T::default(), |acc, x| acc + x.clone())
     }
@@ -173,6 +174,7 @@ impl<T: Clone + Add<Output = T> + Default> UArray<T> {
 
 impl<T: Clone + Mul<Output = T> + From<i32>> UArray<T> {
     /// Computes the product of all elements.
+    #[must_use]
     pub fn product(&self) -> T {
         self.fold(T::from(1), |acc, x| acc * x.clone())
     }
@@ -180,6 +182,7 @@ impl<T: Clone + Mul<Output = T> + From<i32>> UArray<T> {
 
 impl<T: Clone + PartialOrd> UArray<T> {
     /// Returns the maximum element, if any.
+    #[must_use]
     pub fn maximum(&self) -> Option<T> {
         self.data
             .iter()
@@ -188,6 +191,7 @@ impl<T: Clone + PartialOrd> UArray<T> {
     }
 
     /// Returns the minimum element, if any.
+    #[must_use]
     pub fn minimum(&self) -> Option<T> {
         self.data
             .iter()
@@ -199,6 +203,7 @@ impl<T: Clone + PartialOrd> UArray<T> {
 /// Specialized operations for numeric arrays.
 impl UArray<i64> {
     /// Computes the dot product of two integer arrays.
+    #[must_use]
     pub fn dot(&self, other: &UArray<i64>) -> i64 {
         self.zip_with(other, |a, b| a * b).sum()
     }
@@ -206,11 +211,13 @@ impl UArray<i64> {
 
 impl UArray<f64> {
     /// Computes the dot product of two float arrays.
+    #[must_use]
     pub fn dot(&self, other: &UArray<f64>) -> f64 {
         self.zip_with(other, |a, b| a * b).sum()
     }
 
     /// Computes the mean of all elements.
+    #[must_use]
     pub fn mean(&self) -> f64 {
         if self.is_empty() {
             0.0
@@ -220,7 +227,7 @@ impl UArray<f64> {
     }
 }
 
-/// Creates a UArray from a range.
+/// Creates a `UArray` from a range.
 impl UArray<i64> {
     /// Creates an array containing [start, start+1, ..., end-1].
     #[must_use]

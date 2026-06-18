@@ -68,7 +68,7 @@ pub enum LoadError {
 /// Information about an exported constructor.
 #[derive(Clone, Debug)]
 pub struct ConstructorInfo {
-    /// The DefId of the constructor.
+    /// The `DefId` of the constructor.
     pub def_id: DefId,
     /// The number of fields/arguments the constructor takes.
     pub arity: usize,
@@ -87,7 +87,7 @@ pub struct ConstructorInfo {
 
 /// Exports collected from a loaded module.
 ///
-/// Contains mappings from names to their DefIds for values, types, and constructors
+/// Contains mappings from names to their `DefIds` for values, types, and constructors
 /// exported by a module.
 #[derive(Clone, Debug)]
 pub struct ModuleExports {
@@ -206,7 +206,7 @@ pub fn find_module_file(name: &str, search_paths: &[Utf8PathBuf]) -> Option<Utf8
 /// Collect exports from an AST module.
 ///
 /// Examines the module's declarations and export list to determine which names
-/// are exported and creates DefIds for them.
+/// are exported and creates `DefIds` for them.
 ///
 /// # Export Rules
 ///
@@ -268,18 +268,18 @@ pub fn collect_exports(
         for exp in export_list {
             match exp {
                 ast::Export::Var(ident, span) => {
-                    if !exports.values.contains_key(&ident.name) {
+                    exports.values.entry(ident.name).or_insert_with(|| {
                         let def_id = ctx.fresh_def_id();
                         ctx.define(def_id, ident.name, DefKind::Value, *span);
-                        exports.values.insert(ident.name, def_id);
-                    }
+                        def_id
+                    });
                 }
                 ast::Export::Type(ident, cons, span) => {
-                    if !exports.types.contains_key(&ident.name) {
+                    exports.types.entry(ident.name).or_insert_with(|| {
                         let def_id = ctx.fresh_def_id();
                         ctx.define(def_id, ident.name, DefKind::Type, *span);
-                        exports.types.insert(ident.name, def_id);
-                    }
+                        def_id
+                    });
                     // Also export constructors listed with the type
                     if let Some(con_list) = cons {
                         if con_list.is_empty() {
@@ -311,15 +311,14 @@ pub fn collect_exports(
                                 }
                                 // Check if this cached module has constructors for this type
                                 for (con_name, con_info) in &cached_exports.constructors {
-                                    if con_info.type_con_name == type_name {
-                                        if !exports.values.contains_key(con_name)
+                                    if con_info.type_con_name == type_name
+                                        && !exports.values.contains_key(con_name)
                                             && !exports.constructors.contains_key(con_name)
                                         {
                                             let c_def_id = ctx.fresh_def_id();
                                             ctx.define(c_def_id, *con_name, DefKind::Value, *span);
                                             exports.values.insert(*con_name, c_def_id);
                                         }
-                                    }
                                 }
                             }
                         } else {
@@ -340,11 +339,11 @@ pub fn collect_exports(
                     // recursive module loading to handle fully. Skip for now.
                 }
                 ast::Export::Pattern(ident, span) => {
-                    if !exports.values.contains_key(&ident.name) {
+                    exports.values.entry(ident.name).or_insert_with(|| {
                         let def_id = ctx.fresh_def_id();
                         ctx.define(def_id, ident.name, DefKind::Value, *span);
-                        exports.values.insert(ident.name, def_id);
-                    }
+                        def_id
+                    });
                 }
             }
         }
@@ -587,7 +586,7 @@ fn collect_decl_exports(
 /// Check if constructors should be exported for a type.
 ///
 /// Returns true if the export list contains `Type(..)` for the given type name.
-/// Since we don't track the `..` syntax in the simple explicit_exports set,
+/// Since we don't track the `..` syntax in the simple `explicit_exports` set,
 /// we conservatively return true if the type is exported.
 fn should_export_constructors(_type_name: Symbol, _explicit_exports: &FxHashSet<Symbol>) -> bool {
     // TODO: Properly parse export specs to distinguish Type vs Type(..)
@@ -609,7 +608,7 @@ fn should_export_constructors(_type_name: Symbol, _explicit_exports: &FxHashSet<
 /// * `name` - The module name (e.g., "XMonad.StackSet")
 /// * `search_paths` - Directories to search for the module file
 /// * `cache` - Module cache for memoization and cycle detection
-/// * `ctx` - Lowering context for creating DefIds
+/// * `ctx` - Lowering context for creating `DefIds`
 ///
 /// # Returns
 ///
@@ -656,16 +655,13 @@ pub fn load_module(
 
     // Only fail if module couldn't be parsed at all (match driver behavior —
     // diagnostics may include non-fatal warnings that don't prevent parsing)
-    let module = match module {
-        Some(m) => m,
-        None => {
-            cache.end_loading(sym);
-            let messages: Vec<_> = diagnostics.iter().map(|d| d.message.clone()).collect();
-            return Err(LoadError::ParseError {
-                path,
-                message: messages.join("; "),
-            });
-        }
+    let module = if let Some(m) = module { m } else {
+        cache.end_loading(sym);
+        let messages: Vec<_> = diagnostics.iter().map(|d| d.message.clone()).collect();
+        return Err(LoadError::ParseError {
+            path,
+            message: messages.join("; "),
+        });
     };
 
     // Collect exports
@@ -681,6 +677,7 @@ pub fn load_module(
 /// Apply an import specification to filter module exports.
 ///
 /// Handles both `import M (a, b, c)` (Only) and `import M hiding (a, b)` (Hiding).
+#[must_use]
 pub fn apply_import_spec(exports: &ModuleExports, spec: &Option<ast::ImportSpec>) -> ModuleExports {
     match spec {
         None => exports.clone(), // Import everything
@@ -824,11 +821,10 @@ pub fn register_imported_names(
         ctx.bind_value(qualified, def_id);
 
         // For non-qualified imports, also bind the unqualified name
-        if !import.qualified {
-            if ctx.lookup_value(name).is_none() {
+        if !import.qualified
+            && ctx.lookup_value(name).is_none() {
                 ctx.bind_value(name, def_id);
             }
-        }
     }
 
     // Register types
@@ -837,11 +833,10 @@ pub fn register_imported_names(
         ctx.register_qualified_name(qualified, name);
         ctx.bind_type(qualified, def_id);
 
-        if !import.qualified {
-            if ctx.lookup_type(name).is_none() {
+        if !import.qualified
+            && ctx.lookup_type(name).is_none() {
                 ctx.bind_type(name, def_id);
             }
-        }
     }
 
     // Register constructors
@@ -850,66 +845,10 @@ pub fn register_imported_names(
         ctx.register_qualified_name(qualified, name);
         ctx.bind_constructor(qualified, info.def_id);
 
-        if !import.qualified {
-            if ctx.lookup_constructor(name).is_none() {
+        if !import.qualified
+            && ctx.lookup_constructor(name).is_none() {
                 ctx.bind_constructor(name, info.def_id);
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use bhc_index::Idx;
-
-    #[test]
-    fn test_module_name_to_path() {
-        assert_eq!(
-            module_name_to_path("XMonad.StackSet"),
-            Utf8PathBuf::from("XMonad/StackSet.hs")
-        );
-        assert_eq!(
-            module_name_to_path("Data.Map.Strict"),
-            Utf8PathBuf::from("Data/Map/Strict.hs")
-        );
-        assert_eq!(module_name_to_path("Main"), Utf8PathBuf::from("Main.hs"));
-    }
-
-    #[test]
-    fn test_module_cache() {
-        let mut cache = ModuleCache::new();
-        let name = Symbol::intern("Test.Module");
-
-        // Initially empty
-        assert!(cache.get(name).is_none());
-        assert!(!cache.is_loading(name));
-
-        // Begin loading
-        assert!(cache.begin_loading(name));
-        assert!(cache.is_loading(name));
-
-        // Can't begin loading again (cycle detection)
-        assert!(!cache.begin_loading(name));
-
-        // End loading
-        cache.end_loading(name);
-        assert!(!cache.is_loading(name));
-
-        // Insert exports
-        let exports = ModuleExports::new(name);
-        cache.insert(name, exports);
-        assert!(cache.get(name).is_some());
-    }
-
-    #[test]
-    fn test_module_exports_is_empty() {
-        let name = Symbol::intern("Test");
-        let mut exports = ModuleExports::new(name);
-        assert!(exports.is_empty());
-
-        exports.values.insert(Symbol::intern("foo"), DefId::new(0));
-        assert!(!exports.is_empty());
     }
 }
 
@@ -1183,4 +1122,59 @@ fn find_matching_paren(s: &str) -> Option<usize> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bhc_index::Idx;
+
+    #[test]
+    fn test_module_name_to_path() {
+        assert_eq!(
+            module_name_to_path("XMonad.StackSet"),
+            Utf8PathBuf::from("XMonad/StackSet.hs")
+        );
+        assert_eq!(
+            module_name_to_path("Data.Map.Strict"),
+            Utf8PathBuf::from("Data/Map/Strict.hs")
+        );
+        assert_eq!(module_name_to_path("Main"), Utf8PathBuf::from("Main.hs"));
+    }
+
+    #[test]
+    fn test_module_cache() {
+        let mut cache = ModuleCache::new();
+        let name = Symbol::intern("Test.Module");
+
+        // Initially empty
+        assert!(cache.get(name).is_none());
+        assert!(!cache.is_loading(name));
+
+        // Begin loading
+        assert!(cache.begin_loading(name));
+        assert!(cache.is_loading(name));
+
+        // Can't begin loading again (cycle detection)
+        assert!(!cache.begin_loading(name));
+
+        // End loading
+        cache.end_loading(name);
+        assert!(!cache.is_loading(name));
+
+        // Insert exports
+        let exports = ModuleExports::new(name);
+        cache.insert(name, exports);
+        assert!(cache.get(name).is_some());
+    }
+
+    #[test]
+    fn test_module_exports_is_empty() {
+        let name = Symbol::intern("Test");
+        let mut exports = ModuleExports::new(name);
+        assert!(exports.is_empty());
+
+        exports.values.insert(Symbol::intern("foo"), DefId::new(0));
+        assert!(!exports.is_empty());
+    }
 }

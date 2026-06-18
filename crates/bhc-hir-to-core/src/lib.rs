@@ -70,7 +70,7 @@ pub enum LowerError {
     },
 
     /// Multiple errors occurred.
-    #[error("multiple errors:\n{}", .0.iter().map(|e| format!("  - {}", e)).collect::<Vec<_>>().join("\n"))]
+    #[error("multiple errors:\n{}", .0.iter().map(|e| format!("  - {e}")).collect::<Vec<_>>().join("\n"))]
     Multiple(Vec<LowerError>),
 }
 
@@ -99,8 +99,8 @@ pub fn lower_module(module: &HirModule) -> LowerResult<CoreModule> {
 
 /// Lower a HIR module to Core IR with definition mappings from the lowering pass.
 ///
-/// This function accepts the DefMap from the lowering context, which allows
-/// the Core lowering to register builtins with the correct DefIds assigned
+/// This function accepts the `DefMap` from the lowering context, which allows
+/// the Core lowering to register builtins with the correct `DefIds` assigned
 /// during the AST-to-HIR lowering pass.
 ///
 /// # Arguments

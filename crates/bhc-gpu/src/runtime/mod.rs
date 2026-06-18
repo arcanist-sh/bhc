@@ -32,6 +32,9 @@ pub mod cuda;
 pub mod rocm;
 
 use crate::device::{DeviceId, DeviceInfo};
+// Only referenced by the cuda/rocm match arms below.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+use crate::device::DeviceKind;
 use crate::memory::DevicePtr;
 use crate::GpuResult;
 
@@ -131,10 +134,9 @@ mod tests {
     fn test_runtime_selection() {
         let mock = DeviceInfo::mock();
 
-        // Mock device doesn't have a real runtime
+        // A mock device never has a real runtime, regardless of which GPU
+        // backends are compiled in.
         let runtime = runtime_for_device(&mock);
-
-        #[cfg(not(any(feature = "cuda", feature = "rocm")))]
         assert!(runtime.is_none());
     }
 }

@@ -20,6 +20,10 @@
 //! to compile on systems without CUDA, and gracefully handle missing CUDA
 //! at runtime.
 
+// The function-pointer fields and FFI signatures intentionally mirror the CUDA
+// Driver API's C names (cuStreamCreate, gridDimX, ...) for 1:1 correspondence.
+#![allow(non_snake_case)]
+
 use super::GpuRuntime;
 use crate::device::{DeviceId, DeviceInfo, DeviceKind};
 use crate::kernel::CompiledModule;
@@ -65,13 +69,11 @@ const CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X: c_int = 5;
 const CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y: c_int = 6;
 const CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z: c_int = 7;
 const CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK: c_int = 8;
-const CU_DEVICE_ATTRIBUTE_TOTAL_CONSTANT_MEMORY: c_int = 9;
 const CU_DEVICE_ATTRIBUTE_WARP_SIZE: c_int = 10;
 const CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT: c_int = 16;
 const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR: c_int = 75;
 const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR: c_int = 76;
 const CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_BLOCK: c_int = 12;
-const CU_DEVICE_ATTRIBUTE_CLOCK_RATE: c_int = 13;
 const CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE: c_int = 36;
 const CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH: c_int = 37;
 const CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE: c_int = 38;
@@ -142,7 +144,10 @@ struct CudaApi {
     cuDeviceTotalMem: FnCuDeviceTotalMem,
     cuCtxCreate: FnCuCtxCreate,
     cuCtxDestroy: FnCuCtxDestroy,
+    // Loaded for completeness / future multi-context support; not called yet.
+    #[allow(dead_code)]
     cuCtxSetCurrent: FnCuCtxSetCurrent,
+    #[allow(dead_code)]
     cuCtxGetCurrent: FnCuCtxGetCurrent,
     cuCtxSynchronize: FnCuCtxSynchronize,
     cuMemAlloc: FnCuMemAlloc,
@@ -297,11 +302,17 @@ fn cuda_error(result: CUresult, context: &str) -> GpuError {
             (api.cuGetErrorString)(result, &mut error_str);
             if !error_str.is_null() {
                 let msg = CStr::from_ptr(error_str).to_string_lossy();
-                return GpuError::CudaError(result, format!("{}: {}", context, msg));
+                return GpuError::CudaError {
+                    code: result,
+                    message: format!("{}: {}", context, msg),
+                };
             }
         }
     }
-    GpuError::CudaError(result, format!("{}: error code {}", context, result))
+    GpuError::CudaError {
+        code: result,
+        message: format!("{}: error code {}", context, result),
+    }
 }
 
 /// Check CUDA result and convert to GpuResult.
@@ -323,6 +334,14 @@ pub struct CudaRuntime {
     context: parking_lot::Mutex<Option<CUcontext>>,
     current_device: std::sync::atomic::AtomicI32,
 }
+
+// SAFETY: `CUcontext` is a raw `*mut c_void` handle to a CUDA driver context.
+// It is only accessed under the `context` mutex, and the CUDA driver API is
+// thread-safe for context management, so transferring/sharing `CudaRuntime`
+// across threads is sound. `GpuRuntime` requires `Send + Sync`, which the raw
+// pointer field would otherwise prevent.
+unsafe impl Send for CudaRuntime {}
+unsafe impl Sync for CudaRuntime {}
 
 impl CudaRuntime {
     /// Create a new CUDA runtime.
@@ -454,26 +473,50 @@ impl GpuRuntime for CudaRuntime {
                 )?;
             }
 
-            // Get multiprocessor count
-            let mut sm_count: c_int = 0;
-            unsafe {
-                check_cuda(
-                    (api.cuDeviceGetAttribute)(
-                        &mut sm_count,
-                        CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
-                        device,
-                    ),
-                    "cuDeviceGetAttribute(MULTIPROCESSOR_COUNT)",
-                )?;
-            }
+            // Query integer device attributes via the CUDA driver API.
+            let get_attr = |attr: c_int| -> GpuResult<c_int> {
+                let mut value: c_int = 0;
+                unsafe {
+                    check_cuda(
+                        (api.cuDeviceGetAttribute)(&mut value, attr, device),
+                        "cuDeviceGetAttribute",
+                    )?;
+                }
+                Ok(value)
+            };
+
+            let sm_count = get_attr(CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?;
+            let max_threads = get_attr(CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)?;
+            let block_x = get_attr(CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X)?;
+            let block_y = get_attr(CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y)?;
+            let block_z = get_attr(CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z)?;
+            let grid_x = get_attr(CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X)?;
+            let grid_y = get_attr(CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y)?;
+            let grid_z = get_attr(CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z)?;
+            let warp = get_attr(CU_DEVICE_ATTRIBUTE_WARP_SIZE)?;
+            let shared_mem = get_attr(CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)?;
+            let regs = get_attr(CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_BLOCK)?;
+            let mem_clock = get_attr(CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE)?;
+            let bus_width = get_attr(CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH)?;
+            let l2_cache = get_attr(CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE)?;
 
             devices.push(DeviceInfo {
                 id: DeviceId(ordinal as u32),
                 kind: DeviceKind::Cuda,
                 name,
                 compute_capability: (major as u32, minor as u32),
-                total_memory: total_mem,
+                memory_total: total_mem,
+                max_threads_per_block: max_threads as u32,
+                max_block_dim: (block_x as u32, block_y as u32, block_z as u32),
+                max_grid_dim: (grid_x as u32, grid_y as u32, grid_z as u32),
+                warp_size: warp as u32,
                 multiprocessor_count: sm_count as u32,
+                shared_memory_per_block: shared_mem as usize,
+                registers_per_block: regs as u32,
+                memory_clock_rate: mem_clock as u32,
+                memory_bus_width: bus_width as u32,
+                l2_cache_size: l2_cache as usize,
+                ..Default::default()
             });
         }
 
@@ -641,7 +684,7 @@ impl GpuRuntime for CudaRuntime {
         let api = self.api()?;
 
         let c_name = CString::new(name)
-            .map_err(|_| GpuError::InvalidParameter(format!("Invalid function name: {}", name)))?;
+            .map_err(|_| GpuError::InvalidConfig(format!("Invalid function name: {}", name)))?;
 
         let mut func: CUfunction = std::ptr::null_mut();
         unsafe {

@@ -13,8 +13,13 @@
 //! HIP errors are translated to `GpuError::RocmError` with the error
 //! code and descriptive message.
 
+// This backend is an unimplemented stub: every entry point returns
+// `GpuError::NotSupported`, so its parameters are intentionally unused until
+// the HIP bindings are wired up.
+#![allow(unused_variables)]
+
 use super::GpuRuntime;
-use crate::device::{DeviceId, DeviceInfo, DeviceKind};
+use crate::device::{DeviceId, DeviceInfo};
 use crate::kernel::CompiledModule;
 use crate::memory::DevicePtr;
 use crate::{GpuError, GpuResult};

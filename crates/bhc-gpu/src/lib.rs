@@ -203,9 +203,11 @@ pub fn available_devices() -> Vec<DeviceInfo> {
     #[cfg(feature = "rocm")]
     devices.extend(runtime::rocm::enumerate_devices().unwrap_or_default());
 
-    // If no GPU runtime is compiled in, return mock device for testing
-    #[cfg(not(any(feature = "cuda", feature = "rocm")))]
-    {
+    // Fall back to a mock device when no real GPU was found. This covers both
+    // the case where no GPU runtime is compiled in and the case where a runtime
+    // is present but no hardware is available (e.g. CI / CPU-only machines),
+    // keeping the backend usable for testing.
+    if devices.is_empty() {
         devices.push(DeviceInfo::mock());
     }
 
@@ -412,8 +414,7 @@ mod tests {
     #[test]
     fn test_device_enumeration() {
         let devices = available_devices();
-        // Should at least have mock device when no GPU runtime
-        #[cfg(not(any(feature = "cuda", feature = "rocm")))]
+        // Always non-empty: real GPUs if present, otherwise a mock fallback.
         assert!(!devices.is_empty());
     }
 

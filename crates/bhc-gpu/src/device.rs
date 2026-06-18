@@ -25,7 +25,7 @@ use std::fmt;
 ///
 /// Device IDs are assigned based on the order devices are enumerated
 /// and are stable within a single program execution.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DeviceId(pub u32);
 
 impl fmt::Display for DeviceId {
@@ -35,7 +35,7 @@ impl fmt::Display for DeviceId {
 }
 
 /// The type of GPU device.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DeviceKind {
     /// NVIDIA GPU (CUDA).
     Cuda,
@@ -48,6 +48,7 @@ pub enum DeviceKind {
     /// WebGPU (WGSL).
     WebGpu,
     /// Mock device for testing without hardware.
+    #[default]
     Mock,
 }
 
@@ -98,7 +99,7 @@ impl fmt::Display for DeviceKind {
 ///
 /// Contains hardware capabilities and properties that affect kernel
 /// compilation and execution.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DeviceInfo {
     /// Device identifier.
     pub id: DeviceId,

@@ -68,6 +68,40 @@ pub fn compile_native(
     Ok(output_path)
 }
 
+/// Add the workspace target dirs (which hold BHC's runtime/stdlib shared
+/// libraries) to the dynamic loader path for `cmd`.
+///
+/// Native executables produced by the driver dynamically link `libbhc_rts`,
+/// `libbhc_text`, etc. from `target/debug` (or `target/release`). On Linux
+/// those have no embedded rpath, so without this the executable fails to start
+/// with exit code 127.
+fn add_bhc_library_path(cmd: &mut Command) {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Some(workspace) = manifest_dir.parent().and_then(|p| p.parent()) else {
+        return;
+    };
+    let lib_dirs: Vec<PathBuf> = ["target/debug", "target/release"]
+        .iter()
+        .map(|d| workspace.join(d))
+        .filter(|p| p.exists())
+        .collect();
+    if lib_dirs.is_empty() {
+        return;
+    }
+    let var = if cfg!(target_os = "macos") {
+        "DYLD_LIBRARY_PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    };
+    let mut paths = lib_dirs;
+    if let Some(existing) = std::env::var_os(var) {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    if let Ok(joined) = std::env::join_paths(&paths) {
+        cmd.env(var, joined);
+    }
+}
+
 /// Run a native executable and capture its output.
 pub fn run_native(
     exe_path: &Path,
@@ -90,6 +124,11 @@ pub fn run_native(
     if let Some(dir) = work_dir {
         cmd.current_dir(dir);
     }
+    // The compiled executable dynamically links the BHC runtime/stdlib shared
+    // libraries (libbhc_rts, libbhc_text, ...) from the workspace target dir.
+    // Add those dirs to the runtime loader path so the executable can start
+    // (otherwise it fails with exit 127 on Linux, where there is no rpath).
+    add_bhc_library_path(&mut cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| E2EError::ExecutionError(format!("Failed to spawn process: {}", e)))?;

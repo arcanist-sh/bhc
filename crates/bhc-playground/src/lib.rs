@@ -55,7 +55,6 @@
 //! ```
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
 
 use bhc_ast::Module as AstModule;
 use bhc_core::eval::{Env, Evaluator, Value};

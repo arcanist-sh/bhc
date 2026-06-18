@@ -75,7 +75,6 @@
 //! - Performance competitive with manual CUDA code for matmul
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
 #![allow(clippy::module_name_repetitions)]
 
 pub mod codegen;

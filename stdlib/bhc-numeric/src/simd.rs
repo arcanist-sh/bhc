@@ -1325,8 +1325,8 @@ pub extern "C" fn bhc_simd_sum_f32(ptr: *const f32, len: usize) -> f32 {
 
     let mut result = sum.sum();
 
-    for i in (chunks * 8)..len {
-        result += slice[i];
+    for &value in &slice[chunks * 8..len] {
+        result += value;
     }
 
     result
@@ -1350,8 +1350,8 @@ pub extern "C" fn bhc_simd_sum_f64(ptr: *const f64, len: usize) -> f64 {
 
     let mut result = sum.sum();
 
-    for i in (chunks * 4)..len {
-        result += slice[i];
+    for &value in &slice[chunks * 4..len] {
+        result += value;
     }
 
     result

@@ -92,6 +92,10 @@ impl NeonVec4F32 {
     }
 
     /// Load from an aligned pointer (16-byte aligned).
+    ///
+    /// # Safety
+    /// - `ptr` must point to at least 4 readable `f32` values.
+    /// - `ptr` must be 16-byte aligned.
     #[inline]
     pub unsafe fn load_aligned(ptr: *const f32) -> Self {
         Self {
@@ -109,6 +113,10 @@ impl NeonVec4F32 {
     }
 
     /// Store to an aligned pointer (16-byte aligned).
+    ///
+    /// # Safety
+    /// - `ptr` must point to at least 4 writable `f32` values.
+    /// - `ptr` must be 16-byte aligned.
     #[inline]
     pub unsafe fn store_aligned(&self, ptr: *mut f32) {
         vst1q_f32(ptr, self.inner);

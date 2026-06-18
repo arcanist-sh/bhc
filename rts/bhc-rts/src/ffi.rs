@@ -521,7 +521,7 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
             unsafe { std::mem::transmute(eval_fn_ptr) };
 
         // Call the evaluation function with the environment
-        let result = eval_fn(env_ptr as *mut u8);
+        let result = eval_fn(env_ptr);
 
         // Publish the result, then the INDIRECTION tag (both Release so a
         // reader that Acquire-loads the tag sees the result pointer)
@@ -1121,81 +1121,97 @@ pub extern "C" fn bhc_integer_to_float(a: i64) -> f32 {
 
 // Transcendental functions for Float
 
+/// Float exponential (`e^a`).
 #[no_mangle]
 pub extern "C" fn bhc_exp_float(a: f32) -> f32 {
     a.exp()
 }
 
+/// Float natural logarithm.
 #[no_mangle]
 pub extern "C" fn bhc_log_float(a: f32) -> f32 {
     a.ln()
 }
 
+/// Float square root.
 #[no_mangle]
 pub extern "C" fn bhc_sqrt_float(a: f32) -> f32 {
     a.sqrt()
 }
 
+/// Float power (`a` raised to `b`).
 #[no_mangle]
 pub extern "C" fn bhc_pow_float(a: f32, b: f32) -> f32 {
     a.powf(b)
 }
 
+/// Float sine (radians).
 #[no_mangle]
 pub extern "C" fn bhc_sin_float(a: f32) -> f32 {
     a.sin()
 }
 
+/// Float cosine (radians).
 #[no_mangle]
 pub extern "C" fn bhc_cos_float(a: f32) -> f32 {
     a.cos()
 }
 
+/// Float tangent (radians).
 #[no_mangle]
 pub extern "C" fn bhc_tan_float(a: f32) -> f32 {
     a.tan()
 }
 
+/// Float arcsine (radians).
 #[no_mangle]
 pub extern "C" fn bhc_asin_float(a: f32) -> f32 {
     a.asin()
 }
 
+/// Float arccosine (radians).
 #[no_mangle]
 pub extern "C" fn bhc_acos_float(a: f32) -> f32 {
     a.acos()
 }
 
+/// Float arctangent (radians).
 #[no_mangle]
 pub extern "C" fn bhc_atan_float(a: f32) -> f32 {
     a.atan()
 }
 
+/// Float hyperbolic sine.
 #[no_mangle]
 pub extern "C" fn bhc_sinh_float(a: f32) -> f32 {
     a.sinh()
 }
 
+/// Float hyperbolic cosine.
 #[no_mangle]
 pub extern "C" fn bhc_cosh_float(a: f32) -> f32 {
     a.cosh()
 }
 
+/// Float hyperbolic tangent.
 #[no_mangle]
 pub extern "C" fn bhc_tanh_float(a: f32) -> f32 {
     a.tanh()
 }
 
+/// Float inverse hyperbolic sine.
 #[no_mangle]
 pub extern "C" fn bhc_asinh_float(a: f32) -> f32 {
     a.asinh()
 }
 
+/// Float inverse hyperbolic cosine.
 #[no_mangle]
 pub extern "C" fn bhc_acosh_float(a: f32) -> f32 {
     a.acosh()
 }
 
+/// Float inverse hyperbolic tangent.
 #[no_mangle]
 pub extern "C" fn bhc_atanh_float(a: f32) -> f32 {
     a.atanh()
@@ -1342,81 +1358,97 @@ pub extern "C" fn bhc_integer_to_double(a: i64) -> f64 {
 
 // Transcendental functions for Double
 
+/// Double exponential (`e^a`).
 #[no_mangle]
 pub extern "C" fn bhc_exp_double(a: f64) -> f64 {
     a.exp()
 }
 
+/// Double natural logarithm.
 #[no_mangle]
 pub extern "C" fn bhc_log_double(a: f64) -> f64 {
     a.ln()
 }
 
+/// Double square root.
 #[no_mangle]
 pub extern "C" fn bhc_sqrt_double(a: f64) -> f64 {
     a.sqrt()
 }
 
+/// Double power (`a` raised to `b`).
 #[no_mangle]
 pub extern "C" fn bhc_pow_double(a: f64, b: f64) -> f64 {
     a.powf(b)
 }
 
+/// Double sine (radians).
 #[no_mangle]
 pub extern "C" fn bhc_sin_double(a: f64) -> f64 {
     a.sin()
 }
 
+/// Double cosine (radians).
 #[no_mangle]
 pub extern "C" fn bhc_cos_double(a: f64) -> f64 {
     a.cos()
 }
 
+/// Double tangent (radians).
 #[no_mangle]
 pub extern "C" fn bhc_tan_double(a: f64) -> f64 {
     a.tan()
 }
 
+/// Double arcsine (radians).
 #[no_mangle]
 pub extern "C" fn bhc_asin_double(a: f64) -> f64 {
     a.asin()
 }
 
+/// Double arccosine (radians).
 #[no_mangle]
 pub extern "C" fn bhc_acos_double(a: f64) -> f64 {
     a.acos()
 }
 
+/// Double arctangent (radians).
 #[no_mangle]
 pub extern "C" fn bhc_atan_double(a: f64) -> f64 {
     a.atan()
 }
 
+/// Double hyperbolic sine.
 #[no_mangle]
 pub extern "C" fn bhc_sinh_double(a: f64) -> f64 {
     a.sinh()
 }
 
+/// Double hyperbolic cosine.
 #[no_mangle]
 pub extern "C" fn bhc_cosh_double(a: f64) -> f64 {
     a.cosh()
 }
 
+/// Double hyperbolic tangent.
 #[no_mangle]
 pub extern "C" fn bhc_tanh_double(a: f64) -> f64 {
     a.tanh()
 }
 
+/// Double inverse hyperbolic sine.
 #[no_mangle]
 pub extern "C" fn bhc_asinh_double(a: f64) -> f64 {
     a.asinh()
 }
 
+/// Double inverse hyperbolic cosine.
 #[no_mangle]
 pub extern "C" fn bhc_acosh_double(a: f64) -> f64 {
     a.acosh()
 }
 
+/// Double inverse hyperbolic tangent.
 #[no_mangle]
 pub extern "C" fn bhc_atanh_double(a: f64) -> f64 {
     a.atanh()
@@ -2228,6 +2260,12 @@ pub extern "C" fn bhc_print_newline() {
 // ----------------------------------------------------------------------------
 
 /// Free a string allocated by show functions
+///
+/// # Safety
+///
+/// `s` must be either null or a pointer previously returned by one of this
+/// crate's string-producing FFI functions (i.e. created via `CString::into_raw`).
+/// It must not have been freed already, and must not be used after this call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_free_string(s: *mut c_char) {
     if !s.is_null() {
@@ -2310,7 +2348,7 @@ pub extern "C" fn bhc_make_some_exception(type_tag: i64, payload: *mut u8) -> *m
     }
     unsafe {
         *(ptr as *mut i64) = type_tag;
-        *((ptr as *mut u8).add(8) as *mut *mut u8) = payload;
+        *(ptr.add(8) as *mut *mut u8) = payload;
     }
     ptr
 }
@@ -2346,7 +2384,7 @@ pub extern "C" fn bhc_exc_get_payload(exc: *mut u8) -> *mut u8 {
     if exc.is_null() {
         return ptr::null_mut();
     }
-    unsafe { *((exc as *mut u8).add(8) as *const *mut u8) }
+    unsafe { *(exc.add(8) as *const *mut u8) }
 }
 
 /// Get a human-readable string representation of a SomeException.
@@ -2838,7 +2876,7 @@ extern "C" fn bhc_restore_fn(inner_io: *mut u8, restore_closure: *mut u8) -> *mu
 // Real file handles are heap-allocated BhcHandle structs leaked as *mut u8.
 // ============================================================================
 
-use std::io::{BufRead, Read, Seek, Write};
+use std::io::{Read, Seek, Write};
 
 /// Internal handle representation tracking open state and capabilities.
 struct BhcHandle {
@@ -2895,6 +2933,11 @@ pub extern "C" fn bhc_stderr() -> *mut u8 {
 ///
 /// Mode: 0=ReadMode, 1=WriteMode, 2=AppendMode, 3=ReadWriteMode.
 /// Returns null on error.
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string
+/// that remains valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_open_file(path: *const c_char, mode: c_int) -> *mut u8 {
     if path.is_null() {
@@ -2942,6 +2985,12 @@ pub unsafe extern "C" fn bhc_open_file(path: *const c_char, mode: c_int) -> *mut
 }
 
 /// Close a handle. No-op for standard stream sentinels.
+///
+/// # Safety
+///
+/// `handle` must be null, a standard-stream sentinel returned by `bhc_stdin`/
+/// `bhc_stdout`/`bhc_stderr`, or a non-null handle previously returned by
+/// `bhc_open_file`. A non-sentinel handle must point to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_close_handle(handle: *mut u8) {
     if handle.is_null() || is_sentinel(handle) {
@@ -2961,6 +3010,11 @@ pub unsafe extern "C" fn bhc_close_handle(handle: *mut u8) {
 
 /// Read a single character from a handle.
 /// Returns the character code, or -1 on EOF/error.
+///
+/// # Safety
+///
+/// `handle` must be null, a standard-stream sentinel, or a non-null handle
+/// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hGetChar(handle: *mut u8) -> c_int {
     let h = handle as usize;
@@ -2987,6 +3041,11 @@ pub unsafe extern "C" fn bhc_hGetChar(handle: *mut u8) -> c_int {
 
 /// Read a line from a handle. Returns a heap-allocated C string, or null on EOF/error.
 /// Reads byte-by-byte to avoid BufReader consuming ahead of the file position.
+///
+/// # Safety
+///
+/// `handle` must be null, a standard-stream sentinel, or a non-null handle
+/// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hGetLine(handle: *mut u8) -> *mut c_char {
     let h = handle as usize;
@@ -3047,6 +3106,11 @@ pub unsafe extern "C" fn bhc_hGetLine(handle: *mut u8) -> *mut c_char {
 }
 
 /// Read all remaining contents from a handle. Returns heap-allocated C string.
+///
+/// # Safety
+///
+/// `handle` must be null, a standard-stream sentinel, or a non-null handle
+/// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hGetContents(handle: *mut u8) -> *mut c_char {
     let h = handle as usize;
@@ -3071,6 +3135,11 @@ pub unsafe extern "C" fn bhc_hGetContents(handle: *mut u8) -> *mut c_char {
 }
 
 /// Check if a handle is at EOF. Returns 1 if EOF, 0 otherwise.
+///
+/// # Safety
+///
+/// `handle` must be null, a standard-stream sentinel, or a non-null handle
+/// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hIsEOF(handle: *mut u8) -> c_int {
     if let Some(bh) = get_bhc_handle(handle) {
@@ -3098,6 +3167,12 @@ pub unsafe extern "C" fn bhc_hIsEOF(handle: *mut u8) -> c_int {
 // ----------------------------------------------------------------------------
 
 /// Write a string to a handle.
+///
+/// # Safety
+///
+/// `handle` must be null, a standard-stream sentinel, or a non-null handle
+/// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
+/// `s` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hPutStr(handle: *mut u8, s: *const c_char) {
     if s.is_null() {
@@ -3121,6 +3196,11 @@ pub unsafe extern "C" fn bhc_hPutStr(handle: *mut u8, s: *const c_char) {
 }
 
 /// Write a single character to a handle.
+///
+/// # Safety
+///
+/// `handle` must be null, a standard-stream sentinel, or a non-null handle
+/// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hPutChar(handle: *mut u8, c: c_int) {
     let ch = match char::from_u32(c as u32) {
@@ -3143,6 +3223,11 @@ pub unsafe extern "C" fn bhc_hPutChar(handle: *mut u8, c: c_int) {
 }
 
 /// Flush a handle's output buffer.
+///
+/// # Safety
+///
+/// `handle` must be null, a standard-stream sentinel, or a non-null handle
+/// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hFlush(handle: *mut u8) {
     let h = handle as usize;
@@ -3277,6 +3362,11 @@ pub extern "C" fn bhc_hGetBuffering(_handle: *mut u8) -> c_int {
 
 /// Seek within a handle.
 /// mode: 0=AbsoluteSeek, 1=RelativeSeek, 2=SeekFromEnd.
+///
+/// # Safety
+///
+/// `handle` must be null, a standard-stream sentinel, or a non-null handle
+/// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hSeek(handle: *mut u8, mode: c_int, offset: i64) {
     if is_sentinel(handle) {
@@ -3296,6 +3386,11 @@ pub unsafe extern "C" fn bhc_hSeek(handle: *mut u8, mode: c_int, offset: i64) {
 }
 
 /// Get the current position in a handle. Returns -1 on error.
+///
+/// # Safety
+///
+/// `handle` must be null, a standard-stream sentinel, or a non-null handle
+/// previously returned by `bhc_open_file` that points to a live `BhcHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_hTell(handle: *mut u8) -> i64 {
     if is_sentinel(handle) {
@@ -3320,6 +3415,10 @@ pub unsafe extern "C" fn bhc_hTell(handle: *mut u8) -> i64 {
 // ----------------------------------------------------------------------------
 
 /// Check if a file exists. Returns 1 if it exists, 0 otherwise.
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_exists(path: *const c_char) -> c_int {
     if path.is_null() {
@@ -3337,6 +3436,10 @@ pub unsafe extern "C" fn bhc_exists(path: *const c_char) -> c_int {
 }
 
 /// Check if a path is a directory. Returns 1 if directory, 0 otherwise.
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_is_directory(path: *const c_char) -> c_int {
     if path.is_null() {
@@ -3354,6 +3457,10 @@ pub unsafe extern "C" fn bhc_is_directory(path: *const c_char) -> c_int {
 }
 
 /// Get an environment variable. Returns heap-allocated C string, or null if not set.
+///
+/// # Safety
+///
+/// `name` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_get_env(name: *const c_char) -> *mut c_char {
     if name.is_null() {
@@ -3370,6 +3477,10 @@ pub unsafe extern "C" fn bhc_get_env(name: *const c_char) -> *mut c_char {
 }
 
 /// Lookup an environment variable. Returns heap-allocated C string, or null for Nothing.
+///
+/// # Safety
+///
+/// `name` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_lookupEnv(name: *const c_char) -> *mut c_char {
     // Same as bhc_get_env; null encodes Nothing
@@ -3410,6 +3521,10 @@ pub extern "C" fn bhc_get_current_directory() -> *mut c_char {
 }
 
 /// Create a directory (and parents). No-op on error.
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_create_directory(path: *const c_char) {
     if path.is_null() {
@@ -3423,6 +3538,10 @@ pub unsafe extern "C" fn bhc_create_directory(path: *const c_char) {
 }
 
 /// Remove a file. No-op on error.
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_remove_file(path: *const c_char) {
     if path.is_null() {
@@ -3436,6 +3555,10 @@ pub unsafe extern "C" fn bhc_remove_file(path: *const c_char) {
 }
 
 /// List directory entries as a cons-cell list of C strings.
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_directory(path: *const c_char) -> *mut u8 {
     if path.is_null() {
@@ -3469,23 +3592,22 @@ pub unsafe extern "C" fn bhc_list_directory(path: *const c_char) -> *mut u8 {
 
 /// Join two path components (Haskell's `</>` operator).
 /// Returns heap-allocated C string.
+///
+/// # Safety
+///
+/// `base` and `path` must each be either null or a pointer to a valid,
+/// NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_combine(base: *const c_char, path: *const c_char) -> *mut c_char {
     let base_str = if base.is_null() {
         ""
     } else {
-        match unsafe { CStr::from_ptr(base) }.to_str() {
-            Ok(s) => s,
-            Err(_) => "",
-        }
+        unsafe { CStr::from_ptr(base) }.to_str().unwrap_or_default()
     };
     let path_str = if path.is_null() {
         ""
     } else {
-        match unsafe { CStr::from_ptr(path) }.to_str() {
-            Ok(s) => s,
-            Err(_) => "",
-        }
+        unsafe { CStr::from_ptr(path) }.to_str().unwrap_or_default()
     };
     let result = std::path::Path::new(base_str)
         .join(path_str)
@@ -3495,6 +3617,10 @@ pub unsafe extern "C" fn bhc_combine(base: *const c_char, path: *const c_char) -
 }
 
 /// Get the file name component of a path (e.g., "/usr/local/bin/ghc" -> "ghc").
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_take_file_name(path: *const c_char) -> *mut c_char {
     if path.is_null() {
@@ -3512,6 +3638,10 @@ pub unsafe extern "C" fn bhc_take_file_name(path: *const c_char) -> *mut c_char 
 }
 
 /// Get the directory component of a path (e.g., "/usr/local/bin/ghc" -> "/usr/local/bin").
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_take_directory(path: *const c_char) -> *mut c_char {
     if path.is_null() {
@@ -3530,6 +3660,10 @@ pub unsafe extern "C" fn bhc_take_directory(path: *const c_char) -> *mut c_char 
 
 /// Get the extension of a path WITH leading dot (e.g., "report.tar.gz" -> ".gz").
 /// Returns empty string if no extension.
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_take_extension(path: *const c_char) -> *mut c_char {
     if path.is_null() {
@@ -3550,6 +3684,10 @@ pub unsafe extern "C" fn bhc_take_extension(path: *const c_char) -> *mut c_char 
 }
 
 /// Drop the extension from a path (e.g., "report.tar.gz" -> "report.tar").
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_drop_extension(path: *const c_char) -> *mut c_char {
     if path.is_null() {
@@ -3571,6 +3709,10 @@ pub unsafe extern "C" fn bhc_drop_extension(path: *const c_char) -> *mut c_char 
 }
 
 /// Get the base name without extension (e.g., "/path/to/file.txt" -> "file").
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_take_base_name(path: *const c_char) -> *mut c_char {
     if path.is_null() {
@@ -3589,6 +3731,11 @@ pub unsafe extern "C" fn bhc_take_base_name(path: *const c_char) -> *mut c_char 
 
 /// Replace the extension of a path (e.g., replaceExtension "file.txt" ".md" -> "file.md").
 /// The new extension may or may not have a leading dot.
+///
+/// # Safety
+///
+/// `path` and `ext` must each be either null or a pointer to a valid,
+/// NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_replace_extension(
     path: *const c_char,
@@ -3604,10 +3751,7 @@ pub unsafe extern "C" fn bhc_replace_extension(
     let ext_str = if ext.is_null() {
         ""
     } else {
-        match unsafe { CStr::from_ptr(ext) }.to_str() {
-            Ok(s) => s,
-            Err(_) => "",
-        }
+        unsafe { CStr::from_ptr(ext) }.to_str().unwrap_or_default()
     };
     let new_ext = ext_str.trim_start_matches('.');
     let result = std::path::Path::new(path_str)
@@ -3618,6 +3762,10 @@ pub unsafe extern "C" fn bhc_replace_extension(
 }
 
 /// Check if a path is absolute. Returns 1 if absolute, 0 if relative.
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_is_absolute(path: *const c_char) -> c_int {
     if path.is_null() {
@@ -3631,6 +3779,10 @@ pub unsafe extern "C" fn bhc_is_absolute(path: *const c_char) -> c_int {
 }
 
 /// Check if a path is relative. Returns 1 if relative, 0 if absolute.
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_is_relative(path: *const c_char) -> c_int {
     if path.is_null() {
@@ -3644,6 +3796,10 @@ pub unsafe extern "C" fn bhc_is_relative(path: *const c_char) -> c_int {
 }
 
 /// Check if a path has an extension. Returns 1 if it has one, 0 otherwise.
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_has_extension(path: *const c_char) -> c_int {
     if path.is_null() {
@@ -3661,6 +3817,10 @@ pub unsafe extern "C" fn bhc_has_extension(path: *const c_char) -> c_int {
 // ----------------------------------------------------------------------------
 
 /// Set the current working directory.
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_current_directory(path: *const c_char) {
     if path.is_null() {
@@ -3674,6 +3834,10 @@ pub unsafe extern "C" fn bhc_set_current_directory(path: *const c_char) {
 }
 
 /// Remove a directory (must be empty).
+///
+/// # Safety
+///
+/// `path` must be either null or a pointer to a valid, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_remove_directory(path: *const c_char) {
     if path.is_null() {
@@ -3687,6 +3851,11 @@ pub unsafe extern "C" fn bhc_remove_directory(path: *const c_char) {
 }
 
 /// Rename (move) a file.
+///
+/// # Safety
+///
+/// `src` and `dst` must each be either null or a pointer to a valid,
+/// NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_rename_file(src: *const c_char, dst: *const c_char) {
     if src.is_null() || dst.is_null() {
@@ -3704,6 +3873,11 @@ pub unsafe extern "C" fn bhc_rename_file(src: *const c_char, dst: *const c_char)
 }
 
 /// Copy a file.
+///
+/// # Safety
+///
+/// `src` and `dst` must each be either null or a pointer to a valid,
+/// NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_copy_file(src: *const c_char, dst: *const c_char) {
     if src.is_null() || dst.is_null() {

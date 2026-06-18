@@ -55,7 +55,6 @@
 //! - H26-SPEC Section 7: Tensor Model
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
 
 pub mod dyn_tensor;
 pub mod nat;
@@ -1090,9 +1089,12 @@ mod tests {
         let int_ty = Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star));
         let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
 
-        assert!(types_match_multi(&[int_ty.clone()], &[int_ty.clone()]).is_some());
-        assert!(types_match_multi(&[int_ty.clone()], &[bool_ty]).is_none());
+        assert!(
+            types_match_multi(std::slice::from_ref(&int_ty), std::slice::from_ref(&int_ty))
+                .is_some()
+        );
+        assert!(types_match_multi(std::slice::from_ref(&int_ty), &[bool_ty]).is_none());
         assert!(types_match_multi(&[], &[]).is_some());
-        assert!(types_match_multi(&[int_ty.clone()], &[]).is_none());
+        assert!(types_match_multi(std::slice::from_ref(&int_ty), &[]).is_none());
     }
 }

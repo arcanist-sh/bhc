@@ -62,7 +62,6 @@
 //! ```
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
 #![allow(clippy::module_name_repetitions)]
 
 pub mod blas;

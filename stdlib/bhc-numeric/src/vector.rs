@@ -591,6 +591,11 @@ pub extern "C" fn bhc_vector_data_f64(vec: *const Vector<f64>) -> *const f64 {
 }
 
 /// Get element at index
+///
+/// # Safety
+/// - `vec` must be either null or a valid pointer to a live `Vector<f64>`.
+///
+/// Returns 0.0 if `vec` is null or `index` is out of bounds.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_get_f64(vec: *const Vector<f64>, index: usize) -> f64 {
     if vec.is_null() {
@@ -600,6 +605,11 @@ pub unsafe extern "C" fn bhc_vector_get_f64(vec: *const Vector<f64>, index: usiz
 }
 
 /// Compute dot product
+///
+/// # Safety
+/// - `a` and `b` must each be either null or a valid pointer to a live `Vector<f64>`.
+///
+/// Returns 0.0 if either is null or the lengths differ.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_dot_f64(a: *const Vector<f64>, b: *const Vector<f64>) -> f64 {
     if a.is_null() || b.is_null() {
@@ -636,6 +646,12 @@ pub extern "C" fn bhc_vector_mean_f64(vec: *const Vector<f64>) -> f64 {
 }
 
 /// Element-wise add, returns new vector
+///
+/// # Safety
+/// - `a` and `b` must each be either null or a valid pointer to a live `Vector<f64>`.
+///
+/// On success returns a newly allocated vector the caller must free with
+/// `bhc_vector_free_f64`; returns null on null input or length mismatch.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_add_f64(
     a: *const Vector<f64>,
@@ -651,6 +667,12 @@ pub unsafe extern "C" fn bhc_vector_add_f64(
 }
 
 /// Element-wise subtract, returns new vector
+///
+/// # Safety
+/// - `a` and `b` must each be either null or a valid pointer to a live `Vector<f64>`.
+///
+/// On success returns a newly allocated vector the caller must free with
+/// `bhc_vector_free_f64`; returns null on null input or length mismatch.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_sub_f64(
     a: *const Vector<f64>,
@@ -666,6 +688,12 @@ pub unsafe extern "C" fn bhc_vector_sub_f64(
 }
 
 /// Element-wise multiply, returns new vector
+///
+/// # Safety
+/// - `a` and `b` must each be either null or a valid pointer to a live `Vector<f64>`.
+///
+/// On success returns a newly allocated vector the caller must free with
+/// `bhc_vector_free_f64`; returns null on null input or length mismatch.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_mul_f64(
     a: *const Vector<f64>,
@@ -681,6 +709,12 @@ pub unsafe extern "C" fn bhc_vector_mul_f64(
 }
 
 /// Scalar multiply, returns new vector
+///
+/// # Safety
+/// - `vec` must be either null or a valid pointer to a live `Vector<f64>`.
+///
+/// On success returns a newly allocated vector the caller must free with
+/// `bhc_vector_free_f64`; returns null if `vec` is null.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_scale_f64(
     vec: *const Vector<f64>,
@@ -694,6 +728,12 @@ pub unsafe extern "C" fn bhc_vector_scale_f64(
 }
 
 /// Normalize vector, returns new vector
+///
+/// # Safety
+/// - `vec` must be either null or a valid pointer to a live `Vector<f64>`.
+///
+/// On success returns a newly allocated vector the caller must free with
+/// `bhc_vector_free_f64`; returns null if `vec` is null.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_normalize_f64(vec: *const Vector<f64>) -> *mut Vector<f64> {
     if vec.is_null() {
@@ -708,6 +748,10 @@ pub unsafe extern "C" fn bhc_vector_normalize_f64(vec: *const Vector<f64>) -> *m
 // ============================================================
 
 /// Create a vector from a raw pointer
+///
+/// # Safety
+/// - `data` must point to `len` valid f32 values.
+/// - The memory is copied, caller retains ownership of input.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_from_f32(data: *const f32, len: usize) -> *mut Vector<f32> {
     if data.is_null() || len == 0 {
@@ -719,6 +763,10 @@ pub unsafe extern "C" fn bhc_vector_from_f32(data: *const f32, len: usize) -> *m
 }
 
 /// Free a vector
+///
+/// # Safety
+/// - `vec` must have been created by `bhc_vector_from_f32` or similar.
+/// - Must not be called twice on the same pointer.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_free_f32(vec: *mut Vector<f32>) {
     if !vec.is_null() {
@@ -736,6 +784,11 @@ pub extern "C" fn bhc_vector_len_f32(vec: *const Vector<f32>) -> usize {
 }
 
 /// Compute dot product
+///
+/// # Safety
+/// - `a` and `b` must each be either null or a valid pointer to a live `Vector<f32>`.
+///
+/// Returns 0.0 if either is null or the lengths differ.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_dot_f32(a: *const Vector<f32>, b: *const Vector<f32>) -> f32 {
     if a.is_null() || b.is_null() {
@@ -763,6 +816,12 @@ pub extern "C" fn bhc_vector_norm_f32(vec: *const Vector<f32>) -> f32 {
 }
 
 /// Element-wise add, returns new vector
+///
+/// # Safety
+/// - `a` and `b` must each be either null or a valid pointer to a live `Vector<f32>`.
+///
+/// On success returns a newly allocated vector the caller must free with
+/// `bhc_vector_free_f32`; returns null on null input or length mismatch.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_add_f32(
     a: *const Vector<f32>,
@@ -778,6 +837,12 @@ pub unsafe extern "C" fn bhc_vector_add_f32(
 }
 
 /// Scalar multiply, returns new vector
+///
+/// # Safety
+/// - `vec` must be either null or a valid pointer to a live `Vector<f32>`.
+///
+/// On success returns a newly allocated vector the caller must free with
+/// `bhc_vector_free_f32`; returns null if `vec` is null.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_scale_f32(
     vec: *const Vector<f32>,
@@ -795,6 +860,10 @@ pub unsafe extern "C" fn bhc_vector_scale_f32(
 // ============================================================
 
 /// Create a vector from a raw pointer
+///
+/// # Safety
+/// - `data` must point to `len` valid i64 values.
+/// - The memory is copied, caller retains ownership of input.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_from_i64(data: *const i64, len: usize) -> *mut Vector<i64> {
     if data.is_null() || len == 0 {
@@ -816,6 +885,10 @@ pub extern "C" fn bhc_vector_new_i64(len: usize) -> *mut Vector<i64> {
 }
 
 /// Free a vector
+///
+/// # Safety
+/// - `vec` must have been created by `bhc_vector_from_i64` or similar.
+/// - Must not be called twice on the same pointer.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_free_i64(vec: *mut Vector<i64>) {
     if !vec.is_null() {
@@ -833,6 +906,11 @@ pub extern "C" fn bhc_vector_len_i64(vec: *const Vector<i64>) -> usize {
 }
 
 /// Get element at index
+///
+/// # Safety
+/// - `vec` must be either null or a valid pointer to a live `Vector<i64>`.
+///
+/// Returns 0 if `vec` is null or `index` is out of bounds.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_get_i64(vec: *const Vector<i64>, index: usize) -> i64 {
     if vec.is_null() {
@@ -851,6 +929,11 @@ pub extern "C" fn bhc_vector_sum_i64(vec: *const Vector<i64>) -> i64 {
 }
 
 /// Compute dot product
+///
+/// # Safety
+/// - `a` and `b` must each be either null or a valid pointer to a live `Vector<i64>`.
+///
+/// Returns 0 if either is null or the lengths differ.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_vector_dot_i64(a: *const Vector<i64>, b: *const Vector<i64>) -> i64 {
     if a.is_null() || b.is_null() {

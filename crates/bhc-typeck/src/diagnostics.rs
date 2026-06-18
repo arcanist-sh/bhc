@@ -49,6 +49,7 @@ pub fn emit_type_mismatch(ctx: &mut TyCtxt, expected: &Ty, found: &Ty, span: Spa
 }
 
 /// Emit a type mismatch error with additional context about where the expectation came from.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_type_mismatch_with_context(
     ctx: &mut TyCtxt,
     expected: &Ty,
@@ -113,6 +114,7 @@ pub fn emit_unbound_var(ctx: &mut TyCtxt, def_id: DefId, span: Span) {
 ///
 /// This enhanced version provides "Did you mean?" suggestions based on
 /// similar names in scope.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_unbound_var_named(
     ctx: &mut TyCtxt,
     name: Symbol,
@@ -158,6 +160,7 @@ pub fn emit_unbound_constructor(ctx: &mut TyCtxt, def_id: DefId, span: Span) {
 }
 
 /// Emit an unbound constructor error with the actual name and suggestions.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_unbound_constructor_named(
     ctx: &mut TyCtxt,
     name: Symbol,
@@ -204,6 +207,7 @@ pub fn emit_too_many_pattern_args(ctx: &mut TyCtxt, span: Span) {
 }
 
 /// Emit a pattern arity mismatch error with detailed information.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_pattern_arity_mismatch(
     ctx: &mut TyCtxt,
     constructor_name: &str,
@@ -322,6 +326,7 @@ pub fn emit_type_family_reduction_failed(
 }
 
 /// Emit an error when a type family is not defined.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_type_family_not_found(ctx: &mut TyCtxt, name: Symbol, span: Span) {
     let name_str = name.as_str();
 
@@ -341,6 +346,7 @@ pub fn emit_type_family_not_found(ctx: &mut TyCtxt, name: Symbol, span: Span) {
 ///
 /// Called when an instance doesn't provide an implementation for an
 /// associated type and the class has no default.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_missing_assoc_type_impl(
     ctx: &mut TyCtxt,
     class_name: Symbol,
@@ -399,6 +405,7 @@ pub fn emit_type_family_overlap(ctx: &mut TyCtxt, family_name: Symbol, args: &[T
 /// Emit a function arity mismatch error.
 ///
 /// Called when a function is applied to the wrong number of arguments.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_function_arity_mismatch(
     ctx: &mut TyCtxt,
     function_name: &str,
@@ -436,6 +443,7 @@ pub fn emit_function_arity_mismatch(
 }
 
 /// Emit an error when a non-function is applied to arguments.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_not_a_function(ctx: &mut TyCtxt, actual_type: &Ty, num_args: usize, span: Span) {
     let ty_str = pretty_ty(actual_type);
     let plural = if num_args == 1 {
@@ -487,6 +495,7 @@ pub fn emit_partial_application_hint(
 }
 
 /// Helper to format ordinal numbers.
+#[allow(dead_code)] // helper for WIP diagnostic emitters above
 fn ordinal(n: usize) -> String {
     match n {
         1 => "1st".to_string(),
@@ -523,6 +532,7 @@ pub fn emit_dimension_mismatch(ctx: &mut TyCtxt, expected: u64, found: u64, span
 }
 
 /// Emit a type-level natural unification failure.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_nat_mismatch(ctx: &mut TyCtxt, n1: &TyNat, n2: &TyNat, span: Span) {
     let diag = Diagnostic::error(format!(
         "cannot unify type-level naturals: `{}` vs `{}`",
@@ -666,6 +676,7 @@ pub fn emit_nat_solver_error(ctx: &mut TyCtxt, err: &crate::nat_solver::SolverEr
 ///
 /// Includes an ASCII art diagram showing the matrices and highlighting
 /// the mismatched inner dimensions.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_matmul_dimension_mismatch(
     ctx: &mut TyCtxt,
     left_shape: &TyList,
@@ -699,6 +710,7 @@ pub fn emit_matmul_dimension_mismatch(
 ///
 /// Includes a visual diagram showing compatibility at each axis,
 /// with the failing axis clearly marked.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_broadcast_incompatible(
     ctx: &mut TyCtxt,
     shape1: &TyList,
@@ -727,6 +739,7 @@ pub fn emit_broadcast_incompatible(
 }
 
 /// Emit a transpose axis out of bounds error.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_transpose_axis_error(ctx: &mut TyCtxt, rank: usize, invalid_axis: usize, span: Span) {
     let diag = Diagnostic::error(format!(
         "transpose axis {invalid_axis} is out of bounds for tensor of rank {rank}"
@@ -742,6 +755,7 @@ pub fn emit_transpose_axis_error(ctx: &mut TyCtxt, rank: usize, invalid_axis: us
 }
 
 /// Emit a concatenation shape mismatch error.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_concat_shape_mismatch(
     ctx: &mut TyCtxt,
     axis: usize,
@@ -767,6 +781,7 @@ pub fn emit_concat_shape_mismatch(
 }
 
 /// Emit an error when a specific dimension value is required.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_dimension_must_be(
     ctx: &mut TyCtxt,
     operation: &str,
@@ -793,6 +808,7 @@ pub fn emit_dimension_must_be(
 /// ## M10 Phase 3: Visual Rank Comparison
 ///
 /// Includes a visual representation of expected vs found dimensions.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_wrong_tensor_rank(
     ctx: &mut TyCtxt,
     operation: &str,
@@ -832,6 +848,7 @@ pub fn emit_wrong_tensor_rank(
 }
 
 /// Emit a shape mismatch error with detailed axis information.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_shape_axis_mismatch(
     ctx: &mut TyCtxt,
     shape1: &TyList,
@@ -863,6 +880,7 @@ pub fn emit_shape_axis_mismatch(
 }
 
 /// Emit an error when DynTensor conversion fails at runtime.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_dyn_tensor_conversion_failed(
     ctx: &mut TyCtxt,
     expected_shape: &TyList,
@@ -900,6 +918,7 @@ pub fn emit_dyn_tensor_conversion_failed(
 /// ## M10 Phase 3: Visual Transpose Suggestion
 ///
 /// Shows a visual diagram of the transpose operation that would fix the error.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_possible_transpose_suggestion(
     ctx: &mut TyCtxt,
     found: &TyList,
@@ -934,6 +953,7 @@ pub fn emit_possible_transpose_suggestion(
 }
 
 /// Emit a helpful error when matmul arguments might be swapped.
+#[allow(dead_code)] // WIP diagnostic emitter, wired up as inference paths land
 pub fn emit_matmul_swap_suggestion(
     ctx: &mut TyCtxt,
     left_shape: &TyList,

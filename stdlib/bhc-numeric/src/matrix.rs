@@ -83,6 +83,8 @@ impl<T> Matrix<T> {
     }
 
     /// Convert linear index to (row, col)
+    // Symmetric counterpart to `to_index`; kept for completeness of the layout API.
+    #[allow(dead_code)]
     fn to_coords(&self, index: usize) -> (usize, usize) {
         (index / self.cols, index % self.cols)
     }
@@ -443,12 +445,12 @@ where
             return None;
         }
         let mut result = vec![T::default(); self.rows];
-        for i in 0..self.rows {
+        for (i, result_i) in result.iter_mut().enumerate() {
             let mut sum = T::default();
             for j in 0..self.cols {
                 sum = sum + self.data[i * self.cols + j] * vec[j];
             }
-            result[i] = sum;
+            *result_i = sum;
         }
         Some(Vector::from_vec(result))
     }
@@ -740,6 +742,11 @@ pub unsafe extern "C" fn bhc_matrix_from_f64(
 }
 
 /// Free a matrix
+///
+/// # Safety
+/// - `mat` must be either null or a pointer previously returned by one of the
+///   `bhc_matrix_*` constructors and not yet freed.
+/// - After this call `mat` is dangling and must not be used again.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_matrix_free_f64(mat: *mut Matrix<f64>) {
     if !mat.is_null() {
@@ -775,6 +782,11 @@ pub extern "C" fn bhc_matrix_data_f64(mat: *const Matrix<f64>) -> *const f64 {
 }
 
 /// Get element at (row, col)
+///
+/// # Safety
+/// - `mat` must be either null or a valid pointer to a live `Matrix<f64>`.
+///
+/// Returns 0.0 if `mat` is null or the indices are out of bounds.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_matrix_get_f64(
     mat: *const Matrix<f64>,
@@ -788,6 +800,12 @@ pub unsafe extern "C" fn bhc_matrix_get_f64(
 }
 
 /// Matrix multiplication
+///
+/// # Safety
+/// - `a` and `b` must each be either null or a valid pointer to a live `Matrix<f64>`.
+///
+/// On success returns a newly allocated matrix that the caller must free with
+/// `bhc_matrix_free_f64`; returns null on null input or dimension mismatch.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_matrix_matmul_f64(
     a: *const Matrix<f64>,
@@ -803,6 +821,12 @@ pub unsafe extern "C" fn bhc_matrix_matmul_f64(
 }
 
 /// Matrix transpose
+///
+/// # Safety
+/// - `mat` must be either null or a valid pointer to a live `Matrix<f64>`.
+///
+/// On success returns a newly allocated matrix that the caller must free with
+/// `bhc_matrix_free_f64`; returns null if `mat` is null.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_matrix_transpose_f64(mat: *const Matrix<f64>) -> *mut Matrix<f64> {
     if mat.is_null() {
@@ -813,6 +837,12 @@ pub unsafe extern "C" fn bhc_matrix_transpose_f64(mat: *const Matrix<f64>) -> *m
 }
 
 /// Matrix addition
+///
+/// # Safety
+/// - `a` and `b` must each be either null or a valid pointer to a live `Matrix<f64>`.
+///
+/// On success returns a newly allocated matrix that the caller must free with
+/// `bhc_matrix_free_f64`; returns null on null input or shape mismatch.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_matrix_add_f64(
     a: *const Matrix<f64>,
@@ -828,6 +858,12 @@ pub unsafe extern "C" fn bhc_matrix_add_f64(
 }
 
 /// Matrix scalar multiplication
+///
+/// # Safety
+/// - `mat` must be either null or a valid pointer to a live `Matrix<f64>`.
+///
+/// On success returns a newly allocated matrix that the caller must free with
+/// `bhc_matrix_free_f64`; returns null if `mat` is null.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_matrix_scale_f64(
     mat: *const Matrix<f64>,

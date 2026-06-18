@@ -12,7 +12,6 @@
 //! - **Type erasure**: Type annotations are preserved but simplified
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
 
 mod binding;
 mod context;

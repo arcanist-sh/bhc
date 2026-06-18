@@ -194,6 +194,7 @@ fn substitute_ty_list(l: &TyList, subst: &FxHashMap<u32, Ty>) -> TyList {
 /// Instantiate a type scheme for a specific use with a given set of type arguments.
 ///
 /// This is used for explicit type applications like `f @Int`.
+#[allow(dead_code)] // for upcoming explicit type-application (`f @Int`) support
 pub fn instantiate_with(scheme: &Scheme, type_args: &[Ty]) -> Result<Ty, InstantiateError> {
     if type_args.len() != scheme.vars.len() {
         return Err(InstantiateError::ArityMismatch {
@@ -212,6 +213,7 @@ pub fn instantiate_with(scheme: &Scheme, type_args: &[Ty]) -> Result<Ty, Instant
 }
 
 /// Errors that can occur during instantiation.
+#[allow(dead_code)] // paired with `instantiate_with`, for explicit type applications
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum InstantiateError {
     /// Wrong number of type arguments.

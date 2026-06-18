@@ -72,7 +72,6 @@
 //! - H26-SPEC Section 8: Fusion Laws
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
 
 pub mod fusion;
 pub mod lower;

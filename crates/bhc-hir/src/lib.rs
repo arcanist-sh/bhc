@@ -56,7 +56,6 @@
 //! - `bhc-types`: Type representations used here
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
 
 use bhc_index::Idx;
 use bhc_intern::Symbol;

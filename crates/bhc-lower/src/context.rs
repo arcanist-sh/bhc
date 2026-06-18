@@ -2249,6 +2249,7 @@ impl LowerContext {
     }
 
     /// Records a constructor definition with full type information.
+    #[allow(clippy::too_many_arguments)] // each field is a distinct part of the constructor's type
     pub fn define_constructor_with_type(
         &mut self,
         id: DefId,

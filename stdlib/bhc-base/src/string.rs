@@ -85,6 +85,12 @@ fn is_whitespace(cp: i64) -> bool {
 /// - `lines "abc" = ["abc"]`
 /// - `lines "abc\ndef" = ["abc","def"]`
 /// - `lines "abc\n" = ["abc"]`
+///
+/// # Safety
+///
+/// `str_list` must be a valid BHC char-list ADT node chain (Nil tag=0 or
+/// Cons tag=1 with the char codepoint at offset 8 and the tail at offset
+/// 16).
 #[no_mangle]
 pub unsafe extern "C" fn bhc_string_lines(str_list: *mut u8) -> *mut u8 {
     let chars = list_to_vec(str_list);
@@ -120,6 +126,11 @@ pub unsafe extern "C" fn bhc_string_lines(str_list: *mut u8) -> *mut u8 {
 /// Join strings with newlines appended to each.
 ///
 /// `unlines ["abc","def"] = "abc\ndef\n"`
+///
+/// # Safety
+///
+/// `lines_list` must be a valid BHC list ADT node chain whose every
+/// element is itself a valid char-list node chain.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_string_unlines(lines_list: *mut u8) -> *mut u8 {
     let lines = list_to_vec(lines_list);
@@ -141,6 +152,10 @@ pub unsafe extern "C" fn bhc_string_unlines(lines_list: *mut u8) -> *mut u8 {
 /// - `words "" = []`
 /// - `words "  abc  def  " = ["abc","def"]`
 /// - Leading, trailing, and multiple whitespace is collapsed.
+///
+/// # Safety
+///
+/// `str_list` must be a valid BHC char-list ADT node chain.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_string_words(str_list: *mut u8) -> *mut u8 {
     let chars = list_to_vec(str_list);
@@ -168,6 +183,11 @@ pub unsafe extern "C" fn bhc_string_words(str_list: *mut u8) -> *mut u8 {
 /// Join strings with single spaces.
 ///
 /// `unwords ["abc","def"] = "abc def"`
+///
+/// # Safety
+///
+/// `words_list` must be a valid BHC list ADT node chain whose every
+/// element is itself a valid char-list node chain.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_string_unwords(words_list: *mut u8) -> *mut u8 {
     let words = list_to_vec(words_list);
@@ -193,6 +213,10 @@ pub unsafe extern "C" fn bhc_string_unwords(words_list: *mut u8) -> *mut u8 {
 ///
 /// Walks a BHC char list (`[Char]`), collects digits, and parses as i64.
 /// Panics with "Prelude.read: no parse" on invalid input (matches GHC behavior).
+///
+/// # Safety
+///
+/// `str_list` must be a valid BHC char-list ADT node chain.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_read_int(str_list: *mut u8) -> i64 {
     let chars = list_to_vec(str_list);
@@ -215,6 +239,10 @@ pub unsafe extern "C" fn bhc_read_int(str_list: *mut u8) -> i64 {
 /// Walks a BHC char list, tries to parse as i64.
 /// Returns a Maybe ADT: Nothing (tag=0) on failure, Just n (tag=1) on success.
 /// The Int value inside Just is stored as an int-as-pointer (BHC convention).
+///
+/// # Safety
+///
+/// `str_list` must be a valid BHC char-list ADT node chain.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_try_read_int(str_list: *mut u8) -> *mut u8 {
     let chars = list_to_vec(str_list);

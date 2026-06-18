@@ -42,6 +42,12 @@ pub extern "C" fn bhc_map_singleton(key: i64, value: *mut u8) -> *mut u8 {
 }
 
 /// Check if map is empty. Returns 1 if null, 0 otherwise.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_map_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_null(map_ptr: *mut u8) -> i64 {
     if map_ptr.is_null() {
@@ -56,6 +62,12 @@ pub unsafe extern "C" fn bhc_map_null(map_ptr: *mut u8) -> i64 {
 }
 
 /// Get the size of a map.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_map_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_size(map_ptr: *mut u8) -> i64 {
     if map_ptr.is_null() {
@@ -66,6 +78,12 @@ pub unsafe extern "C" fn bhc_map_size(map_ptr: *mut u8) -> i64 {
 }
 
 /// Check if a key is a member of the map. Returns 1 if member, 0 otherwise.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_map_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_member(key: i64, map_ptr: *mut u8) -> i64 {
     if map_ptr.is_null() {
@@ -81,6 +99,14 @@ pub unsafe extern "C" fn bhc_map_member(key: i64, map_ptr: *mut u8) -> i64 {
 
 /// Lookup a key in the map. Returns the value pointer or null if not found.
 /// The caller must wrap in Just/Nothing.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_map_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call. The
+/// returned value pointer is borrowed from the map and is only valid while the
+/// map remains live.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_lookup(key: i64, map_ptr: *mut u8) -> *mut u8 {
     if map_ptr.is_null() {
@@ -94,6 +120,13 @@ pub unsafe extern "C" fn bhc_map_lookup(key: i64, map_ptr: *mut u8) -> *mut u8 {
 }
 
 /// Find with default: return the value for key, or default if not found.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_map_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call. The
+/// `default` pointer is returned unchanged when the key is absent.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_find_with_default(
     default: *mut u8,
@@ -111,6 +144,13 @@ pub unsafe extern "C" fn bhc_map_find_with_default(
 }
 
 /// Insert a key-value pair into the map. Returns a new map (COW).
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_map_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// cloned rather than mutated, so the input map is left intact.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_insert(key: i64, value: *mut u8, map_ptr: *mut u8) -> *mut u8 {
     let mut m = if map_ptr.is_null() {
@@ -123,6 +163,13 @@ pub unsafe extern "C" fn bhc_map_insert(key: i64, value: *mut u8, map_ptr: *mut 
 }
 
 /// Delete a key from the map. Returns a new map (COW).
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_map_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// cloned rather than mutated, so the input map is left intact.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_delete(key: i64, map_ptr: *mut u8) -> *mut u8 {
     if map_ptr.is_null() {
@@ -134,6 +181,13 @@ pub unsafe extern "C" fn bhc_map_delete(key: i64, map_ptr: *mut u8) -> *mut u8 {
 }
 
 /// Union of two maps (left-biased). Returns a new map.
+///
+/// # Safety
+///
+/// `map1` and `map2` must each be either null or point to a live `RtsMap`
+/// previously returned by one of the `bhc_map_*` constructors. Both pointees
+/// must remain valid and not be mutated concurrently for the duration of the
+/// call; they are read/cloned, not mutated.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_union(map1: *mut u8, map2: *mut u8) -> *mut u8 {
     let mut result = if map1.is_null() {
@@ -151,6 +205,13 @@ pub unsafe extern "C" fn bhc_map_union(map1: *mut u8, map2: *mut u8) -> *mut u8 
 }
 
 /// Intersection of two maps (left-biased). Returns a new map.
+///
+/// # Safety
+///
+/// `map1` and `map2` must each be either null or point to a live `RtsMap`
+/// previously returned by one of the `bhc_map_*` constructors. Both pointees
+/// must remain valid and not be mutated concurrently for the duration of the
+/// call; they are read/cloned, not mutated.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_intersection(map1: *mut u8, map2: *mut u8) -> *mut u8 {
     if map1.is_null() || map2.is_null() {
@@ -167,6 +228,13 @@ pub unsafe extern "C" fn bhc_map_intersection(map1: *mut u8, map2: *mut u8) -> *
 }
 
 /// Difference of two maps. Returns a new map with keys in m1 but not m2.
+///
+/// # Safety
+///
+/// `map1` and `map2` must each be either null or point to a live `RtsMap`
+/// previously returned by one of the `bhc_map_*` constructors. Both pointees
+/// must remain valid and not be mutated concurrently for the duration of the
+/// call; they are read/cloned, not mutated.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_difference(map1: *mut u8, map2: *mut u8) -> *mut u8 {
     if map1.is_null() {
@@ -187,6 +255,12 @@ pub unsafe extern "C" fn bhc_map_difference(map1: *mut u8, map2: *mut u8) -> *mu
 
 /// Get the keys of a map as a count + array.
 /// Returns the number of keys. Writes key array to `out_keys` if non-null.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_map_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_keys_count(map_ptr: *mut u8) -> i64 {
     if map_ptr.is_null() {
@@ -197,6 +271,13 @@ pub unsafe extern "C" fn bhc_map_keys_count(map_ptr: *mut u8) -> i64 {
 }
 
 /// Get a key at index from the map (for iteration).
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_map_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
+/// Out-of-range `index` values yield 0 rather than reading out of bounds.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_key_at(map_ptr: *mut u8, index: i64) -> i64 {
     if map_ptr.is_null() {
@@ -207,6 +288,14 @@ pub unsafe extern "C" fn bhc_map_key_at(map_ptr: *mut u8, index: i64) -> i64 {
 }
 
 /// Get a value at index from the map (for iteration).
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_map_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
+/// Out-of-range `index` values yield null. The returned value pointer is
+/// borrowed from the map and is only valid while the map remains live.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_value_at(map_ptr: *mut u8, index: i64) -> *mut u8 {
     if map_ptr.is_null() {
@@ -220,6 +309,13 @@ pub unsafe extern "C" fn bhc_map_value_at(map_ptr: *mut u8, index: i64) -> *mut 
 }
 
 /// Check if map1 is a submap of map2.
+///
+/// # Safety
+///
+/// `map1` and `map2` must each be either null or point to a live `RtsMap`
+/// previously returned by one of the `bhc_map_*` constructors. Both pointees
+/// must remain valid and not be mutated concurrently for the duration of the
+/// call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_map_is_submap_of(map1: *mut u8, map2: *mut u8) -> i64 {
     if map1.is_null() {
@@ -256,6 +352,12 @@ pub extern "C" fn bhc_set_singleton(value: i64) -> *mut u8 {
 }
 
 /// Check if set is empty.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_set_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_null(set_ptr: *mut u8) -> i64 {
     if set_ptr.is_null() {
@@ -270,6 +372,12 @@ pub unsafe extern "C" fn bhc_set_null(set_ptr: *mut u8) -> i64 {
 }
 
 /// Get the size of a set.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_set_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_size(set_ptr: *mut u8) -> i64 {
     if set_ptr.is_null() {
@@ -280,6 +388,12 @@ pub unsafe extern "C" fn bhc_set_size(set_ptr: *mut u8) -> i64 {
 }
 
 /// Check if a value is a member of the set.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_set_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_member(value: i64, set_ptr: *mut u8) -> i64 {
     if set_ptr.is_null() {
@@ -294,6 +408,13 @@ pub unsafe extern "C" fn bhc_set_member(value: i64, set_ptr: *mut u8) -> i64 {
 }
 
 /// Insert a value into the set. Returns a new set (COW).
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_set_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// cloned rather than mutated, so the input set is left intact.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_insert(value: i64, set_ptr: *mut u8) -> *mut u8 {
     let mut s = if set_ptr.is_null() {
@@ -306,6 +427,13 @@ pub unsafe extern "C" fn bhc_set_insert(value: i64, set_ptr: *mut u8) -> *mut u8
 }
 
 /// Delete a value from the set. Returns a new set (COW).
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_set_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// cloned rather than mutated, so the input set is left intact.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_delete(value: i64, set_ptr: *mut u8) -> *mut u8 {
     if set_ptr.is_null() {
@@ -317,6 +445,13 @@ pub unsafe extern "C" fn bhc_set_delete(value: i64, set_ptr: *mut u8) -> *mut u8
 }
 
 /// Union of two sets. Returns a new set.
+///
+/// # Safety
+///
+/// `set1` and `set2` must each be either null or point to a live `RtsSet`
+/// previously returned by one of the `bhc_set_*` constructors. Both pointees
+/// must remain valid and not be mutated concurrently for the duration of the
+/// call; they are read/cloned, not mutated.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_union(set1: *mut u8, set2: *mut u8) -> *mut u8 {
     let s1 = if set1.is_null() {
@@ -335,6 +470,13 @@ pub unsafe extern "C" fn bhc_set_union(set1: *mut u8, set2: *mut u8) -> *mut u8 
 }
 
 /// Intersection of two sets. Returns a new set.
+///
+/// # Safety
+///
+/// `set1` and `set2` must each be either null or point to a live `RtsSet`
+/// previously returned by one of the `bhc_set_*` constructors. Both pointees
+/// must remain valid and not be mutated concurrently for the duration of the
+/// call; they are read/cloned, not mutated.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_intersection(set1: *mut u8, set2: *mut u8) -> *mut u8 {
     if set1.is_null() || set2.is_null() {
@@ -347,6 +489,13 @@ pub unsafe extern "C" fn bhc_set_intersection(set1: *mut u8, set2: *mut u8) -> *
 }
 
 /// Difference of two sets. Returns a new set.
+///
+/// # Safety
+///
+/// `set1` and `set2` must each be either null or point to a live `RtsSet`
+/// previously returned by one of the `bhc_set_*` constructors. Both pointees
+/// must remain valid and not be mutated concurrently for the duration of the
+/// call; they are read/cloned, not mutated.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_difference(set1: *mut u8, set2: *mut u8) -> *mut u8 {
     if set1.is_null() {
@@ -362,6 +511,13 @@ pub unsafe extern "C" fn bhc_set_difference(set1: *mut u8, set2: *mut u8) -> *mu
 }
 
 /// Check if set1 is a subset of set2.
+///
+/// # Safety
+///
+/// `set1` and `set2` must each be either null or point to a live `RtsSet`
+/// previously returned by one of the `bhc_set_*` constructors. Both pointees
+/// must remain valid and not be mutated concurrently for the duration of the
+/// call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_is_subset_of(set1: *mut u8, set2: *mut u8) -> i64 {
     if set1.is_null() {
@@ -380,6 +536,13 @@ pub unsafe extern "C" fn bhc_set_is_subset_of(set1: *mut u8, set2: *mut u8) -> i
 }
 
 /// Check if set1 is a proper subset of set2.
+///
+/// # Safety
+///
+/// `set1` and `set2` must each be either null or point to a live `RtsSet`
+/// previously returned by one of the `bhc_set_*` constructors. Both pointees
+/// must remain valid and not be mutated concurrently for the duration of the
+/// call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_is_proper_subset_of(set1: *mut u8, set2: *mut u8) -> i64 {
     if set1.is_null() {
@@ -398,6 +561,12 @@ pub unsafe extern "C" fn bhc_set_is_proper_subset_of(set1: *mut u8, set2: *mut u
 }
 
 /// Get count of elements in set (for iteration).
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_set_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_elem_count(set_ptr: *mut u8) -> i64 {
     if set_ptr.is_null() {
@@ -408,6 +577,13 @@ pub unsafe extern "C" fn bhc_set_elem_count(set_ptr: *mut u8) -> i64 {
 }
 
 /// Get element at index from the set (for iteration).
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_set_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
+/// Out-of-range `index` values yield 0 rather than reading out of bounds.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_elem_at(set_ptr: *mut u8, index: i64) -> i64 {
     if set_ptr.is_null() {
@@ -418,6 +594,12 @@ pub unsafe extern "C" fn bhc_set_elem_at(set_ptr: *mut u8, index: i64) -> i64 {
 }
 
 /// Find the minimum element of a set. Returns 0 if empty.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_set_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_find_min(set_ptr: *mut u8) -> i64 {
     if set_ptr.is_null() {
@@ -428,6 +610,12 @@ pub unsafe extern "C" fn bhc_set_find_min(set_ptr: *mut u8) -> i64 {
 }
 
 /// Find the maximum element of a set. Returns 0 if empty.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_set_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_find_max(set_ptr: *mut u8) -> i64 {
     if set_ptr.is_null() {
@@ -438,6 +626,13 @@ pub unsafe extern "C" fn bhc_set_find_max(set_ptr: *mut u8) -> i64 {
 }
 
 /// Delete the minimum element. Returns a new set.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_set_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// cloned rather than mutated, so the input set is left intact.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_delete_min(set_ptr: *mut u8) -> *mut u8 {
     if set_ptr.is_null() {
@@ -451,6 +646,13 @@ pub unsafe extern "C" fn bhc_set_delete_min(set_ptr: *mut u8) -> *mut u8 {
 }
 
 /// Delete the maximum element. Returns a new set.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_set_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// cloned rather than mutated, so the input set is left intact.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_set_delete_max(set_ptr: *mut u8) -> *mut u8 {
     if set_ptr.is_null() {
@@ -480,30 +682,62 @@ pub extern "C" fn bhc_intmap_singleton(key: i64, value: *mut u8) -> *mut u8 {
 }
 
 /// Check if IntMap is empty.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_intmap_*`/`bhc_map_*` constructors and must
+/// remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intmap_null(map_ptr: *mut u8) -> i64 {
     bhc_map_null(map_ptr)
 }
 
 /// Get IntMap size.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_intmap_*`/`bhc_map_*` constructors and must
+/// remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intmap_size(map_ptr: *mut u8) -> i64 {
     bhc_map_size(map_ptr)
 }
 
 /// Check IntMap membership.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_intmap_*`/`bhc_map_*` constructors and must
+/// remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intmap_member(key: i64, map_ptr: *mut u8) -> i64 {
     bhc_map_member(key, map_ptr)
 }
 
 /// IntMap lookup.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_intmap_*`/`bhc_map_*` constructors and must
+/// remain valid for the duration of the call. The returned value pointer is
+/// borrowed from the map and is only valid while the map remains live.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intmap_lookup(key: i64, map_ptr: *mut u8) -> *mut u8 {
     bhc_map_lookup(key, map_ptr)
 }
 
 /// IntMap findWithDefault.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_intmap_*`/`bhc_map_*` constructors and must
+/// remain valid for the duration of the call. The `default` pointer is
+/// returned unchanged when the key is absent.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intmap_find_with_default(
     default: *mut u8,
@@ -514,48 +748,99 @@ pub unsafe extern "C" fn bhc_intmap_find_with_default(
 }
 
 /// IntMap insert.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_intmap_*`/`bhc_map_*` constructors and must
+/// remain valid for the duration of the call. The input map is cloned, not
+/// mutated.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intmap_insert(key: i64, value: *mut u8, map_ptr: *mut u8) -> *mut u8 {
     bhc_map_insert(key, value, map_ptr)
 }
 
 /// IntMap delete.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_intmap_*`/`bhc_map_*` constructors and must
+/// remain valid for the duration of the call. The input map is cloned, not
+/// mutated.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intmap_delete(key: i64, map_ptr: *mut u8) -> *mut u8 {
     bhc_map_delete(key, map_ptr)
 }
 
 /// IntMap union.
+///
+/// # Safety
+///
+/// `map1` and `map2` must each be either null or point to a live `RtsMap`
+/// previously returned by one of the `bhc_intmap_*`/`bhc_map_*` constructors
+/// and must remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intmap_union(map1: *mut u8, map2: *mut u8) -> *mut u8 {
     bhc_map_union(map1, map2)
 }
 
 /// IntMap intersection.
+///
+/// # Safety
+///
+/// `map1` and `map2` must each be either null or point to a live `RtsMap`
+/// previously returned by one of the `bhc_intmap_*`/`bhc_map_*` constructors
+/// and must remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intmap_intersection(map1: *mut u8, map2: *mut u8) -> *mut u8 {
     bhc_map_intersection(map1, map2)
 }
 
 /// IntMap difference.
+///
+/// # Safety
+///
+/// `map1` and `map2` must each be either null or point to a live `RtsMap`
+/// previously returned by one of the `bhc_intmap_*`/`bhc_map_*` constructors
+/// and must remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intmap_difference(map1: *mut u8, map2: *mut u8) -> *mut u8 {
     bhc_map_difference(map1, map2)
 }
 
 /// IntMap keys count.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_intmap_*`/`bhc_map_*` constructors and must
+/// remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intmap_keys_count(map_ptr: *mut u8) -> i64 {
     bhc_map_keys_count(map_ptr)
 }
 
 /// IntMap key at index.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_intmap_*`/`bhc_map_*` constructors and must
+/// remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intmap_key_at(map_ptr: *mut u8, index: i64) -> i64 {
     bhc_map_key_at(map_ptr, index)
 }
 
 /// IntMap value at index.
+///
+/// # Safety
+///
+/// `map_ptr` must either be null or point to a live `RtsMap` previously
+/// returned by one of the `bhc_intmap_*`/`bhc_map_*` constructors and must
+/// remain valid for the duration of the call. The returned value pointer is
+/// borrowed from the map and is only valid while the map remains live.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intmap_value_at(map_ptr: *mut u8, index: i64) -> *mut u8 {
     bhc_map_value_at(map_ptr, index)
@@ -578,66 +863,134 @@ pub extern "C" fn bhc_intset_singleton(value: i64) -> *mut u8 {
 }
 
 /// Check if IntSet is empty.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_intset_*`/`bhc_set_*` constructors and must
+/// remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intset_null(set_ptr: *mut u8) -> i64 {
     bhc_set_null(set_ptr)
 }
 
 /// Get IntSet size.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_intset_*`/`bhc_set_*` constructors and must
+/// remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intset_size(set_ptr: *mut u8) -> i64 {
     bhc_set_size(set_ptr)
 }
 
 /// Check IntSet membership.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_intset_*`/`bhc_set_*` constructors and must
+/// remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intset_member(value: i64, set_ptr: *mut u8) -> i64 {
     bhc_set_member(value, set_ptr)
 }
 
 /// IntSet insert.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_intset_*`/`bhc_set_*` constructors and must
+/// remain valid for the duration of the call. The input set is cloned, not
+/// mutated.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intset_insert(value: i64, set_ptr: *mut u8) -> *mut u8 {
     bhc_set_insert(value, set_ptr)
 }
 
 /// IntSet delete.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_intset_*`/`bhc_set_*` constructors and must
+/// remain valid for the duration of the call. The input set is cloned, not
+/// mutated.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intset_delete(value: i64, set_ptr: *mut u8) -> *mut u8 {
     bhc_set_delete(value, set_ptr)
 }
 
 /// IntSet union.
+///
+/// # Safety
+///
+/// `set1` and `set2` must each be either null or point to a live `RtsSet`
+/// previously returned by one of the `bhc_intset_*`/`bhc_set_*` constructors
+/// and must remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intset_union(set1: *mut u8, set2: *mut u8) -> *mut u8 {
     bhc_set_union(set1, set2)
 }
 
 /// IntSet intersection.
+///
+/// # Safety
+///
+/// `set1` and `set2` must each be either null or point to a live `RtsSet`
+/// previously returned by one of the `bhc_intset_*`/`bhc_set_*` constructors
+/// and must remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intset_intersection(set1: *mut u8, set2: *mut u8) -> *mut u8 {
     bhc_set_intersection(set1, set2)
 }
 
 /// IntSet difference.
+///
+/// # Safety
+///
+/// `set1` and `set2` must each be either null or point to a live `RtsSet`
+/// previously returned by one of the `bhc_intset_*`/`bhc_set_*` constructors
+/// and must remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intset_difference(set1: *mut u8, set2: *mut u8) -> *mut u8 {
     bhc_set_difference(set1, set2)
 }
 
 /// IntSet isSubsetOf.
+///
+/// # Safety
+///
+/// `set1` and `set2` must each be either null or point to a live `RtsSet`
+/// previously returned by one of the `bhc_intset_*`/`bhc_set_*` constructors
+/// and must remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intset_is_subset_of(set1: *mut u8, set2: *mut u8) -> i64 {
     bhc_set_is_subset_of(set1, set2)
 }
 
 /// IntSet element count.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_intset_*`/`bhc_set_*` constructors and must
+/// remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intset_elem_count(set_ptr: *mut u8) -> i64 {
     bhc_set_elem_count(set_ptr)
 }
 
 /// IntSet element at index.
+///
+/// # Safety
+///
+/// `set_ptr` must either be null or point to a live `RtsSet` previously
+/// returned by one of the `bhc_intset_*`/`bhc_set_*` constructors and must
+/// remain valid for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_intset_elem_at(set_ptr: *mut u8, index: i64) -> i64 {
     bhc_set_elem_at(set_ptr, index)
@@ -663,6 +1016,12 @@ pub extern "C" fn bhc_seq_singleton(elem: *mut u8) -> *mut u8 {
 }
 
 /// Check if sequence is empty. Returns 1 if empty, 0 otherwise.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_null(seq_ptr: *mut u8) -> i64 {
     if seq_ptr.is_null() {
@@ -677,6 +1036,12 @@ pub unsafe extern "C" fn bhc_seq_null(seq_ptr: *mut u8) -> i64 {
 }
 
 /// Get the length of a sequence.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_length(seq_ptr: *mut u8) -> i64 {
     if seq_ptr.is_null() {
@@ -687,6 +1052,15 @@ pub unsafe extern "C" fn bhc_seq_length(seq_ptr: *mut u8) -> i64 {
 }
 
 /// Index into a sequence. Panics on out-of-bounds.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call.
+/// Out-of-range `idx` values yield null rather than reading out of bounds. The
+/// returned element pointer is borrowed from the sequence and is only valid
+/// while the sequence remains live.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_index(seq_ptr: *mut u8, idx: i64) -> *mut u8 {
     if seq_ptr.is_null() {
@@ -702,6 +1076,14 @@ pub unsafe extern "C" fn bhc_seq_index(seq_ptr: *mut u8, idx: i64) -> *mut u8 {
 }
 
 /// Lookup by index, returning null if out-of-bounds (for Maybe wrapping).
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call. The
+/// returned element pointer is borrowed from the sequence and is only valid
+/// while the sequence remains live.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_lookup(idx: i64, seq_ptr: *mut u8) -> *mut u8 {
     if seq_ptr.is_null() {
@@ -717,6 +1099,13 @@ pub unsafe extern "C" fn bhc_seq_lookup(idx: i64, seq_ptr: *mut u8) -> *mut u8 {
 }
 
 /// Prepend an element (`<|`). Returns a new sequence.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// cloned rather than mutated, so the input sequence is left intact.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_cons(elem: *mut u8, seq_ptr: *mut u8) -> *mut u8 {
     let mut v = if seq_ptr.is_null() {
@@ -729,6 +1118,13 @@ pub unsafe extern "C" fn bhc_seq_cons(elem: *mut u8, seq_ptr: *mut u8) -> *mut u
 }
 
 /// Append an element (`|>`). Returns a new sequence.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// cloned rather than mutated, so the input sequence is left intact.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_snoc(seq_ptr: *mut u8, elem: *mut u8) -> *mut u8 {
     let mut v = if seq_ptr.is_null() {
@@ -741,6 +1137,13 @@ pub unsafe extern "C" fn bhc_seq_snoc(seq_ptr: *mut u8, elem: *mut u8) -> *mut u
 }
 
 /// Concatenate two sequences (`><`). Returns a new sequence.
+///
+/// # Safety
+///
+/// `seq1` and `seq2` must each be either null or point to a live `RtsSeq`
+/// previously returned by one of the `bhc_seq_*` constructors. Both pointees
+/// must remain valid and not be mutated concurrently for the duration of the
+/// call; they are read/cloned, not mutated.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_append(seq1: *mut u8, seq2: *mut u8) -> *mut u8 {
     let mut v1 = if seq1.is_null() {
@@ -756,6 +1159,13 @@ pub unsafe extern "C" fn bhc_seq_append(seq1: *mut u8, seq2: *mut u8) -> *mut u8
 }
 
 /// Take first n elements. Returns a new sequence.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// cloned rather than mutated, so the input sequence is left intact.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_take(n: i64, seq_ptr: *mut u8) -> *mut u8 {
     if seq_ptr.is_null() {
@@ -767,6 +1177,13 @@ pub unsafe extern "C" fn bhc_seq_take(n: i64, seq_ptr: *mut u8) -> *mut u8 {
 }
 
 /// Drop first n elements. Returns a new sequence.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// cloned rather than mutated, so the input sequence is left intact.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_drop(n: i64, seq_ptr: *mut u8) -> *mut u8 {
     if seq_ptr.is_null() {
@@ -778,6 +1195,13 @@ pub unsafe extern "C" fn bhc_seq_drop(n: i64, seq_ptr: *mut u8) -> *mut u8 {
 }
 
 /// Reverse a sequence. Returns a new sequence.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// cloned rather than mutated, so the input sequence is left intact.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_reverse(seq_ptr: *mut u8) -> *mut u8 {
     if seq_ptr.is_null() {
@@ -790,6 +1214,14 @@ pub unsafe extern "C" fn bhc_seq_reverse(seq_ptr: *mut u8) -> *mut u8 {
 }
 
 /// Update element at index. Returns a new sequence.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// cloned rather than mutated, so the input sequence is left intact.
+/// Out-of-range `idx` values leave the cloned sequence unchanged.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_update(idx: i64, elem: *mut u8, seq_ptr: *mut u8) -> *mut u8 {
     if seq_ptr.is_null() {
@@ -805,6 +1237,14 @@ pub unsafe extern "C" fn bhc_seq_update(idx: i64, elem: *mut u8, seq_ptr: *mut u
 }
 
 /// Insert element at index. Returns a new sequence.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// cloned rather than mutated, so the input sequence is left intact. The
+/// insertion index is clamped to the sequence length.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_insert_at(idx: i64, elem: *mut u8, seq_ptr: *mut u8) -> *mut u8 {
     let mut v = if seq_ptr.is_null() {
@@ -818,6 +1258,14 @@ pub unsafe extern "C" fn bhc_seq_insert_at(idx: i64, elem: *mut u8, seq_ptr: *mu
 }
 
 /// Delete element at index. Returns a new sequence.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// cloned rather than mutated, so the input sequence is left intact.
+/// Out-of-range `idx` values leave the cloned sequence unchanged.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_delete_at(idx: i64, seq_ptr: *mut u8) -> *mut u8 {
     if seq_ptr.is_null() {
@@ -833,12 +1281,25 @@ pub unsafe extern "C" fn bhc_seq_delete_at(idx: i64, seq_ptr: *mut u8) -> *mut u
 }
 
 /// Get element count (for toList iteration). Same as length.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors and must remain valid for
+/// the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_elem_count(seq_ptr: *mut u8) -> i64 {
     bhc_seq_length(seq_ptr)
 }
 
 /// Get element at index (for toList iteration). Same as index.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors and must remain valid for
+/// the duration of the call. The returned element pointer is borrowed from the
+/// sequence and is only valid while the sequence remains live.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_elem_at(seq_ptr: *mut u8, idx: i64) -> *mut u8 {
     bhc_seq_index(seq_ptr, idx)
@@ -852,6 +1313,12 @@ pub extern "C" fn bhc_seq_replicate(n: i64, elem: *mut u8) -> *mut u8 {
 }
 
 /// ViewL tag: 0 if empty, 1 if non-empty.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors and must remain valid for
+/// the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewl_tag(seq_ptr: *mut u8) -> i64 {
     if seq_ptr.is_null() {
@@ -866,6 +1333,14 @@ pub unsafe extern "C" fn bhc_seq_viewl_tag(seq_ptr: *mut u8) -> i64 {
 }
 
 /// ViewL head: first element (undefined if empty).
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors and must remain valid for
+/// the duration of the call. Returns null for null/empty inputs. The returned
+/// element pointer is borrowed from the sequence and is only valid while the
+/// sequence remains live.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewl_head(seq_ptr: *mut u8) -> *mut u8 {
     if seq_ptr.is_null() {
@@ -880,6 +1355,13 @@ pub unsafe extern "C" fn bhc_seq_viewl_head(seq_ptr: *mut u8) -> *mut u8 {
 }
 
 /// ViewL tail: all elements after first. Returns a new sequence.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// read/cloned, not mutated.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewl_tail(seq_ptr: *mut u8) -> *mut u8 {
     if seq_ptr.is_null() {
@@ -893,6 +1375,12 @@ pub unsafe extern "C" fn bhc_seq_viewl_tail(seq_ptr: *mut u8) -> *mut u8 {
 }
 
 /// ViewR tag: 0 if empty, 1 if non-empty.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors and must remain valid for
+/// the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewr_tag(seq_ptr: *mut u8) -> i64 {
     if seq_ptr.is_null() {
@@ -907,6 +1395,14 @@ pub unsafe extern "C" fn bhc_seq_viewr_tag(seq_ptr: *mut u8) -> i64 {
 }
 
 /// ViewR last: last element (undefined if empty).
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors and must remain valid for
+/// the duration of the call. Returns null for null/empty inputs. The returned
+/// element pointer is borrowed from the sequence and is only valid while the
+/// sequence remains live.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewr_last(seq_ptr: *mut u8) -> *mut u8 {
     if seq_ptr.is_null() {
@@ -921,6 +1417,13 @@ pub unsafe extern "C" fn bhc_seq_viewr_last(seq_ptr: *mut u8) -> *mut u8 {
 }
 
 /// ViewR init: all elements except last. Returns a new sequence.
+///
+/// # Safety
+///
+/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
+/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
+/// valid and not be mutated concurrently for the duration of the call; it is
+/// read/cloned, not mutated.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewr_init(seq_ptr: *mut u8) -> *mut u8 {
     if seq_ptr.is_null() {

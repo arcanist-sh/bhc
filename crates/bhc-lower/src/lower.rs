@@ -4778,55 +4778,6 @@ fn register_standard_module_exports(
             "lookAhead",
         ],
         // =====================================================================
-        // Data.Attoparsec stubs
-        // =====================================================================
-        "Data.Attoparsec.ByteString" | "Data.Attoparsec.ByteString.Char8" => &[
-            "Parser",
-            "Result",
-            "IResult",
-            "parse",
-            "parseOnly",
-            "feed",
-            "Done",
-            "Fail",
-            "Partial",
-            "string",
-            "char",
-            "anyChar",
-            "notChar",
-            "satisfy",
-            "digit",
-            "letter_ascii",
-            "takeWhile",
-            "takeWhile1",
-            "takeTill",
-            "take",
-            "takeByteString",
-            "takeLazyByteString",
-            "skipWhile",
-            "skipSpace",
-            "choice",
-            "count",
-            "option",
-            "many1",
-            "manyTill",
-            "sepBy",
-            "sepBy1",
-            "endOfInput",
-            "atEnd",
-            "decimal",
-            "hexadecimal",
-            "signed",
-            "double",
-            "rational",
-            "isDigit",
-            "isAlpha_ascii",
-            "isSpace",
-            "endOfLine",
-            "inClass",
-            "notInClass",
-        ],
-        // =====================================================================
         // Data.CaseInsensitive
         // =====================================================================
         "Data.CaseInsensitive" => &[
@@ -5798,6 +5749,8 @@ fn pat_to_expr(pat: &ast::Pat, span: Span) -> ast::Expr {
 }
 
 /// Recursively substitute variables in a pattern.
+// `span` is threaded through for spans on rebuilt patterns (WIP: not all arms use it yet).
+#[allow(clippy::only_used_in_recursion)]
 fn subst_pat(pat: &ast::Pat, subst: &FxHashMap<Symbol, &ast::Pat>, span: Span) -> ast::Pat {
     match pat {
         ast::Pat::Var(ident, _) => {
@@ -7623,6 +7576,8 @@ fn lower_type_to_scheme(ctx: &mut LowerContext, ty: &ast::Type) -> bhc_types::Sc
     }
 }
 
+// `ctx` is threaded through for resolving named types (WIP: most arms are structural for now).
+#[allow(clippy::only_used_in_recursion)]
 pub(crate) fn lower_type(ctx: &mut LowerContext, ty: &ast::Type) -> bhc_types::Ty {
     match ty {
         ast::Type::Var(tyvar, _) => {
@@ -7925,13 +7880,10 @@ fn infer_param_arity(param_name: Symbol, tys: &[&ast::Type]) -> usize {
 /// Recursively find the maximum arity for a type parameter in a type expression.
 fn infer_param_arity_in_type(param_name: Symbol, ty: &ast::Type) -> usize {
     match ty {
-        ast::Type::Var(v, _) => {
-            // A bare type variable has arity 0 (it appears as itself)
-            if v.name.name == param_name {
-                0
-            } else {
-                0
-            }
+        ast::Type::Var(_, _) => {
+            // A bare type variable has arity 0 (it appears as itself), whether or
+            // not it is the parameter we are looking for.
+            0
         }
         ast::Type::App(f, a, _) => {
             // Check if this application chain has our parameter at the base

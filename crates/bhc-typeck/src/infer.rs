@@ -623,6 +623,7 @@ fn extract_type_head(ty: &Ty) -> Ty {
 /// Extract the result type from a constructor type.
 ///
 /// Given `a -> b -> T a b`, returns `T a b`.
+#[allow(dead_code)] // helper for upcoming constructor-result inference
 fn extract_result_type(ty: &Ty) -> Ty {
     match ty {
         Ty::Fun(_, result) => extract_result_type(result),

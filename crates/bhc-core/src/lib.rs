@@ -58,7 +58,6 @@
 //! - H26-SPEC Section 5: Core IR Specification
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
 
 pub mod demand;
 pub mod escape;

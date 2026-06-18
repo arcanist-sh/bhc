@@ -895,31 +895,31 @@ fn preprocess_cpp(source: &str) -> String {
         if trimmed.starts_with('#') {
             let directive = trimmed.trim_start_matches('#').trim();
 
-            if directive.starts_with("ifdef ") {
-                let macro_name = directive["ifdef ".len()..].trim();
+            if let Some(rest) = directive.strip_prefix("ifdef ") {
+                let macro_name = rest.trim();
                 let macro_name = strip_cpp_line_comment(macro_name);
                 let defined = defines.contains(macro_name);
                 let parent_active = is_active(&condition_stack);
                 let active = parent_active && defined;
                 condition_stack.push((active, active));
                 output.push('\n');
-            } else if directive.starts_with("ifndef ") {
-                let macro_name = directive["ifndef ".len()..].trim();
+            } else if let Some(rest) = directive.strip_prefix("ifndef ") {
+                let macro_name = rest.trim();
                 let macro_name = strip_cpp_line_comment(macro_name);
                 let defined = defines.contains(macro_name);
                 let parent_active = is_active(&condition_stack);
                 let active = parent_active && !defined;
                 condition_stack.push((active, active));
                 output.push('\n');
-            } else if directive.starts_with("if ") {
+            } else if let Some(rest) = directive.strip_prefix("if ") {
                 // Simplified: treat #if as false unless it references a defined macro
-                let expr = directive["if ".len()..].trim();
+                let expr = rest.trim();
                 let parent_active = is_active(&condition_stack);
                 let value = eval_simple_cpp_expr(expr, &defines);
                 let active = parent_active && value;
                 condition_stack.push((active, active));
                 output.push('\n');
-            } else if directive.starts_with("elif ") {
+            } else if let Some(elif_rest) = directive.strip_prefix("elif ") {
                 let parent_active = if condition_stack.len() > 1 {
                     condition_stack[..condition_stack.len() - 1]
                         .iter()
@@ -932,7 +932,7 @@ fn preprocess_cpp(source: &str) -> String {
                         // Already found a true branch, skip this
                         last.0 = false;
                     } else {
-                        let expr = directive["elif ".len()..].trim();
+                        let expr = elif_rest.trim();
                         let value = eval_simple_cpp_expr(expr, &defines);
                         let active = parent_active && value;
                         last.0 = active;

@@ -40,6 +40,8 @@ pub fn resolve_var(ctx: &mut LowerContext, name: Symbol, span: Span) -> Option<D
 /// Resolve a type reference.
 ///
 /// If the resolved definition is a stub, emits a warning.
+// Not yet wired into the lowering pass (WIP type-name resolution).
+#[allow(dead_code)]
 pub fn resolve_type(ctx: &mut LowerContext, name: Symbol, span: Span) -> Option<DefId> {
     if let Some(def_id) = ctx.lookup_type(name) {
         // Warn if this is a stub (external package placeholder)
@@ -464,12 +466,16 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
 }
 
 /// Collect type variables from a type, binding them in the current scope.
+// Not yet wired into the lowering pass (WIP type-variable binding).
+#[allow(dead_code)]
 pub fn bind_type_vars(ctx: &mut LowerContext, ty: &ast::Type) -> Vec<(Symbol, DefId)> {
     let mut bindings = Vec::new();
     collect_type_vars(ctx, ty, &mut bindings);
     bindings
 }
 
+// Helper for the WIP `bind_type_vars`; unused until that pass is wired in.
+#[allow(dead_code)]
 fn collect_type_vars(ctx: &mut LowerContext, ty: &ast::Type, bindings: &mut Vec<(Symbol, DefId)>) {
     match ty {
         ast::Type::Var(tyvar, span) => {

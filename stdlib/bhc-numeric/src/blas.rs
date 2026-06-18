@@ -17,8 +17,11 @@ use crate::blas_accelerate::AccelerateProvider;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transpose {
+    /// No transpose: op(A) = A.
     NoTrans = 111,
+    /// Transpose: op(A) = A^T.
     Trans = 112,
+    /// Conjugate transpose: op(A) = A^H.
     ConjTrans = 113,
 }
 
@@ -26,7 +29,9 @@ pub enum Transpose {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
+    /// Row-major storage (C order): rows are contiguous in memory.
     RowMajor = 101,
+    /// Column-major storage (Fortran order): columns are contiguous in memory.
     ColMajor = 102,
 }
 
@@ -36,6 +41,8 @@ pub trait BlasProviderF64: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// Matrix-matrix multiply: C = alpha * op(A) * op(B) + beta * C
+    // Argument count is fixed by the BLAS GEMM API.
+    #[allow(clippy::too_many_arguments)]
     fn dgemm(
         &self,
         layout: Layout,
@@ -55,6 +62,8 @@ pub trait BlasProviderF64: Send + Sync {
     );
 
     /// Matrix-vector multiply: y = alpha * op(A) * x + beta * y
+    // Argument count is fixed by the BLAS GEMV API.
+    #[allow(clippy::too_many_arguments)]
     fn dgemv(
         &self,
         layout: Layout,
@@ -99,6 +108,8 @@ pub trait BlasProviderF32: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// Matrix-matrix multiply
+    // Argument count is fixed by the BLAS GEMM API.
+    #[allow(clippy::too_many_arguments)]
     fn sgemm(
         &self,
         layout: Layout,
@@ -118,6 +129,8 @@ pub trait BlasProviderF32: Send + Sync {
     );
 
     /// Matrix-vector multiply
+    // Argument count is fixed by the BLAS GEMV API.
+    #[allow(clippy::too_many_arguments)]
     fn sgemv(
         &self,
         layout: Layout,

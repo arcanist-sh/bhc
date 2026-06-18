@@ -907,7 +907,7 @@ mod tests {
 
         // Pattern: a, Concrete: Int, should bind a -> Int
         let pattern = Ty::Var(a_var.clone());
-        let result = env.match_types(&pattern, &int_ty, &[a_var.clone()]);
+        let result = env.match_types(&pattern, &int_ty, std::slice::from_ref(&a_var));
 
         assert!(result.is_some());
         let subst = result.unwrap();
@@ -945,7 +945,7 @@ mod tests {
         let int_ty = Ty::Con(TyCon::new(int_sym, Kind::Star));
         let concrete = Ty::App(Box::new(list_con), Box::new(int_ty.clone()));
 
-        let result = env.match_types(&pattern, &concrete, &[a_var.clone()]);
+        let result = env.match_types(&pattern, &concrete, std::slice::from_ref(&a_var));
         assert!(result.is_some());
         let subst = result.unwrap();
         assert_eq!(subst.apply(&Ty::Var(a_var)), int_ty);
@@ -997,7 +997,7 @@ mod tests {
             .push(instance_info);
 
         // Now reduce: Unwrap Int -> Int (using the default)
-        let result = env.reduce_type_family(unwrap, &[int_ty.clone()]);
+        let result = env.reduce_type_family(unwrap, std::slice::from_ref(&int_ty));
         assert!(result.is_some());
         // The default is `w`, which gets substituted with `Int`
         let reduced = result.unwrap();
@@ -1120,7 +1120,7 @@ mod tests {
         let int_ty = Ty::Con(TyCon::new(int_tycon, Kind::Star));
         let list_int = Ty::App(Box::new(list_con), Box::new(int_ty));
 
-        let result = env.reduce_type_family(element, &[list_int.clone()]);
+        let result = env.reduce_type_family(element, std::slice::from_ref(&list_int));
         assert!(result.is_some());
         // The default is `c`, which gets substituted with `[Int]`
         let reduced = result.unwrap();
@@ -1162,11 +1162,11 @@ mod tests {
         env.register_type_family(info);
 
         // F Int should reduce to Bool
-        let result = env.reduce_type_family(f, &[int_ty.clone()]);
+        let result = env.reduce_type_family(f, std::slice::from_ref(&int_ty));
         assert_eq!(result, Some(bool_ty.clone()));
 
         // F Bool should reduce to () via catch-all
-        let result = env.reduce_type_family(f, &[bool_ty.clone()]);
+        let result = env.reduce_type_family(f, std::slice::from_ref(&bool_ty));
         assert_eq!(result, Some(unit_ty.clone()));
     }
 
@@ -1227,7 +1227,7 @@ mod tests {
         env.register_type_family(info);
 
         // No instances yet — should return None
-        assert!(env.reduce_type_family(f, &[int_ty.clone()]).is_none());
+        assert!(env.reduce_type_family(f, std::slice::from_ref(&int_ty)).is_none());
 
         // Register instance: type instance Size Int = Int
         env.register_type_family_instance(
@@ -1239,7 +1239,7 @@ mod tests {
         );
 
         // Now should reduce
-        let result = env.reduce_type_family(f, &[int_ty.clone()]);
+        let result = env.reduce_type_family(f, std::slice::from_ref(&int_ty));
         assert_eq!(result, Some(int_ty));
     }
 
@@ -1270,7 +1270,7 @@ mod tests {
 
         // Standalone should reduce
         assert_eq!(
-            env.reduce_type_family(standalone, &[int_ty.clone()]),
+            env.reduce_type_family(standalone, std::slice::from_ref(&int_ty)),
             Some(bool_ty)
         );
 

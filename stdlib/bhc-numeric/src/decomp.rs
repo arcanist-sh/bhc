@@ -43,14 +43,29 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecompError {
     /// Matrix is singular (has zero or near-zero pivot).
-    Singular { pivot_index: usize, value: f64 },
+    Singular {
+        /// Index of the pivot at which singularity was detected.
+        pivot_index: usize,
+        /// The (near-zero) pivot value found.
+        value: f64,
+    },
     /// Matrix is not square when a square matrix is required.
-    NotSquare { rows: usize, cols: usize },
+    NotSquare {
+        /// Number of rows.
+        rows: usize,
+        /// Number of columns.
+        cols: usize,
+    },
     /// Matrix is not symmetric positive definite (for Cholesky).
-    NotPositiveDefinite { index: usize },
+    NotPositiveDefinite {
+        /// Index of the diagonal entry where positive-definiteness failed.
+        index: usize,
+    },
     /// Dimensions are incompatible.
     DimensionMismatch {
+        /// Expected (rows, cols).
         expected: (usize, usize),
+        /// Actual (rows, cols) received.
         got: (usize, usize),
     },
 }
@@ -319,6 +334,9 @@ impl QrResult {
     ///
     /// For overdetermined systems (m > n), this gives the least squares solution.
     /// For square systems, this gives the exact solution.
+    // Index-based loops mirror the standard matrix algebra notation and index
+    // into 2D matrices alongside the vectors.
+    #[allow(clippy::needless_range_loop)]
     pub fn solve(&self, b: &[f64]) -> Vec<f64> {
         let m = self.q.rows();
         let n = self.r.cols();
@@ -656,6 +674,9 @@ impl SvdResult {
     /// Compute the pseudoinverse A^+ using SVD.
     ///
     /// A^+ = V * Σ^+ * U^T where Σ^+ inverts non-zero singular values.
+    // Index-based loops mirror the standard matrix algebra notation and index
+    // into 2D matrices alongside the vectors.
+    #[allow(clippy::needless_range_loop)]
     pub fn pseudoinverse(&self) -> Matrix<f64> {
         let m = self.u.rows();
         let n = self.v.rows();
@@ -689,6 +710,9 @@ impl SvdResult {
     /// Solve the least squares problem min ||Ax - b||_2 using SVD.
     ///
     /// More numerically stable than QR for ill-conditioned matrices.
+    // Index-based loops mirror the standard matrix algebra notation and index
+    // into 2D matrices alongside the vectors.
+    #[allow(clippy::needless_range_loop)]
     pub fn solve(&self, b: &[f64]) -> Vec<f64> {
         let m = self.u.rows();
         let n = self.v.rows();
@@ -1079,6 +1103,9 @@ fn chase_zero_row(
 }
 
 /// Perform one implicit QR step on the bidiagonal matrix.
+// The bidiagonal QR sweep operates over several arrays and matrices plus the
+// active subproblem bounds, so the argument count is inherent to the algorithm.
+#[allow(clippy::too_many_arguments)]
 fn implicit_qr_step(
     d: &mut [f64],
     e: &mut [f64],

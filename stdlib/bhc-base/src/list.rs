@@ -123,6 +123,12 @@ unsafe fn vec_to_list(slice: &[*mut u8]) -> *mut u8 {
 /// Sort a linked list by comparing elements as `i64` (pointer cast).
 ///
 /// Converts to `Vec`, sorts, and rebuilds a new list.
+///
+/// # Safety
+///
+/// `list` must be a valid pointer to a BHC list ADT node (Nil tag=0 or
+/// Cons tag=1 with head at offset 8 and tail at offset 16), and every
+/// tail in the chain must likewise be a valid list node.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_sort(list: *mut u8) -> *mut u8 {
     let mut vec = list_to_vec(list);
@@ -137,6 +143,13 @@ pub unsafe extern "C" fn bhc_list_sort(list: *mut u8) -> *mut u8 {
 /// `extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8`.
 /// The return value encodes Ordering as LT=-1, EQ=0, GT=1 cast to
 /// `*mut u8`.
+///
+/// # Safety
+///
+/// `list` must be a valid BHC list ADT node chain. `cmp_fn` must be a
+/// valid pointer to a BHC closure whose first field (offset 0) is a code
+/// pointer of type `extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8`
+/// that returns a value usable as an `i64` ordering.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_sort_by(cmp_fn: *mut u8, list: *mut u8) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
@@ -157,6 +170,10 @@ pub unsafe extern "C" fn bhc_list_sort_by(cmp_fn: *mut u8, list: *mut u8) -> *mu
 /// Remove duplicate elements from a list (by `i64` value comparison).
 ///
 /// Preserves the order of first occurrences.
+///
+/// # Safety
+///
+/// `list` must be a valid BHC list ADT node chain.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_nub(list: *mut u8) -> *mut u8 {
     let vec = list_to_vec(list);
@@ -168,6 +185,10 @@ pub unsafe extern "C" fn bhc_list_nub(list: *mut u8) -> *mut u8 {
 /// Group consecutive equal elements into sublists.
 ///
 /// `group [1,1,2,2,2,3] = [[1,1],[2,2,2],[3]]`
+///
+/// # Safety
+///
+/// `list` must be a valid BHC list ADT node chain.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_group(list: *mut u8) -> *mut u8 {
     let vec = list_to_vec(list);
@@ -196,6 +217,11 @@ pub unsafe extern "C" fn bhc_list_group(list: *mut u8) -> *mut u8 {
 /// Concatenate a list of lists with a separator list between each.
 ///
 /// `intercalate ", " ["a","b","c"] = "a, b, c"` (for general lists).
+///
+/// # Safety
+///
+/// `sep` must be a valid BHC list ADT node chain, and `lists` must be a
+/// valid list whose every element is itself a valid list node chain.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_intercalate(sep: *mut u8, lists: *mut u8) -> *mut u8 {
     let sep_vec = list_to_vec(sep);
@@ -223,6 +249,11 @@ pub unsafe extern "C" fn bhc_list_intercalate(sep: *mut u8, lists: *mut u8) -> *
 /// Follows Haskell semantics: rows of different lengths are handled
 /// by skipping missing elements (shorter rows are ignored once
 /// exhausted).
+///
+/// # Safety
+///
+/// `lists` must be a valid BHC list ADT node chain whose every element is
+/// itself a valid list node chain.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_transpose(lists: *mut u8) -> *mut u8 {
     let rows: Vec<Vec<*mut u8>> = list_to_vec(lists)
@@ -253,6 +284,13 @@ pub unsafe extern "C" fn bhc_list_transpose(lists: *mut u8) -> *mut u8 {
 ///
 /// `sortOn f xs` sorts `xs` by comparing `f x` values as `i64`.
 /// `key_fn` is a 1-arg closure: `fn(env, elem) -> key`.
+///
+/// # Safety
+///
+/// `list` must be a valid BHC list ADT node chain. `key_fn` must be a
+/// valid pointer to a BHC closure whose first field (offset 0) is a code
+/// pointer of type `extern "C" fn(*mut u8, *mut u8) -> *mut u8` whose
+/// result is usable as an `i64` sort key.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_sort_on(key_fn: *mut u8, list: *mut u8) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8) -> *mut u8 =
@@ -275,6 +313,13 @@ pub unsafe extern "C" fn bhc_list_sort_on(key_fn: *mut u8, list: *mut u8) -> *mu
 ///
 /// `nubBy eq xs` keeps the first occurrence of each element,
 /// removing later elements for which `eq earlier later` is True.
+///
+/// # Safety
+///
+/// `list` must be a valid BHC list ADT node chain. `eq_fn` must be a
+/// valid pointer to a BHC closure whose first field (offset 0) is a code
+/// pointer of type `extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8`
+/// returning a BHC Bool.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_nub_by(eq_fn: *mut u8, list: *mut u8) -> *mut u8 {
     let vec = list_to_vec(list);
@@ -293,6 +338,13 @@ pub unsafe extern "C" fn bhc_list_nub_by(eq_fn: *mut u8, list: *mut u8) -> *mut 
 /// Group consecutive elements using a custom equality closure.
 ///
 /// `groupBy eq xs` groups consecutive elements where `eq a b` is True.
+///
+/// # Safety
+///
+/// `list` must be a valid BHC list ADT node chain. `eq_fn` must be a
+/// valid pointer to a BHC closure whose first field (offset 0) is a code
+/// pointer of type `extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8`
+/// returning a BHC Bool.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_group_by(eq_fn: *mut u8, list: *mut u8) -> *mut u8 {
     let vec = list_to_vec(list);
@@ -320,6 +372,13 @@ pub unsafe extern "C" fn bhc_list_group_by(eq_fn: *mut u8, list: *mut u8) -> *mu
 /// Delete the first element matching by a custom equality closure.
 ///
 /// `deleteBy eq x xs` removes the first `y` in `xs` where `eq x y` is True.
+///
+/// # Safety
+///
+/// `list` must be a valid BHC list ADT node chain. `eq_fn` must be a
+/// valid pointer to a BHC closure whose first field (offset 0) is a code
+/// pointer of type `extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8`
+/// returning a BHC Bool. `val` is passed through to `eq_fn` unchanged.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_delete_by(
     eq_fn: *mut u8,
@@ -343,6 +402,14 @@ pub unsafe extern "C" fn bhc_list_delete_by(
 ///
 /// `unionBy eq xs ys = xs ++ [y | y <- ys, not (any (eq y) xs')]`
 /// where `xs'` grows as elements from `ys` are added.
+///
+/// # Safety
+///
+/// `xs` and `ys` must each be a valid BHC list ADT node chain. `eq_fn`
+/// must be a valid pointer to a BHC closure whose first field (offset 0)
+/// is a code pointer of type
+/// `extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8` returning a BHC
+/// Bool.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_union_by(eq_fn: *mut u8, xs: *mut u8, ys: *mut u8) -> *mut u8 {
     let xs_vec = list_to_vec(xs);
@@ -360,6 +427,14 @@ pub unsafe extern "C" fn bhc_list_union_by(eq_fn: *mut u8, xs: *mut u8, ys: *mut
 /// Intersection of two lists using a custom equality closure.
 ///
 /// `intersectBy eq xs ys = [x | x <- xs, any (eq x) ys]`
+///
+/// # Safety
+///
+/// `xs` and `ys` must each be a valid BHC list ADT node chain. `eq_fn`
+/// must be a valid pointer to a BHC closure whose first field (offset 0)
+/// is a code pointer of type
+/// `extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8` returning a BHC
+/// Bool.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_intersect_by(
     eq_fn: *mut u8,
@@ -378,6 +453,10 @@ pub unsafe extern "C" fn bhc_list_intersect_by(
 /// Strip a prefix from a list, returning `Just remainder` or `Nothing`.
 ///
 /// Elements are compared as `i64` (pointer cast).
+///
+/// # Safety
+///
+/// `prefix` and `list` must each be a valid BHC list ADT node chain.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_strip_prefix(prefix: *mut u8, list: *mut u8) -> *mut u8 {
     let mut p = prefix;
@@ -405,6 +484,11 @@ pub unsafe extern "C" fn bhc_list_strip_prefix(prefix: *mut u8, list: *mut u8) -
 ///
 /// Elements are compared as `i64` (pointer cast).
 /// `insert 3 [1,2,4,5] = [1,2,3,4,5]`
+///
+/// # Safety
+///
+/// `list` must be a valid BHC list ADT node chain. `val` is compared as
+/// an `i64` (pointer cast) and inserted unchanged.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_insert(val: *mut u8, list: *mut u8) -> *mut u8 {
     let vec = list_to_vec(list);
@@ -423,6 +507,14 @@ pub unsafe extern "C" fn bhc_list_insert(val: *mut u8, list: *mut u8) -> *mut u8
 /// `mapAccumL f acc xs` calls `f acc x` for each element left-to-right.
 /// The closure returns a 2-tuple `(new_acc, y)`. Returns `(final_acc, ys)`.
 /// `f` is a 2-arg closure: `fn(env, acc, x) -> tuple`.
+///
+/// # Safety
+///
+/// `list` must be a valid BHC list ADT node chain. `f` must be a valid
+/// pointer to a BHC closure whose first field (offset 0) is a code
+/// pointer of type `extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8`
+/// that returns a valid 2-tuple ADT node. `acc` is the initial
+/// accumulator passed through unchanged.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_map_accum_l(f: *mut u8, acc: *mut u8, list: *mut u8) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
@@ -447,6 +539,14 @@ pub unsafe extern "C" fn bhc_list_map_accum_l(f: *mut u8, acc: *mut u8, list: *m
 /// `mapAccumR f acc xs` calls `f acc x` for each element right-to-left.
 /// The closure returns a 2-tuple `(new_acc, y)`. Returns `(final_acc, ys)`.
 /// `f` is a 2-arg closure: `fn(env, acc, x) -> tuple`.
+///
+/// # Safety
+///
+/// `list` must be a valid BHC list ADT node chain. `f` must be a valid
+/// pointer to a BHC closure whose first field (offset 0) is a code
+/// pointer of type `extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8`
+/// that returns a valid 2-tuple ADT node. `acc` is the initial
+/// accumulator passed through unchanged.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_list_map_accum_r(f: *mut u8, acc: *mut u8, list: *mut u8) -> *mut u8 {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =

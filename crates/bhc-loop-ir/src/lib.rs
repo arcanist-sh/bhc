@@ -71,7 +71,6 @@
 //! - H26-SPEC Section 7: Tensor Model (lowering)
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
 #![allow(clippy::module_name_repetitions)]
 
 use bhc_index::Idx;

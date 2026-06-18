@@ -43,7 +43,6 @@
 //! ```
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
 
 mod context;
 mod desugar;

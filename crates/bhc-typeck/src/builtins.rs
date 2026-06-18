@@ -552,7 +552,7 @@ impl Builtins {
     pub fn register_primitive_ops(&self, env: &mut TypeEnv) {
         // Start after types (25) and constructors (49) = 74
         // Order MUST match bhc_lower::context::define_builtins
-        let mut next_id = BUILTIN_TYPE_COUNT
+        let next_id = BUILTIN_TYPE_COUNT
             + BUILTIN_CON_COUNT
             + BUILTIN_ORDERING_COUNT
             + BUILTIN_LIST_UNIT_COUNT
@@ -5829,10 +5829,9 @@ impl Builtins {
             }),
         ];
 
-        for (name, scheme) in ops {
-            let def_id = DefId::new(next_id);
+        for (offset, (name, scheme)) in ops.into_iter().enumerate() {
+            let def_id = DefId::new(next_id + offset);
             env.register_value(def_id, Symbol::intern(name), scheme);
-            next_id += 1;
         }
 
         // Register type-specialized show functions at fixed DefIds (10100+)

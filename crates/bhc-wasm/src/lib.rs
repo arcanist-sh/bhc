@@ -67,7 +67,6 @@
 //! - Edge profile produces minimal module size
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
 #![allow(clippy::module_name_repetitions)]
 
 pub mod codegen;

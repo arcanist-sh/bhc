@@ -138,7 +138,7 @@ pub fn spmv_f64(matrix: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
     // Clear output
     y.iter_mut().for_each(|v| *v = 0.0);
 
-    for row in 0..matrix.rows {
+    for (row, y_row) in y.iter_mut().enumerate() {
         let row_start = matrix.row_ptrs[row];
         let row_end = matrix.row_ptrs[row + 1];
 
@@ -164,7 +164,7 @@ pub fn spmv_f64(matrix: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
             }
         }
 
-        y[row] = sum;
+        *y_row = sum;
     }
 }
 
@@ -249,7 +249,7 @@ pub fn spmv_f32(matrix: &CsrMatrix<f32>, x: &[f32], y: &mut [f32]) {
 
     y.iter_mut().for_each(|v| *v = 0.0);
 
-    for row in 0..matrix.rows {
+    for (row, y_row) in y.iter_mut().enumerate() {
         let row_start = matrix.row_ptrs[row];
         let row_end = matrix.row_ptrs[row + 1];
 
@@ -271,7 +271,7 @@ pub fn spmv_f32(matrix: &CsrMatrix<f32>, x: &[f32], y: &mut [f32]) {
             }
         }
 
-        y[row] = sum;
+        *y_row = sum;
     }
 }
 
@@ -523,6 +523,10 @@ pub unsafe extern "C" fn bhc_sparse_csr_spmv_f64(
 }
 
 /// Create a new CSR matrix (f32).
+///
+/// # Safety
+/// Caller must ensure all pointers are valid and arrays have correct lengths:
+/// `row_ptrs` has `rows + 1` elements, `col_indices` and `values` have `nnz` each.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_sparse_csr_new_f32(
     rows: usize,
@@ -549,6 +553,9 @@ pub unsafe extern "C" fn bhc_sparse_csr_new_f32(
 }
 
 /// Free a CSR matrix (f32).
+///
+/// # Safety
+/// Handle must be valid and not previously freed.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_sparse_csr_free_f32(handle: *mut CsrMatrixF32Handle) {
     if !handle.is_null() {
@@ -557,6 +564,11 @@ pub unsafe extern "C" fn bhc_sparse_csr_free_f32(handle: *mut CsrMatrixF32Handle
 }
 
 /// Sparse matrix-vector multiply (f32).
+///
+/// Computes y = A * x.
+///
+/// # Safety
+/// All pointers must be valid, x must have length == cols, y must have length == rows.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_sparse_csr_spmv_f32(
     handle: *const CsrMatrixF32Handle,
@@ -573,6 +585,10 @@ pub unsafe extern "C" fn bhc_sparse_csr_spmv_f32(
 /// Sparse-dense matrix multiply (f64).
 ///
 /// Computes C = A * B where A is sparse (m x k) and B is dense (k x n).
+///
+/// # Safety
+/// All pointers must be valid: `b` must have `k * b_cols` elements and `c` must
+/// have `m * b_cols` elements, where `m`/`k` are the matrix's rows/cols.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_sparse_csr_spmm_f64(
     handle: *const CsrMatrixF64Handle,
@@ -592,6 +608,12 @@ pub unsafe extern "C" fn bhc_sparse_csr_spmm_f64(
 }
 
 /// Sparse-dense matrix multiply (f32).
+///
+/// Computes C = A * B where A is sparse (m x k) and B is dense (k x n).
+///
+/// # Safety
+/// All pointers must be valid: `b` must have `k * b_cols` elements and `c` must
+/// have `m * b_cols` elements, where `m`/`k` are the matrix's rows/cols.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_sparse_csr_spmm_f32(
     handle: *const CsrMatrixF32Handle,

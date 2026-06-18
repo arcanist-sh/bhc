@@ -200,10 +200,13 @@ impl<T: Clone> TensorStorage<T> {
         &self.data[self.offset + index]
     }
 
+    // Internal storage accessors kept for completeness of the storage API.
+    #[allow(dead_code)]
     fn len(&self) -> usize {
         self.data.len() - self.offset
     }
 
+    #[allow(dead_code)]
     fn as_slice(&self) -> &[T] {
         &self.data[self.offset..]
     }

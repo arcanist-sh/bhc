@@ -730,12 +730,10 @@ mod tests {
     fn test_arena_alloc_basic() {
         let mut arena = TensorArena::new(1024);
 
-        let ptr1 = arena.alloc(64, 8).expect("allocation should succeed");
-        assert!(!ptr1.as_ptr().is_null());
+        let _ptr1 = arena.alloc(64, 8).expect("allocation should succeed");
         assert_eq!(arena.alloc_count(), 1);
 
-        let ptr2 = arena.alloc(128, 16).expect("allocation should succeed");
-        assert!(!ptr2.as_ptr().is_null());
+        let _ptr2 = arena.alloc(128, 16).expect("allocation should succeed");
         assert_eq!(arena.alloc_count(), 2);
     }
 

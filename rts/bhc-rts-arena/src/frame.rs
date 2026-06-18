@@ -175,11 +175,15 @@ impl FrameArena {
                     min.min(self.current_frame_bytes)
                 }),
         );
-        self.stats.avg_frame_bytes = if self.stats.frames_completed > 0 {
-            (self.stats.total_bytes_allocated / self.stats.frames_completed) as usize
-        } else {
-            0
-        };
+        // Explicit guard kept for readability; behavior is unchanged.
+        #[allow(clippy::manual_checked_ops)]
+        {
+            self.stats.avg_frame_bytes = if self.stats.frames_completed > 0 {
+                (self.stats.total_bytes_allocated / self.stats.frames_completed) as usize
+            } else {
+                0
+            };
+        }
         self.stats.max_frame_allocations = self
             .stats
             .max_frame_allocations

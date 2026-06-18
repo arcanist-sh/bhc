@@ -497,7 +497,6 @@ impl PauseStats {
     }
 
     /// Get recent pauses (most recent first).
-    #[must_use]
     pub fn recent_pauses(&self) -> impl Iterator<Item = &PauseMeasurement> {
         // Return pauses in reverse chronological order
         let len = self.recent_pauses.len();

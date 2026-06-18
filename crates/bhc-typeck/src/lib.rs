@@ -47,7 +47,6 @@
 //! - `bhc-core`: Output Core IR (after lowering)
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
 #![allow(clippy::module_name_repetitions)]
 
 mod binding_groups;

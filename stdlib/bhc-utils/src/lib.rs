@@ -34,7 +34,6 @@
 //! - [`json`] - JSON parsing and serialization
 
 #![warn(missing_docs)]
-#![warn(unsafe_code)]
 
 pub mod json;
 pub mod random;

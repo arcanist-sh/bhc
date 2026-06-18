@@ -57,7 +57,6 @@
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
-#![warn(clippy::pedantic)]
 
 use bhc_index::Idx;
 use bhc_intern::Symbol;

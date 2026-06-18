@@ -399,8 +399,8 @@ mod tests {
         let x = arena.alloc(42i32).unwrap();
         assert_eq!(*x, 42);
 
-        let y = arena.alloc(3.14f64).unwrap();
-        assert!((*y - 3.14).abs() < f64::EPSILON);
+        let y = arena.alloc(2.5f64).unwrap();
+        assert!((*y - 2.5).abs() < f64::EPSILON);
 
         assert!(arena.used() > 0);
     }
@@ -491,7 +491,7 @@ mod tests {
         let arena = HotArena::new(4096);
 
         let _ = arena.alloc(42i32).unwrap();
-        let _ = arena.alloc(3.14f64).unwrap();
+        let _ = arena.alloc(2.5f64).unwrap();
 
         let stats = arena.stats();
         assert_eq!(stats.allocation_count, 2);

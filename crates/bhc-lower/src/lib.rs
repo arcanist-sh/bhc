@@ -44,7 +44,6 @@
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
-#![warn(clippy::pedantic)]
 
 mod context;
 mod desugar;

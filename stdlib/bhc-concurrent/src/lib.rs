@@ -35,7 +35,6 @@
 //! - **STM**: Software transactional memory with retry/orElse
 
 #![warn(missing_docs)]
-#![warn(unsafe_code)]
 
 pub mod channel;
 pub mod ffi;

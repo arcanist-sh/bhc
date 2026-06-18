@@ -352,9 +352,9 @@ mod vec2f64_tests {
 
     #[test]
     fn test_splat() {
-        let v = Vec2F64::splat(3.14159265358979);
-        assert_eq!(v.get(0), 3.14159265358979);
-        assert_eq!(v.get(1), 3.14159265358979);
+        let v = Vec2F64::splat(2.5);
+        assert_eq!(v.get(0), 2.5);
+        assert_eq!(v.get(1), 2.5);
     }
 
     #[test]
@@ -385,9 +385,9 @@ mod vec4f64_tests {
 
     #[test]
     fn test_splat() {
-        let v = Vec4F64::splat(2.718281828);
+        let v = Vec4F64::splat(1.5);
         for i in 0..4 {
-            assert_eq!(v.get(i), 2.718281828);
+            assert_eq!(v.get(i), 1.5);
         }
     }
 

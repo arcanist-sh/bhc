@@ -763,7 +763,7 @@ mod tests {
     fn test_parse_number() {
         assert_eq!(Json::parse("42").unwrap().as_i64(), Some(42));
         assert_eq!(Json::parse("-42").unwrap().as_i64(), Some(-42));
-        assert_eq!(Json::parse("3.14").unwrap().as_f64(), Some(3.14));
+        assert_eq!(Json::parse("2.5").unwrap().as_f64(), Some(2.5));
         assert_eq!(Json::parse("1e10").unwrap().as_f64(), Some(1e10));
         assert_eq!(Json::parse("1.5e-2").unwrap().as_f64(), Some(0.015));
     }
@@ -839,7 +839,7 @@ mod tests {
     fn test_constructors() {
         assert!(Json::null().is_null());
         assert!(Json::bool(true).is_bool());
-        assert!(Json::number(3.14).is_number());
+        assert!(Json::number(2.5).is_number());
         assert!(Json::string("test").is_string());
         assert!(Json::array([]).is_array());
         assert!(Json::object::<&str, _>([]).is_object());

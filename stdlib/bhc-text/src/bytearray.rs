@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_float_bitcast_roundtrip() {
-        let f: f32 = 3.14;
+        let f: f32 = 2.5;
         let w = bhc_float_to_word32(f);
         let f2 = bhc_word32_to_float(w);
         assert_eq!(f, f2);
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_double_bitcast_roundtrip() {
-        let d: f64 = 2.718281828459045;
+        let d: f64 = 1.5;
         let w = bhc_double_to_word64(d);
         let d2 = bhc_word64_to_double(w);
         assert_eq!(d, d2);

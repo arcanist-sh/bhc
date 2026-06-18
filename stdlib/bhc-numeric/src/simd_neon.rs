@@ -739,9 +739,9 @@ mod tests {
 
     #[test]
     fn test_vec2f64_splat() {
-        let v = NeonVec2F64::splat(3.14);
-        assert_eq!(v.get(0), 3.14);
-        assert_eq!(v.get(1), 3.14);
+        let v = NeonVec2F64::splat(2.5);
+        assert_eq!(v.get(0), 2.5);
+        assert_eq!(v.get(1), 2.5);
     }
 
     #[test]

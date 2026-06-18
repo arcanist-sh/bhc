@@ -3948,8 +3948,8 @@ mod tests {
 
     #[test]
     fn test_bhc_print_double() {
-        bhc_print_double(3.14);
-        bhc_print_double_ln(3.14);
+        bhc_print_double(2.5);
+        bhc_print_double_ln(2.5);
     }
 
     #[test]

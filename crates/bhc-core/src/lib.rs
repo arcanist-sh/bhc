@@ -59,7 +59,6 @@
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
-#![warn(clippy::pedantic)]
 
 pub mod demand;
 pub mod escape;

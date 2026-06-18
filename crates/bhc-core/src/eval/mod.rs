@@ -19,6 +19,12 @@
 //! let result = evaluator.eval(&expr)?;
 //! ```
 
+// The interpreter represents Haskell `Data.Map` as `BTreeMap<OrdValue, Value>`.
+// `Value` carries `Arc<HandleValue>` (thunks), so clippy flags it as an
+// interiorly-mutable map key — but values used as keys are forced and never
+// mutated through the key reference, so the Ord/Eq is stable in practice.
+#![allow(clippy::mutable_key_type)]
+
 mod env;
 mod value;
 

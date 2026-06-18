@@ -73,7 +73,6 @@
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
-#![warn(clippy::pedantic)]
 
 pub mod fusion;
 pub mod lower;

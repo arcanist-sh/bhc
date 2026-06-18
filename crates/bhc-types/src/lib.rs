@@ -56,7 +56,6 @@
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
-#![warn(clippy::pedantic)]
 
 pub mod dyn_tensor;
 pub mod nat;

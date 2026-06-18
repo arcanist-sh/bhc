@@ -29,3 +29,10 @@ openblas = ["blas"]
 accelerate = ["blas"]  # macOS only - uses Apple Accelerate framework
 mkl = ["blas"]
 neon = []  # ARM NEON SIMD support (aarch64)
+
+[lints.clippy]
+# Numeric kernels deliberately expose inherent ops (add/mul/dot/...) shaped for
+# SIMD/BLAS layout rather than the std arithmetic traits (see BHC-RULE-012), and
+# the FFI/SIMD entry points take raw pointers as their C-ABI contract.
+should_implement_trait = "allow"
+not_unsafe_ptr_arg_deref = "allow"

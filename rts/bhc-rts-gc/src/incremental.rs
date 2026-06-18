@@ -692,7 +692,9 @@ mod tests {
         // Perform remark
         let remark_pause = marker.remark(|_| Vec::new());
 
-        assert!(remark_pause.duration_us() >= 0);
+        // duration_us() is unsigned (always non-negative); assert the cycle
+        // actually completed instead of a tautological bound.
+        let _ = remark_pause.duration_us();
         assert_eq!(marker.state(), MarkState::Complete);
         assert_eq!(marker.cycles(), 1);
 

@@ -14,3 +14,8 @@ serde = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+
+[lints.clippy]
+# Intentional inherent methods whose names overlap std traits but have distinct
+# semantics; implementing the std trait here would be misleading.
+should_implement_trait = "allow"

@@ -993,7 +993,7 @@ mod edge_cases {
 #[cfg(feature = "openblas")]
 mod provider_comparison {
     use super::*;
-    use bhc_numeric::blas::OpenBlasProvider;
+    use bhc_numeric::blas_openblas::OpenBlasProvider;
 
     #[test]
     fn test_gemm_consistency_with_openblas() {

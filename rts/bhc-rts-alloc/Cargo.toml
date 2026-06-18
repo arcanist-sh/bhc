@@ -11,3 +11,8 @@ repository.workspace = true
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+
+[lints.clippy]
+# C-ABI / FFI boundary crate: raw-pointer args are the contract; safety is
+# documented at the FFI layer.
+not_unsafe_ptr_arg_deref = "allow"

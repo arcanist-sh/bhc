@@ -1,56 +1,72 @@
-# Basel Haskell Compiler (BHC)
+<div align="center">
 
-**A next-generation Haskell compiler and runtime for 2026: predictable performance, structured concurrency, and a tensor-native numeric pipeline.**
+<h1 align="center">BHC</h1>
+
+<p align="center">
+  <strong>Haskell, made predictable.</strong><br>
+  <em>A clean-slate Haskell compiler and runtime for 2026.</em><br>
+  <em>Predictable, concurrent, tensor-native.</em>
+</p>
+
+<p align="center">
+  <a href="https://www.rust-lang.org/">
+    <img alt="Rust" src="https://img.shields.io/badge/Rust-stable-000000?logo=rust&logoColor=white&style=for-the-badge">
+  </a>
+  <a href="https://www.haskell.org/">
+    <img alt="Haskell" src="https://img.shields.io/badge/For-Haskell%202026-5e5086?logo=haskell&logoColor=white&style=for-the-badge">
+  </a>
+  <a href="#license">
+    <img alt="License" src="https://img.shields.io/badge/License-BSD--3--Clause-c6a0f6?style=for-the-badge">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://bhc.raskell.io">Documentation</a> •
+  <a href="https://bhc.raskell.io/playground/">Playground</a> •
+  <a href="ROADMAP.md">Roadmap</a> •
+  <a href="#contributing">Contributing</a>
+</p>
+
+</div>
 
 ---
 
-## Overview
+GHC is a marvel — and its performance is often folklore. Whether your code fuses, allocates a thunk, or blocks a thread is something you learn by reading Core dumps and staring at profiles, not something the compiler tells you.
 
-BHC is a clean-slate Haskell compiler and runtime built to remain compatible with the spirit of Haskell while introducing modern profiles, a standardized runtime contract, and a tensor-native compilation pipeline.
+**BHC** (the Basel Haskell Compiler) is a clean-slate Haskell compiler and runtime that makes the machine legible. Written in Rust, it keeps the spirit of Haskell while adding explicit performance profiles, a standardized runtime contract, guaranteed fusion, structured concurrency, and a tensor-native numeric pipeline — so behavior is something you can *rely on*, not reverse-engineer.
 
-BHC is named after Basel, Switzerland — as a deliberate successor culture to the Glasgow Haskell Compiler lineage, with a new focus on predictability, concurrency, and numerical computing.
+> **If performance matters, the compiler tells you what happened. If concurrency matters, cancellation is structured. If numerics matter, fusion is guaranteed.**
 
-### Philosophy
+Named after Basel, Switzerland — a deliberate successor culture to the Glasgow lineage, focused on predictability, concurrency, and numerical computing.
 
-> BHC prioritizes **predictability over folklore**: if performance matters, the compiler tells you what happened. If concurrency matters, cancellation is structured. If numerics matter, fusion is guaranteed and kernels are traceable.
+## Why BHC?
 
----
+- **Predictable by contract** — Explicit profiles give each module a behavioral contract (laziness, strictness, latency, footprint). Performance is correct by construction, not by luck.
+- **Guaranteed fusion** — Standard patterns (`map`, `zipWith`, `fold`) fuse into a single loop with no intermediate allocation. In the Numeric Profile, fusion failure is a *compiler bug*, not a surprise.
+- **Tensor-native numerics** — A Tensor IR with shape/stride tracking, SIMD auto-vectorization, and BLAS-backed kernels — strict-by-default, unboxed, no hidden thunks.
+- **Structured concurrency** — Scoped tasks with automatic cleanup, cooperative cancellation with propagation, deadlines, and a work-stealing scheduler with built-in tracing.
+- **Traceable by design** — Kernel reports and fusion diagnostics show exactly what the compiler did. `bhi` lets you inspect every IR stage.
+- **A modern runtime contract** — Three explicit memory regions (Hot Arena, Pinned Heap, General Heap) and a generational, incremental GC tuned per profile.
+- **Still Haskell** — Multiple editions (Haskell 2010, GHC2021, GHC2024, H26) and 30+ extensions, so existing code feels at home.
+- **Part of the toolchain** — BHC is the next-generation backend behind [**hx**](https://github.com/arcanist-sh/hx), the unified Haskell toolchain: `hx` drives BHC the same way it drives GHC.
 
-## Features
+## Profiles
 
-### Profiles
-
-BHC supports multiple compilation profiles with distinct performance contracts:
+BHC compiles every module under an explicit profile with a distinct performance contract:
 
 | Profile | Use Case | Key Characteristics |
 |---------|----------|---------------------|
 | **Default** | General Haskell | Lazy evaluation, GC managed |
-| **Server** | Web services, daemons | Concurrency, bounded latency, observability |
+| **Server** | Web services, daemons | Structured concurrency, bounded latency, observability |
 | **Numeric** | ML, linear algebra, tensors | Strict-by-default, unboxed, fusion guaranteed |
 | **Edge** | Embedded, WASM | Minimal runtime footprint |
 
-### Numeric Performance
+Profiles are explicit and localizable — per package or per module:
 
-- **Strict-by-default** in Numeric Profile — no hidden thunks
-- **Guaranteed fusion** for standard patterns (`map`, `zipWith`, `fold`)
-- **Tensor IR** with shape/stride tracking for optimal code generation
-- **SIMD auto-vectorization** for modern CPUs
-- **Parallel primitives** with deterministic scheduling
-
-### Structured Concurrency
-
-- Scoped task spawning with automatic cleanup
-- Cooperative cancellation with propagation
-- Deadline and timeout support
-- Event tracing for observability
-
-### Memory Model
-
-- **Hot Arena** — Bump allocation for loop temporaries
-- **Pinned Heap** — Non-moving memory for FFI/DMA
-- **General Heap** — GC-managed allocations
-
----
+```haskell
+{-# OPTIONS_BHC -profile=numeric #-}
+module HotPath where
+```
 
 ## Conformance Levels
 
@@ -60,8 +76,6 @@ BHC targets the Haskell 2026 Platform specification:
 - **H26-Platform** — Core + standard libraries + packaging
 - **H26-Numeric** — Platform + Numeric Profile + Tensor IR guarantees
 
----
-
 ## CLI Tools
 
 | Command | Description |
@@ -69,8 +83,6 @@ BHC targets the Haskell 2026 Platform specification:
 | `bhc` | Compiler driver |
 | `bhci` | Interactive REPL |
 | `bhi` | IR inspector / kernel reports |
-
----
 
 ## Quick Start
 
@@ -81,17 +93,14 @@ cargo build --release
 # Compile a program
 ./target/release/bhc hello.hs -o hello
 
-# Run with Numeric Profile
+# Run with the Numeric Profile
 ./target/release/bhc --profile=numeric matmul.hs -o matmul
 
-# View kernel fusion report
+# See exactly what the compiler did
 ./target/release/bhc --profile=numeric --kernel-report tensor_ops.hs
-
-# Try it in your browser
-# Visit https://bhc.raskell.io/playground/
 ```
 
----
+> **Try it in your browser:** [bhc.raskell.io/playground](https://bhc.raskell.io/playground/)
 
 ## Example
 
@@ -103,7 +112,7 @@ module Main where
 
 import H26.Tensor
 
--- Dot product: guaranteed to fuse into single loop
+-- Dot product: guaranteed to fuse into a single loop
 dot :: Tensor Float -> Tensor Float -> Float
 dot xs ys = sum (zipWith (*) xs ys)
 
@@ -123,8 +132,6 @@ main = do
       c = matmul a b
   print c
 ```
-
----
 
 ## Project Structure
 
@@ -158,8 +165,6 @@ bhc/
 └── tests/                     # Test suites
 ```
 
----
-
 ## Roadmap
 
 | Milestone | Name | Status |
@@ -173,25 +178,21 @@ bhc/
 
 See [ROADMAP.md](ROADMAP.md) for detailed milestone specifications.
 
----
-
 ## Documentation
 
-- [Website](https://bhc.raskell.io) — Official website with guides and tutorials
+- [Website](https://bhc.raskell.io) — Official site with guides and tutorials
 - [API Docs](https://bhc.raskell.io/docs/api/) — Standard library reference (63 modules)
 - [Playground](https://bhc.raskell.io/playground/) — Try BHC in your browser
 - [ROADMAP.md](ROADMAP.md) — Implementation status and milestones
 - [.claude/CLAUDE.md](.claude/CLAUDE.md) — Development guidelines
 
----
-
 ## Building
 
 ### Prerequisites
 
-- Rust 1.75+ (stable toolchain)
-- LLVM 17+ (for native codegen)
-- wasm32-unknown-unknown target (for playground)
+- Rust 1.82+ (stable toolchain)
+- LLVM 21 (for native codegen)
+- `wasm32-unknown-unknown` target (for the playground)
 
 ### Build Commands
 
@@ -205,7 +206,7 @@ cargo build --release
 # Run tests
 cargo test
 
-# Run specific crate tests
+# Run a specific crate's tests
 cargo test -p bhc-parser
 
 # Run benchmarks
@@ -215,7 +216,15 @@ cargo bench
 cargo run --bin bhc -- Main.hs
 ```
 
----
+## Philosophy
+
+BHC prioritizes **predictability over folklore**. Three principles follow from that:
+
+1. **Legible over magic** — The compiler reports what it did (kernel reports, fusion diagnostics, allocation tracking) instead of leaving you to infer it from profiles.
+2. **Contracts over guesswork** — Profiles make performance behavior explicit and local, so a module's costs are part of its interface.
+3. **Correct by construction** — Guaranteed fusion, structured cancellation, and a standardized runtime contract make the fast, safe path the default — not a reward for expertise.
+
+The destination: a Haskell that is **predictable, concurrent, and tensor-native** — without giving up purity, and without asking you to read Core to trust your code.
 
 ## Contributing
 
@@ -224,6 +233,7 @@ Contributions are welcome. Please read the guidelines in `.claude/rules/` before
 ### Commit Messages
 
 Use conventional commits:
+
 - `feat:` New features
 - `fix:` Bug fixes
 - `perf:` Performance improvements
@@ -231,13 +241,9 @@ Use conventional commits:
 - `docs:` Documentation
 - `test:` Test additions/changes
 
----
-
 ## License
 
-BSD-3-Clause
-
----
+BSD-3-Clause — part of [arcanist.sh](https://arcanist.sh).
 
 ## Acknowledgments
 

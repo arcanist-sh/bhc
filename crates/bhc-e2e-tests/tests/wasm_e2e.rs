@@ -233,3 +233,15 @@ fn test_tier2_partial_app_wasm() {
 fn test_tier2_show_types_wasm() {
     run_wasm_test("tier2_functions/show_types", Profile::Default);
 }
+
+// =============================================================================
+// Floating point (boxed f64)
+// =============================================================================
+
+// Double literals, runtime arithmetic (+,-,*,/), negation, comparison, and the
+// double formatter (round to 6 decimals, strip trailing zeros). Doubles are
+// represented as boxed f64 values.
+#[test]
+fn test_tier2_floats_wasm() {
+    run_wasm_test("tier2_functions/floats", Profile::Default);
+}

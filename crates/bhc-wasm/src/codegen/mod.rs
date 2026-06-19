@@ -87,6 +87,8 @@ pub struct RuntimeIndices {
     pub print_str_idx: u32,
     /// Index of the `print_str_ln` function.
     pub print_str_ln_idx: u32,
+    /// Index of the `print_double` function (renders an f64, no newline).
+    pub print_double_idx: u32,
     /// Offset of the newline byte in the data segment.
     pub newline_offset: u32,
 }
@@ -604,6 +606,10 @@ impl WasmModule {
         let print_str_ln_func = wasi::generate_print_str_ln(fd_write_idx, newline_offset);
         let print_str_ln_idx = self.add_function(print_str_ln_func);
 
+        // Add print_double function
+        let print_double_func = wasi::generate_print_double(fd_write_idx);
+        let print_double_idx = self.add_function(print_double_func);
+
         RuntimeIndices {
             fd_write_idx,
             proc_exit_idx,
@@ -611,6 +617,7 @@ impl WasmModule {
             print_i32_idx,
             print_str_idx,
             print_str_ln_idx,
+            print_double_idx,
             newline_offset,
         }
     }

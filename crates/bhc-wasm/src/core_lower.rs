@@ -15,6 +15,7 @@ use bhc_core::{AltCon, Bind, CoreModule, Expr, Literal, Var, VarId};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
+use bhc_types::Ty;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::codegen::{RuntimeIndices, WasmFunc, WasmFuncType};
@@ -50,6 +51,8 @@ enum Cont {
 enum ShowKind {
     /// Decimal integer (the default).
     Int,
+    /// A boxed double, rendered via the runtime double formatter.
+    Double,
     /// `True`/`False`, chosen at runtime from the boolean tag.
     Bool,
     /// A statically known rendering — a nullary constructor's name
@@ -397,7 +400,7 @@ impl<'a> WasmLowering<'a> {
     ) -> WasmResult<()> {
         match expr {
             Expr::Lit(lit, _, _) => {
-                self.lower_literal(lit, instrs)?;
+                self.lower_literal(lit, instrs, local_count)?;
             }
 
             Expr::Var(var, _) => {
@@ -499,7 +502,12 @@ impl<'a> WasmLowering<'a> {
     }
 
     /// Lower a literal value.
-    fn lower_literal(&mut self, lit: &Literal, instrs: &mut Vec<WasmInstr>) -> WasmResult<()> {
+    fn lower_literal(
+        &mut self,
+        lit: &Literal,
+        instrs: &mut Vec<WasmInstr>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
         match lit {
             Literal::Int(n) => {
                 instrs.push(WasmInstr::I32Const(*n as i32));
@@ -516,13 +524,80 @@ impl<'a> WasmLowering<'a> {
                 let (offset, _len) = self.intern_string(s);
                 instrs.push(WasmInstr::I32Const(offset as i32));
             }
+            // Floating-point literals are boxed: a pointer to an 8-byte f64 cell.
             Literal::Float(f) => {
-                instrs.push(WasmInstr::I32Const((*f as i32).max(0)));
+                self.emit_boxed_double(f64::from(*f), instrs, local_count);
             }
             Literal::Double(d) => {
-                instrs.push(WasmInstr::I32Const((*d as i32).max(0)));
+                self.emit_boxed_double(*d, instrs, local_count);
             }
         }
+        Ok(())
+    }
+
+    /// Allocate an 8-byte cell, store `value` as f64, and leave the pointer on
+    /// the stack. This is the boxed representation of a `Double`/`Float`.
+    fn emit_boxed_double(
+        &mut self,
+        value: f64,
+        instrs: &mut Vec<WasmInstr>,
+        local_count: &mut u32,
+    ) {
+        instrs.push(WasmInstr::I32Const(8));
+        instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+        let ptr = *local_count;
+        *local_count += 1;
+        instrs.push(WasmInstr::LocalTee(ptr));
+        instrs.push(WasmInstr::F64Const(value));
+        instrs.push(WasmInstr::F64Store(3, 0));
+        instrs.push(WasmInstr::LocalGet(ptr));
+    }
+
+    /// Emit a binary floating-point operation on two boxed-double operands,
+    /// boxing the result. `op` is the f64 instruction (e.g. `F64Add`).
+    fn emit_float_binop(
+        &mut self,
+        op: WasmInstr,
+        lhs: &Expr,
+        rhs: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        // Allocate the result cell first so the f64 result can be stored
+        // without needing an f64 local.
+        instrs.push(WasmInstr::I32Const(8));
+        instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+        let ptr = *local_count;
+        *local_count += 1;
+        instrs.push(WasmInstr::LocalTee(ptr));
+        // Load both operands as f64.
+        self.lower_expr(lhs, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::F64Load(3, 0));
+        self.lower_expr(rhs, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::F64Load(3, 0));
+        instrs.push(op);
+        instrs.push(WasmInstr::F64Store(3, 0));
+        instrs.push(WasmInstr::LocalGet(ptr));
+        Ok(())
+    }
+
+    /// Emit a floating-point comparison on two boxed-double operands, leaving
+    /// an unboxed i32 boolean (the comparison result is not boxed).
+    fn emit_float_cmp(
+        &mut self,
+        op: WasmInstr,
+        lhs: &Expr,
+        rhs: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        self.lower_expr(lhs, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::F64Load(3, 0));
+        self.lower_expr(rhs, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::F64Load(3, 0));
+        instrs.push(op);
         Ok(())
     }
 
@@ -599,6 +674,18 @@ impl<'a> WasmLowering<'a> {
                 instrs.push(WasmInstr::I32Const(0));
                 instrs.push(WasmInstr::End);
             }
+            ShowKind::Double => {
+                // Load the boxed f64 and render it; append a newline if asked.
+                self.lower_expr(arg, instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::F64Load(3, 0));
+                instrs.push(WasmInstr::Call(self.runtime.print_double_idx));
+                if newline {
+                    instrs.push(WasmInstr::I32Const(self.runtime.newline_offset as i32));
+                    instrs.push(WasmInstr::I32Const(1));
+                    instrs.push(WasmInstr::Call(self.runtime.print_str_idx));
+                }
+                instrs.push(WasmInstr::I32Const(0));
+            }
             ShowKind::Int => {
                 self.lower_expr(arg, instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::Call(self.runtime.print_i32_idx));
@@ -635,6 +722,11 @@ impl<'a> WasmLowering<'a> {
                 | Expr::Lazy(inner, _) => inner,
                 _ => break,
             };
+        }
+
+        // Floating-point values render via the double formatter.
+        if expr_is_float(e) {
+            return ShowKind::Double;
         }
 
         match e {
@@ -1034,6 +1126,70 @@ impl<'a> WasmLowering<'a> {
             if let Some(&slot) = locals.get(&var.id) {
                 instrs.push(WasmInstr::LocalGet(slot));
                 return self.apply_closure_on_stack(&args, instrs, locals, local_count);
+            }
+        }
+
+        // Floating-point arithmetic and comparison on boxed-double operands.
+        // `/` is Fractional, so it is always float; the others are dispatched
+        // by operand type.
+        if let Some(name) = func_name {
+            if args.len() == 2 {
+                let is_float = expr_is_float(args[0]) || expr_is_float(args[1]);
+                let binop = match name {
+                    "+" | "GHC.Num.+" if is_float => Some(WasmInstr::F64Add),
+                    "-" | "GHC.Num.-" if is_float => Some(WasmInstr::F64Sub),
+                    "*" | "GHC.Num.*" if is_float => Some(WasmInstr::F64Mul),
+                    "/" | "GHC.Real./" | "GHC.Float./" => Some(WasmInstr::F64Div),
+                    _ => None,
+                };
+                if let Some(op) = binop {
+                    return self.emit_float_binop(
+                        op,
+                        args[0],
+                        args[1],
+                        instrs,
+                        locals,
+                        local_count,
+                    );
+                }
+                if is_float {
+                    let cmp = match name {
+                        "==" | "GHC.Classes.==" => Some(WasmInstr::F64Eq),
+                        "/=" | "GHC.Classes./=" => Some(WasmInstr::F64Ne),
+                        "<" | "GHC.Classes.<" => Some(WasmInstr::F64Lt),
+                        "<=" | "GHC.Classes.<=" => Some(WasmInstr::F64Le),
+                        ">" | "GHC.Classes.>" => Some(WasmInstr::F64Gt),
+                        ">=" | "GHC.Classes.>=" => Some(WasmInstr::F64Ge),
+                        _ => None,
+                    };
+                    if let Some(op) = cmp {
+                        return self.emit_float_cmp(
+                            op,
+                            args[0],
+                            args[1],
+                            instrs,
+                            locals,
+                            local_count,
+                        );
+                    }
+                }
+            }
+            // Unary negate on a float: box(-x).
+            if args.len() == 1
+                && matches!(name, "negate" | "GHC.Num.negate")
+                && expr_is_float(args[0])
+            {
+                instrs.push(WasmInstr::I32Const(8));
+                instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+                let ptr = *local_count;
+                *local_count += 1;
+                instrs.push(WasmInstr::LocalTee(ptr));
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::F64Load(3, 0));
+                instrs.push(WasmInstr::F64Neg);
+                instrs.push(WasmInstr::F64Store(3, 0));
+                instrs.push(WasmInstr::LocalGet(ptr));
+                return Ok(());
             }
         }
 
@@ -1756,6 +1912,27 @@ fn match_show_arg(expr: &Expr) -> Option<&Expr> {
     } else {
         None
     }
+}
+
+/// Whether a type is a floating-point type (`Double` or `Float`), which the
+/// backend represents as a boxed `f64`.
+fn is_float_ty(ty: &Ty) -> bool {
+    match ty {
+        Ty::Con(c) => matches!(c.name.as_str(), "Double" | "Float"),
+        // Look through a single application layer (defensive; scalar floats are
+        // plain `Con`s in practice).
+        Ty::App(head, _) => is_float_ty(head),
+        _ => false,
+    }
+}
+
+/// Whether an expression has floating-point type. A `Float`/`Double` literal is
+/// always float; otherwise consult the expression's inferred type.
+fn expr_is_float(expr: &Expr) -> bool {
+    if let Expr::Lit(Literal::Float(_) | Literal::Double(_), _, _) = expr {
+        return true;
+    }
+    is_float_ty(&expr.ty())
 }
 
 /// Whether an operator name denotes a boolean-valued operation (comparison or

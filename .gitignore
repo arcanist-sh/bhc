@@ -1,7 +1,8 @@
 # Rust/Cargo
 /target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is tracked: bhc ships binaries, and pinning the lockfile keeps
+# local and CI builds reproducible (e.g. the llvm-sys/LLVM version).
 
 # IDE
 .idea/

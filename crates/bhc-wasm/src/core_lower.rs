@@ -422,8 +422,21 @@ impl<'a> WasmLowering<'a> {
                     // Check if it's a local variable
                     instrs.push(WasmInstr::LocalGet(local_idx));
                 } else if let Some(&func_idx) = self.func_map.get(&var.name) {
-                    // It's a reference to a top-level function (as a value).
-                    // For now, just call it with no args (for nullary functions).
+                    // A top-level function used as a value. With arity >= 1 it
+                    // becomes a closure (eta-expansion with no supplied args) so
+                    // it can be passed to higher-order functions; a nullary
+                    // binding (a CAF) is simply evaluated.
+                    let arity = self.arities.get(&var.name).copied().unwrap_or(0);
+                    if arity >= 1 {
+                        return self.lower_partial_application(
+                            var,
+                            &[],
+                            arity,
+                            instrs,
+                            locals,
+                            local_count,
+                        );
+                    }
                     instrs.push(WasmInstr::Call(func_idx));
                 } else {
                     // Unknown variable - push 0 as fallback

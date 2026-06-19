@@ -271,3 +271,11 @@ fn test_tier2_show_string_wasm() {
 fn test_tier2_show_recursive_wasm() {
     run_wasm_test("tier2_functions/show_recursive", Profile::Default);
 }
+
+// A top-level function used as a value (passed to a recursive higher-order
+// function) eta-expands to a closure, so `applyN n inc x` works with the
+// bare function name `inc`.
+#[test]
+fn test_tier2_func_value_wasm() {
+    run_wasm_test("tier2_functions/func_value", Profile::Default);
+}

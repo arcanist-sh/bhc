@@ -1,0 +1,4 @@
+value = 42
+pi ~ 3.25
+ok? True
+10 and 20

@@ -178,9 +178,6 @@ struct WasmLowering<'a> {
     runtime: &'a RuntimeIndices,
     /// Maps Haskell function names to WASM function indices.
     func_map: FxHashMap<Symbol, u32>,
-    /// Raw string pool: maps content to (data_offset, length). Used for fixed
-    /// runtime output (`True`/`False`, newline) printed via `print_str`.
-    string_pool: FxHashMap<String, (u32, u32)>,
     /// Length-prefixed string pool: maps content to a pointer to a
     /// `[len: i32 | bytes...]` block. This is the runtime representation of a
     /// `String` *value*.
@@ -224,7 +221,6 @@ impl<'a> WasmLowering<'a> {
             wasm,
             runtime,
             func_map: FxHashMap::default(),
-            string_pool: FxHashMap::default(),
             pstr_pool: FxHashMap::default(),
             next_data_offset: STRING_DATA_BASE,
             next_func_idx,
@@ -307,24 +303,6 @@ impl<'a> WasmLowering<'a> {
             self.func_map.insert(name, self.next_func_idx);
             self.next_func_idx += 1;
         }
-    }
-
-    /// Intern a string into the data segment, returning (offset, length).
-    fn intern_string(&mut self, s: &str) -> (u32, u32) {
-        if let Some(&entry) = self.string_pool.get(s) {
-            return entry;
-        }
-
-        let offset = self.next_data_offset;
-        let len = s.len() as u32;
-        let bytes = s.as_bytes().to_vec();
-        self.wasm.add_data_segment(offset, bytes);
-        self.next_data_offset += len;
-        // Align to 4 bytes
-        self.next_data_offset = (self.next_data_offset + 3) & !3;
-
-        self.string_pool.insert(s.to_string(), (offset, len));
-        (offset, len)
     }
 
     /// Intern a string as a length-prefixed `[len: i32 | bytes...]` block in the
@@ -675,9 +653,9 @@ impl<'a> WasmLowering<'a> {
         Ok(())
     }
 
-    /// Lower `show`/`print` of `arg`, rendering it according to its inferred
-    /// type and leaving the IO result (`0`) on the stack. `newline` selects
-    /// `putStrLn` vs `putStr` semantics for string-rendered values.
+    /// Lower `show`/`print` of `arg`: render it to a string value and print it,
+    /// leaving the IO result (`0`) on the stack. `newline` selects `putStrLn`
+    /// vs `putStr` semantics.
     fn lower_show(
         &mut self,
         arg: &Expr,
@@ -686,54 +664,54 @@ impl<'a> WasmLowering<'a> {
         locals: &mut FxHashMap<VarId, u32>,
         local_count: &mut u32,
     ) -> WasmResult<()> {
-        match self.infer_show(arg) {
-            ShowKind::Literal(text) => {
-                self.emit_print_str(&text, newline, instrs);
-                instrs.push(WasmInstr::I32Const(0));
-            }
-            ShowKind::Bool => {
-                // Render from the boolean tag: 1 -> "True", 0 -> "False".
-                self.lower_expr(arg, instrs, locals, local_count, false)?;
-                instrs.push(WasmInstr::If(Some(WasmType::I32)));
-                self.emit_print_str("True", newline, instrs);
-                instrs.push(WasmInstr::I32Const(0));
-                instrs.push(WasmInstr::Else);
-                self.emit_print_str("False", newline, instrs);
-                instrs.push(WasmInstr::I32Const(0));
-                instrs.push(WasmInstr::End);
-            }
-            ShowKind::Double => {
-                // Load the boxed f64 and render it; append a newline if asked.
-                self.lower_expr(arg, instrs, locals, local_count, false)?;
-                instrs.push(WasmInstr::F64Load(3, 0));
-                instrs.push(WasmInstr::Call(self.runtime.print_double_idx));
-                if newline {
-                    instrs.push(WasmInstr::I32Const(self.runtime.newline_offset as i32));
-                    instrs.push(WasmInstr::I32Const(1));
-                    instrs.push(WasmInstr::Call(self.runtime.print_str_idx));
-                }
-                instrs.push(WasmInstr::I32Const(0));
-            }
-            ShowKind::Int => {
-                self.lower_expr(arg, instrs, locals, local_count, false)?;
-                instrs.push(WasmInstr::Call(self.runtime.print_i32_idx));
-                instrs.push(WasmInstr::I32Const(0));
-            }
+        self.emit_show_to_pstr(arg, instrs, locals, local_count)?;
+        instrs.push(WasmInstr::Call(self.runtime.print_pstr_idx));
+        if newline {
+            instrs.push(WasmInstr::I32Const(self.runtime.newline_offset as i32));
+            instrs.push(WasmInstr::I32Const(1));
+            instrs.push(WasmInstr::Call(self.runtime.print_str_idx));
         }
+        instrs.push(WasmInstr::I32Const(0));
         Ok(())
     }
 
-    /// Emit a print of the static string `text`.
-    fn emit_print_str(&mut self, text: &str, newline: bool, instrs: &mut Vec<WasmInstr>) {
-        let (offset, len) = self.intern_string(text);
-        let print_idx = if newline {
-            self.runtime.print_str_ln_idx
-        } else {
-            self.runtime.print_str_idx
-        };
-        instrs.push(WasmInstr::I32Const(offset as i32));
-        instrs.push(WasmInstr::I32Const(len as i32));
-        instrs.push(WasmInstr::Call(print_idx));
+    /// Render `show arg` to a length-prefixed string *value*, leaving its
+    /// pointer on the stack. This lets `show` compose with `++` and be used as
+    /// a normal `String`, and is the basis for printing.
+    fn emit_show_to_pstr(
+        &mut self,
+        arg: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        match self.infer_show(arg) {
+            ShowKind::Literal(text) => {
+                let ptr = self.intern_pstr(&text);
+                instrs.push(WasmInstr::I32Const(ptr as i32));
+            }
+            ShowKind::Bool => {
+                // Render from the boolean tag: 1 -> "True", 0 -> "False".
+                let true_ptr = self.intern_pstr("True");
+                let false_ptr = self.intern_pstr("False");
+                self.lower_expr(arg, instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::I32Const(true_ptr as i32));
+                instrs.push(WasmInstr::Else);
+                instrs.push(WasmInstr::I32Const(false_ptr as i32));
+                instrs.push(WasmInstr::End);
+            }
+            ShowKind::Double => {
+                self.lower_expr(arg, instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::F64Load(3, 0));
+                instrs.push(WasmInstr::Call(self.runtime.double_to_str_idx));
+            }
+            ShowKind::Int => {
+                self.lower_expr(arg, instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
+            }
+        }
+        Ok(())
     }
 
     /// Infer how to render `expr` under `show`. Types are erased, so this works
@@ -1301,6 +1279,16 @@ impl<'a> WasmLowering<'a> {
             // String value; the literal already lowers to a string pointer.
             Some(name) if name.contains("unpackCString") && args.len() == 1 => {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
+            }
+
+            // `show x` as a value: produce a String (length-prefixed) so it
+            // composes with `++`. The last argument is the value; any earlier
+            // argument is a dictionary.
+            Some("show" | "GHC.Show.show" | "Prelude.show" | "Text.Show.show")
+                if !args.is_empty() =>
+            {
+                let value = args[args.len() - 1];
+                self.emit_show_to_pstr(value, instrs, locals, local_count)?;
             }
 
             Some("putStrLn" | "System.IO.putStrLn" | "GHC.IO.putStrLn") if args.len() == 1 => {

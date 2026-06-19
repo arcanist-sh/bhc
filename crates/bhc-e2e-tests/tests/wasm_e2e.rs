@@ -256,3 +256,10 @@ fn test_tier2_floats_wasm() {
 fn test_tier2_string_concat_wasm() {
     run_wasm_test("tier2_functions/string_concat", Profile::Default);
 }
+
+// `show` produces a String value, so it composes with `++`
+// (`"value = " ++ show n`) and works for Int, Double, and Bool.
+#[test]
+fn test_tier2_show_string_wasm() {
+    run_wasm_test("tier2_functions/show_string", Profile::Default);
+}

@@ -423,16 +423,19 @@ pub fn generate_print_str_ln(fd_write_idx: u32, newline_offset: u32) -> WasmFunc
 
 /// Generate a `print_double` function that renders an `f64` to stdout.
 ///
+/// Render an `f64` as a length-prefixed string `[len | bytes...]` in freshly
+/// allocated memory, returning the pointer. This is the string-producing
+/// counterpart used by `show`/`print` for doubles.
+///
 /// The value is rounded to 6 fractional digits, then trailing zeros are
 /// stripped (keeping at least one), giving GHC-style output for terminating
-/// decimals (e.g. `5.5`, `6.0`, `0.25`). No newline is appended — callers add
-/// one when they want `print`/`putStrLn` semantics.
+/// decimals (e.g. `5.5`, `6.0`, `0.25`).
 ///
-/// Scratch memory: the decimal string is built backward in `[0, 32)`, with the
-/// iovec at offset 32 and the `nwritten` slot at 40.
-pub fn generate_print_double(fd_write_idx: u32) -> WasmFunc {
-    let mut func = WasmFunc::new(WasmFuncType::new(vec![WasmType::F64], vec![]));
-    func.name = Some("print_double".to_string());
+/// Scratch memory: the decimal string is built backward in `[0, 32)`, then
+/// copied into the allocated block.
+pub fn generate_double_to_str(alloc_idx: u32) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(vec![WasmType::F64], vec![WasmType::I32]));
+    func.name = Some("double_to_str".to_string());
     func.exported = true;
 
     let neg = func.add_local(WasmType::I32);
@@ -442,6 +445,8 @@ pub fn generate_print_double(fd_write_idx: u32) -> WasmFunc {
     let ndigits = func.add_local(WasmType::I32);
     let ptr = func.add_local(WasmType::I32);
     let len = func.add_local(WasmType::I32);
+    let result = func.add_local(WasmType::I32);
+    let i = func.add_local(WasmType::I32);
 
     // neg = v < 0
     func.emit(WasmInstr::LocalGet(0));
@@ -621,22 +626,175 @@ pub fn generate_print_double(fd_write_idx: u32) -> WasmFunc {
     func.emit(WasmInstr::I32Add);
     func.emit(WasmInstr::LocalSet(ptr));
 
-    // iovec at 32: buf = ptr, len = len.
-    func.emit(WasmInstr::I32Const(32));
-    func.emit(WasmInstr::LocalGet(ptr));
-    func.emit(WasmInstr::I32Store(4, 0));
-    func.emit(WasmInstr::I32Const(36));
+    // result = alloc(4 + len); [result] = len
+    func.emit(WasmInstr::I32Const(4));
     func.emit(WasmInstr::LocalGet(len));
-    func.emit(WasmInstr::I32Store(4, 0));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(result));
+    func.emit(WasmInstr::LocalGet(result));
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32Store(2, 0));
 
-    // fd_write(stdout, 32, 1, 40)
-    func.emit(WasmInstr::I32Const(STDOUT_FD));
-    func.emit(WasmInstr::I32Const(32));
+    // copy len bytes: result[4+i] = scratch[ptr+i]
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32GeU);
+    func.emit(WasmInstr::BrIf(1));
+    func.emit(WasmInstr::LocalGet(result));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(ptr));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Load8U(0, 0));
+    func.emit(WasmInstr::I32Store8(0, 0));
+    func.emit(WasmInstr::LocalGet(i));
     func.emit(WasmInstr::I32Const(1));
-    func.emit(WasmInstr::I32Const(40));
-    func.emit(WasmInstr::Call(fd_write_idx));
-    func.emit(WasmInstr::Drop);
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
 
+    func.emit(WasmInstr::LocalGet(result));
+    func.emit(WasmInstr::End);
+    func
+}
+
+/// Generate an `int_to_str` function: render an i32 as a length-prefixed
+/// string `[len | bytes...]` in freshly allocated memory, returning the pointer.
+///
+/// Digits are built backward into scratch `[0, 32)`, then copied into the
+/// allocated block. This is the string-producing counterpart of `print_i32`,
+/// used by `show`.
+pub fn generate_int_to_str(alloc_idx: u32) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(vec![WasmType::I32], vec![WasmType::I32]));
+    func.name = Some("int_to_str".to_string());
+    func.exported = true;
+
+    let num = func.add_local(WasmType::I32);
+    let ptr = func.add_local(WasmType::I32); // scratch cursor
+    let len = func.add_local(WasmType::I32);
+    let is_neg = func.add_local(WasmType::I32);
+    let result = func.add_local(WasmType::I32);
+    let i = func.add_local(WasmType::I32);
+
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::LocalSet(num));
+    func.emit(WasmInstr::I32Const(31));
+    func.emit(WasmInstr::LocalSet(ptr));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(len));
+
+    // is_neg = num < 0; if so negate
+    func.emit(WasmInstr::LocalGet(num));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::I32LtS);
+    func.emit(WasmInstr::LocalSet(is_neg));
+    func.emit(WasmInstr::LocalGet(is_neg));
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalGet(num));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::LocalSet(num));
+    func.emit(WasmInstr::End);
+
+    // Digit loop (at least one digit): do { d = num%10; store; num/=10 } while num>0
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    func.emit(WasmInstr::LocalGet(ptr));
+    func.emit(WasmInstr::LocalGet(num));
+    func.emit(WasmInstr::I32Const(10));
+    func.emit(WasmInstr::I32RemU);
+    func.emit(WasmInstr::I32Const(48));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Store8(0, 0));
+    func.emit(WasmInstr::LocalGet(num));
+    func.emit(WasmInstr::I32Const(10));
+    func.emit(WasmInstr::I32DivU);
+    func.emit(WasmInstr::LocalSet(num));
+    func.emit(WasmInstr::LocalGet(ptr));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::LocalSet(ptr));
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(len));
+    func.emit(WasmInstr::LocalGet(num));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::I32GtU);
+    func.emit(WasmInstr::BrIf(0));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+
+    // '-' prefix if negative
+    func.emit(WasmInstr::LocalGet(is_neg));
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::LocalGet(ptr));
+    func.emit(WasmInstr::I32Const(45));
+    func.emit(WasmInstr::I32Store8(0, 0));
+    func.emit(WasmInstr::LocalGet(ptr));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::LocalSet(ptr));
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(len));
+    func.emit(WasmInstr::End);
+
+    // start of string is ptr + 1
+    func.emit(WasmInstr::LocalGet(ptr));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(ptr));
+
+    // result = alloc(4 + len); [result] = len
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(result));
+    func.emit(WasmInstr::LocalGet(result));
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32Store(2, 0));
+
+    // copy len bytes: result[4+i] = scratch[ptr+i]
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32GeU);
+    func.emit(WasmInstr::BrIf(1));
+    func.emit(WasmInstr::LocalGet(result));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(ptr));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Load8U(0, 0));
+    func.emit(WasmInstr::I32Store8(0, 0));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+
+    func.emit(WasmInstr::LocalGet(result));
     func.emit(WasmInstr::End);
     func
 }

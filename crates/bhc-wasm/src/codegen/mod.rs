@@ -87,12 +87,14 @@ pub struct RuntimeIndices {
     pub print_str_idx: u32,
     /// Index of the `print_str_ln` function.
     pub print_str_ln_idx: u32,
-    /// Index of the `print_double` function (renders an f64, no newline).
-    pub print_double_idx: u32,
     /// Index of the `print_pstr` function (prints a length-prefixed string).
     pub print_pstr_idx: u32,
     /// Index of the `concat_str` function (concatenates two strings).
     pub concat_str_idx: u32,
+    /// Index of `int_to_str` (renders an i32 to a length-prefixed string).
+    pub int_to_str_idx: u32,
+    /// Index of `double_to_str` (renders an f64 to a length-prefixed string).
+    pub double_to_str_idx: u32,
     /// Offset of the newline byte in the data segment.
     pub newline_offset: u32,
 }
@@ -610,10 +612,6 @@ impl WasmModule {
         let print_str_ln_func = wasi::generate_print_str_ln(fd_write_idx, newline_offset);
         let print_str_ln_idx = self.add_function(print_str_ln_func);
 
-        // Add print_double function
-        let print_double_func = wasi::generate_print_double(fd_write_idx);
-        let print_double_idx = self.add_function(print_double_func);
-
         // Add print_pstr function (length-prefixed string printing)
         let print_pstr_func = wasi::generate_print_pstr(fd_write_idx);
         let print_pstr_idx = self.add_function(print_pstr_func);
@@ -622,6 +620,12 @@ impl WasmModule {
         let concat_str_func = wasi::generate_concat_str(fd_write_idx, alloc_idx);
         let concat_str_idx = self.add_function(concat_str_func);
 
+        // Add int_to_str and double_to_str (string-producing formatters for show)
+        let int_to_str_func = wasi::generate_int_to_str(alloc_idx);
+        let int_to_str_idx = self.add_function(int_to_str_func);
+        let double_to_str_func = wasi::generate_double_to_str(alloc_idx);
+        let double_to_str_idx = self.add_function(double_to_str_func);
+
         RuntimeIndices {
             fd_write_idx,
             proc_exit_idx,
@@ -629,9 +633,10 @@ impl WasmModule {
             print_i32_idx,
             print_str_idx,
             print_str_ln_idx,
-            print_double_idx,
             print_pstr_idx,
             concat_str_idx,
+            int_to_str_idx,
+            double_to_str_idx,
             newline_offset,
         }
     }

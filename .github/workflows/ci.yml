@@ -56,6 +56,7 @@ jobs:
     name: Test
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         rust: [stable, beta]
@@ -203,15 +204,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run benchmarks
+      # Compile-only smoke test: ensures the benchmark harnesses build. We do
+      # not execute them in CI (slow) or publish results, so there is no
+      # criterion output to store.
+      - name: Build benchmarks
         run: cargo bench --no-run
-
-      - name: Store benchmark results
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          tool: 'cargo'
-          output-file-path: target/criterion/*/new/estimates.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: true
-          alert-threshold: '150%'
-          comment-on-alert: true

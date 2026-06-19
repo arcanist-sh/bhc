@@ -182,3 +182,29 @@ fn test_tier2_derive_eq_wasm() {
 fn test_tier2_user_monad_wasm() {
     run_wasm_test("tier2_functions/user_monad", Profile::Default);
 }
+
+// =============================================================================
+// First-class closures (call_indirect)
+// =============================================================================
+
+// Lambdas passed to higher-order functions. The worker/wrapper pass forces the
+// function argument with `case f of x -> x arg`, so `f` must be a real closure
+// value and the application must go through `call_indirect`.
+#[test]
+fn test_tier2_higher_order_wasm() {
+    run_wasm_test("tier2_functions/higher_order", Profile::Default);
+}
+
+// Recursive higher-order function: the closure is a genuine runtime parameter
+// threaded through recursion (cannot be inlined away), so this exercises
+// `call_indirect` directly.
+#[test]
+fn test_tier2_closure_map_wasm() {
+    run_wasm_test("tier2_functions/closure_map", Profile::Default);
+}
+
+// Closure capturing a free variable from its environment.
+#[test]
+fn test_tier2_closure_capture_wasm() {
+    run_wasm_test("tier2_functions/closure_capture", Profile::Default);
+}

@@ -125,6 +125,20 @@ pub fn lower_core_module(
         }
     }
 
+    // Register lambda-lifted closure functions. They were assigned indices
+    // starting right after the top-level bindings; add them in index order so
+    // `add_function` hands back exactly those indices.
+    lowering.pending_closures.sort_by_key(|(idx, _)| *idx);
+    let pending = std::mem::take(&mut lowering.pending_closures);
+    for (reserved_idx, func) in pending {
+        let actual = lowering.wasm.add_function(func);
+        if actual != reserved_idx {
+            return Err(crate::WasmError::Internal(format!(
+                "closure function index mismatch: reserved {reserved_idx}, got {actual}"
+            )));
+        }
+    }
+
     // Find main's function index
     let main_idx = lowering
         .func_map
@@ -164,6 +178,10 @@ struct WasmLowering<'a> {
     inline_bodies: FxHashMap<Symbol, (Vec<VarId>, Expr)>,
     /// Functions currently being inlined, to break inlining cycles.
     inlining: FxHashSet<Symbol>,
+    /// Lambda-lifted closure functions awaiting registration, as
+    /// `(reserved_function_index, function)`. They are added to the module
+    /// after all top-level bindings so their indices match what was reserved.
+    pending_closures: Vec<(u32, WasmFunc)>,
 }
 
 impl<'a> WasmLowering<'a> {
@@ -182,6 +200,7 @@ impl<'a> WasmLowering<'a> {
             subst: FxHashMap::default(),
             inline_bodies: FxHashMap::default(),
             inlining: FxHashSet::default(),
+            pending_closures: Vec::new(),
         }
     }
 
@@ -364,12 +383,9 @@ impl<'a> WasmLowering<'a> {
                 self.lower_app(expr, instrs, locals, local_count, is_main)?;
             }
 
-            Expr::Lam(_, _, _) => {
-                // A lambda at expression level (not at the top of a binding)
-                // means a closure. For our simple lowering, we don't support
-                // higher-order functions yet - just push 0.
-                tracing::warn!("lambda expression in non-binding position, using 0");
-                instrs.push(WasmInstr::I32Const(0));
+            Expr::Lam(param, body, _) => {
+                // A lambda in value position becomes a first-class closure.
+                self.lower_closure(param, body, instrs, locals, local_count)?;
             }
 
             Expr::Let(bind, body, _) => {
@@ -509,6 +525,167 @@ impl<'a> WasmLowering<'a> {
 
         // Push ptr as the result value
         instrs.push(WasmInstr::LocalGet(ptr_local));
+        Ok(())
+    }
+
+    /// The type index for the closure calling convention `(env, arg) -> result`.
+    fn closure_type_index(&mut self) -> u32 {
+        self.wasm.add_type(WasmFuncType::new(
+            vec![WasmType::I32, WasmType::I32],
+            vec![WasmType::I32],
+        ))
+    }
+
+    /// Free variables of a lambda that must be captured: those referenced in
+    /// the body, not bound by the lambda, and live as runtime values in the
+    /// enclosing scope (a local or an inlined substitution).
+    fn closure_free_vars(
+        &self,
+        param: &Var,
+        body: &Expr,
+        locals: &FxHashMap<VarId, u32>,
+    ) -> Vec<Var> {
+        let mut bound = FxHashSet::default();
+        bound.insert(param.id);
+        let mut acc = Vec::new();
+        let mut seen = FxHashSet::default();
+        collect_free_vars(body, &mut bound, &mut acc, &mut seen);
+        acc.retain(|v| locals.contains_key(&v.id) || self.subst.contains_key(&v.id));
+        acc
+    }
+
+    /// Lambda-lift `\param -> body` into a standalone function with the closure
+    /// calling convention `clos(env, arg)`. Captured free variables are loaded
+    /// from the environment record; the parameter is the second argument.
+    /// Returns the reserved function index (also its table slot).
+    fn lift_lambda(&mut self, param: &Var, body: &Expr, captured: &[Var]) -> WasmResult<u32> {
+        let func_idx = self.next_func_idx;
+        self.next_func_idx += 1;
+
+        let ty = WasmFuncType::new(vec![WasmType::I32, WasmType::I32], vec![WasmType::I32]);
+        let mut func = WasmFunc::new(ty);
+        func.name = Some(format!("clos_{func_idx}"));
+
+        let mut instrs = Vec::new();
+        let mut locals: FxHashMap<VarId, u32> = FxHashMap::default();
+        let mut local_count: u32 = 2; // local 0 = env pointer, local 1 = argument
+
+        // Load each captured free variable from the environment record.
+        for (i, fv) in captured.iter().enumerate() {
+            let slot = local_count;
+            local_count += 1;
+            instrs.push(WasmInstr::LocalGet(0));
+            instrs.push(WasmInstr::I32Load(2, ((i + 1) * 4) as u32));
+            instrs.push(WasmInstr::LocalSet(slot));
+            locals.insert(fv.id, slot);
+        }
+        // The lambda parameter is the call argument (local 1).
+        locals.insert(param.id, 1);
+
+        // Captured values now live in locals, so lower the body with a fresh
+        // substitution environment (creation-site inlining does not apply here).
+        let saved = std::mem::take(&mut self.subst);
+        let res = self.lower_expr(body, &mut instrs, &mut locals, &mut local_count, false);
+        self.subst = saved;
+        res?;
+
+        instrs.push(WasmInstr::End);
+        for _ in 2..local_count {
+            func.add_local(WasmType::I32);
+        }
+        for instr in instrs {
+            func.emit(instr);
+        }
+
+        self.pending_closures.push((func_idx, func));
+        self.wasm.enable_func_table();
+        Ok(func_idx)
+    }
+
+    /// Lower a lambda expression to a closure value: a heap record
+    /// `[code_index | captured_0 | captured_1 | ...]`. Leaves the record
+    /// pointer on the stack.
+    fn lower_closure(
+        &mut self,
+        param: &Var,
+        body: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let captured = self.closure_free_vars(param, body, locals);
+        let func_idx = self.lift_lambda(param, body, &captured)?;
+
+        let size = ((1 + captured.len()) * 4) as i32;
+        instrs.push(WasmInstr::I32Const(size));
+        instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+
+        let ptr = *local_count;
+        *local_count += 1;
+        instrs.push(WasmInstr::LocalTee(ptr));
+
+        // Store the code index at offset 0.
+        instrs.push(WasmInstr::I32Const(func_idx as i32));
+        instrs.push(WasmInstr::I32Store(2, 0));
+
+        // Store each captured value at offset (i+1)*4.
+        for (i, fv) in captured.iter().enumerate() {
+            instrs.push(WasmInstr::LocalGet(ptr));
+            self.emit_var_value(fv, instrs, locals, local_count);
+            instrs.push(WasmInstr::I32Store(2, ((i + 1) * 4) as u32));
+        }
+
+        instrs.push(WasmInstr::LocalGet(ptr));
+        Ok(())
+    }
+
+    /// Emit the current value of a variable (a local, or an inlined
+    /// substitution). Used to snapshot captured free variables.
+    fn emit_var_value(
+        &mut self,
+        var: &Var,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) {
+        if let Some(&slot) = locals.get(&var.id) {
+            instrs.push(WasmInstr::LocalGet(slot));
+        } else if let Some(arg) = self.subst.get(&var.id).cloned() {
+            // Best effort: lowering may fail only on unsupported constructs,
+            // which would already warn elsewhere; ignore the result here.
+            let _ = self.lower_expr(&arg, instrs, locals, local_count, false);
+        } else {
+            instrs.push(WasmInstr::I32Const(0));
+        }
+    }
+
+    /// Apply a closure value (already on top of the stack) to `args`, one
+    /// argument at a time via `call_indirect`, leaving the final result on the
+    /// stack. Curried application threads each intermediate closure through.
+    fn apply_closure_on_stack(
+        &mut self,
+        args: &[&Expr],
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let type_idx = self.closure_type_index();
+        self.wasm.enable_func_table();
+
+        let cur = *local_count;
+        *local_count += 1;
+        instrs.push(WasmInstr::LocalSet(cur));
+
+        for arg in args {
+            instrs.push(WasmInstr::LocalGet(cur)); // env pointer
+            self.lower_expr(arg, instrs, locals, local_count, false)?; // argument
+            instrs.push(WasmInstr::LocalGet(cur));
+            instrs.push(WasmInstr::I32Load(2, 0)); // code index at offset 0
+            instrs.push(WasmInstr::CallIndirect(type_idx, 0));
+            instrs.push(WasmInstr::LocalSet(cur)); // result (possibly another closure)
+        }
+
+        instrs.push(WasmInstr::LocalGet(cur));
         Ok(())
     }
 
@@ -665,6 +842,15 @@ impl<'a> WasmLowering<'a> {
         // call path supports.
         if self.try_lower_inline_app(func_expr, &args, instrs, locals, local_count, is_main)? {
             return Ok(());
+        }
+
+        // Application of a closure value held in a local (a function-typed
+        // parameter, a case binder, a let binding): call it indirectly.
+        if let Expr::Var(var, _) = peel_head(func_expr) {
+            if let Some(&slot) = locals.get(&var.id) {
+                instrs.push(WasmInstr::LocalGet(slot));
+                return self.apply_closure_on_stack(&args, instrs, locals, local_count);
+            }
         }
 
         match func_name {
@@ -904,14 +1090,11 @@ impl<'a> WasmLowering<'a> {
                 }
             }
 
-            // Non-variable function expression (e.g., lambda application)
+            // Non-variable function expression: evaluate it to a closure value
+            // and apply the arguments indirectly.
             None => {
-                // Evaluate the function and all args, use the function's result
                 self.lower_expr(func_expr, instrs, locals, local_count, false)?;
-                for arg in &args {
-                    self.lower_expr(arg, instrs, locals, local_count, false)?;
-                    instrs.push(WasmInstr::Drop);
-                }
+                self.apply_closure_on_stack(&args, instrs, locals, local_count)?;
             }
         }
 
@@ -1255,6 +1438,80 @@ fn expr_uses_name(expr: &Expr, name: Symbol) -> bool {
         }
         Expr::Case(scrut, alts, _, _) => {
             expr_uses_name(scrut, name) || alts.iter().any(|a| expr_uses_name(&a.rhs, name))
+        }
+    }
+}
+
+/// Collect the free variables of `expr` (in first-occurrence order), skipping
+/// any bound within it. `bound` tracks variables in scope; `seen` deduplicates.
+fn collect_free_vars(
+    expr: &Expr,
+    bound: &mut FxHashSet<VarId>,
+    acc: &mut Vec<Var>,
+    seen: &mut FxHashSet<VarId>,
+) {
+    match expr {
+        Expr::Var(v, _) => {
+            if !bound.contains(&v.id) && seen.insert(v.id) {
+                acc.push(v.clone());
+            }
+        }
+        Expr::Lit(_, _, _) | Expr::Type(_, _) | Expr::Coercion(_, _) => {}
+        Expr::App(f, a, _) => {
+            collect_free_vars(f, bound, acc, seen);
+            collect_free_vars(a, bound, acc, seen);
+        }
+        Expr::TyApp(inner, _, _)
+        | Expr::Cast(inner, _, _)
+        | Expr::Tick(_, inner, _)
+        | Expr::Lazy(inner, _)
+        | Expr::TyLam(_, inner, _) => collect_free_vars(inner, bound, acc, seen),
+        Expr::Lam(p, body, _) => {
+            let added = bound.insert(p.id);
+            collect_free_vars(body, bound, acc, seen);
+            if added {
+                bound.remove(&p.id);
+            }
+        }
+        Expr::Let(bind, body, _) => match bind.as_ref() {
+            Bind::NonRec(v, rhs) => {
+                collect_free_vars(rhs, bound, acc, seen);
+                let added = bound.insert(v.id);
+                collect_free_vars(body, bound, acc, seen);
+                if added {
+                    bound.remove(&v.id);
+                }
+            }
+            Bind::Rec(bs) => {
+                let mut added = Vec::new();
+                for (v, _) in bs {
+                    if bound.insert(v.id) {
+                        added.push(v.id);
+                    }
+                }
+                for (_, rhs) in bs {
+                    collect_free_vars(rhs, bound, acc, seen);
+                }
+                collect_free_vars(body, bound, acc, seen);
+                for id in added {
+                    bound.remove(&id);
+                }
+            }
+        },
+        Expr::Case(scrut, alts, _, _) => {
+            collect_free_vars(scrut, bound, acc, seen);
+            for alt in alts {
+                let mut added = Vec::new();
+                for b in &alt.binders {
+                    if bound.insert(b.id) {
+                        added.push(b.id);
+                    }
+                }
+                collect_free_vars(&alt.rhs, bound, acc, seen);
+                for id in added {
+                    bound.remove(&id);
+                }
+            }
         }
     }
 }

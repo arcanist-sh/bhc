@@ -418,6 +418,12 @@ pub struct WasmModule {
     exports: Vec<WasmExport>,
     /// Data segments.
     data_segments: Vec<(u32, Vec<u8>)>,
+    /// Whether a function-reference table is needed (set when the program
+    /// uses first-class closures via `call_indirect`). When set, a `funcref`
+    /// table covering every function index is emitted, populated by an
+    /// identity element segment so a closure can store a function index and
+    /// call it indirectly.
+    needs_func_table: bool,
 }
 
 impl WasmModule {
@@ -441,6 +447,7 @@ impl WasmModule {
             globals: Vec::new(),
             exports: Vec::new(),
             data_segments: Vec::new(),
+            needs_func_table: false,
         };
 
         // Add runtime exports if configured
@@ -511,6 +518,20 @@ impl WasmModule {
     /// Add a data segment.
     pub fn add_data_segment(&mut self, offset: u32, data: Vec<u8>) {
         self.data_segments.push((offset, data));
+    }
+
+    /// Request emission of a function-reference table (for `call_indirect`).
+    pub fn enable_func_table(&mut self) {
+        self.needs_func_table = true;
+    }
+
+    /// Total number of function indices (imported + defined).
+    fn total_function_count(&self) -> u32 {
+        self.imports
+            .iter()
+            .filter(|i| matches!(i.kind, WasmImportKind::Func(_)))
+            .count() as u32
+            + self.functions.len() as u32
     }
 
     /// Get the next function index that would be assigned by `add_function`.
@@ -824,6 +845,9 @@ impl BinaryEncoder {
         // Function section
         self.encode_function_section(module, &type_table)?;
 
+        // Table section (function-reference table for call_indirect)
+        self.encode_table_section(module)?;
+
         // Memory section
         self.encode_memory_section(module)?;
 
@@ -832,6 +856,9 @@ impl BinaryEncoder {
 
         // Export section
         self.encode_export_section(module)?;
+
+        // Element section (populates the function table)
+        self.encode_element_section(module)?;
 
         // Code section
         self.encode_code_section(module)?;
@@ -1048,6 +1075,51 @@ impl BinaryEncoder {
 
         content = encoder.output;
         self.encode_section(0x03, content);
+        Ok(())
+    }
+
+    /// Emit a single `funcref` table sized to hold every function index.
+    fn encode_table_section(&mut self, module: &WasmModule) -> WasmResult<()> {
+        if !module.needs_func_table {
+            return Ok(());
+        }
+        let count = module.total_function_count();
+
+        let mut encoder = BinaryEncoder { output: Vec::new() };
+        encoder.encode_uleb128(1); // one table
+        encoder.output.push(0x70); // funcref element type
+        encoder.output.push(0x00); // limits: min only
+        encoder.encode_uleb128(count);
+
+        self.encode_section(0x04, encoder.output);
+        Ok(())
+    }
+
+    /// Emit an active element segment giving the table an identity mapping
+    /// (`table[i] = function i`), so a closure can store a function index and
+    /// invoke it via `call_indirect`.
+    fn encode_element_section(&mut self, module: &WasmModule) -> WasmResult<()> {
+        if !module.needs_func_table {
+            return Ok(());
+        }
+        let count = module.total_function_count();
+        if count == 0 {
+            return Ok(());
+        }
+
+        let mut encoder = BinaryEncoder { output: Vec::new() };
+        encoder.encode_uleb128(1); // one element segment
+        encoder.encode_uleb128(0); // segment flags: active, table 0, funcref
+                                   // offset expression: i32.const 0; end
+        encoder.output.push(0x41); // i32.const
+        encoder.encode_sleb128(0);
+        encoder.output.push(0x0b); // end
+        encoder.encode_uleb128(count); // number of function indices
+        for i in 0..count {
+            encoder.encode_uleb128(i);
+        }
+
+        self.encode_section(0x09, encoder.output);
         Ok(())
     }
 

@@ -55,10 +55,19 @@ jobs:
   test:
     name: Test
     runs-on: ${{ matrix.os }}
+    # The Test matrix is a functional gate (does it build & do tests pass).
+    # Lint enforcement (-D warnings) lives in the Check job on stable; denying
+    # warnings here too makes the beta toolchain fragile (new lints land on
+    # beta and on platform-specific cfg code), so override RUSTFLAGS to empty.
+    env:
+      RUSTFLAGS: ""
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # windows-latest is omitted: building inkwell/llvm-sys needs LLVM dev
+        # libraries + llvm-config, which the choco `llvm` package doesn't ship
+        # (unlike apt `llvm.sh ... all` and Homebrew). Windows is best-effort.
+        os: [ubuntu-latest, macos-latest]
         rust: [stable, beta]
     steps:
       - uses: actions/checkout@v4

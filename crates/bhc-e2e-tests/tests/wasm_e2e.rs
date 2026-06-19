@@ -148,3 +148,20 @@ fn test_tier2_factorial_wasm_edge() {
 fn test_tier1_arithmetic_wasm_numeric() {
     run_wasm_test("tier1_simple/arithmetic", Profile::Numeric);
 }
+
+// =============================================================================
+// Tier 2: Additional language coverage
+// =============================================================================
+
+#[test]
+fn test_tier2_lambda_wasm() {
+    run_wasm_test("tier2_functions/lambda", Profile::Default);
+}
+
+// User-defined ADTs: constructor tags come from module metadata, not just
+// the well-known set. Regression test for nullary constructors all lowering
+// to tag 0 (Red/Green/Blue → 1,1,1 instead of 1,2,3).
+#[test]
+fn test_tier2_custom_adt_wasm() {
+    run_wasm_test("tier2_functions/custom_adt", Profile::Default);
+}

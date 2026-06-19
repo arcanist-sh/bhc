@@ -25,25 +25,29 @@ struct ConInfo {
 }
 
 /// Build a map of well-known constructors to their tag and arity.
-fn well_known_constructors() -> FxHashMap<&'static str, ConInfo> {
+///
+/// User-defined constructors are layered on top of this in
+/// [`WasmLowering::register_constructors`] from the module's constructor
+/// metadata, so their tags match what the case-match logic expects.
+fn well_known_constructors() -> FxHashMap<String, ConInfo> {
     let mut m = FxHashMap::default();
     // Bool
-    m.insert("False", ConInfo { tag: 0, arity: 0 });
-    m.insert("True", ConInfo { tag: 1, arity: 0 });
+    m.insert("False".to_string(), ConInfo { tag: 0, arity: 0 });
+    m.insert("True".to_string(), ConInfo { tag: 1, arity: 0 });
     // Unit
-    m.insert("()", ConInfo { tag: 0, arity: 0 });
+    m.insert("()".to_string(), ConInfo { tag: 0, arity: 0 });
     // Maybe
-    m.insert("Nothing", ConInfo { tag: 0, arity: 0 });
-    m.insert("Just", ConInfo { tag: 1, arity: 1 });
+    m.insert("Nothing".to_string(), ConInfo { tag: 0, arity: 0 });
+    m.insert("Just".to_string(), ConInfo { tag: 1, arity: 1 });
     // Either
-    m.insert("Left", ConInfo { tag: 0, arity: 1 });
-    m.insert("Right", ConInfo { tag: 1, arity: 1 });
+    m.insert("Left".to_string(), ConInfo { tag: 0, arity: 1 });
+    m.insert("Right".to_string(), ConInfo { tag: 1, arity: 1 });
     // List
-    m.insert("[]", ConInfo { tag: 0, arity: 0 });
-    m.insert(":", ConInfo { tag: 1, arity: 2 });
+    m.insert("[]".to_string(), ConInfo { tag: 0, arity: 0 });
+    m.insert(":".to_string(), ConInfo { tag: 1, arity: 2 });
     // Tuples
-    m.insert("(,)", ConInfo { tag: 0, arity: 2 });
-    m.insert("(,,)", ConInfo { tag: 0, arity: 3 });
+    m.insert("(,)".to_string(), ConInfo { tag: 0, arity: 2 });
+    m.insert("(,,)".to_string(), ConInfo { tag: 0, arity: 3 });
     m
 }
 
@@ -65,6 +69,11 @@ pub fn lower_core_module(
     runtime: &RuntimeIndices,
 ) -> WasmResult<u32> {
     let mut lowering = WasmLowering::new(wasm, runtime);
+
+    // Register user-defined data constructors so their tags/arities match the
+    // case-match logic. Without this, only well-known constructors are known
+    // and user ADT values all lower to tag 0.
+    lowering.register_constructors(core);
 
     // First pass: register all top-level function names so we can resolve calls
     for bind in &core.bindings {
@@ -119,8 +128,9 @@ struct WasmLowering<'a> {
     next_data_offset: u32,
     /// Counter for pre-registering function indices.
     next_func_idx: u32,
-    /// Well-known constructor map: name -> (tag, arity).
-    con_map: FxHashMap<&'static str, ConInfo>,
+    /// Constructor map: name -> (tag, arity). Seeded with well-known
+    /// constructors and extended with user-defined ones from the module.
+    con_map: FxHashMap<String, ConInfo>,
 }
 
 impl<'a> WasmLowering<'a> {
@@ -136,6 +146,24 @@ impl<'a> WasmLowering<'a> {
             next_data_offset: STRING_DATA_BASE,
             next_func_idx,
             con_map: well_known_constructors(),
+        }
+    }
+
+    /// Register user-defined data constructors from the module's constructor
+    /// metadata. Newtype constructors are identity at runtime, so they are
+    /// skipped — their argument flows through unwrapped.
+    fn register_constructors(&mut self, core: &CoreModule) {
+        for con in &core.constructors {
+            if con.is_newtype {
+                continue;
+            }
+            self.con_map.insert(
+                con.name.clone(),
+                ConInfo {
+                    tag: con.tag,
+                    arity: con.arity,
+                },
+            );
         }
     }
 

@@ -1,0 +1,7 @@
+[1,2,3]
+Just 5
+Nothing
+(1,True)
+[True,False]
+Just (Just 7)
+Left 3

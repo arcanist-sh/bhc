@@ -685,6 +685,33 @@ impl<'a> WasmLowering<'a> {
         locals: &mut FxHashMap<VarId, u32>,
         local_count: &mut u32,
     ) -> WasmResult<()> {
+        // Structural show for statically-known compound values: lists, tuples,
+        // and constructor applications with fields. Each element/field is shown
+        // recursively (its type comes from its sub-expression).
+        if let Some(elems) = extract_list_elements(arg) {
+            return self.emit_show_seq("[", "]", &elems, false, instrs, locals, local_count);
+        }
+        let (head, fields) = collect_app_spine(arg);
+        if let Expr::Var(hv, _) = head {
+            let name = hv.name.as_str();
+            if !fields.is_empty()
+                && matches!(self.lookup_constructor(name), Some((_, arity)) if arity as usize == fields.len())
+            {
+                if is_tuple_con(name) {
+                    return self.emit_show_seq(
+                        "(",
+                        ")",
+                        &fields,
+                        false,
+                        instrs,
+                        locals,
+                        local_count,
+                    );
+                }
+                return self.emit_show_constructor(name, &fields, instrs, locals, local_count);
+            }
+        }
+
         match self.infer_show(arg) {
             ShowKind::Literal(text) => {
                 let ptr = self.intern_pstr(&text);
@@ -712,6 +739,103 @@ impl<'a> WasmLowering<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Push a length-prefixed string literal pointer onto the stack.
+    fn emit_pstr_lit(&mut self, s: &str, instrs: &mut Vec<WasmInstr>) {
+        let ptr = self.intern_pstr(s);
+        instrs.push(WasmInstr::I32Const(ptr as i32));
+    }
+
+    /// Show a comma-separated sequence wrapped in `open`/`close` (a list or a
+    /// tuple), concatenating the rendered pieces. If `paren_items`, each item is
+    /// parenthesized when it is a compound value (used for constructor fields,
+    /// not here). Leaves the result string pointer on the stack.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_show_seq(
+        &mut self,
+        open: &str,
+        close: &str,
+        items: &[&Expr],
+        paren_items: bool,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        self.emit_pstr_lit(open, instrs);
+        for (i, item) in items.iter().enumerate() {
+            if i > 0 {
+                self.emit_pstr_lit(",", instrs);
+                instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+            }
+            self.emit_show_item(item, paren_items, instrs, locals, local_count)?;
+            instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+        }
+        self.emit_pstr_lit(close, instrs);
+        instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+        Ok(())
+    }
+
+    /// Show a constructor application `Con f1 f2 ...` as `Con f1 f2 ...`, with
+    /// each compound field parenthesized (Haskell `showsPrec` at precedence 11).
+    fn emit_show_constructor(
+        &mut self,
+        name: &str,
+        fields: &[&Expr],
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        self.emit_pstr_lit(name, instrs);
+        for field in fields {
+            self.emit_pstr_lit(" ", instrs);
+            instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+            self.emit_show_item(field, true, instrs, locals, local_count)?;
+            instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+        }
+        Ok(())
+    }
+
+    /// Show a single element/field, optionally parenthesizing it when it is a
+    /// compound value (a constructor application with fields, or a negative
+    /// number) — matching Haskell's parenthesization of nested `show`.
+    fn emit_show_item(
+        &mut self,
+        item: &Expr,
+        paren: bool,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        if paren && self.show_needs_parens(item) {
+            self.emit_pstr_lit("(", instrs);
+            self.emit_show_to_pstr(item, instrs, locals, local_count)?;
+            instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+            self.emit_pstr_lit(")", instrs);
+            instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+            Ok(())
+        } else {
+            self.emit_show_to_pstr(item, instrs, locals, local_count)
+        }
+    }
+
+    /// Whether `show item` needs surrounding parentheses as a constructor field:
+    /// a constructor application with arguments, or a negative numeric literal.
+    fn show_needs_parens(&self, item: &Expr) -> bool {
+        match item {
+            Expr::Lit(Literal::Int(n), _, _) => return *n < 0,
+            Expr::Lit(Literal::Integer(n), _, _) => return *n < 0,
+            _ => {}
+        }
+        let (head, fields) = collect_app_spine(item);
+        if let Expr::Var(hv, _) = head {
+            let name = hv.name.as_str();
+            // Lists and tuples render with their own brackets — no parens.
+            if !fields.is_empty() && !is_tuple_con(name) && name != ":" {
+                return matches!(self.lookup_constructor(name), Some((_, arity)) if arity as usize == fields.len());
+            }
+        }
+        false
     }
 
     /// Infer how to render `expr` under `show`. Types are erased, so this works
@@ -1913,6 +2037,47 @@ fn match_show_arg(expr: &Expr) -> Option<&Expr> {
     } else {
         None
     }
+}
+
+/// Peel transparent wrappers (`TyApp`/`Cast`/`Tick`/`Lazy`) off an expression.
+fn peel_show_wrappers(expr: &Expr) -> &Expr {
+    let mut e = expr;
+    loop {
+        e = match e {
+            Expr::TyApp(inner, _, _)
+            | Expr::Cast(inner, _, _)
+            | Expr::Tick(_, inner, _)
+            | Expr::Lazy(inner, _) => inner,
+            _ => return e,
+        };
+    }
+}
+
+/// If `expr` is a statically-known list (a chain of `:` ending in `[]`), return
+/// its element expressions. Returns `None` for runtime lists (a variable, a
+/// `++` result, etc.) whose elements aren't known at compile time.
+fn extract_list_elements(expr: &Expr) -> Option<Vec<&Expr>> {
+    let mut elems = Vec::new();
+    let mut cur = peel_show_wrappers(expr);
+    loop {
+        let (head, args) = collect_app_spine(cur);
+        match head {
+            Expr::Var(v, _) if v.name.as_str() == "[]" && args.is_empty() => return Some(elems),
+            Expr::Var(v, _) if v.name.as_str() == ":" && args.len() == 2 => {
+                elems.push(args[0]);
+                cur = peel_show_wrappers(args[1]);
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Whether a constructor name is a tuple constructor (`(,)`, `(,,)`, ...).
+fn is_tuple_con(name: &str) -> bool {
+    name.len() >= 3
+        && name.starts_with('(')
+        && name.ends_with(')')
+        && name[1..name.len() - 1].chars().all(|c| c == ',')
 }
 
 /// Whether a type is a floating-point type (`Double` or `Float`), which the

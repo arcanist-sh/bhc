@@ -263,3 +263,11 @@ fn test_tier2_string_concat_wasm() {
 fn test_tier2_show_string_wasm() {
     run_wasm_test("tier2_functions/show_string", Profile::Default);
 }
+
+// Recursive show: statically-known lists, tuples, and constructors-with-fields
+// expand into ++ chains, recursing on each element/field (with parens for
+// nested compound values, e.g. `Just (Just 7)`).
+#[test]
+fn test_tier2_show_recursive_wasm() {
+    run_wasm_test("tier2_functions/show_recursive", Profile::Default);
+}

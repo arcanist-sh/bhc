@@ -8,7 +8,7 @@
 //! Metal Shading Language is a C++14-based language with:
 //! - Address space qualifiers (device, constant, threadgroup)
 //! - Built-in vector and matrix types
-//! - Compute kernel entry points with [[kernel]] attribute
+//! - Compute kernel entry points with `[[kernel]]` attribute
 //! - Thread indexing via thread_position_in_grid
 //!
 //! # Example MSL

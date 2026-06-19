@@ -3,6 +3,11 @@
 //! This module defines the `Value` type that represents values during
 //! interpretation of Core IR expressions.
 
+// Doc comments here describe Haskell value/type semantics using Haskell
+// notation (`[a]` lists, `[Bool]`, tuple patterns like `[a,b,c]`). Rustdoc
+// otherwise reads those as intra-doc links; they are prose, not item links.
+#![allow(rustdoc::broken_intra_doc_links)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -151,7 +156,7 @@ pub enum Value {
     /// An integer-keyed map (Data.IntMap) backed by `BTreeMap`<i64, Value>.
     IntMap(Arc<BTreeMap<i64, Value>>),
 
-    /// An integer set (Data.IntSet) backed by `BTreeSet`<i64>.
+    /// An integer set (Data.IntSet) backed by `BTreeSet<i64>`.
     IntSet(Arc<BTreeSet<i64>>),
 
     /// A file handle (System.IO).

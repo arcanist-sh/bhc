@@ -478,9 +478,9 @@ pub enum SimdIntrinsic {
     Fnmadd,
 
     // --- Horizontal Operations ---
-    /// Horizontal add (pairwise): hadd([a,b,c,d], [e,f,g,h]) = [a+b, c+d, e+f, g+h]
+    /// Horizontal add (pairwise): `hadd([a,b,c,d], [e,f,g,h]) = [a+b, c+d, e+f, g+h]`
     Hadd,
-    /// Horizontal sum (reduce all elements): sum([a,b,c,d]) = a+b+c+d
+    /// Horizontal sum (reduce all elements): `sum([a,b,c,d]) = a+b+c+d`
     HorizontalSum,
 
     // --- Min/Max ---

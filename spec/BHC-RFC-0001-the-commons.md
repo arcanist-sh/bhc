@@ -41,7 +41,9 @@ A manifest's address is **not** a hash of source text. It is a hash of two thing
 
 ### 4.1 Meaning
 
-The hash is computed over the **elaborated** definition — post-typecheck, post-desugar Core IR (`bhc-core`), with binders converted to de Bruijn indices and all surface-level incidentals (names, comments, layout, formatting, alpha-renaming) erased. Two definitions that elaborate to the same normalized Core have the same identity. This is the Unison move, applied to BHC's Core.
+The hash is computed over the **elaborated** definition — post-typecheck, post-desugar Core IR (`bhc-core`) — with all surface-level incidentals (comments, layout, formatting, choice of local names) erased, so that two definitions that elaborate to the same normalized Core have the same identity. This is the Unison move, applied to BHC's Core.
+
+> **Status (audited 2026-06-19):** BHC's Core IR is today *name-based* — binders are interned `Symbol` + `VarId(u32)` (`bhc-core/src/lib.rs`), with no alpha-normalization pass. A canonical-binder normalization (de Bruijn indexing, or deterministic canonical renaming) is therefore a **prerequisite** for content-addressing — without it, two definitions that differ only in local variable names hash differently. This is task zero of the stage-1 brief (BHC-BRIEF-0001); the rest of this section assumes that pass exists.
 
 Hashing *after* elaboration (not surface AST) is essential, because elaboration is where the ambiguities that would otherwise break addressing are resolved — most importantly, type-class instance selection (see §4.4 and RFC-0002).
 
@@ -60,7 +62,12 @@ The same definition under two profiles is **two manifests**, because it is two b
 
 ### 4.3 Relationship to existing machinery
 
-The identity function is largely already implicit in `bhc-query` (the incremental/query compiler) and `bhc-interface`/`.bhi` (separate compilation). Query systems are content-addressed by construction: they hash inputs and memoize results. The work is to (a) make the key explicitly `hash(meaning ⊗ contract)`, (b) persist the store, and (c) make it shareable. `.bhi` interface files are the natural on-disk carrier for a manifest's public face.
+The identity function is largely already implicit in `bhc-query` (the incremental/query compiler) and `bhc-interface`/`.bhi` (separate compilation). Query systems are content-addressed by construction: they hash inputs and memoize results, and `bhc-query` already does exactly this (`QueryId { key_hash }`, `FxHasher`). The work is to (a) make the key explicitly `hash(meaning ⊗ contract)`, (b) persist the store, and (c) make it shareable.
+
+Two corrections from the source audit (2026-06-19):
+
+- **Cryptographic hash required.** `bhc-query` keys on a *non-cryptographic* 64-bit `FxHash` — correct for in-process memoization, unsafe as a commons address, because attestations bind to the address and it must be collision-resistant. Commons identities must use a cryptographic digest (SHA-256 or BLAKE3). `bhc-query` proves the *architecture*, not the hash function; keep the two hashes distinct.
+- **The slot already exists.** `.bhi` interfaces already carry a `module_hash: u64` field and an `InterfaceDependency.hash` plumbing path (`bhc-interface`), but both are placeholders — `compute_module_hash` (`bhc-interface/src/generate.rs`) hashes only the module *name*, and dependency hashes are written as `0`. Filling these with real content hashes is the most concrete first PR. `.bhi` is the natural on-disk carrier for a manifest's public face.
 
 ### 4.4 What identity is *not*
 
@@ -108,7 +115,7 @@ The bundle must never launder an `Asserted` claim into apparent authority. A con
 
 ### 7.1 What is signed
 
-An attestation is an Ed25519 signature (reusing the primitive already behind `HX_BHC_PLATFORM_PUBKEY`) over a statement binding:
+An attestation is an Ed25519 signature over a statement binding (the verification primitive already exists in hx — see the status note below):
 
 ```
 Attestation
@@ -119,6 +126,8 @@ Attestation
   signer        : PublicKey
   signature     : Sig
 ```
+
+> **Status (audited 2026-06-19):** Ed25519 *verification* is implemented and reusable — `hx-solver/src/bhc_platform.rs::verify_ed25519`, `ed25519-dalek` v2, with `HX_BHC_PLATFORM_PUBKEY` key pinning (and a deliberate "don't trust a registry-supplied key" warning). Net-new work: (1) a *signing* path (signing currently exists only in tests), and (2) lifting verification out of the snapshot-specific `SnapshotError` into a generic `hx-crypto`-style module that signs/verifies a digest against a pinned key. SHA-256 fingerprinting already exists for reproducibility (`hx-solver/src/cache.rs::compute_deps_fingerprint`).
 
 ### 7.2 Reproducibility is the objective floor
 

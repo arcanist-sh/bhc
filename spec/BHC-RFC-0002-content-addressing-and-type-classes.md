@@ -31,7 +31,9 @@ sort :: OrdDict a -> [a] -> [a]
 sort $dOrd xs = ... ($sel_compare $dOrd) ...
 ```
 
-**We hash this.** The identity of a manifest is computed over the *dictionary-passed, de-Bruijn-normalized* Core, not the surface definition. The consequences are exactly what we want:
+> **Status (audited 2026-06-19):** the dictionary-passed Core form is real and already produced. `bhc-hir-to-core/src/dictionary.rs` elaborates instances into dictionary values bound as `$d…` variables, passes them as ordinary `App` arguments, and selects methods via `$sel_N` field selectors; `bhc-core/src/specialize.rs` already optimizes exactly this representation (it rewrites `App($sel_N, $d)` to the Nth field of a known dictionary tuple). What does **not** yet exist is the canonical-binder normalization the hash needs — BHC's Core is name-based (`Symbol` + `VarId`), see §8. So the representation we want to hash exists; making it *stably* hashable is the open work.
+
+**We hash this.** The identity of a manifest is computed over the *dictionary-passed, normalized* Core, not the surface definition. The consequences are exactly what we want:
 
 1. **Identity becomes local again.** Every instance the definition uses is now an explicit dependency — a dictionary value, itself a manifest, with its own content address. `sort`'s identity transitively includes the identity of the `Ord` instance(s) it was elaborated against, the same way it includes any other dependency.
 2. **Coherence becomes explicit and addressable.** "Which `Ord Int` did this use?" stops being an ambient property of the import graph and becomes a hash in the dependency list. Two builds that resolved `Ord Int` differently produce two different manifests — correctly, because they *mean* different things.
@@ -97,11 +99,15 @@ The same "hash after elaboration" principle resolves the neighbors of the class 
 
 **Recommendation:** Adopt dictionary-passed, de-Bruijn-normalized Core as the canonical hashing representation. It restores locality, makes coherence explicit, composes with the contract axis, and reuses elaboration BHC already performs. Treat orphan/overlapping/incoherent instances as evidence-bundle risk flags and as the responsibility of the link-time coherence check, not the identity function.
 
-**Go/no-go experiment (small, decisive):** take ~10 `base`-style functions with class constraints (`sort`, `nub`, `maximum`, `lookup`, a `Show` and a `Num` user). For each:
+**Go/no-go experiment (small, decisive):** take ~10 `base`-style functions with class constraints (`sort`, `nub`, `maximum`, `lookup`, a `Show` and a `Num` user).
 
-1. Elaborate to dictionary-passed Core; compute `hash(meaning ⊗ contract)`.
-2. **Soundness:** reimplement each in a different surface style; confirm identical hash.
+**Step 0 (prerequisite — confirmed necessary by the source audit):** implement canonical-binder normalization of dictionary-passed Core. BHC's Core is name-based today (`Symbol` + `VarId`), so without this step the soundness check below fails trivially on differing local names. This is the *only* piece of new compiler work the experiment depends on; everything after it is measurement.
+
+Then, for each function:
+
+1. Elaborate to dictionary-passed Core; normalize; compute `hash(meaning ⊗ contract)`.
+2. **Soundness:** reimplement each in a different surface style (rename locals, reorder `where`-binds); confirm identical hash.
 3. **Sensitivity:** swap a relied-upon instance (e.g. a flipped `Ord`); confirm the hash changes.
 4. **Coherence:** construct a two-manifest closure with conflicting orphan `Ord Int`; confirm the link-time check rejects it.
 
-If (2)–(4) hold on this sample, content-addressing real Haskell is buildable and RFC-0001 can proceed. If (2) fails (stable definitions hashing differently), the normalization of dictionary-passed Core is underspecified and must be fixed before anything else.
+If (2)–(4) hold on this sample, content-addressing real Haskell is buildable and RFC-0001 can proceed. If (2) fails *after* Step 0, the normalization of dictionary-passed Core is underspecified and must be fixed before anything else.

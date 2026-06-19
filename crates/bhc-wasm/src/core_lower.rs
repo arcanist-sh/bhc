@@ -11,11 +11,11 @@
 //! - Functions become WASM functions with `i32` parameters and results
 //! - IO actions are executed for their side effects and return `i32(0)`
 
-use bhc_core::{AltCon, Bind, CoreModule, Expr, Literal, Var, VarId};
+use bhc_core::{Alt, AltCon, Bind, CoreModule, DataCon, Expr, Literal, Var, VarId};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
-use bhc_types::Ty;
+use bhc_types::{Kind, Ty, TyCon};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::codegen::{RuntimeIndices, WasmFunc, WasmFuncType};
@@ -92,6 +92,12 @@ fn well_known_constructors() -> FxHashMap<String, ConInfo> {
 /// Placed after the WASI scratch area and runtime data segments.
 const STRING_DATA_BASE: u32 = 2048;
 
+/// Heap base address. The bump allocator starts handing out addresses here, so
+/// any value below it that flows into a case scrutinee is a small nullary
+/// constructor tag rather than a heap pointer. Used to discriminate nullary
+/// constructors from heap objects in mixed data types (e.g. `[]` vs `(:)`).
+const HEAP_BASE: i32 = 65536;
+
 /// Lower a Core IR module to WASM, adding functions to the given module.
 ///
 /// Returns the function index of `main` so the caller can wire up `_start`.
@@ -131,7 +137,23 @@ pub fn lower_core_module(
         }
     }
 
-    // Second pass: lower each binding to a WASM function
+    // Synthesize any referenced list-prelude functions the program doesn't
+    // define itself (map/filter/foldr/...), then register them like user code.
+    let mut prelude: Vec<(Var, Expr)> = Vec::new();
+    for &name in LIST_PRELUDE_NAMES {
+        let sym = Symbol::intern(name);
+        if lowering.func_map.contains_key(&sym) || !module_uses_name(core, sym) {
+            continue;
+        }
+        if let Some((var, body)) = build_list_fn(name, &mut lowering.next_synthetic_id) {
+            lowering.register_binding(&var);
+            let (params, _) = peel_lambdas(&body);
+            lowering.arities.insert(var.name, params.len());
+            prelude.push((var, body));
+        }
+    }
+
+    // Second pass: lower each user binding to a WASM function.
     for bind in &core.bindings {
         match bind {
             Bind::NonRec(var, expr) => {
@@ -143,6 +165,12 @@ pub fn lower_core_module(
                 }
             }
         }
+    }
+
+    // Lower the synthesized prelude functions (after user bindings so their
+    // pre-registered indices line up).
+    for (var, expr) in &prelude {
+        lowering.lower_binding(var, expr)?;
     }
 
     // Register lambda-lifted closure functions. They were assigned indices
@@ -438,6 +466,17 @@ impl<'a> WasmLowering<'a> {
                         );
                     }
                     instrs.push(WasmInstr::Call(func_idx));
+                } else if let Some(arity) = operator_arity(name) {
+                    // A primitive operator used as a value (e.g. `(+)` passed to
+                    // `foldr`): eta-expand to a closure `\a b -> a OP b`.
+                    return self.lower_partial_application(
+                        var,
+                        &[],
+                        arity,
+                        instrs,
+                        locals,
+                        local_count,
+                    );
                 } else {
                     // Unknown variable - push 0 as fallback
                     tracing::warn!(var = name, "unresolved variable, using 0");
@@ -704,6 +743,11 @@ impl<'a> WasmLowering<'a> {
         if let Some(elems) = extract_list_elements(arg) {
             return self.emit_show_seq("[", "]", &elems, false, instrs, locals, local_count);
         }
+        // A runtime list of scalars (e.g. the result of `map`): walk the cons
+        // cells at runtime, rendering each element by its type.
+        if let Some(kind) = list_elem_show_kind(&arg.ty()) {
+            return self.emit_show_runtime_list(arg, kind, instrs, locals, local_count);
+        }
         let (head, fields) = collect_app_spine(arg);
         if let Expr::Var(hv, _) = head {
             let name = hv.name.as_str();
@@ -751,6 +795,99 @@ impl<'a> WasmLowering<'a> {
                 instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
             }
         }
+        Ok(())
+    }
+
+    /// Show a runtime list of scalars by walking its cons cells, rendering each
+    /// element according to `kind` and joining with commas inside `[`...`]`.
+    /// Leaves the result string pointer on the stack.
+    fn emit_show_runtime_list(
+        &mut self,
+        list: &Expr,
+        kind: ElemKind,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let true_ptr = self.intern_pstr("True");
+        let false_ptr = self.intern_pstr("False");
+        let concat = self.runtime.concat_str_idx;
+
+        // cur = list
+        self.lower_expr(list, instrs, locals, local_count, false)?;
+        let cur = *local_count;
+        *local_count += 1;
+        instrs.push(WasmInstr::LocalSet(cur));
+        // acc = "["
+        self.emit_pstr_lit("[", instrs);
+        let acc = *local_count;
+        *local_count += 1;
+        instrs.push(WasmInstr::LocalSet(acc));
+        // first = 1
+        let first = *local_count;
+        *local_count += 1;
+        instrs.push(WasmInstr::I32Const(1));
+        instrs.push(WasmInstr::LocalSet(first));
+        let head = *local_count;
+        *local_count += 1;
+
+        instrs.push(WasmInstr::Block(None));
+        instrs.push(WasmInstr::Loop(None));
+        // nil when cur < HEAP_BASE (the empty list is the value 0)
+        instrs.push(WasmInstr::LocalGet(cur));
+        instrs.push(WasmInstr::I32Const(HEAP_BASE));
+        instrs.push(WasmInstr::I32LtU);
+        instrs.push(WasmInstr::BrIf(1));
+        // comma separator after the first element
+        instrs.push(WasmInstr::LocalGet(first));
+        instrs.push(WasmInstr::I32Eqz);
+        instrs.push(WasmInstr::If(None));
+        instrs.push(WasmInstr::LocalGet(acc));
+        self.emit_pstr_lit(",", instrs);
+        instrs.push(WasmInstr::Call(concat));
+        instrs.push(WasmInstr::LocalSet(acc));
+        instrs.push(WasmInstr::End);
+        // head = cons.head ([cur+4])
+        instrs.push(WasmInstr::LocalGet(cur));
+        instrs.push(WasmInstr::I32Load(2, 4));
+        instrs.push(WasmInstr::LocalSet(head));
+        // acc = acc ++ show(head)
+        instrs.push(WasmInstr::LocalGet(acc));
+        match kind {
+            ElemKind::Int => {
+                instrs.push(WasmInstr::LocalGet(head));
+                instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
+            }
+            ElemKind::Double => {
+                instrs.push(WasmInstr::LocalGet(head));
+                instrs.push(WasmInstr::F64Load(3, 0));
+                instrs.push(WasmInstr::Call(self.runtime.double_to_str_idx));
+            }
+            ElemKind::Bool => {
+                instrs.push(WasmInstr::LocalGet(head));
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::I32Const(true_ptr as i32));
+                instrs.push(WasmInstr::Else);
+                instrs.push(WasmInstr::I32Const(false_ptr as i32));
+                instrs.push(WasmInstr::End);
+            }
+        }
+        instrs.push(WasmInstr::Call(concat));
+        instrs.push(WasmInstr::LocalSet(acc));
+        // first = 0; cur = cons.tail ([cur+8])
+        instrs.push(WasmInstr::I32Const(0));
+        instrs.push(WasmInstr::LocalSet(first));
+        instrs.push(WasmInstr::LocalGet(cur));
+        instrs.push(WasmInstr::I32Load(2, 8));
+        instrs.push(WasmInstr::LocalSet(cur));
+        instrs.push(WasmInstr::Br(0));
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::End);
+
+        // acc ++ "]"
+        instrs.push(WasmInstr::LocalGet(acc));
+        self.emit_pstr_lit("]", instrs);
+        instrs.push(WasmInstr::Call(concat));
         Ok(())
     }
 
@@ -1843,12 +1980,22 @@ impl<'a> WasmLowering<'a> {
                 }
             });
 
-        // If the scrutinee is a heap pointer, load the tag into a separate local.
+        // Compute the constructor tag. In a type with field-carrying
+        // constructors, a value is either a small nullary tag (e.g. `[]`) or a
+        // heap pointer (e.g. `(:)`). Heap pointers are >= HEAP_BASE, so below
+        // that the scrutinee *is* the tag; otherwise the tag is at offset 0.
         let tag_local = if has_fields {
             let tl = *local_count;
             *local_count += 1;
             instrs.push(WasmInstr::LocalGet(scrut_local));
-            instrs.push(WasmInstr::I32Load(2, 0)); // load tag from offset 0
+            instrs.push(WasmInstr::I32Const(HEAP_BASE));
+            instrs.push(WasmInstr::I32GeU);
+            instrs.push(WasmInstr::If(Some(WasmType::I32)));
+            instrs.push(WasmInstr::LocalGet(scrut_local));
+            instrs.push(WasmInstr::I32Load(2, 0)); // heap object: tag at offset 0
+            instrs.push(WasmInstr::Else);
+            instrs.push(WasmInstr::LocalGet(scrut_local)); // nullary: value is the tag
+            instrs.push(WasmInstr::End);
             instrs.push(WasmInstr::LocalSet(tl));
             tl
         } else {
@@ -2052,6 +2199,216 @@ fn match_show_arg(expr: &Expr) -> Option<&Expr> {
     }
 }
 
+// ============================================================
+// Injected list-prelude functions
+// ============================================================
+//
+// The WASM path links no standard library, so prelude list functions appear as
+// unresolved names. We synthesize Core definitions for the common ones and
+// lower them like user code — recursion, cons-cell matching, and closure
+// parameters already work, so these "just compile".
+
+/// List-prelude functions we can synthesize, by name.
+const LIST_PRELUDE_NAMES: &[&str] = &["map", "filter", "foldr", "foldl", "length", "elem"];
+
+/// Whether any binding in the module references `name`.
+fn module_uses_name(core: &CoreModule, name: Symbol) -> bool {
+    core.bindings.iter().any(|bind| match bind {
+        Bind::NonRec(_, e) => expr_uses_name(e, name),
+        Bind::Rec(bs) => bs.iter().any(|(_, e)| expr_uses_name(e, name)),
+    })
+}
+
+// Small Core builders for synthesizing prelude definitions.
+fn pv(name: &str, id: usize) -> Var {
+    Var::new(Symbol::intern(name), VarId::new(id), Ty::Error)
+}
+fn pev(v: &Var) -> Expr {
+    Expr::Var(v.clone(), Span::default())
+}
+/// A reference resolved by name at lowering time (top-level function, primitive,
+/// or constructor). The id is irrelevant.
+fn pref(name: &str, id: &mut usize) -> Expr {
+    let e = Expr::Var(pv(name, *id), Span::default());
+    *id += 1;
+    e
+}
+fn papp(f: Expr, x: Expr) -> Expr {
+    Expr::App(Box::new(f), Box::new(x), Span::default())
+}
+fn papp2(f: Expr, a: Expr, b: Expr) -> Expr {
+    papp(papp(f, a), b)
+}
+fn plam(v: Var, body: Expr) -> Expr {
+    Expr::Lam(v, Box::new(body), Span::default())
+}
+fn pint(n: i64) -> Expr {
+    Expr::Lit(Literal::Int(n), Ty::Error, Span::default())
+}
+fn pcase(scrut: Expr, alts: Vec<Alt>) -> Expr {
+    Expr::Case(Box::new(scrut), alts, Ty::Error, Span::default())
+}
+fn pdatacon(name: &str, tag: u32, arity: u32) -> DataCon {
+    DataCon {
+        name: Symbol::intern(name),
+        ty_con: TyCon::new(Symbol::intern("[]"), Kind::Star),
+        tag,
+        arity,
+    }
+}
+fn palt(name: &str, tag: u32, arity: u32, binders: Vec<Var>, rhs: Expr) -> Alt {
+    Alt {
+        con: AltCon::DataCon(pdatacon(name, tag, arity)),
+        binders,
+        rhs,
+    }
+}
+
+/// Build a single named list-prelude binding, drawing fresh ids from `id`.
+fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
+    let fresh = |id: &mut usize| {
+        let v = *id;
+        *id += 1;
+        v
+    };
+    let body = match name {
+        // map f xs = case xs of { [] -> []; (y:ys) -> f y : map f ys }
+        "map" => {
+            let f = pv("f", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let nil = palt("[]", 0, 0, vec![], pref("[]", id));
+            let cons = palt(
+                ":",
+                1,
+                2,
+                vec![y.clone(), ys.clone()],
+                papp2(
+                    pref(":", id),
+                    papp(pev(&f), pev(&y)),
+                    papp2(pref("map", id), pev(&f), pev(&ys)),
+                ),
+            );
+            plam(f, plam(xs.clone(), pcase(pev(&xs), vec![nil, cons])))
+        }
+        // filter p xs = case xs of
+        //   [] -> []
+        //   (y:ys) -> case p y of { True -> y : filter p ys; False -> filter p ys }
+        "filter" => {
+            let p = pv("p", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let keep = papp2(
+                pref(":", id),
+                pev(&y),
+                papp2(pref("filter", id), pev(&p), pev(&ys)),
+            );
+            let skip = papp2(pref("filter", id), pev(&p), pev(&ys));
+            let inner = pcase(
+                papp(pev(&p), pev(&y)),
+                vec![
+                    palt("False", 0, 0, vec![], skip),
+                    palt("True", 1, 0, vec![], keep),
+                ],
+            );
+            let nil = palt("[]", 0, 0, vec![], pref("[]", id));
+            let cons = palt(":", 1, 2, vec![y.clone(), ys.clone()], inner);
+            plam(p, plam(xs.clone(), pcase(pev(&xs), vec![nil, cons])))
+        }
+        // foldr f z xs = case xs of { [] -> z; (y:ys) -> f y (foldr f z ys) }
+        "foldr" => {
+            let f = pv("f", fresh(id));
+            let z = pv("z", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let nil = palt("[]", 0, 0, vec![], pev(&z));
+            let cons = palt(
+                ":",
+                1,
+                2,
+                vec![y.clone(), ys.clone()],
+                papp2(
+                    pev(&f),
+                    pev(&y),
+                    papp(papp2(pref("foldr", id), pev(&f), pev(&z)), pev(&ys)),
+                ),
+            );
+            plam(
+                f,
+                plam(z, plam(xs.clone(), pcase(pev(&xs), vec![nil, cons]))),
+            )
+        }
+        // foldl f z xs = case xs of { [] -> z; (y:ys) -> foldl f (f z y) ys }
+        "foldl" => {
+            let f = pv("f", fresh(id));
+            let z = pv("z", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let nil = palt("[]", 0, 0, vec![], pev(&z));
+            let cons = palt(
+                ":",
+                1,
+                2,
+                vec![y.clone(), ys.clone()],
+                papp(
+                    papp2(pref("foldl", id), pev(&f), papp2(pev(&f), pev(&z), pev(&y))),
+                    pev(&ys),
+                ),
+            );
+            plam(
+                f,
+                plam(z, plam(xs.clone(), pcase(pev(&xs), vec![nil, cons]))),
+            )
+        }
+        // length xs = case xs of { [] -> 0; (y:ys) -> 1 + length ys }
+        "length" => {
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let nil = palt("[]", 0, 0, vec![], pint(0));
+            let cons = palt(
+                ":",
+                1,
+                2,
+                vec![y, ys.clone()],
+                papp2(pref("+", id), pint(1), papp(pref("length", id), pev(&ys))),
+            );
+            plam(xs.clone(), pcase(pev(&xs), vec![nil, cons]))
+        }
+        // elem x xs = case xs of
+        //   [] -> False
+        //   (y:ys) -> case x == y of { True -> True; False -> elem x ys }
+        "elem" => {
+            let x = pv("x", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let inner = pcase(
+                papp2(pref("==", id), pev(&x), pev(&y)),
+                vec![
+                    palt(
+                        "False",
+                        0,
+                        0,
+                        vec![],
+                        papp2(pref("elem", id), pev(&x), pev(&ys)),
+                    ),
+                    palt("True", 1, 0, vec![], pref("True", id)),
+                ],
+            );
+            let nil = palt("[]", 0, 0, vec![], pref("False", id));
+            let cons = palt(":", 1, 2, vec![y.clone(), ys.clone()], inner);
+            plam(x, plam(xs.clone(), pcase(pev(&xs), vec![nil, cons])))
+        }
+        _ => return None,
+    };
+    Some((pv(name, fresh(id)), body))
+}
+
 /// Peel transparent wrappers (`TyApp`/`Cast`/`Tick`/`Lazy`) off an expression.
 fn peel_show_wrappers(expr: &Expr) -> &Expr {
     let mut e = expr;
@@ -2093,6 +2450,36 @@ fn is_tuple_con(name: &str) -> bool {
         && name[1..name.len() - 1].chars().all(|c| c == ',')
 }
 
+/// The renderable kind of a runtime scalar (a list element).
+#[derive(Clone, Copy)]
+enum ElemKind {
+    Int,
+    Double,
+    Bool,
+}
+
+/// If `ty` is a list type `[e]` whose element is a renderable scalar, return its
+/// element kind. Used to show runtime lists (e.g. `map`/`filter` results).
+fn list_elem_show_kind(ty: &Ty) -> Option<ElemKind> {
+    let elem = match ty {
+        Ty::List(e) => e.as_ref(),
+        // `[] e` desugared as an application.
+        Ty::App(c, e) if matches!(c.as_ref(), Ty::Con(tc) if tc.name.as_str() == "[]") => {
+            e.as_ref()
+        }
+        _ => return None,
+    };
+    match elem {
+        Ty::Con(c) => match c.name.as_str() {
+            "Int" | "Integer" | "Word" | "Char" => Some(ElemKind::Int),
+            "Double" | "Float" => Some(ElemKind::Double),
+            "Bool" => Some(ElemKind::Bool),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Whether a type is a floating-point type (`Double` or `Float`), which the
 /// backend represents as a boxed `f64`.
 fn is_float_ty(ty: &Ty) -> bool {
@@ -2112,6 +2499,21 @@ fn expr_is_float(expr: &Expr) -> bool {
         return true;
     }
     is_float_ty(&expr.ty())
+}
+
+/// If `name` is a primitive operator that can be used as a function value,
+/// return its arity. Used to eta-expand operator sections like `(+)` into
+/// closures when passed to higher-order functions.
+fn operator_arity(name: &str) -> Option<usize> {
+    match name {
+        "+" | "GHC.Num.+" | "-" | "GHC.Num.-" | "*" | "GHC.Num.*" | "/" | "GHC.Real./"
+        | "GHC.Float./" | "div" | "GHC.Real.div" | "mod" | "GHC.Real.mod" | "=="
+        | "GHC.Classes.==" | "/=" | "GHC.Classes./=" | "<" | "GHC.Classes.<" | "<="
+        | "GHC.Classes.<=" | ">" | "GHC.Classes.>" | ">=" | "GHC.Classes.>=" | "++"
+        | "GHC.Base.++" => Some(2),
+        "negate" | "GHC.Num.negate" => Some(1),
+        _ => None,
+    }
 }
 
 /// Whether an operator name denotes a boolean-valued operation (comparison or

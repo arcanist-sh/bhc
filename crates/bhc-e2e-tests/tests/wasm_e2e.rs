@@ -279,3 +279,15 @@ fn test_tier2_show_recursive_wasm() {
 fn test_tier2_func_value_wasm() {
     run_wasm_test("tier2_functions/func_value", Profile::Default);
 }
+
+// =============================================================================
+// List operations (injected prelude)
+// =============================================================================
+
+// map/filter/foldr/foldl/length are synthesized as Core when referenced and
+// not user-defined. Operator sections like `(+)` become closures; runtime
+// lists with a concrete element type print via a runtime walk.
+#[test]
+fn test_tier2_list_ops_wasm() {
+    run_wasm_test("tier2_functions/list_ops", Profile::Default);
+}

@@ -134,7 +134,7 @@ pub struct TyCtxt {
     /// and look up the accessor function's type scheme.
     pub(crate) field_name_to_con: FxHashMap<Symbol, Vec<(DefId, DefId)>>,
 
-    /// Maps type constructor name → Vec<DefId> (constructor DefIds).
+    /// Maps type constructor name → `Vec<DefId>` (constructor DefIds).
     /// Used for RecordUpdate to find constructors of the record type.
     pub(crate) type_to_data_cons: FxHashMap<Symbol, Vec<DefId>>,
 

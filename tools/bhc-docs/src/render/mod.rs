@@ -53,7 +53,7 @@ pub struct RenderConfig {
     pub version: Option<String>,
     /// All available versions (for version selector).
     pub versions: Vec<String>,
-    /// Base URL for source code links (e.g., "https://github.com/raskell-io/bhc/blob/main").
+    /// Base URL for source code links (e.g., `https://github.com/raskell-io/bhc/blob/main`).
     pub source_base_url: Option<String>,
 }
 

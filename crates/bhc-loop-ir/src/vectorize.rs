@@ -460,21 +460,21 @@ pub struct VectorizedLoopInfo {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SimdIntrinsic {
     // --- Arithmetic ---
-    /// Vector add: result[i] = a[i] + b[i]
+    /// Vector add: `result[i] = a[i] + b[i]`
     Add,
-    /// Vector subtract: result[i] = a[i] - b[i]
+    /// Vector subtract: `result[i] = a[i] - b[i]`
     Sub,
-    /// Vector multiply: result[i] = a[i] * b[i]
+    /// Vector multiply: `result[i] = a[i] * b[i]`
     Mul,
-    /// Vector divide: result[i] = a[i] / b[i]
+    /// Vector divide: `result[i] = a[i] / b[i]`
     Div,
 
     // --- Fused Multiply-Add ---
-    /// Fused multiply-add: result[i] = a[i] * b[i] + c[i]
+    /// Fused multiply-add: `result[i] = a[i] * b[i] + c[i]`
     Fmadd,
-    /// Fused multiply-subtract: result[i] = a[i] * b[i] - c[i]
+    /// Fused multiply-subtract: `result[i] = a[i] * b[i] - c[i]`
     Fmsub,
-    /// Fused negative multiply-add: result[i] = -(a[i] * b[i]) + c[i]
+    /// Fused negative multiply-add: `result[i] = -(a[i] * b[i]) + c[i]`
     Fnmadd,
 
     // --- Horizontal Operations ---
@@ -484,17 +484,17 @@ pub enum SimdIntrinsic {
     HorizontalSum,
 
     // --- Min/Max ---
-    /// Vector minimum: result[i] = min(a[i], b[i])
+    /// Vector minimum: `result[i] = min(a[i], b[i])`
     Min,
-    /// Vector maximum: result[i] = max(a[i], b[i])
+    /// Vector maximum: `result[i] = max(a[i], b[i])`
     Max,
 
     // --- Comparison ---
-    /// Vector compare equal: result[i] = a[i] == b[i] ? ~0 : 0
+    /// Vector compare equal: `result[i] = a[i] == b[i] ? ~0 : 0`
     CmpEq,
-    /// Vector compare less than: result[i] = a[i] < b[i] ? ~0 : 0
+    /// Vector compare less than: `result[i] = a[i] < b[i] ? ~0 : 0`
     CmpLt,
-    /// Vector compare less or equal: result[i] = a[i] <= b[i] ? ~0 : 0
+    /// Vector compare less or equal: `result[i] = a[i] <= b[i] ? ~0 : 0`
     CmpLe,
 
     // --- Data Movement ---

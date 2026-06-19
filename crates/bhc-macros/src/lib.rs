@@ -14,7 +14,7 @@
 //! ## Attribute Macros
 //!
 //! - [`query`] - Define a query for the query system
-//! - [`salsa_query`] - Alternative query definition
+//! - `salsa_query` - Alternative query definition
 //!
 //! # Usage
 //!

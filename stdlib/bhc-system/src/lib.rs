@@ -37,7 +37,7 @@
 //! - [`environment`] - Environment variables and program arguments
 //! - [`filepath`] - Path manipulation utilities
 //! - [`directory`] - Directory operations
-//! - [`exit`] - Program exit codes
+//! - [`exit`](mod@exit) - Program exit codes
 //! - [`process`] - Process spawning and management
 
 #![warn(missing_docs)]

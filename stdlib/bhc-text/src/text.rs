@@ -625,7 +625,7 @@ pub extern "C" fn bhc_text_to_title(text: *const u8) -> *mut u8 {
 /// RTS list structure using the standard ADT layout:
 ///
 /// - Nil: tag == 0
-/// - Cons head tail: tag == 1, fields[0] = head (Char as i64), fields[1] = tail
+/// - Cons head tail: tag == 1, `fields[0]` = head (Char as i64), `fields[1]` = tail
 ///
 /// `list_ptr` is the head of the BHC cons-list.
 #[no_mangle]

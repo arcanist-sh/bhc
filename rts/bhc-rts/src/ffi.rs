@@ -1670,7 +1670,7 @@ unsafe fn read_char_list(mut list_ptr: *const u8) -> String {
     }
 }
 
-/// Show String - wraps a [Char] list in quotes: "\"hello\""
+/// Show String - wraps a `[Char]` list in quotes: "\"hello\""
 #[no_mangle]
 pub extern "C" fn bhc_show_string(list_ptr: *const u8) -> *mut c_char {
     let s = unsafe { read_char_list(list_ptr) };
@@ -1679,7 +1679,7 @@ pub extern "C" fn bhc_show_string(list_ptr: *const u8) -> *mut c_char {
     c_string.into_raw()
 }
 
-/// Show List - formats a [a] list as "[el1,el2,el3]"
+/// Show List - formats a `[a]` list as `[el1,el2,el3]`
 /// Special case: elem_type_tag==4 (Char) formats as String: "\"abc\""
 #[no_mangle]
 pub extern "C" fn bhc_show_list(list_ptr: *const u8, elem_type_tag: i64) -> *mut c_char {
@@ -1706,7 +1706,7 @@ pub extern "C" fn bhc_show_list(list_ptr: *const u8, elem_type_tag: i64) -> *mut
     c_string.into_raw()
 }
 
-/// Show Maybe - "Nothing" or "Just <val>"
+/// Show Maybe - "Nothing" or "Just `<val>`"
 #[no_mangle]
 pub extern "C" fn bhc_show_maybe(maybe_ptr: *const u8, elem_type_tag: i64) -> *mut c_char {
     let tag = unsafe { *(maybe_ptr as *const i64) };
@@ -1720,7 +1720,7 @@ pub extern "C" fn bhc_show_maybe(maybe_ptr: *const u8, elem_type_tag: i64) -> *m
     c_string.into_raw()
 }
 
-/// Show Either - "Left <val>" or "Right <val>"
+/// Show Either - "Left `<val>`" or "Right `<val>`"
 #[no_mangle]
 pub extern "C" fn bhc_show_either(
     either_ptr: *const u8,
@@ -3913,14 +3913,14 @@ pub extern "C" fn bhc_exit_failure() -> ! {
 
 use num_bigint::BigInt;
 
-/// Create a BigInt from an i64 value. Returns a heap-allocated Box<BigInt>.
+/// Create a BigInt from an i64 value. Returns a heap-allocated `Box<BigInt>`.
 #[no_mangle]
 pub extern "C" fn bhc_integer_from_i64(n: i64) -> *mut u8 {
     let big = Box::new(BigInt::from(n));
     Box::into_raw(big) as *mut u8
 }
 
-/// Create a BigInt from a C string representation. Returns a heap-allocated Box<BigInt>.
+/// Create a BigInt from a C string representation. Returns a heap-allocated `Box<BigInt>`.
 #[no_mangle]
 pub extern "C" fn bhc_integer_from_str(s: *const c_char) -> *mut u8 {
     let c_str = unsafe { CStr::from_ptr(s) };

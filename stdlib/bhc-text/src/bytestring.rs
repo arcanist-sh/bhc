@@ -108,7 +108,7 @@ pub extern "C" fn bhc_bs_singleton(byte: i64) -> *mut u8 {
 ///
 /// The list uses the standard BHC ADT layout:
 /// - Nil: tag == 0
-/// - Cons head tail: tag == 1, fields[0] = head (Int), fields[1] = tail
+/// - Cons head tail: tag == 1, `fields[0]` = head (Int), `fields[1]` = tail
 #[no_mangle]
 pub extern "C" fn bhc_bs_pack(list_ptr: *const u8) -> *mut u8 {
     if list_ptr.is_null() {

@@ -188,7 +188,7 @@ pub extern "C" fn bhc_check_cancelled() -> i32 {
 // STM FFI
 // ============================================================================
 
-/// Opaque handle to a TVar<i64>.
+/// Opaque handle to a `TVar<i64>`.
 pub struct TVarI64Handle {
     tvar: TVar<i64>,
 }
@@ -202,7 +202,7 @@ pub extern "C" fn bhc_tvar_new_i64(value: i64) -> *mut TVarI64Handle {
     Box::into_raw(handle)
 }
 
-/// Read a TVar<i64> within a transaction.
+/// Read a `TVar<i64>` within a transaction.
 ///
 /// # Safety
 ///
@@ -214,7 +214,7 @@ pub unsafe extern "C" fn bhc_tvar_read_i64(tvar_ptr: *mut TVarI64Handle) -> i64 
     handle.tvar.read_tx().unwrap_or(0)
 }
 
-/// Write to a TVar<i64> within a transaction.
+/// Write to a `TVar<i64>` within a transaction.
 ///
 /// # Safety
 ///
@@ -226,7 +226,7 @@ pub unsafe extern "C" fn bhc_tvar_write_i64(tvar_ptr: *mut TVarI64Handle, value:
     let _ = handle.tvar.write_tx(value);
 }
 
-/// Free a TVar<i64> handle.
+/// Free a `TVar<i64>` handle.
 ///
 /// # Safety
 ///
@@ -238,7 +238,7 @@ pub unsafe extern "C" fn bhc_tvar_free_i64(tvar_ptr: *mut TVarI64Handle) {
     }
 }
 
-/// Opaque handle to a TVar<f64>.
+/// Opaque handle to a `TVar<f64>`.
 pub struct TVarF64Handle {
     tvar: TVar<f64>,
 }
@@ -252,7 +252,7 @@ pub extern "C" fn bhc_tvar_new_f64(value: f64) -> *mut TVarF64Handle {
     Box::into_raw(handle)
 }
 
-/// Read a TVar<f64> within a transaction.
+/// Read a `TVar<f64>` within a transaction.
 ///
 /// # Safety
 ///
@@ -263,7 +263,7 @@ pub unsafe extern "C" fn bhc_tvar_read_f64(tvar_ptr: *mut TVarF64Handle) -> f64 
     handle.tvar.read_tx().unwrap_or(0.0)
 }
 
-/// Write to a TVar<f64> within a transaction.
+/// Write to a `TVar<f64>` within a transaction.
 ///
 /// # Safety
 ///
@@ -274,7 +274,7 @@ pub unsafe extern "C" fn bhc_tvar_write_f64(tvar_ptr: *mut TVarF64Handle, value:
     let _ = handle.tvar.write_tx(value);
 }
 
-/// Free a TVar<f64> handle.
+/// Free a `TVar<f64>` handle.
 ///
 /// # Safety
 ///
@@ -331,7 +331,7 @@ pub extern "C" fn bhc_check(condition: i32) -> i32 {
 // TMVar FFI
 // ============================================================================
 
-/// Opaque handle to a TMVar<i64>.
+/// Opaque handle to a `TMVar<i64>`.
 pub struct TMVarI64Handle {
     tmvar: TMVar<i64>,
 }
@@ -404,7 +404,7 @@ pub unsafe extern "C" fn bhc_tmvar_free_i64(tmvar_ptr: *mut TMVarI64Handle) {
 // TQueue FFI
 // ============================================================================
 
-/// Opaque handle to a TQueue<i64>.
+/// Opaque handle to a `TQueue<i64>`.
 pub struct TQueueI64Handle {
     queue: TQueue<i64>,
 }

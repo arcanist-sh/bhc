@@ -120,7 +120,7 @@ impl std::error::Error for DecompError {}
 pub struct LuResult {
     /// Combined L and U matrix (L below diagonal, U on and above diagonal).
     pub lu: Matrix<f64>,
-    /// Pivot indices: row i was swapped with row pivot[i].
+    /// Pivot indices: row `i` was swapped with row `pivot[i]`.
     pub pivot: Vec<usize>,
     /// Number of row swaps (parity of permutation).
     pub num_swaps: usize,

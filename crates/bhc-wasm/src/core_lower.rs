@@ -2209,7 +2209,15 @@ fn match_show_arg(expr: &Expr) -> Option<&Expr> {
 // parameters already work, so these "just compile".
 
 /// List-prelude functions we can synthesize, by name.
-const LIST_PRELUDE_NAMES: &[&str] = &["map", "filter", "foldr", "foldl", "length", "elem"];
+const LIST_PRELUDE_NAMES: &[&str] = &[
+    "map",
+    "filter",
+    "foldr",
+    "foldl",
+    "length",
+    "elem",
+    "enumFromTo",
+];
 
 /// Whether any binding in the module references `name`.
 fn module_uses_name(core: &CoreModule, name: Symbol) -> bool {
@@ -2403,6 +2411,29 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
             let nil = palt("[]", 0, 0, vec![], pref("False", id));
             let cons = palt(":", 1, 2, vec![y.clone(), ys.clone()], inner);
             plam(x, plam(xs.clone(), pcase(pev(&xs), vec![nil, cons])))
+        }
+        // enumFromTo lo hi = case lo > hi of { True -> []; False -> lo : enumFromTo (lo+1) hi }
+        "enumFromTo" => {
+            let lo = pv("lo", fresh(id));
+            let hi = pv("hi", fresh(id));
+            let cond = papp2(pref(">", id), pev(&lo), pev(&hi));
+            let empty = palt("True", 1, 0, vec![], pref("[]", id));
+            let step = palt(
+                "False",
+                0,
+                0,
+                vec![],
+                papp2(
+                    pref(":", id),
+                    pev(&lo),
+                    papp2(
+                        pref("enumFromTo", id),
+                        papp2(pref("+", id), pev(&lo), pint(1)),
+                        pev(&hi),
+                    ),
+                ),
+            );
+            plam(lo, plam(hi.clone(), pcase(cond, vec![step, empty])))
         }
         _ => return None,
     };

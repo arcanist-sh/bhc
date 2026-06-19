@@ -291,3 +291,11 @@ fn test_tier2_func_value_wasm() {
 fn test_tier2_list_ops_wasm() {
     run_wasm_test("tier2_functions/list_ops", Profile::Default);
 }
+
+// `[a..b]` ranges build real cons lists via an injected enumFromTo, so they
+// compose with map/filter/foldl/length; `sum [1..n]` still uses the fast
+// enumFromTo fusion.
+#[test]
+fn test_tier2_ranges_wasm() {
+    run_wasm_test("tier2_functions/ranges", Profile::Default);
+}

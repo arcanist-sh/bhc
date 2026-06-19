@@ -24,6 +24,23 @@ struct ConInfo {
     arity: u32,
 }
 
+/// What to do with the value an expression produces.
+///
+/// String values carry only their offset on the WASM stack — the length is
+/// lost — so a dynamic string (e.g. the result of an `if`/`case` over string
+/// literals) cannot be printed after the fact. Instead we push the print
+/// *into* each leaf of the expression, where the literal (and thus its length)
+/// is statically known. [`Cont::Value`] preserves the ordinary "leave the
+/// value on the stack" behaviour.
+#[derive(Clone, Copy)]
+enum Cont {
+    /// Leave the expression's value on the stack.
+    Value,
+    /// Print the expression as a string and leave the IO result (`0`) on the
+    /// stack. `newline` selects `putStrLn` vs `putStr` semantics.
+    PrintStr { newline: bool },
+}
+
 /// Build a map of well-known constructors to their tag and arity.
 ///
 /// User-defined constructors are layered on top of this in
@@ -343,7 +360,15 @@ impl<'a> WasmLowering<'a> {
             }
 
             Expr::Case(scrut, alts, _, _) => {
-                self.lower_case(scrut, alts, instrs, locals, local_count, is_main)?;
+                self.lower_case(
+                    scrut,
+                    alts,
+                    Cont::Value,
+                    instrs,
+                    locals,
+                    local_count,
+                    is_main,
+                )?;
             }
 
             // Type-level constructs: erase and look at inner expression
@@ -540,35 +565,29 @@ impl<'a> WasmLowering<'a> {
                 instrs.push(WasmInstr::I32GeS);
             }
 
-            // IO: putStrLn "..." => print_str_ln(offset, len)
+            // IO: putStrLn "..." => print_str_ln(offset, len). Handles dynamic
+            // strings (if/case over string literals) by printing each leaf.
             Some("putStrLn" | "System.IO.putStrLn" | "GHC.IO.putStrLn") if args.len() == 1 => {
-                if let Some(s) = extract_string_literal(args[0]) {
-                    let (offset, len) = self.intern_string(s);
-                    instrs.push(WasmInstr::I32Const(offset as i32));
-                    instrs.push(WasmInstr::I32Const(len as i32));
-                    instrs.push(WasmInstr::Call(self.runtime.print_str_ln_idx));
-                } else {
-                    // Dynamic string - we don't handle this yet
-                    tracing::warn!("putStrLn with non-literal argument");
-                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
-                    instrs.push(WasmInstr::Drop);
-                }
-                // IO action returns a dummy value
-                instrs.push(WasmInstr::I32Const(0));
+                self.lower_cont(
+                    args[0],
+                    Cont::PrintStr { newline: true },
+                    instrs,
+                    locals,
+                    local_count,
+                    is_main,
+                )?;
             }
 
             // IO: putStr "..." => print_str(offset, len)
             Some("putStr" | "System.IO.putStr" | "GHC.IO.putStr") if args.len() == 1 => {
-                if let Some(s) = extract_string_literal(args[0]) {
-                    let (offset, len) = self.intern_string(s);
-                    instrs.push(WasmInstr::I32Const(offset as i32));
-                    instrs.push(WasmInstr::I32Const(len as i32));
-                    instrs.push(WasmInstr::Call(self.runtime.print_str_idx));
-                } else {
-                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
-                    instrs.push(WasmInstr::Drop);
-                }
-                instrs.push(WasmInstr::I32Const(0));
+                self.lower_cont(
+                    args[0],
+                    Cont::PrintStr { newline: false },
+                    instrs,
+                    locals,
+                    local_count,
+                    is_main,
+                )?;
             }
 
             // IO: print x => print_i32(x) + newline
@@ -733,10 +752,78 @@ impl<'a> WasmLowering<'a> {
     }
 
     /// Lower a case expression.
+    /// Lower an expression under a continuation.
+    ///
+    /// For [`Cont::Value`] this is exactly [`Self::lower_expr`]. For
+    /// [`Cont::PrintStr`] the print is pushed into each leaf: `case`/`if`
+    /// expressions recurse so every branch prints its own (statically sized)
+    /// string literal, and transparent wrappers are peeled through.
+    fn lower_cont(
+        &mut self,
+        expr: &Expr,
+        cont: Cont,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+        is_main: bool,
+    ) -> WasmResult<()> {
+        let newline = match cont {
+            Cont::Value => {
+                return self.lower_expr(expr, instrs, locals, local_count, is_main);
+            }
+            Cont::PrintStr { newline } => newline,
+        };
+
+        match expr {
+            // Push the print into each branch so the leaf literal's length is
+            // known statically.
+            Expr::Case(scrut, alts, _, _) => {
+                self.lower_case(scrut, alts, cont, instrs, locals, local_count, is_main)?;
+            }
+
+            // Transparent wrappers: see through to the inner expression.
+            Expr::TyApp(inner, _, _)
+            | Expr::TyLam(_, inner, _)
+            | Expr::Cast(inner, _, _)
+            | Expr::Tick(_, inner, _)
+            | Expr::Lazy(inner, _) => {
+                self.lower_cont(inner, cont, instrs, locals, local_count, is_main)?;
+            }
+
+            // Leaf: a string literal whose length we know.
+            _ => {
+                if let Some(s) = extract_string_literal(expr) {
+                    let (offset, len) = self.intern_string(s);
+                    let print_idx = if newline {
+                        self.runtime.print_str_ln_idx
+                    } else {
+                        self.runtime.print_str_idx
+                    };
+                    instrs.push(WasmInstr::I32Const(offset as i32));
+                    instrs.push(WasmInstr::I32Const(len as i32));
+                    instrs.push(WasmInstr::Call(print_idx));
+                } else {
+                    // Dynamic string with no statically known length — we can't
+                    // recover it from the offset alone, so evaluate for effect
+                    // and drop.
+                    tracing::warn!("print of dynamic string with unknown length");
+                    self.lower_expr(expr, instrs, locals, local_count, false)?;
+                    instrs.push(WasmInstr::Drop);
+                }
+                // IO action returns a dummy value.
+                instrs.push(WasmInstr::I32Const(0));
+            }
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn lower_case(
         &mut self,
         scrut: &Expr,
         alts: &[bhc_core::Alt],
+        cont: Cont,
         instrs: &mut Vec<WasmInstr>,
         locals: &mut FxHashMap<VarId, u32>,
         local_count: &mut u32,
@@ -755,7 +842,7 @@ impl<'a> WasmLowering<'a> {
                 if let Some(binder) = alts[0].binders.first() {
                     locals.insert(binder.id, scrut_local);
                 }
-                self.lower_expr(&alts[0].rhs, instrs, locals, local_count, is_main)?;
+                self.lower_cont(&alts[0].rhs, cont, instrs, locals, local_count, is_main)?;
                 return Ok(());
             }
         }
@@ -777,6 +864,7 @@ impl<'a> WasmLowering<'a> {
                 scrut_local,
                 &lit_alts,
                 default_alt,
+                cont,
                 instrs,
                 locals,
                 local_count,
@@ -789,6 +877,7 @@ impl<'a> WasmLowering<'a> {
                 scrut_local,
                 &datacon_alts,
                 default_alt,
+                cont,
                 instrs,
                 locals,
                 local_count,
@@ -799,7 +888,7 @@ impl<'a> WasmLowering<'a> {
             if let Some(binder) = def.binders.first() {
                 locals.insert(binder.id, scrut_local);
             }
-            self.lower_expr(&def.rhs, instrs, locals, local_count, is_main)?;
+            self.lower_cont(&def.rhs, cont, instrs, locals, local_count, is_main)?;
         } else {
             // No alternatives at all - push 0
             instrs.push(WasmInstr::I32Const(0));
@@ -815,6 +904,7 @@ impl<'a> WasmLowering<'a> {
         scrut_local: u32,
         lit_alts: &[&bhc_core::Alt],
         default_alt: Option<&bhc_core::Alt>,
+        cont: Cont,
         instrs: &mut Vec<WasmInstr>,
         locals: &mut FxHashMap<VarId, u32>,
         local_count: &mut u32,
@@ -845,7 +935,7 @@ impl<'a> WasmLowering<'a> {
             }
 
             // RHS
-            self.lower_expr(&alt.rhs, instrs, locals, local_count, is_main)?;
+            self.lower_cont(&alt.rhs, cont, instrs, locals, local_count, is_main)?;
 
             instrs.push(WasmInstr::Else);
 
@@ -855,7 +945,7 @@ impl<'a> WasmLowering<'a> {
                     if let Some(binder) = def.binders.first() {
                         locals.insert(binder.id, scrut_local);
                     }
-                    self.lower_expr(&def.rhs, instrs, locals, local_count, is_main)?;
+                    self.lower_cont(&def.rhs, cont, instrs, locals, local_count, is_main)?;
                 } else {
                     // No default - unreachable or just push 0
                     instrs.push(WasmInstr::I32Const(0));
@@ -883,6 +973,7 @@ impl<'a> WasmLowering<'a> {
         scrut_local: u32,
         datacon_alts: &[&bhc_core::Alt],
         default_alt: Option<&bhc_core::Alt>,
+        cont: Cont,
         instrs: &mut Vec<WasmInstr>,
         locals: &mut FxHashMap<VarId, u32>,
         local_count: &mut u32,
@@ -935,7 +1026,7 @@ impl<'a> WasmLowering<'a> {
             }
 
             // RHS
-            self.lower_expr(&alt.rhs, instrs, locals, local_count, is_main)?;
+            self.lower_cont(&alt.rhs, cont, instrs, locals, local_count, is_main)?;
 
             instrs.push(WasmInstr::Else);
 
@@ -945,7 +1036,7 @@ impl<'a> WasmLowering<'a> {
                     if let Some(binder) = def.binders.first() {
                         locals.insert(binder.id, scrut_local);
                     }
-                    self.lower_expr(&def.rhs, instrs, locals, local_count, is_main)?;
+                    self.lower_cont(&def.rhs, cont, instrs, locals, local_count, is_main)?;
                 } else {
                     instrs.push(WasmInstr::I32Const(0));
                 }

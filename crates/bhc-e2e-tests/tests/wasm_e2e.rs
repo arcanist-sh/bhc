@@ -165,3 +165,11 @@ fn test_tier2_lambda_wasm() {
 fn test_tier2_custom_adt_wasm() {
     run_wasm_test("tier2_functions/custom_adt", Profile::Default);
 }
+
+// Dynamic strings: `putStrLn (if cond then "yes" else "no")`. The print is
+// pushed into each branch so the literal's length is known. Also exercises
+// `==`/`/=` on a derived-Eq ADT.
+#[test]
+fn test_tier2_derive_eq_wasm() {
+    run_wasm_test("tier2_functions/derive_eq", Profile::Default);
+}

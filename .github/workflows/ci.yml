@@ -114,11 +114,14 @@ jobs:
         with:
           components: miri
 
+      # Use +nightly explicitly: rust-toolchain.toml pins 1.96.0 (which has no
+      # miri component), and it would otherwise override the nightly installed
+      # above.
       - name: Setup Miri
-        run: cargo miri setup
+        run: cargo +nightly miri setup
 
       - name: Run Miri on arena crate
-        run: cargo miri test -p bhc-arena
+        run: cargo +nightly miri test -p bhc-arena
 
   docs:
     name: Documentation

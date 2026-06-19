@@ -12,7 +12,9 @@
 //! - IO actions are executed for their side effects and return `i32(0)`
 
 use bhc_core::{AltCon, Bind, CoreModule, Expr, Literal, Var, VarId};
+use bhc_index::Idx;
 use bhc_intern::Symbol;
+use bhc_span::Span;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::codegen::{RuntimeIndices, WasmFunc, WasmFuncType};
@@ -93,9 +95,10 @@ pub fn lower_core_module(
     lowering.register_constructors(core);
 
     // Record non-recursive top-level functions so saturated calls can be
-    // inlined (the WASM backend has no first-class closures; inlining lets
-    // dictionary-specialized typeclass methods reduce away at lowering time).
+    // inlined; record every top-level function's arity so partial and
+    // over-applications can be handled via closures.
     lowering.register_inline_bodies(core);
+    lowering.register_arities(core);
 
     // First pass: register all top-level function names so we can resolve calls
     for bind in &core.bindings {
@@ -182,6 +185,12 @@ struct WasmLowering<'a> {
     /// `(reserved_function_index, function)`. They are added to the module
     /// after all top-level bindings so their indices match what was reserved.
     pending_closures: Vec<(u32, WasmFunc)>,
+    /// Arity (number of value parameters) of each top-level binding, used to
+    /// detect partial and over-application.
+    arities: FxHashMap<Symbol, usize>,
+    /// Counter for fresh variable ids used when eta-expanding partial
+    /// applications. Starts high to avoid colliding with real program ids.
+    next_synthetic_id: usize,
 }
 
 impl<'a> WasmLowering<'a> {
@@ -201,6 +210,8 @@ impl<'a> WasmLowering<'a> {
             inline_bodies: FxHashMap::default(),
             inlining: FxHashSet::default(),
             pending_closures: Vec::new(),
+            arities: FxHashMap::default(),
+            next_synthetic_id: 5_000_000,
         }
     }
 
@@ -243,6 +254,25 @@ impl<'a> WasmLowering<'a> {
                 let param_ids: Vec<VarId> = params.iter().map(|p| p.id).collect();
                 self.inline_bodies
                     .insert(var.name, (param_ids, body.clone()));
+            }
+        }
+    }
+
+    /// Record the arity (leading lambda parameter count) of every top-level
+    /// binding, so partial/over-application can be detected at call sites.
+    fn register_arities(&mut self, core: &CoreModule) {
+        let mut record = |var: &Var, expr: &Expr| {
+            let (params, _) = peel_lambdas(expr);
+            self.arities.insert(var.name, params.len());
+        };
+        for bind in &core.bindings {
+            match bind {
+                Bind::NonRec(var, expr) => record(var, expr),
+                Bind::Rec(bindings) => {
+                    for (var, expr) in bindings {
+                        record(var, expr);
+                    }
+                }
             }
         }
     }
@@ -637,6 +667,58 @@ impl<'a> WasmLowering<'a> {
 
         instrs.push(WasmInstr::LocalGet(ptr));
         Ok(())
+    }
+
+    /// Lower a partial application `func a_0 .. a_{k-1}` (where `func` has
+    /// arity `> k`) by eta-expanding it to a closure
+    /// `\f_0 .. f_{m-1} -> func a_0 .. a_{k-1} f_0 .. f_{m-1}` and lowering
+    /// that. The closure captures the supplied arguments; the closure
+    /// machinery handles capture and currying.
+    fn lower_partial_application(
+        &mut self,
+        func_var: &Var,
+        args: &[&Expr],
+        arity: usize,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let missing = arity - args.len();
+
+        // Fresh parameters for the missing arguments. Their type is irrelevant
+        // to lowering, so reuse the function's type.
+        let fresh: Vec<Var> = (0..missing)
+            .map(|_| {
+                let id = self.next_synthetic_id;
+                self.next_synthetic_id += 1;
+                Var::new(Symbol::intern("_eta"), VarId::new(id), func_var.ty.clone())
+            })
+            .collect();
+
+        // Build the saturated application spine.
+        let mut app = Expr::Var(func_var.clone(), Span::default());
+        for arg in args {
+            app = Expr::App(Box::new(app), Box::new((*arg).clone()), Span::default());
+        }
+        for f in &fresh {
+            app = Expr::App(
+                Box::new(app),
+                Box::new(Expr::Var(f.clone(), Span::default())),
+                Span::default(),
+            );
+        }
+
+        // Wrap in nested lambdas (outermost is the first missing parameter).
+        let mut lam = app;
+        for f in fresh.iter().rev() {
+            lam = Expr::Lam(f.clone(), Box::new(lam), Span::default());
+        }
+
+        if let Expr::Lam(param, body, _) = &lam {
+            self.lower_closure(param, body, instrs, locals, local_count)
+        } else {
+            unreachable!("eta-expansion always produces a lambda")
+        }
     }
 
     /// Emit the current value of a variable (a local, or an inlined
@@ -1057,12 +1139,31 @@ impl<'a> WasmLowering<'a> {
 
             // User-defined function call
             Some(name) => {
-                if let Some(&func_idx) = self.func_map.get(&func_expr_symbol(func_expr).unwrap()) {
-                    // Push arguments
-                    for arg in &args {
+                let sym = func_expr_symbol(func_expr).unwrap();
+                if let Some(&func_idx) = self.func_map.get(&sym) {
+                    let arity = self.arities.get(&sym).copied().unwrap_or(args.len());
+                    if args.len() < arity {
+                        // Partial application: build a closure that captures the
+                        // supplied arguments and waits for the rest.
+                        let func_var = func_expr_var(func_expr).unwrap().clone();
+                        return self.lower_partial_application(
+                            &func_var,
+                            &args,
+                            arity,
+                            instrs,
+                            locals,
+                            local_count,
+                        );
+                    }
+                    // Saturated: call with the first `arity` arguments.
+                    for arg in &args[..arity] {
                         self.lower_expr(arg, instrs, locals, local_count, false)?;
                     }
                     instrs.push(WasmInstr::Call(func_idx));
+                    // Over-application: the result is a closure; apply the rest.
+                    if args.len() > arity {
+                        self.apply_closure_on_stack(&args[arity..], instrs, locals, local_count)?;
+                    }
                 } else if let Some(var) = func_expr_var(func_expr) {
                     // Check if it's a local variable being called (like a closure)
                     if let Some(&local_idx) = locals.get(&var.id) {

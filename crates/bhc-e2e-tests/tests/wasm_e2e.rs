@@ -208,3 +208,16 @@ fn test_tier2_closure_map_wasm() {
 fn test_tier2_closure_capture_wasm() {
     run_wasm_test("tier2_functions/closure_capture", Profile::Default);
 }
+
+// =============================================================================
+// Partial application of top-level functions
+// =============================================================================
+
+// A top-level function applied to fewer arguments than its arity eta-expands
+// to a closure that captures the supplied args. Covers partial application
+// passed to a HOF, a multi-argument partial, and a partial stored in a CAF
+// then over-applied.
+#[test]
+fn test_tier2_partial_app_wasm() {
+    run_wasm_test("tier2_functions/partial_app", Profile::Default);
+}

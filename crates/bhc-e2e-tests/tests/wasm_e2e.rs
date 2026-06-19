@@ -166,9 +166,9 @@ fn test_tier2_custom_adt_wasm() {
     run_wasm_test("tier2_functions/custom_adt", Profile::Default);
 }
 
-// Dynamic strings: `putStrLn (if cond then "yes" else "no")`. The print is
-// pushed into each branch so the literal's length is known. Also exercises
-// `==`/`/=` on a derived-Eq ADT.
+// Dynamic strings: `putStrLn (if cond then "yes" else "no")`. The `if` yields a
+// length-prefixed string pointer that carries its own length, so it prints
+// directly. Also exercises `==`/`/=` on a derived-Eq ADT.
 #[test]
 fn test_tier2_derive_eq_wasm() {
     run_wasm_test("tier2_functions/derive_eq", Profile::Default);
@@ -244,4 +244,15 @@ fn test_tier2_show_types_wasm() {
 #[test]
 fn test_tier2_floats_wasm() {
     run_wasm_test("tier2_functions/floats", Profile::Default);
+}
+
+// =============================================================================
+// Strings (length-prefixed) and concatenation
+// =============================================================================
+
+// `++` on strings: each String value is a length-prefixed block, so dynamic
+// strings carry their own length and concatenate/print at runtime.
+#[test]
+fn test_tier2_string_concat_wasm() {
+    run_wasm_test("tier2_functions/string_concat", Profile::Default);
 }

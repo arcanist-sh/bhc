@@ -178,8 +178,13 @@ struct WasmLowering<'a> {
     runtime: &'a RuntimeIndices,
     /// Maps Haskell function names to WASM function indices.
     func_map: FxHashMap<Symbol, u32>,
-    /// String pool: maps string content to (data_offset, length).
+    /// Raw string pool: maps content to (data_offset, length). Used for fixed
+    /// runtime output (`True`/`False`, newline) printed via `print_str`.
     string_pool: FxHashMap<String, (u32, u32)>,
+    /// Length-prefixed string pool: maps content to a pointer to a
+    /// `[len: i32 | bytes...]` block. This is the runtime representation of a
+    /// `String` *value*.
+    pstr_pool: FxHashMap<String, u32>,
     /// Next available offset in the data segment for string storage.
     next_data_offset: u32,
     /// Counter for pre-registering function indices.
@@ -220,6 +225,7 @@ impl<'a> WasmLowering<'a> {
             runtime,
             func_map: FxHashMap::default(),
             string_pool: FxHashMap::default(),
+            pstr_pool: FxHashMap::default(),
             next_data_offset: STRING_DATA_BASE,
             next_func_idx,
             con_map: well_known_constructors(),
@@ -319,6 +325,28 @@ impl<'a> WasmLowering<'a> {
 
         self.string_pool.insert(s.to_string(), (offset, len));
         (offset, len)
+    }
+
+    /// Intern a string as a length-prefixed `[len: i32 | bytes...]` block in the
+    /// data segment, returning a pointer to it. This is the runtime value
+    /// representation of a `String`.
+    fn intern_pstr(&mut self, s: &str) -> u32 {
+        if let Some(&ptr) = self.pstr_pool.get(s) {
+            return ptr;
+        }
+
+        // Align so the length word can be read with an aligned i32 load.
+        self.next_data_offset = (self.next_data_offset + 3) & !3;
+        let ptr = self.next_data_offset;
+        let len = s.len() as u32;
+        let mut bytes = (len as i32).to_le_bytes().to_vec();
+        bytes.extend_from_slice(s.as_bytes());
+        self.wasm.add_data_segment(ptr, bytes);
+        self.next_data_offset = ptr + 4 + len;
+        self.next_data_offset = (self.next_data_offset + 3) & !3;
+
+        self.pstr_pool.insert(s.to_string(), ptr);
+        ptr
     }
 
     /// Lower a single top-level binding to a WASM function.
@@ -519,10 +547,10 @@ impl<'a> WasmLowering<'a> {
                 instrs.push(WasmInstr::I32Const(*c as i32));
             }
             Literal::String(sym) => {
-                // Intern the string and push its offset as the "value"
+                // A String value is a pointer to a length-prefixed block.
                 let s = sym.as_str();
-                let (offset, _len) = self.intern_string(s);
-                instrs.push(WasmInstr::I32Const(offset as i32));
+                let ptr = self.intern_pstr(s);
+                instrs.push(WasmInstr::I32Const(ptr as i32));
             }
             // Floating-point literals are boxed: a pointer to an 8-byte f64 cell.
             Literal::Float(f) => {
@@ -1260,6 +1288,21 @@ impl<'a> WasmLowering<'a> {
 
             // IO: putStrLn "..." => print_str_ln(offset, len). Handles dynamic
             // strings (if/case over string literals) by printing each leaf.
+            // String concatenation: both operands are length-prefixed strings.
+            Some("++" | "GHC.Base.++" | "Data.List.++" | "Data.List.NonEmpty.++")
+                if args.len() == 2 =>
+            {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+            }
+
+            // `unpackCString#`/`unpackCStringUtf8#` turn a string literal into a
+            // String value; the literal already lowers to a string pointer.
+            Some(name) if name.contains("unpackCString") && args.len() == 1 => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+            }
+
             Some("putStrLn" | "System.IO.putStrLn" | "GHC.IO.putStrLn") if args.len() == 1 => {
                 self.lower_cont(
                     args[0],
@@ -1482,54 +1525,24 @@ impl<'a> WasmLowering<'a> {
             Cont::PrintStr { newline } => newline,
         };
 
-        match expr {
-            // Push the print into each branch so the leaf literal's length is
-            // known statically.
-            Expr::Case(scrut, alts, _, _) => {
-                self.lower_case(scrut, alts, cont, instrs, locals, local_count, is_main)?;
-            }
-
-            // Transparent wrappers: see through to the inner expression.
-            Expr::TyApp(inner, _, _)
-            | Expr::TyLam(_, inner, _)
-            | Expr::Cast(inner, _, _)
-            | Expr::Tick(_, inner, _)
-            | Expr::Lazy(inner, _) => {
-                self.lower_cont(inner, cont, instrs, locals, local_count, is_main)?;
-            }
-
-            // Leaf: `putStrLn (show x)` / `putStr (show x)` — type-directed
-            // rendering of the shown value.
-            _ if match_show_arg(expr).is_some() => {
-                let inner = match_show_arg(expr).unwrap();
-                self.lower_show(inner, newline, instrs, locals, local_count)?;
-            }
-
-            // Leaf: a string literal whose length we know.
-            _ => {
-                if let Some(s) = extract_string_literal(expr) {
-                    let (offset, len) = self.intern_string(s);
-                    let print_idx = if newline {
-                        self.runtime.print_str_ln_idx
-                    } else {
-                        self.runtime.print_str_idx
-                    };
-                    instrs.push(WasmInstr::I32Const(offset as i32));
-                    instrs.push(WasmInstr::I32Const(len as i32));
-                    instrs.push(WasmInstr::Call(print_idx));
-                } else {
-                    // Dynamic string with no statically known length — we can't
-                    // recover it from the offset alone, so evaluate for effect
-                    // and drop.
-                    tracing::warn!("print of dynamic string with unknown length");
-                    self.lower_expr(expr, instrs, locals, local_count, false)?;
-                    instrs.push(WasmInstr::Drop);
-                }
-                // IO action returns a dummy value.
-                instrs.push(WasmInstr::I32Const(0));
-            }
+        // `putStrLn (show x)` / `putStr (show x)`: type-directed rendering of the
+        // shown value (Int/Bool/Double/constructor) rather than a real String.
+        if let Some(inner) = match_show_arg(expr) {
+            return self.lower_show(inner, newline, instrs, locals, local_count);
         }
 
+        // Any other string-valued expression — a literal, an `if`/`case` over
+        // strings, or a `++` result — evaluates to a length-prefixed string
+        // pointer that carries its own length, so it prints uniformly.
+        self.lower_expr(expr, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::Call(self.runtime.print_pstr_idx));
+        if newline {
+            instrs.push(WasmInstr::I32Const(self.runtime.newline_offset as i32));
+            instrs.push(WasmInstr::I32Const(1));
+            instrs.push(WasmInstr::Call(self.runtime.print_str_idx));
+        }
+        // IO action returns a dummy value.
+        instrs.push(WasmInstr::I32Const(0));
         Ok(())
     }
 
@@ -2009,25 +2022,6 @@ fn collect_app_spine(expr: &Expr) -> (&Expr, Vec<&Expr>) {
 
     args.reverse();
     (current, args)
-}
-
-/// Extract a string literal from an expression, looking through casts/ticks.
-fn extract_string_literal(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Lit(Literal::String(sym), _, _) => Some(sym.as_str()),
-        Expr::Cast(inner, _, _) | Expr::Tick(_, inner, _) => extract_string_literal(inner),
-        Expr::TyApp(inner, _, _) => extract_string_literal(inner),
-        Expr::App(f, arg, _) => {
-            // Sometimes strings appear as `unpackCString# "literal"`
-            if let Expr::Var(var, _) = f.as_ref() {
-                if var.name.as_str().contains("unpackCString") {
-                    return extract_string_literal(arg);
-                }
-            }
-            None
-        }
-        _ => None,
-    }
 }
 
 /// Get the `Symbol` from a function expression if it's a `Var`.

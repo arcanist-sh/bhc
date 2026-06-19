@@ -641,6 +641,154 @@ pub fn generate_print_double(fd_write_idx: u32) -> WasmFunc {
     func
 }
 
+/// Generate a `print_pstr` function that prints a length-prefixed string.
+///
+/// The parameter points to a `[len: i32 | bytes...]` block (the runtime
+/// representation of a `String` value); the bytes start at `ptr + 4`. No
+/// newline is appended.
+pub fn generate_print_pstr(fd_write_idx: u32) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(vec![WasmType::I32], vec![]));
+    func.name = Some("print_pstr".to_string());
+    func.exported = true;
+
+    // iovec.buf = ptr + 4
+    func.emit(WasmInstr::I32Const(16));
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Store(4, 0));
+
+    // iovec.len = load len at ptr
+    func.emit(WasmInstr::I32Const(20));
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::I32Store(4, 0));
+
+    // fd_write(stdout, 16, 1, 24)
+    func.emit(WasmInstr::I32Const(STDOUT_FD));
+    func.emit(WasmInstr::I32Const(16));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Const(24));
+    func.emit(WasmInstr::Call(fd_write_idx));
+    func.emit(WasmInstr::Drop);
+
+    func.emit(WasmInstr::End);
+    func
+}
+
+/// Generate a `concat_str` function that concatenates two length-prefixed
+/// strings into a freshly allocated one, returning the new pointer.
+///
+/// Each argument points to `[len: i32 | bytes...]`. The result is
+/// `[lenA + lenB | bytesA ++ bytesB]`.
+pub fn generate_concat_str(fd_write_idx: u32, alloc_idx: u32) -> WasmFunc {
+    let _ = fd_write_idx;
+    let mut func = WasmFunc::new(WasmFuncType::new(
+        vec![WasmType::I32, WasmType::I32], // a, b
+        vec![WasmType::I32],                // result pointer
+    ));
+    func.name = Some("concat_str".to_string());
+    func.exported = true;
+
+    let len_a = func.add_local(WasmType::I32);
+    let len_b = func.add_local(WasmType::I32);
+    let result = func.add_local(WasmType::I32);
+    let i = func.add_local(WasmType::I32);
+
+    // len_a = [a], len_b = [b]
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::LocalSet(len_a));
+    func.emit(WasmInstr::LocalGet(1));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::LocalSet(len_b));
+
+    // result = alloc(4 + len_a + len_b)
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::LocalGet(len_a));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(len_b));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(result));
+
+    // [result] = len_a + len_b
+    func.emit(WasmInstr::LocalGet(result));
+    func.emit(WasmInstr::LocalGet(len_a));
+    func.emit(WasmInstr::LocalGet(len_b));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Store(2, 0));
+
+    // Copy bytes of a: for i in 0..len_a { result[4+i] = a[4+i] }
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::LocalGet(len_a));
+    func.emit(WasmInstr::I32GeU);
+    func.emit(WasmInstr::BrIf(1));
+    // dst addr = result + 4 + i
+    func.emit(WasmInstr::LocalGet(result));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Add);
+    // src byte = a[4 + i]
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Load8U(0, 0));
+    func.emit(WasmInstr::I32Store8(0, 0));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+
+    // Copy bytes of b: for i in 0..len_b { result[4 + len_a + i] = b[4 + i] }
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::LocalGet(len_b));
+    func.emit(WasmInstr::I32GeU);
+    func.emit(WasmInstr::BrIf(1));
+    // dst addr = result + 4 + len_a + i
+    func.emit(WasmInstr::LocalGet(result));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(len_a));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Add);
+    // src byte = b[4 + i]
+    func.emit(WasmInstr::LocalGet(1));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Load8U(0, 0));
+    func.emit(WasmInstr::I32Store8(0, 0));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+
+    // return result
+    func.emit(WasmInstr::LocalGet(result));
+    func.emit(WasmInstr::End);
+    func
+}
+
 /// Offset where the newline byte is stored in the data segment.
 pub const NEWLINE_DATA_OFFSET: u32 = 1020;
 

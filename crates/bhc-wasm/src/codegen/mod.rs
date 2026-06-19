@@ -89,6 +89,10 @@ pub struct RuntimeIndices {
     pub print_str_ln_idx: u32,
     /// Index of the `print_double` function (renders an f64, no newline).
     pub print_double_idx: u32,
+    /// Index of the `print_pstr` function (prints a length-prefixed string).
+    pub print_pstr_idx: u32,
+    /// Index of the `concat_str` function (concatenates two strings).
+    pub concat_str_idx: u32,
     /// Offset of the newline byte in the data segment.
     pub newline_offset: u32,
 }
@@ -610,6 +614,14 @@ impl WasmModule {
         let print_double_func = wasi::generate_print_double(fd_write_idx);
         let print_double_idx = self.add_function(print_double_func);
 
+        // Add print_pstr function (length-prefixed string printing)
+        let print_pstr_func = wasi::generate_print_pstr(fd_write_idx);
+        let print_pstr_idx = self.add_function(print_pstr_func);
+
+        // Add concat_str function (string concatenation)
+        let concat_str_func = wasi::generate_concat_str(fd_write_idx, alloc_idx);
+        let concat_str_idx = self.add_function(concat_str_func);
+
         RuntimeIndices {
             fd_write_idx,
             proc_exit_idx,
@@ -618,6 +630,8 @@ impl WasmModule {
             print_str_idx,
             print_str_ln_idx,
             print_double_idx,
+            print_pstr_idx,
+            concat_str_idx,
             newline_offset,
         }
     }

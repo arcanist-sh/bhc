@@ -1,0 +1,4 @@
+foobar
+Hello, world!
+abcd
+nonewline

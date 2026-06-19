@@ -15,7 +15,7 @@
   <a href="https://www.haskell.org/">
     <img alt="Haskell" src="https://img.shields.io/badge/For-Haskell-5e5086?logo=haskell&logoColor=white&style=for-the-badge">
   </a>
-  <a href="#license">
+  <a href="LICENSE">
     <img alt="License" src="https://img.shields.io/badge/License-BSD--3--Clause-c6a0f6?style=for-the-badge">
   </a>
 </p>

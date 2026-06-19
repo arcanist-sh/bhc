@@ -221,3 +221,15 @@ fn test_tier2_closure_capture_wasm() {
 fn test_tier2_partial_app_wasm() {
     run_wasm_test("tier2_functions/partial_app", Profile::Default);
 }
+
+// =============================================================================
+// Type-directed show / print
+// =============================================================================
+
+// `show`/`print` beyond Int: nullary constructors render as their name
+// (`True`, `Red`, ...), and boolean-valued operators render as `True`/`False`
+// from the runtime tag. Types are erased, so this is inferred structurally.
+#[test]
+fn test_tier2_show_types_wasm() {
+    run_wasm_test("tier2_functions/show_types", Profile::Default);
+}

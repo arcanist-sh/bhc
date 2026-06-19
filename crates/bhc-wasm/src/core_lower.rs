@@ -43,6 +43,20 @@ enum Cont {
     PrintStr { newline: bool },
 }
 
+/// How a value should be rendered by `show`/`print`.
+///
+/// Types are erased by the time Core reaches this backend, so the kind is
+/// inferred from the expression's structure (mirroring the native backend).
+enum ShowKind {
+    /// Decimal integer (the default).
+    Int,
+    /// `True`/`False`, chosen at runtime from the boolean tag.
+    Bool,
+    /// A statically known rendering — a nullary constructor's name
+    /// (`True`, `Red`, `Nothing`, `[]`, `()`, ...).
+    Literal(String),
+}
+
 /// Build a map of well-known constructors to their tag and arity.
 ///
 /// User-defined constructors are layered on top of this in
@@ -558,6 +572,94 @@ impl<'a> WasmLowering<'a> {
         Ok(())
     }
 
+    /// Lower `show`/`print` of `arg`, rendering it according to its inferred
+    /// type and leaving the IO result (`0`) on the stack. `newline` selects
+    /// `putStrLn` vs `putStr` semantics for string-rendered values.
+    fn lower_show(
+        &mut self,
+        arg: &Expr,
+        newline: bool,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        match self.infer_show(arg) {
+            ShowKind::Literal(text) => {
+                self.emit_print_str(&text, newline, instrs);
+                instrs.push(WasmInstr::I32Const(0));
+            }
+            ShowKind::Bool => {
+                // Render from the boolean tag: 1 -> "True", 0 -> "False".
+                self.lower_expr(arg, instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                self.emit_print_str("True", newline, instrs);
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::Else);
+                self.emit_print_str("False", newline, instrs);
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::End);
+            }
+            ShowKind::Int => {
+                self.lower_expr(arg, instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Call(self.runtime.print_i32_idx));
+                instrs.push(WasmInstr::I32Const(0));
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit a print of the static string `text`.
+    fn emit_print_str(&mut self, text: &str, newline: bool, instrs: &mut Vec<WasmInstr>) {
+        let (offset, len) = self.intern_string(text);
+        let print_idx = if newline {
+            self.runtime.print_str_ln_idx
+        } else {
+            self.runtime.print_str_idx
+        };
+        instrs.push(WasmInstr::I32Const(offset as i32));
+        instrs.push(WasmInstr::I32Const(len as i32));
+        instrs.push(WasmInstr::Call(print_idx));
+    }
+
+    /// Infer how to render `expr` under `show`. Types are erased, so this works
+    /// structurally: a nullary constructor shows as its name; a boolean-valued
+    /// operator shows as `True`/`False`; everything else defaults to integer.
+    fn infer_show(&self, expr: &Expr) -> ShowKind {
+        // Peel transparent wrappers.
+        let mut e = expr;
+        loop {
+            e = match e {
+                Expr::TyApp(inner, _, _)
+                | Expr::Cast(inner, _, _)
+                | Expr::Tick(_, inner, _)
+                | Expr::Lazy(inner, _) => inner,
+                _ => break,
+            };
+        }
+
+        match e {
+            Expr::Var(v, _) => {
+                if matches!(self.lookup_constructor(v.name.as_str()), Some((_, 0))) {
+                    return ShowKind::Literal(v.name.as_str().to_string());
+                }
+                if let Some(bound) = self.subst.get(&v.id) {
+                    return self.infer_show(bound);
+                }
+                ShowKind::Int
+            }
+            Expr::App(..) => {
+                let (head, _) = collect_app_spine(e);
+                if let Expr::Var(hv, _) = head {
+                    if is_bool_valued_op(hv.name.as_str()) {
+                        return ShowKind::Bool;
+                    }
+                }
+                ShowKind::Int
+            }
+            _ => ShowKind::Int,
+        }
+    }
+
     /// The type index for the closure calling convention `(env, arg) -> result`.
     fn closure_type_index(&mut self) -> u32 {
         self.wasm.add_type(WasmFuncType::new(
@@ -1027,9 +1129,8 @@ impl<'a> WasmLowering<'a> {
 
             // IO: print x => print_i32(x) + newline
             Some("print" | "System.IO.print" | "GHC.Show.print") if args.len() == 1 => {
-                self.lower_expr(args[0], instrs, locals, local_count, false)?;
-                instrs.push(WasmInstr::Call(self.runtime.print_i32_idx));
-                instrs.push(WasmInstr::I32Const(0));
+                // `print x` = `putStrLn (show x)`: type-directed, with a newline.
+                self.lower_show(args[0], true, instrs, locals, local_count)?;
             }
 
             // IO: >> (sequence) - evaluate both sides for effects
@@ -1241,13 +1342,11 @@ impl<'a> WasmLowering<'a> {
                 self.lower_cont(inner, cont, instrs, locals, local_count, is_main)?;
             }
 
-            // Leaf: `putStrLn (show n)` / `putStr (show n)` prints the integer
-            // directly via the runtime's int printer (which appends a newline).
+            // Leaf: `putStrLn (show x)` / `putStr (show x)` — type-directed
+            // rendering of the shown value.
             _ if match_show_arg(expr).is_some() => {
                 let inner = match_show_arg(expr).unwrap();
-                self.lower_expr(inner, instrs, locals, local_count, false)?;
-                instrs.push(WasmInstr::Call(self.runtime.print_i32_idx));
-                instrs.push(WasmInstr::I32Const(0));
+                self.lower_show(inner, newline, instrs, locals, local_count)?;
             }
 
             // Leaf: a string literal whose length we know.
@@ -1657,6 +1756,37 @@ fn match_show_arg(expr: &Expr) -> Option<&Expr> {
     } else {
         None
     }
+}
+
+/// Whether an operator name denotes a boolean-valued operation (comparison or
+/// logical connective), so its result should `show` as `True`/`False`.
+fn is_bool_valued_op(name: &str) -> bool {
+    matches!(
+        name,
+        "==" | "GHC.Classes.=="
+            | "eqInt#"
+            | "/="
+            | "GHC.Classes./="
+            | "neInt#"
+            | "<"
+            | "GHC.Classes.<"
+            | "ltInt#"
+            | "<="
+            | "GHC.Classes.<="
+            | "leInt#"
+            | ">"
+            | "GHC.Classes.>"
+            | "gtInt#"
+            | ">="
+            | "GHC.Classes.>="
+            | "geInt#"
+            | "&&"
+            | "GHC.Classes.&&"
+            | "||"
+            | "GHC.Classes.||"
+            | "not"
+            | "GHC.Classes.not"
+    )
 }
 
 /// Peel lambda abstractions off the front of an expression.

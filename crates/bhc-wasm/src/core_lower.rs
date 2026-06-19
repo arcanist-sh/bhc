@@ -13,7 +13,7 @@
 
 use bhc_core::{AltCon, Bind, CoreModule, Expr, Literal, Var, VarId};
 use bhc_intern::Symbol;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::codegen::{RuntimeIndices, WasmFunc, WasmFuncType};
 use crate::{WasmInstr, WasmModule, WasmResult, WasmType};
@@ -92,6 +92,11 @@ pub fn lower_core_module(
     // and user ADT values all lower to tag 0.
     lowering.register_constructors(core);
 
+    // Record non-recursive top-level functions so saturated calls can be
+    // inlined (the WASM backend has no first-class closures; inlining lets
+    // dictionary-specialized typeclass methods reduce away at lowering time).
+    lowering.register_inline_bodies(core);
+
     // First pass: register all top-level function names so we can resolve calls
     for bind in &core.bindings {
         match bind {
@@ -148,6 +153,17 @@ struct WasmLowering<'a> {
     /// Constructor map: name -> (tag, arity). Seeded with well-known
     /// constructors and extended with user-defined ones from the module.
     con_map: FxHashMap<String, ConInfo>,
+    /// Substitution environment: var id -> expression to lower in its place.
+    /// Used to inline function/lambda arguments without alpha-renaming —
+    /// when a parameter is referenced, its argument expression is lowered.
+    subst: FxHashMap<VarId, Expr>,
+    /// Bodies of non-recursive top-level functions eligible for inlining,
+    /// keyed by name: `(param_ids, body)`. Lets us evaluate
+    /// dictionary-specialized typeclass methods (and the closures they
+    /// receive) by inlining instead of needing first-class closures.
+    inline_bodies: FxHashMap<Symbol, (Vec<VarId>, Expr)>,
+    /// Functions currently being inlined, to break inlining cycles.
+    inlining: FxHashSet<Symbol>,
 }
 
 impl<'a> WasmLowering<'a> {
@@ -163,6 +179,9 @@ impl<'a> WasmLowering<'a> {
             next_data_offset: STRING_DATA_BASE,
             next_func_idx,
             con_map: well_known_constructors(),
+            subst: FxHashMap::default(),
+            inline_bodies: FxHashMap::default(),
+            inlining: FxHashSet::default(),
         }
     }
 
@@ -181,6 +200,31 @@ impl<'a> WasmLowering<'a> {
                     arity: con.arity,
                 },
             );
+        }
+    }
+
+    /// Record non-recursive top-level functions (those with at least one
+    /// value parameter) so saturated applications can be inlined. `main` is
+    /// excluded — it is the entry point, never a callee.
+    fn register_inline_bodies(&mut self, core: &CoreModule) {
+        for bind in &core.bindings {
+            if let Bind::NonRec(var, expr) = bind {
+                if var.name.as_str() == "main" {
+                    continue;
+                }
+                let (params, body) = peel_lambdas(expr);
+                if params.is_empty() {
+                    continue;
+                }
+                // Recursive functions (even structurally `NonRec` ones that call
+                // themselves by name) must not be inlined.
+                if expr_uses_name(body, var.name) {
+                    continue;
+                }
+                let param_ids: Vec<VarId> = params.iter().map(|p| p.id).collect();
+                self.inline_bodies
+                    .insert(var.name, (param_ids, body.clone()));
+            }
         }
     }
 
@@ -295,6 +339,10 @@ impl<'a> WasmLowering<'a> {
 
             Expr::Var(var, _) => {
                 let name = var.name.as_str();
+                // Inlined parameter: lower its bound argument expression.
+                if let Some(arg) = self.subst.get(&var.id).cloned() {
+                    return self.lower_expr(&arg, instrs, locals, local_count, is_main);
+                }
                 // Check if it's a nullary constructor
                 if let Some((tag, 0)) = self.lookup_constructor(name) {
                     instrs.push(WasmInstr::I32Const(tag as i32));
@@ -468,6 +516,117 @@ impl<'a> WasmLowering<'a> {
     ///
     /// This is the core dispatch logic. We collect the function and all its
     /// arguments, then decide how to emit code based on the function name.
+    /// Attempt to lower an application by inlining or beta-reduction.
+    ///
+    /// Returns `Ok(true)` if it handled the application. Handles two shapes the
+    /// plain call path cannot:
+    /// - a lambda applied directly, or via a parameter bound to a lambda
+    ///   argument (`subst`) — beta-reduction;
+    /// - a saturated call to a non-recursive top-level function — inlining.
+    ///
+    /// Both bind the parameters to the argument *expressions* (no
+    /// alpha-renaming needed: each argument is re-lowered where its parameter
+    /// is referenced) and lower the body in place.
+    fn try_lower_inline_app(
+        &mut self,
+        func_expr: &Expr,
+        args: &[&Expr],
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+        is_main: bool,
+    ) -> WasmResult<bool> {
+        let head = peel_head(func_expr);
+
+        if let Expr::Var(var, _) = head {
+            // A parameter bound to a lambda argument (a closure): beta-reduce.
+            if let Some(bound) = self.subst.get(&var.id).cloned() {
+                let bound_head = peel_head(&bound);
+                if matches!(bound_head, Expr::Lam(..)) {
+                    let (params, body) = peel_lambdas(bound_head);
+                    if args.len() == params.len() {
+                        let param_ids: Vec<VarId> = params.iter().map(|p| p.id).collect();
+                        self.inline_call(
+                            &param_ids,
+                            body,
+                            args,
+                            instrs,
+                            locals,
+                            local_count,
+                            is_main,
+                        )?;
+                        return Ok(true);
+                    }
+                }
+                return Ok(false);
+            }
+            // A non-recursive top-level function: inline its body.
+            if !self.inlining.contains(&var.name) {
+                if let Some((param_ids, body)) = self.inline_bodies.get(&var.name).cloned() {
+                    if args.len() == param_ids.len() {
+                        self.inlining.insert(var.name);
+                        let result = self.inline_call(
+                            &param_ids,
+                            &body,
+                            args,
+                            instrs,
+                            locals,
+                            local_count,
+                            is_main,
+                        );
+                        self.inlining.remove(&var.name);
+                        result?;
+                        return Ok(true);
+                    }
+                }
+            }
+            return Ok(false);
+        }
+
+        // A lambda applied directly: (\x -> ...) arg.
+        if matches!(head, Expr::Lam(..)) {
+            let (params, body) = peel_lambdas(head);
+            if args.len() == params.len() {
+                let param_ids: Vec<VarId> = params.iter().map(|p| p.id).collect();
+                self.inline_call(&param_ids, body, args, instrs, locals, local_count, is_main)?;
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Inline a call: bind each parameter to its argument expression in
+    /// `subst`, lower the body, then restore any shadowed bindings.
+    #[allow(clippy::too_many_arguments)]
+    fn inline_call(
+        &mut self,
+        param_ids: &[VarId],
+        body: &Expr,
+        args: &[&Expr],
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+        is_main: bool,
+    ) -> WasmResult<()> {
+        let mut saved: Vec<(VarId, Option<Expr>)> = Vec::with_capacity(param_ids.len());
+        for (id, arg) in param_ids.iter().zip(args.iter()) {
+            saved.push((*id, self.subst.insert(*id, (**arg).clone())));
+        }
+        let result = self.lower_expr(body, instrs, locals, local_count, is_main);
+        for (id, prev) in saved {
+            match prev {
+                Some(e) => {
+                    self.subst.insert(id, e);
+                }
+                None => {
+                    self.subst.remove(&id);
+                }
+            }
+        }
+        result
+    }
+
     fn lower_app(
         &mut self,
         expr: &Expr,
@@ -498,6 +657,14 @@ impl<'a> WasmLowering<'a> {
                     return self.emit_adt_construction(tag, &args, instrs, locals, local_count);
                 }
             }
+        }
+
+        // Try to inline/beta-reduce the application. Handles dictionary-
+        // specialized typeclass methods (head buried under dead dictionary
+        // lets) and closures passed as arguments, neither of which the simple
+        // call path supports.
+        if self.try_lower_inline_app(func_expr, &args, instrs, locals, local_count, is_main)? {
+            return Ok(());
         }
 
         match func_name {
@@ -790,6 +957,15 @@ impl<'a> WasmLowering<'a> {
                 self.lower_cont(inner, cont, instrs, locals, local_count, is_main)?;
             }
 
+            // Leaf: `putStrLn (show n)` / `putStr (show n)` prints the integer
+            // directly via the runtime's int printer (which appends a newline).
+            _ if match_show_arg(expr).is_some() => {
+                let inner = match_show_arg(expr).unwrap();
+                self.lower_expr(inner, instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Call(self.runtime.print_i32_idx));
+                instrs.push(WasmInstr::I32Const(0));
+            }
+
             // Leaf: a string literal whose length we know.
             _ => {
                 if let Some(s) = extract_string_literal(expr) {
@@ -1055,6 +1231,75 @@ impl<'a> WasmLowering<'a> {
 // ============================================================
 // Helper functions
 // ============================================================
+
+/// Whether `expr` references the given name anywhere. Used to detect
+/// (self-)recursive functions, which must not be inlined: inlining a function
+/// into its own body would alias parameter `VarId`s and loop forever.
+fn expr_uses_name(expr: &Expr, name: Symbol) -> bool {
+    match expr {
+        Expr::Var(v, _) => v.name == name,
+        Expr::Lit(_, _, _) | Expr::Type(_, _) | Expr::Coercion(_, _) => false,
+        Expr::App(f, a, _) => expr_uses_name(f, name) || expr_uses_name(a, name),
+        Expr::TyApp(inner, _, _)
+        | Expr::TyLam(_, inner, _)
+        | Expr::Lam(_, inner, _)
+        | Expr::Lazy(inner, _)
+        | Expr::Cast(inner, _, _)
+        | Expr::Tick(_, inner, _) => expr_uses_name(inner, name),
+        Expr::Let(bind, body, _) => {
+            let in_bind = match bind.as_ref() {
+                Bind::NonRec(_, rhs) => expr_uses_name(rhs, name),
+                Bind::Rec(bs) => bs.iter().any(|(_, rhs)| expr_uses_name(rhs, name)),
+            };
+            in_bind || expr_uses_name(body, name)
+        }
+        Expr::Case(scrut, alts, _, _) => {
+            expr_uses_name(scrut, name) || alts.iter().any(|a| expr_uses_name(&a.rhs, name))
+        }
+    }
+}
+
+/// Peel transparent wrappers and (dead) let-bindings to reach the head of an
+/// application's function position.
+///
+/// Let-bindings in head position are skipped: after dictionary specialization
+/// they bind dead dictionaries. A live reference resolves via the normal
+/// variable path instead.
+fn peel_head(expr: &Expr) -> &Expr {
+    let mut e = expr;
+    loop {
+        e = match e {
+            Expr::TyApp(inner, _, _)
+            | Expr::TyLam(_, inner, _)
+            | Expr::Cast(inner, _, _)
+            | Expr::Tick(_, inner, _)
+            | Expr::Lazy(inner, _)
+            | Expr::Let(_, inner, _) => inner,
+            _ => return e,
+        };
+    }
+}
+
+/// If `expr` is `show <value>` (possibly with a leading dictionary argument),
+/// return the value being shown. Used to print `show n` for integers via the
+/// runtime int printer without materialising a string.
+fn match_show_arg(expr: &Expr) -> Option<&Expr> {
+    let (func, args) = collect_app_spine(expr);
+    let name = match func {
+        Expr::Var(v, _) => v.name.as_str(),
+        _ => return None,
+    };
+    let is_show = matches!(
+        name,
+        "show" | "GHC.Show.show" | "Prelude.show" | "Text.Show.show"
+    );
+    if is_show && !args.is_empty() {
+        // The last argument is the value; any earlier argument is a dictionary.
+        Some(args[args.len() - 1])
+    } else {
+        None
+    }
+}
 
 /// Peel lambda abstractions off the front of an expression.
 fn peel_lambdas(expr: &Expr) -> (Vec<&Var>, &Expr) {

@@ -173,3 +173,12 @@ fn test_tier2_custom_adt_wasm() {
 fn test_tier2_derive_eq_wasm() {
     run_wasm_test("tier2_functions/derive_eq", Profile::Default);
 }
+
+// User-defined Monad: do-notation desugars to a dictionary-specialized
+// `>>=` applied to a closure. The WASM backend has no first-class closures,
+// so the call is inlined/beta-reduced at lowering time. Also exercises
+// `show` on an Int.
+#[test]
+fn test_tier2_user_monad_wasm() {
+    run_wasm_test("tier2_functions/user_monad", Profile::Default);
+}

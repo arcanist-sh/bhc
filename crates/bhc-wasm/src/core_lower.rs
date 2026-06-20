@@ -659,6 +659,48 @@ impl<'a> WasmLowering<'a> {
         Ok(())
     }
 
+    /// Emit a unary floating-point operation on a boxed-double operand, boxing
+    /// the result (e.g. `sqrt`, `abs`). `op` is the f64 instruction.
+    fn emit_float_unary_box(
+        &mut self,
+        op: WasmInstr,
+        arg: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        instrs.push(WasmInstr::I32Const(8));
+        instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+        let ptr = *local_count;
+        *local_count += 1;
+        instrs.push(WasmInstr::LocalTee(ptr));
+        self.lower_expr(arg, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::F64Load(3, 0));
+        instrs.push(op);
+        instrs.push(WasmInstr::F64Store(3, 0));
+        instrs.push(WasmInstr::LocalGet(ptr));
+        Ok(())
+    }
+
+    /// Emit a Double -> Int conversion: optionally round the boxed double with
+    /// `pre`, then truncate toward zero to an i32 (`truncate`/`floor`/etc.).
+    fn emit_float_to_int(
+        &mut self,
+        pre: Option<WasmInstr>,
+        arg: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        self.lower_expr(arg, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::F64Load(3, 0));
+        if let Some(op) = pre {
+            instrs.push(op);
+        }
+        instrs.push(WasmInstr::I32TruncF64S);
+        Ok(())
+    }
+
     /// Look up a name in the well-known constructor map, or in AltCon info
     /// from the Core module. Returns `(tag, arity)` if found.
     fn lookup_constructor(&self, name: &str) -> Option<(u32, u32)> {
@@ -1022,8 +1064,12 @@ impl<'a> WasmLowering<'a> {
             Expr::App(..) => {
                 let (head, _) = collect_app_spine(e);
                 if let Expr::Var(hv, _) = head {
-                    if is_bool_valued_op(hv.name.as_str()) {
+                    let name = hv.name.as_str();
+                    if is_bool_valued_op(name) {
                         return ShowKind::Bool;
+                    }
+                    if returns_double_fn(name) {
+                        return ShowKind::Double;
                     }
                 }
                 ShowKind::Int
@@ -1563,6 +1609,53 @@ impl<'a> WasmLowering<'a> {
             {
                 let value = args[args.len() - 1];
                 self.emit_show_to_pstr(value, instrs, locals, local_count)?;
+            }
+
+            // Floating-point math: Double -> Double (boxed result).
+            Some("sqrt" | "GHC.Float.sqrt") if args.len() == 1 => {
+                self.emit_float_unary_box(
+                    WasmInstr::F64Sqrt,
+                    args[0],
+                    instrs,
+                    locals,
+                    local_count,
+                )?;
+            }
+            // abs/signum on a Double; integer abs/signum falls through.
+            Some("abs" | "GHC.Num.abs") if args.len() == 1 && expr_is_float(args[0]) => {
+                self.emit_float_unary_box(WasmInstr::F64Abs, args[0], instrs, locals, local_count)?;
+            }
+
+            // Double -> Int conversions (result is an unboxed Int).
+            Some("truncate" | "GHC.Float.truncate") if args.len() == 1 => {
+                self.emit_float_to_int(None, args[0], instrs, locals, local_count)?;
+            }
+            Some("floor" | "GHC.Float.floor") if args.len() == 1 => {
+                self.emit_float_to_int(
+                    Some(WasmInstr::F64Floor),
+                    args[0],
+                    instrs,
+                    locals,
+                    local_count,
+                )?;
+            }
+            Some("ceiling" | "GHC.Float.ceiling") if args.len() == 1 => {
+                self.emit_float_to_int(
+                    Some(WasmInstr::F64Ceil),
+                    args[0],
+                    instrs,
+                    locals,
+                    local_count,
+                )?;
+            }
+            Some("round" | "GHC.Float.round") if args.len() == 1 => {
+                self.emit_float_to_int(
+                    Some(WasmInstr::F64Nearest),
+                    args[0],
+                    instrs,
+                    locals,
+                    local_count,
+                )?;
             }
 
             Some("putStrLn" | "System.IO.putStrLn" | "GHC.IO.putStrLn") if args.len() == 1 => {
@@ -2524,12 +2617,36 @@ fn is_float_ty(ty: &Ty) -> bool {
 }
 
 /// Whether an expression has floating-point type. A `Float`/`Double` literal is
-/// always float; otherwise consult the expression's inferred type.
+/// always float; otherwise consult the inferred type, and — since the types of
+/// intermediate arithmetic are often erased — infer structurally: `/` and
+/// `sqrt` are always floating, and `+`/`-`/`*`/`negate`/`abs` are floating when
+/// an operand is.
 fn expr_is_float(expr: &Expr) -> bool {
-    if let Expr::Lit(Literal::Float(_) | Literal::Double(_), _, _) = expr {
+    let e = peel_show_wrappers(expr);
+    if let Expr::Lit(Literal::Float(_) | Literal::Double(_), _, _) = e {
         return true;
     }
-    is_float_ty(&expr.ty())
+    if is_float_ty(&e.ty()) {
+        return true;
+    }
+    let (head, args) = collect_app_spine(e);
+    if let Expr::Var(hv, _) = head {
+        match hv.name.as_str() {
+            "/" | "GHC.Real./" | "GHC.Float./" | "sqrt" | "GHC.Float.sqrt" => return true,
+            "+" | "GHC.Num.+" | "-" | "GHC.Num.-" | "*" | "GHC.Num.*"
+                if args.iter().any(|a| expr_is_float(a)) =>
+            {
+                return true;
+            }
+            "negate" | "GHC.Num.negate" | "abs" | "GHC.Num.abs"
+                if args.len() == 1 && expr_is_float(args[0]) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// If `name` is a primitive operator that can be used as a function value,
@@ -2545,6 +2662,12 @@ fn operator_arity(name: &str) -> Option<usize> {
         "negate" | "GHC.Num.negate" => Some(1),
         _ => None,
     }
+}
+
+/// Whether a function name always returns a `Double`, so its result should
+/// `show` via the double formatter even when the static type is erased.
+fn returns_double_fn(name: &str) -> bool {
+    matches!(name, "sqrt" | "GHC.Float.sqrt")
 }
 
 /// Whether an operator name denotes a boolean-valued operation (comparison or

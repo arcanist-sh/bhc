@@ -299,3 +299,11 @@ fn test_tier2_list_ops_wasm() {
 fn test_tier2_ranges_wasm() {
     run_wasm_test("tier2_functions/ranges", Profile::Default);
 }
+
+// Floating-point math: sqrt, abs, and Double->Int conversions
+// (truncate/floor/ceiling/round). Nested float arithmetic is detected
+// structurally even when intermediate types are erased.
+#[test]
+fn test_tier2_float_math_wasm() {
+    run_wasm_test("tier2_functions/float_math", Profile::Default);
+}

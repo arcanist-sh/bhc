@@ -3189,6 +3189,13 @@ impl Compiler {
             }
             let exports =
                 Self::build_module_exports_from_hir(mod_name, &hir, &lower_ctx, Some(&registry));
+
+            // Qualify this module's top-level names to `Module.name` and rewrite
+            // its references (including imports, resolved via the registry, which
+            // at this point holds only the already-compiled modules). Done
+            // before inserting this module so its own `main` stays unqualified.
+            let qualified = Self::qualify_core_module(core, mod_name, &registry);
+
             registry.modules.insert(
                 mod_name.clone(),
                 CompiledModuleInfo {
@@ -3201,7 +3208,7 @@ impl Compiler {
             );
 
             entry_module = mod_name.clone();
-            cores.push(core);
+            cores.push(qualified);
         }
 
         // Merge all modules' Core into one. Cross-module references are by
@@ -3293,6 +3300,69 @@ impl Compiler {
             overloaded_strings,
             constructors,
         }
+    }
+
+    /// Rewrite a module's Core so its top-level names are qualified `Module.name`
+    /// and its references resolve unambiguously after merging.
+    ///
+    /// - This module's own top-level bindings are renamed to `Module.name`
+    ///   (except `main`, which must stay so the entry point is found).
+    /// - Free references are rewritten via a name map built from imported
+    ///   modules (`registry`, which holds only already-compiled modules) plus
+    ///   this module's own names; locals (lambda/let/case binders) and
+    ///   primitives/constructors are left untouched.
+    fn qualify_core_module(
+        mut core: CoreModule,
+        module_name: &str,
+        registry: &ModuleRegistry,
+    ) -> CoreModule {
+        let mut map: FxHashMap<Symbol, Symbol> = FxHashMap::default();
+        // Imported names -> their defining module's qualified name.
+        for info in registry.modules.values() {
+            for s in &info.symbols {
+                map.insert(s.name, Symbol::intern(&s.llvm_name));
+            }
+        }
+        // This module's own top-level names -> Module.name (override imports).
+        for bind in &core.bindings {
+            let names: Vec<Symbol> = match bind {
+                Bind::NonRec(var, _) => vec![var.name],
+                Bind::Rec(bs) => bs.iter().map(|(v, _)| v.name).collect(),
+            };
+            for n in names {
+                if n.as_str() != "main" {
+                    map.insert(
+                        n,
+                        Symbol::intern(&format!("{}.{}", module_name, n.as_str())),
+                    );
+                }
+            }
+        }
+
+        // Rename binders, then rewrite references in each body.
+        for bind in &mut core.bindings {
+            match bind {
+                Bind::NonRec(var, expr) => {
+                    if let Some(q) = map.get(&var.name) {
+                        var.name = *q;
+                    }
+                    let mut bound = rustc_hash::FxHashSet::default();
+                    qualify_expr_mut(expr, &map, &mut bound);
+                }
+                Bind::Rec(bs) => {
+                    for (var, _) in bs.iter_mut() {
+                        if let Some(q) = map.get(&var.name) {
+                            var.name = *q;
+                        }
+                    }
+                    for (_, expr) in bs.iter_mut() {
+                        let mut bound = rustc_hash::FxHashSet::default();
+                        qualify_expr_mut(expr, &map, &mut bound);
+                    }
+                }
+            }
+        }
+        core
     }
 
     /// Compile a source file, automatically discovering imported modules.
@@ -4114,6 +4184,83 @@ fn count_lambda_params_static(expr: &Expr) -> usize {
         current = body.as_ref();
     }
     count
+}
+
+/// Rewrite free top-level references in `e` using `map` (unqualified name ->
+/// qualified name). Variables bound locally (lambda/let/case binders, tracked in
+/// `bound` by `VarId`) shadow top-level names and are left unchanged; so are
+/// names not in the map (primitives, constructors, builtins).
+fn qualify_expr_mut(
+    e: &mut Expr,
+    map: &FxHashMap<Symbol, Symbol>,
+    bound: &mut rustc_hash::FxHashSet<VarId>,
+) {
+    match e {
+        Expr::Var(v, _) => {
+            if !bound.contains(&v.id) {
+                if let Some(q) = map.get(&v.name) {
+                    v.name = *q;
+                }
+            }
+        }
+        Expr::Lit(_, _, _) | Expr::Type(_, _) | Expr::Coercion(_, _) => {}
+        Expr::App(f, a, _) => {
+            qualify_expr_mut(f, map, bound);
+            qualify_expr_mut(a, map, bound);
+        }
+        Expr::TyApp(i, _, _)
+        | Expr::Cast(i, _, _)
+        | Expr::Tick(_, i, _)
+        | Expr::Lazy(i, _)
+        | Expr::TyLam(_, i, _) => qualify_expr_mut(i, map, bound),
+        Expr::Lam(p, body, _) => {
+            let added = bound.insert(p.id);
+            qualify_expr_mut(body, map, bound);
+            if added {
+                bound.remove(&p.id);
+            }
+        }
+        Expr::Let(bind, body, _) => match bind.as_mut() {
+            Bind::NonRec(v, rhs) => {
+                qualify_expr_mut(rhs, map, bound);
+                let added = bound.insert(v.id);
+                qualify_expr_mut(body, map, bound);
+                if added {
+                    bound.remove(&v.id);
+                }
+            }
+            Bind::Rec(bs) => {
+                let mut added = Vec::new();
+                for (v, _) in bs.iter() {
+                    if bound.insert(v.id) {
+                        added.push(v.id);
+                    }
+                }
+                for (_, rhs) in bs.iter_mut() {
+                    qualify_expr_mut(rhs, map, bound);
+                }
+                qualify_expr_mut(body, map, bound);
+                for id in added {
+                    bound.remove(&id);
+                }
+            }
+        },
+        Expr::Case(scrut, alts, _, _) => {
+            qualify_expr_mut(scrut, map, bound);
+            for alt in alts.iter_mut() {
+                let mut added = Vec::new();
+                for b in &alt.binders {
+                    if bound.insert(b.id) {
+                        added.push(b.id);
+                    }
+                }
+                qualify_expr_mut(&mut alt.rhs, map, bound);
+                for id in added {
+                    bound.remove(&id);
+                }
+            }
+        }
+    }
 }
 
 /// Builder for configuring and creating a compiler.

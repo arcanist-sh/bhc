@@ -339,3 +339,10 @@ fn test_tier2_take_while_wasm() {
 fn test_tier2_multimodule_wasm() {
     run_wasm_test("tier2_functions/multimodule", Profile::Default);
 }
+
+// Same top-level name (`go`) defined in two modules: name qualification keeps
+// them distinct so each module's references resolve to its own definition.
+#[test]
+fn test_tier2_multimodule_shadow_wasm() {
+    run_wasm_test("tier2_functions/multimodule_shadow", Profile::Default);
+}

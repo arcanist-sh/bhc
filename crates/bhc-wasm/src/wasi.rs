@@ -131,27 +131,47 @@ pub fn generate_alloc_function(heap_ptr_global: u32) -> WasmFunc {
     func.exported = true;
     func.export_name = Some("alloc".to_string());
 
-    // Get current heap pointer
-    func.emit(WasmInstr::GlobalGet(heap_ptr_global));
+    let result_local = func.add_local(WasmType::I32); // returned (old) heap pointer
+    let new_top_local = func.add_local(WasmType::I32); // bumped, 8-byte-aligned top
 
-    // Duplicate for return value (local.tee pattern)
-    let result_local = func.add_local(WasmType::I32);
+    // result = heap_ptr (the object's start, returned to the caller)
+    func.emit(WasmInstr::GlobalGet(heap_ptr_global));
     func.emit(WasmInstr::LocalTee(result_local));
 
-    // Add size to heap pointer
+    // new_top = align8(heap_ptr + size)
     func.emit(WasmInstr::LocalGet(0)); // size parameter
     func.emit(WasmInstr::I32Add);
-
-    // Align to 8 bytes: (ptr + 7) & ~7
     func.emit(WasmInstr::I32Const(7));
     func.emit(WasmInstr::I32Add);
-    func.emit(WasmInstr::I32Const(-8)); // ~7 in two's complement
+    func.emit(WasmInstr::I32Const(-8)); // ~7
     func.emit(WasmInstr::I32And);
-
-    // Store new heap pointer
+    func.emit(WasmInstr::LocalTee(new_top_local));
     func.emit(WasmInstr::GlobalSet(heap_ptr_global));
 
-    // Return original heap pointer
+    // Grow linear memory on demand: if the new top exceeds the current size,
+    // grow by enough whole pages so the allocation's bytes are backed.
+    // current bytes = memory.size() * 65536
+    func.emit(WasmInstr::LocalGet(new_top_local));
+    func.emit(WasmInstr::MemorySize);
+    func.emit(WasmInstr::I32Const(16));
+    func.emit(WasmInstr::I32Shl);
+    func.emit(WasmInstr::I32GtU);
+    func.emit(WasmInstr::If(None));
+    // pages = ceil((new_top - current_bytes) / 65536)
+    func.emit(WasmInstr::LocalGet(new_top_local));
+    func.emit(WasmInstr::MemorySize);
+    func.emit(WasmInstr::I32Const(16));
+    func.emit(WasmInstr::I32Shl);
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::I32Const(0xFFFF)); // 65535
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Const(16));
+    func.emit(WasmInstr::I32ShrU);
+    func.emit(WasmInstr::MemoryGrow);
+    func.emit(WasmInstr::Drop); // ignore result; a failed grow traps on later access
+    func.emit(WasmInstr::End);
+
+    // Return the object's start.
     func.emit(WasmInstr::LocalGet(result_local));
     func.emit(WasmInstr::End);
 

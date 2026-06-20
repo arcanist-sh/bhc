@@ -354,3 +354,11 @@ fn test_tier2_multimodule_shadow_wasm() {
 fn test_tier2_list_append_wasm() {
     run_wasm_test("tier2_functions/list_append", Profile::Default);
 }
+
+// Grow-on-demand allocation: cumulative allocation (~585 KB, no GC) exceeds the
+// Edge profile's 256 KB initial memory, so the allocator must grow linear
+// memory (up to the 4 MB max) for the program to complete.
+#[test]
+fn test_tier2_heap_grow_wasm() {
+    run_wasm_test("tier2_functions/heap_grow", Profile::Edge);
+}

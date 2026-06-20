@@ -613,6 +613,28 @@ impl<'a> WasmLowering<'a> {
 
     /// Emit a binary floating-point operation on two boxed-double operands,
     /// boxing the result. `op` is the f64 instruction (e.g. `F64Add`).
+    /// Leave a floating-point operand on the stack as an unboxed `f64`. A boxed
+    /// `Double` is unboxed with `F64Load`; an `Int` reached through
+    /// `fromIntegral` at this float-consumption site is converted directly with
+    /// `F64ConvertI32S` (the value never gets boxed). This lets `fromIntegral`
+    /// work inside float arithmetic even though its target type is erased.
+    fn emit_operand_as_f64(
+        &mut self,
+        operand: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        if let Some(inner) = match_from_integral(operand) {
+            self.lower_expr(inner, instrs, locals, local_count, false)?;
+            instrs.push(WasmInstr::F64ConvertI32S);
+        } else {
+            self.lower_expr(operand, instrs, locals, local_count, false)?;
+            instrs.push(WasmInstr::F64Load(3, 0));
+        }
+        Ok(())
+    }
+
     fn emit_float_binop(
         &mut self,
         op: WasmInstr,
@@ -630,10 +652,8 @@ impl<'a> WasmLowering<'a> {
         *local_count += 1;
         instrs.push(WasmInstr::LocalTee(ptr));
         // Load both operands as f64.
-        self.lower_expr(lhs, instrs, locals, local_count, false)?;
-        instrs.push(WasmInstr::F64Load(3, 0));
-        self.lower_expr(rhs, instrs, locals, local_count, false)?;
-        instrs.push(WasmInstr::F64Load(3, 0));
+        self.emit_operand_as_f64(lhs, instrs, locals, local_count)?;
+        self.emit_operand_as_f64(rhs, instrs, locals, local_count)?;
         instrs.push(op);
         instrs.push(WasmInstr::F64Store(3, 0));
         instrs.push(WasmInstr::LocalGet(ptr));
@@ -651,10 +671,8 @@ impl<'a> WasmLowering<'a> {
         locals: &mut FxHashMap<VarId, u32>,
         local_count: &mut u32,
     ) -> WasmResult<()> {
-        self.lower_expr(lhs, instrs, locals, local_count, false)?;
-        instrs.push(WasmInstr::F64Load(3, 0));
-        self.lower_expr(rhs, instrs, locals, local_count, false)?;
-        instrs.push(WasmInstr::F64Load(3, 0));
+        self.emit_operand_as_f64(lhs, instrs, locals, local_count)?;
+        self.emit_operand_as_f64(rhs, instrs, locals, local_count)?;
         instrs.push(op);
         Ok(())
     }
@@ -674,8 +692,7 @@ impl<'a> WasmLowering<'a> {
         let ptr = *local_count;
         *local_count += 1;
         instrs.push(WasmInstr::LocalTee(ptr));
-        self.lower_expr(arg, instrs, locals, local_count, false)?;
-        instrs.push(WasmInstr::F64Load(3, 0));
+        self.emit_operand_as_f64(arg, instrs, locals, local_count)?;
         instrs.push(op);
         instrs.push(WasmInstr::F64Store(3, 0));
         instrs.push(WasmInstr::LocalGet(ptr));
@@ -692,8 +709,7 @@ impl<'a> WasmLowering<'a> {
         locals: &mut FxHashMap<VarId, u32>,
         local_count: &mut u32,
     ) -> WasmResult<()> {
-        self.lower_expr(arg, instrs, locals, local_count, false)?;
-        instrs.push(WasmInstr::F64Load(3, 0));
+        self.emit_operand_as_f64(arg, instrs, locals, local_count)?;
         if let Some(op) = pre {
             instrs.push(op);
         }
@@ -1611,6 +1627,19 @@ impl<'a> WasmLowering<'a> {
                 self.emit_show_to_pstr(value, instrs, locals, local_count)?;
             }
 
+            // `fromIntegral`/`realToFrac` used outside a float-consumption site:
+            // pass the value through unchanged (Int stays an i32; a Double stays
+            // boxed). Float contexts intercept `fromIntegral` earlier and
+            // convert with F64ConvertI32S instead.
+            Some("fromIntegral" | "GHC.Real.fromIntegral" | "Prelude.fromIntegral")
+                if !args.is_empty() =>
+            {
+                self.lower_expr(args[args.len() - 1], instrs, locals, local_count, false)?;
+            }
+            Some("realToFrac" | "GHC.Real.realToFrac") if !args.is_empty() => {
+                self.lower_expr(args[args.len() - 1], instrs, locals, local_count, false)?;
+            }
+
             // Floating-point math: Double -> Double (boxed result).
             Some("sqrt" | "GHC.Float.sqrt") if args.len() == 1 => {
                 self.emit_float_unary_box(
@@ -2269,6 +2298,22 @@ fn peel_head(expr: &Expr) -> &Expr {
             _ => return e,
         };
     }
+}
+
+/// If `expr` is `fromIntegral <value>` (possibly with leading dictionary
+/// arguments), return the integer value being converted.
+fn match_from_integral(expr: &Expr) -> Option<&Expr> {
+    let (head, args) = collect_app_spine(peel_show_wrappers(expr));
+    if let Expr::Var(v, _) = head {
+        if matches!(
+            v.name.as_str(),
+            "fromIntegral" | "GHC.Real.fromIntegral" | "Prelude.fromIntegral"
+        ) && !args.is_empty()
+        {
+            return Some(args[args.len() - 1]);
+        }
+    }
+    None
 }
 
 /// If `expr` is `show <value>` (possibly with a leading dictionary argument),

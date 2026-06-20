@@ -307,3 +307,11 @@ fn test_tier2_ranges_wasm() {
 fn test_tier2_float_math_wasm() {
     run_wasm_test("tier2_functions/float_math", Profile::Default);
 }
+
+// fromIntegral (Int -> Double) at float-consumption sites: the target type
+// is erased, but under sqrt or mixed with a Double the conversion is known,
+// so the Int is converted with F64ConvertI32S instead of being unboxed.
+#[test]
+fn test_tier2_from_integral_wasm() {
+    run_wasm_test("tier2_functions/from_integral", Profile::Default);
+}

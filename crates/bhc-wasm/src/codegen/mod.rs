@@ -95,6 +95,10 @@ pub struct RuntimeIndices {
     pub int_to_str_idx: u32,
     /// Index of `double_to_str` (renders an f64 to a length-prefixed string).
     pub double_to_str_idx: u32,
+    /// Index of `append_list` (concatenates two cons-lists, list `++`).
+    pub append_list_idx: u32,
+    /// Index of `reverse_list` (reverses a cons-list).
+    pub reverse_list_idx: u32,
     /// Offset of the newline byte in the data segment.
     pub newline_offset: u32,
 }
@@ -626,6 +630,12 @@ impl WasmModule {
         let double_to_str_func = wasi::generate_double_to_str(alloc_idx);
         let double_to_str_idx = self.add_function(double_to_str_func);
 
+        // Add list operations (list ++ and reverse over cons cells)
+        let append_list_func = wasi::generate_append_list(alloc_idx);
+        let append_list_idx = self.add_function(append_list_func);
+        let reverse_list_func = wasi::generate_reverse_list(alloc_idx);
+        let reverse_list_idx = self.add_function(reverse_list_func);
+
         RuntimeIndices {
             fd_write_idx,
             proc_exit_idx,
@@ -637,6 +647,8 @@ impl WasmModule {
             concat_str_idx,
             int_to_str_idx,
             double_to_str_idx,
+            append_list_idx,
+            reverse_list_idx,
             newline_offset,
         }
     }

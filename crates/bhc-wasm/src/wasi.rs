@@ -947,6 +947,136 @@ pub fn generate_concat_str(fd_write_idx: u32, alloc_idx: u32) -> WasmFunc {
     func
 }
 
+/// Generate `append_list`: concatenate two cons-lists (list `++`).
+///
+/// Each list is `nil` (the value 0) or a cons cell `[tag=1 | head | tail]`
+/// (12 bytes). Copies the spine of the first list, pointing the last cell's
+/// tail at the second list; returns the new list (or `b` if `a` is empty).
+pub fn generate_append_list(alloc_idx: u32) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(
+        vec![WasmType::I32, WasmType::I32], // a, b
+        vec![WasmType::I32],
+    ));
+    func.name = Some("append_list".to_string());
+    func.exported = true;
+
+    let result = func.add_local(WasmType::I32);
+    let last = func.add_local(WasmType::I32);
+    let cur = func.add_local(WasmType::I32);
+    let cell = func.add_local(WasmType::I32);
+
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(result));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(last));
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::LocalSet(cur));
+
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    // nil (cur == 0) -> done
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::BrIf(1));
+    // cell = alloc(12); cell.tag = 1; cell.head = cur.head; cell.tail = 0
+    func.emit(WasmInstr::I32Const(12));
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(cell));
+    func.emit(WasmInstr::LocalGet(cell));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Store(2, 0));
+    func.emit(WasmInstr::LocalGet(cell));
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Load(2, 4));
+    func.emit(WasmInstr::I32Store(2, 4));
+    func.emit(WasmInstr::LocalGet(cell));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::I32Store(2, 8));
+    // link: if last == 0 { result = cell } else { last.tail = cell }
+    func.emit(WasmInstr::LocalGet(last));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::LocalGet(cell));
+    func.emit(WasmInstr::LocalSet(result));
+    func.emit(WasmInstr::Else);
+    func.emit(WasmInstr::LocalGet(last));
+    func.emit(WasmInstr::LocalGet(cell));
+    func.emit(WasmInstr::I32Store(2, 8));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::LocalGet(cell));
+    func.emit(WasmInstr::LocalSet(last));
+    // cur = cur.tail
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Load(2, 8));
+    func.emit(WasmInstr::LocalSet(cur));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+
+    // attach b: empty a -> b; else last.tail = b, return result
+    func.emit(WasmInstr::LocalGet(last));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::If(Some(WasmType::I32)));
+    func.emit(WasmInstr::LocalGet(1));
+    func.emit(WasmInstr::Else);
+    func.emit(WasmInstr::LocalGet(last));
+    func.emit(WasmInstr::LocalGet(1));
+    func.emit(WasmInstr::I32Store(2, 8));
+    func.emit(WasmInstr::LocalGet(result));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+    func
+}
+
+/// Generate `reverse_list`: reverse a cons-list by prepending each element.
+pub fn generate_reverse_list(alloc_idx: u32) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(vec![WasmType::I32], vec![WasmType::I32]));
+    func.name = Some("reverse_list".to_string());
+    func.exported = true;
+
+    let rev = func.add_local(WasmType::I32);
+    let cur = func.add_local(WasmType::I32);
+    let cell = func.add_local(WasmType::I32);
+
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(rev));
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::LocalSet(cur));
+
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::BrIf(1));
+    // cell = alloc(12); tag=1; head=cur.head; tail=rev
+    func.emit(WasmInstr::I32Const(12));
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(cell));
+    func.emit(WasmInstr::LocalGet(cell));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Store(2, 0));
+    func.emit(WasmInstr::LocalGet(cell));
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Load(2, 4));
+    func.emit(WasmInstr::I32Store(2, 4));
+    func.emit(WasmInstr::LocalGet(cell));
+    func.emit(WasmInstr::LocalGet(rev));
+    func.emit(WasmInstr::I32Store(2, 8));
+    func.emit(WasmInstr::LocalGet(cell));
+    func.emit(WasmInstr::LocalSet(rev));
+    // cur = cur.tail
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Load(2, 8));
+    func.emit(WasmInstr::LocalSet(cur));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+
+    func.emit(WasmInstr::LocalGet(rev));
+    func.emit(WasmInstr::End);
+    func
+}
+
 /// Offset where the newline byte is stored in the data segment.
 pub const NEWLINE_DATA_OFFSET: u32 = 1020;
 

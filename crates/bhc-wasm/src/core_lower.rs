@@ -1603,12 +1603,29 @@ impl<'a> WasmLowering<'a> {
             // IO: putStrLn "..." => print_str_ln(offset, len). Handles dynamic
             // strings (if/case over string literals) by printing each leaf.
             // String concatenation: both operands are length-prefixed strings.
+            // `++`: list append for cons-lists, string concat otherwise. Strings
+            // and lists have different runtime representations and the same
+            // `[a]` type, so dispatch on whether an operand is confidently a
+            // (non-String) list; ambiguous cases default to string concat.
             Some("++" | "GHC.Base.++" | "Data.List.++" | "Data.List.NonEmpty.++")
                 if args.len() == 2 =>
             {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
                 self.lower_expr(args[1], instrs, locals, local_count, false)?;
-                instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+                let idx = if is_list_operand(args[0]) || is_list_operand(args[1]) {
+                    self.runtime.append_list_idx
+                } else {
+                    self.runtime.concat_str_idx
+                };
+                instrs.push(WasmInstr::Call(idx));
+            }
+
+            // `reverse` on a cons-list (string reversal is not supported).
+            Some("reverse" | "GHC.List.reverse" | "Data.List.reverse")
+                if args.len() == 1 && is_list_operand(args[0]) =>
+            {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Call(self.runtime.reverse_list_idx));
             }
 
             // `unpackCString#`/`unpackCStringUtf8#` turn a string literal into a
@@ -3024,6 +3041,63 @@ fn is_tuple_con(name: &str) -> bool {
         && name.starts_with('(')
         && name.ends_with(')')
         && name[1..name.len() - 1].chars().all(|c| c == ',')
+}
+
+/// The element type of a list type `[e]`, if `ty` is one.
+fn list_element_ty(ty: &Ty) -> Option<&Ty> {
+    match ty {
+        Ty::List(e) => Some(e.as_ref()),
+        Ty::App(c, e) if matches!(c.as_ref(), Ty::Con(tc) if tc.name.as_str() == "[]") => {
+            Some(e.as_ref())
+        }
+        _ => None,
+    }
+}
+
+/// Whether a type is a (cons-list) list whose element is *not* `Char` — i.e. a
+/// real list, not a `String` (which has a length-prefixed representation). Only
+/// reports `true` for a concrete element type; polymorphic/erased elements are
+/// treated as ambiguous (`false`) so `++` defaults to string concatenation.
+fn is_nonstring_list_ty(ty: &Ty) -> bool {
+    match list_element_ty(ty) {
+        Some(Ty::Con(c)) => c.name.as_str() != "Char",
+        Some(Ty::List(_) | Ty::App(..) | Ty::Tuple(_)) => true,
+        _ => false,
+    }
+}
+
+/// Whether a function always returns a cons-list (used to classify an operand
+/// of `++` as a list). Excludes `++`/`reverse`/`show`, whose result kind is
+/// ambiguous (string vs list).
+fn is_list_returning_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "map"
+            | "filter"
+            | "take"
+            | "drop"
+            | "zip"
+            | "zipWith"
+            | "replicate"
+            | "enumFromTo"
+            | "takeWhile"
+            | "dropWhile"
+    )
+}
+
+/// Whether an expression is confidently a (non-String) cons-list: a syntactic
+/// list literal, a value of concrete non-`Char` list type, or the result of a
+/// list-returning function.
+fn is_list_operand(expr: &Expr) -> bool {
+    let e = peel_show_wrappers(expr);
+    if extract_list_elements(e).is_some() {
+        return true;
+    }
+    if is_nonstring_list_ty(&e.ty()) {
+        return true;
+    }
+    let (head, _) = collect_app_spine(e);
+    matches!(head, Expr::Var(v, _) if is_list_returning_fn(v.name.as_str()))
 }
 
 /// The renderable kind of a runtime scalar (a list element).

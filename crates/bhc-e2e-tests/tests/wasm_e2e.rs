@@ -346,3 +346,11 @@ fn test_tier2_multimodule_wasm() {
 fn test_tier2_multimodule_shadow_wasm() {
     run_wasm_test("tier2_functions/multimodule_shadow", Profile::Default);
 }
+
+// List `++` and `reverse` over cons cells, dispatched away from string concat
+// by operand kind (literal list / concrete non-Char list type / list-returning
+// function). String `++` is unaffected.
+#[test]
+fn test_tier2_list_append_wasm() {
+    run_wasm_test("tier2_functions/list_append", Profile::Default);
+}

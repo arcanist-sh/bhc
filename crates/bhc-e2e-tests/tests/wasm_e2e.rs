@@ -315,3 +315,10 @@ fn test_tier2_float_math_wasm() {
 fn test_tier2_from_integral_wasm() {
     run_wasm_test("tier2_functions/from_integral", Profile::Default);
 }
+
+// A broader batch of injected list-prelude functions: take, drop, replicate,
+// null, head, tail, product, zipWith, zip, all, any, and, or.
+#[test]
+fn test_tier2_list_prelude_wasm() {
+    run_wasm_test("tier2_functions/list_prelude", Profile::Default);
+}

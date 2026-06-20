@@ -1081,7 +1081,7 @@ impl<'a> WasmLowering<'a> {
                 let (head, _) = collect_app_spine(e);
                 if let Expr::Var(hv, _) = head {
                     let name = hv.name.as_str();
-                    if is_bool_valued_op(name) {
+                    if is_bool_valued_op(name) || returns_bool_fn(name) {
                         return ShowKind::Bool;
                     }
                     if returns_double_fn(name) {
@@ -2355,6 +2355,19 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "length",
     "elem",
     "enumFromTo",
+    "take",
+    "drop",
+    "replicate",
+    "null",
+    "head",
+    "tail",
+    "product",
+    "zipWith",
+    "zip",
+    "all",
+    "any",
+    "and",
+    "or",
 ];
 
 /// Whether any binding in the module references `name`.
@@ -2573,6 +2586,334 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
             );
             plam(lo, plam(hi.clone(), pcase(cond, vec![step, empty])))
         }
+        // take n xs = case n <= 0 of
+        //   True -> []
+        //   False -> case xs of { [] -> []; (y:ys) -> y : take (n-1) ys }
+        "take" => {
+            let n = pv("n", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let inner = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(
+                        ":",
+                        1,
+                        2,
+                        vec![y.clone(), ys.clone()],
+                        papp2(
+                            pref(":", id),
+                            pev(&y),
+                            papp2(
+                                pref("take", id),
+                                papp2(pref("-", id), pev(&n), pint(1)),
+                                pev(&ys),
+                            ),
+                        ),
+                    ),
+                ],
+            );
+            let cond = papp2(pref("<=", id), pev(&n), pint(0));
+            let body = pcase(
+                cond,
+                vec![
+                    palt("False", 0, 0, vec![], inner),
+                    palt("True", 1, 0, vec![], pref("[]", id)),
+                ],
+            );
+            plam(n, plam(xs, body))
+        }
+        // drop n xs = case n <= 0 of
+        //   True -> xs
+        //   False -> case xs of { [] -> []; (y:ys) -> drop (n-1) ys }
+        "drop" => {
+            let n = pv("n", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let inner = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(
+                        ":",
+                        1,
+                        2,
+                        vec![y, ys.clone()],
+                        papp2(
+                            pref("drop", id),
+                            papp2(pref("-", id), pev(&n), pint(1)),
+                            pev(&ys),
+                        ),
+                    ),
+                ],
+            );
+            let cond = papp2(pref("<=", id), pev(&n), pint(0));
+            let body = pcase(
+                cond,
+                vec![
+                    palt("False", 0, 0, vec![], inner),
+                    palt("True", 1, 0, vec![], pev(&xs)),
+                ],
+            );
+            plam(n, plam(xs.clone(), body))
+        }
+        // replicate n x = case n <= 0 of { True -> []; False -> x : replicate (n-1) x }
+        "replicate" => {
+            let n = pv("n", fresh(id));
+            let x = pv("x", fresh(id));
+            let cons = papp2(
+                pref(":", id),
+                pev(&x),
+                papp2(
+                    pref("replicate", id),
+                    papp2(pref("-", id), pev(&n), pint(1)),
+                    pev(&x),
+                ),
+            );
+            let cond = papp2(pref("<=", id), pev(&n), pint(0));
+            let body = pcase(
+                cond,
+                vec![
+                    palt("False", 0, 0, vec![], cons),
+                    palt("True", 1, 0, vec![], pref("[]", id)),
+                ],
+            );
+            plam(n, plam(x, body))
+        }
+        // null xs = case xs of { [] -> True; (y:ys) -> False }
+        "null" => {
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let body = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("True", id)),
+                    palt(":", 1, 2, vec![y, ys], pref("False", id)),
+                ],
+            );
+            plam(xs.clone(), body)
+        }
+        // head (y:_) = y
+        "head" => {
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let body = pcase(
+                pev(&xs),
+                vec![palt(":", 1, 2, vec![y.clone(), ys], pev(&y))],
+            );
+            plam(xs.clone(), body)
+        }
+        // tail (_:ys) = ys
+        "tail" => {
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let body = pcase(
+                pev(&xs),
+                vec![palt(":", 1, 2, vec![y, ys.clone()], pev(&ys))],
+            );
+            plam(xs.clone(), body)
+        }
+        // product xs = case xs of { [] -> 1; (y:ys) -> y * product ys }
+        "product" => {
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let body = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pint(1)),
+                    palt(
+                        ":",
+                        1,
+                        2,
+                        vec![y.clone(), ys.clone()],
+                        papp2(pref("*", id), pev(&y), papp(pref("product", id), pev(&ys))),
+                    ),
+                ],
+            );
+            plam(xs.clone(), body)
+        }
+        // zipWith f xs ys = case xs of
+        //   [] -> []
+        //   (a:as) -> case ys of { [] -> []; (b:bs) -> f a b : zipWith f as bs }
+        "zipWith" => {
+            let f = pv("f", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let a = pv("a", fresh(id));
+            let as_ = pv("as", fresh(id));
+            let b = pv("b", fresh(id));
+            let bs = pv("bs", fresh(id));
+            let inner = pcase(
+                pev(&ys),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(
+                        ":",
+                        1,
+                        2,
+                        vec![b.clone(), bs.clone()],
+                        papp2(
+                            pref(":", id),
+                            papp2(pev(&f), pev(&a), pev(&b)),
+                            papp(papp2(pref("zipWith", id), pev(&f), pev(&as_)), pev(&bs)),
+                        ),
+                    ),
+                ],
+            );
+            let outer = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(":", 1, 2, vec![a.clone(), as_.clone()], inner),
+                ],
+            );
+            plam(f, plam(xs, plam(ys.clone(), outer)))
+        }
+        // zip xs ys = case xs of
+        //   [] -> []
+        //   (a:as) -> case ys of { [] -> []; (b:bs) -> (a,b) : zip as bs }
+        "zip" => {
+            let xs = pv("xs", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let a = pv("a", fresh(id));
+            let as_ = pv("as", fresh(id));
+            let b = pv("b", fresh(id));
+            let bs = pv("bs", fresh(id));
+            let inner = pcase(
+                pev(&ys),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(
+                        ":",
+                        1,
+                        2,
+                        vec![b.clone(), bs.clone()],
+                        papp2(
+                            pref(":", id),
+                            papp2(pref("(,)", id), pev(&a), pev(&b)),
+                            papp2(pref("zip", id), pev(&as_), pev(&bs)),
+                        ),
+                    ),
+                ],
+            );
+            let outer = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(":", 1, 2, vec![a.clone(), as_.clone()], inner),
+                ],
+            );
+            plam(xs, plam(ys.clone(), outer))
+        }
+        // all p xs = case xs of
+        //   [] -> True
+        //   (y:ys) -> case p y of { True -> all p ys; False -> False }
+        "all" => {
+            let p = pv("p", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let inner = pcase(
+                papp(pev(&p), pev(&y)),
+                vec![
+                    palt("False", 0, 0, vec![], pref("False", id)),
+                    palt(
+                        "True",
+                        1,
+                        0,
+                        vec![],
+                        papp2(pref("all", id), pev(&p), pev(&ys)),
+                    ),
+                ],
+            );
+            let body = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("True", id)),
+                    palt(":", 1, 2, vec![y.clone(), ys.clone()], inner),
+                ],
+            );
+            plam(p, plam(xs, body))
+        }
+        // any p xs = case xs of
+        //   [] -> False
+        //   (y:ys) -> case p y of { True -> True; False -> any p ys }
+        "any" => {
+            let p = pv("p", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let inner = pcase(
+                papp(pev(&p), pev(&y)),
+                vec![
+                    palt(
+                        "False",
+                        0,
+                        0,
+                        vec![],
+                        papp2(pref("any", id), pev(&p), pev(&ys)),
+                    ),
+                    palt("True", 1, 0, vec![], pref("True", id)),
+                ],
+            );
+            let body = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("False", id)),
+                    palt(":", 1, 2, vec![y.clone(), ys.clone()], inner),
+                ],
+            );
+            plam(p, plam(xs, body))
+        }
+        // and xs = case xs of { [] -> True; (y:ys) -> case y of { True -> and ys; False -> False } }
+        "and" => {
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let inner = pcase(
+                pev(&y),
+                vec![
+                    palt("False", 0, 0, vec![], pref("False", id)),
+                    palt("True", 1, 0, vec![], papp(pref("and", id), pev(&ys))),
+                ],
+            );
+            let body = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("True", id)),
+                    palt(":", 1, 2, vec![y.clone(), ys.clone()], inner),
+                ],
+            );
+            plam(xs.clone(), body)
+        }
+        // or xs = case xs of { [] -> False; (y:ys) -> case y of { True -> True; False -> or ys } }
+        "or" => {
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let inner = pcase(
+                pev(&y),
+                vec![
+                    palt("False", 0, 0, vec![], papp(pref("or", id), pev(&ys))),
+                    palt("True", 1, 0, vec![], pref("True", id)),
+                ],
+            );
+            let body = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("False", id)),
+                    palt(":", 1, 2, vec![y.clone(), ys.clone()], inner),
+                ],
+            );
+            plam(xs.clone(), body)
+        }
         _ => return None,
     };
     Some((pv(name, fresh(id)), body))
@@ -2713,6 +3054,12 @@ fn operator_arity(name: &str) -> Option<usize> {
 /// `show` via the double formatter even when the static type is erased.
 fn returns_double_fn(name: &str) -> bool {
     matches!(name, "sqrt" | "GHC.Float.sqrt")
+}
+
+/// Whether a prelude function always returns a `Bool`, so its result should
+/// `show` as `True`/`False` even when the static type is erased.
+fn returns_bool_fn(name: &str) -> bool {
+    matches!(name, "null" | "all" | "any" | "and" | "or" | "elem")
 }
 
 /// Whether an operator name denotes a boolean-valued operation (comparison or

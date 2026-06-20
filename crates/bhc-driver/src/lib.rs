@@ -3022,6 +3022,12 @@ impl Compiler {
             }
         }
 
+        // WASM produces a single module, so it can't link per-module objects.
+        // Instead, lower every module's Core and merge into one WASM module.
+        if self.is_wasm_target() {
+            return self.compile_modules_to_wasm(&module_info, &ordered, registry);
+        }
+
         // Phase 3: Compile each module in dependency order with cross-module context
         let mut object_paths = Vec::new();
         let mut compile_outputs = Vec::new();
@@ -3116,6 +3122,177 @@ impl Compiler {
             path: output_path,
             output_type: self.session.options.output_type,
         }])
+    }
+
+    /// Compile several modules to a single WASM module.
+    ///
+    /// Each module is taken through the front end (parse → HIR → typecheck →
+    /// Core) in dependency order with shared cross-module context, then all the
+    /// Core modules are merged and lowered together — WASM has one output
+    /// module, so there is no per-object linking step.
+    fn compile_modules_to_wasm(
+        &self,
+        module_info: &[(Utf8PathBuf, String, Vec<String>)],
+        ordered: &[usize],
+        mut registry: ModuleRegistry,
+    ) -> CompileResult<Vec<CompileOutput>> {
+        let file_id = FileId::new(0);
+        let mut cores: Vec<CoreModule> = Vec::new();
+        let mut entry_module = String::from("Main");
+
+        for &idx in ordered {
+            let (ref path, ref mod_name, _) = module_info[idx];
+            let unit = CompilationUnit::from_path(path.clone())?;
+
+            self.callbacks
+                .on_phase_start(CompilePhase::CoreLower, mod_name);
+            let ast = self.parse(&unit, file_id)?;
+            let (hir, lower_ctx) = self.lower_with_registry(&ast, &registry)?;
+            let typed = self.type_check(&hir, file_id, &lower_ctx)?;
+
+            let imported_constructors = self.build_imported_constructor_map(&registry, &lower_ctx);
+            let core = self.core_lower_with_constructors(
+                &hir,
+                &lower_ctx,
+                &typed,
+                if imported_constructors.is_empty() {
+                    None
+                } else {
+                    Some(&imported_constructors)
+                },
+            )?;
+            self.callbacks
+                .on_phase_complete(CompilePhase::CoreLower, mod_name);
+
+            // Update the registry so later modules can resolve this one's
+            // exports and constructors.
+            let mut compiled_symbols = Vec::new();
+            for bind in &core.bindings {
+                match bind {
+                    Bind::NonRec(var, expr) => {
+                        compiled_symbols.push(CompiledSymbol {
+                            name: var.name,
+                            llvm_name: format!("{}.{}", mod_name, var.name.as_str()),
+                            param_count: count_lambda_params_static(expr),
+                        });
+                    }
+                    Bind::Rec(bindings) => {
+                        for (var, expr) in bindings {
+                            compiled_symbols.push(CompiledSymbol {
+                                name: var.name,
+                                llvm_name: format!("{}.{}", mod_name, var.name.as_str()),
+                                param_count: count_lambda_params_static(expr),
+                            });
+                        }
+                    }
+                }
+            }
+            let exports =
+                Self::build_module_exports_from_hir(mod_name, &hir, &lower_ctx, Some(&registry));
+            registry.modules.insert(
+                mod_name.clone(),
+                CompiledModuleInfo {
+                    module_name: mod_name.clone(),
+                    symbols: compiled_symbols,
+                    exports,
+                    type_aliases: Vec::new(),
+                    value_schemes: FxHashMap::default(),
+                },
+            );
+
+            entry_module = mod_name.clone();
+            cores.push(core);
+        }
+
+        // Merge all modules' Core into one. Cross-module references are by
+        // unqualified name, so this works when top-level names are unique;
+        // duplicate names (e.g. shared generated dictionaries) are deduplicated,
+        // keeping the first (dependency-order) definition.
+        let merged = Self::merge_core_modules(cores);
+
+        let wasm_config = WasmConfig::for_profile(self.session.profile());
+        let target = self.get_target_spec();
+        let mut wasm_module = WasmModule::new(entry_module.clone(), wasm_config, target);
+        wasm_module.add_wasi_imports();
+        let runtime_indices = wasm_module.add_runtime_functions();
+
+        let main_idx =
+            bhc_wasm::core_lower::lower_core_module(&merged, &mut wasm_module, &runtime_indices)
+                .map_err(|e| {
+                    CompileError::CodegenError(format!("Core IR to WASM failed: {}", e))
+                })?;
+        wasm_module.add_start_function(main_idx, runtime_indices.proc_exit_idx);
+
+        let output_path = if let Some(ref path) = self.session.options.output_path {
+            path.clone()
+        } else {
+            Utf8PathBuf::from(format!("{entry_module}.wasm"))
+        };
+        wasm_module
+            .write_wasm(&output_path)
+            .map_err(|e| CompileError::CodegenError(format!("WASM codegen failed: {}", e)))?;
+
+        info!(output = %output_path, modules = ordered.len(), "multi-module WASM compilation complete");
+
+        Ok(vec![CompileOutput {
+            path: output_path,
+            output_type: OutputType::Wasm,
+        }])
+    }
+
+    /// Merge several Core modules into one, deduplicating bindings and
+    /// constructors by name (keeping the first occurrence). The result is named
+    /// after the entry module and carries the union of all definitions.
+    fn merge_core_modules(cores: Vec<CoreModule>) -> CoreModule {
+        let mut bindings: Vec<Bind> = Vec::new();
+        let mut constructors = Vec::new();
+        let mut exports = Vec::new();
+        let mut foreign_imports = Vec::new();
+        let mut overloaded_strings = false;
+        let mut seen_binds: rustc_hash::FxHashSet<Symbol> = rustc_hash::FxHashSet::default();
+        let mut seen_cons: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+
+        for core in cores {
+            overloaded_strings |= core.overloaded_strings;
+            exports.extend(core.exports);
+            foreign_imports.extend(core.foreign_imports);
+            for con in core.constructors {
+                if seen_cons.insert(con.name.clone()) {
+                    constructors.push(con);
+                }
+            }
+            for bind in core.bindings {
+                let names: Vec<Symbol> = match &bind {
+                    Bind::NonRec(var, _) => vec![var.name],
+                    Bind::Rec(bs) => bs.iter().map(|(v, _)| v.name).collect(),
+                };
+                // Keep the binding only if none of its names were already seen.
+                if names.iter().all(|n| !seen_binds.contains(n)) {
+                    for n in &names {
+                        seen_binds.insert(*n);
+                    }
+                    bindings.push(bind);
+                } else {
+                    for n in &names {
+                        if !n.as_str().starts_with(['$', '_']) {
+                            tracing::warn!(
+                                name = n.as_str(),
+                                "duplicate top-level name across modules; keeping first"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        CoreModule {
+            name: Symbol::intern("Main"),
+            bindings,
+            exports,
+            foreign_imports,
+            overloaded_strings,
+            constructors,
+        }
     }
 
     /// Compile a source file, automatically discovering imported modules.

@@ -328,3 +328,14 @@ fn test_tier2_list_prelude_wasm() {
 fn test_tier2_take_while_wasm() {
     run_wasm_test("tier2_functions/take_while", Profile::Default);
 }
+
+// =============================================================================
+// Multimodule compilation
+// =============================================================================
+
+// Several modules merged into one WASM module: a cross-module function and a
+// cross-module ADT (type + constructors defined in Helper, used in Main).
+#[test]
+fn test_tier2_multimodule_wasm() {
+    run_wasm_test("tier2_functions/multimodule", Profile::Default);
+}

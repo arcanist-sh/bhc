@@ -2368,6 +2368,8 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "any",
     "and",
     "or",
+    "takeWhile",
+    "dropWhile",
 ];
 
 /// Whether any binding in the module references `name`.
@@ -2913,6 +2915,70 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
                 ],
             );
             plam(xs.clone(), body)
+        }
+        // takeWhile p xs = case xs of
+        //   [] -> []
+        //   (y:ys) -> case p y of { True -> y : takeWhile p ys; False -> [] }
+        "takeWhile" => {
+            let p = pv("p", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let inner = pcase(
+                papp(pev(&p), pev(&y)),
+                vec![
+                    palt("False", 0, 0, vec![], pref("[]", id)),
+                    palt(
+                        "True",
+                        1,
+                        0,
+                        vec![],
+                        papp2(
+                            pref(":", id),
+                            pev(&y),
+                            papp2(pref("takeWhile", id), pev(&p), pev(&ys)),
+                        ),
+                    ),
+                ],
+            );
+            let body = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(":", 1, 2, vec![y.clone(), ys.clone()], inner),
+                ],
+            );
+            plam(p, plam(xs, body))
+        }
+        // dropWhile p xs = case xs of
+        //   [] -> []
+        //   (y:ys) -> case p y of { True -> dropWhile p ys; False -> xs }
+        "dropWhile" => {
+            let p = pv("p", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let inner = pcase(
+                papp(pev(&p), pev(&y)),
+                vec![
+                    palt("False", 0, 0, vec![], pev(&xs)),
+                    palt(
+                        "True",
+                        1,
+                        0,
+                        vec![],
+                        papp2(pref("dropWhile", id), pev(&p), pev(&ys)),
+                    ),
+                ],
+            );
+            let body = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(":", 1, 2, vec![y.clone(), ys.clone()], inner),
+                ],
+            );
+            plam(p, plam(xs.clone(), body))
         }
         _ => return None,
     };

@@ -322,3 +322,9 @@ fn test_tier2_from_integral_wasm() {
 fn test_tier2_list_prelude_wasm() {
     run_wasm_test("tier2_functions/list_prelude", Profile::Default);
 }
+
+// takeWhile / dropWhile (predicate-driven list prefix/suffix).
+#[test]
+fn test_tier2_take_while_wasm() {
+    run_wasm_test("tier2_functions/take_while", Profile::Default);
+}

@@ -36,9 +36,11 @@ def sources(d):
 
 
 def run(cmd, stdin=None, timeout=60):
+    # Run in the work dir so fixtures that writeFile to a relative path don't
+    # litter the repo.
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           input=stdin, env=ENV)
+                           input=stdin, env=ENV, cwd=WORK)
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         return -99, "", "TIMEOUT"

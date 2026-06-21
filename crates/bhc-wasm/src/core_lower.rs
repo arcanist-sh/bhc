@@ -496,6 +496,21 @@ impl<'a> WasmLowering<'a> {
                 if let Some(arg) = self.subst.get(&var.id).cloned() {
                     return self.lower_expr(&arg, instrs, locals, local_count, is_main);
                 }
+                // Stdin IO actions used as a value (their result is the bound
+                // value in `x <- getLine`). `getLine :: IO String` reads a line;
+                // `readLn :: IO Int` reads a line and parses it.
+                match name {
+                    "getLine" | "System.IO.getLine" | "GHC.IO.getLine" | "Prelude.getLine" => {
+                        instrs.push(WasmInstr::Call(self.runtime.read_line_idx));
+                        return Ok(());
+                    }
+                    "readLn" | "System.IO.readLn" | "GHC.Read.readLn" | "Prelude.readLn" => {
+                        instrs.push(WasmInstr::Call(self.runtime.read_line_idx));
+                        instrs.push(WasmInstr::Call(self.runtime.parse_int_idx));
+                        return Ok(());
+                    }
+                    _ => {}
+                }
                 // Check if it's a nullary constructor
                 if let Some((tag, 0)) = self.lookup_constructor(name) {
                     instrs.push(WasmInstr::I32Const(tag as i32));
@@ -1784,6 +1799,17 @@ impl<'a> WasmLowering<'a> {
             Some("print" | "System.IO.print" | "GHC.Show.print") if args.len() == 1 => {
                 // `print x` = `putStrLn (show x)`: type-directed, with a newline.
                 self.lower_show(args[0], true, instrs, locals, local_count)?;
+            }
+
+            // IO: getLine / readLn applied to dictionary/type arguments. The args
+            // are class dictionaries (e.g. `readLn`'s `Read` dict), not values, so
+            // they are ignored — the action takes no value arguments.
+            Some("getLine" | "System.IO.getLine" | "GHC.IO.getLine" | "Prelude.getLine") => {
+                instrs.push(WasmInstr::Call(self.runtime.read_line_idx));
+            }
+            Some("readLn" | "System.IO.readLn" | "GHC.Read.readLn" | "Prelude.readLn") => {
+                instrs.push(WasmInstr::Call(self.runtime.read_line_idx));
+                instrs.push(WasmInstr::Call(self.runtime.parse_int_idx));
             }
 
             // IO: >> (sequence) - evaluate both sides for effects

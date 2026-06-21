@@ -194,7 +194,12 @@ impl E2ERunner {
 
         // Execute
         let exec_start = Instant::now();
-        let output = match self.execute(&artifact_path, test_case.timeout(), &test_work_dir) {
+        let output = match self.execute(
+            test_case,
+            &artifact_path,
+            test_case.timeout(),
+            &test_work_dir,
+        ) {
             Ok(output) => output,
             Err(E2EError::Timeout(d)) => return Ok(E2EResult::Timeout(d)),
             Err(e) => return Ok(E2EResult::ExecutionError(e.to_string())),
@@ -249,13 +254,14 @@ impl E2ERunner {
     /// Execute the compiled artifact.
     fn execute(
         &self,
+        test_case: &E2ETestCase,
         artifact_path: &Path,
         timeout: Duration,
         work_dir: &Path,
     ) -> Result<ExecutionOutput, E2EError> {
         match self.config.backend {
             Backend::Native => crate::native::run_native(artifact_path, timeout, Some(work_dir)),
-            Backend::Wasm => crate::wasm::run_wasm(artifact_path, timeout),
+            Backend::Wasm => crate::wasm::run_wasm(artifact_path, timeout, test_case.stdin_bytes()),
             Backend::Gpu => crate::gpu::run_gpu(artifact_path, timeout, self.config.gpu_mock),
         }
     }

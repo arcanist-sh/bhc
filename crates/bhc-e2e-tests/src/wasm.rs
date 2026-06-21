@@ -67,7 +67,14 @@ pub fn compile_wasm(
 }
 
 /// Run a WASM module using wasmtime with WASI support.
-pub fn run_wasm(wasm_path: &Path, timeout: Duration) -> Result<ExecutionOutput, E2EError> {
+///
+/// `stdin` optionally supplies bytes for the program to read (backs `getLine`
+/// / `readLn` in fixtures that provide a `stdin.txt`).
+pub fn run_wasm(
+    wasm_path: &Path,
+    timeout: Duration,
+    stdin: Option<Vec<u8>>,
+) -> Result<ExecutionOutput, E2EError> {
     let start = Instant::now();
 
     // Create wasmtime engine with fuel-based timeout
@@ -85,11 +92,15 @@ pub fn run_wasm(wasm_path: &Path, timeout: Duration) -> Result<ExecutionOutput, 
     let stdout_pipe = MemoryOutputPipe::new(4096);
     let stderr_pipe = MemoryOutputPipe::new(4096);
 
-    // Create WASI context with captured stdout
-    let wasi_ctx = WasiCtxBuilder::new()
+    // Create WASI context with captured stdout (and optional stdin).
+    let mut wasi_builder = WasiCtxBuilder::new();
+    wasi_builder
         .stdout(stdout_pipe.clone())
-        .stderr(stderr_pipe.clone())
-        .build_p1();
+        .stderr(stderr_pipe.clone());
+    if let Some(bytes) = stdin {
+        wasi_builder.stdin(wasmtime_wasi::pipe::MemoryInputPipe::new(bytes));
+    }
+    let wasi_ctx = wasi_builder.build_p1();
 
     // Create store with WASI context
     let mut store = Store::new(&engine, wasi_ctx);

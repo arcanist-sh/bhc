@@ -2650,6 +2650,16 @@ impl Builtins {
                     Box::new(self.string_ty.clone()),
                 )),
             ),
+            // `readLn :: IO Int`. Real `readLn` is `Read a => IO a`, but the
+            // runtime parser only reads integers, so it is specialized to Int
+            // (which is also what defaulting picks for bare integer input).
+            (
+                "readLn",
+                Scheme::mono(Ty::App(
+                    Box::new(Ty::Con(self.io_con.clone())),
+                    Box::new(self.int_ty.clone()),
+                )),
+            ),
             (
                 "readFile",
                 Scheme::mono(Ty::fun(

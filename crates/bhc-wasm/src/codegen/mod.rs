@@ -99,6 +99,10 @@ pub struct RuntimeIndices {
     pub append_list_idx: u32,
     /// Index of `reverse_list` (reverses a cons-list).
     pub reverse_list_idx: u32,
+    /// Index of `read_line` (reads a line from stdin as a String). Backs `getLine`.
+    pub read_line_idx: u32,
+    /// Index of `parse_int` (parses a String to an Int). Backs `readLn`.
+    pub parse_int_idx: u32,
     /// Offset of the newline byte in the data segment.
     pub newline_offset: u32,
 }
@@ -636,6 +640,12 @@ impl WasmModule {
         let reverse_list_func = wasi::generate_reverse_list(alloc_idx);
         let reverse_list_idx = self.add_function(reverse_list_func);
 
+        // Add stdin input functions: read_line (getLine) and parse_int (readLn).
+        let read_line_func = wasi::generate_read_line(wasi::FD_READ_IDX, alloc_idx, heap_ptr_idx);
+        let read_line_idx = self.add_function(read_line_func);
+        let parse_int_func = wasi::generate_parse_int();
+        let parse_int_idx = self.add_function(parse_int_func);
+
         RuntimeIndices {
             fd_write_idx,
             proc_exit_idx,
@@ -649,6 +659,8 @@ impl WasmModule {
             double_to_str_idx,
             append_list_idx,
             reverse_list_idx,
+            read_line_idx,
+            parse_int_idx,
             newline_offset,
         }
     }

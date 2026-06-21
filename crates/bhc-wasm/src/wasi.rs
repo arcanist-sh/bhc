@@ -1100,6 +1100,276 @@ pub fn generate_reverse_list(alloc_idx: u32) -> WasmFunc {
 /// Offset where the newline byte is stored in the data segment.
 pub const NEWLINE_DATA_OFFSET: u32 = 1020;
 
+/// Fixed scratch for `fd_read`: an 8-byte iovec followed by a 4-byte `nread`
+/// slot. Placed in the WASI scratch area (after the newline byte at 1020 and
+/// before user string data at 2048), clear of the `fd_write` iovec at 16-24.
+const READ_IOVEC_PTR: i32 = 1024;
+const READ_IOVEC_LEN: i32 = 1028;
+const READ_NREAD: i32 = 1032;
+
+/// Maximum bytes read by a single `read_line` call. Longer lines are truncated.
+const MAX_LINE: i32 = 8192;
+
+/// Stdin file descriptor.
+const STDIN_FD: i32 = 0;
+
+/// Generate a `read_line` function: read one line from stdin, returning a
+/// length-prefixed string `[len: i32 | bytes...]` (the runtime `String`
+/// representation) with the trailing newline removed. This backs `getLine`.
+///
+/// Strategy: reserve a `MAX_LINE` buffer with `alloc`, read one byte at a time
+/// via `fd_read` until newline or EOF, then roll the heap pointer back to the
+/// exact bytes used (the buffer is the most recent allocation, so the unused
+/// tail is reclaimed). Reserving up front guarantees the destination memory is
+/// backed (grown) before `fd_read` writes to it. A trailing `\r` is stripped so
+/// CRLF input behaves. On immediate EOF an empty string is returned.
+pub fn generate_read_line(fd_read_idx: u32, alloc_idx: u32, heap_ptr_global: u32) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(vec![], vec![WasmType::I32]));
+    func.name = Some("read_line".to_string());
+    func.exported = true;
+
+    let buf = func.add_local(WasmType::I32); // result buffer base ([len|bytes])
+    let count = func.add_local(WasmType::I32); // bytes read so far (excl. newline)
+    let byte = func.add_local(WasmType::I32); // last byte read
+
+    // buf = alloc(4 + MAX_LINE); count = 0
+    func.emit(WasmInstr::I32Const(4 + MAX_LINE));
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(buf));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(count));
+
+    // Read loop.
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+
+    // if count >= MAX_LINE break
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Const(MAX_LINE));
+    func.emit(WasmInstr::I32GeU);
+    func.emit(WasmInstr::BrIf(1));
+
+    // iovec.ptr = buf + 4 + count
+    func.emit(WasmInstr::I32Const(READ_IOVEC_PTR));
+    func.emit(WasmInstr::LocalGet(buf));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Store(2, 0));
+    // iovec.len = 1
+    func.emit(WasmInstr::I32Const(READ_IOVEC_LEN));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Store(2, 0));
+
+    // fd_read(stdin, iovec, 1, nread); break on error (nonzero errno)
+    func.emit(WasmInstr::I32Const(STDIN_FD));
+    func.emit(WasmInstr::I32Const(READ_IOVEC_PTR));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Const(READ_NREAD));
+    func.emit(WasmInstr::Call(fd_read_idx));
+    func.emit(WasmInstr::BrIf(1));
+
+    // if nread == 0 (EOF) break
+    func.emit(WasmInstr::I32Const(READ_NREAD));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::BrIf(1));
+
+    // byte = load8(buf + 4 + count)
+    func.emit(WasmInstr::LocalGet(buf));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Load8U(0, 0));
+    func.emit(WasmInstr::LocalSet(byte));
+    // if byte == '\n' break (newline excluded)
+    func.emit(WasmInstr::LocalGet(byte));
+    func.emit(WasmInstr::I32Const(10));
+    func.emit(WasmInstr::I32Eq);
+    func.emit(WasmInstr::BrIf(1));
+    // count++
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(count));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End); // loop
+    func.emit(WasmInstr::End); // block
+
+    // Strip a trailing '\r' (CRLF input).
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::I32GtU);
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::LocalGet(buf));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::I32Load8U(0, 0));
+    func.emit(WasmInstr::I32Const(13));
+    func.emit(WasmInstr::I32Eq);
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::LocalSet(count));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+
+    // [buf] = count (the string length)
+    func.emit(WasmInstr::LocalGet(buf));
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Store(2, 0));
+
+    // Reclaim the unused tail: heap_ptr = align8(buf + 4 + count).
+    func.emit(WasmInstr::LocalGet(buf));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Const(7));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Const(-8));
+    func.emit(WasmInstr::I32And);
+    func.emit(WasmInstr::GlobalSet(heap_ptr_global));
+
+    func.emit(WasmInstr::LocalGet(buf));
+    func.emit(WasmInstr::End);
+    func
+}
+
+/// Generate a `parse_int` function: parse a length-prefixed string into an
+/// `i32`. Skips leading spaces, accepts an optional leading `-`, then consumes
+/// decimal digits until a non-digit. This backs `readLn`/`read` at type `Int`.
+pub fn generate_parse_int() -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(vec![WasmType::I32], vec![WasmType::I32]));
+    func.name = Some("parse_int".to_string());
+    func.exported = true;
+
+    // param 0 = pstr
+    let len = func.add_local(WasmType::I32);
+    let i = func.add_local(WasmType::I32);
+    let acc = func.add_local(WasmType::I32);
+    let neg = func.add_local(WasmType::I32);
+    let byte = func.add_local(WasmType::I32);
+
+    // len = [pstr]; i = acc = neg = 0
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::LocalSet(len));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(acc));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(neg));
+
+    // Skip leading spaces.
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32GeU);
+    func.emit(WasmInstr::BrIf(1));
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Load8U(0, 0));
+    func.emit(WasmInstr::LocalSet(byte));
+    func.emit(WasmInstr::LocalGet(byte));
+    func.emit(WasmInstr::I32Const(32));
+    func.emit(WasmInstr::I32Ne);
+    func.emit(WasmInstr::BrIf(1));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+
+    // Optional leading '-'.
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32LtU);
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Load8U(0, 0));
+    func.emit(WasmInstr::I32Const(45)); // '-'
+    func.emit(WasmInstr::I32Eq);
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::LocalSet(neg));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+
+    // Digit loop: acc = acc*10 + (byte - '0').
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32GeU);
+    func.emit(WasmInstr::BrIf(1));
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Load8U(0, 0));
+    func.emit(WasmInstr::LocalSet(byte));
+    func.emit(WasmInstr::LocalGet(byte));
+    func.emit(WasmInstr::I32Const(48));
+    func.emit(WasmInstr::I32LtS);
+    func.emit(WasmInstr::BrIf(1));
+    func.emit(WasmInstr::LocalGet(byte));
+    func.emit(WasmInstr::I32Const(57));
+    func.emit(WasmInstr::I32GtS);
+    func.emit(WasmInstr::BrIf(1));
+    func.emit(WasmInstr::LocalGet(acc));
+    func.emit(WasmInstr::I32Const(10));
+    func.emit(WasmInstr::I32Mul);
+    func.emit(WasmInstr::LocalGet(byte));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Const(48));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::LocalSet(acc));
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::End);
+
+    // Apply sign.
+    func.emit(WasmInstr::LocalGet(neg));
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalGet(acc));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::LocalSet(acc));
+    func.emit(WasmInstr::End);
+
+    func.emit(WasmInstr::LocalGet(acc));
+    func.emit(WasmInstr::End);
+    func
+}
+
 /// Generate the _start function that calls main.
 ///
 /// This is the WASI entry point. It calls the Haskell main function

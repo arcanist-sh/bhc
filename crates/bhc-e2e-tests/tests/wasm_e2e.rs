@@ -107,6 +107,20 @@ fn test_tier3_catch_test_wasm() {
     run_wasm_test("tier3_io/catch_test", Profile::Default);
 }
 
+// stdin input: `getLine` reads a line as a String (newline stripped) via the
+// WASI `fd_read` runtime. The fixture supplies a `stdin.txt`.
+#[test]
+fn test_tier3_stdin_echo_wasm() {
+    run_wasm_test("tier3_io/stdin_echo", Profile::Default);
+}
+
+// stdin input: `readLn` reads a line and parses it as an Int (handles a leading
+// sign), composing with `getLine` and arithmetic.
+#[test]
+fn test_tier3_stdin_readln_wasm() {
+    run_wasm_test("tier3_io/stdin_readln", Profile::Default);
+}
+
 // =============================================================================
 // Tier 5: Benchmark Tests
 // =============================================================================

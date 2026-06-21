@@ -256,6 +256,13 @@ impl E2ETestCase {
     pub fn timeout(&self) -> Duration {
         Duration::from_secs(self.timeout_secs)
     }
+
+    /// Read the fixture's `stdin.txt`, if present, to feed the program's stdin.
+    /// Returns `None` when the fixture provides no stdin file.
+    pub fn stdin_bytes(&self) -> Option<Vec<u8>> {
+        let path = self.fixture_dir.join("stdin.txt");
+        std::fs::read(path).ok()
+    }
 }
 
 /// Configuration file format for test.toml.

@@ -576,6 +576,7 @@ impl LowerContext {
             "putStrLn",
             "putStr",
             "getLine",
+            "readLn",
             "readFile",
             "writeFile",
             // Guard helper

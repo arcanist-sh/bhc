@@ -1,0 +1,3 @@
+Sum for pair:
+38
+42

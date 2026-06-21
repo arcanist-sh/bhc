@@ -464,6 +464,7 @@ fn register_standard_module_exports(
             "putStr",
             "print",
             "getLine",
+            "readLn",
             ">>",
             ">>=",
             "return",
@@ -1098,6 +1099,7 @@ fn register_standard_module_exports(
             "writeFile",
             "appendFile",
             "getLine",
+            "readLn",
             "getContents",
             "putStr",
             "putStrLn",
@@ -1199,6 +1201,7 @@ fn register_standard_module_exports(
             "putStr",
             "putStrLn",
             "getLine",
+            "readLn",
             "getContents",
         ],
         "GHC.Generics" => &[

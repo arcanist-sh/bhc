@@ -2751,6 +2751,12 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "isSpace",
     "toUpper",
     "toLower",
+    "mapM_",
+    "mapM",
+    "intersect",
+    "scanl",
+    "scanl1",
+    "scanr",
 ];
 
 /// Whether any binding in the module references `name`.
@@ -3904,6 +3910,178 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
                             papp2(pref(op, id), pev(&c), pint(delta)),
                         ),
                     ],
+                ),
+            )
+        }
+        // mapM_ f xs = case xs of { [] -> (); (y:ys) -> f y >> mapM_ f ys }
+        "mapM_" => {
+            let f = pv("f", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let cons = papp2(
+                pref(">>", id),
+                papp(pev(&f), pev(&y)),
+                papp2(pref("mapM_", id), pev(&f), pev(&ys)),
+            );
+            plam(
+                f.clone(),
+                plam(
+                    xs.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt("[]", 0, 0, vec![], pint(0)),
+                            palt(":", 1, 2, vec![y.clone(), ys.clone()], cons),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // mapM f xs = case xs of
+        //   [] -> return []
+        //   (y:ys) -> f y >>= \r -> mapM f ys >>= \rs -> return (r:rs)
+        "mapM" => {
+            let f = pv("f", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let r = pv("r", fresh(id));
+            let rs = pv("rs", fresh(id));
+            let ret_cons = papp(pref("return", id), papp2(pref(":", id), pev(&r), pev(&rs)));
+            let inner_bind = papp2(
+                pref(">>=", id),
+                papp2(pref("mapM", id), pev(&f), pev(&ys)),
+                plam(rs.clone(), ret_cons),
+            );
+            let outer_bind = papp2(
+                pref(">>=", id),
+                papp(pev(&f), pev(&y)),
+                plam(r.clone(), inner_bind),
+            );
+            let nil = papp(pref("return", id), pref("[]", id));
+            plam(
+                f.clone(),
+                plam(
+                    xs.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt("[]", 0, 0, vec![], nil),
+                            palt(":", 1, 2, vec![y.clone(), ys.clone()], outer_bind),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // intersect xs ys = filter (\x -> elem x ys) xs
+        "intersect" => {
+            let xs = pv("xs", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let x = pv("x", fresh(id));
+            let pred = plam(x.clone(), papp2(pref("elem", id), pev(&x), pev(&ys)));
+            plam(
+                xs.clone(),
+                plam(ys.clone(), papp2(pref("filter", id), pred, pev(&xs))),
+            )
+        }
+        // scanl f z xs = z : (case xs of { [] -> []; (y:ys) -> scanl f (f z y) ys })
+        "scanl" => {
+            let f = pv("f", fresh(id));
+            let z = pv("z", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let rest = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(
+                        ":",
+                        1,
+                        2,
+                        vec![y.clone(), ys.clone()],
+                        papp(
+                            papp2(pref("scanl", id), pev(&f), papp2(pev(&f), pev(&z), pev(&y))),
+                            pev(&ys),
+                        ),
+                    ),
+                ],
+            );
+            plam(
+                f.clone(),
+                plam(
+                    z.clone(),
+                    plam(xs.clone(), papp2(pref(":", id), pev(&z), rest)),
+                ),
+            )
+        }
+        // scanl1 f xs = case xs of { [] -> []; (y:ys) -> scanl f y ys }
+        "scanl1" => {
+            let f = pv("f", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            plam(
+                f.clone(),
+                plam(
+                    xs.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt("[]", 0, 0, vec![], pref("[]", id)),
+                            palt(
+                                ":",
+                                1,
+                                2,
+                                vec![y.clone(), ys.clone()],
+                                papp(papp2(pref("scanl", id), pev(&f), pev(&y)), pev(&ys)),
+                            ),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // scanr f z xs = case xs of
+        //   [] -> [z]
+        //   (y:ys) -> case scanr f z ys of (q:qs) -> f y q : q : qs
+        "scanr" => {
+            let f = pv("f", fresh(id));
+            let z = pv("z", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let q = pv("q", fresh(id));
+            let qs = pv("qs", fresh(id));
+            let cons = pcase(
+                papp(papp2(pref("scanr", id), pev(&f), pev(&z)), pev(&ys)),
+                vec![palt(
+                    ":",
+                    1,
+                    2,
+                    vec![q.clone(), qs.clone()],
+                    papp2(
+                        pref(":", id),
+                        papp2(pev(&f), pev(&y), pev(&q)),
+                        papp2(pref(":", id), pev(&q), pev(&qs)),
+                    ),
+                )],
+            );
+            let nil = papp2(pref(":", id), pev(&z), pref("[]", id));
+            plam(
+                f.clone(),
+                plam(
+                    z.clone(),
+                    plam(
+                        xs.clone(),
+                        pcase(
+                            pev(&xs),
+                            vec![
+                                palt("[]", 0, 0, vec![], nil),
+                                palt(":", 1, 2, vec![y.clone(), ys.clone()], cons),
+                            ],
+                        ),
+                    ),
                 ),
             )
         }

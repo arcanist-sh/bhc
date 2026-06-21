@@ -466,6 +466,22 @@ fn test_tier3_any_all_wasm() {
     run_wasm_test("tier3_io/any_all", Profile::Default);
 }
 
+// mapM_/mapM (IO over a list), intersect, and scans (scanl/scanl1/scanr).
+#[test]
+fn test_tier3_mapm_basic_wasm() {
+    run_wasm_test("tier3_io/mapm_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_intersect_basic_wasm() {
+    run_wasm_test("tier3_io/intersect_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_scanr_basic_wasm() {
+    run_wasm_test("tier3_io/scanr_basic", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

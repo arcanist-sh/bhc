@@ -157,17 +157,34 @@ pub fn lower_core_module(
 
     // Synthesize any referenced list-prelude functions the program doesn't
     // define itself (map/filter/foldr/...), then register them like user code.
+    // Iterate to a fixpoint so a synthesized function that references another
+    // prelude function (e.g. `maximum` uses `foldl`, `elemIndex` uses
+    // `findIndex`) pulls that one in too.
     let mut prelude: Vec<(Var, Expr)> = Vec::new();
-    for &name in LIST_PRELUDE_NAMES {
-        let sym = Symbol::intern(name);
-        if lowering.func_map.contains_key(&sym) || !module_uses_name(core, sym) {
-            continue;
+    let mut synthesized: FxHashSet<Symbol> = FxHashSet::default();
+    loop {
+        let mut added = false;
+        for &name in LIST_PRELUDE_NAMES {
+            let sym = Symbol::intern(name);
+            if lowering.func_map.contains_key(&sym) || synthesized.contains(&sym) {
+                continue;
+            }
+            let used =
+                module_uses_name(core, sym) || prelude.iter().any(|(_, e)| expr_uses_name(e, sym));
+            if !used {
+                continue;
+            }
+            if let Some((var, body)) = build_list_fn(name, &mut lowering.next_synthetic_id) {
+                lowering.register_binding(&var);
+                let (params, _) = peel_lambdas(&body);
+                lowering.arities.insert(var.name, params.len());
+                synthesized.insert(sym);
+                prelude.push((var, body));
+                added = true;
+            }
         }
-        if let Some((var, body)) = build_list_fn(name, &mut lowering.next_synthetic_id) {
-            lowering.register_binding(&var);
-            let (params, _) = peel_lambdas(&body);
-            lowering.arities.insert(var.name, params.len());
-            prelude.push((var, body));
+        if !added {
+            break;
         }
     }
 
@@ -887,6 +904,12 @@ impl<'a> WasmLowering<'a> {
         // cells at runtime, rendering each element by its type.
         if let Some(kind) = list_elem_show_kind(&arg.ty()) {
             return self.emit_show_runtime_list(arg, kind, instrs, locals, local_count);
+        }
+        // Confidently a list (a list-returning function application such as
+        // `take`/`drop`/`map`) but with an erased element type: walk it as a
+        // runtime list of Int, the common case.
+        if is_list_operand(arg) {
+            return self.emit_show_runtime_list(arg, ElemKind::Int, instrs, locals, local_count);
         }
         let (head, fields) = collect_app_spine(arg);
         if let Expr::Var(hv, _) = head {
@@ -1662,15 +1685,75 @@ impl<'a> WasmLowering<'a> {
                 self.lower_expr(args[1], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32Mul);
             }
+            // `div` is floored division (not the truncating wasm `i32.div_s`):
+            // adjust the truncated quotient down by 1 when there is a remainder
+            // and the operands have opposite signs.
             Some("div" | "divInt#" | "GHC.Real.div") if args.len() == 2 => {
+                let a = *local_count;
+                let b = *local_count + 1;
+                *local_count += 2;
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::LocalSet(a));
                 self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::LocalSet(b));
+                // q = a / b (truncated)
+                instrs.push(WasmInstr::LocalGet(a));
+                instrs.push(WasmInstr::LocalGet(b));
                 instrs.push(WasmInstr::I32DivS);
+                // adjust = (a % b != 0) & ((a ^ b) < 0)
+                instrs.push(WasmInstr::LocalGet(a));
+                instrs.push(WasmInstr::LocalGet(b));
+                instrs.push(WasmInstr::I32RemS);
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::I32Ne);
+                instrs.push(WasmInstr::LocalGet(a));
+                instrs.push(WasmInstr::LocalGet(b));
+                instrs.push(WasmInstr::I32Xor);
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::I32LtS);
+                instrs.push(WasmInstr::I32And);
+                instrs.push(WasmInstr::I32Sub); // q - adjust
             }
+            // `mod` is the floored modulus: take the truncated remainder and add
+            // the divisor back when it is non-zero and has the opposite sign.
             Some("mod" | "modInt#" | "GHC.Real.mod") if args.len() == 2 => {
+                let a = *local_count;
+                let b = *local_count + 1;
+                let r = *local_count + 2;
+                *local_count += 3;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::LocalSet(a));
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::LocalSet(b));
+                // r = a % b (truncated)
+                instrs.push(WasmInstr::LocalGet(a));
+                instrs.push(WasmInstr::LocalGet(b));
+                instrs.push(WasmInstr::I32RemS);
+                instrs.push(WasmInstr::LocalSet(r));
+                // result = r + b * ((r != 0) & ((r ^ b) < 0))
+                instrs.push(WasmInstr::LocalGet(r));
+                instrs.push(WasmInstr::LocalGet(b));
+                instrs.push(WasmInstr::LocalGet(r));
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::I32Ne);
+                instrs.push(WasmInstr::LocalGet(r));
+                instrs.push(WasmInstr::LocalGet(b));
+                instrs.push(WasmInstr::I32Xor);
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::I32LtS);
+                instrs.push(WasmInstr::I32And);
+                instrs.push(WasmInstr::I32Mul);
+                instrs.push(WasmInstr::I32Add);
+            }
+            Some("rem" | "remInt#" | "GHC.Real.rem") if args.len() == 2 => {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
                 self.lower_expr(args[1], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32RemS);
+            }
+            Some("quot" | "quotInt#" | "GHC.Real.quot") if args.len() == 2 => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::I32DivS);
             }
             Some("negate" | "negateInt#" | "GHC.Num.negate") if args.len() == 1 => {
                 instrs.push(WasmInstr::I32Const(0));
@@ -2638,6 +2721,22 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "or",
     "takeWhile",
     "dropWhile",
+    "maximum",
+    "minimum",
+    "unzip",
+    "splitAt",
+    "span",
+    "break",
+    "findIndex",
+    "elemIndex",
+    "isPrefixOf",
+    "fst",
+    "snd",
+    "fromMaybe",
+    "even",
+    "odd",
+    "divMod",
+    "quotRem",
 ];
 
 /// Whether any binding in the module references `name`.
@@ -3247,6 +3346,359 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
                 ],
             );
             plam(p, plam(xs.clone(), body))
+        }
+        // maximum/minimum xs = foldl (\a b -> if b `cmp` a then b else a) (head) (tail)
+        "maximum" | "minimum" => {
+            let cmp_op = if name == "maximum" { ">" } else { "<" };
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            let cmp = plam(
+                a.clone(),
+                plam(
+                    b.clone(),
+                    pcase(
+                        papp2(pref(cmp_op, id), pev(&b), pev(&a)),
+                        vec![
+                            palt("False", 0, 0, vec![], pev(&a)),
+                            palt("True", 1, 0, vec![], pev(&b)),
+                        ],
+                    ),
+                ),
+            );
+            let cons_rhs = papp(papp2(pref("foldl", id), cmp, pev(&y)), pev(&ys));
+            plam(
+                xs.clone(),
+                pcase(
+                    pev(&xs),
+                    vec![
+                        palt("[]", 0, 0, vec![], pint(0)),
+                        palt(":", 1, 2, vec![y.clone(), ys.clone()], cons_rhs),
+                    ],
+                ),
+            )
+        }
+        // unzip xs = case xs of
+        //   [] -> ([], [])
+        //   (p:rest) -> case p of (a,b) -> case unzip rest of (as,bs) -> (a:as, b:bs)
+        "unzip" => {
+            let xs = pv("xs", fresh(id));
+            let p = pv("p", fresh(id));
+            let rest = pv("rest", fresh(id));
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            let as_ = pv("as", fresh(id));
+            let bs = pv("bs", fresh(id));
+            let rebuild = papp2(
+                pref("(,)", id),
+                papp2(pref(":", id), pev(&a), pev(&as_)),
+                papp2(pref(":", id), pev(&b), pev(&bs)),
+            );
+            let inner = pcase(
+                papp(pref("unzip", id), pev(&rest)),
+                vec![palt("(,)", 0, 2, vec![as_.clone(), bs.clone()], rebuild)],
+            );
+            let cons_rhs = pcase(
+                pev(&p),
+                vec![palt("(,)", 0, 2, vec![a.clone(), b.clone()], inner)],
+            );
+            let nil_rhs = papp2(pref("(,)", id), pref("[]", id), pref("[]", id));
+            plam(
+                xs.clone(),
+                pcase(
+                    pev(&xs),
+                    vec![
+                        palt("[]", 0, 0, vec![], nil_rhs),
+                        palt(":", 1, 2, vec![p.clone(), rest.clone()], cons_rhs),
+                    ],
+                ),
+            )
+        }
+        // splitAt n xs = case n <= 0 of
+        //   True  -> ([], xs)
+        //   False -> case xs of { [] -> ([],[]); (y:ys) -> case splitAt (n-1) ys of (a,b) -> (y:a, b) }
+        "splitAt" => {
+            let n = pv("n", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            let rec = pcase(
+                papp2(
+                    pref("splitAt", id),
+                    papp2(pref("-", id), pev(&n), pint(1)),
+                    pev(&ys),
+                ),
+                vec![palt(
+                    "(,)",
+                    0,
+                    2,
+                    vec![a.clone(), b.clone()],
+                    papp2(
+                        pref("(,)", id),
+                        papp2(pref(":", id), pev(&y), pev(&a)),
+                        pev(&b),
+                    ),
+                )],
+            );
+            let false_rhs = pcase(
+                pev(&xs),
+                vec![
+                    palt(
+                        "[]",
+                        0,
+                        0,
+                        vec![],
+                        papp2(pref("(,)", id), pref("[]", id), pref("[]", id)),
+                    ),
+                    palt(":", 1, 2, vec![y.clone(), ys.clone()], rec),
+                ],
+            );
+            let body = pcase(
+                papp2(pref("<=", id), pev(&n), pint(0)),
+                vec![
+                    palt("False", 0, 0, vec![], false_rhs),
+                    palt(
+                        "True",
+                        1,
+                        0,
+                        vec![],
+                        papp2(pref("(,)", id), pref("[]", id), pev(&xs)),
+                    ),
+                ],
+            );
+            plam(n, plam(xs.clone(), body))
+        }
+        // span/break p xs: split at the first element where the predicate
+        // changes. span keeps the prefix where p holds; break keeps the prefix
+        // where p does *not* hold.
+        "span" | "break" => {
+            let p = pv("p", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            let rec = pcase(
+                papp2(pref(name, id), pev(&p), pev(&ys)),
+                vec![palt(
+                    "(,)",
+                    0,
+                    2,
+                    vec![a.clone(), b.clone()],
+                    papp2(
+                        pref("(,)", id),
+                        papp2(pref(":", id), pev(&y), pev(&a)),
+                        pev(&b),
+                    ),
+                )],
+            );
+            let stop = papp2(
+                pref("(,)", id),
+                pref("[]", id),
+                papp2(pref(":", id), pev(&y), pev(&ys)),
+            );
+            let (true_branch, false_branch) = if name == "span" {
+                (rec, stop)
+            } else {
+                (stop, rec)
+            };
+            let cons_rhs = pcase(
+                papp(pev(&p), pev(&y)),
+                vec![
+                    palt("False", 0, 0, vec![], false_branch),
+                    palt("True", 1, 0, vec![], true_branch),
+                ],
+            );
+            plam(
+                p,
+                plam(
+                    xs.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt(
+                                "[]",
+                                0,
+                                0,
+                                vec![],
+                                papp2(pref("(,)", id), pref("[]", id), pref("[]", id)),
+                            ),
+                            palt(":", 1, 2, vec![y.clone(), ys.clone()], cons_rhs),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // findIndex p xs = case xs of
+        //   [] -> Nothing
+        //   (y:ys) -> case p y of
+        //     True  -> Just 0
+        //     False -> case findIndex p ys of { Nothing -> Nothing; Just i -> Just (i+1) }
+        "findIndex" => {
+            let p = pv("p", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let i = pv("i", fresh(id));
+            let rec = pcase(
+                papp2(pref("findIndex", id), pev(&p), pev(&ys)),
+                vec![
+                    palt("Nothing", 0, 0, vec![], pref("Nothing", id)),
+                    palt(
+                        "Just",
+                        1,
+                        1,
+                        vec![i.clone()],
+                        papp(pref("Just", id), papp2(pref("+", id), pev(&i), pint(1))),
+                    ),
+                ],
+            );
+            let cons_rhs = pcase(
+                papp(pev(&p), pev(&y)),
+                vec![
+                    palt("False", 0, 0, vec![], rec),
+                    palt("True", 1, 0, vec![], papp(pref("Just", id), pint(0))),
+                ],
+            );
+            plam(
+                p,
+                plam(
+                    xs.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt("[]", 0, 0, vec![], pref("Nothing", id)),
+                            palt(":", 1, 2, vec![y.clone(), ys.clone()], cons_rhs),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // elemIndex x xs = findIndex (\y -> y == x) xs
+        "elemIndex" => {
+            let x = pv("x", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let pred = plam(y.clone(), papp2(pref("==", id), pev(&y), pev(&x)));
+            plam(
+                x.clone(),
+                plam(xs.clone(), papp2(pref("findIndex", id), pred, pev(&xs))),
+            )
+        }
+        // isPrefixOf xs ys = case xs of
+        //   [] -> True
+        //   (a:as) -> case ys of { [] -> False; (b:bs) -> case a==b of { False -> False; True -> isPrefixOf as bs } }
+        "isPrefixOf" => {
+            let xs = pv("xs", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let a = pv("a", fresh(id));
+            let as_ = pv("as", fresh(id));
+            let b = pv("b", fresh(id));
+            let bs = pv("bs", fresh(id));
+            let inner = pcase(
+                papp2(pref("==", id), pev(&a), pev(&b)),
+                vec![
+                    palt("False", 0, 0, vec![], pref("False", id)),
+                    palt(
+                        "True",
+                        1,
+                        0,
+                        vec![],
+                        papp2(pref("isPrefixOf", id), pev(&as_), pev(&bs)),
+                    ),
+                ],
+            );
+            let cons_xs = pcase(
+                pev(&ys),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("False", id)),
+                    palt(":", 1, 2, vec![b.clone(), bs.clone()], inner),
+                ],
+            );
+            plam(
+                xs.clone(),
+                plam(
+                    ys.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt("[]", 0, 0, vec![], pref("True", id)),
+                            palt(":", 1, 2, vec![a.clone(), as_.clone()], cons_xs),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // fst / snd: tuple accessors.
+        "fst" | "snd" => {
+            let p = pv("p", fresh(id));
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            let result = if name == "fst" { pev(&a) } else { pev(&b) };
+            plam(
+                p.clone(),
+                pcase(
+                    pev(&p),
+                    vec![palt("(,)", 0, 2, vec![a.clone(), b.clone()], result)],
+                ),
+            )
+        }
+        // fromMaybe d m = case m of { Nothing -> d; Just x -> x }
+        "fromMaybe" => {
+            let d = pv("d", fresh(id));
+            let m = pv("m", fresh(id));
+            let x = pv("x", fresh(id));
+            plam(
+                d.clone(),
+                plam(
+                    m.clone(),
+                    pcase(
+                        pev(&m),
+                        vec![
+                            palt("Nothing", 0, 0, vec![], pev(&d)),
+                            palt("Just", 1, 1, vec![x.clone()], pev(&x)),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // divMod n d = (div n d, mod n d) ; quotRem n d = (quot n d, rem n d)
+        "divMod" | "quotRem" => {
+            let (op1, op2) = if name == "divMod" {
+                ("div", "mod")
+            } else {
+                ("quot", "rem")
+            };
+            let n = pv("n", fresh(id));
+            let d = pv("d", fresh(id));
+            plam(
+                n.clone(),
+                plam(
+                    d.clone(),
+                    papp2(
+                        pref("(,)", id),
+                        papp2(pref(op1, id), pev(&n), pev(&d)),
+                        papp2(pref(op2, id), pev(&n), pev(&d)),
+                    ),
+                ),
+            )
+        }
+        // even n = rem n 2 == 0 ; odd n = rem n 2 /= 0
+        "even" | "odd" => {
+            let cmp = if name == "even" { "==" } else { "/=" };
+            let n = pv("n", fresh(id));
+            plam(
+                n.clone(),
+                papp2(
+                    pref(cmp, id),
+                    papp2(pref("rem", id), pev(&n), pint(2)),
+                    pint(0),
+                ),
+            )
         }
         _ => return None,
     };

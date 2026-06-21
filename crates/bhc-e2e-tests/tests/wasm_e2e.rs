@@ -427,6 +427,29 @@ fn test_tier3_show_adt_nested_wasm() {
     run_wasm_test("tier3_io/show_adt_nested", Profile::Default);
 }
 
+// Injected list/prelude functions: maximum/minimum, unzip, splitAt/span/break,
+// findIndex/elemIndex/isPrefixOf, fst/snd, fromMaybe, even/odd, divMod/quotRem;
+// plus rem/quot and floored div/mod primitives, and show of a runtime list.
+#[test]
+fn test_tier3_max_min_and_or_wasm() {
+    run_wasm_test("tier3_io/max_min_and_or", Profile::Default);
+}
+
+#[test]
+fn test_tier3_list_unzip_wasm() {
+    run_wasm_test("tier3_io/list_unzip", Profile::Default);
+}
+
+#[test]
+fn test_tier3_list_split_span_wasm() {
+    run_wasm_test("tier3_io/list_split_span", Profile::Default);
+}
+
+#[test]
+fn test_tier3_divmod_wasm() {
+    run_wasm_test("tier3_io/divmod", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

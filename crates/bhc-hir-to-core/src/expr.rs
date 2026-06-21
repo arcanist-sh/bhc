@@ -650,6 +650,116 @@ fn lower_constrained_fn_value(
     Some(result)
 }
 
+/// Whether `expr` references a constrained user *function* used as a value
+/// (a bare reference to a function with a user-class constraint, not a class
+/// method and not applied here).
+fn is_constrained_fn_value(ctx: &LowerContext, expr: &hir::Expr) -> bool {
+    let mut h = expr;
+    while let Expr::TypeApp(i, _, _) | Expr::Ann(i, _, _) = h {
+        h = i.as_ref();
+    }
+    let Expr::Var(dr) = h else {
+        return false;
+    };
+    if let Some(name) = ctx.lookup_var(dr.def_id).map(|v| v.name) {
+        if ctx.is_class_method(name).is_some() {
+            return false;
+        }
+    }
+    ctx.lookup_scheme(dr.def_id)
+        .is_some_and(|s| s.constraints.iter().any(|c| ctx.is_user_class(c.class)))
+}
+
+/// Handle a call that passes a constrained function as a *value* argument, when
+/// the type at which it is used is determined by the call's other arguments
+/// (e.g. `twice sz (Box 3) (Box 4)` where `twice :: (a -> Int) -> a -> a -> Int`
+/// — `a` is pinned by the second/third arguments, not by `twice`'s own
+/// parameter for `sz`). The whole spine is needed because those sibling
+/// arguments are not visible at the point the value argument alone is lowered.
+///
+/// Solves the callee's type variables from all inferable argument types, then
+/// resolves each constrained-function-value argument's dictionaries at the
+/// resulting concrete parameter type. Returns the fully lowered application, or
+/// `None` (leaving the normal cases to run) when there is no such argument, the
+/// callee is itself user-constrained, or any dictionary cannot be resolved.
+fn try_lower_spine_with_dicts(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    // Peel the full spine: callee head + arguments in source order.
+    let mut head: &hir::Expr = f;
+    let mut args: Vec<&hir::Expr> = vec![x];
+    loop {
+        match head {
+            Expr::App(g, a, _) => {
+                args.push(a.as_ref());
+                head = g.as_ref();
+            }
+            Expr::TypeApp(inner, _, _) | Expr::Ann(inner, _, _) => head = inner.as_ref(),
+            _ => break,
+        }
+    }
+    args.reverse();
+    let Expr::Var(callee_ref) = head else {
+        return Ok(None);
+    };
+
+    // Only act when some argument is a constrained-function value; otherwise
+    // leave the existing cases untouched.
+    if !args.iter().any(|a| is_constrained_fn_value(ctx, a)) {
+        return Ok(None);
+    }
+
+    // Callee parameter types. A user-constrained callee is left to the
+    // constrained-function call paths (Case 2/3).
+    let Some(scheme) = ctx.lookup_scheme(callee_ref.def_id) else {
+        return Ok(None);
+    };
+    if scheme
+        .constraints
+        .iter()
+        .any(|c| ctx.is_user_class(c.class))
+    {
+        return Ok(None);
+    }
+    let mut callee_param_tys = Vec::new();
+    let mut cur = &scheme.ty;
+    while let Ty::Fun(p, r) = cur {
+        callee_param_tys.push(p.as_ref().clone());
+        cur = r.as_ref();
+    }
+
+    // Solve the callee's type variables from the inferable argument types.
+    let mut subst = bhc_types::Subst::new();
+    for (pty, a) in callee_param_tys.iter().zip(args.iter()) {
+        if let Some(at) = try_infer_arg_type(ctx, a) {
+            match_ty(pty, &at, &mut subst);
+        }
+    }
+
+    let Some(callee_var) = ctx.lookup_var(callee_ref.def_id).cloned() else {
+        return Ok(None);
+    };
+    let mut result = core::Expr::Var(callee_var, callee_ref.span);
+    for (i, a) in args.iter().enumerate() {
+        if is_constrained_fn_value(ctx, a) {
+            let Some(expected) = callee_param_tys.get(i).map(|p| subst.apply(p)) else {
+                return Ok(None);
+            };
+            let Some(arg_core) = lower_constrained_fn_value(ctx, a, &expected) else {
+                return Ok(None);
+            };
+            result = core::Expr::App(Box::new(result), Box::new(arg_core), span);
+        } else {
+            let arg_core = lower_expr(ctx, a)?;
+            result = core::Expr::App(Box::new(result), Box::new(arg_core), span);
+        }
+    }
+    Ok(Some(result))
+}
+
 /// Lower a function application, handling dictionary-passing for class methods
 /// and constrained functions when the argument type is known.
 ///
@@ -663,6 +773,15 @@ fn lower_app(
     x: &hir::Expr,
     span: Span,
 ) -> LowerResult<core::Expr> {
+    // A constrained function passed as a value argument: resolve its
+    // dictionaries from the type at which the call uses it (determined by this
+    // call's arguments). Handles both a concrete callee parameter and a
+    // polymorphic one pinned by sibling arguments. Only fires when such an
+    // argument is present; otherwise the normal cases below run unchanged.
+    if let Some(result) = try_lower_spine_with_dicts(ctx, f, x, span)? {
+        return Ok(result);
+    }
+
     // Check if f is a Var referencing a class method or constrained function
     if let Expr::Var(def_ref) = f {
         if let Some(var) = ctx.lookup_var(def_ref.def_id).cloned() {
@@ -1129,44 +1248,6 @@ fn lower_app(
                 }
                 let x_core = lower_expr(ctx, x)?;
                 return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
-            }
-        }
-    }
-
-    // A constrained user function passed as a value argument (not applied):
-    // resolve its dictionaries from the parameter type the callee expects at
-    // this position. e.g. `applyTo sz (Box 7)` where `sz :: Sized a => a -> Int`
-    // and `applyTo`'s first parameter is `Box -> Int` becomes
-    // `applyTo (sz $dSized_Box) (Box 7)`.
-    {
-        // Find the callee head and how many arguments precede `x`.
-        let mut callee = f;
-        let mut preceding = 0usize;
-        loop {
-            match callee {
-                Expr::App(inner_f, _, _) => {
-                    preceding += 1;
-                    callee = inner_f.as_ref();
-                }
-                Expr::TypeApp(inner, _, _) | Expr::Ann(inner, _, _) => callee = inner.as_ref(),
-                _ => break,
-            }
-        }
-        if let Expr::Var(callee_ref) = callee {
-            let param_ty = ctx.lookup_scheme(callee_ref.def_id).and_then(|scheme| {
-                let mut param_tys = Vec::new();
-                let mut cur = &scheme.ty;
-                while let Ty::Fun(a, r) = cur {
-                    param_tys.push(a.as_ref().clone());
-                    cur = r.as_ref();
-                }
-                param_tys.get(preceding).cloned()
-            });
-            if let Some(expected) = param_ty {
-                if let Some(arg_core) = lower_constrained_fn_value(ctx, x, &expected) {
-                    let f_core = lower_expr(ctx, f)?;
-                    return Ok(core::Expr::App(Box::new(f_core), Box::new(arg_core), span));
-                }
             }
         }
     }

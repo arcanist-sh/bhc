@@ -790,6 +790,14 @@ fn test_tier3_dict_higher_order_native() {
     run_native_test("tier3_io/dict_higher_order", Profile::Default);
 }
 
+// A constrained function passed to a polymorphic higher-order function, where
+// the instantiation is pinned by sibling value arguments rather than the
+// callee's parameter type for it.
+#[test]
+fn test_tier3_dict_sibling_inferred_native() {
+    run_native_test("tier3_io/dict_sibling_inferred", Profile::Default);
+}
+
 // E.42: Deriving for user-defined typeclasses (DeriveAnyClass)
 #[test]
 fn test_tier3_derive_any_class_native() {

@@ -85,6 +85,13 @@ fn test_tier3_print_string_native() {
     run_native_test("tier3_io/print_string", Profile::Default);
 }
 
+// Double arithmetic through user functions (boxed Double args must be unboxed
+// to f64, not int-added on their raw bits) and whole-number formatting (`6.0`).
+#[test]
+fn test_tier2_floats_native() {
+    run_native_test("tier2_functions/floats", Profile::Default);
+}
+
 #[test]
 fn test_tier2_factorial_native() {
     run_native_test("tier2_functions/factorial", Profile::Default);

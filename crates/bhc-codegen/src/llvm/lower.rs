@@ -46903,6 +46903,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let rhs = self
                     .lower_expr(args[1])?
                     .ok_or_else(|| CodegenError::Internal("primop arg has no value".to_string()))?;
+                // Double/Float arithmetic must operate on f64. A boxed Double
+                // operand (e.g. a function parameter) is a PointerValue, which
+                // `lower_binary_arith` would int-add on its raw bits — so detect
+                // the floating type and route through the unboxing float path.
+                let t0 = args[0].ty();
+                let t1 = args[1].ty();
+                if self.is_double_type(&t0)
+                    || self.is_float_type(&t0)
+                    || self.is_double_type(&t1)
+                    || self.is_float_type(&t1)
+                {
+                    return self.lower_float_arith(op, lhs, rhs);
+                }
                 self.lower_binary_arith(op, lhs, rhs)
             }
 
@@ -47161,6 +47174,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder()
             .build_int_to_ptr(val, self.type_mapper().ptr_type(), "box_int")
             .map_err(|e| CodegenError::Internal(format!("failed to box int: {:?}", e)))
+    }
+
+    /// Lower a binary arithmetic operation on `Double`/`Float`. Both operands
+    /// are coerced to `f64` first — crucially unboxing a boxed `Double` (a
+    /// `PointerValue`, e.g. a function parameter), which `lower_binary_arith`
+    /// would otherwise int-add on its raw bits. Returns an unboxed `FloatValue`.
+    fn lower_float_arith(
+        &self,
+        op: PrimOp,
+        lhs: BasicValueEnum<'ctx>,
+        rhs: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let l = self.coerce_to_f64(lhs)?;
+        let r = self.coerce_to_f64(rhs)?;
+        let result = match op {
+            PrimOp::Add => self.builder().build_float_add(l, r, "fadd"),
+            PrimOp::Sub => self.builder().build_float_sub(l, r, "fsub"),
+            PrimOp::Mul => self.builder().build_float_mul(l, r, "fmul"),
+            PrimOp::Div | PrimOp::Quot => self.builder().build_float_div(l, r, "fdiv"),
+            PrimOp::Mod | PrimOp::Rem => self.builder().build_float_rem(l, r, "frem"),
+            _ => return Err(CodegenError::Internal("invalid float arith op".to_string())),
+        };
+        result
+            .map(|v| Some(v.into()))
+            .map_err(|e| CodegenError::Internal(format!("failed to build float op: {:?}", e)))
     }
 
     /// Lower a binary arithmetic operation.

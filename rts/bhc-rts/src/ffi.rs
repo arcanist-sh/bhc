@@ -271,7 +271,29 @@ pub extern "C" fn bhc_print_int_ln(n: i64) {
 /// This function is safe to call from C code.
 #[no_mangle]
 pub extern "C" fn bhc_print_double(d: f64) {
-    print!("{}", d);
+    print!("{}", format_double(d));
+}
+
+/// Format an `f64` the way Haskell's `show` does: whole numbers keep a trailing
+/// `.0` (`show 6.0 == "6.0"`), and non-finite values use `Infinity` /
+/// `-Infinity` / `NaN`. Shared by `print`/`show` of a `Double`.
+fn format_double(n: f64) -> String {
+    if n.is_infinite() {
+        if n.is_sign_positive() {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
+    } else if n.is_nan() {
+        "NaN".to_string()
+    } else {
+        let formatted = format!("{n}");
+        if !formatted.contains('.') && !formatted.contains('e') && !formatted.contains('E') {
+            format!("{formatted}.0")
+        } else {
+            formatted
+        }
+    }
 }
 
 /// Print a double to stdout with newline.
@@ -285,7 +307,7 @@ pub extern "C" fn bhc_print_double(d: f64) {
 /// This function is safe to call from C code.
 #[no_mangle]
 pub extern "C" fn bhc_print_double_ln(d: f64) {
-    println!("{}", d);
+    println!("{}", format_double(d));
 }
 
 /// Print a single character (without newline).
@@ -1481,23 +1503,7 @@ pub extern "C" fn bhc_floor_double(a: f64) -> i64 {
 /// Whole numbers include a trailing `.0` (e.g., `1.0` not `1`).
 #[no_mangle]
 pub extern "C" fn bhc_show_double(n: f64) -> *mut c_char {
-    let s = if n.is_infinite() {
-        if n.is_sign_positive() {
-            "Infinity".to_string()
-        } else {
-            "-Infinity".to_string()
-        }
-    } else if n.is_nan() {
-        "NaN".to_string()
-    } else {
-        let formatted = format!("{}", n);
-        // Ensure whole numbers have a decimal point (Haskell: show 1.0 = "1.0")
-        if !formatted.contains('.') && !formatted.contains('e') && !formatted.contains('E') {
-            format!("{}.0", formatted)
-        } else {
-            formatted
-        }
-    };
+    let s = format_double(n);
     let c_string = std::ffi::CString::new(s).unwrap();
     c_string.into_raw()
 }

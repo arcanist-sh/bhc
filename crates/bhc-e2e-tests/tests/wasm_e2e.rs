@@ -406,3 +406,11 @@ fn test_tier2_tco_wasm() {
 fn test_tier3_dict_passing_wasm() {
     run_wasm_test("tier3_io/dict_passing", Profile::Default);
 }
+
+// A constrained function passed as a value to a higher-order function with a
+// concrete parameter type: its dictionary is resolved from that expected type
+// and applied as a partial application, then called via call_indirect.
+#[test]
+fn test_tier3_dict_higher_order_wasm() {
+    run_wasm_test("tier3_io/dict_higher_order", Profile::Default);
+}

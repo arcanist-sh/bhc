@@ -783,6 +783,13 @@ fn test_tier3_dict_passing_native() {
     run_native_test("tier3_io/dict_passing", Profile::Default);
 }
 
+// A constrained function passed as a value to a higher-order function with a
+// concrete parameter type: its dictionary is resolved from that expected type.
+#[test]
+fn test_tier3_dict_higher_order_native() {
+    run_native_test("tier3_io/dict_higher_order", Profile::Default);
+}
+
 // E.42: Deriving for user-defined typeclasses (DeriveAnyClass)
 #[test]
 fn test_tier3_derive_any_class_native() {

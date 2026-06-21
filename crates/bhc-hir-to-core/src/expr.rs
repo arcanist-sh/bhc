@@ -591,6 +591,65 @@ fn resolve_constrained_fn_dicts(
     Some(dicts)
 }
 
+/// If `arg` references a constrained user *function* used as a value (passed,
+/// not applied) at the known concrete type `expected_ty`, return it with its
+/// dictionaries applied (a partial application, e.g. `sz $dSized_Box`). The
+/// constrained type variables are recovered by matching the function's declared
+/// type against `expected_ty` — the instantiation isn't visible at the bare
+/// reference, only in the callee's parameter type. Returns `None` if `arg` is
+/// not such a reference, is a class method, or any dictionary can't be resolved
+/// at a concrete type.
+fn lower_constrained_fn_value(
+    ctx: &mut LowerContext,
+    arg: &hir::Expr,
+    expected_ty: &Ty,
+) -> Option<core::Expr> {
+    // Peel type applications / annotations to find the function reference.
+    let mut head = arg;
+    while let Expr::TypeApp(inner, _, _) | Expr::Ann(inner, _, _) = head {
+        head = inner.as_ref();
+    }
+    let Expr::Var(def_ref) = head else {
+        return None;
+    };
+    let name = ctx.lookup_var(def_ref.def_id)?.name;
+    if ctx.is_class_method(name).is_some() {
+        return None;
+    }
+    let (user_constraints, scheme_ty) = {
+        let scheme = ctx.lookup_scheme(def_ref.def_id)?;
+        let uc: Vec<Constraint> = scheme
+            .constraints
+            .iter()
+            .filter(|c| ctx.is_user_class(c.class))
+            .cloned()
+            .collect();
+        if uc.is_empty() {
+            return None;
+        }
+        (uc, scheme.ty.clone())
+    };
+
+    // Recover the constrained type variables from the expected type.
+    let mut subst = bhc_types::Subst::new();
+    match_ty(&scheme_ty, expected_ty, &mut subst);
+
+    let var = ctx.lookup_var(def_ref.def_id).cloned()?;
+    let mut result = core::Expr::Var(var, def_ref.span);
+    for c in &user_constraints {
+        let concrete_args: Vec<Ty> = c.args.iter().map(|t| subst.apply(t)).collect();
+        // Require a fully concrete instantiation; otherwise leave it to other
+        // paths rather than emit an unresolved dictionary.
+        if concrete_args.iter().any(has_type_variables) {
+            return None;
+        }
+        let concrete = Constraint::new_multi(c.class, concrete_args, def_ref.span);
+        let dict = ctx.resolve_dictionary(&concrete, def_ref.span)?;
+        result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
+    }
+    Some(result)
+}
+
 /// Lower a function application, handling dictionary-passing for class methods
 /// and constrained functions when the argument type is known.
 ///
@@ -1070,6 +1129,44 @@ fn lower_app(
                 }
                 let x_core = lower_expr(ctx, x)?;
                 return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
+            }
+        }
+    }
+
+    // A constrained user function passed as a value argument (not applied):
+    // resolve its dictionaries from the parameter type the callee expects at
+    // this position. e.g. `applyTo sz (Box 7)` where `sz :: Sized a => a -> Int`
+    // and `applyTo`'s first parameter is `Box -> Int` becomes
+    // `applyTo (sz $dSized_Box) (Box 7)`.
+    {
+        // Find the callee head and how many arguments precede `x`.
+        let mut callee = f;
+        let mut preceding = 0usize;
+        loop {
+            match callee {
+                Expr::App(inner_f, _, _) => {
+                    preceding += 1;
+                    callee = inner_f.as_ref();
+                }
+                Expr::TypeApp(inner, _, _) | Expr::Ann(inner, _, _) => callee = inner.as_ref(),
+                _ => break,
+            }
+        }
+        if let Expr::Var(callee_ref) = callee {
+            let param_ty = ctx.lookup_scheme(callee_ref.def_id).and_then(|scheme| {
+                let mut param_tys = Vec::new();
+                let mut cur = &scheme.ty;
+                while let Ty::Fun(a, r) = cur {
+                    param_tys.push(a.as_ref().clone());
+                    cur = r.as_ref();
+                }
+                param_tys.get(preceding).cloned()
+            });
+            if let Some(expected) = param_ty {
+                if let Some(arg_core) = lower_constrained_fn_value(ctx, x, &expected) {
+                    let f_core = lower_expr(ctx, f)?;
+                    return Ok(core::Expr::App(Box::new(f_core), Box::new(arg_core), span));
+                }
             }
         }
     }

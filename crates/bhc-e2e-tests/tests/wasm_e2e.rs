@@ -482,6 +482,23 @@ fn test_tier3_scanr_basic_wasm() {
     run_wasm_test("tier3_io/scanr_basic", Profile::Default);
 }
 
+// reverse, tails/inits, lookup, concat/concatMap, maybeToList, stripPrefix,
+// isSuffixOf/isInfixOf, not, otherwise.
+#[test]
+fn test_tier3_elem_index_prefix_wasm() {
+    run_wasm_test("tier3_io/elem_index_prefix", Profile::Default);
+}
+
+#[test]
+fn test_tier3_tails_inits_wasm() {
+    run_wasm_test("tier3_io/tails_inits", Profile::Default);
+}
+
+#[test]
+fn test_tier3_pattern_guards_wasm() {
+    run_wasm_test("tier3_io/pattern_guards", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

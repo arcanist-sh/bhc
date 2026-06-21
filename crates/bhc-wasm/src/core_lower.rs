@@ -2757,6 +2757,19 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "scanl",
     "scanl1",
     "scanr",
+    "not",
+    "reverse",
+    "tails",
+    "inits",
+    "lookup",
+    "maybeToList",
+    "stripPrefix",
+    "concat",
+    "concatMap",
+    "isSuffixOf",
+    "isInfixOf",
+    "__listAppend",
+    "otherwise",
 ];
 
 /// Whether any binding in the module references `name`.
@@ -4085,6 +4098,290 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
                 ),
             )
         }
+        // not b = case b of { True -> False; False -> True }
+        "not" => {
+            let b = pv("b", fresh(id));
+            plam(
+                b.clone(),
+                pcase(
+                    pev(&b),
+                    vec![
+                        palt("False", 0, 0, vec![], pref("True", id)),
+                        palt("True", 1, 0, vec![], pref("False", id)),
+                    ],
+                ),
+            )
+        }
+        // reverse = foldl (\acc x -> x : acc) []
+        "reverse" => {
+            let xs = pv("xs", fresh(id));
+            let acc = pv("acc", fresh(id));
+            let x = pv("x", fresh(id));
+            let step = plam(
+                acc.clone(),
+                plam(x.clone(), papp2(pref(":", id), pev(&x), pev(&acc))),
+            );
+            plam(
+                xs.clone(),
+                papp(papp2(pref("foldl", id), step, pref("[]", id)), pev(&xs)),
+            )
+        }
+        // __listAppend a b = case a of { [] -> b; (x:xs) -> x : __listAppend xs b }
+        "__listAppend" => {
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            let x = pv("x", fresh(id));
+            let xs = pv("xs", fresh(id));
+            plam(
+                a.clone(),
+                plam(
+                    b.clone(),
+                    pcase(
+                        pev(&a),
+                        vec![
+                            palt("[]", 0, 0, vec![], pev(&b)),
+                            palt(
+                                ":",
+                                1,
+                                2,
+                                vec![x.clone(), xs.clone()],
+                                papp2(
+                                    pref(":", id),
+                                    pev(&x),
+                                    papp2(pref("__listAppend", id), pev(&xs), pev(&b)),
+                                ),
+                            ),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // concat xs = case xs of { [] -> []; (y:ys) -> __listAppend y (concat ys) }
+        "concat" => {
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            plam(
+                xs.clone(),
+                pcase(
+                    pev(&xs),
+                    vec![
+                        palt("[]", 0, 0, vec![], pref("[]", id)),
+                        palt(
+                            ":",
+                            1,
+                            2,
+                            vec![y.clone(), ys.clone()],
+                            papp2(
+                                pref("__listAppend", id),
+                                pev(&y),
+                                papp(pref("concat", id), pev(&ys)),
+                            ),
+                        ),
+                    ],
+                ),
+            )
+        }
+        // concatMap f xs = concat (map f xs)
+        "concatMap" => {
+            let f = pv("f", fresh(id));
+            let xs = pv("xs", fresh(id));
+            plam(
+                f.clone(),
+                plam(
+                    xs.clone(),
+                    papp(
+                        pref("concat", id),
+                        papp2(pref("map", id), pev(&f), pev(&xs)),
+                    ),
+                ),
+            )
+        }
+        // tails xs = xs : (case xs of { [] -> []; (y:ys) -> tails ys })
+        "tails" => {
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let rest = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(
+                        ":",
+                        1,
+                        2,
+                        vec![y.clone(), ys.clone()],
+                        papp(pref("tails", id), pev(&ys)),
+                    ),
+                ],
+            );
+            plam(xs.clone(), papp2(pref(":", id), pev(&xs), rest))
+        }
+        // inits xs = [] : (case xs of { [] -> []; (y:ys) -> map (\t -> y:t) (inits ys) })
+        "inits" => {
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let t = pv("t", fresh(id));
+            let cons_map = papp2(
+                pref("map", id),
+                plam(t.clone(), papp2(pref(":", id), pev(&y), pev(&t))),
+                papp(pref("inits", id), pev(&ys)),
+            );
+            let rest = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(":", 1, 2, vec![y.clone(), ys.clone()], cons_map),
+                ],
+            );
+            plam(xs.clone(), papp2(pref(":", id), pref("[]", id), rest))
+        }
+        // lookup k xs = case xs of
+        //   [] -> Nothing
+        //   ((a,b):rest) -> case a == k of { True -> Just b; False -> lookup k rest }
+        "lookup" => {
+            let k = pv("k", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let p = pv("p", fresh(id));
+            let rest = pv("rest", fresh(id));
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            let pair_case = pcase(
+                pev(&p),
+                vec![palt(
+                    "(,)",
+                    0,
+                    2,
+                    vec![a.clone(), b.clone()],
+                    pcase(
+                        papp2(pref("==", id), pev(&a), pev(&k)),
+                        vec![
+                            palt(
+                                "False",
+                                0,
+                                0,
+                                vec![],
+                                papp2(pref("lookup", id), pev(&k), pev(&rest)),
+                            ),
+                            palt("True", 1, 0, vec![], papp(pref("Just", id), pev(&b))),
+                        ],
+                    ),
+                )],
+            );
+            plam(
+                k.clone(),
+                plam(
+                    xs.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt("[]", 0, 0, vec![], pref("Nothing", id)),
+                            palt(":", 1, 2, vec![p.clone(), rest.clone()], pair_case),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // maybeToList m = case m of { Nothing -> []; Just x -> x : [] }
+        "maybeToList" => {
+            let m = pv("m", fresh(id));
+            let x = pv("x", fresh(id));
+            plam(
+                m.clone(),
+                pcase(
+                    pev(&m),
+                    vec![
+                        palt("Nothing", 0, 0, vec![], pref("[]", id)),
+                        palt(
+                            "Just",
+                            1,
+                            1,
+                            vec![x.clone()],
+                            papp2(pref(":", id), pev(&x), pref("[]", id)),
+                        ),
+                    ],
+                ),
+            )
+        }
+        // stripPrefix xs ys = case xs of
+        //   [] -> Just ys
+        //   (a:as) -> case ys of { [] -> Nothing; (b:bs) -> case a==b of { True -> stripPrefix as bs; False -> Nothing } }
+        "stripPrefix" => {
+            let xs = pv("xs", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let a = pv("a", fresh(id));
+            let as_ = pv("as", fresh(id));
+            let b = pv("b", fresh(id));
+            let bs = pv("bs", fresh(id));
+            let inner = pcase(
+                papp2(pref("==", id), pev(&a), pev(&b)),
+                vec![
+                    palt("False", 0, 0, vec![], pref("Nothing", id)),
+                    palt(
+                        "True",
+                        1,
+                        0,
+                        vec![],
+                        papp2(pref("stripPrefix", id), pev(&as_), pev(&bs)),
+                    ),
+                ],
+            );
+            let cons_xs = pcase(
+                pev(&ys),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("Nothing", id)),
+                    palt(":", 1, 2, vec![b.clone(), bs.clone()], inner),
+                ],
+            );
+            plam(
+                xs.clone(),
+                plam(
+                    ys.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt("[]", 0, 0, vec![], papp(pref("Just", id), pev(&ys))),
+                            palt(":", 1, 2, vec![a.clone(), as_.clone()], cons_xs),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // isSuffixOf xs ys = isPrefixOf (reverse xs) (reverse ys)
+        "isSuffixOf" => {
+            let xs = pv("xs", fresh(id));
+            let ys = pv("ys", fresh(id));
+            plam(
+                xs.clone(),
+                plam(
+                    ys.clone(),
+                    papp2(
+                        pref("isPrefixOf", id),
+                        papp(pref("reverse", id), pev(&xs)),
+                        papp(pref("reverse", id), pev(&ys)),
+                    ),
+                ),
+            )
+        }
+        // isInfixOf xs ys = any (isPrefixOf xs) (tails ys)
+        "isInfixOf" => {
+            let xs = pv("xs", fresh(id));
+            let ys = pv("ys", fresh(id));
+            plam(
+                xs.clone(),
+                plam(
+                    ys.clone(),
+                    papp2(
+                        pref("any", id),
+                        papp(pref("isPrefixOf", id), pev(&xs)),
+                        papp(pref("tails", id), pev(&ys)),
+                    ),
+                ),
+            )
+        }
+        // otherwise = True (a CAF, not a function)
+        "otherwise" => pref("True", id),
         _ => return None,
     };
     Some((pv(name, fresh(id)), body))

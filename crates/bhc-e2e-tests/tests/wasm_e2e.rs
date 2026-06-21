@@ -547,6 +547,13 @@ fn test_tier3_derive_read_wasm() {
     run_wasm_test("tier3_io/derive_read", Profile::Default);
 }
 
+// Derived Traversable: traverse/mapM reduce to the derived Functor (fmap)/map
+// in the eager IO model — the effect runs as each element is evaluated.
+#[test]
+fn test_tier3_derive_traversable_wasm() {
+    run_wasm_test("tier3_io/derive_traversable", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

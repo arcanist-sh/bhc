@@ -176,10 +176,12 @@ pub fn lower_core_module(
     // `findIndex`) pulls that one in too.
     let mut prelude: Vec<(Var, Expr)> = Vec::new();
     let mut synthesized: FxHashSet<Symbol> = FxHashSet::default();
-    // `fmap`/`<$>` dispatch needs the list (`map`) and Maybe (`__fmapMaybe`)
-    // arms, but the program references only `fmap` — pull those helpers in.
-    let uses_fmap = module_uses_name(core, Symbol::intern("fmap"))
-        || module_uses_name(core, Symbol::intern("<$>"));
+    // `fmap`/`<$>`/`traverse`/`mapM` dispatch needs the list (`map`) and Maybe
+    // (`__fmapMaybe`) arms, but the program references only the method name —
+    // pull those helpers in.
+    let uses_fmap = ["fmap", "<$>", "traverse", "mapM"]
+        .iter()
+        .any(|n| module_uses_name(core, Symbol::intern(n)));
     loop {
         let mut added = false;
         for &name in LIST_PRELUDE_NAMES {
@@ -1785,7 +1787,10 @@ impl<'a> WasmLowering<'a> {
         local_count: &mut u32,
     ) -> WasmResult<bool> {
         match strip_qualifier(name) {
-            "fmap" | "<$>" if args.len() == 2 => {
+            // `traverse`/`mapM` reduce to `fmap`/`map` in BHC's eager IO model:
+            // `f x` runs the effect when evaluated, and the structure is rebuilt
+            // in field order — identical to applying the derived Functor.
+            "fmap" | "<$>" | "traverse" | "mapM" if args.len() == 2 => {
                 let (f, x) = (args[0], args[1]);
                 // 1. Derived Functor on a user ADT.
                 if let Some(ty) = self.container_type_name(x) {

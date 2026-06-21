@@ -14889,6 +14889,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     || self.is_tuple_type(&expr_ty).is_some();
                 if compound_show {
                     self.print_via_show_desc(p, val_expr)?;
+                } else if let Some(adt_type) = self
+                    .infer_adt_type_from_expr(val_expr)
+                    .filter(|tn| self.derived_show_fns.contains_key(tn))
+                {
+                    // A user-defined ADT with derived Show. Detected
+                    // structurally because its type is usually erased to `Error`
+                    // by codegen (otherwise the boxed-int branch below would
+                    // print its pointer).
+                    self.print_adt_via_derived_show(p, &adt_type)?;
                 } else if self.is_bool_type(&expr_ty) || self.expr_looks_like_bool(val_expr) {
                     // Bool value - use extract_bool_tag which handles both Bool ADT
                     // (heap-allocated from any/all/even/odd/char predicates) and
@@ -15000,6 +15009,46 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder()
             .build_call(print_ln, &[cstr.into_pointer_value().into()], "")
             .map_err(|e| CodegenError::Internal(format!("print_string_ln call failed: {:?}", e)))?;
+        Ok(())
+    }
+
+    /// Print a user-defined ADT value that has a derived `Show`: call its
+    /// `$derived_show_<Type>` function on the already-lowered value `p`, then
+    /// print the resulting `[Char]` with a trailing newline — `print x =
+    /// putStrLn (show x)`. Uses `p` directly (no re-lowering of the argument).
+    fn print_adt_via_derived_show(
+        &mut self,
+        p: inkwell::values::PointerValue<'ctx>,
+        type_name: &str,
+    ) -> CodegenResult<()> {
+        let show_var_id = *self
+            .derived_show_fns
+            .get(type_name)
+            .ok_or_else(|| CodegenError::Internal(format!("no derived show for {type_name}")))?;
+        let show_fn = *self.functions.get(&show_var_id).ok_or_else(|| {
+            CodegenError::Internal(format!("derived show fn for {type_name} not declared"))
+        })?;
+        // Derived show uses the standard (env, value) -> string closure calling
+        // convention, returning a `[Char]`.
+        let ptr_type = self.type_mapper().ptr_type();
+        let null_env = ptr_type.const_null();
+        let fn_ptr = show_fn.as_global_value().as_pointer_value();
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        let result = self
+            .builder()
+            .build_indirect_call(fn_type, fn_ptr, &[null_env.into(), p.into()], "derived_show")
+            .map_err(|e| CodegenError::Internal(format!("derived show call: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("derived show: returned void".to_string()))?;
+        let list_ptr = self.value_to_ptr(result)?;
+        self.lower_print_char_list_ptr(list_ptr)?;
+        let newline_fn = *self.functions.get(&VarId::new(1000010)).ok_or_else(|| {
+            CodegenError::Internal("bhc_print_newline not declared".to_string())
+        })?;
+        self.builder()
+            .build_call(newline_fn, &[], "")
+            .map_err(|e| CodegenError::Internal(format!("print newline: {:?}", e)))?;
         Ok(())
     }
 
@@ -27060,11 +27109,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("iprint: branch: {:?}", e)))?;
 
         self.builder().position_at_end(loop_body);
-        let char_val =
+        // Extract head (Char) at field 0. The char is stored boxed (via
+        // int_to_ptr), so convert back to an int and truncate to i32 — which is
+        // what bhc_print_char expects. (Passing the i64 directly fails LLVM
+        // verification.)
+        let head =
             self.extract_adt_field(current_node.as_basic_value().into_pointer_value(), 2, 0)?;
-        let char_int = self.coerce_to_int(char_val.into())?;
+        let char_val = self
+            .builder()
+            .build_ptr_to_int(head, tm.i64_type(), "char_val")
+            .map_err(|e| CodegenError::Internal(format!("iprint: char ptr_to_int: {:?}", e)))?;
+        let char_i32 = self
+            .builder()
+            .build_int_truncate(char_val, tm.i32_type(), "char_i32")
+            .map_err(|e| CodegenError::Internal(format!("iprint: char truncate: {:?}", e)))?;
         self.builder()
-            .build_call(*print_char_fn, &[char_int.into()], "")
+            .build_call(*print_char_fn, &[char_i32.into()], "")
             .map_err(|e| CodegenError::Internal(format!("iprint: call: {:?}", e)))?;
         let next =
             self.extract_adt_field(current_node.as_basic_value().into_pointer_value(), 2, 1)?;

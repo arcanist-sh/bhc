@@ -72,6 +72,13 @@ fn test_tier2_show_recursive_native() {
     run_native_test("tier2_functions/show_recursive", Profile::Default);
 }
 
+// `print` of a user-defined ADT value (with derived Show) dispatches to its
+// derived show function instead of printing the value's pointer.
+#[test]
+fn test_tier3_print_adt_native() {
+    run_native_test("tier3_io/print_adt", Profile::Default);
+}
+
 #[test]
 fn test_tier2_factorial_native() {
     run_native_test("tier2_functions/factorial", Profile::Default);

@@ -415,6 +415,12 @@ fn test_tier3_dict_higher_order_wasm() {
     run_wasm_test("tier3_io/dict_higher_order", Profile::Default);
 }
 
+// `print` of a user-defined ADT value renders via its derived Show.
+#[test]
+fn test_tier3_print_adt_wasm() {
+    run_wasm_test("tier3_io/print_adt", Profile::Default);
+}
+
 // A constrained function passed to a polymorphic higher-order function, where
 // the instantiation is pinned by sibling value arguments. The dictionary is
 // resolved from the whole call's argument types.

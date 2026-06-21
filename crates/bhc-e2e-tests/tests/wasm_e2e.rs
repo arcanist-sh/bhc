@@ -526,6 +526,20 @@ fn test_tier3_derive_enum_wasm() {
     run_wasm_test("tier3_io/derive_enum", Profile::Default);
 }
 
+// Derived Functor: fmap routed to the generated $derived_fmap_<Type> for user
+// ADTs (Box/Pair), plus the Maybe and list (map) arms.
+#[test]
+fn test_tier3_derive_functor_wasm() {
+    run_wasm_test("tier3_io/derive_functor", Profile::Default);
+}
+
+// Derived Foldable: foldr routed to $derived_foldr_<Type> (Box/Pair/Maybe2),
+// including (:) used as a first-class function value.
+#[test]
+fn test_tier3_derive_foldable_wasm() {
+    run_wasm_test("tier3_io/derive_foldable", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

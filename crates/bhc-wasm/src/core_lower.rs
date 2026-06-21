@@ -145,6 +145,10 @@ pub fn lower_core_module(
     // and user ADT values all lower to tag 0.
     lowering.register_constructors(core);
 
+    // Record auto-derived Functor/Foldable instance methods so `fmap`/`foldr`
+    // can dispatch to the generated `$derived_*` functions.
+    lowering.register_derived_instances(core);
+
     // Record non-recursive top-level functions so saturated calls can be
     // inlined; record every top-level function's arity so partial and
     // over-applications can be handled via closures.
@@ -172,6 +176,10 @@ pub fn lower_core_module(
     // `findIndex`) pulls that one in too.
     let mut prelude: Vec<(Var, Expr)> = Vec::new();
     let mut synthesized: FxHashSet<Symbol> = FxHashSet::default();
+    // `fmap`/`<$>` dispatch needs the list (`map`) and Maybe (`__fmapMaybe`)
+    // arms, but the program references only `fmap` — pull those helpers in.
+    let uses_fmap = module_uses_name(core, Symbol::intern("fmap"))
+        || module_uses_name(core, Symbol::intern("<$>"));
     loop {
         let mut added = false;
         for &name in LIST_PRELUDE_NAMES {
@@ -179,8 +187,9 @@ pub fn lower_core_module(
             if lowering.func_map.contains_key(&sym) || synthesized.contains(&sym) {
                 continue;
             }
-            let used =
-                module_uses_name(core, sym) || prelude.iter().any(|(_, e)| expr_uses_name(e, sym));
+            let used = module_uses_name(core, sym)
+                || prelude.iter().any(|(_, e)| expr_uses_name(e, sym))
+                || (uses_fmap && matches!(name, "map" | "__fmapMaybe"));
             if !used {
                 continue;
             }
@@ -269,6 +278,15 @@ struct WasmLowering<'a> {
     /// Reverse map: nullary constructor name -> its enum type name. Lets `show`
     /// recover an enum's constructor table from a value's source constructor.
     enum_of_ctor: FxHashMap<String, String>,
+    /// Every (non-newtype) constructor name -> its data type name. Used to find
+    /// the container type at a `fmap`/`foldr` call site for instance dispatch.
+    ctor_type: FxHashMap<String, String>,
+    /// Derived `Functor` instances: type name -> the `$derived_fmap_<Type>`
+    /// binding symbol. Lets `fmap` dispatch to the generated method.
+    derived_functor: FxHashMap<String, Symbol>,
+    /// Derived `Foldable` instances: type name -> the `$derived_foldr_<Type>`
+    /// binding symbol. Lets `foldr` dispatch to the generated method.
+    derived_foldable: FxHashMap<String, Symbol>,
     /// Substitution environment: var id -> expression to lower in its place.
     /// Used to inline function/lambda arguments without alpha-renaming —
     /// when a parameter is referenced, its argument expression is lowered.
@@ -310,6 +328,9 @@ impl<'a> WasmLowering<'a> {
             con_map: well_known_constructors(),
             enum_types: FxHashMap::default(),
             enum_of_ctor: FxHashMap::default(),
+            ctor_type: FxHashMap::default(),
+            derived_functor: FxHashMap::default(),
+            derived_foldable: FxHashMap::default(),
             subst: FxHashMap::default(),
             inline_bodies: FxHashMap::default(),
             inlining: FxHashSet::default(),
@@ -335,6 +356,9 @@ impl<'a> WasmLowering<'a> {
                     arity: con.arity,
                 },
             );
+            if let Some(ty) = &con.type_name {
+                self.ctor_type.insert(con.name.clone(), ty.clone());
+            }
         }
 
         // Build the derived-`Enum` registry. Group constructors by their data
@@ -376,6 +400,32 @@ impl<'a> WasmLowering<'a> {
                 self.enum_of_ctor.insert(n.clone(), ty.clone());
             }
             self.enum_types.insert(ty, names);
+        }
+    }
+
+    /// Scan top-level bindings for auto-derived `Functor`/`Foldable` instance
+    /// methods (`$derived_fmap_<Type>_<counter>` / `$derived_foldr_<Type>_…`),
+    /// recording each by its data type so `fmap`/`foldr` can dispatch to it.
+    fn register_derived_instances(&mut self, core: &CoreModule) {
+        let mut record = |var: &Var| {
+            let name = var.name.as_str();
+            if let Some(rest) = name.strip_prefix("$derived_fmap_") {
+                self.derived_functor
+                    .insert(strip_counter_suffix(rest).to_string(), var.name);
+            } else if let Some(rest) = name.strip_prefix("$derived_foldr_") {
+                self.derived_foldable
+                    .insert(strip_counter_suffix(rest).to_string(), var.name);
+            }
+        };
+        for bind in &core.bindings {
+            match bind {
+                Bind::NonRec(var, _) => record(var),
+                Bind::Rec(bindings) => {
+                    for (var, _) in bindings {
+                        record(var);
+                    }
+                }
+            }
         }
     }
 
@@ -646,6 +696,18 @@ impl<'a> WasmLowering<'a> {
                 // Check if it's a nullary constructor
                 if let Some((tag, 0)) = self.lookup_constructor(name) {
                     instrs.push(WasmInstr::I32Const(tag as i32));
+                } else if let Some((_, arity)) = self.lookup_constructor(name) {
+                    // A constructor with fields used as a first-class function
+                    // value (e.g. `(:)` passed to `foldr`): eta-expand to a
+                    // closure `\a b -> Con a b` that allocates when saturated.
+                    return self.lower_partial_application(
+                        var,
+                        &[],
+                        arity as usize,
+                        instrs,
+                        locals,
+                        local_count,
+                    );
                 } else if let Some(&local_idx) = locals.get(&var.id) {
                     // Check if it's a local variable
                     instrs.push(WasmInstr::LocalGet(local_idx));
@@ -1710,6 +1772,99 @@ impl<'a> WasmLowering<'a> {
         result
     }
 
+    /// Dispatch `fmap`/`<$>`/`foldr` to a derived instance method (or, for
+    /// `fmap`, the Maybe/list arms). Returns `Ok(true)` if it emitted the call;
+    /// `Ok(false)` leaves the application for the normal path (e.g. `foldr` on a
+    /// plain list, handled by the synthesized list `foldr`).
+    fn try_lower_functor_foldable(
+        &mut self,
+        name: &str,
+        args: &[&Expr],
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<bool> {
+        match strip_qualifier(name) {
+            "fmap" | "<$>" if args.len() == 2 => {
+                let (f, x) = (args[0], args[1]);
+                // 1. Derived Functor on a user ADT.
+                if let Some(ty) = self.container_type_name(x) {
+                    if let Some(sym) = self.derived_functor.get(&ty).copied() {
+                        return self.emit_known_call(sym, &[f, x], instrs, locals, local_count);
+                    }
+                }
+                // 2. Maybe.
+                if is_maybe_expr(x) {
+                    let sym = Symbol::intern("__fmapMaybe");
+                    return self.emit_known_call(sym, &[f, x], instrs, locals, local_count);
+                }
+                // 3. List -> map.
+                if extract_list_elements(x).is_some() || is_list_operand(x) {
+                    let sym = Symbol::intern("map");
+                    return self.emit_known_call(sym, &[f, x], instrs, locals, local_count);
+                }
+                Ok(false)
+            }
+            "foldr" if args.len() == 3 => {
+                let container = args[2];
+                if let Some(ty) = self.container_type_name(container) {
+                    if let Some(sym) = self.derived_foldable.get(&ty).copied() {
+                        return self.emit_known_call(sym, args, instrs, locals, local_count);
+                    }
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Emit a saturated call to a known top-level function by symbol: lower each
+    /// argument, then `call`. Returns `Ok(false)` if the symbol isn't registered
+    /// (e.g. a synthesized helper that wasn't pulled in).
+    fn emit_known_call(
+        &mut self,
+        sym: Symbol,
+        args: &[&Expr],
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<bool> {
+        let Some(&func_idx) = self.func_map.get(&sym) else {
+            return Ok(false);
+        };
+        for arg in args {
+            self.lower_expr(arg, instrs, locals, local_count, false)?;
+        }
+        instrs.push(WasmInstr::Call(func_idx));
+        Ok(true)
+    }
+
+    /// The data type name of the value `expr` evaluates to, if its head is a
+    /// known user constructor (recursing through `subst`-bound variables). Only
+    /// resolves user ADTs — builtin Maybe/list constructors aren't recorded.
+    fn container_type_name(&self, expr: &Expr) -> Option<String> {
+        let mut e = expr;
+        loop {
+            e = match e {
+                Expr::TyApp(inner, _, _)
+                | Expr::Cast(inner, _, _)
+                | Expr::Tick(_, inner, _)
+                | Expr::Lazy(inner, _) => inner,
+                _ => break,
+            };
+        }
+        let (head, _) = collect_app_spine(e);
+        if let Expr::Var(hv, _) = head {
+            if let Some(ty) = self.ctor_type.get(hv.name.as_str()) {
+                return Some(ty.clone());
+            }
+            if let Some(bound) = self.subst.get(&hv.id) {
+                return self.container_type_name(bound);
+            }
+        }
+        None
+    }
+
     fn lower_app(
         &mut self,
         expr: &Expr,
@@ -1739,6 +1894,20 @@ impl<'a> WasmLowering<'a> {
                     // Saturated constructor application: allocate heap object
                     return self.emit_adt_construction(tag, &args, instrs, locals, local_count);
                 }
+            }
+        }
+
+        // Derived `Functor`/`Foldable` dispatch: route `fmap`/`foldr` on a
+        // user ADT (or `fmap` on Maybe/list) to the generated method. Use the
+        // *peeled* head name: dictionary specialization leaves the method buried
+        // under a dead `let $dictFunctor… in fmap` whose spine head is a `Let`.
+        let peeled_name = match peel_head(func_expr) {
+            Expr::Var(v, _) => Some(v.name.as_str()),
+            _ => None,
+        };
+        if let Some(name) = peeled_name {
+            if self.try_lower_functor_foldable(name, &args, instrs, locals, local_count)? {
+                return Ok(());
             }
         }
 
@@ -2900,6 +3069,7 @@ fn match_show_arg(expr: &Expr) -> Option<&Expr> {
 /// List-prelude functions we can synthesize, by name.
 const LIST_PRELUDE_NAMES: &[&str] = &[
     "map",
+    "__fmapMaybe",
     "filter",
     "foldr",
     "foldl",
@@ -3065,6 +3235,22 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
                 ),
             );
             plam(f, plam(xs.clone(), pcase(pev(&xs), vec![nil, cons])))
+        }
+        // __fmapMaybe f m = case m of { Nothing -> Nothing; Just x -> Just (f x) }
+        // The Maybe arm of `fmap`, synthesized when the program uses `fmap`.
+        "__fmapMaybe" => {
+            let f = pv("f", fresh(id));
+            let m = pv("m", fresh(id));
+            let x = pv("x", fresh(id));
+            let nothing = palt("Nothing", 0, 0, vec![], pref("Nothing", id));
+            let just = palt(
+                "Just",
+                1,
+                1,
+                vec![x.clone()],
+                papp(pref("Just", id), papp(pev(&f), pev(&x))),
+            );
+            plam(f, plam(m.clone(), pcase(pev(&m), vec![nothing, just])))
         }
         // filter p xs = case xs of
         //   [] -> []
@@ -5110,6 +5296,15 @@ fn is_tuple_con(name: &str) -> bool {
         && name[1..name.len() - 1].chars().all(|c| c == ',')
 }
 
+/// Strip a trailing `_<digits>` deriving counter (`Box_50000` -> `Box`,
+/// `Maybe2_50011` -> `Maybe2`). Names without such a suffix are unchanged.
+fn strip_counter_suffix(s: &str) -> &str {
+    match s.rsplit_once('_') {
+        Some((head, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => s,
+    }
+}
+
 /// Drop a module qualifier from a name (`GHC.Enum.succ` -> `succ`), leaving the
 /// final dotted segment. Operators (which may legitimately contain `.`) are
 /// returned unchanged.
@@ -5212,8 +5407,29 @@ fn is_list_operand(expr: &Expr) -> bool {
     if is_nonstring_list_ty(&e.ty()) {
         return true;
     }
-    let (head, _) = collect_app_spine(e);
-    matches!(head, Expr::Var(v, _) if is_list_returning_fn(v.name.as_str()))
+    let (head, args) = collect_app_spine(e);
+    if let Expr::Var(v, _) = head {
+        let name = strip_qualifier(v.name.as_str());
+        if is_list_returning_fn(v.name.as_str()) {
+            return true;
+        }
+        // `fmap`/`<$>` over a list is a list; `foldr (:) [] xs` builds a list —
+        // detect both by the list-ness of the relevant operand.
+        if matches!(name, "fmap" | "<$>") && args.len() == 2 {
+            return is_list_operand(args[1]);
+        }
+        if name == "foldr" && args.len() == 3 {
+            return is_list_operand(args[1]);
+        }
+    }
+    false
+}
+
+/// Whether `expr`'s head is a `Maybe` constructor (`Just`/`Nothing`), used to
+/// pick the Maybe arm of `fmap`.
+fn is_maybe_expr(expr: &Expr) -> bool {
+    let (head, _) = collect_app_spine(peel_head(expr));
+    matches!(head, Expr::Var(v, _) if matches!(v.name.as_str(), "Just" | "Nothing"))
 }
 
 /// The renderable kind of a runtime scalar (a list element).

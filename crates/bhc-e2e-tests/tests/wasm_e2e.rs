@@ -554,6 +554,20 @@ fn test_tier3_derive_traversable_wasm() {
     run_wasm_test("tier3_io/derive_traversable", Profile::Default);
 }
 
+// Derived Generic + Control.DeepSeq: force/id are identities and seq/deepseq
+// evaluate-then-return-second in the strict runtime.
+#[test]
+fn test_tier3_derive_generic_wasm() {
+    run_wasm_test("tier3_io/derive_generic", Profile::Default);
+}
+
+// GHC.Generics from/to as runtime identities: `to (from x)` roundtrips, and
+// `show` sees through the wrappers.
+#[test]
+fn test_tier3_generic_from_to_wasm() {
+    run_wasm_test("tier3_io/generic_from_to", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

@@ -1071,6 +1071,9 @@ impl<'a> WasmLowering<'a> {
         locals: &mut FxHashMap<VarId, u32>,
         local_count: &mut u32,
     ) -> WasmResult<()> {
+        // See through runtime-identity wrappers (`force`/`to . from`/…) so the
+        // structural and inferred paths inspect the real value.
+        let arg = peel_runtime_identity(arg);
         // A String value renders quoted and escaped (`show "a\"b" == "\"a\\\"b\""`),
         // not as a list of characters — so handle it before the list paths.
         if is_string_expr(arg) {
@@ -1390,17 +1393,8 @@ impl<'a> WasmLowering<'a> {
     /// structurally: a nullary constructor shows as its name; a boolean-valued
     /// operator shows as `True`/`False`; everything else defaults to integer.
     fn infer_show(&self, expr: &Expr) -> ShowKind {
-        // Peel transparent wrappers.
-        let mut e = expr;
-        loop {
-            e = match e {
-                Expr::TyApp(inner, _, _)
-                | Expr::Cast(inner, _, _)
-                | Expr::Tick(_, inner, _)
-                | Expr::Lazy(inner, _) => inner,
-                _ => break,
-            };
-        }
+        // Peel transparent wrappers and runtime-identity applications.
+        let e = peel_runtime_identity(expr);
 
         // Floating-point values render via the double formatter.
         if expr_is_float(e) {
@@ -2167,6 +2161,30 @@ impl<'a> WasmLowering<'a> {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::I32Const(1));
                 instrs.push(WasmInstr::I32Sub);
+            }
+
+            // `Control.DeepSeq`: in the strict runtime everything is already
+            // forced, so `force`/`id` are the identity, and `seq`/`deepseq`
+            // evaluate the first argument (for its effects) and return the
+            // second. `rnf` reduces to `()`.
+            Some(n) if args.len() == 1 && matches!(strip_qualifier(n), "force" | "id") => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+            }
+            // `GHC.Generics.from`/`to` roundtrip to the identity; we lower each
+            // as the identity so `to (from x)` reconstructs `x`. (Pattern
+            // matching on the generic Rep — M1/L1/R1 — is not modeled.)
+            Some(n) if args.len() == 1 && matches!(strip_qualifier(n), "from" | "to") => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+            }
+            Some(n) if args.len() == 1 && strip_qualifier(n) == "rnf" => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Drop);
+                instrs.push(WasmInstr::I32Const(0));
+            }
+            Some(n) if args.len() == 2 && matches!(strip_qualifier(n), "seq" | "deepseq") => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Drop);
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
             }
 
             // Comparison primitives
@@ -5297,6 +5315,29 @@ fn peel_show_wrappers(expr: &Expr) -> &Expr {
             | Expr::Cast(inner, _, _)
             | Expr::Tick(_, inner, _)
             | Expr::Lazy(inner, _) => inner,
+            _ => return e,
+        };
+    }
+}
+
+/// Peel transparent wrappers *and* runtime-identity applications
+/// (`force`/`id`/`from`/`to`) so `show` and structure inspection see the
+/// underlying value. In the strict backend these functions are the identity
+/// (and `to . from` is a no-op roundtrip), so peeling them is sound.
+fn peel_runtime_identity(expr: &Expr) -> &Expr {
+    let mut e = expr;
+    loop {
+        e = match e {
+            Expr::TyApp(inner, _, _)
+            | Expr::Cast(inner, _, _)
+            | Expr::Tick(_, inner, _)
+            | Expr::Lazy(inner, _) => inner,
+            Expr::App(f, arg, _)
+                if matches!(peel_show_wrappers(f), Expr::Var(v, _)
+                    if matches!(strip_qualifier(v.name.as_str()), "force" | "id" | "from" | "to")) =>
+            {
+                arg.as_ref()
+            }
             _ => return e,
         };
     }

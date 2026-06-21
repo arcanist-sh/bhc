@@ -15750,19 +15750,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_conditional_branch(need_separator, sep_block, after_sep)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
-        // Print ", "
+        // Print the element separator. GHC's `show` for lists uses a bare comma
+        // (`[1,2,3]`), with no space after it.
         self.builder().position_at_end(sep_block);
         self.builder()
             .build_call(
                 *print_char_fn,
                 &[tm.i32_type().const_int(',' as u64, false).into()],
-                "",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to print char: {:?}", e)))?;
-        self.builder()
-            .build_call(
-                *print_char_fn,
-                &[tm.i32_type().const_int(' ' as u64, false).into()],
                 "",
             )
             .map_err(|e| CodegenError::Internal(format!("failed to print char: {:?}", e)))?;

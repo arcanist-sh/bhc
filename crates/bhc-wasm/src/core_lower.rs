@@ -78,6 +78,10 @@ enum ShowKind {
     Literal(String),
     /// An `Ordering` value, rendered `LT`/`EQ`/`GT` from its tag (0/1/2).
     Ordering,
+    /// A value of a derived `Enum`/`Bounded` type, rendered as the constructor
+    /// name selected by its runtime tag. Carries the constructor names ordered
+    /// by tag (so `names[tag]` is the name to print).
+    Enum(Vec<String>),
 }
 
 /// Build a map of well-known constructors to their tag and arity.
@@ -258,6 +262,13 @@ struct WasmLowering<'a> {
     /// Constructor map: name -> (tag, arity). Seeded with well-known
     /// constructors and extended with user-defined ones from the module.
     con_map: FxHashMap<String, ConInfo>,
+    /// Derived-`Enum` types: type name -> constructor names ordered by tag.
+    /// Only types whose constructors are all nullary are recorded, so a value
+    /// of such a type is exactly its tag and `names[tag]` is its `show` text.
+    enum_types: FxHashMap<String, Vec<String>>,
+    /// Reverse map: nullary constructor name -> its enum type name. Lets `show`
+    /// recover an enum's constructor table from a value's source constructor.
+    enum_of_ctor: FxHashMap<String, String>,
     /// Substitution environment: var id -> expression to lower in its place.
     /// Used to inline function/lambda arguments without alpha-renaming —
     /// when a parameter is referenced, its argument expression is lowered.
@@ -297,6 +308,8 @@ impl<'a> WasmLowering<'a> {
             next_data_offset: STRING_DATA_BASE,
             next_func_idx,
             con_map: well_known_constructors(),
+            enum_types: FxHashMap::default(),
+            enum_of_ctor: FxHashMap::default(),
             subst: FxHashMap::default(),
             inline_bodies: FxHashMap::default(),
             inlining: FxHashSet::default(),
@@ -323,6 +336,95 @@ impl<'a> WasmLowering<'a> {
                 },
             );
         }
+
+        // Build the derived-`Enum` registry. Group constructors by their data
+        // type; a type qualifies as an enum only if every constructor is
+        // nullary (so each value is exactly its tag). For those, record the
+        // constructor names ordered by tag, which drives `show` of computed
+        // enum values and `minBound`/`maxBound`.
+        let mut by_type: FxHashMap<String, Vec<(u32, String)>> = FxHashMap::default();
+        let mut all_nullary: FxHashMap<String, bool> = FxHashMap::default();
+        for con in &core.constructors {
+            if con.is_newtype {
+                continue;
+            }
+            let Some(ty) = &con.type_name else { continue };
+            by_type
+                .entry(ty.clone())
+                .or_default()
+                .push((con.tag, con.name.clone()));
+            let entry = all_nullary.entry(ty.clone()).or_insert(true);
+            *entry = *entry && con.arity == 0;
+        }
+        for (ty, mut ctors) in by_type {
+            if !all_nullary.get(&ty).copied().unwrap_or(false) {
+                continue;
+            }
+            // Skip builtin nullary types (`Bool`, `Ordering`, `()`), whose
+            // constructors are already well-known and shown by dedicated
+            // `ShowKind`s, and the `GHC.Generics` representation types — so the
+            // single-user-enum heuristic isn't diluted by them.
+            let well_known = well_known_constructors();
+            if ctors.iter().all(|(_, n)| well_known.contains_key(n))
+                || matches!(ty.as_str(), "U1" | "V1" | "Par1" | "Rec1" | "M1" | "K1")
+            {
+                continue;
+            }
+            ctors.sort_by_key(|(tag, _)| *tag);
+            let names: Vec<String> = ctors.iter().map(|(_, n)| n.clone()).collect();
+            for n in &names {
+                self.enum_of_ctor.insert(n.clone(), ty.clone());
+            }
+            self.enum_types.insert(ty, names);
+        }
+    }
+
+    /// If the module defines exactly one derived-`Enum` type, return its
+    /// constructor names (ordered by tag). Used as a heuristic for nullary,
+    /// type-directed methods (`minBound`/`maxBound`/`toEnum`) whose type
+    /// annotation has been erased by the time Core reaches the backend —
+    /// mirroring the native backend's single-enum resolution.
+    fn sole_enum(&self) -> Option<&Vec<String>> {
+        if self.enum_types.len() == 1 {
+            self.enum_types.values().next()
+        } else {
+            None
+        }
+    }
+
+    /// Recover the enum constructor table for the value `expr` evaluates to, if
+    /// it is a derived-`Enum` value: a bare enum constructor, `succ`/`pred` of
+    /// one, or a type-directed `toEnum`/`minBound`/`maxBound` (resolved via the
+    /// single-enum heuristic).
+    fn enum_names_of_expr(&self, expr: &Expr) -> Option<Vec<String>> {
+        let mut e = expr;
+        loop {
+            e = match e {
+                Expr::TyApp(inner, _, _)
+                | Expr::Cast(inner, _, _)
+                | Expr::Tick(_, inner, _)
+                | Expr::Lazy(inner, _) => inner,
+                _ => break,
+            };
+        }
+        if let Expr::Var(v, _) = e {
+            let name = v.name.as_str();
+            if let Some(ty) = self.enum_of_ctor.get(name) {
+                return self.enum_types.get(ty).cloned();
+            }
+            if matches!(strip_qualifier(name), "minBound" | "maxBound") {
+                return self.sole_enum().cloned();
+            }
+        }
+        let (head, args) = collect_app_spine(e);
+        if let Expr::Var(hv, _) = head {
+            match strip_qualifier(hv.name.as_str()) {
+                "succ" | "pred" if args.len() == 1 => return self.enum_names_of_expr(args[0]),
+                "toEnum" | "minBound" | "maxBound" => return self.sole_enum().cloned(),
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Record non-recursive top-level functions (those with at least one
@@ -575,6 +677,18 @@ impl<'a> WasmLowering<'a> {
                         locals,
                         local_count,
                     );
+                } else if matches!(strip_qualifier(name), "minBound" | "maxBound")
+                    && self.sole_enum().is_some()
+                {
+                    // Derived `Bounded` on the sole enum: the value is the
+                    // first (tag 0) or last constructor's tag.
+                    let names = self.sole_enum().unwrap();
+                    let tag = if strip_qualifier(name) == "minBound" {
+                        0
+                    } else {
+                        names.len().saturating_sub(1) as i32
+                    };
+                    instrs.push(WasmInstr::I32Const(tag));
                 } else {
                     // Unknown variable - push 0 as fallback
                     tracing::warn!(var = name, "unresolved variable, using 0");
@@ -987,6 +1101,33 @@ impl<'a> WasmLowering<'a> {
                 instrs.push(WasmInstr::End);
                 instrs.push(WasmInstr::End);
             }
+            ShowKind::Enum(names) => {
+                // Render the runtime tag as the constructor name: a chain of
+                // `if tag == k then names[k] else ...`, with the last name as
+                // the trailing else.
+                let ptrs: Vec<i32> = names.iter().map(|n| self.intern_pstr(n) as i32).collect();
+                let tag = *local_count;
+                *local_count += 1;
+                self.lower_expr(arg, instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::LocalSet(tag));
+                let last = ptrs.len().saturating_sub(1);
+                for (k, &ptr) in ptrs.iter().enumerate() {
+                    if k == last {
+                        instrs.push(WasmInstr::I32Const(ptr));
+                        break;
+                    }
+                    instrs.push(WasmInstr::LocalGet(tag));
+                    instrs.push(WasmInstr::I32Const(k as i32));
+                    instrs.push(WasmInstr::I32Eq);
+                    instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                    instrs.push(WasmInstr::I32Const(ptr));
+                    instrs.push(WasmInstr::Else);
+                }
+                // Close the nested `else` blocks opened above.
+                for _ in 0..last {
+                    instrs.push(WasmInstr::End);
+                }
+            }
         }
         Ok(())
     }
@@ -1207,12 +1348,21 @@ impl<'a> WasmLowering<'a> {
                 if matches!(self.lookup_constructor(v.name.as_str()), Some((_, 0))) {
                     return ShowKind::Literal(v.name.as_str().to_string());
                 }
+                // Nullary, type-directed `minBound`/`maxBound` of the sole enum.
+                if let Some(names) = self.enum_names_of_expr(e) {
+                    return ShowKind::Enum(names);
+                }
                 if let Some(bound) = self.subst.get(&v.id) {
                     return self.infer_show(bound);
                 }
                 ShowKind::Int
             }
             Expr::App(..) => {
+                // A computed enum value (`succ`/`pred`/`toEnum`) renders as a
+                // constructor name from its tag.
+                if let Some(names) = self.enum_names_of_expr(e) {
+                    return ShowKind::Enum(names);
+                }
                 let (head, _) = collect_app_spine(e);
                 if let Expr::Var(hv, _) = head {
                     let name = hv.name.as_str();
@@ -1791,6 +1941,23 @@ impl<'a> WasmLowering<'a> {
             Some("negate" | "negateInt#" | "GHC.Num.negate") if args.len() == 1 => {
                 instrs.push(WasmInstr::I32Const(0));
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::I32Sub);
+            }
+
+            // Derived `Enum` methods. A nullary constructor's runtime value is
+            // exactly its tag, so `fromEnum`/`toEnum` are identities and
+            // `succ`/`pred` step the tag by one.
+            Some(n) if args.len() == 1 && matches!(strip_qualifier(n), "fromEnum" | "toEnum") => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+            }
+            Some(n) if args.len() == 1 && strip_qualifier(n) == "succ" => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::I32Const(1));
+                instrs.push(WasmInstr::I32Add);
+            }
+            Some(n) if args.len() == 1 && strip_qualifier(n) == "pred" => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::I32Const(1));
                 instrs.push(WasmInstr::I32Sub);
             }
 
@@ -4941,6 +5108,23 @@ fn is_tuple_con(name: &str) -> bool {
         && name.starts_with('(')
         && name.ends_with(')')
         && name[1..name.len() - 1].chars().all(|c| c == ',')
+}
+
+/// Drop a module qualifier from a name (`GHC.Enum.succ` -> `succ`), leaving the
+/// final dotted segment. Operators (which may legitimately contain `.`) are
+/// returned unchanged.
+fn strip_qualifier(name: &str) -> &str {
+    match name.rsplit_once('.') {
+        Some((_, last))
+            if !last.is_empty()
+                && last
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '\'') =>
+        {
+            last
+        }
+        _ => name,
+    }
 }
 
 /// The element type of a list type `[e]`, if `ty` is one.

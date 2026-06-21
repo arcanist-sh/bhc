@@ -421,6 +421,12 @@ fn test_tier3_print_adt_wasm() {
     run_wasm_test("tier3_io/print_adt", Profile::Default);
 }
 
+// `print` of a String shows it quoted and escaped via the show_string runtime.
+#[test]
+fn test_tier3_print_string_wasm() {
+    run_wasm_test("tier3_io/print_string", Profile::Default);
+}
+
 // A constrained function passed to a polymorphic higher-order function, where
 // the instantiation is pinned by sibling value arguments. The dictionary is
 // resolved from the whole call's argument types.

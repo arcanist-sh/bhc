@@ -870,6 +870,13 @@ impl<'a> WasmLowering<'a> {
         locals: &mut FxHashMap<VarId, u32>,
         local_count: &mut u32,
     ) -> WasmResult<()> {
+        // A String value renders quoted and escaped (`show "a\"b" == "\"a\\\"b\""`),
+        // not as a list of characters — so handle it before the list paths.
+        if is_string_expr(arg) {
+            self.lower_expr(arg, instrs, locals, local_count, false)?;
+            instrs.push(WasmInstr::Call(self.runtime.show_string_idx));
+            return Ok(());
+        }
         // Structural show for statically-known compound values: lists, tuples,
         // and constructor applications with fields. Each element/field is shown
         // recursively (its type comes from its sub-expression).
@@ -3308,6 +3315,25 @@ fn list_element_ty(ty: &Ty) -> Option<&Ty> {
 /// real list, not a `String` (which has a length-prefixed representation). Only
 /// reports `true` for a concrete element type; polymorphic/erased elements are
 /// treated as ambiguous (`false`) so `++` defaults to string concatenation.
+/// Whether `expr` is a `String` value — a string literal or anything of type
+/// `[Char]` — for which `show` produces a quoted, escaped rendering.
+fn is_string_expr(expr: &Expr) -> bool {
+    let mut e = expr;
+    loop {
+        e = match e {
+            Expr::TyApp(inner, _, _)
+            | Expr::Cast(inner, _, _)
+            | Expr::Tick(_, inner, _)
+            | Expr::Lazy(inner, _) => inner,
+            _ => break,
+        };
+    }
+    if matches!(e, Expr::Lit(Literal::String(_), _, _)) {
+        return true;
+    }
+    matches!(list_element_ty(&e.ty()), Some(Ty::Con(c)) if c.name.as_str() == "Char")
+}
+
 fn is_nonstring_list_ty(ty: &Ty) -> bool {
     match list_element_ty(ty) {
         Some(Ty::Con(c)) => c.name.as_str() != "Char",

@@ -14874,6 +14874,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // structurally (via `infer_show_from_expr`) as well as by type,
                 // because the type is often erased to `Error` by codegen time —
                 // the greedy "boxed int" branch below would otherwise claim them.
+                // `print` on a String must show it *with quotes* (`print x =
+                // putStrLn (show x)`), unlike `putStrLn`/`putStr`. Route it
+                // through the show machinery too (the StringList descriptor adds
+                // the quotes), alongside the other compound types.
                 let compound_show = matches!(
                     self.infer_show_from_expr(val_expr).map(|(c, _, _)| c),
                     Some(
@@ -14881,9 +14885,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             | ShowCoerce::MaybeOf
                             | ShowCoerce::EitherOf
                             | ShowCoerce::Tuple2Of
+                            | ShowCoerce::StringList
                     )
                 ) || self.is_list_type(&expr_ty)
                     || self.expr_looks_like_list(val_expr)
+                    || self.is_string_type(&expr_ty)
                     || self.is_maybe_type(&expr_ty).is_some()
                     || self.is_either_type(&expr_ty).is_some()
                     || self.is_tuple_type(&expr_ty).is_some();
@@ -14993,9 +14999,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         val_expr: &Expr,
     ) -> CodegenResult<()> {
         let desc = self.build_show_descriptor(val_expr);
-        let show_fn = *self.functions.get(&VarId::new(1000099)).ok_or_else(|| {
-            CodegenError::Internal("bhc_show_with_desc not declared".to_string())
-        })?;
+        let show_fn = *self
+            .functions
+            .get(&VarId::new(1000099))
+            .ok_or_else(|| CodegenError::Internal("bhc_show_with_desc not declared".to_string()))?;
         let cstr = self
             .builder()
             .build_call(show_fn, &[p.into(), desc.into()], "show_desc")
@@ -15036,16 +15043,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
         let result = self
             .builder()
-            .build_indirect_call(fn_type, fn_ptr, &[null_env.into(), p.into()], "derived_show")
+            .build_indirect_call(
+                fn_type,
+                fn_ptr,
+                &[null_env.into(), p.into()],
+                "derived_show",
+            )
             .map_err(|e| CodegenError::Internal(format!("derived show call: {:?}", e)))?
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| CodegenError::Internal("derived show: returned void".to_string()))?;
         let list_ptr = self.value_to_ptr(result)?;
         self.lower_print_char_list_ptr(list_ptr)?;
-        let newline_fn = *self.functions.get(&VarId::new(1000010)).ok_or_else(|| {
-            CodegenError::Internal("bhc_print_newline not declared".to_string())
-        })?;
+        let newline_fn = *self
+            .functions
+            .get(&VarId::new(1000010))
+            .ok_or_else(|| CodegenError::Internal("bhc_print_newline not declared".to_string()))?;
         self.builder()
             .build_call(newline_fn, &[], "")
             .map_err(|e| CodegenError::Internal(format!("print newline: {:?}", e)))?;

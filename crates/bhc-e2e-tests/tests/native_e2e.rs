@@ -79,6 +79,12 @@ fn test_tier3_print_adt_native() {
     run_native_test("tier3_io/print_adt", Profile::Default);
 }
 
+// `print` of a String shows it quoted and escaped (unlike putStr/putStrLn).
+#[test]
+fn test_tier3_print_string_native() {
+    run_native_test("tier3_io/print_string", Profile::Default);
+}
+
 #[test]
 fn test_tier2_factorial_native() {
     run_native_test("tier2_functions/factorial", Profile::Default);

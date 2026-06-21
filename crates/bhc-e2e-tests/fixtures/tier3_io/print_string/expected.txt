@@ -1,0 +1,4 @@
+"hello"
+"with \"quotes\""
+Just "hi"
+plain

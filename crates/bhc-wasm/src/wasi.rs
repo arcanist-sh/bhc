@@ -1485,6 +1485,145 @@ pub fn generate_read_all(fd_read_idx: u32, alloc_idx: u32, heap_ptr_global: u32)
     func
 }
 
+/// Generate a `show_string` function: render a length-prefixed `String` the way
+/// `show` does — wrapped in double quotes with `"`, `\`, newline, tab and
+/// carriage-return escaped. Backs `print`/`show` of a `String` (which, unlike
+/// `putStr`, quotes). Returns a new length-prefixed string.
+///
+/// Reserves a worst-case buffer (every byte escaped to two), fills it, then
+/// rolls the heap pointer back to the exact bytes used.
+pub fn generate_show_string(alloc_idx: u32, heap_ptr_global: u32) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(vec![WasmType::I32], vec![WasmType::I32]));
+    func.name = Some("show_string".to_string());
+    func.exported = true;
+
+    // param 0 = input pstr
+    let inlen = func.add_local(WasmType::I32);
+    let out = func.add_local(WasmType::I32); // result base
+    let i = func.add_local(WasmType::I32); // input index
+    let pos = func.add_local(WasmType::I32); // output cursor (absolute address)
+    let b = func.add_local(WasmType::I32); // current byte
+    let esc = func.add_local(WasmType::I32); // escape's second char, 0 if none
+
+    // inlen = [param0]
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::LocalSet(inlen));
+    // out = alloc(6 + 2*inlen)   (4 header + 2 quotes + worst-case escapes)
+    func.emit(WasmInstr::I32Const(6));
+    func.emit(WasmInstr::LocalGet(inlen));
+    func.emit(WasmInstr::I32Const(2));
+    func.emit(WasmInstr::I32Mul);
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(out));
+    // pos = out + 4; write opening quote
+    func.emit(WasmInstr::LocalGet(out));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(pos));
+    emit_store_byte_advance(&mut func, pos, 34); // '"'
+                                                 // i = 0
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(i));
+
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    // if i >= inlen break
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::LocalGet(inlen));
+    func.emit(WasmInstr::I32GeU);
+    func.emit(WasmInstr::BrIf(1));
+    // b = load8(param0 + 4 + i)
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Load8U(0, 0));
+    func.emit(WasmInstr::LocalSet(b));
+    // esc = 0, then set per special byte
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(esc));
+    emit_esc_case(&mut func, b, esc, 34, 34); // '"'  -> \"
+    emit_esc_case(&mut func, b, esc, 92, 92); // '\\' -> \\
+    emit_esc_case(&mut func, b, esc, 10, 110); // \n  -> \n
+    emit_esc_case(&mut func, b, esc, 9, 116); // \t   -> \t
+    emit_esc_case(&mut func, b, esc, 13, 114); // \r  -> \r
+                                               // if esc != 0 { '\' ; esc } else { b }
+    func.emit(WasmInstr::LocalGet(esc));
+    func.emit(WasmInstr::If(None));
+    emit_store_byte_advance(&mut func, pos, 92); // '\'
+    func.emit(WasmInstr::LocalGet(pos));
+    func.emit(WasmInstr::LocalGet(esc));
+    func.emit(WasmInstr::I32Store8(0, 0));
+    func.emit(WasmInstr::LocalGet(pos));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(pos));
+    func.emit(WasmInstr::Else);
+    func.emit(WasmInstr::LocalGet(pos));
+    func.emit(WasmInstr::LocalGet(b));
+    func.emit(WasmInstr::I32Store8(0, 0));
+    func.emit(WasmInstr::LocalGet(pos));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(pos));
+    func.emit(WasmInstr::End);
+    // i++
+    func.emit(WasmInstr::LocalGet(i));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(i));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End); // loop
+    func.emit(WasmInstr::End); // block
+
+    // closing quote
+    emit_store_byte_advance(&mut func, pos, 34);
+    // [out] = pos - (out + 4)
+    func.emit(WasmInstr::LocalGet(out));
+    func.emit(WasmInstr::LocalGet(pos));
+    func.emit(WasmInstr::LocalGet(out));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::I32Store(2, 0));
+    // heap_ptr = align8(pos)
+    func.emit(WasmInstr::LocalGet(pos));
+    func.emit(WasmInstr::I32Const(7));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Const(-8));
+    func.emit(WasmInstr::I32And);
+    func.emit(WasmInstr::GlobalSet(heap_ptr_global));
+
+    func.emit(WasmInstr::LocalGet(out));
+    func.emit(WasmInstr::End);
+    func
+}
+
+/// Emit `mem[pos] = byte; pos += 1` for the absolute-address cursor `pos`.
+fn emit_store_byte_advance(func: &mut WasmFunc, pos: u32, byte: i32) {
+    func.emit(WasmInstr::LocalGet(pos));
+    func.emit(WasmInstr::I32Const(byte));
+    func.emit(WasmInstr::I32Store8(0, 0));
+    func.emit(WasmInstr::LocalGet(pos));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(pos));
+}
+
+/// Emit `if b == byte { esc = escaped }` (the escape's second character).
+fn emit_esc_case(func: &mut WasmFunc, b: u32, esc: u32, byte: i32, escaped: i32) {
+    func.emit(WasmInstr::LocalGet(b));
+    func.emit(WasmInstr::I32Const(byte));
+    func.emit(WasmInstr::I32Eq);
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::I32Const(escaped));
+    func.emit(WasmInstr::LocalSet(esc));
+    func.emit(WasmInstr::End);
+}
+
 /// Generate the _start function that calls main.
 ///
 /// This is the WASI entry point. It calls the Haskell main function

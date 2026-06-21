@@ -540,6 +540,13 @@ fn test_tier3_derive_foldable_wasm() {
     run_wasm_test("tier3_io/derive_foldable", Profile::Default);
 }
 
+// Derived Read for an enum: `read "Green" :: Color` resolves to the matching
+// constructor tag via the single-user-enum heuristic.
+#[test]
+fn test_tier3_derive_read_wasm() {
+    run_wasm_test("tier3_io/derive_read", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

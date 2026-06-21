@@ -470,7 +470,7 @@ impl<'a> WasmLowering<'a> {
         if let Expr::Var(hv, _) = head {
             match strip_qualifier(hv.name.as_str()) {
                 "succ" | "pred" if args.len() == 1 => return self.enum_names_of_expr(args[0]),
-                "toEnum" | "minBound" | "maxBound" => return self.sole_enum().cloned(),
+                "toEnum" | "minBound" | "maxBound" | "read" => return self.sole_enum().cloned(),
                 _ => {}
             }
         }
@@ -1839,6 +1839,31 @@ impl<'a> WasmLowering<'a> {
         Ok(true)
     }
 
+    /// For `read <string-literal>` of the sole derived-`Read` enum, the tag of
+    /// the constructor whose name matches the literal. Returns `None` if the
+    /// argument isn't a string literal, there isn't exactly one user enum, or no
+    /// constructor matches (a malformed `read` is left to the fallback).
+    fn read_enum_tag(&self, arg: &Expr) -> Option<i32> {
+        let mut e = arg;
+        loop {
+            e = match e {
+                Expr::TyApp(inner, _, _)
+                | Expr::Cast(inner, _, _)
+                | Expr::Tick(_, inner, _)
+                | Expr::Lazy(inner, _) => inner,
+                _ => break,
+            };
+        }
+        let Expr::Lit(Literal::String(sym), _, _) = e else {
+            return None;
+        };
+        let names = self.sole_enum()?;
+        names
+            .iter()
+            .position(|n| n == sym.as_str())
+            .map(|i| i as i32)
+    }
+
     /// The data type name of the value `expr` evaluates to, if its head is a
     /// known user constructor (recursing through `subst`-bound variables). Only
     /// resolves user ADTs — builtin Maybe/list constructors aren't recorded.
@@ -1908,6 +1933,15 @@ impl<'a> WasmLowering<'a> {
         if let Some(name) = peeled_name {
             if self.try_lower_functor_foldable(name, &args, instrs, locals, local_count)? {
                 return Ok(());
+            }
+            // Derived `Read` for an enum: `read "Green" :: Color` resolves to the
+            // constructor tag whose name matches the string literal (the type
+            // annotation is erased, so use the single-user-enum heuristic).
+            if strip_qualifier(name) == "read" && args.len() == 1 {
+                if let Some(tag) = self.read_enum_tag(args[0]) {
+                    instrs.push(WasmInstr::I32Const(tag));
+                    return Ok(());
+                }
             }
         }
 

@@ -64,6 +64,14 @@ fn test_tier2_fibonacci_native() {
     run_native_test("tier2_functions/fibonacci", Profile::Default);
 }
 
+// `print` of compound values — lists, Maybe, Either, tuples, and lists of
+// those — routes through the typed `show` machinery so elements/fields render
+// recursively instead of printing raw pointers.
+#[test]
+fn test_tier2_show_recursive_native() {
+    run_native_test("tier2_functions/show_recursive", Profile::Default);
+}
+
 #[test]
 fn test_tier2_factorial_native() {
     run_native_test("tier2_functions/factorial", Profile::Default);

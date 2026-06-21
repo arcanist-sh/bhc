@@ -14867,9 +14867,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // Pointer could be a boxed value from closure call, string, or ADT.
                 // Use the expression's type to decide how to print.
                 // Check list first - by type or by expression structure (for when type is Error)
-                if self.is_list_type(&expr_ty) || self.expr_looks_like_list(val_expr) {
-                    // Print list: [el1, el2, ...]
-                    self.print_list(p)?;
+                // Compound showable values (lists, Maybe, Either, tuples) must
+                // be rendered through the typed `show` machinery so their
+                // elements/fields show recursively instead of printing raw
+                // pointers — matching `print x = putStrLn (show x)`. Detect them
+                // structurally (via `infer_show_from_expr`) as well as by type,
+                // because the type is often erased to `Error` by codegen time —
+                // the greedy "boxed int" branch below would otherwise claim them.
+                let compound_show = matches!(
+                    self.infer_show_from_expr(val_expr).map(|(c, _, _)| c),
+                    Some(
+                        ShowCoerce::List
+                            | ShowCoerce::MaybeOf
+                            | ShowCoerce::EitherOf
+                            | ShowCoerce::Tuple2Of
+                    )
+                ) || self.is_list_type(&expr_ty)
+                    || self.expr_looks_like_list(val_expr)
+                    || self.is_maybe_type(&expr_ty).is_some()
+                    || self.is_either_type(&expr_ty).is_some()
+                    || self.is_tuple_type(&expr_ty).is_some();
+                if compound_show {
+                    self.print_via_show_desc(p, val_expr)?;
                 } else if self.is_bool_type(&expr_ty) || self.expr_looks_like_bool(val_expr) {
                     // Bool value - use extract_bool_tag which handles both Bool ADT
                     // (heap-allocated from any/all/even/odd/char predicates) and
@@ -14952,6 +14971,36 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Return unit
         Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+    }
+
+    /// Print a value by rendering it through the typed `show` machinery
+    /// (`bhc_show_with_desc`) and writing the result with a trailing newline —
+    /// i.e. `print x = putStrLn (show x)`. Used for compound types (lists,
+    /// Maybe, Either, tuples) whose elements/fields must be shown recursively
+    /// rather than printed as raw pointers.
+    fn print_via_show_desc(
+        &mut self,
+        p: inkwell::values::PointerValue<'ctx>,
+        val_expr: &Expr,
+    ) -> CodegenResult<()> {
+        let desc = self.build_show_descriptor(val_expr);
+        let show_fn = *self.functions.get(&VarId::new(1000099)).ok_or_else(|| {
+            CodegenError::Internal("bhc_show_with_desc not declared".to_string())
+        })?;
+        let cstr = self
+            .builder()
+            .build_call(show_fn, &[p.into(), desc.into()], "show_desc")
+            .map_err(|e| CodegenError::Internal(format!("show_with_desc call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("show_with_desc: returned void".to_string()))?;
+        let print_ln = *self.functions.get(&VarId::new(1000002)).ok_or_else(|| {
+            CodegenError::Internal("bhc_print_string_ln not declared".to_string())
+        })?;
+        self.builder()
+            .build_call(print_ln, &[cstr.into_pointer_value().into()], "")
+            .map_err(|e| CodegenError::Internal(format!("print_string_ln call failed: {:?}", e)))?;
+        Ok(())
     }
 
     /// Check if a type is an integer type.
@@ -15651,164 +15700,6 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             _ => false,
         }
-    }
-
-    /// Print a list value: [el1, el2, ...]
-    fn print_list(&mut self, list_ptr: inkwell::values::PointerValue<'ctx>) -> CodegenResult<()> {
-        let tm = self.type_mapper();
-        let ptr_type = tm.ptr_type();
-
-        let current_fn = self
-            .builder()
-            .get_insert_block()
-            .and_then(|b| b.get_parent())
-            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
-
-        // Get print functions
-        let print_char_fn = self
-            .functions
-            .get(&VarId::new(1000009))
-            .ok_or_else(|| CodegenError::Internal("bhc_print_char not declared".to_string()))?;
-        let print_int_fn = self
-            .functions
-            .get(&VarId::new(1000003))
-            .ok_or_else(|| CodegenError::Internal("bhc_print_int not declared".to_string()))?;
-
-        // Print opening bracket (print_char takes i32)
-        self.builder()
-            .build_call(
-                *print_char_fn,
-                &[tm.i32_type().const_int('[' as u64, false).into()],
-                "",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to print char: {:?}", e)))?;
-
-        // Create loop blocks
-        let entry_block = self
-            .builder()
-            .get_insert_block()
-            .ok_or_else(|| CodegenError::Internal("no current block".to_string()))?;
-        let loop_header = self
-            .llvm_ctx
-            .append_basic_block(current_fn, "print_list_header");
-        let loop_body = self
-            .llvm_ctx
-            .append_basic_block(current_fn, "print_list_body");
-        let loop_exit = self
-            .llvm_ctx
-            .append_basic_block(current_fn, "print_list_exit");
-
-        self.builder()
-            .build_unconditional_branch(loop_header)
-            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
-
-        // Loop header: phi for list and first flag
-        self.builder().position_at_end(loop_header);
-        let list_phi = self
-            .builder()
-            .build_phi(ptr_type, "print_list_ptr")
-            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
-        let is_first_phi = self
-            .builder()
-            .build_phi(tm.i64_type(), "is_first")
-            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
-
-        // Check if list is empty
-        let tag = self.extract_adt_tag(list_phi.as_basic_value().into_pointer_value())?;
-        let is_empty = self
-            .builder()
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                tag,
-                tm.i64_type().const_zero(),
-                "is_empty",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to compare tag: {:?}", e)))?;
-
-        self.builder()
-            .build_conditional_branch(is_empty, loop_exit, loop_body)
-            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
-
-        // Loop body: print separator if not first, then print element
-        self.builder().position_at_end(loop_body);
-
-        // Check if we need to print ", "
-        let need_separator = self
-            .builder()
-            .build_int_compare(
-                inkwell::IntPredicate::EQ,
-                is_first_phi.as_basic_value().into_int_value(),
-                tm.i64_type().const_zero(),
-                "need_sep",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
-
-        let sep_block = self.llvm_ctx.append_basic_block(current_fn, "print_sep");
-        let after_sep = self.llvm_ctx.append_basic_block(current_fn, "after_sep");
-
-        self.builder()
-            .build_conditional_branch(need_separator, sep_block, after_sep)
-            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
-
-        // Print the element separator. GHC's `show` for lists uses a bare comma
-        // (`[1,2,3]`), with no space after it.
-        self.builder().position_at_end(sep_block);
-        self.builder()
-            .build_call(
-                *print_char_fn,
-                &[tm.i32_type().const_int(',' as u64, false).into()],
-                "",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to print char: {:?}", e)))?;
-        self.builder()
-            .build_unconditional_branch(after_sep)
-            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
-
-        // Continue printing element
-        self.builder().position_at_end(after_sep);
-        let head_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 0)?;
-        let tail_ptr =
-            self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
-
-        // Print head as int (for now assume list of ints)
-        let head_int = self
-            .builder()
-            .build_ptr_to_int(head_ptr, tm.i64_type(), "head_int")
-            .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
-        self.builder()
-            .build_call(*print_int_fn, &[head_int.into()], "")
-            .map_err(|e| CodegenError::Internal(format!("failed to print int: {:?}", e)))?;
-
-        self.builder()
-            .build_unconditional_branch(loop_header)
-            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
-
-        // Update phi nodes
-        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, after_sep)]);
-        is_first_phi.add_incoming(&[
-            (&tm.i64_type().const_int(1, false), entry_block),
-            (&tm.i64_type().const_zero(), after_sep),
-        ]);
-
-        // Loop exit: print closing bracket and newline
-        self.builder().position_at_end(loop_exit);
-        self.builder()
-            .build_call(
-                *print_char_fn,
-                &[tm.i32_type().const_int(']' as u64, false).into()],
-                "",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to print char: {:?}", e)))?;
-        self.builder()
-            .build_call(
-                *print_char_fn,
-                &[tm.i32_type().const_int('\n' as u64, false).into()],
-                "",
-            )
-            .map_err(|e| CodegenError::Internal(format!("failed to print char: {:?}", e)))?;
-
-        Ok(())
     }
 
     /// Lower `getLine` - read a line from stdin via RTS `bhc_getLine`.

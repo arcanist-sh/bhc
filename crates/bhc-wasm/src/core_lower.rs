@@ -2737,6 +2737,20 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "odd",
     "divMod",
     "quotRem",
+    "min",
+    "max",
+    "subtract",
+    "foldl1",
+    "foldr1",
+    "flip",
+    "const",
+    "isDigit",
+    "isUpper",
+    "isLower",
+    "isAlpha",
+    "isSpace",
+    "toUpper",
+    "toLower",
 ];
 
 /// Whether any binding in the module references `name`.
@@ -3697,6 +3711,199 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
                     pref(cmp, id),
                     papp2(pref("rem", id), pev(&n), pint(2)),
                     pint(0),
+                ),
+            )
+        }
+        // min/max a b = if a `op` b then a else b
+        "min" | "max" => {
+            let op = if name == "max" { ">=" } else { "<=" };
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            plam(
+                a.clone(),
+                plam(
+                    b.clone(),
+                    pcase(
+                        papp2(pref(op, id), pev(&a), pev(&b)),
+                        vec![
+                            palt("False", 0, 0, vec![], pev(&b)),
+                            palt("True", 1, 0, vec![], pev(&a)),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // subtract n x = x - n
+        "subtract" => {
+            let n = pv("n", fresh(id));
+            let x = pv("x", fresh(id));
+            plam(
+                n.clone(),
+                plam(x.clone(), papp2(pref("-", id), pev(&x), pev(&n))),
+            )
+        }
+        // foldl1 f xs = case xs of (y:ys) -> foldl f y ys
+        "foldl1" => {
+            let f = pv("f", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            plam(
+                f.clone(),
+                plam(
+                    xs.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt("[]", 0, 0, vec![], pint(0)),
+                            palt(
+                                ":",
+                                1,
+                                2,
+                                vec![y.clone(), ys.clone()],
+                                papp(papp2(pref("foldl", id), pev(&f), pev(&y)), pev(&ys)),
+                            ),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // foldr1 f xs = case xs of (y:ys) -> case ys of { [] -> y; _ -> f y (foldr1 f ys) }
+        "foldr1" => {
+            let f = pv("f", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let z = pv("z", fresh(id));
+            let zs = pv("zs", fresh(id));
+            let inner = pcase(
+                pev(&ys),
+                vec![
+                    palt("[]", 0, 0, vec![], pev(&y)),
+                    palt(
+                        ":",
+                        1,
+                        2,
+                        vec![z.clone(), zs.clone()],
+                        papp2(
+                            pev(&f),
+                            pev(&y),
+                            papp2(pref("foldr1", id), pev(&f), pev(&ys)),
+                        ),
+                    ),
+                ],
+            );
+            plam(
+                f.clone(),
+                plam(
+                    xs.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt("[]", 0, 0, vec![], pint(0)),
+                            palt(":", 1, 2, vec![y.clone(), ys.clone()], inner),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // flip f a b = f b a
+        "flip" => {
+            let f = pv("f", fresh(id));
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            plam(
+                f.clone(),
+                plam(a.clone(), plam(b.clone(), papp2(pev(&f), pev(&b), pev(&a)))),
+            )
+        }
+        // const a b = a
+        "const" => {
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            plam(a.clone(), plam(b, pev(&a)))
+        }
+        // Char predicates on the codepoint: range checks.
+        "isDigit" | "isUpper" | "isLower" => {
+            let (lo, hi) = match name {
+                "isDigit" => (48, 57),
+                "isUpper" => (65, 90),
+                _ => (97, 122),
+            };
+            let c = pv("c", fresh(id));
+            plam(
+                c.clone(),
+                pcase(
+                    papp2(pref(">=", id), pev(&c), pint(lo)),
+                    vec![
+                        palt("False", 0, 0, vec![], pref("False", id)),
+                        palt(
+                            "True",
+                            1,
+                            0,
+                            vec![],
+                            papp2(pref("<=", id), pev(&c), pint(hi)),
+                        ),
+                    ],
+                ),
+            )
+        }
+        // isAlpha c = isUpper c || isLower c
+        "isAlpha" => {
+            let c = pv("c", fresh(id));
+            plam(
+                c.clone(),
+                pcase(
+                    papp(pref("isUpper", id), pev(&c)),
+                    vec![
+                        palt("False", 0, 0, vec![], papp(pref("isLower", id), pev(&c))),
+                        palt("True", 1, 0, vec![], pref("True", id)),
+                    ],
+                ),
+            )
+        }
+        // isSpace c = c==32 || c==9 || c==10 || c==13
+        "isSpace" => {
+            let c = pv("c", fresh(id));
+            let or_eq = |val: i64, alt: Expr, id: &mut usize| {
+                pcase(
+                    papp2(pref("==", id), pev(&c), pint(val)),
+                    vec![
+                        palt("False", 0, 0, vec![], alt),
+                        palt("True", 1, 0, vec![], pref("True", id)),
+                    ],
+                )
+            };
+            let e = pref("False", id);
+            let e = or_eq(13, e, id);
+            let e = or_eq(10, e, id);
+            let e = or_eq(9, e, id);
+            let e = or_eq(32, e, id);
+            plam(c.clone(), e)
+        }
+        // toUpper c = if isLower c then c - 32 else c
+        // toLower c = if isUpper c then c + 32 else c
+        "toUpper" | "toLower" => {
+            let (test, op, delta) = if name == "toUpper" {
+                ("isLower", "-", 32)
+            } else {
+                ("isUpper", "+", 32)
+            };
+            let c = pv("c", fresh(id));
+            plam(
+                c.clone(),
+                pcase(
+                    papp(pref(test, id), pev(&c)),
+                    vec![
+                        palt("False", 0, 0, vec![], pev(&c)),
+                        palt(
+                            "True",
+                            1,
+                            0,
+                            vec![],
+                            papp2(pref(op, id), pev(&c), pint(delta)),
+                        ),
+                    ],
                 ),
             )
         }

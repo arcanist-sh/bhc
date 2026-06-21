@@ -450,6 +450,22 @@ fn test_tier3_divmod_wasm() {
     run_wasm_test("tier3_io/divmod", Profile::Default);
 }
 
+// min/max/subtract, foldl1/foldr1, flip/const, and Char predicates.
+#[test]
+fn test_tier3_fold_misc_wasm() {
+    run_wasm_test("tier3_io/fold_misc", Profile::Default);
+}
+
+#[test]
+fn test_tier3_flip_test_wasm() {
+    run_wasm_test("tier3_io/flip_test", Profile::Default);
+}
+
+#[test]
+fn test_tier3_any_all_wasm() {
+    run_wasm_test("tier3_io/any_all", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

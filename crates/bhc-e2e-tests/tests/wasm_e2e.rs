@@ -362,3 +362,11 @@ fn test_tier2_list_append_wasm() {
 fn test_tier2_heap_grow_wasm() {
     run_wasm_test("tier2_functions/heap_grow", Profile::Edge);
 }
+
+// Tail-call optimization: self-tail-recursive functions compile to a WASM
+// loop, so they run in constant stack (100K iterations would overflow the
+// call stack without TCO).
+#[test]
+fn test_tier2_tco_wasm() {
+    run_wasm_test("tier2_functions/tco", Profile::Default);
+}

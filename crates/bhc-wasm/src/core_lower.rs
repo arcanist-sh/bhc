@@ -42,6 +42,24 @@ enum Cont {
     /// Print the expression as a string and leave the IO result (`0`) on the
     /// stack. `newline` selects `putStrLn` vs `putStr` semantics.
     PrintStr { newline: bool },
+    /// Tail position of a self-recursive function being compiled to a loop
+    /// (tail-call optimization). At each leaf: a saturated self-call reassigns
+    /// the parameters and sets the `continue` flag; any other expression sets
+    /// the `result` and clears the flag. Leaves no value on the stack.
+    Tail,
+}
+
+/// Context for tail-call optimization of the function currently being lowered.
+#[derive(Clone)]
+struct TcoCtx {
+    /// Name of the self-recursive function (to detect self-calls).
+    name: Symbol,
+    /// Local indices of the function's parameters, in order.
+    params: Vec<u32>,
+    /// Local holding the "continue looping" flag.
+    continue_local: u32,
+    /// Local holding the function's result value.
+    result_local: u32,
 }
 
 /// How a value should be rendered by `show`/`print`.
@@ -238,6 +256,9 @@ struct WasmLowering<'a> {
     /// Counter for fresh variable ids used when eta-expanding partial
     /// applications. Starts high to avoid colliding with real program ids.
     next_synthetic_id: usize,
+    /// Tail-call-optimization context for the function currently being lowered,
+    /// if it is self-recursive. Drives `Cont::Tail` lowering.
+    tco_ctx: Option<TcoCtx>,
 }
 
 impl<'a> WasmLowering<'a> {
@@ -259,6 +280,7 @@ impl<'a> WasmLowering<'a> {
             pending_closures: Vec::new(),
             arities: FxHashMap::default(),
             next_synthetic_id: 5_000_000,
+            tco_ctx: None,
         }
     }
 
@@ -377,10 +399,41 @@ impl<'a> WasmLowering<'a> {
             locals.insert(param.id, i as u32);
         }
 
-        // Lower the body expression
+        // Lower the body expression. A self-recursive function (with at least
+        // one parameter, not `main`) is compiled with tail-call optimization:
+        // its body runs inside a loop, and tail self-calls reassign parameters
+        // and loop instead of growing the stack.
         let mut instrs = Vec::new();
         let mut local_count = params.len() as u32;
-        self.lower_expr(body, &mut instrs, &mut locals, &mut local_count, is_main)?;
+        if !is_main && !params.is_empty() && expr_uses_name(body, name) {
+            let continue_local = local_count;
+            local_count += 1;
+            let result_local = local_count;
+            local_count += 1;
+            self.tco_ctx = Some(TcoCtx {
+                name,
+                params: (0..params.len() as u32).collect(),
+                continue_local,
+                result_local,
+            });
+            instrs.push(WasmInstr::Loop(None));
+            self.lower_cont(
+                body,
+                Cont::Tail,
+                &mut instrs,
+                &mut locals,
+                &mut local_count,
+                false,
+            )?;
+            // Loop again while the continue flag is set (br 0 = this loop).
+            instrs.push(WasmInstr::LocalGet(continue_local));
+            instrs.push(WasmInstr::BrIf(0));
+            instrs.push(WasmInstr::End); // end loop
+            instrs.push(WasmInstr::LocalGet(result_local));
+            self.tco_ctx = None;
+        } else {
+            self.lower_expr(body, &mut instrs, &mut locals, &mut local_count, is_main)?;
+        }
 
         // For main: if the body was an IO action (returns nothing useful),
         // ensure we return 0
@@ -1923,6 +1976,9 @@ impl<'a> WasmLowering<'a> {
             Cont::Value => {
                 return self.lower_expr(expr, instrs, locals, local_count, is_main);
             }
+            Cont::Tail => {
+                return self.lower_tail(expr, instrs, locals, local_count);
+            }
             Cont::PrintStr { newline } => newline,
         };
 
@@ -1945,6 +2001,97 @@ impl<'a> WasmLowering<'a> {
         // IO action returns a dummy value.
         instrs.push(WasmInstr::I32Const(0));
         Ok(())
+    }
+
+    /// Lower an expression in tail position (TCO). `case` branches are
+    /// themselves tail positions and recurse; everything else is a leaf.
+    fn lower_tail(
+        &mut self,
+        expr: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        match expr {
+            Expr::Case(scrut, alts, _, _) => {
+                self.lower_case(scrut, alts, Cont::Tail, instrs, locals, local_count, false)
+            }
+            Expr::TyApp(i, _, _)
+            | Expr::Cast(i, _, _)
+            | Expr::Tick(_, i, _)
+            | Expr::Lazy(i, _)
+            | Expr::TyLam(_, i, _) => self.lower_tail(i, instrs, locals, local_count),
+            _ => self.lower_tail_leaf(expr, instrs, locals, local_count),
+        }
+    }
+
+    /// Lower a tail-position leaf: a saturated self-call loops (reassign
+    /// parameters, set the continue flag); anything else sets the result and
+    /// clears the flag. (A non-tail self-call nested in a value leaf stays a
+    /// normal recursive `Call`.)
+    fn lower_tail_leaf(
+        &mut self,
+        expr: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let ctx = self
+            .tco_ctx
+            .clone()
+            .expect("lower_tail_leaf requires an active TCO context");
+        let (head, args) = collect_app_spine(peel_show_wrappers(expr));
+        if let Expr::Var(v, _) = head {
+            if v.name == ctx.name && args.len() == ctx.params.len() {
+                // Tail self-call: evaluate all args into fresh temporaries first
+                // (an arg may read the old parameters), then assign parameters.
+                let mut temps = Vec::with_capacity(args.len());
+                for arg in &args {
+                    self.lower_expr(arg, instrs, locals, local_count, false)?;
+                    let t = *local_count;
+                    *local_count += 1;
+                    instrs.push(WasmInstr::LocalSet(t));
+                    temps.push(t);
+                }
+                for (t, p) in temps.iter().zip(ctx.params.iter()) {
+                    instrs.push(WasmInstr::LocalGet(*t));
+                    instrs.push(WasmInstr::LocalSet(*p));
+                }
+                instrs.push(WasmInstr::I32Const(1));
+                instrs.push(WasmInstr::LocalSet(ctx.continue_local));
+                return Ok(());
+            }
+        }
+        // Value leaf: compute it, store as the result, stop looping.
+        self.lower_expr(expr, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalSet(ctx.result_local));
+        instrs.push(WasmInstr::I32Const(0));
+        instrs.push(WasmInstr::LocalSet(ctx.continue_local));
+        Ok(())
+    }
+
+    /// The block result type for lowering a case alternative under `cont`: a
+    /// `Tail` alt leaves nothing (it sets locals), others leave an `i32`.
+    fn cont_block_type(cont: Cont) -> Option<WasmType> {
+        match cont {
+            Cont::Tail => None,
+            _ => Some(WasmType::I32),
+        }
+    }
+
+    /// Emit the fallback for a case alternative with no matching default: a
+    /// dummy `0` value for value/print conts, or "stop looping" for `Tail`.
+    fn emit_cont_fallback(&self, cont: Cont, instrs: &mut Vec<WasmInstr>) {
+        match cont {
+            Cont::Tail => {
+                let ctx = self.tco_ctx.as_ref().expect("Tail cont without context");
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::LocalSet(ctx.result_local));
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::LocalSet(ctx.continue_local));
+            }
+            _ => instrs.push(WasmInstr::I32Const(0)),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2019,8 +2166,8 @@ impl<'a> WasmLowering<'a> {
             }
             self.lower_cont(&def.rhs, cont, instrs, locals, local_count, is_main)?;
         } else {
-            // No alternatives at all - push 0
-            instrs.push(WasmInstr::I32Const(0));
+            // No alternatives at all.
+            self.emit_cont_fallback(cont, instrs);
         }
 
         Ok(())
@@ -2056,7 +2203,7 @@ impl<'a> WasmLowering<'a> {
             instrs.push(WasmInstr::LocalGet(scrut_local));
             instrs.push(WasmInstr::I32Const(lit_val));
             instrs.push(WasmInstr::I32Eq);
-            instrs.push(WasmInstr::If(Some(WasmType::I32)));
+            instrs.push(WasmInstr::If(Self::cont_block_type(cont)));
 
             // Bind scrutinee to binder if present
             if let Some(binder) = alt.binders.first() {
@@ -2076,8 +2223,7 @@ impl<'a> WasmLowering<'a> {
                     }
                     self.lower_cont(&def.rhs, cont, instrs, locals, local_count, is_main)?;
                 } else {
-                    // No default - unreachable or just push 0
-                    instrs.push(WasmInstr::I32Const(0));
+                    self.emit_cont_fallback(cont, instrs);
                 }
             }
         }
@@ -2152,7 +2298,7 @@ impl<'a> WasmLowering<'a> {
             instrs.push(WasmInstr::LocalGet(tag_local));
             instrs.push(WasmInstr::I32Const(tag));
             instrs.push(WasmInstr::I32Eq);
-            instrs.push(WasmInstr::If(Some(WasmType::I32)));
+            instrs.push(WasmInstr::If(Self::cont_block_type(cont)));
 
             // Extract field binders from the heap object
             for (fi, binder) in alt.binders.iter().enumerate() {
@@ -2177,7 +2323,7 @@ impl<'a> WasmLowering<'a> {
                     }
                     self.lower_cont(&def.rhs, cont, instrs, locals, local_count, is_main)?;
                 } else {
-                    instrs.push(WasmInstr::I32Const(0));
+                    self.emit_cont_fallback(cont, instrs);
                 }
             }
         }

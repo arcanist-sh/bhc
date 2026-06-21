@@ -2770,6 +2770,16 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "isInfixOf",
     "__listAppend",
     "otherwise",
+    "deleteBy",
+    "intersectBy",
+    "nubBy",
+    "groupBy",
+    "insert",
+    "unionBy",
+    "sortOn",
+    "__insertOn",
+    "mapAccumL",
+    "mapAccumR",
 ];
 
 /// Whether any binding in the module references `name`.
@@ -4382,6 +4392,413 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
         }
         // otherwise = True (a CAF, not a function)
         "otherwise" => pref("True", id),
+        // deleteBy eq x xs = case xs of { [] -> []; (y:ys) -> case eq x y of { True -> ys; False -> y : deleteBy eq x ys } }
+        "deleteBy" => {
+            let eq = pv("eq", fresh(id));
+            let x = pv("x", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let cons = pcase(
+                papp2(pev(&eq), pev(&x), pev(&y)),
+                vec![
+                    palt(
+                        "False",
+                        0,
+                        0,
+                        vec![],
+                        papp2(
+                            pref(":", id),
+                            pev(&y),
+                            papp(papp2(pref("deleteBy", id), pev(&eq), pev(&x)), pev(&ys)),
+                        ),
+                    ),
+                    palt("True", 1, 0, vec![], pev(&ys)),
+                ],
+            );
+            plam(
+                eq.clone(),
+                plam(
+                    x.clone(),
+                    plam(
+                        xs.clone(),
+                        pcase(
+                            pev(&xs),
+                            vec![
+                                palt("[]", 0, 0, vec![], pref("[]", id)),
+                                palt(":", 1, 2, vec![y.clone(), ys.clone()], cons),
+                            ],
+                        ),
+                    ),
+                ),
+            )
+        }
+        // intersectBy eq xs ys = filter (\x -> any (eq x) ys) xs
+        "intersectBy" => {
+            let eq = pv("eq", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let x = pv("x", fresh(id));
+            let pred = plam(
+                x.clone(),
+                papp2(pref("any", id), papp(pev(&eq), pev(&x)), pev(&ys)),
+            );
+            plam(
+                eq.clone(),
+                plam(
+                    xs.clone(),
+                    plam(ys.clone(), papp2(pref("filter", id), pred, pev(&xs))),
+                ),
+            )
+        }
+        // nubBy eq xs = case xs of { [] -> []; (y:ys) -> y : nubBy eq (filter (\z -> not (eq y z)) ys) }
+        "nubBy" => {
+            let eq = pv("eq", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let z = pv("z", fresh(id));
+            let keep = plam(
+                z.clone(),
+                papp(pref("not", id), papp2(pev(&eq), pev(&y), pev(&z))),
+            );
+            let cons = papp2(
+                pref(":", id),
+                pev(&y),
+                papp2(
+                    pref("nubBy", id),
+                    pev(&eq),
+                    papp2(pref("filter", id), keep, pev(&ys)),
+                ),
+            );
+            plam(
+                eq.clone(),
+                plam(
+                    xs.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt("[]", 0, 0, vec![], pref("[]", id)),
+                            palt(":", 1, 2, vec![y.clone(), ys.clone()], cons),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // groupBy eq xs = case xs of
+        //   [] -> []
+        //   (y:ys) -> case span (eq y) ys of (g, rest) -> (y : g) : groupBy eq rest
+        "groupBy" => {
+            let eq = pv("eq", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let g = pv("g", fresh(id));
+            let rest = pv("rest", fresh(id));
+            let split = pcase(
+                papp2(pref("span", id), papp(pev(&eq), pev(&y)), pev(&ys)),
+                vec![palt(
+                    "(,)",
+                    0,
+                    2,
+                    vec![g.clone(), rest.clone()],
+                    papp2(
+                        pref(":", id),
+                        papp2(pref(":", id), pev(&y), pev(&g)),
+                        papp2(pref("groupBy", id), pev(&eq), pev(&rest)),
+                    ),
+                )],
+            );
+            plam(
+                eq.clone(),
+                plam(
+                    xs.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt("[]", 0, 0, vec![], pref("[]", id)),
+                            palt(":", 1, 2, vec![y.clone(), ys.clone()], split),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // insert x xs = case xs of { [] -> [x]; (y:ys) -> case x <= y of { True -> x:y:ys; False -> y : insert x ys } }
+        "insert" => {
+            let x = pv("x", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let cons = pcase(
+                papp2(pref("<=", id), pev(&x), pev(&y)),
+                vec![
+                    palt(
+                        "False",
+                        0,
+                        0,
+                        vec![],
+                        papp2(
+                            pref(":", id),
+                            pev(&y),
+                            papp2(pref("insert", id), pev(&x), pev(&ys)),
+                        ),
+                    ),
+                    palt(
+                        "True",
+                        1,
+                        0,
+                        vec![],
+                        papp2(
+                            pref(":", id),
+                            pev(&x),
+                            papp2(pref(":", id), pev(&y), pev(&ys)),
+                        ),
+                    ),
+                ],
+            );
+            plam(
+                x.clone(),
+                plam(
+                    xs.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt(
+                                "[]",
+                                0,
+                                0,
+                                vec![],
+                                papp2(pref(":", id), pev(&x), pref("[]", id)),
+                            ),
+                            palt(":", 1, 2, vec![y.clone(), ys.clone()], cons),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // unionBy eq xs ys = __listAppend xs (foldl (\acc x -> deleteBy eq x acc) (nubBy eq ys) xs)
+        "unionBy" => {
+            let eq = pv("eq", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let acc = pv("acc", fresh(id));
+            let x = pv("x", fresh(id));
+            let step = plam(
+                acc.clone(),
+                plam(
+                    x.clone(),
+                    papp(papp2(pref("deleteBy", id), pev(&eq), pev(&x)), pev(&acc)),
+                ),
+            );
+            let folded = papp(
+                papp2(
+                    pref("foldl", id),
+                    step,
+                    papp2(pref("nubBy", id), pev(&eq), pev(&ys)),
+                ),
+                pev(&xs),
+            );
+            plam(
+                eq.clone(),
+                plam(
+                    xs.clone(),
+                    plam(
+                        ys.clone(),
+                        papp2(pref("__listAppend", id), pev(&xs), folded),
+                    ),
+                ),
+            )
+        }
+        // __insertOn f x ys = case ys of { [] -> [x]; (y:rest) -> case f x <= f y of { True -> x:y:rest; False -> y : __insertOn f x rest } }
+        "__insertOn" => {
+            let f = pv("f", fresh(id));
+            let x = pv("x", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let y = pv("y", fresh(id));
+            let rest = pv("rest", fresh(id));
+            let cons = pcase(
+                papp2(
+                    pref("<=", id),
+                    papp(pev(&f), pev(&x)),
+                    papp(pev(&f), pev(&y)),
+                ),
+                vec![
+                    palt(
+                        "False",
+                        0,
+                        0,
+                        vec![],
+                        papp2(
+                            pref(":", id),
+                            pev(&y),
+                            papp(papp2(pref("__insertOn", id), pev(&f), pev(&x)), pev(&rest)),
+                        ),
+                    ),
+                    palt(
+                        "True",
+                        1,
+                        0,
+                        vec![],
+                        papp2(
+                            pref(":", id),
+                            pev(&x),
+                            papp2(pref(":", id), pev(&y), pev(&rest)),
+                        ),
+                    ),
+                ],
+            );
+            plam(
+                f.clone(),
+                plam(
+                    x.clone(),
+                    plam(
+                        ys.clone(),
+                        pcase(
+                            pev(&ys),
+                            vec![
+                                palt(
+                                    "[]",
+                                    0,
+                                    0,
+                                    vec![],
+                                    papp2(pref(":", id), pev(&x), pref("[]", id)),
+                                ),
+                                palt(":", 1, 2, vec![y.clone(), rest.clone()], cons),
+                            ],
+                        ),
+                    ),
+                ),
+            )
+        }
+        // sortOn f xs = foldr (\x acc -> __insertOn f x acc) [] xs
+        "sortOn" => {
+            let f = pv("f", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let x = pv("x", fresh(id));
+            let acc = pv("acc", fresh(id));
+            let step = plam(
+                x.clone(),
+                plam(
+                    acc.clone(),
+                    papp(papp2(pref("__insertOn", id), pev(&f), pev(&x)), pev(&acc)),
+                ),
+            );
+            plam(
+                f.clone(),
+                plam(
+                    xs.clone(),
+                    papp(papp2(pref("foldr", id), step, pref("[]", id)), pev(&xs)),
+                ),
+            )
+        }
+        // mapAccumL f acc xs = case xs of
+        //   [] -> (acc, [])
+        //   (y:ys) -> case f acc y of (acc1,z) -> case mapAccumL f acc1 ys of (acc2,zs) -> (acc2, z:zs)
+        "mapAccumL" => {
+            let f = pv("f", fresh(id));
+            let acc = pv("acc", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let acc1 = pv("acc1", fresh(id));
+            let z = pv("z", fresh(id));
+            let acc2 = pv("acc2", fresh(id));
+            let zs = pv("zs", fresh(id));
+            let rec = pcase(
+                papp(papp2(pref("mapAccumL", id), pev(&f), pev(&acc1)), pev(&ys)),
+                vec![palt(
+                    "(,)",
+                    0,
+                    2,
+                    vec![acc2.clone(), zs.clone()],
+                    papp2(
+                        pref("(,)", id),
+                        pev(&acc2),
+                        papp2(pref(":", id), pev(&z), pev(&zs)),
+                    ),
+                )],
+            );
+            let cons = pcase(
+                papp2(pev(&f), pev(&acc), pev(&y)),
+                vec![palt("(,)", 0, 2, vec![acc1.clone(), z.clone()], rec)],
+            );
+            plam(
+                f.clone(),
+                plam(
+                    acc.clone(),
+                    plam(
+                        xs.clone(),
+                        pcase(
+                            pev(&xs),
+                            vec![
+                                palt(
+                                    "[]",
+                                    0,
+                                    0,
+                                    vec![],
+                                    papp2(pref("(,)", id), pev(&acc), pref("[]", id)),
+                                ),
+                                palt(":", 1, 2, vec![y.clone(), ys.clone()], cons),
+                            ],
+                        ),
+                    ),
+                ),
+            )
+        }
+        // mapAccumR f acc xs = case xs of
+        //   [] -> (acc, [])
+        //   (y:ys) -> case mapAccumR f acc ys of (acc1,zs) -> case f acc1 y of (acc2,z) -> (acc2, z:zs)
+        "mapAccumR" => {
+            let f = pv("f", fresh(id));
+            let acc = pv("acc", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let acc1 = pv("acc1", fresh(id));
+            let zs = pv("zs", fresh(id));
+            let acc2 = pv("acc2", fresh(id));
+            let z = pv("z", fresh(id));
+            let inner = pcase(
+                papp2(pev(&f), pev(&acc1), pev(&y)),
+                vec![palt(
+                    "(,)",
+                    0,
+                    2,
+                    vec![acc2.clone(), z.clone()],
+                    papp2(
+                        pref("(,)", id),
+                        pev(&acc2),
+                        papp2(pref(":", id), pev(&z), pev(&zs)),
+                    ),
+                )],
+            );
+            let cons = pcase(
+                papp(papp2(pref("mapAccumR", id), pev(&f), pev(&acc)), pev(&ys)),
+                vec![palt("(,)", 0, 2, vec![acc1.clone(), zs.clone()], inner)],
+            );
+            plam(
+                f.clone(),
+                plam(
+                    acc.clone(),
+                    plam(
+                        xs.clone(),
+                        pcase(
+                            pev(&xs),
+                            vec![
+                                palt(
+                                    "[]",
+                                    0,
+                                    0,
+                                    vec![],
+                                    papp2(pref("(,)", id), pev(&acc), pref("[]", id)),
+                                ),
+                                palt(":", 1, 2, vec![y.clone(), ys.clone()], cons),
+                            ],
+                        ),
+                    ),
+                ),
+            )
+        }
         _ => return None,
     };
     Some((pv(name, fresh(id)), body))
@@ -4492,6 +4909,19 @@ fn is_list_returning_fn(name: &str) -> bool {
             | "enumFromTo"
             | "takeWhile"
             | "dropWhile"
+            | "reverse"
+            | "intersect"
+            | "scanl"
+            | "scanl1"
+            | "scanr"
+            | "concat"
+            | "concatMap"
+            | "sortOn"
+            | "nubBy"
+            | "deleteBy"
+            | "unionBy"
+            | "intersectBy"
+            | "insert"
     )
 }
 

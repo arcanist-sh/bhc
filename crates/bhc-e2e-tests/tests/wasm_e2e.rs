@@ -499,6 +499,13 @@ fn test_tier3_pattern_guards_wasm() {
     run_wasm_test("tier3_io/pattern_guards", Profile::Default);
 }
 
+// Harder list fns: sortOn, nubBy, groupBy, deleteBy, unionBy, intersectBy,
+// insert, mapAccumL/mapAccumR.
+#[test]
+fn test_tier3_list_by_ops_wasm() {
+    run_wasm_test("tier3_io/list_by_ops", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

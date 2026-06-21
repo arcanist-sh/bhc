@@ -76,6 +76,8 @@ enum ShowKind {
     /// A statically known rendering — a nullary constructor's name
     /// (`True`, `Red`, `Nothing`, `[]`, `()`, ...).
     Literal(String),
+    /// An `Ordering` value, rendered `LT`/`EQ`/`GT` from its tag (0/1/2).
+    Ordering,
 }
 
 /// Build a map of well-known constructors to their tag and arity.
@@ -96,6 +98,10 @@ fn well_known_constructors() -> FxHashMap<String, ConInfo> {
     // Either
     m.insert("Left".to_string(), ConInfo { tag: 0, arity: 1 });
     m.insert("Right".to_string(), ConInfo { tag: 1, arity: 1 });
+    // Ordering
+    m.insert("LT".to_string(), ConInfo { tag: 0, arity: 0 });
+    m.insert("EQ".to_string(), ConInfo { tag: 1, arity: 0 });
+    m.insert("GT".to_string(), ConInfo { tag: 2, arity: 0 });
     // List
     m.insert("[]".to_string(), ConInfo { tag: 0, arity: 0 });
     m.insert(":".to_string(), ConInfo { tag: 1, arity: 2 });
@@ -957,6 +963,30 @@ impl<'a> WasmLowering<'a> {
                 self.lower_expr(arg, instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
             }
+            ShowKind::Ordering => {
+                // Render the Ordering tag (0/1/2) as LT/EQ/GT.
+                let lt = self.intern_pstr("LT") as i32;
+                let eq = self.intern_pstr("EQ") as i32;
+                let gt = self.intern_pstr("GT") as i32;
+                let tag = *local_count;
+                *local_count += 1;
+                self.lower_expr(arg, instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::LocalSet(tag));
+                instrs.push(WasmInstr::LocalGet(tag));
+                instrs.push(WasmInstr::I32Eqz);
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::I32Const(lt));
+                instrs.push(WasmInstr::Else);
+                instrs.push(WasmInstr::LocalGet(tag));
+                instrs.push(WasmInstr::I32Const(1));
+                instrs.push(WasmInstr::I32Eq);
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::I32Const(eq));
+                instrs.push(WasmInstr::Else);
+                instrs.push(WasmInstr::I32Const(gt));
+                instrs.push(WasmInstr::End);
+                instrs.push(WasmInstr::End);
+            }
         }
         Ok(())
     }
@@ -1191,6 +1221,9 @@ impl<'a> WasmLowering<'a> {
                     }
                     if returns_double_fn(name) {
                         return ShowKind::Double;
+                    }
+                    if matches!(name, "compare" | "GHC.Classes.compare") {
+                        return ShowKind::Ordering;
                     }
                 }
                 ShowKind::Int
@@ -2780,6 +2813,9 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "__insertOn",
     "mapAccumL",
     "mapAccumR",
+    "compare",
+    "maximumBy",
+    "minimumBy",
 ];
 
 /// Whether any binding in the module references `name`.
@@ -4797,6 +4833,62 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
                         ),
                     ),
                 ),
+            )
+        }
+        // compare a b = case a < b of { True -> LT; False -> case a == b of { True -> EQ; False -> GT } }
+        // Works for Int and for nullary (enum) constructors, whose runtime value
+        // is the constructor tag.
+        "compare" => {
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            let eq_case = pcase(
+                papp2(pref("==", id), pev(&a), pev(&b)),
+                vec![
+                    palt("False", 0, 0, vec![], pref("GT", id)),
+                    palt("True", 1, 0, vec![], pref("EQ", id)),
+                ],
+            );
+            plam(
+                a.clone(),
+                plam(
+                    b.clone(),
+                    pcase(
+                        papp2(pref("<", id), pev(&a), pev(&b)),
+                        vec![
+                            palt("False", 0, 0, vec![], eq_case),
+                            palt("True", 1, 0, vec![], pref("LT", id)),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // maximumBy/minimumBy cmp xs = foldl1 (\x y -> case cmp x y of ...) xs
+        "maximumBy" | "minimumBy" => {
+            let is_max = name == "maximumBy";
+            let cmp = pv("cmp", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let x = pv("x", fresh(id));
+            let y = pv("y", fresh(id));
+            // maximumBy: GT -> x, else y ; minimumBy: GT -> y, else x
+            let gt_branch = if is_max { pev(&x) } else { pev(&y) };
+            let other = if is_max { pev(&y) } else { pev(&x) };
+            let step = plam(
+                x.clone(),
+                plam(
+                    y.clone(),
+                    pcase(
+                        papp2(pev(&cmp), pev(&x), pev(&y)),
+                        vec![
+                            palt("LT", 0, 0, vec![], other.clone()),
+                            palt("EQ", 1, 0, vec![], other),
+                            palt("GT", 2, 0, vec![], gt_branch),
+                        ],
+                    ),
+                ),
+            );
+            plam(
+                cmp.clone(),
+                plam(xs.clone(), papp2(pref("foldl1", id), step, pev(&xs))),
             )
         }
         _ => return None,

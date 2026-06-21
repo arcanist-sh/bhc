@@ -121,6 +121,20 @@ fn test_tier3_stdin_readln_wasm() {
     run_wasm_test("tier3_io/stdin_readln", Profile::Default);
 }
 
+// stdin input: `getContents` reads all of stdin to EOF as one String via the
+// chunked `read_all` runtime.
+#[test]
+fn test_tier3_stdin_getcontents_wasm() {
+    run_wasm_test("tier3_io/stdin_getcontents", Profile::Default);
+}
+
+// stdin input: `interact f` reads all of stdin, applies the (lambda) function,
+// and writes the result to stdout.
+#[test]
+fn test_tier3_stdin_interact_wasm() {
+    run_wasm_test("tier3_io/stdin_interact", Profile::Default);
+}
+
 // =============================================================================
 // Tier 5: Benchmark Tests
 // =============================================================================

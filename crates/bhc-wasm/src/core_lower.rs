@@ -509,6 +509,13 @@ impl<'a> WasmLowering<'a> {
                         instrs.push(WasmInstr::Call(self.runtime.parse_int_idx));
                         return Ok(());
                     }
+                    "getContents"
+                    | "System.IO.getContents"
+                    | "GHC.IO.getContents"
+                    | "Prelude.getContents" => {
+                        instrs.push(WasmInstr::Call(self.runtime.read_all_idx));
+                        return Ok(());
+                    }
                     _ => {}
                 }
                 // Check if it's a nullary constructor
@@ -1810,6 +1817,43 @@ impl<'a> WasmLowering<'a> {
             Some("readLn" | "System.IO.readLn" | "GHC.Read.readLn" | "Prelude.readLn") => {
                 instrs.push(WasmInstr::Call(self.runtime.read_line_idx));
                 instrs.push(WasmInstr::Call(self.runtime.parse_int_idx));
+            }
+            Some(
+                "getContents"
+                | "System.IO.getContents"
+                | "GHC.IO.getContents"
+                | "Prelude.getContents",
+            ) => {
+                instrs.push(WasmInstr::Call(self.runtime.read_all_idx));
+            }
+
+            // IO: interact f = getContents >>= putStr . f. Read all of stdin,
+            // apply the function `f` (a closure value) to the input String, and
+            // write the resulting String to stdout with no trailing newline.
+            Some("interact" | "System.IO.interact" | "Prelude.interact") if !args.is_empty() => {
+                let f = args[args.len() - 1];
+                // Evaluate f to a closure value.
+                self.lower_expr(f, instrs, locals, local_count, false)?;
+                let f_local = *local_count;
+                *local_count += 1;
+                instrs.push(WasmInstr::LocalSet(f_local));
+                // input = read_all()
+                instrs.push(WasmInstr::Call(self.runtime.read_all_idx));
+                let in_local = *local_count;
+                *local_count += 1;
+                instrs.push(WasmInstr::LocalSet(in_local));
+                // Apply the closure: call_indirect with (env, arg).
+                let type_idx = self.closure_type_index();
+                self.wasm.enable_func_table();
+                instrs.push(WasmInstr::LocalGet(f_local)); // env pointer
+                instrs.push(WasmInstr::LocalGet(in_local)); // argument (input String)
+                instrs.push(WasmInstr::LocalGet(f_local));
+                instrs.push(WasmInstr::I32Load(2, 0)); // code index at offset 0
+                instrs.push(WasmInstr::CallIndirect(type_idx, 0));
+                // Result String -> putStr (no newline).
+                instrs.push(WasmInstr::Call(self.runtime.print_pstr_idx));
+                // IO () result: leave a dummy 0 like other IO actions.
+                instrs.push(WasmInstr::I32Const(0));
             }
 
             // IO: >> (sequence) - evaluate both sides for effects

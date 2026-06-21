@@ -1370,6 +1370,121 @@ pub fn generate_parse_int() -> WasmFunc {
     func
 }
 
+/// Bytes read per `fd_read` reservation in `read_all`. A multiple of 8 so
+/// successive bump allocations stay contiguous with no alignment gaps.
+const READ_CHUNK: i32 = 4096;
+
+/// Generate a `read_all` function: read all of stdin until EOF into a
+/// length-prefixed string `[len: i32 | bytes...]`. This backs `getContents`
+/// (and `interact`, which feeds the result through a function then to stdout).
+///
+/// The buffer grows by whole `READ_CHUNK` reservations. Each reservation is a
+/// fresh bump allocation; since nothing else allocates during the read and the
+/// chunk size is 8-aligned, the reservations are contiguous, so the string
+/// bytes form one block starting at `buf + 4`. `fd_read` fills the remaining
+/// capacity each call. At EOF the heap pointer is rolled back to the exact
+/// bytes used (the buffer is the most recent allocation).
+pub fn generate_read_all(fd_read_idx: u32, alloc_idx: u32, heap_ptr_global: u32) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(vec![], vec![WasmType::I32]));
+    func.name = Some("read_all".to_string());
+    func.exported = true;
+
+    let buf = func.add_local(WasmType::I32); // result base ([len|bytes])
+    let count = func.add_local(WasmType::I32); // bytes read so far
+    let cap = func.add_local(WasmType::I32); // data capacity reserved so far
+    let want = func.add_local(WasmType::I32); // free capacity for this read
+    let n = func.add_local(WasmType::I32); // bytes read this call
+
+    // buf = alloc(READ_CHUNK); cap = READ_CHUNK - 4 (header); count = 0
+    func.emit(WasmInstr::I32Const(READ_CHUNK));
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(buf));
+    func.emit(WasmInstr::I32Const(READ_CHUNK - 4));
+    func.emit(WasmInstr::LocalSet(cap));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(count));
+
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+
+    // Grow the reservation when full (contiguous chunk; only the bump matters).
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::LocalGet(cap));
+    func.emit(WasmInstr::I32GeU);
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::I32Const(READ_CHUNK));
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::Drop);
+    func.emit(WasmInstr::LocalGet(cap));
+    func.emit(WasmInstr::I32Const(READ_CHUNK));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(cap));
+    func.emit(WasmInstr::End);
+
+    // want = cap - count
+    func.emit(WasmInstr::LocalGet(cap));
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::LocalSet(want));
+    // iovec.ptr = buf + 4 + count
+    func.emit(WasmInstr::I32Const(READ_IOVEC_PTR));
+    func.emit(WasmInstr::LocalGet(buf));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Store(2, 0));
+    // iovec.len = want
+    func.emit(WasmInstr::I32Const(READ_IOVEC_LEN));
+    func.emit(WasmInstr::LocalGet(want));
+    func.emit(WasmInstr::I32Store(2, 0));
+
+    // fd_read(stdin, iovec, 1, nread); break on error
+    func.emit(WasmInstr::I32Const(STDIN_FD));
+    func.emit(WasmInstr::I32Const(READ_IOVEC_PTR));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Const(READ_NREAD));
+    func.emit(WasmInstr::Call(fd_read_idx));
+    func.emit(WasmInstr::BrIf(1));
+
+    // n = nread; if n == 0 (EOF) break
+    func.emit(WasmInstr::I32Const(READ_NREAD));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::LocalSet(n));
+    func.emit(WasmInstr::LocalGet(n));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::BrIf(1));
+    // count += n
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::LocalGet(n));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(count));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End); // loop
+    func.emit(WasmInstr::End); // block
+
+    // [buf] = count
+    func.emit(WasmInstr::LocalGet(buf));
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Store(2, 0));
+
+    // Reclaim the unused tail: heap_ptr = align8(buf + 4 + count).
+    func.emit(WasmInstr::LocalGet(buf));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Const(7));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Const(-8));
+    func.emit(WasmInstr::I32And);
+    func.emit(WasmInstr::GlobalSet(heap_ptr_global));
+
+    func.emit(WasmInstr::LocalGet(buf));
+    func.emit(WasmInstr::End);
+    func
+}
+
 /// Generate the _start function that calls main.
 ///
 /// This is the WASI entry point. It calls the Haskell main function

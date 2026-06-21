@@ -103,6 +103,8 @@ pub struct RuntimeIndices {
     pub read_line_idx: u32,
     /// Index of `parse_int` (parses a String to an Int). Backs `readLn`.
     pub parse_int_idx: u32,
+    /// Index of `read_all` (reads all of stdin as a String). Backs `getContents`/`interact`.
+    pub read_all_idx: u32,
     /// Offset of the newline byte in the data segment.
     pub newline_offset: u32,
 }
@@ -645,6 +647,8 @@ impl WasmModule {
         let read_line_idx = self.add_function(read_line_func);
         let parse_int_func = wasi::generate_parse_int();
         let parse_int_idx = self.add_function(parse_int_func);
+        let read_all_func = wasi::generate_read_all(wasi::FD_READ_IDX, alloc_idx, heap_ptr_idx);
+        let read_all_idx = self.add_function(read_all_func);
 
         RuntimeIndices {
             fd_write_idx,
@@ -661,6 +665,7 @@ impl WasmModule {
             reverse_list_idx,
             read_line_idx,
             parse_int_idx,
+            read_all_idx,
             newline_offset,
         }
     }

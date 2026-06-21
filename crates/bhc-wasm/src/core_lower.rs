@@ -1529,6 +1529,34 @@ impl<'a> WasmLowering<'a> {
             }
         }
 
+        // Typeclass dictionary method selection: `$sel_N dict [method args...]`.
+        // A class dictionary is a tuple `[tag | field0 | field1 | ...]` of method
+        // implementations (each a closure), so the selector loads field N at byte
+        // offset (N+1)*4. The dictionary may be a known tuple (statically built or
+        // an inlined parameter), a local holding a dictionary value passed as an
+        // argument, or the result of a superclass selector — `lower_expr` resolves
+        // all of these to a pointer. If the method is applied to further
+        // arguments, apply the selected closure to them via `call_indirect`; with
+        // no further arguments the selected method closure is itself the result
+        // (e.g. `map (describe :: $sel_0 dict)`).
+        if let Some(name) = func_name {
+            if let Some(field_idx) = parse_sel_index(name) {
+                if !args.is_empty() {
+                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                    instrs.push(WasmInstr::I32Load(2, (field_idx + 1) * 4));
+                    if args.len() > 1 {
+                        return self.apply_closure_on_stack(
+                            &args[1..],
+                            instrs,
+                            locals,
+                            local_count,
+                        );
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
         // Try to inline/beta-reduce the application. Handles dictionary-
         // specialized typeclass methods (head buried under dead dictionary
         // lets) and closures passed as arguments, neither of which the simple
@@ -3252,6 +3280,12 @@ fn extract_list_elements(expr: &Expr) -> Option<Vec<&Expr>> {
 }
 
 /// Whether a constructor name is a tuple constructor (`(,)`, `(,,)`, ...).
+/// Parse a dictionary field selector name `$sel_N` into its field index `N`.
+/// Returns `None` for any other name.
+fn parse_sel_index(name: &str) -> Option<u32> {
+    name.strip_prefix("$sel_").and_then(|s| s.parse().ok())
+}
+
 fn is_tuple_con(name: &str) -> bool {
     name.len() >= 3
         && name.starts_with('(')

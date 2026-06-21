@@ -398,3 +398,11 @@ fn test_tier2_heap_grow_wasm() {
 fn test_tier2_tco_wasm() {
     run_wasm_test("tier2_functions/tco", Profile::Default);
 }
+
+// Dictionary passing: a recursive function polymorphic over a user class. The
+// dictionary is passed at runtime (selected per instance via `$sel_N`) and
+// threaded through recursion — it cannot be inlined/specialized away.
+#[test]
+fn test_tier3_dict_passing_wasm() {
+    run_wasm_test("tier3_io/dict_passing", Profile::Default);
+}

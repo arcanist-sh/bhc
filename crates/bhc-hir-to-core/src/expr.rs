@@ -333,6 +333,13 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
                 Kind::Star,
             ))))),
         },
+        // List literal `[a, b, ...]`: infer the element type from the first
+        // element, yielding `[elem]`. Enables resolving dictionaries for
+        // functions like `f :: C a => [a] -> r` applied to a list literal.
+        Expr::List(elems, _) => {
+            let elem_ty = try_infer_arg_type(ctx, elems.first()?)?;
+            Some(Ty::List(Box::new(elem_ty)))
+        }
         Expr::App(f, x, _) => {
             // Peel off App layers to find head constructor and collect args:
             // App(App(Con(Pair), x), y) → (Con(Pair), [x, y])
@@ -499,6 +506,89 @@ fn peel_app_chain(expr: &hir::Expr) -> Option<(&DefRef, Vec<&hir::Expr>)> {
     } else {
         None
     }
+}
+
+/// Structurally match a (possibly polymorphic) parameter type against an
+/// inferred concrete type, recording type-variable bindings in `subst`.
+/// Only the first binding for each variable is kept.
+fn match_ty(param: &Ty, concrete: &Ty, subst: &mut bhc_types::Subst) {
+    match (param, concrete) {
+        (Ty::Var(tv), c) => {
+            if subst.get(tv).is_none() {
+                subst.insert(tv, c.clone());
+            }
+        }
+        (Ty::List(p), Ty::List(c)) => match_ty(p, c, subst),
+        (Ty::App(p1, p2), Ty::App(c1, c2)) => {
+            match_ty(p1, c1, subst);
+            match_ty(p2, c2, subst);
+        }
+        (Ty::Fun(p1, p2), Ty::Fun(c1, c2)) => {
+            match_ty(p1, c1, subst);
+            match_ty(p2, c2, subst);
+        }
+        (Ty::Tuple(ps), Ty::Tuple(cs)) if ps.len() == cs.len() => {
+            for (p, c) in ps.iter().zip(cs) {
+                match_ty(p, c, subst);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// For a constrained user *function* (not a class method) applied to `args`,
+/// resolve the dictionary argument(s) it expects. The constrained type
+/// variables are instantiated by matching the function's declared parameter
+/// types against the inferred argument types, then a dictionary is resolved
+/// per constraint at those types (concrete instance, or an in-scope dictionary
+/// for the deferred/recursive case). Returns the dictionaries in constraint
+/// order, or `None` if the head is not user-constrained or any dictionary
+/// cannot be resolved (the caller then falls back to plain lowering).
+fn resolve_constrained_fn_dicts(
+    ctx: &mut LowerContext,
+    head_ref: &DefRef,
+    args: &[&hir::Expr],
+    span: Span,
+) -> Option<Vec<core::Expr>> {
+    let (user_constraints, scheme_ty) = {
+        let scheme = ctx.lookup_scheme(head_ref.def_id)?;
+        let uc: Vec<Constraint> = scheme
+            .constraints
+            .iter()
+            .filter(|c| ctx.is_user_class(c.class))
+            .cloned()
+            .collect();
+        if uc.is_empty() {
+            return None;
+        }
+        (uc, scheme.ty.clone())
+    };
+
+    // Declared parameter types (the scheme type carries no dictionaries).
+    let mut param_tys = Vec::new();
+    let mut cur = &scheme_ty;
+    while let Ty::Fun(a, r) = cur {
+        param_tys.push(a.as_ref().clone());
+        cur = r.as_ref();
+    }
+
+    // Instantiate the constrained type variables from the argument types.
+    let mut subst = bhc_types::Subst::new();
+    for (p, arg) in param_tys.iter().zip(args.iter()) {
+        if let Some(at) = try_infer_arg_type(ctx, arg) {
+            match_ty(p, &at, &mut subst);
+        }
+    }
+
+    // Resolve one dictionary per constraint at the instantiated types.
+    let mut dicts = Vec::with_capacity(user_constraints.len());
+    for c in &user_constraints {
+        let concrete_args: Vec<Ty> = c.args.iter().map(|t| subst.apply(t)).collect();
+        let concrete = Constraint::new_multi(c.class, concrete_args, span);
+        let dict = ctx.resolve_dictionary(&concrete, span)?;
+        dicts.push(dict);
+    }
+    Some(dicts)
 }
 
 /// Lower a function application, handling dictionary-passing for class methods
@@ -678,44 +768,27 @@ fn lower_app(
                 }
             }
 
-            // Case 2: Constrained function with unresolved type-variable constraints
-            if let Some(scheme) = ctx.lookup_scheme(def_ref.def_id) {
-                let has_unresolved = scheme.constraints.iter().any(|c| {
-                    // Only user-defined classes (not builtins like Show/Eq/Ord/Num)
-                    ctx.is_user_class(c.class) && c.args.iter().any(has_type_variables)
-                });
-                if has_unresolved {
-                    if let Some(concrete_ty) = try_infer_arg_type(ctx, x) {
-                        // Resolve dictionaries with the concrete type substituted in
-                        let constraints = scheme.constraints.clone();
-                        let mut result = core::Expr::Var(var.clone(), def_ref.span);
-
-                        for constraint in &constraints {
-                            if ctx.is_user_class(constraint.class)
-                                && constraint.args.iter().any(has_type_variables)
-                            {
-                                // Replace type variables with the concrete type
-                                let concrete_constraint = Constraint::new(
-                                    constraint.class,
-                                    concrete_ty.clone(),
-                                    constraint.span,
-                                );
-                                if let Some(dict_expr) =
-                                    ctx.resolve_dictionary(&concrete_constraint, span)
-                                {
-                                    result = core::Expr::App(
-                                        Box::new(result),
-                                        Box::new(dict_expr),
-                                        span,
-                                    );
-                                }
-                            }
-                        }
-
-                        // Now apply the argument
-                        let x_core = lower_expr(ctx, x)?;
-                        return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
+            // Case 2: A constrained user function applied to one argument.
+            // Instantiate the constrained type variables by matching the
+            // function's parameter types against the inferred argument type,
+            // resolve a dictionary per constraint, and pass the dictionaries
+            // before the argument (the definition is `\$d -> \x -> ...`).
+            // `resolve_constrained_fn_dicts` returns None — falling through to
+            // later cases — when the head is not user-constrained or any
+            // dictionary cannot be resolved (rather than committing to a bare,
+            // dictionary-less application as the old code did).
+            //
+            // Class methods are excluded: their own class constraint must be
+            // turned into a dictionary *selection* (`$sel_N $dict`) by the
+            // method-selection path, not passed as an ordinary argument.
+            if ctx.is_class_method(method_name).is_none() {
+                if let Some(dicts) = resolve_constrained_fn_dicts(ctx, def_ref, &[x], span) {
+                    let mut result = core::Expr::Var(var.clone(), def_ref.span);
+                    for dict in dicts {
+                        result = core::Expr::App(Box::new(result), Box::new(dict), span);
                     }
+                    let x_core = lower_expr(ctx, x)?;
+                    return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
                 }
             }
         }

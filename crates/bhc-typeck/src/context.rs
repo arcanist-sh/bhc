@@ -7455,8 +7455,17 @@ impl TyCtxt {
                 // Solve constraints accumulated during this group's inference
                 let unsolved = self.solve_constraints_partition(constraint_start);
 
-                // Generalize the types with any unsolved constraints
+                // Generalize the types with any unsolved constraints.
+                // Definitions with an explicit type signature already had their
+                // declared scheme (including its class constraints) stored by
+                // `check_value_def`; re-generalizing from the inferred type would
+                // drop those constraints (the body discharges them locally), so
+                // leave signatured defs untouched. Only signature-less defs are
+                // generalized here.
                 for (def_id, _) in temp_schemes {
+                    if self.explicit_sig_defs.contains(&def_id) {
+                        continue;
+                    }
                     if let Some(scheme) = self.def_schemes.get(&def_id) {
                         let generalized = if unsolved.is_empty() {
                             self.generalize(&scheme.ty)

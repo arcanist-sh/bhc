@@ -775,6 +775,14 @@ fn test_tier3_superclass_native() {
     run_native_test("tier3_io/superclass", Profile::Default);
 }
 
+// Dictionary passing: a recursive function polymorphic over a user class. The
+// dictionary cannot be inlined/specialized away, so it is passed at runtime and
+// each call site resolves the right instance.
+#[test]
+fn test_tier3_dict_passing_native() {
+    run_native_test("tier3_io/dict_passing", Profile::Default);
+}
+
 // E.42: Deriving for user-defined typeclasses (DeriveAnyClass)
 #[test]
 fn test_tier3_derive_any_class_native() {

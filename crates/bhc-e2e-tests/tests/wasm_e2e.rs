@@ -421,6 +421,12 @@ fn test_tier3_print_adt_wasm() {
     run_wasm_test("tier3_io/print_adt", Profile::Default);
 }
 
+// `show` of a user ADT inside a compound recurses into the element.
+#[test]
+fn test_tier3_show_adt_nested_wasm() {
+    run_wasm_test("tier3_io/show_adt_nested", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

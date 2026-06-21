@@ -1,0 +1,5 @@
+[Red,Green,Blue]
+Just (Circle 5)
+Left Red
+(Red,Rect 2 3)
+[Just (Circle 1),Nothing]

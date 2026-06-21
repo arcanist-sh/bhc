@@ -1776,11 +1776,14 @@ pub extern "C" fn bhc_show_unit(_unit_ptr: *const u8) -> *mut c_char {
 /// Tag assignments:
 ///   0=Int, 1=Double, 2=Float, 3=Bool, 4=Char, 5=String, 6=Unit, 7=Ordering
 ///   10=List, 11=Maybe, 12=Tuple2, 13=Either
+///   14=Adt (user type with derived Show): `child1` is repurposed to hold the
+///      value's derived-show function pointer rather than a child descriptor.
 #[repr(C)]
 pub struct ShowTypeDesc {
     /// Type tag (see table above).
     pub tag: i64,
-    /// First child descriptor (elem for List/Maybe, fst for Tuple2, left for Either).
+    /// First child descriptor (elem for List/Maybe, fst for Tuple2, left for
+    /// Either). For tag 14 (Adt) this instead holds a derived-show fn pointer.
     pub child1: *const ShowTypeDesc,
     /// Second child descriptor (snd for Tuple2, right for Either).
     pub child2: *const ShowTypeDesc,
@@ -1853,6 +1856,17 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 // Either: recurse with child1=left, child2=right descriptors
                 show_either_recursive(ptr, &*desc.child1, &*desc.child2)
             }
+            14 => {
+                // User-defined ADT: child1 is repurposed to hold the value's
+                // derived `Show` function pointer (not a child descriptor).
+                // Signature: extern "C" fn(env, value) -> [Char]. Call it and
+                // read back the resulting char list.
+                let raw = desc.child1 as *const ();
+                let show_fn: extern "C" fn(*const u8, *const u8) -> *const u8 =
+                    std::mem::transmute(raw);
+                let result = show_fn(std::ptr::null(), ptr);
+                read_char_list(result)
+            }
             _ => format!("<tag {}>", desc.tag),
         }
     }
@@ -1862,7 +1876,11 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
 unsafe fn show_any_prec(ptr: *const u8, desc: &ShowTypeDesc, prec: i32) -> String {
     unsafe {
         let s = show_any(ptr, desc);
-        if prec > 10 && is_constructor_app(ptr, desc) {
+        // For a user ADT (tag 14) the derived show yields the rendered form;
+        // a constructor *with arguments* (e.g. "Circle 5") needs parens at high
+        // precedence, a nullary one ("Red") does not — detect via a space.
+        let adt_needs_parens = desc.tag == 14 && s.contains(' ') && !s.starts_with('(');
+        if prec > 10 && (is_constructor_app(ptr, desc) || adt_needs_parens) {
             format!("({})", s)
         } else {
             s

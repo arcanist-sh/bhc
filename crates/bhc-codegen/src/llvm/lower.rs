@@ -23824,7 +23824,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         };
 
         match coerce {
-            ShowCoerce::Int => self.get_primitive_show_desc(0),
+            ShowCoerce::Int => {
+                // A user-defined ADT (with derived Show) used as an element of a
+                // compound (e.g. `[Red, Green]`, `Just (Circle 5)`) falls through
+                // to the Int default here; build an Adt descriptor carrying its
+                // derived-show function pointer so the RTS shows it properly
+                // instead of printing the element pointer.
+                if let Some(desc) = self.try_build_adt_show_desc(expr) {
+                    desc
+                } else {
+                    self.get_primitive_show_desc(0)
+                }
+            }
             ShowCoerce::Double => self.get_primitive_show_desc(1),
             ShowCoerce::Float => self.get_primitive_show_desc(2),
             ShowCoerce::Bool => self.get_primitive_show_desc(3),
@@ -23850,6 +23861,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.create_show_desc_global(13, Some(l_d), Some(r_d))
             }
         }
+    }
+
+    /// Build an `Adt` show descriptor (tag 14) for a user-defined type with
+    /// derived Show, carrying its derived-show function pointer in `child1`.
+    /// Returns `None` if `expr` isn't such an ADT.
+    fn try_build_adt_show_desc(&mut self, expr: &Expr) -> Option<PointerValue<'ctx>> {
+        let type_name = self.infer_adt_type_from_expr(expr)?;
+        let show_var_id = *self.derived_show_fns.get(&type_name)?;
+        let show_fn = *self.functions.get(&show_var_id)?;
+        let fn_ptr = show_fn.as_global_value().as_pointer_value();
+        Some(self.create_show_desc_global(14, Some(fn_ptr), None))
     }
 
     /// Build a descriptor for the element type of a list expression.

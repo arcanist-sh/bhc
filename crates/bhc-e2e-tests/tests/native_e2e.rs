@@ -79,6 +79,13 @@ fn test_tier3_print_adt_native() {
     run_native_test("tier3_io/print_adt", Profile::Default);
 }
 
+// `show` of a user ADT *inside* a compound (list/Maybe/Either/tuple) recurses
+// into the element via its derived Show (descriptor tag 14), with precedence.
+#[test]
+fn test_tier3_show_adt_nested_native() {
+    run_native_test("tier3_io/show_adt_nested", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped (unlike putStr/putStrLn).
 #[test]
 fn test_tier3_print_string_native() {

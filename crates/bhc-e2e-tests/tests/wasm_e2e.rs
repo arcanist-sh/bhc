@@ -568,6 +568,27 @@ fn test_tier3_generic_from_to_wasm() {
     run_wasm_test("tier3_io/generic_from_to", Profile::Default);
 }
 
+// Prelude/combinator additions: zip3/zipWith3, unfoldr, gcd/lcm, when/unless.
+#[test]
+fn test_tier3_zip3_basic_wasm() {
+    run_wasm_test("tier3_io/zip3_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_unfoldr_basic_wasm() {
+    run_wasm_test("tier3_io/unfoldr_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_numeric_ops_wasm() {
+    run_wasm_test("tier3_io/numeric_ops", Profile::Default);
+}
+
+#[test]
+fn test_tier3_when_unless_wasm() {
+    run_wasm_test("tier3_io/when_unless", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

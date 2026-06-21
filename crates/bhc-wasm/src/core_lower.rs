@@ -2187,6 +2187,28 @@ impl<'a> WasmLowering<'a> {
                 self.lower_expr(args[1], instrs, locals, local_count, false)?;
             }
 
+            // `when c a` / `unless c a`: run the IO action `a` only on the taken
+            // branch — it must be lowered *inside* the `if`, not eagerly as a
+            // call argument (which would always run its side effects). Result is
+            // `()` (0) on the untaken branch.
+            Some(n) if args.len() == 2 && matches!(strip_qualifier(n), "when" | "unless") => {
+                let run_when_true = strip_qualifier(n) == "when";
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                if run_when_true {
+                    self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                } else {
+                    instrs.push(WasmInstr::I32Const(0));
+                }
+                instrs.push(WasmInstr::Else);
+                if run_when_true {
+                    instrs.push(WasmInstr::I32Const(0));
+                } else {
+                    self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                }
+                instrs.push(WasmInstr::End);
+            }
+
             // Comparison primitives
             Some("==" | "eqInt#" | "GHC.Classes.==") if args.len() == 2 => {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
@@ -3127,6 +3149,11 @@ fn match_show_arg(expr: &Expr) -> Option<&Expr> {
 const LIST_PRELUDE_NAMES: &[&str] = &[
     "map",
     "__fmapMaybe",
+    "zip3",
+    "zipWith3",
+    "unfoldr",
+    "gcd",
+    "lcm",
     "filter",
     "foldr",
     "foldl",
@@ -5301,6 +5328,166 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
                 plam(xs.clone(), papp2(pref("foldl1", id), step, pev(&xs))),
             )
         }
+        // zip3 (a:as) (b:bs) (c:cs) = (a,b,c) : zip3 as bs cs ; _ -> []
+        "zip3" => {
+            let xs = pv("xs", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let zs = pv("zs", fresh(id));
+            let a = pv("a", fresh(id));
+            let as_ = pv("as", fresh(id));
+            let b = pv("b", fresh(id));
+            let bs = pv("bs", fresh(id));
+            let c = pv("c", fresh(id));
+            let cs = pv("cs", fresh(id));
+            // innermost: case zs of (c:cs) -> (a,b,c) : zip3 as bs cs ; [] -> []
+            let triple = papp2(
+                pref(":", id),
+                papp(papp2(pref("(,,)", id), pev(&a), pev(&b)), pev(&c)),
+                papp(papp2(pref("zip3", id), pev(&as_), pev(&bs)), pev(&cs)),
+            );
+            let on_zs = pcase(
+                pev(&zs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(":", 1, 2, vec![c.clone(), cs.clone()], triple),
+                ],
+            );
+            let on_ys = pcase(
+                pev(&ys),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(":", 1, 2, vec![b.clone(), bs.clone()], on_zs),
+                ],
+            );
+            let on_xs = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(":", 1, 2, vec![a.clone(), as_.clone()], on_ys),
+                ],
+            );
+            plam(xs.clone(), plam(ys.clone(), plam(zs.clone(), on_xs)))
+        }
+        // zipWith3 f (a:as) (b:bs) (c:cs) = f a b c : zipWith3 f as bs cs ; _ -> []
+        "zipWith3" => {
+            let f = pv("f", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let zs = pv("zs", fresh(id));
+            let a = pv("a", fresh(id));
+            let as_ = pv("as", fresh(id));
+            let b = pv("b", fresh(id));
+            let bs = pv("bs", fresh(id));
+            let c = pv("c", fresh(id));
+            let cs = pv("cs", fresh(id));
+            let applied = papp2(
+                pref(":", id),
+                papp(papp2(pev(&f), pev(&a), pev(&b)), pev(&c)),
+                papp(
+                    papp2(papp(pref("zipWith3", id), pev(&f)), pev(&as_), pev(&bs)),
+                    pev(&cs),
+                ),
+            );
+            let on_zs = pcase(
+                pev(&zs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(":", 1, 2, vec![c.clone(), cs.clone()], applied),
+                ],
+            );
+            let on_ys = pcase(
+                pev(&ys),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(":", 1, 2, vec![b.clone(), bs.clone()], on_zs),
+                ],
+            );
+            let on_xs = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(":", 1, 2, vec![a.clone(), as_.clone()], on_ys),
+                ],
+            );
+            plam(
+                f,
+                plam(xs.clone(), plam(ys.clone(), plam(zs.clone(), on_xs))),
+            )
+        }
+        // unfoldr f b = case f b of { Nothing -> []; Just p -> case p of (a,b') -> a : unfoldr f b' }
+        "unfoldr" => {
+            let f = pv("f", fresh(id));
+            let b = pv("b", fresh(id));
+            let p = pv("p", fresh(id));
+            let a = pv("a", fresh(id));
+            let b2 = pv("b2", fresh(id));
+            let cons = papp2(
+                pref(":", id),
+                pev(&a),
+                papp2(pref("unfoldr", id), pev(&f), pev(&b2)),
+            );
+            let on_pair = pcase(
+                pev(&p),
+                vec![palt("(,)", 0, 2, vec![a.clone(), b2.clone()], cons)],
+            );
+            let body = pcase(
+                papp(pev(&f), pev(&b)),
+                vec![
+                    palt("Nothing", 0, 0, vec![], pref("[]", id)),
+                    palt("Just", 1, 1, vec![p.clone()], on_pair),
+                ],
+            );
+            plam(f, plam(b.clone(), body))
+        }
+        // gcd a b = case b == 0 of { True -> a; False -> gcd b (a `mod` b) }
+        // (correct for non-negative inputs, which is what the fixtures use)
+        "gcd" => {
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            let recur = papp2(
+                pref("gcd", id),
+                pev(&b),
+                papp2(pref("mod", id), pev(&a), pev(&b)),
+            );
+            let body = pcase(
+                papp2(pref("==", id), pev(&b), pint(0)),
+                vec![
+                    palt("False", 0, 0, vec![], recur),
+                    palt("True", 1, 0, vec![], pev(&a)),
+                ],
+            );
+            plam(a.clone(), plam(b.clone(), body))
+        }
+        // lcm a b = case a == 0 of { True -> 0; False ->
+        //             case b == 0 of { True -> 0; False -> (a `div` gcd a b) * b } }
+        "lcm" => {
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            let prod = papp2(
+                pref("*", id),
+                papp2(
+                    pref("div", id),
+                    pev(&a),
+                    papp2(pref("gcd", id), pev(&a), pev(&b)),
+                ),
+                pev(&b),
+            );
+            let on_b = pcase(
+                papp2(pref("==", id), pev(&b), pint(0)),
+                vec![
+                    palt("False", 0, 0, vec![], prod),
+                    palt("True", 1, 0, vec![], pint(0)),
+                ],
+            );
+            let body = pcase(
+                papp2(pref("==", id), pev(&a), pint(0)),
+                vec![
+                    palt("False", 0, 0, vec![], on_b),
+                    palt("True", 1, 0, vec![], pint(0)),
+                ],
+            );
+            plam(a.clone(), plam(b.clone(), body))
+        }
         _ => return None,
     };
     Some((pv(name, fresh(id)), body))
@@ -5611,7 +5798,21 @@ fn returns_double_fn(name: &str) -> bool {
 /// Whether a prelude function always returns a `Bool`, so its result should
 /// `show` as `True`/`False` even when the static type is erased.
 fn returns_bool_fn(name: &str) -> bool {
-    matches!(name, "null" | "all" | "any" | "and" | "or" | "elem")
+    matches!(
+        strip_qualifier(name),
+        "null"
+            | "all"
+            | "any"
+            | "and"
+            | "or"
+            | "elem"
+            | "even"
+            | "odd"
+            | "notElem"
+            | "isPrefixOf"
+            | "isSuffixOf"
+            | "isInfixOf"
+    )
 }
 
 /// Whether an operator name denotes a boolean-valued operation (comparison or

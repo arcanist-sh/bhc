@@ -647,6 +647,23 @@ fn test_tier3_scoped_tyvars_list_wasm() {
     run_wasm_test("tier3_io/scoped_tyvars_list", Profile::Default);
 }
 
+// GeneralizedNewtypeDeriving / DerivingStrategies: a newtype constructor is
+// identity at runtime, so derived Num/Eq/Ord operate on the underlying value.
+#[test]
+fn test_tier3_gnd_basic_wasm() {
+    run_wasm_test("tier3_io/gnd_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_gnd_newtype_erasure_wasm() {
+    run_wasm_test("tier3_io/gnd_newtype_erasure", Profile::Default);
+}
+
+#[test]
+fn test_tier3_deriving_strategies_wasm() {
+    run_wasm_test("tier3_io/deriving_strategies", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

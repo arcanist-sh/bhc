@@ -289,6 +289,11 @@ struct WasmLowering<'a> {
     /// Derived `Foldable` instances: type name -> the `$derived_foldr_<Type>`
     /// binding symbol. Lets `foldr` dispatch to the generated method.
     derived_foldable: FxHashMap<String, Symbol>,
+    /// Newtype constructor names. A newtype is identity at runtime, so both
+    /// `C x` (construction) and the `C n` pattern unwrap to the field directly —
+    /// essential for GeneralizedNewtypeDeriving, where derived Num/Eq/Ord
+    /// operate on the underlying value, not a box.
+    newtype_cons: FxHashSet<String>,
     /// Substitution environment: var id -> expression to lower in its place.
     /// Used to inline function/lambda arguments without alpha-renaming —
     /// when a parameter is referenced, its argument expression is lowered.
@@ -333,6 +338,7 @@ impl<'a> WasmLowering<'a> {
             ctor_type: FxHashMap::default(),
             derived_functor: FxHashMap::default(),
             derived_foldable: FxHashMap::default(),
+            newtype_cons: FxHashSet::default(),
             subst: FxHashMap::default(),
             inline_bodies: FxHashMap::default(),
             inlining: FxHashSet::default(),
@@ -349,6 +355,7 @@ impl<'a> WasmLowering<'a> {
     fn register_constructors(&mut self, core: &CoreModule) {
         for con in &core.constructors {
             if con.is_newtype {
+                self.newtype_cons.insert(con.name.clone());
                 continue;
             }
             self.con_map.insert(
@@ -1964,6 +1971,10 @@ impl<'a> WasmLowering<'a> {
 
         // Check if this is a constructor application
         if let Some(name) = func_name {
+            // A newtype constructor is identity at runtime: `C x` is just `x`.
+            if args.len() == 1 && self.newtype_cons.contains(name) {
+                return self.lower_expr(args[0], instrs, locals, local_count, false);
+            }
             if let Some((tag, arity)) = self.lookup_constructor(name) {
                 if arity == 0 {
                     // Nullary constructor: just push the tag value
@@ -2913,6 +2924,26 @@ impl<'a> WasmLowering<'a> {
                 }
                 self.lower_cont(&alts[0].rhs, cont, instrs, locals, local_count, is_main)?;
                 return Ok(());
+            }
+        }
+
+        // A match on a newtype constructor (`case x of C n -> ...`) is identity:
+        // the value isn't boxed, so the field binder *is* the scrutinee.
+        if alts.len() == 1 {
+            if let AltCon::DataCon(dc) = &alts[0].con {
+                if self.newtype_cons.contains(dc.name.as_str()) {
+                    if let Some(binder) = alts[0].binders.first() {
+                        locals.insert(binder.id, scrut_local);
+                    }
+                    return self.lower_cont(
+                        &alts[0].rhs,
+                        cont,
+                        instrs,
+                        locals,
+                        local_count,
+                        is_main,
+                    );
+                }
             }
         }
 

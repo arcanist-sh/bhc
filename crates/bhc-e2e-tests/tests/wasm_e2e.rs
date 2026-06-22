@@ -629,6 +629,24 @@ fn test_tier3_show_double_wasm() {
     run_wasm_test("tier3_io/show_double", Profile::Default);
 }
 
+// IORef as a one-slot heap cell (new/read/write/modify).
+#[test]
+fn test_tier3_ioref_basic_wasm() {
+    run_wasm_test("tier3_io/ioref_basic", Profile::Default);
+}
+
+// OverloadedStrings: fromString is the identity for String.
+#[test]
+fn test_tier3_overloaded_strings_wasm() {
+    run_wasm_test("tier3_io/overloaded_strings", Profile::Default);
+}
+
+// ScopedTypeVariables: `show` of a `[a]`-typed result walks the list.
+#[test]
+fn test_tier3_scoped_tyvars_list_wasm() {
+    run_wasm_test("tier3_io/scoped_tyvars_list", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

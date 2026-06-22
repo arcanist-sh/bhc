@@ -2240,7 +2240,10 @@ impl<'a> WasmLowering<'a> {
             // forced, so `force`/`id` are the identity, and `seq`/`deepseq`
             // evaluate the first argument (for its effects) and return the
             // second. `rnf` reduces to `()`.
-            Some(n) if args.len() == 1 && matches!(strip_qualifier(n), "force" | "id") => {
+            Some(n)
+                if args.len() == 1
+                    && matches!(strip_qualifier(n), "force" | "id" | "fromString") =>
+            {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
             }
             // `GHC.Generics.from`/`to` roundtrip to the identity; we lower each
@@ -2280,6 +2283,55 @@ impl<'a> WasmLowering<'a> {
                     self.lower_expr(args[1], instrs, locals, local_count, false)?;
                 }
                 instrs.push(WasmInstr::End);
+            }
+
+            // IORef as a one-slot heap cell holding the current value.
+            Some(n) if args.len() == 1 && strip_qualifier(n) == "newIORef" => {
+                instrs.push(WasmInstr::I32Const(4));
+                instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+                let p = *local_count;
+                *local_count += 1;
+                instrs.push(WasmInstr::LocalTee(p));
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::I32Store(2, 0));
+                instrs.push(WasmInstr::LocalGet(p));
+            }
+            Some(n) if args.len() == 1 && strip_qualifier(n) == "readIORef" => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::I32Load(2, 0));
+            }
+            Some(n) if args.len() == 2 && strip_qualifier(n) == "writeIORef" => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::I32Store(2, 0));
+                instrs.push(WasmInstr::I32Const(0)); // ()
+            }
+            Some(n)
+                if args.len() == 2
+                    && matches!(strip_qualifier(n), "modifyIORef" | "modifyIORef'") =>
+            {
+                // ref[0] = f ref[0]
+                let p = *local_count;
+                let fc = *local_count + 1;
+                let nv = *local_count + 2;
+                *local_count += 3;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::LocalSet(p));
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::LocalSet(fc));
+                let type_idx = self.closure_type_index();
+                self.wasm.enable_func_table();
+                instrs.push(WasmInstr::LocalGet(fc)); // env
+                instrs.push(WasmInstr::LocalGet(p)); // arg = current value
+                instrs.push(WasmInstr::I32Load(2, 0));
+                instrs.push(WasmInstr::LocalGet(fc)); // code index at offset 0
+                instrs.push(WasmInstr::I32Load(2, 0));
+                instrs.push(WasmInstr::CallIndirect(type_idx, 0));
+                instrs.push(WasmInstr::LocalSet(nv));
+                instrs.push(WasmInstr::LocalGet(p));
+                instrs.push(WasmInstr::LocalGet(nv));
+                instrs.push(WasmInstr::I32Store(2, 0));
+                instrs.push(WasmInstr::I32Const(0)); // ()
             }
 
             // Comparison primitives
@@ -5981,7 +6033,10 @@ fn is_string_expr(expr: &Expr) -> bool {
 fn is_nonstring_list_ty(ty: &Ty) -> bool {
     match list_element_ty(ty) {
         Some(Ty::Con(c)) => c.name.as_str() != "Char",
-        Some(Ty::List(_) | Ty::App(..) | Ty::Tuple(_)) => true,
+        // A list whose element type is a variable (`[a]`, from a polymorphic
+        // signature) is treated as a non-String list — the common case; a
+        // genuinely `[Char]` value is usually concretely typed.
+        Some(Ty::List(_) | Ty::App(..) | Ty::Tuple(_) | Ty::Var(_)) => true,
         _ => false,
     }
 }

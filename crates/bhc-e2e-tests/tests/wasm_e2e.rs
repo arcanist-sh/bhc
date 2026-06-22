@@ -589,6 +589,19 @@ fn test_tier3_when_unless_wasm() {
     run_wasm_test("tier3_io/when_unless", Profile::Default);
 }
 
+// Monadic combinators in the eager-IO model: filterM/foldM/foldM_/zipWithM/
+// zipWithM_ reduce to pure folds/maps; replicateM/replicateM_ unroll a
+// statically-counted action so its effects repeat.
+#[test]
+fn test_tier3_monadic_combinators_wasm() {
+    run_wasm_test("tier3_io/monadic_combinators", Profile::Default);
+}
+
+#[test]
+fn test_tier3_zipwithm_basic_wasm() {
+    run_wasm_test("tier3_io/zipwithm_basic", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

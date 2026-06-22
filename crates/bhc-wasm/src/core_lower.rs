@@ -1817,6 +1817,62 @@ impl<'a> WasmLowering<'a> {
         }
     }
 
+    /// Lower `replicateM count act` (or `replicateM_`): run the action `count`
+    /// times, evaluating its expression once per iteration so its effects
+    /// repeat. `replicateM` collects the results into a list (built after all
+    /// effects have run, preserving order); `replicateM_` discards them and
+    /// yields `()`.
+    fn lower_replicate_m(
+        &mut self,
+        count: i64,
+        collect: bool,
+        act: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        if !collect {
+            for _ in 0..count {
+                self.lower_expr(act, instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Drop);
+            }
+            instrs.push(WasmInstr::I32Const(0));
+            return Ok(());
+        }
+        // Evaluate each action into a local first (effects run in order), then
+        // cons the results tail-first so the list reads left-to-right.
+        let mut value_locals = Vec::with_capacity(count.max(0) as usize);
+        for _ in 0..count {
+            self.lower_expr(act, instrs, locals, local_count, false)?;
+            let v = *local_count;
+            *local_count += 1;
+            instrs.push(WasmInstr::LocalSet(v));
+            value_locals.push(v);
+        }
+        let acc = *local_count;
+        let ptr = *local_count + 1;
+        *local_count += 2;
+        instrs.push(WasmInstr::I32Const(0)); // nil
+        instrs.push(WasmInstr::LocalSet(acc));
+        for &v in value_locals.iter().rev() {
+            instrs.push(WasmInstr::I32Const(12)); // cons cell: [tag|head|tail]
+            instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+            instrs.push(WasmInstr::LocalTee(ptr));
+            instrs.push(WasmInstr::I32Const(1)); // `:` tag
+            instrs.push(WasmInstr::I32Store(2, 0));
+            instrs.push(WasmInstr::LocalGet(ptr));
+            instrs.push(WasmInstr::LocalGet(v));
+            instrs.push(WasmInstr::I32Store(2, 4));
+            instrs.push(WasmInstr::LocalGet(ptr));
+            instrs.push(WasmInstr::LocalGet(acc));
+            instrs.push(WasmInstr::I32Store(2, 8));
+            instrs.push(WasmInstr::LocalGet(ptr));
+            instrs.push(WasmInstr::LocalSet(acc));
+        }
+        instrs.push(WasmInstr::LocalGet(acc));
+        Ok(())
+    }
+
     /// Emit a saturated call to a known top-level function by symbol: lower each
     /// argument, then `call`. Returns `Ok(false)` if the symbol isn't registered
     /// (e.g. a synthesized helper that wasn't pulled in).
@@ -1940,6 +1996,23 @@ impl<'a> WasmLowering<'a> {
                 if let Some(tag) = self.read_enum_tag(args[0]) {
                     instrs.push(WasmInstr::I32Const(tag));
                     return Ok(());
+                }
+            }
+            // `replicateM n act` / `replicateM_ n act`: the action must run `n`
+            // times, but it's an expression evaluated once as a call argument —
+            // so lower it `n` times here. Handles a statically-known count
+            // (the common case); a runtime count falls through.
+            if matches!(strip_qualifier(name), "replicateM" | "replicateM_") && args.len() == 2 {
+                if let Some(count) = as_int_literal(args[0]) {
+                    let collect = strip_qualifier(name) == "replicateM";
+                    return self.lower_replicate_m(
+                        count.max(0),
+                        collect,
+                        args[1],
+                        instrs,
+                        locals,
+                        local_count,
+                    );
                 }
             }
         }
@@ -3154,6 +3227,11 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "unfoldr",
     "gcd",
     "lcm",
+    "filterM",
+    "foldM",
+    "foldM_",
+    "zipWithM",
+    "zipWithM_",
     "filter",
     "foldr",
     "foldl",
@@ -5488,6 +5566,87 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
             );
             plam(a.clone(), plam(b.clone(), body))
         }
+        // filterM p xs = case xs of
+        //   [] -> []
+        //   (y:ys) -> case p y of { True -> y : filterM p ys; False -> filterM p ys }
+        // In eager IO, `p y` runs its effect and yields the Bool.
+        "filterM" => {
+            let p = pv("p", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let keep = papp2(
+                pref(":", id),
+                pev(&y),
+                papp2(pref("filterM", id), pev(&p), pev(&ys)),
+            );
+            let skip = papp2(pref("filterM", id), pev(&p), pev(&ys));
+            let inner = pcase(
+                papp(pev(&p), pev(&y)),
+                vec![
+                    palt("False", 0, 0, vec![], skip),
+                    palt("True", 1, 0, vec![], keep),
+                ],
+            );
+            let nil = palt("[]", 0, 0, vec![], pref("[]", id));
+            let cons = palt(":", 1, 2, vec![y.clone(), ys.clone()], inner);
+            plam(p, plam(xs.clone(), pcase(pev(&xs), vec![nil, cons])))
+        }
+        // foldM f z xs = case xs of { [] -> z; (y:ys) -> foldM f (f z y) ys }
+        // foldM_ is the same but yields () (0) — the threaded accumulator still
+        // forces `f z y` at each step for its effect.
+        "foldM" | "foldM_" => {
+            let f = pv("f", fresh(id));
+            let z = pv("z", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let nil_rhs = if name == "foldM" { pev(&z) } else { pint(0) };
+            let recur = papp(
+                papp2(pref(name, id), pev(&f), papp2(pev(&f), pev(&z), pev(&y))),
+                pev(&ys),
+            );
+            let nil = palt("[]", 0, 0, vec![], nil_rhs);
+            let cons = palt(":", 1, 2, vec![y.clone(), ys.clone()], recur);
+            plam(
+                f,
+                plam(z, plam(xs.clone(), pcase(pev(&xs), vec![nil, cons]))),
+            )
+        }
+        // zipWithM f (a:as) (b:bs) = f a b : zipWithM f as bs ; _ -> []
+        // zipWithM_ runs `f a b` for effect and yields () — `seq` forces it.
+        "zipWithM" | "zipWithM_" => {
+            let collect = name == "zipWithM";
+            let f = pv("f", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let a = pv("a", fresh(id));
+            let as_ = pv("as", fresh(id));
+            let b = pv("b", fresh(id));
+            let bs = pv("bs", fresh(id));
+            let recur = papp2(papp(pref(name, id), pev(&f)), pev(&as_), pev(&bs));
+            let step = if collect {
+                papp2(pref(":", id), papp2(pev(&f), pev(&a), pev(&b)), recur)
+            } else {
+                papp2(pref("seq", id), papp2(pev(&f), pev(&a), pev(&b)), recur)
+            };
+            let empty = if collect { pref("[]", id) } else { pint(0) };
+            let on_ys = pcase(
+                pev(&ys),
+                vec![
+                    palt("[]", 0, 0, vec![], empty.clone()),
+                    palt(":", 1, 2, vec![b.clone(), bs.clone()], step),
+                ],
+            );
+            let on_xs = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], empty),
+                    palt(":", 1, 2, vec![a.clone(), as_.clone()], on_ys),
+                ],
+            );
+            plam(f, plam(xs.clone(), plam(ys.clone(), on_xs)))
+        }
         _ => return None,
     };
     Some((pv(name, fresh(id)), body))
@@ -5690,6 +5849,16 @@ fn is_list_operand(expr: &Expr) -> bool {
         }
     }
     false
+}
+
+/// The integer value of `expr` if it is an integer literal (after peeling
+/// transparent wrappers). Used to unroll statically-counted combinators.
+fn as_int_literal(expr: &Expr) -> Option<i64> {
+    match peel_show_wrappers(expr) {
+        Expr::Lit(Literal::Int(n), _, _) => Some(*n),
+        Expr::Lit(Literal::Integer(n), _, _) => i64::try_from(*n).ok(),
+        _ => None,
+    }
 }
 
 /// Whether `expr`'s head is a `Maybe` constructor (`Just`/`Nothing`), used to

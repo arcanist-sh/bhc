@@ -2592,12 +2592,44 @@ impl<'a> WasmLowering<'a> {
                     // Push accumulator as result
                     instrs.push(WasmInstr::LocalGet(acc_local));
                 } else {
-                    // Can't handle non-enumFromTo sum arguments
-                    tracing::warn!("sum with non-enumFromTo argument, using 0");
-                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
-                    instrs.push(WasmInstr::Drop);
+                    // General case: walk the runtime cons list, summing heads
+                    // (Int). acc = 0; cur = xs; while cur is a cons: acc +=
+                    // head; cur = tail.
+                    let acc = *local_count;
+                    let cur = *local_count + 1;
+                    *local_count += 2;
                     instrs.push(WasmInstr::I32Const(0));
+                    instrs.push(WasmInstr::LocalSet(acc));
+                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                    instrs.push(WasmInstr::LocalSet(cur));
+                    instrs.push(WasmInstr::Block(None));
+                    instrs.push(WasmInstr::Loop(None));
+                    // nil (value < HEAP_BASE) -> done
+                    instrs.push(WasmInstr::LocalGet(cur));
+                    instrs.push(WasmInstr::I32Const(HEAP_BASE));
+                    instrs.push(WasmInstr::I32LtU);
+                    instrs.push(WasmInstr::BrIf(1));
+                    // acc += head ([cur+4])
+                    instrs.push(WasmInstr::LocalGet(acc));
+                    instrs.push(WasmInstr::LocalGet(cur));
+                    instrs.push(WasmInstr::I32Load(2, 4));
+                    instrs.push(WasmInstr::I32Add);
+                    instrs.push(WasmInstr::LocalSet(acc));
+                    // cur = tail ([cur+8])
+                    instrs.push(WasmInstr::LocalGet(cur));
+                    instrs.push(WasmInstr::I32Load(2, 8));
+                    instrs.push(WasmInstr::LocalSet(cur));
+                    instrs.push(WasmInstr::Br(0));
+                    instrs.push(WasmInstr::End); // loop
+                    instrs.push(WasmInstr::End); // block
+                    instrs.push(WasmInstr::LocalGet(acc));
                 }
+            }
+            // showDouble x = show (x :: Double): render via the double formatter.
+            Some(n) if args.len() == 1 && strip_qualifier(n) == "showDouble" => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::F64Load(3, 0));
+                instrs.push(WasmInstr::Call(self.runtime.double_to_str_idx));
             }
 
             // User-defined function call
@@ -3232,6 +3264,15 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "foldM_",
     "zipWithM",
     "zipWithM_",
+    "either",
+    "fromLeft",
+    "fromRight",
+    "lefts",
+    "rights",
+    "maybe",
+    "listToMaybe",
+    "catMaybes",
+    "guard",
     "filter",
     "foldr",
     "foldl",
@@ -5646,6 +5687,161 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
                 ],
             );
             plam(f, plam(xs.clone(), plam(ys.clone(), on_xs)))
+        }
+        // either f g e = case e of { Left x -> f x; Right y -> g y }
+        "either" => {
+            let f = pv("f", fresh(id));
+            let g = pv("g", fresh(id));
+            let e = pv("e", fresh(id));
+            let x = pv("x", fresh(id));
+            let y = pv("y", fresh(id));
+            let body = pcase(
+                pev(&e),
+                vec![
+                    palt("Left", 0, 1, vec![x.clone()], papp(pev(&f), pev(&x))),
+                    palt("Right", 1, 1, vec![y.clone()], papp(pev(&g), pev(&y))),
+                ],
+            );
+            plam(f, plam(g, plam(e.clone(), body)))
+        }
+        // fromLeft d e = case e of { Left x -> x; Right _ -> d }
+        // fromRight d e = case e of { Right y -> y; Left _ -> d }
+        "fromLeft" | "fromRight" => {
+            let want_left = name == "fromLeft";
+            let d = pv("d", fresh(id));
+            let e = pv("e", fresh(id));
+            let v = pv("v", fresh(id));
+            let w = pv("w", fresh(id));
+            let left = if want_left {
+                palt("Left", 0, 1, vec![v.clone()], pev(&v))
+            } else {
+                palt("Left", 0, 1, vec![w.clone()], pev(&d))
+            };
+            let right = if want_left {
+                palt("Right", 1, 1, vec![w.clone()], pev(&d))
+            } else {
+                palt("Right", 1, 1, vec![v.clone()], pev(&v))
+            };
+            plam(
+                d.clone(),
+                plam(e.clone(), pcase(pev(&e), vec![left, right])),
+            )
+        }
+        // lefts xs  = [x | Left x  <- xs] ; rights xs = [y | Right y <- xs]
+        "lefts" | "rights" => {
+            let keep_left = name == "lefts";
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let v = pv("v", fresh(id));
+            let w = pv("w", fresh(id));
+            let recur = papp(pref(name, id), pev(&ys));
+            let keep = papp2(pref(":", id), pev(&v), recur.clone());
+            let (left_rhs, right_rhs) = if keep_left {
+                (keep, recur)
+            } else {
+                (recur.clone(), papp2(pref(":", id), pev(&v), recur))
+            };
+            let on_elem = pcase(
+                pev(&y),
+                vec![
+                    palt(
+                        "Left",
+                        0,
+                        1,
+                        vec![if keep_left { v.clone() } else { w.clone() }],
+                        left_rhs,
+                    ),
+                    palt(
+                        "Right",
+                        1,
+                        1,
+                        vec![if keep_left { w.clone() } else { v.clone() }],
+                        right_rhs,
+                    ),
+                ],
+            );
+            let nil = palt("[]", 0, 0, vec![], pref("[]", id));
+            let cons = palt(":", 1, 2, vec![y.clone(), ys.clone()], on_elem);
+            plam(xs.clone(), pcase(pev(&xs), vec![nil, cons]))
+        }
+        // maybe d f m = case m of { Nothing -> d; Just x -> f x }
+        "maybe" => {
+            let d = pv("d", fresh(id));
+            let f = pv("f", fresh(id));
+            let m = pv("m", fresh(id));
+            let x = pv("x", fresh(id));
+            let body = pcase(
+                pev(&m),
+                vec![
+                    palt("Nothing", 0, 0, vec![], pev(&d)),
+                    palt("Just", 1, 1, vec![x.clone()], papp(pev(&f), pev(&x))),
+                ],
+            );
+            plam(d, plam(f, plam(m.clone(), body)))
+        }
+        // listToMaybe xs = case xs of { [] -> Nothing; (x:_) -> Just x }
+        "listToMaybe" => {
+            let xs = pv("xs", fresh(id));
+            let x = pv("x", fresh(id));
+            let rest = pv("rest", fresh(id));
+            let body = pcase(
+                pev(&xs),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("Nothing", id)),
+                    palt(
+                        ":",
+                        1,
+                        2,
+                        vec![x.clone(), rest.clone()],
+                        papp(pref("Just", id), pev(&x)),
+                    ),
+                ],
+            );
+            plam(xs.clone(), body)
+        }
+        // catMaybes xs = case xs of
+        //   [] -> []; (y:ys) -> case y of { Nothing -> catMaybes ys; Just x -> x : catMaybes ys }
+        "catMaybes" => {
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let x = pv("x", fresh(id));
+            let recur = papp(pref("catMaybes", id), pev(&ys));
+            let on_elem = pcase(
+                pev(&y),
+                vec![
+                    palt("Nothing", 0, 0, vec![], recur.clone()),
+                    palt(
+                        "Just",
+                        1,
+                        1,
+                        vec![x.clone()],
+                        papp2(pref(":", id), pev(&x), recur),
+                    ),
+                ],
+            );
+            let nil = palt("[]", 0, 0, vec![], pref("[]", id));
+            let cons = palt(":", 1, 2, vec![y.clone(), ys.clone()], on_elem);
+            plam(xs.clone(), pcase(pev(&xs), vec![nil, cons]))
+        }
+        // guard b = case b of { True -> [()]; False -> [] }  (list Alternative)
+        "guard" => {
+            let b = pv("b", fresh(id));
+            let body = pcase(
+                pev(&b),
+                vec![
+                    palt("False", 0, 0, vec![], pref("[]", id)),
+                    palt(
+                        "True",
+                        1,
+                        0,
+                        vec![],
+                        papp2(pref(":", id), pref("()", id), pref("[]", id)),
+                    ),
+                ],
+            );
+            plam(b.clone(), body)
         }
         _ => return None,
     };

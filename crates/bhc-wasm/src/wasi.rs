@@ -6,6 +6,13 @@
 use crate::codegen::{WasmFunc, WasmFuncType, WasmGlobal, WasmImport, WasmImportKind};
 use crate::{WasmInstr, WasmType};
 
+/// Marker bit set in the length word of a length-prefixed string (`pstr`),
+/// distinguishing it from a cons-cell `[Char]` (whose first word is the `:`
+/// tag `1`). String length is small, so bit 30 is always free.
+pub const PSTR_MARKER: i32 = 0x4000_0000;
+/// Mask to recover the true length from a `pstr` length word.
+pub const PSTR_LEN_MASK: i32 = 0x3FFF_FFFF;
+
 /// Generate the standard WASI imports needed for basic I/O.
 ///
 /// Returns a list of imports for:
@@ -654,6 +661,8 @@ pub fn generate_double_to_str(alloc_idx: u32) -> WasmFunc {
     func.emit(WasmInstr::LocalSet(result));
     func.emit(WasmInstr::LocalGet(result));
     func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32Const(PSTR_MARKER));
+    func.emit(WasmInstr::I32Or);
     func.emit(WasmInstr::I32Store(2, 0));
 
     // copy len bytes: result[4+i] = scratch[ptr+i]
@@ -785,6 +794,8 @@ pub fn generate_int_to_str(alloc_idx: u32) -> WasmFunc {
     func.emit(WasmInstr::LocalSet(result));
     func.emit(WasmInstr::LocalGet(result));
     func.emit(WasmInstr::LocalGet(len));
+    func.emit(WasmInstr::I32Const(PSTR_MARKER));
+    func.emit(WasmInstr::I32Or);
     func.emit(WasmInstr::I32Store(2, 0));
 
     // copy len bytes: result[4+i] = scratch[ptr+i]
@@ -836,10 +847,12 @@ pub fn generate_print_pstr(fd_write_idx: u32) -> WasmFunc {
     func.emit(WasmInstr::I32Add);
     func.emit(WasmInstr::I32Store(4, 0));
 
-    // iovec.len = load len at ptr
+    // iovec.len = load len at ptr (masking off the pstr marker bit)
     func.emit(WasmInstr::I32Const(20));
     func.emit(WasmInstr::LocalGet(0));
     func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::I32Const(PSTR_LEN_MASK));
+    func.emit(WasmInstr::I32And);
     func.emit(WasmInstr::I32Store(4, 0));
 
     // fd_write(stdout, 16, 1, 24)
@@ -873,12 +886,16 @@ pub fn generate_concat_str(fd_write_idx: u32, alloc_idx: u32) -> WasmFunc {
     let result = func.add_local(WasmType::I32);
     let i = func.add_local(WasmType::I32);
 
-    // len_a = [a], len_b = [b]
+    // len_a = [a], len_b = [b]  (masking off the pstr marker bit)
     func.emit(WasmInstr::LocalGet(0));
     func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::I32Const(PSTR_LEN_MASK));
+    func.emit(WasmInstr::I32And);
     func.emit(WasmInstr::LocalSet(len_a));
     func.emit(WasmInstr::LocalGet(1));
     func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::I32Const(PSTR_LEN_MASK));
+    func.emit(WasmInstr::I32And);
     func.emit(WasmInstr::LocalSet(len_b));
 
     // result = alloc(4 + len_a + len_b)
@@ -890,11 +907,13 @@ pub fn generate_concat_str(fd_write_idx: u32, alloc_idx: u32) -> WasmFunc {
     func.emit(WasmInstr::Call(alloc_idx));
     func.emit(WasmInstr::LocalSet(result));
 
-    // [result] = len_a + len_b
+    // [result] = (len_a + len_b) | marker
     func.emit(WasmInstr::LocalGet(result));
     func.emit(WasmInstr::LocalGet(len_a));
     func.emit(WasmInstr::LocalGet(len_b));
     func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Const(PSTR_MARKER));
+    func.emit(WasmInstr::I32Or);
     func.emit(WasmInstr::I32Store(2, 0));
 
     // Copy bytes of a: for i in 0..len_a { result[4+i] = a[4+i] }
@@ -1221,9 +1240,11 @@ pub fn generate_read_line(fd_read_idx: u32, alloc_idx: u32, heap_ptr_global: u32
     func.emit(WasmInstr::End);
     func.emit(WasmInstr::End);
 
-    // [buf] = count (the string length)
+    // [buf] = count | marker (the string length)
     func.emit(WasmInstr::LocalGet(buf));
     func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Const(PSTR_MARKER));
+    func.emit(WasmInstr::I32Or);
     func.emit(WasmInstr::I32Store(2, 0));
 
     // Reclaim the unused tail: heap_ptr = align8(buf + 4 + count).
@@ -1258,9 +1279,11 @@ pub fn generate_parse_int() -> WasmFunc {
     let neg = func.add_local(WasmType::I32);
     let byte = func.add_local(WasmType::I32);
 
-    // len = [pstr]; i = acc = neg = 0
+    // len = [pstr] (masking off the pstr marker bit); i = acc = neg = 0
     func.emit(WasmInstr::LocalGet(0));
     func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::I32Const(PSTR_LEN_MASK));
+    func.emit(WasmInstr::I32And);
     func.emit(WasmInstr::LocalSet(len));
     func.emit(WasmInstr::I32Const(0));
     func.emit(WasmInstr::LocalSet(i));
@@ -1463,9 +1486,11 @@ pub fn generate_read_all(fd_read_idx: u32, alloc_idx: u32, heap_ptr_global: u32)
     func.emit(WasmInstr::End); // loop
     func.emit(WasmInstr::End); // block
 
-    // [buf] = count
+    // [buf] = count | marker
     func.emit(WasmInstr::LocalGet(buf));
     func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Const(PSTR_MARKER));
+    func.emit(WasmInstr::I32Or);
     func.emit(WasmInstr::I32Store(2, 0));
 
     // Reclaim the unused tail: heap_ptr = align8(buf + 4 + count).
@@ -1505,9 +1530,11 @@ pub fn generate_show_string(alloc_idx: u32, heap_ptr_global: u32) -> WasmFunc {
     let b = func.add_local(WasmType::I32); // current byte
     let esc = func.add_local(WasmType::I32); // escape's second char, 0 if none
 
-    // inlen = [param0]
+    // inlen = [param0] (masking off the pstr marker bit)
     func.emit(WasmInstr::LocalGet(0));
     func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::I32Const(PSTR_LEN_MASK));
+    func.emit(WasmInstr::I32And);
     func.emit(WasmInstr::LocalSet(inlen));
     // out = alloc(6 + 2*inlen)   (4 header + 2 quotes + worst-case escapes)
     func.emit(WasmInstr::I32Const(6));
@@ -1581,13 +1608,15 @@ pub fn generate_show_string(alloc_idx: u32, heap_ptr_global: u32) -> WasmFunc {
 
     // closing quote
     emit_store_byte_advance(&mut func, pos, 34);
-    // [out] = pos - (out + 4)
+    // [out] = (pos - (out + 4)) | marker
     func.emit(WasmInstr::LocalGet(out));
     func.emit(WasmInstr::LocalGet(pos));
     func.emit(WasmInstr::LocalGet(out));
     func.emit(WasmInstr::I32Sub);
     func.emit(WasmInstr::I32Const(4));
     func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::I32Const(PSTR_MARKER));
+    func.emit(WasmInstr::I32Or);
     func.emit(WasmInstr::I32Store(2, 0));
     // heap_ptr = align8(pos)
     func.emit(WasmInstr::LocalGet(pos));

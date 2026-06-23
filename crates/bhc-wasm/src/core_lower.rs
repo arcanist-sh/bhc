@@ -568,7 +568,11 @@ impl<'a> WasmLowering<'a> {
         self.next_data_offset = (self.next_data_offset + 3) & !3;
         let ptr = self.next_data_offset;
         let len = s.len() as u32;
-        let mut bytes = (len as i32).to_le_bytes().to_vec();
+        // Tag the length word with the pstr marker so it is distinguishable from
+        // a cons-cell `[Char]` at print/length sites.
+        let mut bytes = ((len as i32) | crate::wasi::PSTR_MARKER)
+            .to_le_bytes()
+            .to_vec();
         bytes.extend_from_slice(s.as_bytes());
         self.wasm.add_data_segment(ptr, bytes);
         self.next_data_offset = ptr + 4 + len;
@@ -1262,6 +1266,145 @@ impl<'a> WasmLowering<'a> {
         instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
         instrs.push(WasmInstr::End);
         Ok(())
+    }
+
+    /// Emit `length arg`, handling both string representations: a marked `pstr`
+    /// returns its stored length; nil is 0; any cons list is walked.
+    fn emit_length(
+        &mut self,
+        arg: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let v = *local_count;
+        let len = *local_count + 1;
+        let cur = *local_count + 2;
+        *local_count += 3;
+        self.lower_expr(arg, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalSet(v));
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::I32Eqz);
+        instrs.push(WasmInstr::If(Some(WasmType::I32)));
+        instrs.push(WasmInstr::I32Const(0)); // nil/empty
+        instrs.push(WasmInstr::Else);
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::I32Load(2, 0));
+        instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_MARKER));
+        instrs.push(WasmInstr::I32And);
+        instrs.push(WasmInstr::If(Some(WasmType::I32)));
+        // marked pstr: stored length
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::I32Load(2, 0));
+        instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_LEN_MASK));
+        instrs.push(WasmInstr::I32And);
+        instrs.push(WasmInstr::Else);
+        // cons list: walk the spine
+        instrs.push(WasmInstr::I32Const(0));
+        instrs.push(WasmInstr::LocalSet(len));
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::LocalSet(cur));
+        instrs.push(WasmInstr::Block(None));
+        instrs.push(WasmInstr::Loop(None));
+        instrs.push(WasmInstr::LocalGet(cur));
+        instrs.push(WasmInstr::I32Const(HEAP_BASE));
+        instrs.push(WasmInstr::I32LtU);
+        instrs.push(WasmInstr::BrIf(1));
+        instrs.push(WasmInstr::LocalGet(len));
+        instrs.push(WasmInstr::I32Const(1));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalSet(len));
+        instrs.push(WasmInstr::LocalGet(cur));
+        instrs.push(WasmInstr::I32Load(2, 8));
+        instrs.push(WasmInstr::LocalSet(cur));
+        instrs.push(WasmInstr::Br(0));
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::LocalGet(len));
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::End);
+        Ok(())
+    }
+
+    /// Convert a runtime cons-`[Char]` (in local `src`) to a freshly allocated
+    /// length-prefixed `pstr`, leaving its pointer on the stack. Walks the cons
+    /// cells once to count, allocates `[len|marker | bytes]`, then copies each
+    /// head byte.
+    fn emit_charlist_to_pstr(
+        &mut self,
+        src: u32,
+        instrs: &mut Vec<WasmInstr>,
+        local_count: &mut u32,
+    ) {
+        let len = *local_count;
+        let cur = *local_count + 1;
+        let result = *local_count + 2;
+        let i = *local_count + 3;
+        *local_count += 4;
+        // count length
+        instrs.push(WasmInstr::LocalGet(src));
+        instrs.push(WasmInstr::LocalSet(cur));
+        instrs.push(WasmInstr::I32Const(0));
+        instrs.push(WasmInstr::LocalSet(len));
+        instrs.push(WasmInstr::Block(None));
+        instrs.push(WasmInstr::Loop(None));
+        instrs.push(WasmInstr::LocalGet(cur));
+        instrs.push(WasmInstr::I32Const(HEAP_BASE));
+        instrs.push(WasmInstr::I32LtU);
+        instrs.push(WasmInstr::BrIf(1));
+        instrs.push(WasmInstr::LocalGet(len));
+        instrs.push(WasmInstr::I32Const(1));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalSet(len));
+        instrs.push(WasmInstr::LocalGet(cur));
+        instrs.push(WasmInstr::I32Load(2, 8)); // tail
+        instrs.push(WasmInstr::LocalSet(cur));
+        instrs.push(WasmInstr::Br(0));
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::End);
+        // alloc(4 + len); [result] = len | marker
+        instrs.push(WasmInstr::LocalGet(len));
+        instrs.push(WasmInstr::I32Const(4));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+        instrs.push(WasmInstr::LocalSet(result));
+        instrs.push(WasmInstr::LocalGet(result));
+        instrs.push(WasmInstr::LocalGet(len));
+        instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_MARKER));
+        instrs.push(WasmInstr::I32Or);
+        instrs.push(WasmInstr::I32Store(2, 0));
+        // copy each head byte
+        instrs.push(WasmInstr::LocalGet(src));
+        instrs.push(WasmInstr::LocalSet(cur));
+        instrs.push(WasmInstr::I32Const(0));
+        instrs.push(WasmInstr::LocalSet(i));
+        instrs.push(WasmInstr::Block(None));
+        instrs.push(WasmInstr::Loop(None));
+        instrs.push(WasmInstr::LocalGet(cur));
+        instrs.push(WasmInstr::I32Const(HEAP_BASE));
+        instrs.push(WasmInstr::I32LtU);
+        instrs.push(WasmInstr::BrIf(1));
+        // dst = result + 4 + i
+        instrs.push(WasmInstr::LocalGet(result));
+        instrs.push(WasmInstr::I32Const(4));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::I32Add);
+        // byte = head [cur+4]
+        instrs.push(WasmInstr::LocalGet(cur));
+        instrs.push(WasmInstr::I32Load(2, 4));
+        instrs.push(WasmInstr::I32Store8(0, 0));
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::I32Const(1));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalSet(i));
+        instrs.push(WasmInstr::LocalGet(cur));
+        instrs.push(WasmInstr::I32Load(2, 8));
+        instrs.push(WasmInstr::LocalSet(cur));
+        instrs.push(WasmInstr::Br(0));
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::LocalGet(result));
     }
 
     /// Show a runtime list of scalars by walking its cons cells, rendering each
@@ -2103,6 +2246,14 @@ impl<'a> WasmLowering<'a> {
                     );
                 }
             }
+            // `length` works on both string representations: a marked `pstr`
+            // returns its stored length; a cons list (incl. cons-`[Char]`) is
+            // walked. This keeps `length` correct whether its argument is a
+            // built list or a String literal/`++`/show result.
+            if strip_qualifier(name) == "length" && args.len() == 1 {
+                self.emit_length(args[0], instrs, locals, local_count)?;
+                return Ok(());
+            }
             // `take k (iterate/repeat/cycle/enumFrom/enumFromThen …)`: the strict
             // backend can't build an infinite list, so for a statically-known
             // count fuse the take into a finite list of `k` elements. Finite
@@ -2885,7 +3036,7 @@ impl<'a> WasmLowering<'a> {
                 instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
                 instrs.push(WasmInstr::LocalSet(p));
                 instrs.push(WasmInstr::LocalGet(p));
-                instrs.push(WasmInstr::I32Const(1));
+                instrs.push(WasmInstr::I32Const(1 | crate::wasi::PSTR_MARKER));
                 instrs.push(WasmInstr::I32Store(2, 0));
                 instrs.push(WasmInstr::LocalGet(p));
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
@@ -2993,11 +3144,35 @@ impl<'a> WasmLowering<'a> {
             return self.lower_show(inner, newline, instrs, locals, local_count);
         }
 
-        // Any other string-valued expression — a literal, an `if`/`case` over
-        // strings, or a `++` result — evaluates to a length-prefixed string
-        // pointer that carries its own length, so it prints uniformly.
+        // Any other string-valued expression. The value is either a
+        // length-prefixed `pstr` (literal/`++`/show result — its length word
+        // carries the marker bit) or a runtime cons-`[Char]` (a built string,
+        // e.g. `c : acc`). Discriminate at runtime: empty (nil/0) prints
+        // nothing; a marked pstr prints directly; a cons list is converted to a
+        // pstr first.
+        let v = *local_count;
+        *local_count += 1;
         self.lower_expr(expr, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalSet(v));
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::I32Eqz);
+        instrs.push(WasmInstr::If(None));
+        // empty string: print nothing
+        instrs.push(WasmInstr::Else);
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::I32Load(2, 0));
+        instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_MARKER));
+        instrs.push(WasmInstr::I32And);
+        instrs.push(WasmInstr::If(None));
+        // marked pstr
+        instrs.push(WasmInstr::LocalGet(v));
         instrs.push(WasmInstr::Call(self.runtime.print_pstr_idx));
+        instrs.push(WasmInstr::Else);
+        // cons-[Char]: convert to a pstr, then print
+        self.emit_charlist_to_pstr(v, instrs, local_count);
+        instrs.push(WasmInstr::Call(self.runtime.print_pstr_idx));
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::End);
         if newline {
             instrs.push(WasmInstr::I32Const(self.runtime.newline_offset as i32));
             instrs.push(WasmInstr::I32Const(1));

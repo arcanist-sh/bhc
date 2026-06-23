@@ -762,6 +762,23 @@ fn test_tier3_cross_writer_state_wasm() {
     run_wasm_test("tier3_io/cross_writer_state", Profile::Default);
 }
 
+#[test]
+fn test_tier3_cross_except_reader_wasm() {
+    run_wasm_test("tier3_io/cross_except_reader", Profile::Default);
+}
+
+// String-representation discriminator: putStrLn/length handle both a marked
+// length-prefixed pstr and a runtime cons-[Char].
+#[test]
+fn test_tier3_bytestring_basic_wasm() {
+    run_wasm_test("tier3_io/bytestring_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_char_ranges_wasm() {
+    run_wasm_test("tier3_io/char_ranges", Profile::Default);
+}
+
 // take k of an infinite producer (iterate/repeat/cycle/enumFrom/enumFromThen)
 // fuses to a finite list; enumFromThenTo and until synthesize directly.
 #[test]

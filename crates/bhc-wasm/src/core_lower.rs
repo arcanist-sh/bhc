@@ -3356,6 +3356,58 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "listToMaybe",
     "catMaybes",
     "guard",
+    // Data.Map / Data.IntMap
+    "Data.Map.fromList",
+    "Data.Map.size",
+    "Data.Map.member",
+    "Data.Map.insert",
+    "Data.Map.delete",
+    "Data.Map.null",
+    "Data.Map.findWithDefault",
+    "Data.Map.elems",
+    "Data.Map.keys",
+    "Data.Map.lookup",
+    "Data.Map.mapMaybe",
+    "Data.Map.union",
+    "Data.Map.unions",
+    "Data.Map.update",
+    "Data.Map.alter",
+    "Data.IntMap.fromList",
+    "Data.IntMap.size",
+    "Data.IntMap.member",
+    "Data.IntMap.insert",
+    "Data.IntMap.delete",
+    "Data.IntMap.null",
+    "Data.IntMap.findWithDefault",
+    "Data.IntMap.elems",
+    "Data.IntMap.keys",
+    "Data.IntMap.lookup",
+    "Data.IntMap.mapMaybe",
+    "Data.IntMap.union",
+    "Data.IntMap.unions",
+    "Data.IntMap.update",
+    "Data.IntMap.alter",
+    // Data.Set / Data.IntSet
+    "Data.Set.fromList",
+    "Data.Set.size",
+    "Data.Set.member",
+    "Data.Set.insert",
+    "Data.Set.delete",
+    "Data.Set.union",
+    "Data.Set.intersection",
+    "Data.Set.difference",
+    "Data.Set.filter",
+    "Data.Set.foldr",
+    "Data.IntSet.fromList",
+    "Data.IntSet.size",
+    "Data.IntSet.member",
+    "Data.IntSet.insert",
+    "Data.IntSet.delete",
+    "Data.IntSet.union",
+    "Data.IntSet.intersection",
+    "Data.IntSet.difference",
+    "Data.IntSet.filter",
+    "Data.IntSet.foldr",
     "filter",
     "foldr",
     "foldl",
@@ -3495,12 +3547,472 @@ fn palt(name: &str, tag: u32, arity: u32, binders: Vec<Var>, rhs: Expr) -> Alt {
 }
 
 /// Build a single named list-prelude binding, drawing fresh ids from `id`.
+/// Synthesize a `Data.Map`/`Data.Set`/`Data.IntMap`/`Data.IntSet` operation.
+///
+/// A Set is a deduplicated list `[a]`; a Map is an association list `[(k, v)]`.
+/// IntMap/IntSet share the Map/Set implementations. Sibling/recursive calls use
+/// the same module prefix as `name`, so the IntMap/IntSet copies stay internally
+/// consistent. Returns the lambda body, or `None` if `name` isn't a container op.
+fn build_container_fn(name: &str, id: &mut usize) -> Option<Expr> {
+    let (prefix, op) = name.rsplit_once('.')?;
+    let is_map = prefix.ends_with("Map");
+    let is_set = prefix.ends_with("Set");
+    if !is_map && !is_set {
+        return None;
+    }
+    let fresh = |id: &mut usize| {
+        let v = *id;
+        *id += 1;
+        v
+    };
+    // Reference a sibling op in the same module (e.g. insert calls delete).
+    let q = |op: &str, id: &mut usize| pref(&format!("{prefix}.{op}"), id);
+
+    let body = if is_map {
+        match op {
+            // member k m = case m of [] -> False
+            //   (p:ps) -> case fst p == k of { True -> True; False -> member k ps }
+            "member" => {
+                let k = pv("k", fresh(id));
+                let m = pv("m", fresh(id));
+                let p = pv("p", fresh(id));
+                let ps = pv("ps", fresh(id));
+                let eqk = papp2(pref("==", id), papp(pref("fst", id), pev(&p)), pev(&k));
+                let inner = pcase(
+                    eqk,
+                    vec![
+                        palt(
+                            "False",
+                            0,
+                            0,
+                            vec![],
+                            papp2(q("member", id), pev(&k), pev(&ps)),
+                        ),
+                        palt("True", 1, 0, vec![], pref("True", id)),
+                    ],
+                );
+                let nil = palt("[]", 0, 0, vec![], pref("False", id));
+                let cons = palt(":", 1, 2, vec![p.clone(), ps.clone()], inner);
+                plam(k, plam(m.clone(), pcase(pev(&m), vec![nil, cons])))
+            }
+            // insert k v m = (k,v) : delete k m
+            "insert" => {
+                let k = pv("k", fresh(id));
+                let v = pv("v", fresh(id));
+                let m = pv("m", fresh(id));
+                let pair = papp2(pref("(,)", id), pev(&k), pev(&v));
+                let body = papp2(
+                    pref(":", id),
+                    pair,
+                    papp2(q("delete", id), pev(&k), pev(&m)),
+                );
+                plam(k, plam(v, plam(m.clone(), body)))
+            }
+            // delete k m = filter (\p -> fst p /= k) m
+            "delete" => {
+                let k = pv("k", fresh(id));
+                let m = pv("m", fresh(id));
+                let p = pv("p", fresh(id));
+                let pred = plam(
+                    p.clone(),
+                    papp2(pref("/=", id), papp(pref("fst", id), pev(&p)), pev(&k)),
+                );
+                plam(k, plam(m.clone(), papp2(pref("filter", id), pred, pev(&m))))
+            }
+            // fromList xs = case xs of [] -> []
+            //   (p:ps) -> case p of (k,v) -> insert k v (fromList ps)
+            "fromList" => {
+                let xs = pv("xs", fresh(id));
+                let p = pv("p", fresh(id));
+                let ps = pv("ps", fresh(id));
+                let k = pv("k", fresh(id));
+                let v = pv("v", fresh(id));
+                let ins = papp(
+                    papp2(q("insert", id), pev(&k), pev(&v)),
+                    papp(q("fromList", id), pev(&ps)),
+                );
+                let on_pair = pcase(
+                    pev(&p),
+                    vec![palt("(,)", 0, 2, vec![k.clone(), v.clone()], ins)],
+                );
+                let nil = palt("[]", 0, 0, vec![], pref("[]", id));
+                let cons = palt(":", 1, 2, vec![p.clone(), ps.clone()], on_pair);
+                plam(xs.clone(), pcase(pev(&xs), vec![nil, cons]))
+            }
+            "size" => {
+                let m = pv("m", fresh(id));
+                plam(m.clone(), papp(pref("length", id), pev(&m)))
+            }
+            // null m = case m of [] -> True; (_:_) -> False
+            "null" => {
+                let m = pv("m", fresh(id));
+                let p = pv("p", fresh(id));
+                let ps = pv("ps", fresh(id));
+                plam(
+                    m.clone(),
+                    pcase(
+                        pev(&m),
+                        vec![
+                            palt("[]", 0, 0, vec![], pref("True", id)),
+                            palt(":", 1, 2, vec![p, ps], pref("False", id)),
+                        ],
+                    ),
+                )
+            }
+            // findWithDefault d k m = case m of [] -> d
+            //   (p:ps) -> case fst p == k of { True -> snd p; False -> findWithDefault d k ps }
+            "findWithDefault" => {
+                let d = pv("d", fresh(id));
+                let k = pv("k", fresh(id));
+                let m = pv("m", fresh(id));
+                let p = pv("p", fresh(id));
+                let ps = pv("ps", fresh(id));
+                let eqk = papp2(pref("==", id), papp(pref("fst", id), pev(&p)), pev(&k));
+                let inner = pcase(
+                    eqk,
+                    vec![
+                        palt(
+                            "False",
+                            0,
+                            0,
+                            vec![],
+                            papp(papp2(q("findWithDefault", id), pev(&d), pev(&k)), pev(&ps)),
+                        ),
+                        palt("True", 1, 0, vec![], papp(pref("snd", id), pev(&p))),
+                    ],
+                );
+                let nil = palt("[]", 0, 0, vec![], pev(&d));
+                let cons = palt(":", 1, 2, vec![p.clone(), ps.clone()], inner);
+                plam(d, plam(k, plam(m.clone(), pcase(pev(&m), vec![nil, cons]))))
+            }
+            "elems" => {
+                let m = pv("m", fresh(id));
+                plam(m.clone(), papp2(pref("map", id), pref("snd", id), pev(&m)))
+            }
+            "keys" => {
+                let m = pv("m", fresh(id));
+                plam(m.clone(), papp2(pref("map", id), pref("fst", id), pev(&m)))
+            }
+            // lookup k m = case m of [] -> Nothing
+            //   (p:ps) -> case fst p == k of { True -> Just (snd p); False -> lookup k ps }
+            "lookup" => {
+                let k = pv("k", fresh(id));
+                let m = pv("m", fresh(id));
+                let p = pv("p", fresh(id));
+                let ps = pv("ps", fresh(id));
+                let eqk = papp2(pref("==", id), papp(pref("fst", id), pev(&p)), pev(&k));
+                let inner = pcase(
+                    eqk,
+                    vec![
+                        palt(
+                            "False",
+                            0,
+                            0,
+                            vec![],
+                            papp2(q("lookup", id), pev(&k), pev(&ps)),
+                        ),
+                        palt(
+                            "True",
+                            1,
+                            0,
+                            vec![],
+                            papp(pref("Just", id), papp(pref("snd", id), pev(&p))),
+                        ),
+                    ],
+                );
+                let nil = palt("[]", 0, 0, vec![], pref("Nothing", id));
+                let cons = palt(":", 1, 2, vec![p.clone(), ps.clone()], inner);
+                plam(k, plam(m.clone(), pcase(pev(&m), vec![nil, cons])))
+            }
+            // mapMaybe f m = case m of [] -> []
+            //   ((k,v):ps) -> case f v of { Nothing -> rest; Just w -> (k,w):rest }
+            "mapMaybe" => {
+                let f = pv("f", fresh(id));
+                let m = pv("m", fresh(id));
+                let p = pv("p", fresh(id));
+                let ps = pv("ps", fresh(id));
+                let k = pv("k", fresh(id));
+                let v = pv("v", fresh(id));
+                let w = pv("w", fresh(id));
+                let rest = papp2(q("mapMaybe", id), pev(&f), pev(&ps));
+                let on_just = papp2(
+                    pref(":", id),
+                    papp2(pref("(,)", id), pev(&k), pev(&w)),
+                    rest.clone(),
+                );
+                let on_fv = pcase(
+                    papp(pev(&f), pev(&v)),
+                    vec![
+                        palt("Nothing", 0, 0, vec![], rest),
+                        palt("Just", 1, 1, vec![w.clone()], on_just),
+                    ],
+                );
+                let on_pair = pcase(
+                    pev(&p),
+                    vec![palt("(,)", 0, 2, vec![k.clone(), v.clone()], on_fv)],
+                );
+                let nil = palt("[]", 0, 0, vec![], pref("[]", id));
+                let cons = palt(":", 1, 2, vec![p.clone(), ps.clone()], on_pair);
+                plam(f, plam(m.clone(), pcase(pev(&m), vec![nil, cons])))
+            }
+            // union a b = case a of [] -> b; (p:ps) -> insert (fst p) (snd p) (union ps b)
+            "union" => {
+                let a = pv("a", fresh(id));
+                let b = pv("b", fresh(id));
+                let p = pv("p", fresh(id));
+                let ps = pv("ps", fresh(id));
+                let ins = papp(
+                    papp2(
+                        q("insert", id),
+                        papp(pref("fst", id), pev(&p)),
+                        papp(pref("snd", id), pev(&p)),
+                    ),
+                    papp2(q("union", id), pev(&ps), pev(&b)),
+                );
+                let nil = palt("[]", 0, 0, vec![], pev(&b));
+                let cons = palt(":", 1, 2, vec![p.clone(), ps.clone()], ins);
+                plam(a.clone(), plam(b.clone(), pcase(pev(&a), vec![nil, cons])))
+            }
+            // unions ms = case ms of [] -> []; (m:rest) -> union m (unions rest)
+            "unions" => {
+                let ms = pv("ms", fresh(id));
+                let m = pv("m", fresh(id));
+                let rest = pv("rest", fresh(id));
+                let u = papp2(q("union", id), pev(&m), papp(q("unions", id), pev(&rest)));
+                let nil = palt("[]", 0, 0, vec![], pref("[]", id));
+                let cons = palt(":", 1, 2, vec![m.clone(), rest.clone()], u);
+                plam(ms.clone(), pcase(pev(&ms), vec![nil, cons]))
+            }
+            // update f k m = case m of [] -> []
+            //   ((pk,pv):ps) -> case pk == k of
+            //       True  -> case f pv of { Nothing -> ps; Just w -> (k,w):ps }
+            //       False -> (pk,pv) : update f k ps
+            "update" => {
+                let f = pv("f", fresh(id));
+                let k = pv("k", fresh(id));
+                let m = pv("m", fresh(id));
+                let p = pv("p", fresh(id));
+                let ps = pv("ps", fresh(id));
+                let pk = pv("pk", fresh(id));
+                let pvv = pv("pvv", fresh(id));
+                let w = pv("w", fresh(id));
+                let on_fv = pcase(
+                    papp(pev(&f), pev(&pvv)),
+                    vec![
+                        palt("Nothing", 0, 0, vec![], pev(&ps)),
+                        palt(
+                            "Just",
+                            1,
+                            1,
+                            vec![w.clone()],
+                            papp2(
+                                pref(":", id),
+                                papp2(pref("(,)", id), pev(&k), pev(&w)),
+                                pev(&ps),
+                            ),
+                        ),
+                    ],
+                );
+                let recur = papp2(
+                    pref(":", id),
+                    pev(&p),
+                    papp(papp2(q("update", id), pev(&f), pev(&k)), pev(&ps)),
+                );
+                let on_match = pcase(
+                    papp2(pref("==", id), pev(&pk), pev(&k)),
+                    vec![
+                        palt("False", 0, 0, vec![], recur),
+                        palt("True", 1, 0, vec![], on_fv),
+                    ],
+                );
+                let on_pair = pcase(
+                    pev(&p),
+                    vec![palt("(,)", 0, 2, vec![pk.clone(), pvv.clone()], on_match)],
+                );
+                let nil = palt("[]", 0, 0, vec![], pref("[]", id));
+                let cons = palt(":", 1, 2, vec![p.clone(), ps.clone()], on_pair);
+                plam(f, plam(k, plam(m.clone(), pcase(pev(&m), vec![nil, cons]))))
+            }
+            // alter f k m = case lookup k m of
+            //   Nothing -> case f Nothing  of { Nothing -> m; Just w -> insert k w m }
+            //   Just v  -> case f (Just v) of { Nothing -> delete k m; Just w -> insert k w m }
+            "alter" => {
+                let f = pv("f", fresh(id));
+                let k = pv("k", fresh(id));
+                let m = pv("m", fresh(id));
+                let v = pv("v", fresh(id));
+                let w = pv("w", fresh(id));
+                let ins = |w: &Var, id: &mut usize| {
+                    papp(
+                        papp2(pref(&format!("{prefix}.insert"), id), pev(&k), pev(w)),
+                        pev(&m),
+                    )
+                };
+                let on_absent = pcase(
+                    papp(pev(&f), pref("Nothing", id)),
+                    vec![
+                        palt("Nothing", 0, 0, vec![], pev(&m)),
+                        palt("Just", 1, 1, vec![w.clone()], ins(&w, id)),
+                    ],
+                );
+                let on_present = pcase(
+                    papp(pev(&f), papp(pref("Just", id), pev(&v))),
+                    vec![
+                        palt(
+                            "Nothing",
+                            0,
+                            0,
+                            vec![],
+                            papp2(q("delete", id), pev(&k), pev(&m)),
+                        ),
+                        palt("Just", 1, 1, vec![w.clone()], ins(&w, id)),
+                    ],
+                );
+                let body = pcase(
+                    papp2(q("lookup", id), pev(&k), pev(&m)),
+                    vec![
+                        palt("Nothing", 0, 0, vec![], on_absent),
+                        palt("Just", 1, 1, vec![v.clone()], on_present),
+                    ],
+                );
+                plam(f, plam(k, plam(m.clone(), body)))
+            }
+            _ => return None,
+        }
+    } else {
+        match op {
+            "member" => {
+                let x = pv("x", fresh(id));
+                let s = pv("s", fresh(id));
+                plam(
+                    x.clone(),
+                    plam(s.clone(), papp2(pref("elem", id), pev(&x), pev(&s))),
+                )
+            }
+            // insert x s = case elem x s of { True -> s; False -> x : s }
+            "insert" => {
+                let x = pv("x", fresh(id));
+                let s = pv("s", fresh(id));
+                let body = pcase(
+                    papp2(pref("elem", id), pev(&x), pev(&s)),
+                    vec![
+                        palt(
+                            "False",
+                            0,
+                            0,
+                            vec![],
+                            papp2(pref(":", id), pev(&x), pev(&s)),
+                        ),
+                        palt("True", 1, 0, vec![], pev(&s)),
+                    ],
+                );
+                plam(x.clone(), plam(s.clone(), body))
+            }
+            // delete x s = filter (\e -> e /= x) s
+            "delete" => {
+                let x = pv("x", fresh(id));
+                let s = pv("s", fresh(id));
+                let e = pv("e", fresh(id));
+                let pred = plam(e.clone(), papp2(pref("/=", id), pev(&e), pev(&x)));
+                plam(
+                    x.clone(),
+                    plam(s.clone(), papp2(pref("filter", id), pred, pev(&s))),
+                )
+            }
+            // fromList xs = case xs of [] -> []; (y:ys) -> insert y (fromList ys)
+            "fromList" => {
+                let xs = pv("xs", fresh(id));
+                let y = pv("y", fresh(id));
+                let ys = pv("ys", fresh(id));
+                let ins = papp2(q("insert", id), pev(&y), papp(q("fromList", id), pev(&ys)));
+                let nil = palt("[]", 0, 0, vec![], pref("[]", id));
+                let cons = palt(":", 1, 2, vec![y.clone(), ys.clone()], ins);
+                plam(xs.clone(), pcase(pev(&xs), vec![nil, cons]))
+            }
+            "size" => {
+                let s = pv("s", fresh(id));
+                plam(s.clone(), papp(pref("length", id), pev(&s)))
+            }
+            // union a b = case a of [] -> b; (x:xs) -> insert x (union xs b)
+            "union" => {
+                let a = pv("a", fresh(id));
+                let b = pv("b", fresh(id));
+                let x = pv("x", fresh(id));
+                let xs = pv("xs", fresh(id));
+                let ins = papp2(
+                    q("insert", id),
+                    pev(&x),
+                    papp2(q("union", id), pev(&xs), pev(&b)),
+                );
+                let nil = palt("[]", 0, 0, vec![], pev(&b));
+                let cons = palt(":", 1, 2, vec![x.clone(), xs.clone()], ins);
+                plam(a.clone(), plam(b.clone(), pcase(pev(&a), vec![nil, cons])))
+            }
+            // intersection a b = filter (\x -> elem x b) a
+            "intersection" => {
+                let a = pv("a", fresh(id));
+                let b = pv("b", fresh(id));
+                let x = pv("x", fresh(id));
+                let pred = plam(x.clone(), papp2(pref("elem", id), pev(&x), pev(&b)));
+                plam(
+                    a.clone(),
+                    plam(b.clone(), papp2(pref("filter", id), pred, pev(&a))),
+                )
+            }
+            // difference a b = filter (\x -> not (elem x b)) a
+            "difference" => {
+                let a = pv("a", fresh(id));
+                let b = pv("b", fresh(id));
+                let x = pv("x", fresh(id));
+                let pred = plam(
+                    x.clone(),
+                    papp(pref("not", id), papp2(pref("elem", id), pev(&x), pev(&b))),
+                );
+                plam(
+                    a.clone(),
+                    plam(b.clone(), papp2(pref("filter", id), pred, pev(&a))),
+                )
+            }
+            "filter" => {
+                let p = pv("p", fresh(id));
+                let s = pv("s", fresh(id));
+                plam(
+                    p.clone(),
+                    plam(s.clone(), papp2(pref("filter", id), pev(&p), pev(&s))),
+                )
+            }
+            "foldr" => {
+                let f = pv("f", fresh(id));
+                let z = pv("z", fresh(id));
+                let s = pv("s", fresh(id));
+                plam(
+                    f.clone(),
+                    plam(
+                        z.clone(),
+                        plam(
+                            s.clone(),
+                            papp(papp2(pref("foldr", id), pev(&f), pev(&z)), pev(&s)),
+                        ),
+                    ),
+                )
+            }
+            _ => return None,
+        }
+    };
+    Some(body)
+}
+
 fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
     let fresh = |id: &mut usize| {
         let v = *id;
         *id += 1;
         v
     };
+    // Data.Map/Set/IntMap/IntSet operations, synthesized over an assoc-list
+    // (Map) or list (Set) representation.
+    if let Some(body) = build_container_fn(name, id) {
+        return Some((pv(name, fresh(id)), body));
+    }
     let body = match name {
         // map f xs = case xs of { [] -> []; (y:ys) -> f y : map f ys }
         "map" => {
@@ -6077,9 +6589,12 @@ fn is_nonstring_list_ty(ty: &Ty) -> bool {
 /// ambiguous (string vs list).
 fn is_list_returning_fn(name: &str) -> bool {
     matches!(
-        name,
+        strip_qualifier(name),
         "map"
             | "filter"
+            | "elems"
+            | "keys"
+            | "toList"
             | "take"
             | "drop"
             | "zip"
@@ -6263,6 +6778,7 @@ fn returns_bool_fn(name: &str) -> bool {
             | "isPrefixOf"
             | "isSuffixOf"
             | "isInfixOf"
+            | "member"
     )
 }
 

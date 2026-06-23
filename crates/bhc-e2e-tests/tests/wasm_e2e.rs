@@ -664,6 +664,32 @@ fn test_tier3_deriving_strategies_wasm() {
     run_wasm_test("tier3_io/deriving_strategies", Profile::Default);
 }
 
+// Data.Map/Set/IntMap/IntSet over assoc-list / list representations.
+#[test]
+fn test_tier3_map_basic_wasm() {
+    run_wasm_test("tier3_io/map_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_set_basic_wasm() {
+    run_wasm_test("tier3_io/set_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_intmap_intset_wasm() {
+    run_wasm_test("tier3_io/intmap_intset", Profile::Default);
+}
+
+#[test]
+fn test_tier3_map_maybe_wasm() {
+    run_wasm_test("tier3_io/map_maybe", Profile::Default);
+}
+
+#[test]
+fn test_tier3_map_complete_wasm() {
+    run_wasm_test("tier3_io/map_complete", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

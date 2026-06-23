@@ -813,6 +813,18 @@ fn test_tier3_filepath_basic_wasm() {
     run_wasm_test("tier3_io/filepath_basic", Profile::Default);
 }
 
+// Tuple combinators (swap/curry/uncurry) and Data.Function (&), plus
+// succ/pred as first-class function values.
+#[test]
+fn test_tier3_tuple_functions_wasm() {
+    run_wasm_test("tier3_io/tuple_functions", Profile::Default);
+}
+
+#[test]
+fn test_tier3_data_function_wasm() {
+    run_wasm_test("tier3_io/data_function", Profile::Default);
+}
+
 // take k of an infinite producer (iterate/repeat/cycle/enumFrom/enumFromThen)
 // fuses to a finite list; enumFromThenTo and until synthesize directly.
 #[test]

@@ -4536,6 +4536,10 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "bracket",
     "enumFromThenTo",
     "until",
+    "swap",
+    "curry",
+    "uncurry",
+    "&",
 ];
 
 /// Whether any binding in the module references `name`.
@@ -8359,6 +8363,70 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
             );
             plam(p, plam(f, plam(x.clone(), body)))
         }
+        // swap (a,b) = (b,a)
+        "swap" => {
+            let p = pv("p", fresh(id));
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            plam(
+                p.clone(),
+                pcase(
+                    pev(&p),
+                    vec![palt(
+                        "(,)",
+                        0,
+                        2,
+                        vec![a.clone(), b.clone()],
+                        papp2(pref("(,)", id), pev(&b), pev(&a)),
+                    )],
+                ),
+            )
+        }
+        // curry f x y = f (x, y)
+        "curry" => {
+            let f = pv("f", fresh(id));
+            let x = pv("x", fresh(id));
+            let y = pv("y", fresh(id));
+            plam(
+                f.clone(),
+                plam(
+                    x.clone(),
+                    plam(
+                        y.clone(),
+                        papp(pev(&f), papp2(pref("(,)", id), pev(&x), pev(&y))),
+                    ),
+                ),
+            )
+        }
+        // uncurry f (a, b) = f a b
+        "uncurry" => {
+            let f = pv("f", fresh(id));
+            let p = pv("p", fresh(id));
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            plam(
+                f.clone(),
+                plam(
+                    p.clone(),
+                    pcase(
+                        pev(&p),
+                        vec![palt(
+                            "(,)",
+                            0,
+                            2,
+                            vec![a.clone(), b.clone()],
+                            papp2(pev(&f), pev(&a), pev(&b)),
+                        )],
+                    ),
+                ),
+            )
+        }
+        // (&) x f = f x  (reverse application)
+        "&" => {
+            let x = pv("x", fresh(id));
+            let f = pv("f", fresh(id));
+            plam(x.clone(), plam(f.clone(), papp(pev(&f), pev(&x))))
+        }
         // bracket acquire release use = const (use a) (release a), where the
         // acquire action `a` has already run as an argument. const evaluates its
         // args left-to-right, so the effects run acquire, use, release — then
@@ -8776,7 +8844,11 @@ fn operator_arity(name: &str) -> Option<usize> {
         | "GHC.Classes.<=" | ">" | "GHC.Classes.>" | ">=" | "GHC.Classes.>=" | "++"
         | "GHC.Base.++" => Some(2),
         "negate" | "GHC.Num.negate" => Some(1),
-        _ => None,
+        // Enum/identity builtins usable as first-class function values.
+        _ => match strip_qualifier(name) {
+            "succ" | "pred" | "negate" | "abs" | "fromEnum" | "toEnum" | "not" => Some(1),
+            _ => None,
+        },
     }
 }
 

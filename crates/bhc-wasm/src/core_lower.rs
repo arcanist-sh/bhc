@@ -2846,6 +2846,38 @@ impl<'a> WasmLowering<'a> {
                 instrs.push(WasmInstr::F64Load(3, 0));
                 instrs.push(WasmInstr::Call(self.runtime.double_to_str_idx));
             }
+            // showBool b = if b then "True" else "False"
+            Some(n) if args.len() == 1 && strip_qualifier(n) == "showBool" => {
+                let t = self.intern_pstr("True") as i32;
+                let f = self.intern_pstr("False") as i32;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::I32Const(t));
+                instrs.push(WasmInstr::Else);
+                instrs.push(WasmInstr::I32Const(f));
+                instrs.push(WasmInstr::End);
+            }
+            // showChar c = "'" ++ [c] ++ "'": build a one-char string from the
+            // code and wrap it in single quotes. (No escaping of control chars.)
+            Some(n) if args.len() == 1 && strip_qualifier(n) == "showChar" => {
+                let p = *local_count;
+                *local_count += 1;
+                self.emit_pstr_lit("'", instrs);
+                // one-char pstr: [len=1 | byte]
+                instrs.push(WasmInstr::I32Const(8));
+                instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+                instrs.push(WasmInstr::LocalSet(p));
+                instrs.push(WasmInstr::LocalGet(p));
+                instrs.push(WasmInstr::I32Const(1));
+                instrs.push(WasmInstr::I32Store(2, 0));
+                instrs.push(WasmInstr::LocalGet(p));
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::I32Store(2, 4));
+                instrs.push(WasmInstr::LocalGet(p));
+                instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+                self.emit_pstr_lit("'", instrs);
+                instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+            }
 
             // User-defined function call
             Some(name) => {

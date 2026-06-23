@@ -763,6 +763,12 @@ fn test_tier3_string_read_wasm() {
     run_wasm_test("tier3_io/string_read", Profile::Default);
 }
 
+// Char predicates with showBool / showChar (one-char quoted string).
+#[test]
+fn test_tier3_char_predicates_wasm() {
+    run_wasm_test("tier3_io/char_predicates", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

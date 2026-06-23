@@ -2043,6 +2043,17 @@ impl<'a> WasmLowering<'a> {
                     );
                 }
             }
+            // `take k (iterate/repeat/cycle/enumFrom/enumFromThen …)`: the strict
+            // backend can't build an infinite list, so for a statically-known
+            // count fuse the take into a finite list of `k` elements. Finite
+            // arguments fall through to the normal synthesized `take`.
+            if strip_qualifier(name) == "take" && args.len() == 2 {
+                if let Some(k) = as_int_literal(args[0]) {
+                    if let Some(list) = fuse_take(k.max(0), args[1], &mut self.next_synthetic_id) {
+                        return self.lower_expr(&list, instrs, locals, local_count, is_main);
+                    }
+                }
+            }
         }
 
         // Typeclass dictionary method selection: `$sel_N dict [method args...]`.
@@ -3595,6 +3606,8 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "maximumBy",
     "minimumBy",
     "bracket",
+    "enumFromThenTo",
+    "until",
 ];
 
 /// Whether any binding in the module references `name`.
@@ -6990,6 +7003,50 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
             let cons = palt(":", 1, 2, vec![y.clone(), ys.clone()], on_elem);
             plam(xs.clone(), pcase(pev(&xs), vec![nil, cons]))
         }
+        // enumFromThenTo a b c = case a > c of
+        //   True -> []; False -> a : enumFromThenTo b (b + (b - a)) c
+        // (ascending ranges; the step is b - a)
+        "enumFromThenTo" => {
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            let c = pv("c", fresh(id));
+            let next_b = papp2(
+                pref("+", id),
+                pev(&b),
+                papp2(pref("-", id), pev(&b), pev(&a)),
+            );
+            let recur = papp2(
+                pref(":", id),
+                pev(&a),
+                papp(papp2(pref("enumFromThenTo", id), pev(&b), next_b), pev(&c)),
+            );
+            let body = pcase(
+                papp2(pref(">", id), pev(&a), pev(&c)),
+                vec![
+                    palt("False", 0, 0, vec![], recur),
+                    palt("True", 1, 0, vec![], pref("[]", id)),
+                ],
+            );
+            plam(a.clone(), plam(b.clone(), plam(c.clone(), body)))
+        }
+        // until p f x = case p x of { True -> x; False -> until p f (f x) }
+        "until" => {
+            let p = pv("p", fresh(id));
+            let f = pv("f", fresh(id));
+            let x = pv("x", fresh(id));
+            let recur = papp(
+                papp2(pref("until", id), pev(&p), pev(&f)),
+                papp(pev(&f), pev(&x)),
+            );
+            let body = pcase(
+                papp(pev(&p), pev(&x)),
+                vec![
+                    palt("False", 0, 0, vec![], recur),
+                    palt("True", 1, 0, vec![], pev(&x)),
+                ],
+            );
+            plam(p, plam(f, plam(x.clone(), body)))
+        }
         // bracket acquire release use = const (use a) (release a), where the
         // acquire action `a` has already run as an argument. const evaluates its
         // args left-to-right, so the effects run acquire, use, release — then
@@ -7180,6 +7237,11 @@ fn is_list_returning_fn(name: &str) -> bool {
             | "elems"
             | "keys"
             | "toList"
+            | "enumFromThenTo"
+            | "enumFromThen"
+            | "enumFrom"
+            | "iterate"
+            | "cycle"
             | "take"
             | "drop"
             | "zip"
@@ -7241,6 +7303,64 @@ fn as_int_literal(expr: &Expr) -> Option<i64> {
         Expr::Lit(Literal::Integer(n), _, _) => i64::try_from(*n).ok(),
         _ => None,
     }
+}
+
+/// Build a cons-list Core expression from a vector of element expressions.
+fn build_cons_list(elems: Vec<Expr>, id: &mut usize) -> Expr {
+    elems
+        .into_iter()
+        .rev()
+        .fold(pref("[]", id), |acc, e| papp2(pref(":", id), e, acc))
+}
+
+/// Fuse `take k <producer>` into a finite `k`-element list when the producer is
+/// an infinite/lazy generator the strict backend can't otherwise build. Returns
+/// `None` for ordinary (finite) lists, which use the normal `take`.
+fn fuse_take(k: i64, producer: &Expr, id: &mut usize) -> Option<Expr> {
+    let (head, pargs) = collect_app_spine(peel_show_wrappers(producer));
+    let name = match head {
+        Expr::Var(v, _) => strip_qualifier(v.name.as_str()),
+        _ => return None,
+    };
+    let n = k.max(0) as usize;
+    let elems: Vec<Expr> = match (name, pargs.len()) {
+        // iterate f x = [x, f x, f (f x), ...]
+        ("iterate", 2) => {
+            let (f, x) = (pargs[0], pargs[1]);
+            let mut out = Vec::with_capacity(n);
+            let mut cur = x.clone();
+            for i in 0..n {
+                if i > 0 {
+                    cur = papp(f.clone(), cur);
+                }
+                out.push(cur.clone());
+            }
+            out
+        }
+        // repeat v = [v, v, ...]
+        ("repeat", 1) => (0..n).map(|_| pargs[0].clone()).collect(),
+        // cycle xs = xs ++ xs ++ ... (xs must be a known finite list)
+        ("cycle", 1) => {
+            let es = extract_list_elements(pargs[0])?;
+            if es.is_empty() {
+                return None;
+            }
+            (0..n).map(|i| es[i % es.len()].clone()).collect()
+        }
+        // enumFrom a = [a, a+1, ...]
+        ("enumFrom", 1) => (0..n as i64)
+            .map(|i| papp2(pref("+", id), pargs[0].clone(), pint(i)))
+            .collect(),
+        // enumFromThen a b = [a, a+(b-a), a+2(b-a), ...] (needs literal a, b)
+        ("enumFromThen", 2) => {
+            let a = as_int_literal(pargs[0])?;
+            let b = as_int_literal(pargs[1])?;
+            let step = b - a;
+            (0..n as i64).map(|i| pint(a + step * i)).collect()
+        }
+        _ => return None,
+    };
+    Some(build_cons_list(elems, id))
 }
 
 /// Whether `expr`'s head is a `Maybe` constructor (`Just`/`Nothing`), used to

@@ -745,6 +745,18 @@ fn test_tier3_monad_error_wasm() {
     run_wasm_test("tier3_io/monad_error", Profile::Default);
 }
 
+// take k of an infinite producer (iterate/repeat/cycle/enumFrom/enumFromThen)
+// fuses to a finite list; enumFromThenTo and until synthesize directly.
+#[test]
+fn test_tier3_take_iterate_wasm() {
+    run_wasm_test("tier3_io/take_iterate", Profile::Default);
+}
+
+#[test]
+fn test_tier3_enum_functions_wasm() {
+    run_wasm_test("tier3_io/enum_functions", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

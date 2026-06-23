@@ -745,6 +745,23 @@ fn test_tier3_monad_error_wasm() {
     run_wasm_test("tier3_io/monad_error", Profile::Default);
 }
 
+// Two-layer transformer stacks (data outer over context inner), rewritten via
+// the inner monad's bind/return: ExceptT/WriterT over StateT/ReaderT.
+#[test]
+fn test_tier3_cross_except_state_wasm() {
+    run_wasm_test("tier3_io/cross_except_state", Profile::Default);
+}
+
+#[test]
+fn test_tier3_cross_writer_reader_wasm() {
+    run_wasm_test("tier3_io/cross_writer_reader", Profile::Default);
+}
+
+#[test]
+fn test_tier3_cross_writer_state_wasm() {
+    run_wasm_test("tier3_io/cross_writer_state", Profile::Default);
+}
+
 // take k of an infinite producer (iterate/repeat/cycle/enumFrom/enumFromThen)
 // fuses to a finite list; enumFromThenTo and until synthesize directly.
 #[test]

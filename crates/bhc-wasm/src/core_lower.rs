@@ -2692,9 +2692,26 @@ impl<'a> WasmLowering<'a> {
                         "runReaderT" | "runReader" | "runStateT" | "runState"
                     ) =>
             {
-                // run = apply the representation to the env / initial state
-                let applied = papp(args[0].clone(), args[1].clone());
-                self.lower_expr(&applied, instrs, locals, local_count, is_main)?;
+                // run = apply the representation to the env / initial state. When
+                // the argument is a nested *data* eliminator (`runStateT
+                // (runExceptT comp) …`), it yields the inner closure, which must
+                // be evaluated then applied via call_indirect — a syntactic
+                // `papp` would merge the spine and feed the inner eliminator an
+                // extra argument. Otherwise call directly.
+                let nested_data_elim = matches!(
+                    collect_app_spine(args[0]).0,
+                    Expr::Var(v, _) if matches!(
+                        strip_qualifier(v.name.as_str()),
+                        "runExceptT" | "runExcept" | "runWriterT" | "runWriter"
+                    )
+                );
+                if nested_data_elim {
+                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                    self.apply_closure_on_stack(&[args[1]], instrs, locals, local_count)?;
+                } else {
+                    let applied = papp(args[0].clone(), args[1].clone());
+                    self.lower_expr(&applied, instrs, locals, local_count, is_main)?;
+                }
             }
             Some(n)
                 if args.len() == 2 && matches!(strip_qualifier(n), "evalStateT" | "evalState") =>
@@ -3827,16 +3844,22 @@ fn infer_monad_kind(expr: &Expr) -> Option<MonadKind> {
 /// value-parameter lambdas. Non-transformer bindings are cloned unchanged.
 fn rewrite_bind_monads(bind: &Bind, id: &mut usize) -> Bind {
     let rewrite = |v: &Var, e: &Expr, id: &mut usize| -> (Var, Expr) {
-        match infer_monad_kind(e) {
-            Some(kind) => {
-                // Preserve the binding's own value parameters; rewrite the body.
-                let mut params: Vec<Var> = Vec::new();
-                let mut cur = e;
-                while let Expr::Lam(p, b, _) = cur {
-                    params.push(p.clone());
-                    cur = b;
-                }
-                let mut body = rewrite_monad(kind, cur, id);
+        // Peel the binding's value parameters; rewrite the monadic body.
+        let mut params: Vec<Var> = Vec::new();
+        let mut cur = e;
+        while let Expr::Lam(p, b, _) = cur {
+            params.push(p.clone());
+            cur = b;
+        }
+        // A two-layer stack (an explicit `lift` over a data-monad outer layer)
+        // takes priority over single-layer inference.
+        let rewritten = if let Some((outer, inner)) = infer_stack(cur) {
+            Some(rewrite_stack(outer, inner, cur, id))
+        } else {
+            infer_monad_kind(cur).map(|kind| rewrite_monad(kind, cur, id))
+        };
+        match rewritten {
+            Some(mut body) => {
                 for p in params.into_iter().rev() {
                     body = plam(p, body);
                 }
@@ -4148,6 +4171,384 @@ fn rewrite_monad(kind: MonadKind, expr: &Expr, id: &mut usize) -> Expr {
             }
             _ => expr.clone(),
         },
+    }
+}
+
+// ============================================================
+// Two-layer monad transformer stacks
+// ============================================================
+//
+// A binding with an explicit `lift` over a data-monad outer layer (Writer or
+// Except) stacked on a context-monad inner layer (Reader or State). The outer
+// layer's bind/ops are expressed in terms of the inner monad's bind/return:
+//
+//   WriterT w (m) a ~ m (a, w)         ExceptT e (m) a ~ m (Either e a)
+//
+// where m is the inner ReaderT/StateT (\r->a / \s->(a,s)). The eliminators
+// already compose: runWriterT/runExceptT return the inner value, which the
+// inner eliminator (runReaderT/runStateT) then applies/projects.
+
+/// Find the monad of the operation directly under an explicit `lift` (the inner
+/// layer), scanning the whole expression.
+fn find_lifted_inner(expr: &Expr) -> Option<MonadKind> {
+    let (head, args) = collect_app_spine(expr);
+    if let Expr::Var(v, _) = head {
+        if strip_qualifier(v.name.as_str()) == "lift" && args.len() == 1 {
+            let (ih, _) = collect_app_spine(args[0]);
+            if let Expr::Var(iv, _) = ih {
+                if let Some(k) = monad_op_kind(iv.name.as_str()) {
+                    return Some(k);
+                }
+            }
+        }
+    }
+    // Recurse into children.
+    match expr {
+        Expr::App(f, a, _) => find_lifted_inner(f).or_else(|| find_lifted_inner(a)),
+        Expr::Lam(_, b, _) | Expr::TyLam(_, b, _) => find_lifted_inner(b),
+        Expr::TyApp(i, _, _) | Expr::Cast(i, _, _) | Expr::Tick(_, i, _) | Expr::Lazy(i, _) => {
+            find_lifted_inner(i)
+        }
+        Expr::Let(bind, b, _) => {
+            let in_bind = match bind.as_ref() {
+                Bind::NonRec(_, e) => find_lifted_inner(e),
+                Bind::Rec(bs) => bs.iter().find_map(|(_, e)| find_lifted_inner(e)),
+            };
+            in_bind.or_else(|| find_lifted_inner(b))
+        }
+        Expr::Case(s, alts, _, _) => {
+            find_lifted_inner(s).or_else(|| alts.iter().find_map(|a| find_lifted_inner(&a.rhs)))
+        }
+        _ => None,
+    }
+}
+
+/// Find the outer data-monad layer (Writer via `tell`, Except via
+/// `throwE`/`catchE`) of a stacked binding.
+fn find_outer_data_kind(expr: &Expr) -> Option<MonadKind> {
+    fn scan(e: &Expr) -> Option<MonadKind> {
+        if let Expr::Var(v, _) = e {
+            match strip_qualifier(v.name.as_str()) {
+                "tell" | "writer" => return Some(MonadKind::Writer),
+                "throwE" | "throwError" | "catchE" | "catchError" => {
+                    return Some(MonadKind::Except)
+                }
+                _ => {}
+            }
+        }
+        match e {
+            Expr::App(f, a, _) => scan(f).or_else(|| scan(a)),
+            Expr::Lam(_, b, _) | Expr::TyLam(_, b, _) => scan(b),
+            Expr::TyApp(i, _, _) | Expr::Cast(i, _, _) | Expr::Tick(_, i, _) | Expr::Lazy(i, _) => {
+                scan(i)
+            }
+            Expr::Let(bind, b, _) => {
+                let in_bind = match bind.as_ref() {
+                    Bind::NonRec(_, e) => scan(e),
+                    Bind::Rec(bs) => bs.iter().find_map(|(_, e)| scan(e)),
+                };
+                in_bind.or_else(|| scan(b))
+            }
+            Expr::Case(s, alts, _, _) => scan(s).or_else(|| alts.iter().find_map(|a| scan(&a.rhs))),
+            _ => None,
+        }
+    }
+    scan(expr)
+}
+
+/// Infer a two-layer stack `(outer, inner)`: a data-monad outer (Writer/Except)
+/// over a context-monad inner (Reader/State), identified by an explicit `lift`.
+fn infer_stack(expr: &Expr) -> Option<(MonadKind, MonadKind)> {
+    let inner = find_lifted_inner(expr)?;
+    if !matches!(inner, MonadKind::Reader | MonadKind::State) {
+        return None;
+    }
+    let outer = find_outer_data_kind(expr)?;
+    Some((outer, inner))
+}
+
+/// `return`/`pure` of the inner monad.
+fn inner_return(inner: MonadKind, e: Expr, id: &mut usize) -> Expr {
+    let fresh = |id: &mut usize| {
+        let v = *id;
+        *id += 1;
+        v
+    };
+    match inner {
+        MonadKind::Reader => plam(pv("r", fresh(id)), e),
+        MonadKind::State => {
+            let s = pv("s", fresh(id));
+            plam(s.clone(), papp2(pref("(,)", id), e, pev(&s)))
+        }
+        _ => e,
+    }
+}
+
+/// `m >>= k` of the inner monad, where `k` is a lambda `\x -> <inner value>`.
+fn inner_bind(inner: MonadKind, m: Expr, k: Expr, id: &mut usize) -> Expr {
+    let fresh = |id: &mut usize| {
+        let v = *id;
+        *id += 1;
+        v
+    };
+    match inner {
+        MonadKind::Reader => {
+            let r = pv("r", fresh(id));
+            // \r -> (k (m r)) r
+            plam(r.clone(), papp(papp(k, papp(m, pev(&r))), pev(&r)))
+        }
+        MonadKind::State => {
+            let s = pv("s", fresh(id));
+            let x = pv("x", fresh(id));
+            let s2 = pv("s2", fresh(id));
+            // \s -> case m s of (x, s') -> (k x) s'
+            plam(
+                s.clone(),
+                pcase(
+                    papp(m, pev(&s)),
+                    vec![palt(
+                        "(,)",
+                        0,
+                        2,
+                        vec![x.clone(), s2.clone()],
+                        papp(papp(k, pev(&x)), pev(&s2)),
+                    )],
+                ),
+            )
+        }
+        _ => m,
+    }
+}
+
+/// Lift an inner-monad value into the outer (data) layer.
+fn outer_lift(outer: MonadKind, inner: MonadKind, m: Expr, id: &mut usize) -> Expr {
+    let fresh = |id: &mut usize| {
+        let v = *id;
+        *id += 1;
+        v
+    };
+    let a = pv("a", fresh(id));
+    let wrapped = match outer {
+        // lift m = m >>= \a -> return (Right a)
+        MonadKind::Except => inner_return(inner, papp(pref("Right", id), pev(&a)), id),
+        // lift m = m >>= \a -> return (a, mempty)
+        MonadKind::Writer => inner_return(inner, papp2(pref("(,)", id), pev(&a), pstr_empty()), id),
+        _ => return m,
+    };
+    inner_bind(inner, m, plam(a, wrapped), id)
+}
+
+/// Rewrite the continuation of a stacked bind.
+fn rw_stack_cont(outer: MonadKind, inner: MonadKind, k: &Expr, id: &mut usize) -> Expr {
+    match peel_type_abstractions(k) {
+        Expr::Lam(x, body, _) => plam(x.clone(), rewrite_stack(outer, inner, body, id)),
+        other => other.clone(),
+    }
+}
+
+/// Rewrite a two-layer-stack monadic expression into its representation
+/// (`inner (a, w)` for Writer, `inner (Either e a)` for Except).
+fn rewrite_stack(outer: MonadKind, inner: MonadKind, expr: &Expr, id: &mut usize) -> Expr {
+    let fresh = |id: &mut usize| {
+        let v = *id;
+        *id += 1;
+        v
+    };
+    // Recurse through case/let/wrappers (continuation bodies are monadic).
+    match expr {
+        Expr::Case(scrut, alts, ty, sp) => {
+            let alts = alts
+                .iter()
+                .map(|a| Alt {
+                    con: a.con.clone(),
+                    binders: a.binders.clone(),
+                    rhs: rewrite_stack(outer, inner, &a.rhs, id),
+                })
+                .collect();
+            return Expr::Case(scrut.clone(), alts, ty.clone(), *sp);
+        }
+        Expr::Let(bind, body, sp) => {
+            return Expr::Let(
+                bind.clone(),
+                Box::new(rewrite_stack(outer, inner, body, id)),
+                *sp,
+            );
+        }
+        Expr::TyApp(i, t, sp) => {
+            return Expr::TyApp(Box::new(rewrite_stack(outer, inner, i, id)), t.clone(), *sp)
+        }
+        Expr::Cast(i, t, sp) => {
+            return Expr::Cast(Box::new(rewrite_stack(outer, inner, i, id)), t.clone(), *sp)
+        }
+        Expr::Tick(tk, i, sp) => {
+            return Expr::Tick(
+                tk.clone(),
+                Box::new(rewrite_stack(outer, inner, i, id)),
+                *sp,
+            )
+        }
+        Expr::Lazy(i, sp) => return Expr::Lazy(Box::new(rewrite_stack(outer, inner, i, id)), *sp),
+        _ => {}
+    }
+    let (head, args) = collect_app_spine(expr);
+    let op = match head {
+        Expr::Var(v, _) => strip_qualifier(v.name.as_str()),
+        _ => return expr.clone(),
+    };
+    // `lift m`: lift an inner action (rewritten single-layer) into the stack.
+    if op == "lift" && args.len() == 1 {
+        return outer_lift(outer, inner, rewrite_monad(inner, args[0], id), id);
+    }
+    match outer {
+        MonadKind::Except => match (op, args.len()) {
+            (">>=", 2) => {
+                let m = rewrite_stack(outer, inner, args[0], id);
+                let k = rw_stack_cont(outer, inner, args[1], id);
+                let ea = pv("ea", fresh(id));
+                let e = pv("e", fresh(id));
+                let a = pv("a", fresh(id));
+                // m >>= \ea -> case ea of Left e -> return (Left e); Right a -> k a
+                let cont = plam(
+                    ea.clone(),
+                    pcase(
+                        pev(&ea),
+                        vec![
+                            palt(
+                                "Left",
+                                0,
+                                1,
+                                vec![e.clone()],
+                                inner_return(inner, papp(pref("Left", id), pev(&e)), id),
+                            ),
+                            palt("Right", 1, 1, vec![a.clone()], papp(k, pev(&a))),
+                        ],
+                    ),
+                );
+                inner_bind(inner, m, cont, id)
+            }
+            (">>", 2) => {
+                let m = rewrite_stack(outer, inner, args[0], id);
+                let m2 = rewrite_stack(outer, inner, args[1], id);
+                let ea = pv("ea", fresh(id));
+                let e = pv("e", fresh(id));
+                let a = pv("a", fresh(id));
+                let cont = plam(
+                    ea.clone(),
+                    pcase(
+                        pev(&ea),
+                        vec![
+                            palt(
+                                "Left",
+                                0,
+                                1,
+                                vec![e.clone()],
+                                inner_return(inner, papp(pref("Left", id), pev(&e)), id),
+                            ),
+                            palt("Right", 1, 1, vec![a], m2),
+                        ],
+                    ),
+                );
+                inner_bind(inner, m, cont, id)
+            }
+            ("return" | "pure", 1) => {
+                inner_return(inner, papp(pref("Right", id), args[0].clone()), id)
+            }
+            ("throwE" | "throwError", 1) => {
+                inner_return(inner, papp(pref("Left", id), args[0].clone()), id)
+            }
+            ("catchE" | "catchError", 2) => {
+                let m = rewrite_stack(outer, inner, args[0], id);
+                let h = rw_stack_cont(outer, inner, args[1], id);
+                let ea = pv("ea", fresh(id));
+                let e = pv("e", fresh(id));
+                let a = pv("a", fresh(id));
+                let cont = plam(
+                    ea.clone(),
+                    pcase(
+                        pev(&ea),
+                        vec![
+                            palt("Left", 0, 1, vec![e.clone()], papp(h, pev(&e))),
+                            palt(
+                                "Right",
+                                1,
+                                1,
+                                vec![a.clone()],
+                                inner_return(inner, papp(pref("Right", id), pev(&a)), id),
+                            ),
+                        ],
+                    ),
+                );
+                inner_bind(inner, m, cont, id)
+            }
+            _ => expr.clone(),
+        },
+        MonadKind::Writer => match (op, args.len()) {
+            (">>=", 2) | (">>", 2) => {
+                let is_bind = op == ">>=";
+                let m = rewrite_stack(outer, inner, args[0], id);
+                let p1 = pv("p1", fresh(id));
+                let a = pv("a", fresh(id));
+                let w1 = pv("w1", fresh(id));
+                let p2 = pv("p2", fresh(id));
+                let b = pv("b", fresh(id));
+                let w2 = pv("w2", fresh(id));
+                // k a (>>=) or the second action (>>)
+                let kb = if is_bind {
+                    let k = rw_stack_cont(outer, inner, args[1], id);
+                    papp(k, pev(&a))
+                } else {
+                    rewrite_stack(outer, inner, args[1], id)
+                };
+                // inner: m >>= \(a,w1) -> kb >>= \(b,w2) -> return (b, w1++w2)
+                let inner_cont = plam(
+                    p2.clone(),
+                    pcase(
+                        pev(&p2),
+                        vec![palt(
+                            "(,)",
+                            0,
+                            2,
+                            vec![b.clone(), w2.clone()],
+                            inner_return(
+                                inner,
+                                papp2(
+                                    pref("(,)", id),
+                                    pev(&b),
+                                    papp2(pref("++", id), pev(&w1), pev(&w2)),
+                                ),
+                                id,
+                            ),
+                        )],
+                    ),
+                );
+                let outer_cont = plam(
+                    p1.clone(),
+                    pcase(
+                        pev(&p1),
+                        vec![palt(
+                            "(,)",
+                            0,
+                            2,
+                            vec![a.clone(), w1.clone()],
+                            inner_bind(inner, kb, inner_cont, id),
+                        )],
+                    ),
+                );
+                inner_bind(inner, m, outer_cont, id)
+            }
+            ("return" | "pure", 1) => inner_return(
+                inner,
+                papp2(pref("(,)", id), args[0].clone(), pstr_empty()),
+                id,
+            ),
+            ("tell" | "writer", 1) => inner_return(
+                inner,
+                papp2(pref("(,)", id), pref("()", id), args[0].clone()),
+                id,
+            ),
+            _ => expr.clone(),
+        },
+        _ => expr.clone(),
     }
 }
 

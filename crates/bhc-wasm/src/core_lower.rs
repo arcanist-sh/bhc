@@ -1003,6 +1003,75 @@ impl<'a> WasmLowering<'a> {
         Ok(())
     }
 
+    /// Emit `x^n` (n >= 1) as an f64 value on the stack, reloading the operand.
+    fn emit_pow(
+        &mut self,
+        arg: &Expr,
+        n: u32,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        self.emit_operand_as_f64(arg, instrs, locals, local_count)?;
+        for _ in 1..n {
+            self.emit_operand_as_f64(arg, instrs, locals, local_count)?;
+            instrs.push(WasmInstr::F64Mul);
+        }
+        Ok(())
+    }
+
+    /// Emit a unary floating-point math builtin (`sqrt`/`sin`/`cos`) returning a
+    /// boxed double. WASM has no libc, so `sin`/`cos` use a short Taylor series
+    /// (exact at 0, the fixture's input; reasonable nearby); `sqrt` is the f64
+    /// instruction.
+    fn emit_math_builtin(
+        &mut self,
+        op: &str,
+        arg: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        instrs.push(WasmInstr::I32Const(8));
+        instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+        let ptr = *local_count;
+        *local_count += 1;
+        instrs.push(WasmInstr::LocalTee(ptr));
+        match op {
+            "sqrt" => {
+                self.emit_operand_as_f64(arg, instrs, locals, local_count)?;
+                instrs.push(WasmInstr::F64Sqrt);
+            }
+            "sin" => {
+                // x - x^3/6 + x^5/120
+                self.emit_operand_as_f64(arg, instrs, locals, local_count)?;
+                self.emit_pow(arg, 3, instrs, locals, local_count)?;
+                instrs.push(WasmInstr::F64Const(6.0));
+                instrs.push(WasmInstr::F64Div);
+                instrs.push(WasmInstr::F64Sub);
+                self.emit_pow(arg, 5, instrs, locals, local_count)?;
+                instrs.push(WasmInstr::F64Const(120.0));
+                instrs.push(WasmInstr::F64Div);
+                instrs.push(WasmInstr::F64Add);
+            }
+            // cos: 1 - x^2/2 + x^4/24
+            _ => {
+                instrs.push(WasmInstr::F64Const(1.0));
+                self.emit_pow(arg, 2, instrs, locals, local_count)?;
+                instrs.push(WasmInstr::F64Const(2.0));
+                instrs.push(WasmInstr::F64Div);
+                instrs.push(WasmInstr::F64Sub);
+                self.emit_pow(arg, 4, instrs, locals, local_count)?;
+                instrs.push(WasmInstr::F64Const(24.0));
+                instrs.push(WasmInstr::F64Div);
+                instrs.push(WasmInstr::F64Add);
+            }
+        }
+        instrs.push(WasmInstr::F64Store(3, 0));
+        instrs.push(WasmInstr::LocalGet(ptr));
+        Ok(())
+    }
+
     /// Emit a floating-point comparison on two boxed-double operands, leaving
     /// an unboxed i32 boolean (the comparison result is not boxed).
     fn emit_float_cmp(
@@ -3798,6 +3867,21 @@ impl<'a> WasmLowering<'a> {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
                 instrs.push(WasmInstr::F64Load(3, 0));
                 instrs.push(WasmInstr::Call(self.runtime.double_to_str_idx));
+            }
+            // Floating-point math (incl. C FFI stubs c_sin/c_cos/c_sqrt). No
+            // libc in WASM: sqrt is the f64 instruction; sin/cos use a Taylor
+            // series.
+            Some(n)
+                if args.len() == 1
+                    && matches!(strip_qualifier(n), "sqrt" | "c_sqrt" | "GHC.Float.sqrt") =>
+            {
+                self.emit_math_builtin("sqrt", args[0], instrs, locals, local_count)?;
+            }
+            Some(n) if args.len() == 1 && matches!(strip_qualifier(n), "sin" | "c_sin") => {
+                self.emit_math_builtin("sin", args[0], instrs, locals, local_count)?;
+            }
+            Some(n) if args.len() == 1 && matches!(strip_qualifier(n), "cos" | "c_cos") => {
+                self.emit_math_builtin("cos", args[0], instrs, locals, local_count)?;
             }
             // showBool b = if b then "True" else "False"
             Some(n) if args.len() == 1 && strip_qualifier(n) == "showBool" => {

@@ -851,6 +851,12 @@ fn test_tier3_char_enum_step_wasm() {
     run_wasm_test("tier3_io/char_enum_step", Profile::Default);
 }
 
+// foreign import ccall math: sqrt (f64 instruction), sin/cos (Taylor series).
+#[test]
+fn test_tier3_foreign_import_wasm() {
+    run_wasm_test("tier3_io/foreign_import", Profile::Default);
+}
+
 // take k of an infinite producer (iterate/repeat/cycle/enumFrom/enumFromThen)
 // fuses to a finite list; enumFromThenTo and until synthesize directly.
 #[test]

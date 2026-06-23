@@ -825,6 +825,13 @@ fn test_tier3_data_function_wasm() {
     run_wasm_test("tier3_io/data_function", Profile::Default);
 }
 
+// Char predicates/conversions as first-class fns over String args: filter/map/
+// any/all convert a pstr to a cons-[Char]; ord/chr/isAscii/isLetter/digitToInt.
+#[test]
+fn test_tier3_char_first_class_wasm() {
+    run_wasm_test("tier3_io/char_first_class", Profile::Default);
+}
+
 // take k of an infinite producer (iterate/repeat/cycle/enumFrom/enumFromThen)
 // fuses to a finite list; enumFromThenTo and until synthesize directly.
 #[test]

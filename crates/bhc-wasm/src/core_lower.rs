@@ -1931,6 +1931,86 @@ impl<'a> WasmLowering<'a> {
         instrs.push(WasmInstr::LocalGet(result));
     }
 
+    /// Lower `s` and leave a cons-`[Char]` on the stack: a marked `pstr` is
+    /// converted (so cons-based list ops like filter/map can walk a String); a
+    /// cons list or nil passes through unchanged.
+    fn emit_ensure_charlist(
+        &mut self,
+        s: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let v = *local_count;
+        let len = *local_count + 1;
+        let acc = *local_count + 2;
+        let i = *local_count + 3;
+        let cell = *local_count + 4;
+        *local_count += 5;
+        self.lower_expr(s, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalSet(v));
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::I32Eqz);
+        instrs.push(WasmInstr::If(Some(WasmType::I32)));
+        instrs.push(WasmInstr::I32Const(0)); // nil
+        instrs.push(WasmInstr::Else);
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::I32Load(2, 0));
+        instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_MARKER));
+        instrs.push(WasmInstr::I32And);
+        instrs.push(WasmInstr::If(Some(WasmType::I32)));
+        // pstr -> cons, built back-to-front so head order is preserved
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::I32Load(2, 0));
+        instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_LEN_MASK));
+        instrs.push(WasmInstr::I32And);
+        instrs.push(WasmInstr::LocalSet(len));
+        instrs.push(WasmInstr::I32Const(0));
+        instrs.push(WasmInstr::LocalSet(acc));
+        instrs.push(WasmInstr::LocalGet(len));
+        instrs.push(WasmInstr::I32Const(1));
+        instrs.push(WasmInstr::I32Sub);
+        instrs.push(WasmInstr::LocalSet(i));
+        instrs.push(WasmInstr::Block(None));
+        instrs.push(WasmInstr::Loop(None));
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::I32Const(0));
+        instrs.push(WasmInstr::I32LtS);
+        instrs.push(WasmInstr::BrIf(1));
+        instrs.push(WasmInstr::I32Const(12));
+        instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+        instrs.push(WasmInstr::LocalSet(cell));
+        instrs.push(WasmInstr::LocalGet(cell));
+        instrs.push(WasmInstr::I32Const(1));
+        instrs.push(WasmInstr::I32Store(2, 0)); // `:` tag
+        instrs.push(WasmInstr::LocalGet(cell));
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::I32Const(4));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::I32Load8U(0, 0));
+        instrs.push(WasmInstr::I32Store(2, 4)); // head
+        instrs.push(WasmInstr::LocalGet(cell));
+        instrs.push(WasmInstr::LocalGet(acc));
+        instrs.push(WasmInstr::I32Store(2, 8)); // tail
+        instrs.push(WasmInstr::LocalGet(cell));
+        instrs.push(WasmInstr::LocalSet(acc));
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::I32Const(1));
+        instrs.push(WasmInstr::I32Sub);
+        instrs.push(WasmInstr::LocalSet(i));
+        instrs.push(WasmInstr::Br(0));
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::LocalGet(acc));
+        instrs.push(WasmInstr::Else);
+        instrs.push(WasmInstr::LocalGet(v)); // already a cons list
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::End);
+        Ok(())
+    }
+
     /// Show a runtime list of scalars by walking its cons cells, rendering each
     /// element according to `kind` and joining with commas inside `[`...`]`.
     /// Leaves the result string pointer on the stack.
@@ -2876,6 +2956,19 @@ impl<'a> WasmLowering<'a> {
             if self.try_lower_filepath(name, &args, instrs, locals, local_count)? {
                 return Ok(());
             }
+            // List HOFs over a String: convert a `pstr` list argument to a
+            // cons-`[Char]` so the cons-based synthesized fn can walk it. A cons
+            // list or nil passes through, so non-String lists are unaffected.
+            if args.len() == 2 && matches!(strip_qualifier(name), "filter" | "map" | "any" | "all")
+            {
+                let sym = Symbol::intern(strip_qualifier(name));
+                if let Some(&idx) = self.func_map.get(&sym) {
+                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                    self.emit_ensure_charlist(args[1], instrs, locals, local_count)?;
+                    instrs.push(WasmInstr::Call(idx));
+                    return Ok(());
+                }
+            }
             // `length` works on both string representations: a marked `pstr`
             // returns its stored length; a cons list (incl. cons-`[Char]`) is
             // walked. This keeps `length` correct whether its argument is a
@@ -3122,7 +3215,10 @@ impl<'a> WasmLowering<'a> {
             // second. `rnf` reduces to `()`.
             Some(n)
                 if args.len() == 1
-                    && matches!(strip_qualifier(n), "force" | "id" | "fromString") =>
+                    && matches!(
+                        strip_qualifier(n),
+                        "force" | "id" | "fromString" | "chr" | "ord"
+                    ) =>
             {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
             }
@@ -4540,6 +4636,9 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "curry",
     "uncurry",
     "&",
+    "isAscii",
+    "isLetter",
+    "digitToInt",
 ];
 
 /// Whether any binding in the module references `name`.
@@ -8363,6 +8462,48 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
             );
             plam(p, plam(f, plam(x.clone(), body)))
         }
+        // isAscii c = c < 128
+        "isAscii" => {
+            let c = pv("c", fresh(id));
+            plam(c.clone(), papp2(pref("<", id), pev(&c), pint(128)))
+        }
+        // isLetter = isAlpha
+        "isLetter" => {
+            let c = pv("c", fresh(id));
+            plam(c.clone(), papp(pref("isAlpha", id), pev(&c)))
+        }
+        // digitToInt c = c - 48 ('0'..'9'); 'A'..'F' -> c-55; 'a'..'f' -> c-87
+        "digitToInt" => {
+            let c = pv("c", fresh(id));
+            let hex_lower = papp2(pref("-", id), pev(&c), pint(87));
+            let hex_upper = pcase(
+                papp2(pref("<=", id), pev(&c), pint(70)),
+                vec![
+                    palt("False", 0, 0, vec![], hex_lower),
+                    palt(
+                        "True",
+                        1,
+                        0,
+                        vec![],
+                        papp2(pref("-", id), pev(&c), pint(55)),
+                    ),
+                ],
+            );
+            let body = pcase(
+                papp2(pref("<=", id), pev(&c), pint(57)),
+                vec![
+                    palt("False", 0, 0, vec![], hex_upper),
+                    palt(
+                        "True",
+                        1,
+                        0,
+                        vec![],
+                        papp2(pref("-", id), pev(&c), pint(48)),
+                    ),
+                ],
+            );
+            plam(c.clone(), body)
+        }
         // swap (a,b) = (b,a)
         "swap" => {
             let p = pv("p", fresh(id));
@@ -8844,9 +8985,11 @@ fn operator_arity(name: &str) -> Option<usize> {
         | "GHC.Classes.<=" | ">" | "GHC.Classes.>" | ">=" | "GHC.Classes.>=" | "++"
         | "GHC.Base.++" => Some(2),
         "negate" | "GHC.Num.negate" => Some(1),
-        // Enum/identity builtins usable as first-class function values.
+        // Enum/identity/char builtins usable as first-class function values.
         _ => match strip_qualifier(name) {
-            "succ" | "pred" | "negate" | "abs" | "fromEnum" | "toEnum" | "not" => Some(1),
+            "succ" | "pred" | "negate" | "abs" | "fromEnum" | "toEnum" | "not" | "chr" | "ord" => {
+                Some(1)
+            }
             _ => None,
         },
     }
@@ -8879,6 +9022,8 @@ fn returns_bool_fn(name: &str) -> bool {
             | "isAbsolute"
             | "isRelative"
             | "hasExtension"
+            | "isAscii"
+            | "isLetter"
     )
 }
 

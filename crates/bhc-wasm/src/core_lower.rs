@@ -8772,28 +8772,51 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
             let cons = palt(":", 1, 2, vec![y.clone(), ys.clone()], on_elem);
             plam(xs.clone(), pcase(pev(&xs), vec![nil, cons]))
         }
-        // enumFromThenTo a b c = case a > c of
-        //   True -> []; False -> a : enumFromThenTo b (b + (b - a)) c
-        // (ascending ranges; the step is b - a)
+        // enumFromThenTo a b c: step = b - a. Ascending (step >= 0) stops when
+        // a > c; descending stops when a < c. The recursive step is the same in
+        // both; it is duplicated (not shared) so the empty case stays strict.
         "enumFromThenTo" => {
             let a = pv("a", fresh(id));
             let b = pv("b", fresh(id));
             let c = pv("c", fresh(id));
-            let next_b = papp2(
-                pref("+", id),
-                pev(&b),
-                papp2(pref("-", id), pev(&b), pev(&a)),
-            );
-            let recur = papp2(
-                pref(":", id),
-                pev(&a),
-                papp(papp2(pref("enumFromThenTo", id), pev(&b), next_b), pev(&c)),
-            );
-            let body = pcase(
+            let recur = |id: &mut usize| {
+                let next_b = papp2(
+                    pref("+", id),
+                    pev(&b),
+                    papp2(pref("-", id), pev(&b), pev(&a)),
+                );
+                papp2(
+                    pref(":", id),
+                    pev(&a),
+                    papp(papp2(pref("enumFromThenTo", id), pev(&b), next_b), pev(&c)),
+                )
+            };
+            // ascending arm: stop when a > c
+            let asc = pcase(
                 papp2(pref(">", id), pev(&a), pev(&c)),
                 vec![
-                    palt("False", 0, 0, vec![], recur),
+                    palt("False", 0, 0, vec![], recur(id)),
                     palt("True", 1, 0, vec![], pref("[]", id)),
+                ],
+            );
+            // descending arm: stop when a < c
+            let desc = pcase(
+                papp2(pref("<", id), pev(&a), pev(&c)),
+                vec![
+                    palt("False", 0, 0, vec![], recur(id)),
+                    palt("True", 1, 0, vec![], pref("[]", id)),
+                ],
+            );
+            // choose by step sign: (b - a) >= 0 ?
+            let body = pcase(
+                papp2(
+                    pref(">=", id),
+                    papp2(pref("-", id), pev(&b), pev(&a)),
+                    pint(0),
+                ),
+                vec![
+                    palt("False", 0, 0, vec![], desc),
+                    palt("True", 1, 0, vec![], asc),
                 ],
             );
             plam(a.clone(), plam(b.clone(), plam(c.clone(), body)))
@@ -9184,6 +9207,7 @@ fn as_int_literal(expr: &Expr) -> Option<i64> {
     match peel_show_wrappers(expr) {
         Expr::Lit(Literal::Int(n), _, _) => Some(*n),
         Expr::Lit(Literal::Integer(n), _, _) => i64::try_from(*n).ok(),
+        Expr::Lit(Literal::Char(c), _, _) => Some(*c as i64),
         _ => None,
     }
 }

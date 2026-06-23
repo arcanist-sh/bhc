@@ -844,6 +844,13 @@ fn test_tier3_char_first_class_wasm() {
     run_wasm_test("tier3_io/char_first_class", Profile::Default);
 }
 
+// Stepped char enums: enumFromThenTo (ascending and descending) + take of
+// infinite enumFromThen/enumFrom, printed as Strings.
+#[test]
+fn test_tier3_char_enum_step_wasm() {
+    run_wasm_test("tier3_io/char_enum_step", Profile::Default);
+}
+
 // take k of an infinite producer (iterate/repeat/cycle/enumFrom/enumFromThen)
 // fuses to a finite list; enumFromThenTo and until synthesize directly.
 #[test]

@@ -757,6 +757,12 @@ fn test_tier3_enum_functions_wasm() {
     run_wasm_test("tier3_io/enum_functions", Profile::Default);
 }
 
+// read / readMaybe of Int (parse_int), and runtime-Maybe show (Just n/Nothing).
+#[test]
+fn test_tier3_string_read_wasm() {
+    run_wasm_test("tier3_io/string_read", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

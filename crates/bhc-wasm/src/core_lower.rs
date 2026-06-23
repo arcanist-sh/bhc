@@ -1098,6 +1098,16 @@ impl<'a> WasmLowering<'a> {
         // See through runtime-identity wrappers (`force`/`to . from`/…) so the
         // structural and inferred paths inspect the real value.
         let arg = peel_runtime_identity(arg);
+        // A `Maybe`-returning call (`readMaybe`) is rendered by walking the
+        // runtime value: `Nothing` (the nullary tag 0) or `Just <field>`.
+        {
+            let (h, _) = collect_app_spine(arg);
+            if let Expr::Var(v, _) = h {
+                if strip_qualifier(v.name.as_str()) == "readMaybe" {
+                    return self.emit_show_maybe(arg, instrs, locals, local_count);
+                }
+            }
+        }
         // A String value renders quoted and escaped (`show "a\"b" == "\"a\\\"b\""`),
         // not as a list of characters — so handle it before the list paths.
         if is_string_expr(arg) {
@@ -1220,6 +1230,37 @@ impl<'a> WasmLowering<'a> {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Show a runtime `Maybe Int` value: `Nothing` (value < HEAP_BASE) or
+    /// `Just <n>` (a heap `[tag|field]`, field at offset 4).
+    fn emit_show_maybe(
+        &mut self,
+        arg: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let nothing = self.intern_pstr("Nothing") as i32;
+        let just = self.intern_pstr("Just ");
+        let v = *local_count;
+        *local_count += 1;
+        self.lower_expr(arg, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalSet(v));
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::I32Const(HEAP_BASE));
+        instrs.push(WasmInstr::I32LtU);
+        instrs.push(WasmInstr::If(Some(WasmType::I32)));
+        instrs.push(WasmInstr::I32Const(nothing));
+        instrs.push(WasmInstr::Else);
+        // "Just " ++ show(field)
+        instrs.push(WasmInstr::I32Const(just as i32));
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::I32Load(2, 4));
+        instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
+        instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+        instrs.push(WasmInstr::End);
         Ok(())
     }
 
@@ -2024,6 +2065,25 @@ impl<'a> WasmLowering<'a> {
                 if let Some(tag) = self.read_enum_tag(args[0]) {
                     instrs.push(WasmInstr::I32Const(tag));
                     return Ok(());
+                }
+                // Otherwise read an Int: parse the string at runtime.
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Call(self.runtime.parse_int_idx));
+                return Ok(());
+            }
+            // readMaybe of a string literal: Just n for a valid Int, else Nothing.
+            if strip_qualifier(name) == "readMaybe" && args.len() == 1 {
+                if let Some(s) = as_string_literal(args[0]) {
+                    match s.trim().parse::<i64>() {
+                        Ok(n) => {
+                            let just = papp(pref("Just", &mut self.next_synthetic_id), pint(n));
+                            return self.lower_expr(&just, instrs, locals, local_count, false);
+                        }
+                        Err(_) => {
+                            instrs.push(WasmInstr::I32Const(0)); // Nothing
+                            return Ok(());
+                        }
+                    }
                 }
             }
             // `replicateM n act` / `replicateM_ n act`: the action must run `n`
@@ -7293,6 +7353,14 @@ fn is_list_operand(expr: &Expr) -> bool {
         }
     }
     false
+}
+
+/// The contents of `expr` if it is a string literal (after peeling wrappers).
+fn as_string_literal(expr: &Expr) -> Option<&str> {
+    match peel_show_wrappers(expr) {
+        Expr::Lit(Literal::String(sym), _, _) => Some(sym.as_str()),
+        _ => None,
+    }
 }
 
 /// The integer value of `expr` if it is an integer literal (after peeling

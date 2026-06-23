@@ -149,14 +149,24 @@ pub fn lower_core_module(
     // can dispatch to the generated `$derived_*` functions.
     lowering.register_derived_instances(core);
 
+    // Rewrite monad-transformer bindings (ReaderT/StateT/WriterT/ExceptT) into
+    // their concrete eager representations before anything inspects arities or
+    // bodies. Plain-IO bindings pass through unchanged, so the shared IO `>>=`
+    // path is untouched.
+    let binds: Vec<Bind> = core
+        .bindings
+        .iter()
+        .map(|b| rewrite_bind_monads(b, &mut lowering.next_synthetic_id))
+        .collect();
+
     // Record non-recursive top-level functions so saturated calls can be
     // inlined; record every top-level function's arity so partial and
     // over-applications can be handled via closures.
-    lowering.register_inline_bodies(core);
-    lowering.register_arities(core);
+    lowering.register_inline_bodies(&binds);
+    lowering.register_arities(&binds);
 
     // First pass: register all top-level function names so we can resolve calls
-    for bind in &core.bindings {
+    for bind in &binds {
         match bind {
             Bind::NonRec(var, _) => {
                 lowering.register_binding(var);
@@ -181,7 +191,7 @@ pub fn lower_core_module(
     // pull those helpers in.
     let uses_fmap = ["fmap", "<$>", "traverse", "mapM"]
         .iter()
-        .any(|n| module_uses_name(core, Symbol::intern(n)));
+        .any(|n| module_uses_name(&binds, Symbol::intern(n)));
     loop {
         let mut added = false;
         for &name in LIST_PRELUDE_NAMES {
@@ -189,7 +199,7 @@ pub fn lower_core_module(
             if lowering.func_map.contains_key(&sym) || synthesized.contains(&sym) {
                 continue;
             }
-            let used = module_uses_name(core, sym)
+            let used = module_uses_name(&binds, sym)
                 || prelude.iter().any(|(_, e)| expr_uses_name(e, sym))
                 || (uses_fmap && matches!(name, "map" | "__fmapMaybe"));
             if !used {
@@ -210,7 +220,7 @@ pub fn lower_core_module(
     }
 
     // Second pass: lower each user binding to a WASM function.
-    for bind in &core.bindings {
+    for bind in &binds {
         match bind {
             Bind::NonRec(var, expr) => {
                 lowering.lower_binding(var, expr)?;
@@ -489,8 +499,8 @@ impl<'a> WasmLowering<'a> {
     /// Record non-recursive top-level functions (those with at least one
     /// value parameter) so saturated applications can be inlined. `main` is
     /// excluded — it is the entry point, never a callee.
-    fn register_inline_bodies(&mut self, core: &CoreModule) {
-        for bind in &core.bindings {
+    fn register_inline_bodies(&mut self, binds: &[Bind]) {
+        for bind in binds {
             if let Bind::NonRec(var, expr) = bind {
                 if var.name.as_str() == "main" {
                     continue;
@@ -513,12 +523,12 @@ impl<'a> WasmLowering<'a> {
 
     /// Record the arity (leading lambda parameter count) of every top-level
     /// binding, so partial/over-application can be detected at call sites.
-    fn register_arities(&mut self, core: &CoreModule) {
+    fn register_arities(&mut self, binds: &[Bind]) {
         let mut record = |var: &Var, expr: &Expr| {
             let (params, _) = peel_lambdas(expr);
             self.arities.insert(var.name, params.len());
         };
-        for bind in &core.bindings {
+        for bind in binds {
             match bind {
                 Bind::NonRec(var, expr) => record(var, expr),
                 Bind::Rec(bindings) => {
@@ -528,6 +538,13 @@ impl<'a> WasmLowering<'a> {
                 }
             }
         }
+    }
+
+    /// Draw a fresh synthetic var id (for Core built at lowering time).
+    fn fresh_id(&mut self) -> usize {
+        let v = self.next_synthetic_id;
+        self.next_synthetic_id += 1;
+        v
     }
 
     /// Pre-register a top-level binding so it gets a function index.
@@ -2594,6 +2611,70 @@ impl<'a> WasmLowering<'a> {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
             }
 
+            // Monad-transformer eliminators (see rewrite_monad). The rewritten
+            // value is a function of the environment/state (Reader/State) or the
+            // result data directly (Writer/Except); these apply or project it.
+            Some(n)
+                if args.len() == 2
+                    && matches!(
+                        strip_qualifier(n),
+                        "runReaderT" | "runReader" | "runStateT" | "runState"
+                    ) =>
+            {
+                // run = apply the representation to the env / initial state
+                let applied = papp(args[0].clone(), args[1].clone());
+                self.lower_expr(&applied, instrs, locals, local_count, is_main)?;
+            }
+            Some(n)
+                if args.len() == 2 && matches!(strip_qualifier(n), "evalStateT" | "evalState") =>
+            {
+                // fst (m s): case m s of (a, _) -> a
+                let a = pv("a", self.fresh_id());
+                let s2 = pv("s2", self.fresh_id());
+                let applied = papp(args[0].clone(), args[1].clone());
+                let cas = pcase(
+                    applied,
+                    vec![palt("(,)", 0, 2, vec![a.clone(), s2], pev(&a))],
+                );
+                self.lower_expr(&cas, instrs, locals, local_count, is_main)?;
+            }
+            Some(n)
+                if args.len() == 2 && matches!(strip_qualifier(n), "execStateT" | "execState") =>
+            {
+                // snd (m s): case m s of (_, s') -> s'
+                let a = pv("a", self.fresh_id());
+                let s2 = pv("s2", self.fresh_id());
+                let applied = papp(args[0].clone(), args[1].clone());
+                let cas = pcase(
+                    applied,
+                    vec![palt("(,)", 0, 2, vec![a, s2.clone()], pev(&s2))],
+                );
+                self.lower_expr(&cas, instrs, locals, local_count, is_main)?;
+            }
+            Some(n)
+                if args.len() == 1
+                    && matches!(
+                        strip_qualifier(n),
+                        "runWriterT" | "runWriter" | "runExceptT" | "runExcept"
+                    ) =>
+            {
+                // the representation already is the result (pair / Either)
+                self.lower_expr(args[0], instrs, locals, local_count, is_main)?;
+            }
+            Some(n)
+                if args.len() == 1
+                    && matches!(strip_qualifier(n), "execWriterT" | "execWriter") =>
+            {
+                // snd of the (a, w) pair
+                let a = pv("a", self.fresh_id());
+                let w = pv("w", self.fresh_id());
+                let cas = pcase(
+                    args[0].clone(),
+                    vec![palt("(,)", 0, 2, vec![a, w.clone()], pev(&w))],
+                );
+                self.lower_expr(&cas, instrs, locals, local_count, is_main)?;
+            }
+
             // IO: catch - execute the action, ignore the handler
             Some("catch" | "Control.Exception.catch" | "GHC.IO.catch") if args.len() == 2 => {
                 // Simple implementation: just run the first argument (the IO action).
@@ -3517,8 +3598,8 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
 ];
 
 /// Whether any binding in the module references `name`.
-fn module_uses_name(core: &CoreModule, name: Symbol) -> bool {
-    core.bindings.iter().any(|bind| match bind {
+fn module_uses_name(binds: &[Bind], name: Symbol) -> bool {
+    binds.iter().any(|bind| match bind {
         Bind::NonRec(_, e) => expr_uses_name(e, name),
         Bind::Rec(bs) => bs.iter().any(|(_, e)| expr_uses_name(e, name)),
     })
@@ -3566,6 +3647,402 @@ fn palt(name: &str, tag: u32, arity: u32, binders: Vec<Var>, rhs: Expr) -> Alt {
         con: AltCon::DataCon(pdatacon(name, tag, arity)),
         binders,
         rhs,
+    }
+}
+/// An empty `String` literal (the Writer monoid's `mempty`).
+fn pstr_empty() -> Expr {
+    Expr::Lit(
+        Literal::String(Symbol::intern("")),
+        Ty::Error,
+        Span::default(),
+    )
+}
+
+// ============================================================
+// Monad transformer rewriting
+// ============================================================
+//
+// The Core reaches the backend with untagged `>>=`/`return`/`ask`/`get`/… — the
+// monad is only knowable from the operations a binding uses. We infer a
+// binding's monad and rewrite its body into a concrete eager representation, so
+// no transformer-specific machinery reaches the generic IO `>>=` path:
+//
+//   ReaderT r m a  ~  \r -> a            (a function of the environment)
+//   StateT  s m a  ~  \s -> (a, s)       (state-threading function)
+//   WriterT w m a  ~  (a, w)             (value paired with the log)
+//   ExceptT e m a  ~  Either e a         (Left on throw, Right on success)
+//
+// The eliminators (runReaderT/evalStateT/runWriterT/runExceptT) — which appear
+// in plain-IO code — apply or project these representations (see lower_app).
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MonadKind {
+    Reader,
+    State,
+    Writer,
+    Except,
+}
+
+/// The transformer a characteristic operation belongs to.
+fn monad_op_kind(name: &str) -> Option<MonadKind> {
+    match strip_qualifier(name) {
+        "ask" | "asks" | "local" | "reader" => Some(MonadKind::Reader),
+        "get" | "put" | "modify" | "modify'" | "gets" | "state" => Some(MonadKind::State),
+        "tell" | "writer" => Some(MonadKind::Writer),
+        "throwE" | "catchE" | "throwError" | "catchError" => Some(MonadKind::Except),
+        _ => None,
+    }
+}
+
+/// Infer a binding's monad from the first characteristic operation in its body.
+/// `None` means plain IO (left untouched).
+fn infer_monad_kind(expr: &Expr) -> Option<MonadKind> {
+    match expr {
+        Expr::Var(v, _) => monad_op_kind(v.name.as_str()),
+        Expr::App(f, a, _) => infer_monad_kind(f).or_else(|| infer_monad_kind(a)),
+        Expr::Lam(_, b, _) | Expr::TyLam(_, b, _) => infer_monad_kind(b),
+        Expr::TyApp(i, _, _) | Expr::Cast(i, _, _) | Expr::Tick(_, i, _) | Expr::Lazy(i, _) => {
+            infer_monad_kind(i)
+        }
+        Expr::Let(bind, b, _) => {
+            let in_bind = match bind.as_ref() {
+                Bind::NonRec(_, e) => infer_monad_kind(e),
+                Bind::Rec(bs) => bs.iter().find_map(|(_, e)| infer_monad_kind(e)),
+            };
+            in_bind.or_else(|| infer_monad_kind(b))
+        }
+        Expr::Case(s, alts, _, _) => {
+            infer_monad_kind(s).or_else(|| alts.iter().find_map(|a| infer_monad_kind(&a.rhs)))
+        }
+        _ => None,
+    }
+}
+
+/// Rewrite a binding's body into its monad representation, preserving leading
+/// value-parameter lambdas. Non-transformer bindings are cloned unchanged.
+fn rewrite_bind_monads(bind: &Bind, id: &mut usize) -> Bind {
+    let rewrite = |v: &Var, e: &Expr, id: &mut usize| -> (Var, Expr) {
+        match infer_monad_kind(e) {
+            Some(kind) => {
+                // Preserve the binding's own value parameters; rewrite the body.
+                let mut params: Vec<Var> = Vec::new();
+                let mut cur = e;
+                while let Expr::Lam(p, b, _) = cur {
+                    params.push(p.clone());
+                    cur = b;
+                }
+                let mut body = rewrite_monad(kind, cur, id);
+                for p in params.into_iter().rev() {
+                    body = plam(p, body);
+                }
+                (v.clone(), body)
+            }
+            None => (v.clone(), e.clone()),
+        }
+    };
+    match bind {
+        Bind::NonRec(v, e) => {
+            let (v, e) = rewrite(v, e, id);
+            Bind::NonRec(v, Box::new(e))
+        }
+        Bind::Rec(bs) => Bind::Rec(
+            bs.iter()
+                .map(|(v, e)| {
+                    let (v, e) = rewrite(v, e, id);
+                    (v, Box::new(e))
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// Rewrite the continuation of a bind (`\x -> rest`) so its body is rewritten in
+/// the same monad. A non-lambda continuation (a function value) is left as-is.
+fn rw_cont(kind: MonadKind, k: &Expr, id: &mut usize) -> Expr {
+    match peel_type_abstractions(k) {
+        Expr::Lam(x, body, _) => plam(x.clone(), rewrite_monad(kind, body, id)),
+        other => other.clone(),
+    }
+}
+
+/// Rewrite a monadic expression into the eager representation for `kind`.
+fn rewrite_monad(kind: MonadKind, expr: &Expr, id: &mut usize) -> Expr {
+    let fresh = |id: &mut usize| {
+        let v = *id;
+        *id += 1;
+        v
+    };
+    // A monadic computation can be a `case`/`let` whose scrutinee/bound value is
+    // pure but whose branches/body are monadic — rewrite those in place.
+    match expr {
+        Expr::Case(scrut, alts, ty, sp) => {
+            let alts = alts
+                .iter()
+                .map(|a| Alt {
+                    con: a.con.clone(),
+                    binders: a.binders.clone(),
+                    rhs: rewrite_monad(kind, &a.rhs, id),
+                })
+                .collect();
+            return Expr::Case(scrut.clone(), alts, ty.clone(), *sp);
+        }
+        Expr::Let(bind, body, sp) => {
+            return Expr::Let(bind.clone(), Box::new(rewrite_monad(kind, body, id)), *sp);
+        }
+        Expr::TyApp(i, t, sp) => {
+            return Expr::TyApp(Box::new(rewrite_monad(kind, i, id)), t.clone(), *sp)
+        }
+        Expr::Cast(i, t, sp) => {
+            return Expr::Cast(Box::new(rewrite_monad(kind, i, id)), t.clone(), *sp)
+        }
+        Expr::Tick(tk, i, sp) => {
+            return Expr::Tick(tk.clone(), Box::new(rewrite_monad(kind, i, id)), *sp)
+        }
+        Expr::Lazy(i, sp) => return Expr::Lazy(Box::new(rewrite_monad(kind, i, id)), *sp),
+        _ => {}
+    }
+    let (head, args) = collect_app_spine(expr);
+    let op = match head {
+        Expr::Var(v, _) => strip_qualifier(v.name.as_str()),
+        _ => return expr.clone(),
+    };
+    match kind {
+        MonadKind::Reader => match (op, args.len()) {
+            (">>=", 2) => {
+                let m = rewrite_monad(kind, args[0], id);
+                let k = rw_cont(kind, args[1], id);
+                let r = pv("r", fresh(id));
+                // \r -> (k (m r)) r
+                plam(r.clone(), papp(papp(k, papp(m, pev(&r))), pev(&r)))
+            }
+            (">>", 2) => {
+                let m1 = rewrite_monad(kind, args[0], id);
+                let m2 = rewrite_monad(kind, args[1], id);
+                let r = pv("r", fresh(id));
+                plam(
+                    r.clone(),
+                    papp2(pref("seq", id), papp(m1, pev(&r)), papp(m2, pev(&r))),
+                )
+            }
+            ("return" | "pure", 1) => {
+                let r = pv("r", fresh(id));
+                plam(r, args[0].clone())
+            }
+            ("ask", 0) => {
+                let r = pv("r", fresh(id));
+                plam(r.clone(), pev(&r))
+            }
+            ("asks" | "reader", 1) => {
+                let r = pv("r", fresh(id));
+                plam(r.clone(), papp(args[0].clone(), pev(&r)))
+            }
+            ("local", 2) => {
+                let m = rewrite_monad(kind, args[1], id);
+                let r = pv("r", fresh(id));
+                plam(r.clone(), papp(m, papp(args[0].clone(), pev(&r))))
+            }
+            _ => expr.clone(),
+        },
+        MonadKind::State => match (op, args.len()) {
+            (">>=", 2) => {
+                let m = rewrite_monad(kind, args[0], id);
+                let k = rw_cont(kind, args[1], id);
+                let s = pv("s", fresh(id));
+                let a = pv("a", fresh(id));
+                let s2 = pv("s2", fresh(id));
+                // \s -> case m s of (a, s') -> (k a) s'
+                plam(
+                    s.clone(),
+                    pcase(
+                        papp(m, pev(&s)),
+                        vec![palt(
+                            "(,)",
+                            0,
+                            2,
+                            vec![a.clone(), s2.clone()],
+                            papp(papp(k, pev(&a)), pev(&s2)),
+                        )],
+                    ),
+                )
+            }
+            (">>", 2) => {
+                let m1 = rewrite_monad(kind, args[0], id);
+                let m2 = rewrite_monad(kind, args[1], id);
+                let s = pv("s", fresh(id));
+                let a = pv("a", fresh(id));
+                let s2 = pv("s2", fresh(id));
+                plam(
+                    s.clone(),
+                    pcase(
+                        papp(m1, pev(&s)),
+                        vec![palt("(,)", 0, 2, vec![a, s2.clone()], papp(m2, pev(&s2)))],
+                    ),
+                )
+            }
+            ("return" | "pure", 1) => {
+                let s = pv("s", fresh(id));
+                plam(s.clone(), papp2(pref("(,)", id), args[0].clone(), pev(&s)))
+            }
+            ("get", 0) => {
+                let s = pv("s", fresh(id));
+                plam(s.clone(), papp2(pref("(,)", id), pev(&s), pev(&s)))
+            }
+            ("put", 1) => {
+                let s = pv("s", fresh(id));
+                plam(s, papp2(pref("(,)", id), pref("()", id), args[0].clone()))
+            }
+            ("modify" | "modify'", 1) => {
+                let s = pv("s", fresh(id));
+                plam(
+                    s.clone(),
+                    papp2(
+                        pref("(,)", id),
+                        pref("()", id),
+                        papp(args[0].clone(), pev(&s)),
+                    ),
+                )
+            }
+            ("gets", 1) => {
+                let s = pv("s", fresh(id));
+                plam(
+                    s.clone(),
+                    papp2(pref("(,)", id), papp(args[0].clone(), pev(&s)), pev(&s)),
+                )
+            }
+            _ => expr.clone(),
+        },
+        MonadKind::Writer => match (op, args.len()) {
+            (">>=", 2) => {
+                let m = rewrite_monad(kind, args[0], id);
+                let k = rw_cont(kind, args[1], id);
+                let a = pv("a", fresh(id));
+                let w1 = pv("w1", fresh(id));
+                let b = pv("b", fresh(id));
+                let w2 = pv("w2", fresh(id));
+                // case m of (a,w1) -> case k a of (b,w2) -> (b, w1 ++ w2)
+                pcase(
+                    m,
+                    vec![palt(
+                        "(,)",
+                        0,
+                        2,
+                        vec![a.clone(), w1.clone()],
+                        pcase(
+                            papp(k, pev(&a)),
+                            vec![palt(
+                                "(,)",
+                                0,
+                                2,
+                                vec![b.clone(), w2.clone()],
+                                papp2(
+                                    pref("(,)", id),
+                                    pev(&b),
+                                    papp2(pref("++", id), pev(&w1), pev(&w2)),
+                                ),
+                            )],
+                        ),
+                    )],
+                )
+            }
+            (">>", 2) => {
+                let m1 = rewrite_monad(kind, args[0], id);
+                let m2 = rewrite_monad(kind, args[1], id);
+                let a = pv("a", fresh(id));
+                let w1 = pv("w1", fresh(id));
+                let b = pv("b", fresh(id));
+                let w2 = pv("w2", fresh(id));
+                pcase(
+                    m1,
+                    vec![palt(
+                        "(,)",
+                        0,
+                        2,
+                        vec![a, w1.clone()],
+                        pcase(
+                            m2,
+                            vec![palt(
+                                "(,)",
+                                0,
+                                2,
+                                vec![b.clone(), w2.clone()],
+                                papp2(
+                                    pref("(,)", id),
+                                    pev(&b),
+                                    papp2(pref("++", id), pev(&w1), pev(&w2)),
+                                ),
+                            )],
+                        ),
+                    )],
+                )
+            }
+            ("return" | "pure", 1) => papp2(pref("(,)", id), args[0].clone(), pstr_empty()),
+            ("tell" | "writer", 1) => papp2(pref("(,)", id), pref("()", id), args[0].clone()),
+            _ => expr.clone(),
+        },
+        MonadKind::Except => match (op, args.len()) {
+            (">>=", 2) => {
+                let m = rewrite_monad(kind, args[0], id);
+                let k = rw_cont(kind, args[1], id);
+                let e = pv("e", fresh(id));
+                let a = pv("a", fresh(id));
+                // case m of Left e -> Left e; Right a -> k a
+                pcase(
+                    m,
+                    vec![
+                        palt(
+                            "Left",
+                            0,
+                            1,
+                            vec![e.clone()],
+                            papp(pref("Left", id), pev(&e)),
+                        ),
+                        palt("Right", 1, 1, vec![a.clone()], papp(k, pev(&a))),
+                    ],
+                )
+            }
+            (">>", 2) => {
+                let m1 = rewrite_monad(kind, args[0], id);
+                let m2 = rewrite_monad(kind, args[1], id);
+                let e = pv("e", fresh(id));
+                let a = pv("a", fresh(id));
+                pcase(
+                    m1,
+                    vec![
+                        palt(
+                            "Left",
+                            0,
+                            1,
+                            vec![e.clone()],
+                            papp(pref("Left", id), pev(&e)),
+                        ),
+                        palt("Right", 1, 1, vec![a], m2),
+                    ],
+                )
+            }
+            ("return" | "pure", 1) => papp(pref("Right", id), args[0].clone()),
+            ("throwE" | "throwError", 1) => papp(pref("Left", id), args[0].clone()),
+            ("catchE" | "catchError", 2) => {
+                let m = rewrite_monad(kind, args[0], id);
+                let h = rw_cont(kind, args[1], id);
+                let e = pv("e", fresh(id));
+                let a = pv("a", fresh(id));
+                // case m of Left e -> h e; Right a -> Right a
+                pcase(
+                    m,
+                    vec![
+                        palt("Left", 0, 1, vec![e.clone()], papp(h, pev(&e))),
+                        palt(
+                            "Right",
+                            1,
+                            1,
+                            vec![a.clone()],
+                            papp(pref("Right", id), pev(&a)),
+                        ),
+                    ],
+                )
+            }
+            _ => expr.clone(),
+        },
     }
 }
 

@@ -708,6 +708,43 @@ fn test_tier3_user_monad_wasm() {
     run_wasm_test("tier3_io/user_monad", Profile::Default);
 }
 
+// Monad transformers, rewritten to eager representations: ReaderT (\r->a),
+// StateT (\s->(a,s)), WriterT ((a,w)), ExceptT (Either e a).
+#[test]
+fn test_tier3_reader_t_wasm() {
+    run_wasm_test("tier3_io/reader_t", Profile::Default);
+}
+
+#[test]
+fn test_tier3_state_t_wasm() {
+    run_wasm_test("tier3_io/state_t", Profile::Default);
+}
+
+#[test]
+fn test_tier3_state_t_case_wasm() {
+    run_wasm_test("tier3_io/state_t_case", Profile::Default);
+}
+
+#[test]
+fn test_tier3_state_t_string_wasm() {
+    run_wasm_test("tier3_io/state_t_string", Profile::Default);
+}
+
+#[test]
+fn test_tier3_writer_t_wasm() {
+    run_wasm_test("tier3_io/writer_t", Profile::Default);
+}
+
+#[test]
+fn test_tier3_except_t_wasm() {
+    run_wasm_test("tier3_io/except_t", Profile::Default);
+}
+
+#[test]
+fn test_tier3_monad_error_wasm() {
+    run_wasm_test("tier3_io/monad_error", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

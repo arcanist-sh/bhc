@@ -153,10 +153,30 @@ pub fn lower_core_module(
     // their concrete eager representations before anything inspects arities or
     // bodies. Plain-IO bindings pass through unchanged, so the shared IO `>>=`
     // path is untouched.
+    //
+    // First detect two-context Reader+State stacks (mtl-auto-lifted), reading
+    // their outer layer from the program's eliminator nesting, so the rewrite
+    // and the eliminators agree on the representation.
+    for bind in &core.bindings {
+        let entries: Vec<(&Var, &Expr)> = match bind {
+            Bind::NonRec(v, e) => vec![(v, e)],
+            Bind::Rec(bs) => bs.iter().map(|(v, e)| (v, e.as_ref())).collect(),
+        };
+        for (v, e) in entries {
+            if infer_ctx_stack(e) {
+                if let Some(outer) = find_stack_outer(&core.bindings, v.name) {
+                    lowering
+                        .ctx_stacks
+                        .insert(v.name.as_str().to_string(), outer == MonadKind::State);
+                }
+            }
+        }
+    }
+    let ctx_stacks = lowering.ctx_stacks.clone();
     let binds: Vec<Bind> = core
         .bindings
         .iter()
-        .map(|b| rewrite_bind_monads(b, &mut lowering.next_synthetic_id))
+        .map(|b| rewrite_bind_monads(b, &ctx_stacks, &mut lowering.next_synthetic_id))
         .collect();
 
     // Record non-recursive top-level functions so saturated calls can be
@@ -304,6 +324,10 @@ struct WasmLowering<'a> {
     /// essential for GeneralizedNewtypeDeriving, where derived Num/Eq/Ord
     /// operate on the underlying value, not a box.
     newtype_cons: FxHashSet<String>,
+    /// Two-context monad-transformer stacks (Reader over State or State over
+    /// Reader): binding name -> `state_outer` (true if StateT is the outer
+    /// layer). Lets the eliminators peel a two-context value correctly.
+    ctx_stacks: FxHashMap<String, bool>,
     /// Substitution environment: var id -> expression to lower in its place.
     /// Used to inline function/lambda arguments without alpha-renaming —
     /// when a parameter is referenced, its argument expression is lowered.
@@ -349,6 +373,7 @@ impl<'a> WasmLowering<'a> {
             derived_functor: FxHashMap::default(),
             derived_foldable: FxHashMap::default(),
             newtype_cons: FxHashSet::default(),
+            ctx_stacks: FxHashMap::default(),
             subst: FxHashMap::default(),
             inline_bodies: FxHashMap::default(),
             inlining: FxHashSet::default(),
@@ -538,6 +563,12 @@ impl<'a> WasmLowering<'a> {
                 }
             }
         }
+    }
+
+    /// Whether `expr` is a Var naming a State-outer two-context stack binding.
+    fn is_ctx_stack_arg(&self, expr: &Expr) -> bool {
+        matches!(peel_head(expr), Expr::Var(v, _)
+            if self.ctx_stacks.get(v.name.as_str()) == Some(&true))
     }
 
     /// Draw a fresh synthetic var id (for Core built at lowering time).
@@ -3570,19 +3601,22 @@ impl<'a> WasmLowering<'a> {
                     ) =>
             {
                 // run = apply the representation to the env / initial state. When
-                // the argument is a nested *data* eliminator (`runStateT
-                // (runExceptT comp) …`), it yields the inner closure, which must
-                // be evaluated then applied via call_indirect — a syntactic
-                // `papp` would merge the spine and feed the inner eliminator an
-                // extra argument. Otherwise call directly.
-                let nested_data_elim = matches!(
+                // the argument is a nested eliminator (`runStateT (runExceptT
+                // comp) …`, `runReaderT (evalStateT comp …) …`), it yields the
+                // inner closure, which must be evaluated then applied via
+                // call_indirect — a syntactic `papp` would merge the spine and
+                // feed the inner eliminator an extra argument. Otherwise call
+                // directly.
+                let nested_elim = matches!(
                     collect_app_spine(args[0]).0,
                     Expr::Var(v, _) if matches!(
                         strip_qualifier(v.name.as_str()),
                         "runExceptT" | "runExcept" | "runWriterT" | "runWriter"
+                            | "runReaderT" | "runReader" | "runStateT" | "runState"
+                            | "evalStateT" | "evalState" | "execStateT" | "execState"
                     )
                 );
-                if nested_data_elim {
+                if nested_elim {
                     self.lower_expr(args[0], instrs, locals, local_count, false)?;
                     self.apply_closure_on_stack(&[args[1]], instrs, locals, local_count)?;
                 } else {
@@ -3593,28 +3627,53 @@ impl<'a> WasmLowering<'a> {
             Some(n)
                 if args.len() == 2 && matches!(strip_qualifier(n), "evalStateT" | "evalState") =>
             {
-                // fst (m s): case m s of (a, _) -> a
                 let a = pv("a", self.fresh_id());
                 let s2 = pv("s2", self.fresh_id());
-                let applied = papp(args[0].clone(), args[1].clone());
-                let cas = pcase(
-                    applied,
-                    vec![palt("(,)", 0, 2, vec![a.clone(), s2], pev(&a))],
-                );
-                self.lower_expr(&cas, instrs, locals, local_count, is_main)?;
+                if self.is_ctx_stack_arg(args[0]) {
+                    // State-outer two-context stack: comp s0 is a Reader closure,
+                    // so produce `\r -> fst (comp s0 r)` (peels State, stays in
+                    // the inner Reader). The outer runReaderT then applies it.
+                    let r = pv("r", self.fresh_id());
+                    let applied = papp(papp(args[0].clone(), args[1].clone()), pev(&r));
+                    let body = pcase(
+                        applied,
+                        vec![palt("(,)", 0, 2, vec![a.clone(), s2], pev(&a))],
+                    );
+                    let lam = plam(r, body);
+                    self.lower_expr(&lam, instrs, locals, local_count, is_main)?;
+                } else {
+                    // fst (m s): case m s of (a, _) -> a
+                    let applied = papp(args[0].clone(), args[1].clone());
+                    let cas = pcase(
+                        applied,
+                        vec![palt("(,)", 0, 2, vec![a.clone(), s2], pev(&a))],
+                    );
+                    self.lower_expr(&cas, instrs, locals, local_count, is_main)?;
+                }
             }
             Some(n)
                 if args.len() == 2 && matches!(strip_qualifier(n), "execStateT" | "execState") =>
             {
-                // snd (m s): case m s of (_, s') -> s'
                 let a = pv("a", self.fresh_id());
                 let s2 = pv("s2", self.fresh_id());
-                let applied = papp(args[0].clone(), args[1].clone());
-                let cas = pcase(
-                    applied,
-                    vec![palt("(,)", 0, 2, vec![a, s2.clone()], pev(&s2))],
-                );
-                self.lower_expr(&cas, instrs, locals, local_count, is_main)?;
+                if self.is_ctx_stack_arg(args[0]) {
+                    let r = pv("r", self.fresh_id());
+                    let applied = papp(papp(args[0].clone(), args[1].clone()), pev(&r));
+                    let body = pcase(
+                        applied,
+                        vec![palt("(,)", 0, 2, vec![a, s2.clone()], pev(&s2))],
+                    );
+                    let lam = plam(r, body);
+                    self.lower_expr(&lam, instrs, locals, local_count, is_main)?;
+                } else {
+                    // snd (m s): case m s of (_, s') -> s'
+                    let applied = papp(args[0].clone(), args[1].clone());
+                    let cas = pcase(
+                        applied,
+                        vec![palt("(,)", 0, 2, vec![a, s2.clone()], pev(&s2))],
+                    );
+                    self.lower_expr(&cas, instrs, locals, local_count, is_main)?;
+                }
             }
             Some(n)
                 if args.len() == 1
@@ -4764,7 +4823,7 @@ fn infer_monad_kind(expr: &Expr) -> Option<MonadKind> {
 
 /// Rewrite a binding's body into its monad representation, preserving leading
 /// value-parameter lambdas. Non-transformer bindings are cloned unchanged.
-fn rewrite_bind_monads(bind: &Bind, id: &mut usize) -> Bind {
+fn rewrite_bind_monads(bind: &Bind, ctx_stacks: &FxHashMap<String, bool>, id: &mut usize) -> Bind {
     let rewrite = |v: &Var, e: &Expr, id: &mut usize| -> (Var, Expr) {
         // Peel the binding's value parameters; rewrite the monadic body.
         let mut params: Vec<Var> = Vec::new();
@@ -4773,9 +4832,11 @@ fn rewrite_bind_monads(bind: &Bind, id: &mut usize) -> Bind {
             params.push(p.clone());
             cur = b;
         }
-        // A two-layer stack (an explicit `lift` over a data-monad outer layer)
-        // takes priority over single-layer inference.
-        let rewritten = if let Some((outer, inner)) = infer_stack(cur) {
+        // A two-context Reader+State stack (detected up front) takes priority,
+        // then a data-outer `lift` stack, then single-layer inference.
+        let rewritten = if let Some(&state_outer) = ctx_stacks.get(v.name.as_str()) {
+            Some(rewrite_ctx_stack(state_outer, cur, id))
+        } else if let Some((outer, inner)) = infer_stack(cur) {
             Some(rewrite_stack(outer, inner, cur, id))
         } else {
             infer_monad_kind(cur).map(|kind| rewrite_monad(kind, cur, id))
@@ -5470,6 +5531,299 @@ fn rewrite_stack(outer: MonadKind, inner: MonadKind, expr: &Expr, id: &mut usize
             ),
             _ => expr.clone(),
         },
+        _ => expr.clone(),
+    }
+}
+
+// ============================================================
+// Two-context monad stacks (Reader + State, mtl-auto-lifted)
+// ============================================================
+//
+// A binding using both Reader (ask) and State (get/put) operations with no
+// explicit `lift`. Represented as a curried function of both contexts returning
+// (value, state):
+//   StateT s (ReaderT r)  ~  \s -> \r -> (a, s)
+//   ReaderT r (StateT s)  ~  \r -> \s -> (a, s)
+// The outer layer (which the innermost eliminator peels) is inferred from the
+// program's eliminator nesting.
+
+/// Whether any operation of `kind` appears in `expr`.
+fn body_uses_monad(expr: &Expr, kind: MonadKind) -> bool {
+    if let Expr::Var(v, _) = expr {
+        if monad_op_kind(v.name.as_str()) == Some(kind) {
+            return true;
+        }
+    }
+    match expr {
+        Expr::App(f, a, _) => body_uses_monad(f, kind) || body_uses_monad(a, kind),
+        Expr::Lam(_, b, _) | Expr::TyLam(_, b, _) => body_uses_monad(b, kind),
+        Expr::TyApp(i, _, _) | Expr::Cast(i, _, _) | Expr::Tick(_, i, _) | Expr::Lazy(i, _) => {
+            body_uses_monad(i, kind)
+        }
+        Expr::Let(bind, b, _) => {
+            let in_bind = match bind.as_ref() {
+                Bind::NonRec(_, e) => body_uses_monad(e, kind),
+                Bind::Rec(bs) => bs.iter().any(|(_, e)| body_uses_monad(e, kind)),
+            };
+            in_bind || body_uses_monad(b, kind)
+        }
+        Expr::Case(s, alts, _, _) => {
+            body_uses_monad(s, kind) || alts.iter().any(|a| body_uses_monad(&a.rhs, kind))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `expr` contains an explicit `lift` application.
+fn has_explicit_lift(expr: &Expr) -> bool {
+    if let (Expr::Var(v, _), 1) = {
+        let (h, a) = collect_app_spine(expr);
+        (h, a.len())
+    } {
+        if strip_qualifier(v.name.as_str()) == "lift" {
+            return true;
+        }
+    }
+    match expr {
+        Expr::App(f, a, _) => has_explicit_lift(f) || has_explicit_lift(a),
+        Expr::Lam(_, b, _) | Expr::TyLam(_, b, _) => has_explicit_lift(b),
+        Expr::TyApp(i, _, _) | Expr::Cast(i, _, _) | Expr::Tick(_, i, _) | Expr::Lazy(i, _) => {
+            has_explicit_lift(i)
+        }
+        Expr::Let(bind, b, _) => {
+            let in_bind = match bind.as_ref() {
+                Bind::NonRec(_, e) => has_explicit_lift(e),
+                Bind::Rec(bs) => bs.iter().any(|(_, e)| has_explicit_lift(e)),
+            };
+            in_bind || has_explicit_lift(b)
+        }
+        Expr::Case(s, alts, _, _) => {
+            has_explicit_lift(s) || alts.iter().any(|a| has_explicit_lift(&a.rhs))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `expr` is a two-context Reader+State stack (uses both, no `lift`).
+fn infer_ctx_stack(expr: &Expr) -> bool {
+    !has_explicit_lift(expr)
+        && body_uses_monad(expr, MonadKind::State)
+        && body_uses_monad(expr, MonadKind::Reader)
+}
+
+/// The eliminator family a name belongs to (State vs Reader), if it is one.
+fn eliminator_kind(name: &str) -> Option<MonadKind> {
+    match strip_qualifier(name) {
+        "evalStateT" | "runStateT" | "execStateT" | "evalState" | "runState" | "execState" => {
+            Some(MonadKind::State)
+        }
+        "runReaderT" | "runReader" => Some(MonadKind::Reader),
+        _ => None,
+    }
+}
+
+/// Find the outer layer of a two-context stack binding `name` by locating the
+/// eliminator applied *directly* to it anywhere in the program (the innermost
+/// eliminator peels the outermost transformer).
+fn find_stack_outer(binds: &[Bind], name: Symbol) -> Option<MonadKind> {
+    fn scan(e: &Expr, name: Symbol) -> Option<MonadKind> {
+        let (head, args) = collect_app_spine(e);
+        if let Expr::Var(v, _) = head {
+            if let Some(kind) = eliminator_kind(v.name.as_str()) {
+                if let Some(Expr::Var(arg0, _)) = args.first().map(|a| peel_head(a)) {
+                    if arg0.name == name {
+                        return Some(kind);
+                    }
+                }
+            }
+        }
+        // recurse
+        let mut found = None;
+        for a in &args {
+            found = found.or_else(|| scan(a, name));
+        }
+        found.or_else(|| match e {
+            Expr::Lam(_, b, _) | Expr::TyLam(_, b, _) => scan(b, name),
+            Expr::TyApp(i, _, _) | Expr::Cast(i, _, _) | Expr::Tick(_, i, _) | Expr::Lazy(i, _) => {
+                scan(i, name)
+            }
+            Expr::Let(bind, b, _) => {
+                let ib = match bind.as_ref() {
+                    Bind::NonRec(_, e) => scan(e, name),
+                    Bind::Rec(bs) => bs.iter().find_map(|(_, e)| scan(e, name)),
+                };
+                ib.or_else(|| scan(b, name))
+            }
+            Expr::Case(s, alts, _, _) => {
+                scan(s, name).or_else(|| alts.iter().find_map(|a| scan(&a.rhs, name)))
+            }
+            _ => None,
+        })
+    }
+    binds.iter().find_map(|b| match b {
+        Bind::NonRec(_, e) => scan(e, name),
+        Bind::Rec(bs) => bs.iter().find_map(|(_, e)| scan(e, name)),
+    })
+}
+
+/// Apply a two-context value `f` to the state and reader contexts in the order
+/// dictated by `state_outer`.
+fn ctx_app2(state_outer: bool, f: Expr, s_val: Expr, r_val: Expr) -> Expr {
+    if state_outer {
+        papp2(f, s_val, r_val)
+    } else {
+        papp2(f, r_val, s_val)
+    }
+}
+
+/// Wrap `body` in the two context lambdas in `state_outer` order.
+fn ctx_wrap2(state_outer: bool, s: Var, r: Var, body: Expr) -> Expr {
+    if state_outer {
+        plam(s, plam(r, body))
+    } else {
+        plam(r, plam(s, body))
+    }
+}
+
+/// Rewrite the continuation of a two-context bind.
+fn rw_ctx_cont(state_outer: bool, k: &Expr, id: &mut usize) -> Expr {
+    match peel_type_abstractions(k) {
+        Expr::Lam(x, body, _) => plam(x.clone(), rewrite_ctx_stack(state_outer, body, id)),
+        other => other.clone(),
+    }
+}
+
+/// Rewrite a two-context Reader+State computation into `\pO -> \pI -> (a, s)`.
+fn rewrite_ctx_stack(state_outer: bool, expr: &Expr, id: &mut usize) -> Expr {
+    let fresh = |id: &mut usize| {
+        let v = *id;
+        *id += 1;
+        v
+    };
+    match expr {
+        Expr::Case(scrut, alts, ty, sp) => {
+            let alts = alts
+                .iter()
+                .map(|a| Alt {
+                    con: a.con.clone(),
+                    binders: a.binders.clone(),
+                    rhs: rewrite_ctx_stack(state_outer, &a.rhs, id),
+                })
+                .collect();
+            return Expr::Case(scrut.clone(), alts, ty.clone(), *sp);
+        }
+        Expr::Let(bind, body, sp) => {
+            return Expr::Let(
+                bind.clone(),
+                Box::new(rewrite_ctx_stack(state_outer, body, id)),
+                *sp,
+            );
+        }
+        Expr::TyApp(i, t, sp) => {
+            return Expr::TyApp(
+                Box::new(rewrite_ctx_stack(state_outer, i, id)),
+                t.clone(),
+                *sp,
+            )
+        }
+        Expr::Cast(i, t, sp) => {
+            return Expr::Cast(
+                Box::new(rewrite_ctx_stack(state_outer, i, id)),
+                t.clone(),
+                *sp,
+            )
+        }
+        Expr::Tick(tk, i, sp) => {
+            return Expr::Tick(
+                tk.clone(),
+                Box::new(rewrite_ctx_stack(state_outer, i, id)),
+                *sp,
+            )
+        }
+        Expr::Lazy(i, sp) => {
+            return Expr::Lazy(Box::new(rewrite_ctx_stack(state_outer, i, id)), *sp)
+        }
+        _ => {}
+    }
+    let (head, args) = collect_app_spine(expr);
+    let op = match head {
+        Expr::Var(v, _) => strip_qualifier(v.name.as_str()),
+        _ => return expr.clone(),
+    };
+    let pair = |a: Expr, s: Expr, id: &mut usize| papp2(pref("(,)", id), a, s);
+    match (op, args.len()) {
+        (">>=", 2) | (">>", 2) => {
+            let is_bind = op == ">>=";
+            let m = rewrite_ctx_stack(state_outer, args[0], id);
+            let s = pv("s", fresh(id));
+            let r = pv("r", fresh(id));
+            let a = pv("a", fresh(id));
+            let s2 = pv("s2", fresh(id));
+            // (k a) or the second action, applied to (s', r)
+            let next = if is_bind {
+                let k = rw_ctx_cont(state_outer, args[1], id);
+                papp(k, pev(&a))
+            } else {
+                rewrite_ctx_stack(state_outer, args[1], id)
+            };
+            let body = pcase(
+                ctx_app2(state_outer, m, pev(&s), pev(&r)),
+                vec![palt(
+                    "(,)",
+                    0,
+                    2,
+                    vec![a.clone(), s2.clone()],
+                    ctx_app2(state_outer, next, pev(&s2), pev(&r)),
+                )],
+            );
+            ctx_wrap2(state_outer, s, r, body)
+        }
+        ("return" | "pure", 1) => {
+            let s = pv("s", fresh(id));
+            let r = pv("r", fresh(id));
+            let body = pair(args[0].clone(), pev(&s), id);
+            ctx_wrap2(state_outer, s, r, body)
+        }
+        ("get", 0) => {
+            let s = pv("s", fresh(id));
+            let r = pv("r", fresh(id));
+            let body = pair(pev(&s), pev(&s), id);
+            ctx_wrap2(state_outer, s, r, body)
+        }
+        ("put", 1) => {
+            let s = pv("s", fresh(id));
+            let r = pv("r", fresh(id));
+            let body = papp2(pref("(,)", id), pref("()", id), args[0].clone());
+            ctx_wrap2(state_outer, s, r, body)
+        }
+        ("modify" | "modify'", 1) => {
+            let s = pv("s", fresh(id));
+            let r = pv("r", fresh(id));
+            let body = papp2(
+                pref("(,)", id),
+                pref("()", id),
+                papp(args[0].clone(), pev(&s)),
+            );
+            ctx_wrap2(state_outer, s, r, body)
+        }
+        ("gets", 1) => {
+            let s = pv("s", fresh(id));
+            let r = pv("r", fresh(id));
+            let body = pair(papp(args[0].clone(), pev(&s)), pev(&s), id);
+            ctx_wrap2(state_outer, s, r, body)
+        }
+        ("ask", 0) => {
+            let s = pv("s", fresh(id));
+            let r = pv("r", fresh(id));
+            let body = pair(pev(&r), pev(&s), id);
+            ctx_wrap2(state_outer, s, r, body)
+        }
+        ("asks" | "reader", 1) => {
+            let s = pv("s", fresh(id));
+            let r = pv("r", fresh(id));
+            let body = pair(papp(args[0].clone(), pev(&r)), pev(&s), id);
+            ctx_wrap2(state_outer, s, r, body)
+        }
         _ => expr.clone(),
     }
 }

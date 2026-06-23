@@ -762,6 +762,18 @@ fn test_tier3_cross_writer_state_wasm() {
     run_wasm_test("tier3_io/cross_writer_state", Profile::Default);
 }
 
+// Two-context Reader+State stacks (mtl-auto-lifted); outer layer inferred from
+// the program's eliminator nesting.
+#[test]
+fn test_tier3_cross_state_reader_wasm() {
+    run_wasm_test("tier3_io/cross_state_reader", Profile::Default);
+}
+
+#[test]
+fn test_tier3_cross_reader_state_wasm() {
+    run_wasm_test("tier3_io/cross_reader_state", Profile::Default);
+}
+
 #[test]
 fn test_tier3_cross_except_reader_wasm() {
     run_wasm_test("tier3_io/cross_except_reader", Profile::Default);

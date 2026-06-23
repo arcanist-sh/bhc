@@ -801,6 +801,12 @@ fn test_tier3_lazy_bytestring_basic_wasm() {
     run_wasm_test("tier3_io/lazy_bytestring_basic", Profile::Default);
 }
 
+// ByteString.Builder rendered to a pstr (intDec/stringUtf8/singleton/append).
+#[test]
+fn test_tier3_builder_basic_wasm() {
+    run_wasm_test("tier3_io/builder_basic", Profile::Default);
+}
+
 // take k of an infinite producer (iterate/repeat/cycle/enumFrom/enumFromThen)
 // fuses to a finite list; enumFromThenTo and until synthesize directly.
 #[test]

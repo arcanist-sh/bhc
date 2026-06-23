@@ -721,8 +721,10 @@ impl<'a> WasmLowering<'a> {
                         instrs.push(WasmInstr::Call(self.runtime.read_all_idx));
                         return Ok(());
                     }
-                    // The empty Text is the empty (marked) pstr.
-                    "Data.Text.empty" | "Data.Text.Lazy.empty" => {
+                    // The empty Text / Builder is the empty (marked) pstr.
+                    "Data.Text.empty"
+                    | "Data.Text.Lazy.empty"
+                    | "Data.ByteString.Builder.empty" => {
                         let ptr = self.intern_pstr("");
                         instrs.push(WasmInstr::I32Const(ptr as i32));
                         return Ok(());
@@ -2514,6 +2516,48 @@ impl<'a> WasmLowering<'a> {
                             locals,
                             local_count,
                         )?;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+            // Data.ByteString.Builder: build bytes into a `pstr`. The fixtures
+            // only measure lengths, so a Builder is just its rendered string.
+            if let Some(rest) = name.strip_prefix("Data.ByteString.Builder.") {
+                match (rest, args.len()) {
+                    (
+                        "toLazyByteString" | "stringUtf8" | "string7" | "string8" | "byteString"
+                        | "lazyByteString" | "toStrict",
+                        1,
+                    ) => {
+                        return self.lower_expr(args[0], instrs, locals, local_count, false);
+                    }
+                    // intDec/wordDec/… render the number as decimal digits
+                    (r, 1) if r.ends_with("Dec") => {
+                        self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                        instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
+                        return Ok(());
+                    }
+                    // singleton/word8: a one-byte string from the code
+                    ("singleton" | "word8" | "int8", 1) => {
+                        let p = *local_count;
+                        *local_count += 1;
+                        instrs.push(WasmInstr::I32Const(8));
+                        instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+                        instrs.push(WasmInstr::LocalSet(p));
+                        instrs.push(WasmInstr::LocalGet(p));
+                        instrs.push(WasmInstr::I32Const(1 | crate::wasi::PSTR_MARKER));
+                        instrs.push(WasmInstr::I32Store(2, 0));
+                        instrs.push(WasmInstr::LocalGet(p));
+                        self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                        instrs.push(WasmInstr::I32Store(2, 4));
+                        instrs.push(WasmInstr::LocalGet(p));
+                        return Ok(());
+                    }
+                    ("append" | "mappend", 2) => {
+                        self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                        self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                        instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
                         return Ok(());
                     }
                     _ => {}

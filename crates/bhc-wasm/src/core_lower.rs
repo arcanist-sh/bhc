@@ -3408,6 +3408,28 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "Data.IntSet.difference",
     "Data.IntSet.filter",
     "Data.IntSet.foldr",
+    // Data.Sequence (list-backed)
+    "Data.Sequence.empty",
+    "Data.Sequence.singleton",
+    "Data.Sequence.fromList",
+    "Data.Sequence.toList",
+    "Data.Sequence.length",
+    "Data.Sequence.null",
+    "Data.Sequence.index",
+    "Data.Sequence.take",
+    "Data.Sequence.drop",
+    "Data.Sequence.reverse",
+    // Data.ByteString (list of byte Ints)
+    "Data.ByteString.pack",
+    "Data.ByteString.unpack",
+    "Data.ByteString.singleton",
+    "Data.ByteString.length",
+    "Data.ByteString.null",
+    "Data.ByteString.head",
+    "Data.ByteString.append",
+    "Data.ByteString.take",
+    "Data.ByteString.drop",
+    "Data.ByteString.reverse",
     "filter",
     "foldr",
     "foldl",
@@ -3544,6 +3566,72 @@ fn palt(name: &str, tag: u32, arity: u32, binders: Vec<Var>, rhs: Expr) -> Alt {
         binders,
         rhs,
     }
+}
+
+/// Synthesize a `Data.Sequence`/`Data.ByteString` operation. Both are backed by
+/// a plain list (a ByteString is a list of byte-valued `Int`s), so most ops
+/// alias the list prelude. Returns the lambda/CAF body, or `None`.
+fn build_listbacked_fn(name: &str, id: &mut usize) -> Option<Expr> {
+    let (prefix, op) = name.rsplit_once('.')?;
+    if !(prefix.ends_with("Sequence") || prefix.ends_with("ByteString")) {
+        return None;
+    }
+    let fresh = |id: &mut usize| {
+        let v = *id;
+        *id += 1;
+        v
+    };
+    let body = match op {
+        // empty is a nullary CAF: the empty list (nil == 0).
+        "empty" => pref("[]", id),
+        // singleton x = [x]
+        "singleton" => {
+            let x = pv("x", fresh(id));
+            plam(x.clone(), papp2(pref(":", id), pev(&x), pref("[]", id)))
+        }
+        // identity conversions between the list and its packed form
+        "fromList" | "toList" | "pack" | "unpack" => {
+            let x = pv("x", fresh(id));
+            plam(x.clone(), pev(&x))
+        }
+        // unary ops aliasing the list prelude
+        "length" | "null" | "head" | "reverse" => {
+            let s = pv("s", fresh(id));
+            plam(s.clone(), papp(pref(op, id), pev(&s)))
+        }
+        // take/drop n s
+        "take" | "drop" => {
+            let n = pv("n", fresh(id));
+            let s = pv("s", fresh(id));
+            plam(
+                n.clone(),
+                plam(s.clone(), papp2(pref(op, id), pev(&n), pev(&s))),
+            )
+        }
+        // index s i = head (drop i s)
+        "index" => {
+            let s = pv("s", fresh(id));
+            let i = pv("i", fresh(id));
+            plam(
+                s.clone(),
+                plam(
+                    i.clone(),
+                    papp(pref("head", id), papp2(pref("drop", id), pev(&i), pev(&s))),
+                ),
+            )
+        }
+        // append a b = a ++ b
+        "append" => {
+            let a = pv("a", fresh(id));
+            let b = pv("b", fresh(id));
+            plam(
+                a.clone(),
+                plam(b.clone(), papp2(pref("__listAppend", id), pev(&a), pev(&b))),
+            )
+        }
+        _ => return None,
+    };
+    Some(body)
 }
 
 /// Build a single named list-prelude binding, drawing fresh ids from `id`.
@@ -4011,6 +4099,10 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
     // Data.Map/Set/IntMap/IntSet operations, synthesized over an assoc-list
     // (Map) or list (Set) representation.
     if let Some(body) = build_container_fn(name, id) {
+        return Some((pv(name, fresh(id)), body));
+    }
+    // Data.Sequence/ByteString operations, synthesized over a list.
+    if let Some(body) = build_listbacked_fn(name, id) {
         return Some((pv(name, fresh(id)), body));
     }
     let body = match name {

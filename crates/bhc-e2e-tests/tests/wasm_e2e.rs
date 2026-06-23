@@ -690,6 +690,12 @@ fn test_tier3_map_complete_wasm() {
     run_wasm_test("tier3_io/map_complete", Profile::Default);
 }
 
+// Data.Sequence over a list representation.
+#[test]
+fn test_tier3_sequence_basic_wasm() {
+    run_wasm_test("tier3_io/sequence_basic", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

@@ -721,6 +721,12 @@ impl<'a> WasmLowering<'a> {
                         instrs.push(WasmInstr::Call(self.runtime.read_all_idx));
                         return Ok(());
                     }
+                    // The empty Text is the empty (marked) pstr.
+                    "Data.Text.empty" | "Data.Text.Lazy.empty" => {
+                        let ptr = self.intern_pstr("");
+                        instrs.push(WasmInstr::I32Const(ptr as i32));
+                        return Ok(());
+                    }
                     _ => {}
                 }
                 // Check if it's a nullary constructor
@@ -1323,6 +1329,213 @@ impl<'a> WasmLowering<'a> {
         instrs.push(WasmInstr::LocalGet(len));
         instrs.push(WasmInstr::End);
         instrs.push(WasmInstr::End);
+        Ok(())
+    }
+
+    /// Emit a `pstr` slice `[start, start+count)` of the string in `s`, leaving a
+    /// fresh `pstr` pointer on the stack. `count` and `start` are already clamped
+    /// to the source length by the caller; both are locals.
+    fn emit_pstr_slice(
+        &mut self,
+        s: u32,
+        start: u32,
+        count: u32,
+        instrs: &mut Vec<WasmInstr>,
+        local_count: &mut u32,
+    ) {
+        let res = *local_count;
+        let i = *local_count + 1;
+        *local_count += 2;
+        instrs.push(WasmInstr::LocalGet(count));
+        instrs.push(WasmInstr::I32Const(4));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+        instrs.push(WasmInstr::LocalSet(res));
+        instrs.push(WasmInstr::LocalGet(res));
+        instrs.push(WasmInstr::LocalGet(count));
+        instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_MARKER));
+        instrs.push(WasmInstr::I32Or);
+        instrs.push(WasmInstr::I32Store(2, 0));
+        instrs.push(WasmInstr::I32Const(0));
+        instrs.push(WasmInstr::LocalSet(i));
+        instrs.push(WasmInstr::Block(None));
+        instrs.push(WasmInstr::Loop(None));
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::LocalGet(count));
+        instrs.push(WasmInstr::I32GeU);
+        instrs.push(WasmInstr::BrIf(1));
+        // dst = res + 4 + i
+        instrs.push(WasmInstr::LocalGet(res));
+        instrs.push(WasmInstr::I32Const(4));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::I32Add);
+        // byte = s[4 + start + i]
+        instrs.push(WasmInstr::LocalGet(s));
+        instrs.push(WasmInstr::I32Const(4));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalGet(start));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::I32Load8U(0, 0));
+        instrs.push(WasmInstr::I32Store8(0, 0));
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::I32Const(1));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalSet(i));
+        instrs.push(WasmInstr::Br(0));
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::LocalGet(res));
+    }
+
+    /// `Data.Text.take`/`drop n s` on the `pstr` representation: clamp `n` to the
+    /// length, then slice. `take` keeps `[0, n)`; `drop` keeps `[n, len)`.
+    fn emit_text_take_drop(
+        &mut self,
+        is_take: bool,
+        n: &Expr,
+        s: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let sloc = *local_count;
+        let nloc = *local_count + 1;
+        let slen = *local_count + 2;
+        let start = *local_count + 3;
+        let count = *local_count + 4;
+        *local_count += 5;
+        self.lower_expr(s, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalSet(sloc));
+        self.lower_expr(n, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalSet(nloc));
+        // slen = [sloc] & MASK
+        instrs.push(WasmInstr::LocalGet(sloc));
+        instrs.push(WasmInstr::I32Load(2, 0));
+        instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_LEN_MASK));
+        instrs.push(WasmInstr::I32And);
+        instrs.push(WasmInstr::LocalSet(slen));
+        // clamp nloc to [0, slen]
+        instrs.push(WasmInstr::LocalGet(nloc));
+        instrs.push(WasmInstr::LocalGet(slen));
+        instrs.push(WasmInstr::I32GtS);
+        instrs.push(WasmInstr::If(None));
+        instrs.push(WasmInstr::LocalGet(slen));
+        instrs.push(WasmInstr::LocalSet(nloc));
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::LocalGet(nloc));
+        instrs.push(WasmInstr::I32Const(0));
+        instrs.push(WasmInstr::I32LtS);
+        instrs.push(WasmInstr::If(None));
+        instrs.push(WasmInstr::I32Const(0));
+        instrs.push(WasmInstr::LocalSet(nloc));
+        instrs.push(WasmInstr::End);
+        if is_take {
+            // start = 0, count = n
+            instrs.push(WasmInstr::I32Const(0));
+            instrs.push(WasmInstr::LocalSet(start));
+            instrs.push(WasmInstr::LocalGet(nloc));
+            instrs.push(WasmInstr::LocalSet(count));
+        } else {
+            // start = n, count = slen - n
+            instrs.push(WasmInstr::LocalGet(nloc));
+            instrs.push(WasmInstr::LocalSet(start));
+            instrs.push(WasmInstr::LocalGet(slen));
+            instrs.push(WasmInstr::LocalGet(nloc));
+            instrs.push(WasmInstr::I32Sub);
+            instrs.push(WasmInstr::LocalSet(count));
+        }
+        self.emit_pstr_slice(sloc, start, count, instrs, local_count);
+        Ok(())
+    }
+
+    /// `Data.Text.toUpper`/`toLower s` on the `pstr` representation: copy the
+    /// string, shifting ASCII letters by 32.
+    fn emit_text_case(
+        &mut self,
+        to_upper: bool,
+        s: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let sloc = *local_count;
+        let slen = *local_count + 1;
+        let res = *local_count + 2;
+        let i = *local_count + 3;
+        let b = *local_count + 4;
+        *local_count += 5;
+        self.lower_expr(s, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalSet(sloc));
+        instrs.push(WasmInstr::LocalGet(sloc));
+        instrs.push(WasmInstr::I32Load(2, 0));
+        instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_LEN_MASK));
+        instrs.push(WasmInstr::I32And);
+        instrs.push(WasmInstr::LocalSet(slen));
+        instrs.push(WasmInstr::LocalGet(slen));
+        instrs.push(WasmInstr::I32Const(4));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+        instrs.push(WasmInstr::LocalSet(res));
+        instrs.push(WasmInstr::LocalGet(res));
+        instrs.push(WasmInstr::LocalGet(slen));
+        instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_MARKER));
+        instrs.push(WasmInstr::I32Or);
+        instrs.push(WasmInstr::I32Store(2, 0));
+        instrs.push(WasmInstr::I32Const(0));
+        instrs.push(WasmInstr::LocalSet(i));
+        // bounds: lower letter range and the shift direction
+        let (lo, hi, shift) = if to_upper {
+            (97, 122, -32)
+        } else {
+            (65, 90, 32)
+        };
+        instrs.push(WasmInstr::Block(None));
+        instrs.push(WasmInstr::Loop(None));
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::LocalGet(slen));
+        instrs.push(WasmInstr::I32GeU);
+        instrs.push(WasmInstr::BrIf(1));
+        // b = s[4+i]
+        instrs.push(WasmInstr::LocalGet(sloc));
+        instrs.push(WasmInstr::I32Const(4));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::I32Load8U(0, 0));
+        instrs.push(WasmInstr::LocalSet(b));
+        // if lo <= b <= hi: b += shift
+        instrs.push(WasmInstr::LocalGet(b));
+        instrs.push(WasmInstr::I32Const(lo));
+        instrs.push(WasmInstr::I32GeU);
+        instrs.push(WasmInstr::LocalGet(b));
+        instrs.push(WasmInstr::I32Const(hi));
+        instrs.push(WasmInstr::I32LeU);
+        instrs.push(WasmInstr::I32And);
+        instrs.push(WasmInstr::If(None));
+        instrs.push(WasmInstr::LocalGet(b));
+        instrs.push(WasmInstr::I32Const(shift));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalSet(b));
+        instrs.push(WasmInstr::End);
+        // res[4+i] = b
+        instrs.push(WasmInstr::LocalGet(res));
+        instrs.push(WasmInstr::I32Const(4));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalGet(b));
+        instrs.push(WasmInstr::I32Store8(0, 0));
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::I32Const(1));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalSet(i));
+        instrs.push(WasmInstr::Br(0));
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::LocalGet(res));
         Ok(())
     }
 
@@ -2244,6 +2457,66 @@ impl<'a> WasmLowering<'a> {
                         locals,
                         local_count,
                     );
+                }
+            }
+            // Data.Text (and .Lazy/.Encoding) operations on the `pstr`
+            // representation (Text ~ String; encode/decode are identity for the
+            // ASCII subset, and the lazy variants share the strict ops).
+            let text_rest = name
+                .strip_prefix("Data.Text.Lazy.")
+                .or_else(|| name.strip_prefix("Data.Text.Encoding."))
+                .or_else(|| name.strip_prefix("Data.Text."));
+            if let Some(rest) = text_rest {
+                match (rest, args.len()) {
+                    // identity conversions
+                    (
+                        "pack" | "unpack" | "fromStrict" | "toStrict" | "copy" | "encodeUtf8"
+                        | "decodeUtf8",
+                        1,
+                    ) => {
+                        return self.lower_expr(args[0], instrs, locals, local_count, false);
+                    }
+                    ("length", 1) => {
+                        self.emit_length(args[0], instrs, locals, local_count)?;
+                        return Ok(());
+                    }
+                    ("append" | "concat", 2) => {
+                        self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                        self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                        instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+                        return Ok(());
+                    }
+                    ("toUpper", 1) => {
+                        self.emit_text_case(true, args[0], instrs, locals, local_count)?;
+                        return Ok(());
+                    }
+                    ("toLower", 1) => {
+                        self.emit_text_case(false, args[0], instrs, locals, local_count)?;
+                        return Ok(());
+                    }
+                    ("take", 2) => {
+                        self.emit_text_take_drop(
+                            true,
+                            args[0],
+                            args[1],
+                            instrs,
+                            locals,
+                            local_count,
+                        )?;
+                        return Ok(());
+                    }
+                    ("drop", 2) => {
+                        self.emit_text_take_drop(
+                            false,
+                            args[0],
+                            args[1],
+                            instrs,
+                            locals,
+                            local_count,
+                        )?;
+                        return Ok(());
+                    }
+                    _ => {}
                 }
             }
             // `length` works on both string representations: a marked `pstr`
@@ -3806,6 +4079,20 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "Data.ByteString.take",
     "Data.ByteString.drop",
     "Data.ByteString.reverse",
+    // Data.ByteString.Lazy (also list-backed; strict<->lazy is identity)
+    "Data.ByteString.Lazy.fromStrict",
+    "Data.ByteString.Lazy.toStrict",
+    "Data.ByteString.Lazy.pack",
+    "Data.ByteString.Lazy.unpack",
+    "Data.ByteString.Lazy.empty",
+    "Data.ByteString.Lazy.singleton",
+    "Data.ByteString.Lazy.length",
+    "Data.ByteString.Lazy.null",
+    "Data.ByteString.Lazy.head",
+    "Data.ByteString.Lazy.append",
+    "Data.ByteString.Lazy.take",
+    "Data.ByteString.Lazy.drop",
+    "Data.ByteString.Lazy.reverse",
     "filter",
     "foldr",
     "foldl",
@@ -4732,7 +5019,7 @@ fn rewrite_stack(outer: MonadKind, inner: MonadKind, expr: &Expr, id: &mut usize
 /// alias the list prelude. Returns the lambda/CAF body, or `None`.
 fn build_listbacked_fn(name: &str, id: &mut usize) -> Option<Expr> {
     let (prefix, op) = name.rsplit_once('.')?;
-    if !(prefix.ends_with("Sequence") || prefix.ends_with("ByteString")) {
+    if !(prefix.contains("Sequence") || prefix.contains("ByteString")) {
         return None;
     }
     let fresh = |id: &mut usize| {
@@ -4748,8 +5035,8 @@ fn build_listbacked_fn(name: &str, id: &mut usize) -> Option<Expr> {
             let x = pv("x", fresh(id));
             plam(x.clone(), papp2(pref(":", id), pev(&x), pref("[]", id)))
         }
-        // identity conversions between the list and its packed form
-        "fromList" | "toList" | "pack" | "unpack" => {
+        // identity conversions between the list and its packed/lazy forms
+        "fromList" | "toList" | "pack" | "unpack" | "fromStrict" | "toStrict" | "copy" => {
             let x = pv("x", fresh(id));
             plam(x.clone(), pev(&x))
         }

@@ -779,6 +779,28 @@ fn test_tier3_char_ranges_wasm() {
     run_wasm_test("tier3_io/char_ranges", Profile::Default);
 }
 
+// Data.Text (+ .Lazy/.Encoding) over the pstr representation; Data.ByteString
+// .Lazy over the list representation.
+#[test]
+fn test_tier3_text_basic_wasm() {
+    run_wasm_test("tier3_io/text_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_text_encoding_wasm() {
+    run_wasm_test("tier3_io/text_encoding", Profile::Default);
+}
+
+#[test]
+fn test_tier3_lazy_text_basic_wasm() {
+    run_wasm_test("tier3_io/lazy_text_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_lazy_bytestring_basic_wasm() {
+    run_wasm_test("tier3_io/lazy_bytestring_basic", Profile::Default);
+}
+
 // take k of an infinite producer (iterate/repeat/cycle/enumFrom/enumFromThen)
 // fuses to a finite list; enumFromThenTo and until synthesize directly.
 #[test]

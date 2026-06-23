@@ -807,6 +807,12 @@ fn test_tier3_builder_basic_wasm() {
     run_wasm_test("tier3_io/builder_basic", Profile::Default);
 }
 
+// System.FilePath operations on the pstr path (split on / and .).
+#[test]
+fn test_tier3_filepath_basic_wasm() {
+    run_wasm_test("tier3_io/filepath_basic", Profile::Default);
+}
+
 // take k of an infinite producer (iterate/repeat/cycle/enumFrom/enumFromThen)
 // fuses to a finite list; enumFromThenTo and until synthesize directly.
 #[test]

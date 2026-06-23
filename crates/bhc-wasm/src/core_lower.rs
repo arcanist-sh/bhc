@@ -1392,6 +1392,315 @@ impl<'a> WasmLowering<'a> {
         instrs.push(WasmInstr::LocalGet(res));
     }
 
+    /// Push the index of the last occurrence of `byte` in the `pstr` at local
+    /// `s` (or -1 if absent).
+    fn emit_pstr_last_index(
+        &mut self,
+        s: u32,
+        byte: i32,
+        instrs: &mut Vec<WasmInstr>,
+        local_count: &mut u32,
+    ) {
+        let idx = *local_count;
+        let i = *local_count + 1;
+        let len = *local_count + 2;
+        *local_count += 3;
+        instrs.push(WasmInstr::LocalGet(s));
+        instrs.push(WasmInstr::I32Load(2, 0));
+        instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_LEN_MASK));
+        instrs.push(WasmInstr::I32And);
+        instrs.push(WasmInstr::LocalSet(len));
+        instrs.push(WasmInstr::I32Const(-1));
+        instrs.push(WasmInstr::LocalSet(idx));
+        instrs.push(WasmInstr::I32Const(0));
+        instrs.push(WasmInstr::LocalSet(i));
+        instrs.push(WasmInstr::Block(None));
+        instrs.push(WasmInstr::Loop(None));
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::LocalGet(len));
+        instrs.push(WasmInstr::I32GeU);
+        instrs.push(WasmInstr::BrIf(1));
+        instrs.push(WasmInstr::LocalGet(s));
+        instrs.push(WasmInstr::I32Const(4));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::I32Load8U(0, 0));
+        instrs.push(WasmInstr::I32Const(byte));
+        instrs.push(WasmInstr::I32Eq);
+        instrs.push(WasmInstr::If(None));
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::LocalSet(idx));
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::LocalGet(i));
+        instrs.push(WasmInstr::I32Const(1));
+        instrs.push(WasmInstr::I32Add);
+        instrs.push(WasmInstr::LocalSet(i));
+        instrs.push(WasmInstr::Br(0));
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::LocalGet(idx));
+    }
+
+    /// `System.FilePath` operations on the `pstr` path. Returns `Ok(true)` if
+    /// handled. Paths split on `/` (last separator) and `.` (last dot, only when
+    /// it lies in the final component).
+    fn try_lower_filepath(
+        &mut self,
+        name: &str,
+        args: &[&Expr],
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<bool> {
+        let op = strip_qualifier(name);
+        // Single-path operations
+        if args.len() == 1
+            && matches!(
+                op,
+                "takeFileName"
+                    | "takeDirectory"
+                    | "takeExtension"
+                    | "dropExtension"
+                    | "takeBaseName"
+                    | "isAbsolute"
+                    | "isRelative"
+                    | "hasExtension"
+                    | "splitExtension"
+            )
+        {
+            let s = *local_count;
+            let slen = *local_count + 1;
+            let slash = *local_count + 2;
+            let dot = *local_count + 3;
+            let start = *local_count + 4;
+            let count = *local_count + 5;
+            *local_count += 6;
+            self.lower_expr(args[0], instrs, locals, local_count, false)?;
+            instrs.push(WasmInstr::LocalSet(s));
+            instrs.push(WasmInstr::LocalGet(s));
+            instrs.push(WasmInstr::I32Load(2, 0));
+            instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_LEN_MASK));
+            instrs.push(WasmInstr::I32And);
+            instrs.push(WasmInstr::LocalSet(slen));
+            self.emit_pstr_last_index(s, '/' as i32, instrs, local_count);
+            instrs.push(WasmInstr::LocalSet(slash));
+            self.emit_pstr_last_index(s, '.' as i32, instrs, local_count);
+            instrs.push(WasmInstr::LocalSet(dot));
+            // has_ext = dot > slash  (the dot lies in the final component)
+            let has_ext = |instrs: &mut Vec<WasmInstr>| {
+                instrs.push(WasmInstr::LocalGet(dot));
+                instrs.push(WasmInstr::LocalGet(slash));
+                instrs.push(WasmInstr::I32GtS);
+            };
+            match op {
+                "isAbsolute" | "isRelative" => {
+                    // first byte == '/'
+                    instrs.push(WasmInstr::LocalGet(s));
+                    instrs.push(WasmInstr::I32Load8U(0, 4));
+                    instrs.push(WasmInstr::I32Const('/' as i32));
+                    instrs.push(WasmInstr::I32Eq);
+                    if op == "isRelative" {
+                        instrs.push(WasmInstr::I32Eqz);
+                    }
+                    return Ok(true);
+                }
+                "hasExtension" => {
+                    has_ext(instrs);
+                    return Ok(true);
+                }
+                "takeFileName" => {
+                    // start = slash + 1; count = slen - start
+                    instrs.push(WasmInstr::LocalGet(slash));
+                    instrs.push(WasmInstr::I32Const(1));
+                    instrs.push(WasmInstr::I32Add);
+                    instrs.push(WasmInstr::LocalSet(start));
+                    instrs.push(WasmInstr::LocalGet(slen));
+                    instrs.push(WasmInstr::LocalGet(start));
+                    instrs.push(WasmInstr::I32Sub);
+                    instrs.push(WasmInstr::LocalSet(count));
+                    self.emit_pstr_slice(s, start, count, instrs, local_count);
+                    return Ok(true);
+                }
+                "takeDirectory" => {
+                    // start = 0; count = max(slash, 0)  (slash if slash >= 0 else 0)
+                    instrs.push(WasmInstr::I32Const(0));
+                    instrs.push(WasmInstr::LocalSet(start));
+                    instrs.push(WasmInstr::LocalGet(slash));
+                    instrs.push(WasmInstr::I32Const(0));
+                    instrs.push(WasmInstr::LocalGet(slash));
+                    instrs.push(WasmInstr::I32Const(0));
+                    instrs.push(WasmInstr::I32GeS);
+                    instrs.push(WasmInstr::Select);
+                    instrs.push(WasmInstr::LocalSet(count));
+                    self.emit_pstr_slice(s, start, count, instrs, local_count);
+                    return Ok(true);
+                }
+                "takeExtension" => {
+                    // if has_ext: start = dot; count = slen - dot; else empty
+                    instrs.push(WasmInstr::LocalGet(dot));
+                    instrs.push(WasmInstr::LocalSet(start));
+                    instrs.push(WasmInstr::LocalGet(slen));
+                    instrs.push(WasmInstr::LocalGet(dot));
+                    instrs.push(WasmInstr::I32Sub);
+                    instrs.push(WasmInstr::I32Const(0));
+                    has_ext(instrs);
+                    instrs.push(WasmInstr::Select); // (slen-dot) if has_ext else 0
+                    instrs.push(WasmInstr::LocalSet(count));
+                    // when no ext, start is irrelevant (count 0)
+                    self.emit_pstr_slice(s, start, count, instrs, local_count);
+                    return Ok(true);
+                }
+                "dropExtension" => {
+                    // start = 0; count = has_ext ? dot : slen
+                    instrs.push(WasmInstr::I32Const(0));
+                    instrs.push(WasmInstr::LocalSet(start));
+                    instrs.push(WasmInstr::LocalGet(dot));
+                    instrs.push(WasmInstr::LocalGet(slen));
+                    has_ext(instrs);
+                    instrs.push(WasmInstr::Select);
+                    instrs.push(WasmInstr::LocalSet(count));
+                    self.emit_pstr_slice(s, start, count, instrs, local_count);
+                    return Ok(true);
+                }
+                "takeBaseName" => {
+                    // start = slash + 1; end = has_ext ? dot : slen; count = end - start
+                    instrs.push(WasmInstr::LocalGet(slash));
+                    instrs.push(WasmInstr::I32Const(1));
+                    instrs.push(WasmInstr::I32Add);
+                    instrs.push(WasmInstr::LocalSet(start));
+                    instrs.push(WasmInstr::LocalGet(dot));
+                    instrs.push(WasmInstr::LocalGet(slen));
+                    has_ext(instrs);
+                    instrs.push(WasmInstr::Select); // end
+                    instrs.push(WasmInstr::LocalGet(start));
+                    instrs.push(WasmInstr::I32Sub);
+                    instrs.push(WasmInstr::LocalSet(count));
+                    self.emit_pstr_slice(s, start, count, instrs, local_count);
+                    return Ok(true);
+                }
+                "splitExtension" => {
+                    // tuple (dropExtension s, takeExtension s)
+                    let base = *local_count;
+                    let ext = *local_count + 1;
+                    let tup = *local_count + 2;
+                    *local_count += 3;
+                    // base = drop ext: start 0, count = has_ext ? dot : slen
+                    instrs.push(WasmInstr::I32Const(0));
+                    instrs.push(WasmInstr::LocalSet(start));
+                    instrs.push(WasmInstr::LocalGet(dot));
+                    instrs.push(WasmInstr::LocalGet(slen));
+                    has_ext(instrs);
+                    instrs.push(WasmInstr::Select);
+                    instrs.push(WasmInstr::LocalSet(count));
+                    self.emit_pstr_slice(s, start, count, instrs, local_count);
+                    instrs.push(WasmInstr::LocalSet(base));
+                    // ext = take ext: start = dot, count = has_ext ? slen-dot : 0
+                    instrs.push(WasmInstr::LocalGet(dot));
+                    instrs.push(WasmInstr::LocalSet(start));
+                    instrs.push(WasmInstr::LocalGet(slen));
+                    instrs.push(WasmInstr::LocalGet(dot));
+                    instrs.push(WasmInstr::I32Sub);
+                    instrs.push(WasmInstr::I32Const(0));
+                    has_ext(instrs);
+                    instrs.push(WasmInstr::Select);
+                    instrs.push(WasmInstr::LocalSet(count));
+                    self.emit_pstr_slice(s, start, count, instrs, local_count);
+                    instrs.push(WasmInstr::LocalSet(ext));
+                    // tuple [tag 0 | base | ext]
+                    instrs.push(WasmInstr::I32Const(12));
+                    instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+                    instrs.push(WasmInstr::LocalSet(tup));
+                    instrs.push(WasmInstr::LocalGet(tup));
+                    instrs.push(WasmInstr::I32Const(0));
+                    instrs.push(WasmInstr::I32Store(2, 0));
+                    instrs.push(WasmInstr::LocalGet(tup));
+                    instrs.push(WasmInstr::LocalGet(base));
+                    instrs.push(WasmInstr::I32Store(2, 4));
+                    instrs.push(WasmInstr::LocalGet(tup));
+                    instrs.push(WasmInstr::LocalGet(ext));
+                    instrs.push(WasmInstr::I32Store(2, 8));
+                    instrs.push(WasmInstr::LocalGet(tup));
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+        // replaceExtension path newExt = dropExtension path ++ newExt
+        if op == "replaceExtension" && args.len() == 2 {
+            let s = *local_count;
+            let slen = *local_count + 1;
+            let slash = *local_count + 2;
+            let dot = *local_count + 3;
+            let start = *local_count + 4;
+            let count = *local_count + 5;
+            *local_count += 6;
+            self.lower_expr(args[0], instrs, locals, local_count, false)?;
+            instrs.push(WasmInstr::LocalSet(s));
+            instrs.push(WasmInstr::LocalGet(s));
+            instrs.push(WasmInstr::I32Load(2, 0));
+            instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_LEN_MASK));
+            instrs.push(WasmInstr::I32And);
+            instrs.push(WasmInstr::LocalSet(slen));
+            self.emit_pstr_last_index(s, '/' as i32, instrs, local_count);
+            instrs.push(WasmInstr::LocalSet(slash));
+            self.emit_pstr_last_index(s, '.' as i32, instrs, local_count);
+            instrs.push(WasmInstr::LocalSet(dot));
+            instrs.push(WasmInstr::I32Const(0));
+            instrs.push(WasmInstr::LocalSet(start));
+            instrs.push(WasmInstr::LocalGet(dot));
+            instrs.push(WasmInstr::LocalGet(slen));
+            instrs.push(WasmInstr::LocalGet(dot));
+            instrs.push(WasmInstr::LocalGet(slash));
+            instrs.push(WasmInstr::I32GtS);
+            instrs.push(WasmInstr::Select);
+            instrs.push(WasmInstr::LocalSet(count));
+            self.emit_pstr_slice(s, start, count, instrs, local_count);
+            self.lower_expr(args[1], instrs, locals, local_count, false)?;
+            instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+            return Ok(true);
+        }
+        // a </> b = a ++ b when a ends with '/' (or is empty), else a ++ "/" ++ b
+        if op == "</>" && args.len() == 2 {
+            let a = *local_count;
+            let alen = *local_count + 1;
+            *local_count += 2;
+            self.lower_expr(args[0], instrs, locals, local_count, false)?;
+            instrs.push(WasmInstr::LocalSet(a));
+            instrs.push(WasmInstr::LocalGet(a));
+            instrs.push(WasmInstr::I32Load(2, 0));
+            instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_LEN_MASK));
+            instrs.push(WasmInstr::I32And);
+            instrs.push(WasmInstr::LocalSet(alen));
+            // a' = (alen == 0 || last byte == '/') ? a : a ++ "/"
+            instrs.push(WasmInstr::LocalGet(alen));
+            instrs.push(WasmInstr::I32Eqz); // alen == 0
+            instrs.push(WasmInstr::LocalGet(a));
+            instrs.push(WasmInstr::I32Const(4));
+            instrs.push(WasmInstr::I32Add);
+            instrs.push(WasmInstr::LocalGet(alen));
+            instrs.push(WasmInstr::I32Add);
+            instrs.push(WasmInstr::I32Const(1));
+            instrs.push(WasmInstr::I32Sub);
+            instrs.push(WasmInstr::I32Load8U(0, 0));
+            instrs.push(WasmInstr::I32Const('/' as i32));
+            instrs.push(WasmInstr::I32Eq); // last == '/'
+            instrs.push(WasmInstr::I32Or); // skip-sep?
+            instrs.push(WasmInstr::If(Some(WasmType::I32)));
+            instrs.push(WasmInstr::LocalGet(a));
+            instrs.push(WasmInstr::Else);
+            instrs.push(WasmInstr::LocalGet(a));
+            self.emit_pstr_lit("/", instrs);
+            instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+            instrs.push(WasmInstr::End);
+            // ... ++ b
+            self.lower_expr(args[1], instrs, locals, local_count, false)?;
+            instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// `Data.Text.take`/`drop n s` on the `pstr` representation: clamp `n` to the
     /// length, then slice. `take` keeps `[0, n)`; `drop` keeps `[n, len)`.
     fn emit_text_take_drop(
@@ -2562,6 +2871,10 @@ impl<'a> WasmLowering<'a> {
                     }
                     _ => {}
                 }
+            }
+            // System.FilePath operations on the `pstr` path.
+            if self.try_lower_filepath(name, &args, instrs, locals, local_count)? {
+                return Ok(());
             }
             // `length` works on both string representations: a marked `pstr`
             // returns its stored length; a cons list (incl. cons-`[Char]`) is
@@ -8491,6 +8804,9 @@ fn returns_bool_fn(name: &str) -> bool {
             | "isSuffixOf"
             | "isInfixOf"
             | "member"
+            | "isAbsolute"
+            | "isRelative"
+            | "hasExtension"
     )
 }
 

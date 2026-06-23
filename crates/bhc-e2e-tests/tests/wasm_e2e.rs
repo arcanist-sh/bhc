@@ -696,6 +696,18 @@ fn test_tier3_sequence_basic_wasm() {
     run_wasm_test("tier3_io/sequence_basic", Profile::Default);
 }
 
+// bracket (happy path): acquire, use, release run in order via `const`.
+#[test]
+fn test_tier3_bracket_io_wasm() {
+    run_wasm_test("tier3_io/bracket_io", Profile::Default);
+}
+
+// A user-defined monad with its own bind/return.
+#[test]
+fn test_tier3_user_monad_wasm() {
+    run_wasm_test("tier3_io/user_monad", Profile::Default);
+}
+
 // `print` of a String shows it quoted and escaped via the show_string runtime.
 #[test]
 fn test_tier3_print_string_wasm() {

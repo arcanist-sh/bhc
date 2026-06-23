@@ -3513,6 +3513,7 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "compare",
     "maximumBy",
     "minimumBy",
+    "bracket",
 ];
 
 /// Whether any binding in the module references `name`.
@@ -6511,6 +6512,21 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
             let nil = palt("[]", 0, 0, vec![], pref("[]", id));
             let cons = palt(":", 1, 2, vec![y.clone(), ys.clone()], on_elem);
             plam(xs.clone(), pcase(pev(&xs), vec![nil, cons]))
+        }
+        // bracket acquire release use = const (use a) (release a), where the
+        // acquire action `a` has already run as an argument. const evaluates its
+        // args left-to-right, so the effects run acquire, use, release — then
+        // the use result is returned. (Happy path only; no exception unwinding.)
+        "bracket" => {
+            let acq = pv("acq", fresh(id));
+            let rel = pv("rel", fresh(id));
+            let use_ = pv("use", fresh(id));
+            let body = papp2(
+                pref("const", id),
+                papp(pev(&use_), pev(&acq)),
+                papp(pev(&rel), pev(&acq)),
+            );
+            plam(acq, plam(rel, plam(use_, body)))
         }
         // guard b = case b of { True -> [()]; False -> [] }  (list Alternative)
         "guard" => {

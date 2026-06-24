@@ -118,8 +118,9 @@ pub const STDERR_FD: i32 = 2;
 /// Emit an early-return guard at the start of a void output function: if the
 /// pending-exception flag is set, the effect is suppressed (the eager-IO
 /// exception model — effects no-op while an exception is propagating).
-fn emit_exn_guard(func: &mut WasmFunc, exn_flag_idx: u32) {
-    func.emit(WasmInstr::GlobalGet(exn_flag_idx));
+fn emit_exn_guard(func: &mut WasmFunc, exn_flag_idx: Option<u32>) {
+    let Some(idx) = exn_flag_idx else { return };
+    func.emit(WasmInstr::GlobalGet(idx));
     func.emit(WasmInstr::If(None));
     func.emit(WasmInstr::Return);
     func.emit(WasmInstr::End);
@@ -199,7 +200,7 @@ pub fn generate_alloc_function(heap_ptr_global: u32) -> WasmFunc {
 ///
 /// Prints an i32 value to stdout using WASI fd_write.
 /// Uses memory at a fixed offset for the iovec structure.
-pub fn generate_print_i32(fd_write_idx: u32, exn_flag_idx: u32) -> WasmFunc {
+pub fn generate_print_i32(fd_write_idx: u32, exn_flag_idx: Option<u32>) -> WasmFunc {
     let mut func = WasmFunc::new(WasmFuncType::new(vec![WasmType::I32], vec![]));
     func.name = Some("print_i32".to_string());
     func.exported = true;
@@ -373,7 +374,7 @@ pub fn generate_print_i32(fd_write_idx: u32, exn_flag_idx: u32) -> WasmFunc {
 /// Generate a print_str function for printing string literals.
 ///
 /// Takes a pointer and length, prints to stdout.
-pub fn generate_print_str(fd_write_idx: u32, exn_flag_idx: u32) -> WasmFunc {
+pub fn generate_print_str(fd_write_idx: u32, exn_flag_idx: Option<u32>) -> WasmFunc {
     let mut func = WasmFunc::new(WasmFuncType::new(
         vec![WasmType::I32, WasmType::I32], // ptr, len
         vec![],
@@ -414,7 +415,7 @@ pub fn generate_print_str(fd_write_idx: u32, exn_flag_idx: u32) -> WasmFunc {
 pub fn generate_print_str_ln(
     fd_write_idx: u32,
     newline_offset: u32,
-    exn_flag_idx: u32,
+    exn_flag_idx: Option<u32>,
 ) -> WasmFunc {
     let mut func = WasmFunc::new(WasmFuncType::new(
         vec![WasmType::I32, WasmType::I32], // ptr, len
@@ -1011,7 +1012,7 @@ pub fn generate_file_append(alloc_idx: u32, concat_str_idx: u32, file_table_idx:
 /// The parameter points to a `[len: i32 | bytes...]` block (the runtime
 /// representation of a `String` value); the bytes start at `ptr + 4`. No
 /// newline is appended.
-pub fn generate_print_pstr(fd_write_idx: u32, exn_flag_idx: u32) -> WasmFunc {
+pub fn generate_print_pstr(fd_write_idx: u32, exn_flag_idx: Option<u32>) -> WasmFunc {
     let mut func = WasmFunc::new(WasmFuncType::new(vec![WasmType::I32], vec![]));
     func.name = Some("print_pstr".to_string());
     func.exported = true;
@@ -2190,7 +2191,7 @@ mod tests {
 
     #[test]
     fn test_generate_print_i32() {
-        let func = generate_print_i32(0);
+        let func = generate_print_i32(0, None);
         assert_eq!(func.name.as_deref(), Some("print_i32"));
         assert!(func.exported);
     }

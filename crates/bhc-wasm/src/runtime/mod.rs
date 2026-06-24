@@ -499,10 +499,10 @@ mod tests {
         let _ = func_idx; // Last one, not needed further
 
         // 12. Add WASI helpers
-        let print_i32 = wasi::generate_print_i32(0); // fd_write import index
+        let print_i32 = wasi::generate_print_i32(0, None); // fd_write import index
         module.add_function(print_i32);
 
-        let print_str = wasi::generate_print_str(0);
+        let print_str = wasi::generate_print_str(0, None);
         module.add_function(print_str);
 
         let get_argc = wasi::generate_get_argc();

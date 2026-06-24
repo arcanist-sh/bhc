@@ -645,20 +645,20 @@ impl WasmModule {
         let alloc_idx = self.add_function(alloc_func);
 
         // Add print_i32 function
-        let print_func = wasi::generate_print_i32(fd_write_idx, exn_flag_idx);
+        let print_func = wasi::generate_print_i32(fd_write_idx, Some(exn_flag_idx));
         let print_i32_idx = self.add_function(print_func);
 
         // Add print_str function
-        let print_str_func = wasi::generate_print_str(fd_write_idx, exn_flag_idx);
+        let print_str_func = wasi::generate_print_str(fd_write_idx, Some(exn_flag_idx));
         let print_str_idx = self.add_function(print_str_func);
 
         // Add print_str_ln function
         let print_str_ln_func =
-            wasi::generate_print_str_ln(fd_write_idx, newline_offset, exn_flag_idx);
+            wasi::generate_print_str_ln(fd_write_idx, newline_offset, Some(exn_flag_idx));
         let print_str_ln_idx = self.add_function(print_str_ln_func);
 
         // Add print_pstr function (length-prefixed string printing)
-        let print_pstr_func = wasi::generate_print_pstr(fd_write_idx, exn_flag_idx);
+        let print_pstr_func = wasi::generate_print_pstr(fd_write_idx, Some(exn_flag_idx));
         let print_pstr_idx = self.add_function(print_pstr_func);
 
         // Add concat_str function (string concatenation)

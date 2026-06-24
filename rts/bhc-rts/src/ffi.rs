@@ -287,12 +287,17 @@ fn format_double(n: f64) -> String {
     } else if n.is_nan() {
         "NaN".to_string()
     } else {
-        let formatted = format!("{n}");
-        if !formatted.contains('.') && !formatted.contains('e') && !formatted.contains('E') {
-            format!("{formatted}.0")
-        } else {
-            formatted
+        // BHC renders Double with up to 6 fractional digits — matching the WASM
+        // backend's `double_to_str` and the conformance fixtures — with trailing
+        // zeros stripped but at least one digit after the decimal point.
+        let mut s = format!("{n:.6}");
+        while s.ends_with('0') {
+            s.pop();
         }
+        if s.ends_with('.') {
+            s.push('0');
+        }
+        s
     }
 }
 

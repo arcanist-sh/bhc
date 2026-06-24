@@ -6392,16 +6392,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "negate" => self.lower_builtin_negate(args[0]),
             "abs" => self.lower_builtin_abs(args[0]),
             "signum" => self.lower_builtin_signum(args[0]),
-            "sqrt" => self.lower_builtin_math_unary(args[0], 1013, "sqrt"),
-            "exp" => self.lower_builtin_math_unary(args[0], 1014, "exp"),
-            "log" => self.lower_builtin_math_unary(args[0], 1015, "log"),
-            "sin" => self.lower_builtin_math_unary(args[0], 1016, "sin"),
-            "cos" => self.lower_builtin_math_unary(args[0], 1017, "cos"),
-            "tan" => self.lower_builtin_math_unary(args[0], 1018, "tan"),
-            "asin" => self.lower_builtin_math_unary(args[0], 1019, "asin"),
-            "acos" => self.lower_builtin_math_unary(args[0], 1020, "acos"),
-            "atan" => self.lower_builtin_math_unary(args[0], 1021, "atan"),
-            "atan2" => self.lower_builtin_math_binary(args[0], args[1], 1022, "atan2"),
+            "sqrt" => self.lower_builtin_math_unary(args[0], 1000013, "sqrt"),
+            "exp" => self.lower_builtin_math_unary(args[0], 1000014, "exp"),
+            "log" => self.lower_builtin_math_unary(args[0], 1000015, "log"),
+            "sin" => self.lower_builtin_math_unary(args[0], 1000016, "sin"),
+            "cos" => self.lower_builtin_math_unary(args[0], 1000017, "cos"),
+            "tan" => self.lower_builtin_math_unary(args[0], 1000018, "tan"),
+            "asin" => self.lower_builtin_math_unary(args[0], 1000019, "asin"),
+            "acos" => self.lower_builtin_math_unary(args[0], 1000020, "acos"),
+            "atan" => self.lower_builtin_math_unary(args[0], 1000021, "atan"),
+            "atan2" => self.lower_builtin_math_binary(args[0], args[1], 1000022, "atan2"),
             "ceiling" => self.lower_builtin_float_to_int(args[0], 1000023, "ceiling"),
             "floor" => self.lower_builtin_float_to_int(args[0], 1000024, "floor"),
             "round" => self.lower_builtin_float_to_int(args[0], 1000025, "round"),
@@ -14919,7 +14919,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         .map_err(|e| {
                             CodegenError::Internal(format!("failed to call print_bool: {:?}", e))
                         })?;
-                } else if self.is_int_type(&expr_ty) || self.is_type_variable_or_error(&expr_ty) {
+                } else if (self.is_int_type(&expr_ty) || self.is_type_variable_or_error(&expr_ty))
+                    && !self.expr_returns_double(val_expr)
+                {
                     // Boxed integer (or polymorphic type that might be int) - unbox and print as int.
                     // For type variables from closures, we assume int since that's the most common case.
                     // This is safe because boxed ints use int_to_ptr which stores the value in the
@@ -14940,8 +14942,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         .map_err(|e| {
                             CodegenError::Internal(format!("failed to call print_int: {:?}", e))
                         })?;
-                } else if self.is_float_type(&expr_ty) {
-                    // Boxed float - unbox and print as double
+                } else if self.is_float_type(&expr_ty) || self.expr_returns_double(val_expr) {
+                    // Boxed float/double - unbox and print as double. The
+                    // structural `expr_returns_double` check catches results
+                    // whose type is erased to `Error` (e.g. `sqrt x`, `abs d`).
                     let bits = self
                         .builder()
                         .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_float_bits")
@@ -15507,11 +15511,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     fn expr_returns_double(&self, expr: &Expr) -> bool {
         match expr {
             Expr::Lit(Literal::Double(_), _, _) | Expr::Lit(Literal::Float(_), _, _) => true,
-            Expr::App(f, _, _) => {
+            Expr::App(f, arg, _) => {
                 match f.as_ref() {
                     // Unary Double-returning functions
                     Expr::Var(var, _) => {
                         let n = var.name.as_str();
+                        // Always-Double `Floating` operations.
                         if matches!(
                             n,
                             "sqrt"
@@ -15526,16 +15531,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                                 | "sinh"
                                 | "cosh"
                                 | "tanh"
-                                | "abs"
-                                | "negate"
-                                | "signum"
                                 | "recip"
-                                | "ceiling"
-                                | "floor"
-                                | "round"
-                                | "truncate"
                         ) {
                             return true;
+                        }
+                        // Type-preserving `Num` ops: the result type equals the
+                        // argument's, so a `Double` argument means a `Double`
+                        // result (but an `Int` argument an `Int` result).
+                        if matches!(n, "abs" | "negate" | "signum") {
+                            return self.expr_returns_double(arg);
                         }
                         // Type-based inference: check if function returns Double or IO Double
                         self.fun_returns_double(&var.ty)
@@ -21167,6 +21171,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if self.is_rational_expr(expr) {
             return self.lower_builtin_rational_unary(expr, 1000908, "abs");
         }
+        // Double dispatch: a `Double` value is a boxed f64, so integer abs on its
+        // bits would corrupt it (clearing the sign of `-2.5`'s bit pattern gives
+        // 1.75). Use floating-point abs instead.
+        if self.expr_returns_double(expr) {
+            let val = self
+                .lower_expr(expr)?
+                .ok_or_else(|| CodegenError::Internal("abs: no value".to_string()))?;
+            let f = self.coerce_to_f64(val)?;
+            let zero = self.type_mapper().f64_type().const_float(0.0);
+            let is_neg = self
+                .builder()
+                .build_float_compare(inkwell::FloatPredicate::OLT, f, zero, "is_neg")
+                .map_err(|e| CodegenError::Internal(format!("abs fcmp failed: {:?}", e)))?;
+            let neg = self
+                .builder()
+                .build_float_neg(f, "fneg")
+                .map_err(|e| CodegenError::Internal(format!("abs fneg failed: {:?}", e)))?;
+            let result = self
+                .builder()
+                .build_select(is_neg, neg, f, "fabs")
+                .map_err(|e| CodegenError::Internal(format!("abs select failed: {:?}", e)))?
+                .into_float_value();
+            return Ok(Some(self.f64_to_ptr(result)?.into()));
+        }
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal("abs: no value".to_string()))?;
@@ -23534,12 +23562,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             // Function applications returning known types
             Expr::App(f, _arg, _) => {
-                // E.63: force/id are identity functions — infer from argument
+                // E.63: force/id are identity functions — infer from argument.
+                // The polymorphic `Num`/`Fractional` unary ops preserve their
+                // argument's type (`abs`/`negate`/`signum`/`recip`), so render
+                // them by the argument too — otherwise a `Double` argument would
+                // be misrendered as `Int`.
                 if let Expr::Var(fv, _) = f.as_ref() {
-                    if fv.name.as_str() == "force"
-                        || fv.name.as_str() == "id"
-                        || fv.name.as_str() == "to"
-                    {
+                    if matches!(
+                        fv.name.as_str(),
+                        "force" | "id" | "to" | "abs" | "negate" | "signum" | "recip"
+                    ) {
                         return self.infer_show_from_expr(_arg);
                     }
                 }
@@ -42960,7 +42992,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Lower a Core expression to LLVM IR.
     fn lower_expr(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         match expr {
-            Expr::Lit(lit, _ty, _span) => self.lower_literal(lit).map(Some),
+            Expr::Lit(lit, ty, _span) => self.lower_literal(lit, ty).map(Some),
 
             Expr::Var(var, _span) => {
                 let name = var.name.as_str();
@@ -43108,7 +43140,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower a literal to LLVM IR.
-    fn lower_literal(&self, lit: &Literal) -> CodegenResult<BasicValueEnum<'ctx>> {
+    fn lower_literal(&self, lit: &Literal, ty: &Ty) -> CodegenResult<BasicValueEnum<'ctx>> {
         let tm = self.type_mapper();
         match lit {
             Literal::Int(n) => Ok(tm.i64_type().const_int(*n as u64, true).into()),
@@ -43167,7 +43199,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
             }
 
-            Literal::Float(f) => Ok(tm.f32_type().const_float(*f as f64).into()),
+            Literal::Float(f) => {
+                // A fractional literal is 32-bit only when its type is
+                // explicitly `Float`; otherwise (a `Double` annotation — the
+                // Haskell default for fractional literals — or an erased type)
+                // it is f64. Emitting f32 for a Double literal corrupts every
+                // downstream f64 path (math RTS calls, boxing).
+                let is_float32 = matches!(ty, Ty::Con(c) if c.name.as_str() == "Float");
+                if is_float32 {
+                    Ok(tm.f32_type().const_float(*f as f64).into())
+                } else {
+                    Ok(tm.f64_type().const_float(*f as f64).into())
+                }
+            }
 
             Literal::Double(d) => Ok(tm.f64_type().const_float(*d).into()),
 
@@ -46744,7 +46788,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Coerce a value to f64, unboxing if needed.
     fn coerce_to_f64(&self, value: BasicValueEnum<'ctx>) -> CodegenResult<FloatValue<'ctx>> {
         match value {
-            BasicValueEnum::FloatValue(f) => Ok(f),
+            BasicValueEnum::FloatValue(f) => {
+                // A 32-bit float (e.g. a `Float`-typed literal flowing into a
+                // Double context) must be widened — the RTS math functions all
+                // take f64.
+                let f64_ty = self.type_mapper().f64_type();
+                if f.get_type() == f64_ty {
+                    Ok(f)
+                } else {
+                    self.builder()
+                        .build_float_ext(f, f64_ty, "f32_to_f64")
+                        .map_err(|e| CodegenError::Internal(format!("float widen failed: {:?}", e)))
+                }
+            }
             BasicValueEnum::IntValue(i) => {
                 // Cast int bits to float (for boxed floats)
                 let f = self

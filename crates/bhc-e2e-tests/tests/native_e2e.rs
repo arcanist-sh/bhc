@@ -99,6 +99,14 @@ fn test_tier2_floats_native() {
     run_native_test("tier2_functions/floats", Profile::Default);
 }
 
+// Floating-point math builtins: sqrt and the truncate/floor/ceiling/round
+// family, plus polymorphic abs/negate on Double. Exercises the math RTS
+// declarations, f64 literal/coercion handling, and 6-decimal Double rendering.
+#[test]
+fn test_tier2_float_math_native() {
+    run_native_test("tier2_functions/float_math", Profile::Default);
+}
+
 #[test]
 fn test_tier2_factorial_native() {
     run_native_test("tier2_functions/factorial", Profile::Default);

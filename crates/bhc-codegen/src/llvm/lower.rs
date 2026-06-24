@@ -46802,12 +46802,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
             }
             BasicValueEnum::IntValue(i) => {
-                // Cast int bits to float (for boxed floats)
+                // A raw integer reaching a Double context is a genuine integer
+                // (e.g. a `fromIntegral` result — f64 values are `FloatValue` or
+                // boxed pointers), so convert it with `sitofp` rather than
+                // reinterpreting its bits.
                 let f = self
                     .builder()
-                    .build_bit_cast(i, self.type_mapper().f64_type(), "int_to_float")
+                    .build_signed_int_to_float(i, self.type_mapper().f64_type(), "sitofp")
                     .map_err(|e| CodegenError::Internal(format!("int to float failed: {:?}", e)))?;
-                Ok(f.into_float_value())
+                Ok(f)
             }
             BasicValueEnum::PointerValue(p) => {
                 // Unbox: ptr -> i64 -> f64 bits
@@ -46991,8 +46994,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     || self.is_float_type(&t0)
                     || self.is_double_type(&t1)
                     || self.is_float_type(&t1)
+                    || self.expr_returns_double(args[0])
+                    || self.expr_returns_double(args[1])
                 {
-                    return self.lower_float_arith(op, lhs, rhs);
+                    return self.lower_float_arith(op, args[0], lhs, args[1], rhs);
                 }
                 self.lower_binary_arith(op, lhs, rhs)
             }
@@ -47254,6 +47259,36 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("failed to box int: {:?}", e)))
     }
 
+    /// The head variable name of an application spine, peeling type applications
+    /// and transparent wrappers (`f @t x dict` -> `f`).
+    fn app_head_var_name<'a>(&self, e: &'a Expr) -> Option<&'a str> {
+        match e {
+            Expr::Var(v, _) => Some(v.name.as_str()),
+            Expr::App(f, _, _) | Expr::TyApp(f, _, _) => self.app_head_var_name(f),
+            Expr::Cast(inner, _, _) | Expr::Tick(_, inner, _) => self.app_head_var_name(inner),
+            _ => None,
+        }
+    }
+
+    /// Coerce one operand of a floating-point operation to `f64`. A
+    /// `fromIntegral` operand is a genuine integer (lowered as the identity), so
+    /// convert it with `sitofp`; any other operand is a real `Double` value to be
+    /// unboxed.
+    fn coerce_float_operand(
+        &self,
+        expr: &Expr,
+        val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<FloatValue<'ctx>> {
+        if matches!(self.app_head_var_name(expr), Some("fromIntegral")) {
+            let i = self.coerce_to_int(val)?;
+            self.builder()
+                .build_signed_int_to_float(i, self.type_mapper().f64_type(), "sitofp")
+                .map_err(|e| CodegenError::Internal(format!("fromIntegral sitofp failed: {:?}", e)))
+        } else {
+            self.coerce_to_f64(val)
+        }
+    }
+
     /// Lower a binary arithmetic operation on `Double`/`Float`. Both operands
     /// are coerced to `f64` first — crucially unboxing a boxed `Double` (a
     /// `PointerValue`, e.g. a function parameter), which `lower_binary_arith`
@@ -47261,11 +47296,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     fn lower_float_arith(
         &self,
         op: PrimOp,
+        lhs_expr: &Expr,
         lhs: BasicValueEnum<'ctx>,
+        rhs_expr: &Expr,
         rhs: BasicValueEnum<'ctx>,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let l = self.coerce_to_f64(lhs)?;
-        let r = self.coerce_to_f64(rhs)?;
+        let l = self.coerce_float_operand(lhs_expr, lhs)?;
+        let r = self.coerce_float_operand(rhs_expr, rhs)?;
         let result = match op {
             PrimOp::Add => self.builder().build_float_add(l, r, "fadd"),
             PrimOp::Sub => self.builder().build_float_sub(l, r, "fsub"),

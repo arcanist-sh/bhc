@@ -107,6 +107,13 @@ fn test_tier2_float_math_native() {
     run_native_test("tier2_functions/float_math", Profile::Default);
 }
 
+// fromIntegral :: Int -> Double in Double contexts (sqrt, mixed arithmetic):
+// the integer is converted with sitofp rather than reinterpreting its bits.
+#[test]
+fn test_tier2_from_integral_native() {
+    run_native_test("tier2_functions/from_integral", Profile::Default);
+}
+
 #[test]
 fn test_tier2_factorial_native() {
     run_native_test("tier2_functions/factorial", Profile::Default);

@@ -576,6 +576,13 @@ fn test_tier3_generic_from_to_wasm() {
     run_wasm_test("tier3_io/generic_from_to", Profile::Default);
 }
 
+// Pattern matching on a derived-Generic enum's Rep: a bare `from d` builds the
+// real outer sum (M1 identity wrapper over L1/R1), split at ceil(n/2) by tag.
+#[test]
+fn test_tier3_generic_pattern_wasm() {
+    run_wasm_test("tier3_io/generic_pattern", Profile::Default);
+}
+
 // Prelude/combinator additions: zip3/zipWith3, unfoldr, gcd/lcm, when/unless.
 #[test]
 fn test_tier3_zip3_basic_wasm() {

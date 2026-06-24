@@ -395,6 +395,19 @@ impl<'a> WasmLowering<'a> {
     /// metadata. Newtype constructors are identity at runtime, so they are
     /// skipped — their argument flows through unwrapped.
     fn register_constructors(&mut self, core: &CoreModule) {
+        // Synthetic GHC.Generics representation constructors used by a bare
+        // `from` (the enum-sum Rep). `M1` is a metadata newtype — identity at
+        // runtime — so `case … of M1 inner` binds `inner` to the sum directly;
+        // `L1`/`R1` are the two arms of `(:+:)` (tags 0/1). User definitions, if
+        // any, override these in the loop below.
+        self.newtype_cons.insert("M1".to_string());
+        self.con_map
+            .insert("L1".to_string(), ConInfo { tag: 0, arity: 1 });
+        self.con_map
+            .insert("R1".to_string(), ConInfo { tag: 1, arity: 1 });
+        self.con_map
+            .insert("U1".to_string(), ConInfo { tag: 0, arity: 0 });
+
         for con in &core.constructors {
             if con.is_newtype {
                 self.newtype_cons.insert(con.name.clone());
@@ -451,6 +464,20 @@ impl<'a> WasmLowering<'a> {
                 self.enum_of_ctor.insert(n.clone(), ty.clone());
             }
             self.enum_types.insert(ty, names);
+        }
+    }
+
+    /// The split point `ceil(n/2)` of the sole user enum's constructor count —
+    /// the boundary between the `L1` (left) and `R1` (right) halves of a derived
+    /// `Generic` enum's balanced outer sum. The value's type is erased before
+    /// Core, so this uses the single-user-enum heuristic (as `minBound` does).
+    /// Falls back to 2 (the common 4-constructor split) when ambiguous.
+    fn sole_enum_half(&self) -> i32 {
+        if self.enum_types.len() == 1 {
+            let n = self.enum_types.values().next().map_or(4, Vec::len) as i32;
+            (n + 1) / 2
+        } else {
+            2
         }
     }
 
@@ -3372,11 +3399,45 @@ impl<'a> WasmLowering<'a> {
             {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
             }
-            // `GHC.Generics.from`/`to` roundtrip to the identity; we lower each
-            // as the identity so `to (from x)` reconstructs `x`. (Pattern
-            // matching on the generic Rep — M1/L1/R1 — is not modeled.)
-            Some(n) if args.len() == 1 && matches!(strip_qualifier(n), "from" | "to") => {
+            // `to (from x)` roundtrips to `x` (the common DeriveGeneric idiom):
+            // short-circuit it so no Rep is materialised. A bare `to` elsewhere
+            // is the identity.
+            Some(n) if args.len() == 1 && strip_qualifier(n) == "to" => {
+                let (h, hargs) = collect_app_spine(args[0]);
+                let roundtrip = matches!(h, Expr::Var(v, _) if strip_qualifier(v.name.as_str()) == "from")
+                    && hargs.len() == 1;
+                if roundtrip {
+                    self.lower_expr(hargs[0], instrs, locals, local_count, false)?;
+                } else {
+                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                }
+            }
+            // A bare `from d` for a derived-`Generic` enum builds the real outer
+            // sum of the Rep: `M1` is identity (a metadata newtype), so produce
+            // `L1 _` for the left half of the constructors and `R1 _` for the
+            // right, split at `ceil(n/2)` by the value's tag. (Pattern matching
+            // on the Rep — `case from d of M1 inner -> case inner of L1…/R1…` —
+            // then dispatches on this. Products/`K1` never need a real Rep since
+            // `to (from x)` is short-circuited above.)
+            Some(n) if args.len() == 1 && strip_qualifier(n) == "from" => {
+                let half = self.sole_enum_half();
+                let p = *local_count;
+                *local_count += 1;
+                instrs.push(WasmInstr::I32Const(8));
+                instrs.push(WasmInstr::Call(self.runtime.alloc_idx));
+                instrs.push(WasmInstr::LocalSet(p));
+                // [p] = (tag(d) < half) ? 0 (L1) : 1 (R1)
+                instrs.push(WasmInstr::LocalGet(p));
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::I32Const(half));
+                instrs.push(WasmInstr::I32LtS);
+                instrs.push(WasmInstr::I32Eqz); // L1 when tag<half -> store 0; else 1
+                instrs.push(WasmInstr::I32Store(2, 0));
+                // [p+4] = 0 (the arm's payload is matched with `_`)
+                instrs.push(WasmInstr::LocalGet(p));
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::I32Store(2, 4));
+                instrs.push(WasmInstr::LocalGet(p));
             }
             Some(n) if args.len() == 1 && strip_qualifier(n) == "rnf" => {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;

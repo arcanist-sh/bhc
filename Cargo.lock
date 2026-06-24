@@ -992,6 +992,7 @@ dependencies = [
  "bhc-target",
  "bhc-tensor-ir",
  "bhc-types",
+ "num-bigint",
  "pretty_assertions",
  "rustc-hash 1.1.0",
  "smallvec",

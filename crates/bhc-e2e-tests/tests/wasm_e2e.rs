@@ -933,6 +933,14 @@ fn test_tier3_string_read_wasm() {
     run_wasm_test("tier3_io/string_read", Profile::Default);
 }
 
+// Arbitrary-precision Integer: `show` of a closed integer constant that
+// overflows the i32 runtime (e.g. `factorial 50`) is evaluated exactly at
+// compile time and emitted as a decimal string.
+#[test]
+fn test_tier3_integer_large_wasm() {
+    run_wasm_test("tier3_io/integer_large", Profile::Default);
+}
+
 // Char predicates with showBool / showChar (one-char quoted string).
 #[test]
 fn test_tier3_char_predicates_wasm() {

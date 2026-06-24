@@ -183,6 +183,7 @@ pub fn lower_core_module(
     // inlined; record every top-level function's arity so partial and
     // over-applications can be handled via closures.
     lowering.register_inline_bodies(&binds);
+    lowering.register_fn_bodies(&binds);
     lowering.register_arities(&binds);
 
     // First pass: register all top-level function names so we can resolve calls
@@ -338,6 +339,10 @@ struct WasmLowering<'a> {
     /// skipped and the pending-exception flag is set at each (possibly
     /// conditional) use site instead.
     bottom_vars: FxHashSet<VarId>,
+    /// Bodies of every top-level function (recursive included), keyed by name:
+    /// `(param_ids, body)`. Used by the compile-time arbitrary-precision integer
+    /// evaluator (`const_eval_bigint`) to unfold calls like `factorial 50`.
+    fn_bodies: FxHashMap<Symbol, (Vec<VarId>, Expr)>,
     /// Bodies of non-recursive top-level functions eligible for inlining,
     /// keyed by name: `(param_ids, body)`. Lets us evaluate
     /// dictionary-specialized typeclass methods (and the closures they
@@ -382,6 +387,7 @@ impl<'a> WasmLowering<'a> {
             bottom_vars: FxHashSet::default(),
             ctx_stacks: FxHashMap::default(),
             subst: FxHashMap::default(),
+            fn_bodies: FxHashMap::default(),
             inline_bodies: FxHashMap::default(),
             inlining: FxHashSet::default(),
             pending_closures: Vec::new(),
@@ -577,6 +583,176 @@ impl<'a> WasmLowering<'a> {
                 self.inline_bodies
                     .insert(var.name, (param_ids, body.clone()));
             }
+        }
+    }
+
+    /// Record every top-level function's `(param_ids, body)` (recursive groups
+    /// included), for the compile-time integer evaluator.
+    fn register_fn_bodies(&mut self, binds: &[Bind]) {
+        let mut record = |var: &Var, expr: &Expr| {
+            if var.name.as_str() == "main" {
+                return;
+            }
+            let (params, body) = peel_lambdas(expr);
+            if params.is_empty() {
+                return;
+            }
+            let param_ids: Vec<VarId> = params.iter().map(|p| p.id).collect();
+            self.fn_bodies.insert(var.name, (param_ids, body.clone()));
+        };
+        for bind in binds {
+            match bind {
+                Bind::NonRec(var, expr) => record(var, expr),
+                Bind::Rec(bindings) => {
+                    for (var, expr) in bindings {
+                        record(var, expr);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Try to evaluate a closed integer expression to an exact (arbitrary
+    /// precision) value at compile time. Returns `None` if the expression is not
+    /// a pure integer computation (a free variable, a non-integer construct, IO,
+    /// or recursion past the depth budget) — in which case the caller falls back
+    /// to ordinary lowering. This backs `show`/`print` of large integer
+    /// constants such as `factorial 50`, whose result does not fit in the i32
+    /// runtime representation.
+    fn const_eval_bigint(&self, expr: &Expr) -> Option<num_bigint::BigInt> {
+        let mut env: FxHashMap<VarId, num_bigint::BigInt> = FxHashMap::default();
+        self.ce_eval(expr, &mut env, 0)
+    }
+
+    fn ce_eval(
+        &self,
+        expr: &Expr,
+        env: &mut FxHashMap<VarId, num_bigint::BigInt>,
+        depth: u32,
+    ) -> Option<num_bigint::BigInt> {
+        use num_bigint::BigInt;
+        // Bail well before the evaluator's own (Rust) recursion could overflow
+        // the stack. Deep value recursion (e.g. a `loopN 100000` countdown)
+        // falls back to ordinary runtime lowering; genuinely-large constants like
+        // `factorial 50` only recurse a few hundred frames, comfortably under it.
+        const DEPTH_LIMIT: u32 = 1000;
+        if depth > DEPTH_LIMIT {
+            return None;
+        }
+        let expr = peel_runtime_identity(expr);
+        match expr {
+            Expr::Lit(Literal::Int(n), _, _) => Some(BigInt::from(*n)),
+            Expr::Var(v, _) => env.get(&v.id).cloned(),
+            Expr::Let(bind, body, _) => {
+                let Bind::NonRec(var, rhs) = bind.as_ref() else {
+                    return None; // recursive let unsupported
+                };
+                let val = self.ce_eval(rhs, env, depth + 1)?;
+                let mut new_env = env.clone();
+                new_env.insert(var.id, val);
+                self.ce_eval(body, &mut new_env, depth + 1)
+            }
+            Expr::Case(scrut, alts, _, _) => {
+                let s = self.ce_eval(scrut, env, depth + 1)?;
+                // A single data-constructor alternative is an unboxing/newtype
+                // match (e.g. `case n of I# ww -> …` from worker/wrapper). Take it
+                // unconditionally and bind its field to the integer value.
+                if alts.len() == 1 {
+                    if let AltCon::DataCon(_) = &alts[0].con {
+                        let mut new_env = env.clone();
+                        if let Some(b) = alts[0].binders.first() {
+                            new_env.insert(b.id, s);
+                        }
+                        return self.ce_eval(&alts[0].rhs, &mut new_env, depth + 1);
+                    }
+                }
+                // Otherwise pick the alternative matching the scrutinee value: a
+                // literal by equality, a data-constructor by tag (so `if` —
+                // desugared to a Bool case, False=0/True=1 — works), else the
+                // default. Bind a single field binder to the value if present.
+                let mut chosen: Option<&bhc_core::Alt> = None;
+                let mut default_alt: Option<&bhc_core::Alt> = None;
+                for alt in alts {
+                    match &alt.con {
+                        AltCon::Lit(Literal::Int(k)) if s == BigInt::from(*k) => {
+                            chosen = Some(alt);
+                            break;
+                        }
+                        AltCon::Lit(Literal::Int(_)) => {}
+                        AltCon::DataCon(dc) if s == BigInt::from(dc.tag) => {
+                            chosen = Some(alt);
+                            break;
+                        }
+                        AltCon::DataCon(_) => {}
+                        AltCon::Default => default_alt = Some(alt),
+                        _ => return None,
+                    }
+                }
+                let alt = chosen.or(default_alt)?;
+                let mut new_env = env.clone();
+                if let Some(b) = alt.binders.first() {
+                    new_env.insert(b.id, s);
+                }
+                self.ce_eval(&alt.rhs, &mut new_env, depth + 1)
+            }
+            Expr::App(..) => {
+                let (head, args) = collect_app_spine(expr);
+                let Expr::Var(v, _) = head else { return None };
+                let name = strip_qualifier(v.name.as_str());
+                // Binary integer primitives.
+                if args.len() == 2
+                    && matches!(
+                        name,
+                        "+" | "-"
+                            | "*"
+                            | "div"
+                            | "quot"
+                            | "mod"
+                            | "rem"
+                            | "=="
+                            | "/="
+                            | "<"
+                            | "<="
+                            | ">"
+                            | ">="
+                    )
+                {
+                    let l = self.ce_eval(args[0], env, depth + 1)?;
+                    let r = self.ce_eval(args[1], env, depth + 1)?;
+                    let zero = BigInt::from(0);
+                    let bool_int = |b: bool| Some(BigInt::from(u8::from(b)));
+                    return match name {
+                        "+" => Some(l + r),
+                        "-" => Some(l - r),
+                        "*" => Some(l * r),
+                        "div" | "quot" if r != zero => Some(l / r),
+                        "mod" | "rem" if r != zero => Some(l % r),
+                        "div" | "quot" | "mod" | "rem" => None,
+                        "==" => bool_int(l == r),
+                        "/=" => bool_int(l != r),
+                        "<" => bool_int(l < r),
+                        "<=" => bool_int(l <= r),
+                        ">" => bool_int(l > r),
+                        ">=" => bool_int(l >= r),
+                        _ => None,
+                    };
+                }
+                if args.len() == 1 && name == "negate" {
+                    return Some(-self.ce_eval(args[0], env, depth + 1)?);
+                }
+                // User function: unfold its body with arguments bound.
+                let (params, body) = self.fn_bodies.get(&v.name)?;
+                if args.len() != params.len() {
+                    return None;
+                }
+                let mut new_env = env.clone();
+                for (p, a) in params.iter().zip(args.iter()) {
+                    let val = self.ce_eval(a, env, depth + 1)?;
+                    new_env.insert(*p, val);
+                }
+                self.ce_eval(body, &mut new_env, depth + 1)
+            }
+            _ => None,
         }
     }
 
@@ -1259,6 +1435,19 @@ impl<'a> WasmLowering<'a> {
         // See through runtime-identity wrappers (`force`/`to . from`/…) so the
         // structural and inferred paths inspect the real value.
         let arg = peel_runtime_identity(arg);
+        // A closed integer constant whose value does not fit the i32 runtime
+        // representation (e.g. `factorial 50`): evaluate it exactly at compile
+        // time and emit its decimal rendering as a string literal. Values that
+        // fit i32 fall through to the ordinary (runtime) path unchanged, so this
+        // only affects genuinely-large constants.
+        if let Some(big) = self.const_eval_bigint(arg) {
+            if big < num_bigint::BigInt::from(i32::MIN) || big > num_bigint::BigInt::from(i32::MAX)
+            {
+                let ptr = self.intern_pstr(&big.to_string());
+                instrs.push(WasmInstr::I32Const(ptr as i32));
+                return Ok(());
+            }
+        }
         // A `Maybe`-returning call (`readMaybe`) is rendered by walking the
         // runtime value: `Nothing` (the nullary tag 0) or `Just <field>`.
         {

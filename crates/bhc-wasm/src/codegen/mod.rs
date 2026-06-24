@@ -107,6 +107,10 @@ pub struct RuntimeIndices {
     pub read_all_idx: u32,
     /// Index of `show_string` (quotes/escapes a String). Backs `show`/`print` of a String.
     pub show_string_idx: u32,
+    /// Index of the mutable `exn_flag` global: the pending-exception flag for the
+    /// eager-IO exception model. Set by `throwIO`/`error`/`readFile`, checked by
+    /// effectful ops (which no-op while set), cleared by `catch`.
+    pub exn_flag_idx: u32,
     /// Offset of the newline byte in the data segment.
     pub newline_offset: u32,
 }
@@ -604,6 +608,15 @@ impl WasmModule {
             init: WasmInstr::I32Const(65536), // Start heap at 64KB
         });
 
+        // Add the pending-exception flag global (0 = no exception). The eager-IO
+        // exception model sets this on throw and clears it in `catch`.
+        let exn_flag_idx = self.add_global(WasmGlobal {
+            name: Some("exn_flag".to_string()),
+            ty: WasmType::I32,
+            mutable: true,
+            init: WasmInstr::I32Const(0),
+        });
+
         // Add a newline byte in the data segment
         let newline_offset = wasi::NEWLINE_DATA_OFFSET;
         self.add_data_segment(newline_offset, vec![b'\n']);
@@ -613,19 +626,20 @@ impl WasmModule {
         let alloc_idx = self.add_function(alloc_func);
 
         // Add print_i32 function
-        let print_func = wasi::generate_print_i32(fd_write_idx);
+        let print_func = wasi::generate_print_i32(fd_write_idx, exn_flag_idx);
         let print_i32_idx = self.add_function(print_func);
 
         // Add print_str function
-        let print_str_func = wasi::generate_print_str(fd_write_idx);
+        let print_str_func = wasi::generate_print_str(fd_write_idx, exn_flag_idx);
         let print_str_idx = self.add_function(print_str_func);
 
         // Add print_str_ln function
-        let print_str_ln_func = wasi::generate_print_str_ln(fd_write_idx, newline_offset);
+        let print_str_ln_func =
+            wasi::generate_print_str_ln(fd_write_idx, newline_offset, exn_flag_idx);
         let print_str_ln_idx = self.add_function(print_str_ln_func);
 
         // Add print_pstr function (length-prefixed string printing)
-        let print_pstr_func = wasi::generate_print_pstr(fd_write_idx);
+        let print_pstr_func = wasi::generate_print_pstr(fd_write_idx, exn_flag_idx);
         let print_pstr_idx = self.add_function(print_pstr_func);
 
         // Add concat_str function (string concatenation)
@@ -671,6 +685,7 @@ impl WasmModule {
             parse_int_idx,
             read_all_idx,
             show_string_idx,
+            exn_flag_idx,
             newline_offset,
         }
     }

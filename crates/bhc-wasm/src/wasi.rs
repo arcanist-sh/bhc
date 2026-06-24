@@ -115,6 +115,16 @@ pub const STDOUT_FD: i32 = 1;
 /// Stderr file descriptor.
 pub const STDERR_FD: i32 = 2;
 
+/// Emit an early-return guard at the start of a void output function: if the
+/// pending-exception flag is set, the effect is suppressed (the eager-IO
+/// exception model — effects no-op while an exception is propagating).
+fn emit_exn_guard(func: &mut WasmFunc, exn_flag_idx: u32) {
+    func.emit(WasmInstr::GlobalGet(exn_flag_idx));
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::Return);
+    func.emit(WasmInstr::End);
+}
+
 /// Generate the heap pointer global variable.
 ///
 /// This global tracks the current end of the heap for allocation.
@@ -189,10 +199,12 @@ pub fn generate_alloc_function(heap_ptr_global: u32) -> WasmFunc {
 ///
 /// Prints an i32 value to stdout using WASI fd_write.
 /// Uses memory at a fixed offset for the iovec structure.
-pub fn generate_print_i32(fd_write_idx: u32) -> WasmFunc {
+pub fn generate_print_i32(fd_write_idx: u32, exn_flag_idx: u32) -> WasmFunc {
     let mut func = WasmFunc::new(WasmFuncType::new(vec![WasmType::I32], vec![]));
     func.name = Some("print_i32".to_string());
     func.exported = true;
+
+    emit_exn_guard(&mut func, exn_flag_idx);
 
     // Convert i32 to decimal string in memory
     // Use fixed memory locations:
@@ -361,13 +373,15 @@ pub fn generate_print_i32(fd_write_idx: u32) -> WasmFunc {
 /// Generate a print_str function for printing string literals.
 ///
 /// Takes a pointer and length, prints to stdout.
-pub fn generate_print_str(fd_write_idx: u32) -> WasmFunc {
+pub fn generate_print_str(fd_write_idx: u32, exn_flag_idx: u32) -> WasmFunc {
     let mut func = WasmFunc::new(WasmFuncType::new(
         vec![WasmType::I32, WasmType::I32], // ptr, len
         vec![],
     ));
     func.name = Some("print_str".to_string());
     func.exported = true;
+
+    emit_exn_guard(&mut func, exn_flag_idx);
 
     // Set up iovec at memory offset 16
     // iovec.buf = param 0 (ptr)
@@ -397,13 +411,19 @@ pub fn generate_print_str(fd_write_idx: u32) -> WasmFunc {
 ///
 /// Takes a pointer and length, prints the string then a `\n` to stdout.
 /// The newline byte is stored in a data segment at `newline_offset`.
-pub fn generate_print_str_ln(fd_write_idx: u32, newline_offset: u32) -> WasmFunc {
+pub fn generate_print_str_ln(
+    fd_write_idx: u32,
+    newline_offset: u32,
+    exn_flag_idx: u32,
+) -> WasmFunc {
     let mut func = WasmFunc::new(WasmFuncType::new(
         vec![WasmType::I32, WasmType::I32], // ptr, len
         vec![],
     ));
     func.name = Some("print_str_ln".to_string());
     func.exported = true;
+
+    emit_exn_guard(&mut func, exn_flag_idx);
 
     // --- Print the string ---
     // Set up iovec at memory offset 16: iovec.buf = param 0 (ptr)
@@ -835,10 +855,12 @@ pub fn generate_int_to_str(alloc_idx: u32) -> WasmFunc {
 /// The parameter points to a `[len: i32 | bytes...]` block (the runtime
 /// representation of a `String` value); the bytes start at `ptr + 4`. No
 /// newline is appended.
-pub fn generate_print_pstr(fd_write_idx: u32) -> WasmFunc {
+pub fn generate_print_pstr(fd_write_idx: u32, exn_flag_idx: u32) -> WasmFunc {
     let mut func = WasmFunc::new(WasmFuncType::new(vec![WasmType::I32], vec![]));
     func.name = Some("print_pstr".to_string());
     func.exported = true;
+
+    emit_exn_guard(&mut func, exn_flag_idx);
 
     // iovec.buf = ptr + 4
     func.emit(WasmInstr::I32Const(16));

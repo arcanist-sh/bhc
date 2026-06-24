@@ -332,6 +332,12 @@ struct WasmLowering<'a> {
     /// Used to inline function/lambda arguments without alpha-renaming —
     /// when a parameter is referenced, its argument expression is lowered.
     subst: FxHashMap<VarId, Expr>,
+    /// Let-bound variables whose RHS is a bottom value (`error`/`undefined`/
+    /// `throw`). The strict WASM backend would evaluate the RHS eagerly, but a
+    /// lazy binding must only "raise" when forced — so the binding site is
+    /// skipped and the pending-exception flag is set at each (possibly
+    /// conditional) use site instead.
+    bottom_vars: FxHashSet<VarId>,
     /// Bodies of non-recursive top-level functions eligible for inlining,
     /// keyed by name: `(param_ids, body)`. Lets us evaluate
     /// dictionary-specialized typeclass methods (and the closures they
@@ -373,6 +379,7 @@ impl<'a> WasmLowering<'a> {
             derived_functor: FxHashMap::default(),
             derived_foldable: FxHashMap::default(),
             newtype_cons: FxHashSet::default(),
+            bottom_vars: FxHashSet::default(),
             ctx_stacks: FxHashMap::default(),
             subst: FxHashMap::default(),
             inline_bodies: FxHashMap::default(),
@@ -732,6 +739,13 @@ impl<'a> WasmLowering<'a> {
                 if let Some(arg) = self.subst.get(&var.id).cloned() {
                     return self.lower_expr(&arg, instrs, locals, local_count, is_main);
                 }
+                // Forcing a lazy bottom binding (`let x = error …`): raise here.
+                if self.bottom_vars.contains(&var.id) {
+                    instrs.push(WasmInstr::I32Const(1));
+                    instrs.push(WasmInstr::GlobalSet(self.runtime.exn_flag_idx));
+                    instrs.push(WasmInstr::I32Const(0));
+                    return Ok(());
+                }
                 // Stdin IO actions used as a value (their result is the bound
                 // value in `x <- getLine`). `getLine :: IO String` reads a line;
                 // `readLn :: IO Int` reads a line and parses it.
@@ -839,15 +853,23 @@ impl<'a> WasmLowering<'a> {
             Expr::Let(bind, body, _) => {
                 match bind.as_ref() {
                     Bind::NonRec(var, rhs) => {
-                        // Evaluate RHS
-                        self.lower_expr(rhs, instrs, locals, local_count, false)?;
-                        // Allocate a local
-                        let local_idx = *local_count;
-                        *local_count += 1;
-                        instrs.push(WasmInstr::LocalSet(local_idx));
-                        locals.insert(var.id, local_idx);
-                        // Evaluate body
-                        self.lower_expr(body, instrs, locals, local_count, is_main)?;
+                        if is_bottom_rhs(rhs) {
+                            // Lazy bottom binding (`let x = error …`): don't
+                            // evaluate the RHS here; forcing is deferred to the
+                            // use site (see the bottom-var path in the Var arm).
+                            self.bottom_vars.insert(var.id);
+                            self.lower_expr(body, instrs, locals, local_count, is_main)?;
+                        } else {
+                            // Evaluate RHS
+                            self.lower_expr(rhs, instrs, locals, local_count, false)?;
+                            // Allocate a local
+                            let local_idx = *local_count;
+                            *local_count += 1;
+                            instrs.push(WasmInstr::LocalSet(local_idx));
+                            locals.insert(var.id, local_idx);
+                            // Evaluate body
+                            self.lower_expr(body, instrs, locals, local_count, is_main)?;
+                        }
                     }
                     Bind::Rec(bindings) => {
                         // For recursive let bindings, allocate locals first
@@ -2565,6 +2587,34 @@ impl<'a> WasmLowering<'a> {
         Ok(())
     }
 
+    /// Lower an exception handler (`\e -> action`) applied to a dummy exception
+    /// value, leaving the handler's result on the stack. The exception payload is
+    /// unused in the eager-IO model, so a `\e -> body` handler binds `e` to 0 and
+    /// lowers `body` directly; any other shape is applied as a closure.
+    fn lower_exn_handler(
+        &mut self,
+        handler: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let mut h = handler;
+        while let Expr::TyLam(_, body, _) = h {
+            h = body;
+        }
+        if let Expr::Lam(param, body, _) = h {
+            let local_idx = *local_count;
+            *local_count += 1;
+            instrs.push(WasmInstr::I32Const(0));
+            instrs.push(WasmInstr::LocalSet(local_idx));
+            locals.insert(param.id, local_idx);
+            return self.lower_expr(body, instrs, locals, local_count, false);
+        }
+        self.lower_expr(handler, instrs, locals, local_count, false)?;
+        let dummy = pint(0);
+        self.apply_closure_on_stack(&[&dummy], instrs, locals, local_count)
+    }
+
     /// Lower a function application chain.
     ///
     /// This is the core dispatch logic. We collect the function and all its
@@ -3769,10 +3819,76 @@ impl<'a> WasmLowering<'a> {
             }
 
             // IO: catch - execute the action, ignore the handler
+            // Exception model (eager IO): `throwIO`/`throw`/`ioError`/`error` set
+            // the pending-exception flag and yield a dummy value; effectful ops
+            // no-op while the flag is set (see `emit_exn_guard` in wasi.rs).
+            Some(n)
+                if args.len() == 1
+                    && matches!(
+                        strip_qualifier(n),
+                        "throwIO" | "throw" | "ioError" | "error" | "errorWithoutStackTrace"
+                    ) =>
+            {
+                instrs.push(WasmInstr::I32Const(1));
+                instrs.push(WasmInstr::GlobalSet(self.runtime.exn_flag_idx));
+                instrs.push(WasmInstr::I32Const(0)); // dummy result
+            }
+            // `readFile`/`readFile'`: there is no filesystem under WASI here, so a
+            // read always fails — model it as a thrown IO exception.
+            Some(n)
+                if args.len() == 1 && matches!(strip_qualifier(n), "readFile" | "readFile'") =>
+            {
+                instrs.push(WasmInstr::I32Const(1));
+                instrs.push(WasmInstr::GlobalSet(self.runtime.exn_flag_idx));
+                instrs.push(WasmInstr::I32Const(0));
+            }
+            // `catch action handler`: run the action; if it raised, clear the flag
+            // and run the handler applied to a dummy exception value.
             Some("catch" | "Control.Exception.catch" | "GHC.IO.catch") if args.len() == 2 => {
-                // Simple implementation: just run the first argument (the IO action).
-                // The exception handler (args[1]) is never invoked since we don't throw.
-                self.lower_expr(args[0], instrs, locals, local_count, is_main)?;
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Drop);
+                instrs.push(WasmInstr::GlobalGet(self.runtime.exn_flag_idx));
+                instrs.push(WasmInstr::If(None));
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::GlobalSet(self.runtime.exn_flag_idx));
+                self.lower_exn_handler(args[1], instrs, locals, local_count)?;
+                instrs.push(WasmInstr::Drop);
+                instrs.push(WasmInstr::End);
+                instrs.push(WasmInstr::I32Const(0)); // catch result: ()
+            }
+            // `finally action cleanup`: run the action, then always run the cleanup
+            // (even if the action raised), preserving any pending exception.
+            Some(n) if args.len() == 2 && matches!(strip_qualifier(n), "finally" | "bracket_") => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Drop);
+                let saved = *local_count;
+                *local_count += 1;
+                instrs.push(WasmInstr::GlobalGet(self.runtime.exn_flag_idx));
+                instrs.push(WasmInstr::LocalSet(saved));
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::GlobalSet(self.runtime.exn_flag_idx));
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Drop);
+                instrs.push(WasmInstr::LocalGet(saved));
+                instrs.push(WasmInstr::GlobalSet(self.runtime.exn_flag_idx));
+                instrs.push(WasmInstr::I32Const(0));
+            }
+            // `onException action handler`: run the action; if it raised, run the
+            // handler (with effects temporarily enabled) but keep the exception
+            // pending so it propagates to an enclosing `catch`.
+            Some(n) if args.len() == 2 && strip_qualifier(n) == "onException" => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Drop);
+                instrs.push(WasmInstr::GlobalGet(self.runtime.exn_flag_idx));
+                instrs.push(WasmInstr::If(None));
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::GlobalSet(self.runtime.exn_flag_idx));
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Drop);
+                instrs.push(WasmInstr::I32Const(1));
+                instrs.push(WasmInstr::GlobalSet(self.runtime.exn_flag_idx));
+                instrs.push(WasmInstr::End);
+                instrs.push(WasmInstr::I32Const(0));
             }
 
             // Fused sum/enumFromTo: sum (enumFromTo lo hi) => loop accumulation
@@ -4823,6 +4939,21 @@ fn plam(v: Var, body: Expr) -> Expr {
 }
 fn pint(n: i64) -> Expr {
     Expr::Lit(Literal::Int(n), Ty::Error, Span::default())
+}
+
+/// Whether a let-binding RHS is a bottom value — a call to `error`/`undefined`/
+/// `throw`. Such a binding is lazy: it must only raise when forced, not when
+/// bound. (The strict WASM backend would otherwise evaluate it eagerly.)
+fn is_bottom_rhs(rhs: &Expr) -> bool {
+    let (head, _) = collect_app_spine(rhs);
+    if let Expr::Var(v, _) = head {
+        matches!(
+            strip_qualifier(v.name.as_str()),
+            "error" | "errorWithoutStackTrace" | "undefined" | "throw"
+        )
+    } else {
+        false
+    }
 }
 fn pcase(scrut: Expr, alts: Vec<Alt>) -> Expr {
     Expr::Case(Box::new(scrut), alts, Ty::Error, Span::default())

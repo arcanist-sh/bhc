@@ -710,6 +710,41 @@ fn test_tier3_bracket_io_wasm() {
     run_wasm_test("tier3_io/bracket_io", Profile::Default);
 }
 
+// Exception model (eager IO): `throwIO`/`error`/`readFile` set a pending-exception
+// flag, effectful ops no-op while it is set, and `catch`/`finally`/`onException`
+// run the handler / cleanup. `readFile` always raises (no filesystem under WASI).
+#[test]
+fn test_tier3_catch_file_error_wasm() {
+    run_wasm_test("tier3_io/catch_file_error", Profile::Default);
+}
+
+#[test]
+fn test_tier3_exception_hierarchy_wasm() {
+    run_wasm_test("tier3_io/exception_hierarchy", Profile::Default);
+}
+
+#[test]
+fn test_tier3_exception_test_wasm() {
+    run_wasm_test("tier3_io/exception_test", Profile::Default);
+}
+
+// Lazy bottom let-bindings (`let x = error …`): the strict backend must not
+// evaluate the RHS at the binding site; forcing is deferred to (conditional) use.
+#[test]
+fn test_tier3_lazy_let_wasm() {
+    run_wasm_test("tier3_io/lazy_let", Profile::Default);
+}
+
+#[test]
+fn test_tier3_lazy_let_basic_wasm() {
+    run_wasm_test("tier3_io/lazy_let_basic", Profile::Default);
+}
+
+#[test]
+fn test_tier3_lazy_let_conditional_wasm() {
+    run_wasm_test("tier3_io/lazy_let_conditional", Profile::Default);
+}
+
 // A user-defined monad with its own bind/return.
 #[test]
 fn test_tier3_user_monad_wasm() {

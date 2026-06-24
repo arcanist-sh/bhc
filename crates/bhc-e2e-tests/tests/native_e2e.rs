@@ -114,6 +114,13 @@ fn test_tier2_from_integral_native() {
     run_native_test("tier2_functions/from_integral", Profile::Default);
 }
 
+// List prelude including all/any with a user-defined predicate whose Bool
+// result is a tagged-int-as-pointer (must not be dereferenced as a heap ADT).
+#[test]
+fn test_tier2_list_prelude_native() {
+    run_native_test("tier2_functions/list_prelude", Profile::Default);
+}
+
 #[test]
 fn test_tier2_factorial_native() {
     run_native_test("tier2_functions/factorial", Profile::Default);

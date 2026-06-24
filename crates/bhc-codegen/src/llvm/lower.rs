@@ -27513,9 +27513,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("any: pred returned void".to_string()))?;
 
-        // Check if result is True (ADT tag != 0)
+        // Check if result is True (Bool tag != 0). Use the discriminating
+        // `extract_bool_tag`: the predicate may return a tagged-int-as-pointer
+        // (0/1) or a heap Bool ADT, and `extract_adt_tag` would dereference a
+        // tagged value as a heap pointer and segfault.
         let result_int = match result {
-            BasicValueEnum::PointerValue(p) => self.extract_adt_tag(p)?,
+            BasicValueEnum::PointerValue(p) => self.extract_bool_tag(p)?,
             BasicValueEnum::IntValue(i) => i,
             _ => {
                 return Err(CodegenError::TypeError(
@@ -27527,11 +27530,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .builder()
             .build_int_compare(inkwell::IntPredicate::NE, result_int, i64_zero, "pred_true")
             .map_err(|e| CodegenError::Internal(format!("any: cmp: {:?}", e)))?;
+        // `extract_bool_tag` may have split the body, so the loop back-edge's
+        // actual predecessor is the current block, not `loop_body`.
+        let body_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("any: no current block".to_string()))?;
         self.builder()
             .build_conditional_branch(is_true, return_true, loop_header)
             .map_err(|e| CodegenError::Internal(format!("any: branch: {:?}", e)))?;
 
-        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail, loop_body)]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail, body_end)]);
 
         let true_tag = self.type_mapper().i64_type().const_int(1, false);
         let false_tag = self.type_mapper().i64_type().const_zero();
@@ -27647,9 +27656,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("all: pred returned void".to_string()))?;
 
-        // Check if result is False (ADT tag == 0) → short-circuit
+        // Check if result is False (Bool tag == 0) → short-circuit. The
+        // predicate may return a tagged-int-as-pointer (0/1, e.g. a `==`
+        // comparison) or a heap Bool ADT, so use the discriminating
+        // `extract_bool_tag` — `extract_adt_tag` would dereference a small
+        // tagged value as a heap pointer and segfault.
         let result_int = match result {
-            BasicValueEnum::PointerValue(p) => self.extract_adt_tag(p)?,
+            BasicValueEnum::PointerValue(p) => self.extract_bool_tag(p)?,
             BasicValueEnum::IntValue(i) => i,
             _ => {
                 return Err(CodegenError::TypeError(
@@ -27666,11 +27679,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "pred_false",
             )
             .map_err(|e| CodegenError::Internal(format!("all: cmp: {:?}", e)))?;
+        // `extract_bool_tag` may have split the body into extra blocks, so the
+        // loop back-edge's actual predecessor is the current block, not
+        // `loop_body`.
+        let body_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("all: no current block".to_string()))?;
         self.builder()
             .build_conditional_branch(is_false, return_false, loop_header)
             .map_err(|e| CodegenError::Internal(format!("all: branch: {:?}", e)))?;
 
-        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail, loop_body)]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail, body_end)]);
 
         let true_tag = self.type_mapper().i64_type().const_int(1, false);
         let false_tag = self.type_mapper().i64_type().const_zero();

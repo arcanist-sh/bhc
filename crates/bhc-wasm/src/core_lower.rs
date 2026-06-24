@@ -185,6 +185,8 @@ pub fn lower_core_module(
     lowering.register_inline_bodies(&binds);
     lowering.register_fn_bodies(&binds);
     lowering.register_arities(&binds);
+    lowering.register_bool_returning_fns(&binds);
+    lowering.register_pattern_constructors(&binds);
 
     // First pass: register all top-level function names so we can resolve calls
     for bind in &binds {
@@ -343,6 +345,11 @@ struct WasmLowering<'a> {
     /// `(param_ids, body)`. Used by the compile-time arbitrary-precision integer
     /// evaluator (`const_eval_bigint`) to unfold calls like `factorial 50`.
     fn_bodies: FxHashMap<Symbol, (Vec<VarId>, Expr)>,
+    /// Names of top-level functions whose (curried) result type is `Bool`, taken
+    /// from their binding signatures. Lets `show (f …)` render `True`/`False`
+    /// when `f`'s result type is otherwise erased at the call site (e.g. a
+    /// `data family` accessor like `getBool`).
+    bool_returning_fns: FxHashSet<String>,
     /// Bodies of non-recursive top-level functions eligible for inlining,
     /// keyed by name: `(param_ids, body)`. Lets us evaluate
     /// dictionary-specialized typeclass methods (and the closures they
@@ -388,6 +395,7 @@ impl<'a> WasmLowering<'a> {
             ctx_stacks: FxHashMap::default(),
             subst: FxHashMap::default(),
             fn_bodies: FxHashMap::default(),
+            bool_returning_fns: FxHashSet::default(),
             inline_bodies: FxHashMap::default(),
             inlining: FxHashSet::default(),
             pending_closures: Vec::new(),
@@ -606,6 +614,92 @@ impl<'a> WasmLowering<'a> {
                 Bind::Rec(bindings) => {
                     for (var, expr) in bindings {
                         record(var, expr);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Record every top-level function whose curried result type is `Bool`, so
+    /// `show (f …)` can render `True`/`False` even though the call site's type is
+    /// erased (e.g. a `data family` accessor). Reads the binding signatures.
+    fn register_bool_returning_fns(&mut self, binds: &[Bind]) {
+        let mut record = |var: &Var| {
+            if final_result_is_bool(&var.ty) {
+                self.bool_returning_fns
+                    .insert(var.name.as_str().to_string());
+            }
+        };
+        for bind in binds {
+            match bind {
+                Bind::NonRec(var, _) => record(var),
+                Bind::Rec(bindings) => {
+                    for (var, _) in bindings {
+                        record(var);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Harvest data constructors that appear only in patterns (never in the
+    /// module's constructor metadata) — notably `data family`/`data instance`
+    /// constructors, which the frontend does not surface into Core. Each is
+    /// registered from its pattern's tag/arity so both construction and matching
+    /// resolve.
+    fn register_pattern_constructors(&mut self, binds: &[Bind]) {
+        fn visit(this: &mut WasmLowering, e: &Expr) {
+            match e {
+                Expr::App(f, x, _) => {
+                    visit(this, f);
+                    visit(this, x);
+                }
+                Expr::TyApp(inner, _, _)
+                | Expr::Lam(_, inner, _)
+                | Expr::TyLam(_, inner, _)
+                | Expr::Lazy(inner, _)
+                | Expr::Cast(inner, _, _)
+                | Expr::Tick(_, inner, _) => visit(this, inner),
+                Expr::Let(bind, body, _) => {
+                    match bind.as_ref() {
+                        Bind::NonRec(_, rhs) => visit(this, rhs),
+                        Bind::Rec(bs) => {
+                            for (_, rhs) in bs {
+                                visit(this, rhs);
+                            }
+                        }
+                    }
+                    visit(this, body);
+                }
+                Expr::Case(scrut, alts, _, _) => {
+                    visit(this, scrut);
+                    for alt in alts {
+                        if let AltCon::DataCon(dc) = &alt.con {
+                            let name = dc.name.as_str();
+                            if this.lookup_constructor(name).is_none()
+                                && !this.newtype_cons.contains(name)
+                            {
+                                this.con_map.insert(
+                                    name.to_string(),
+                                    ConInfo {
+                                        tag: dc.tag,
+                                        arity: dc.arity,
+                                    },
+                                );
+                            }
+                        }
+                        visit(this, &alt.rhs);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for bind in binds {
+            match bind {
+                Bind::NonRec(_, e) => visit(self, e),
+                Bind::Rec(bindings) => {
+                    for (_, e) in bindings {
+                        visit(self, e);
                     }
                 }
             }
@@ -2574,7 +2668,10 @@ impl<'a> WasmLowering<'a> {
                 let (head, _) = collect_app_spine(e);
                 if let Expr::Var(hv, _) = head {
                     let name = hv.name.as_str();
-                    if is_bool_valued_op(name) || returns_bool_fn(name) {
+                    if is_bool_valued_op(name)
+                        || returns_bool_fn(name)
+                        || self.bool_returning_fns.contains(name)
+                    {
                         return ShowKind::Bool;
                     }
                     if returns_double_fn(name) {
@@ -9867,6 +9964,20 @@ fn returns_double_fn(name: &str) -> bool {
 
 /// Whether a prelude function always returns a `Bool`, so its result should
 /// `show` as `True`/`False` even when the static type is erased.
+/// Whether a (possibly curried, possibly `forall`-quantified) function type's
+/// final result is `Bool`. Used to record `Bool`-returning functions for `show`.
+fn final_result_is_bool(ty: &Ty) -> bool {
+    let mut t = ty;
+    loop {
+        match t {
+            Ty::Fun(_, res) => t = res,
+            Ty::Forall(_, inner) => t = inner,
+            Ty::Con(c) => return c.name.as_str() == "Bool",
+            _ => return false,
+        }
+    }
+}
+
 fn returns_bool_fn(name: &str) -> bool {
     matches!(
         strip_qualifier(name),

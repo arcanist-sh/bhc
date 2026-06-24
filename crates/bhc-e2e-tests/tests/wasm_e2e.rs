@@ -941,6 +941,15 @@ fn test_tier3_integer_large_wasm() {
     run_wasm_test("tier3_io/integer_large", Profile::Default);
 }
 
+// data family / data instance: the instance constructors are harvested from
+// their patterns (the frontend does not surface them into Core), and an
+// accessor's erased Bool result is recovered from its binding signature so
+// `show` renders True/False.
+#[test]
+fn test_tier3_data_family_basic_wasm() {
+    run_wasm_test("tier3_io/data_family_basic", Profile::Default);
+}
+
 // Char predicates with showBool / showChar (one-char quoted string).
 #[test]
 fn test_tier3_char_predicates_wasm() {

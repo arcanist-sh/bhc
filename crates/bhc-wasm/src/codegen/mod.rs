@@ -111,6 +111,14 @@ pub struct RuntimeIndices {
     /// eager-IO exception model. Set by `throwIO`/`error`/`readFile`, checked by
     /// effectful ops (which no-op while set), cleared by `catch`.
     pub exn_flag_idx: u32,
+    /// Index of `file_write` (path, content): store into the in-memory file table.
+    pub file_write_idx: u32,
+    /// Index of `file_read` (path) -> content: look up the file table, raising
+    /// (via `exn_flag`) when the path is absent.
+    pub file_read_idx: u32,
+    /// Index of `file_append` (path, content): append to an existing file's
+    /// contents, or create it if absent.
+    pub file_append_idx: u32,
     /// Offset of the newline byte in the data segment.
     pub newline_offset: u32,
 }
@@ -617,6 +625,17 @@ impl WasmModule {
             init: WasmInstr::I32Const(0),
         });
 
+        // Add the in-memory file-table head global (0 = empty). Backs the
+        // `writeFile`/`readFile`/`appendFile` model (there is no real filesystem
+        // under WASI here). Each node is `[path | content | next]` (12 bytes),
+        // keyed by interned path pointer.
+        let file_table_idx = self.add_global(WasmGlobal {
+            name: Some("file_table".to_string()),
+            ty: WasmType::I32,
+            mutable: true,
+            init: WasmInstr::I32Const(0),
+        });
+
         // Add a newline byte in the data segment
         let newline_offset = wasi::NEWLINE_DATA_OFFSET;
         self.add_data_segment(newline_offset, vec![b'\n']);
@@ -668,6 +687,15 @@ impl WasmModule {
         let show_string_func = wasi::generate_show_string(alloc_idx, heap_ptr_idx);
         let show_string_idx = self.add_function(show_string_func);
 
+        // In-memory file table operations.
+        let file_write_func = wasi::generate_file_write(alloc_idx, file_table_idx);
+        let file_write_idx = self.add_function(file_write_func);
+        let file_read_func = wasi::generate_file_read(file_table_idx, exn_flag_idx);
+        let file_read_idx = self.add_function(file_read_func);
+        let file_append_func =
+            wasi::generate_file_append(alloc_idx, concat_str_idx, file_table_idx);
+        let file_append_idx = self.add_function(file_append_func);
+
         RuntimeIndices {
             fd_write_idx,
             proc_exit_idx,
@@ -686,6 +714,9 @@ impl WasmModule {
             read_all_idx,
             show_string_idx,
             exn_flag_idx,
+            file_write_idx,
+            file_read_idx,
+            file_append_idx,
             newline_offset,
         }
     }

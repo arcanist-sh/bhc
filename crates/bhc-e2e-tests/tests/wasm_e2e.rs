@@ -846,6 +846,14 @@ fn test_tier3_text_encoding_wasm() {
     run_wasm_test("tier3_io/text_encoding", Profile::Default);
 }
 
+// Data.Text.IO write/read/append over the in-memory file table (no real
+// filesystem under WASI): writeFile then readFile round-trips, appendFile
+// concatenates.
+#[test]
+fn test_tier3_text_io_wasm() {
+    run_wasm_test("tier3_io/text_io", Profile::Default);
+}
+
 #[test]
 fn test_tier3_lazy_text_basic_wasm() {
     run_wasm_test("tier3_io/lazy_text_basic", Profile::Default);

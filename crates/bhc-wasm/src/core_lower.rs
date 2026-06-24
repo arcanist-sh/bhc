@@ -3596,7 +3596,9 @@ impl<'a> WasmLowering<'a> {
                 )?;
             }
 
-            Some("putStrLn" | "System.IO.putStrLn" | "GHC.IO.putStrLn") if args.len() == 1 => {
+            // `putStrLn` and its qualified forms (`System.IO`, `GHC.IO`,
+            // `Data.Text.IO`, …) — Text is a pstr, so they share this path.
+            Some(n) if args.len() == 1 && strip_qualifier(n) == "putStrLn" => {
                 self.lower_cont(
                     args[0],
                     Cont::PrintStr { newline: true },
@@ -3608,7 +3610,7 @@ impl<'a> WasmLowering<'a> {
             }
 
             // IO: putStr "..." => print_str(offset, len)
-            Some("putStr" | "System.IO.putStr" | "GHC.IO.putStr") if args.len() == 1 => {
+            Some(n) if args.len() == 1 && strip_qualifier(n) == "putStr" => {
                 self.lower_cont(
                     args[0],
                     Cont::PrintStr { newline: false },
@@ -3833,14 +3835,27 @@ impl<'a> WasmLowering<'a> {
                 instrs.push(WasmInstr::GlobalSet(self.runtime.exn_flag_idx));
                 instrs.push(WasmInstr::I32Const(0)); // dummy result
             }
-            // `readFile`/`readFile'`: there is no filesystem under WASI here, so a
-            // read always fails — model it as a thrown IO exception.
+            // File IO over the in-memory file table (no real filesystem under
+            // WASI here). `readFile` raises if the path was never written;
+            // `writeFile`/`appendFile` populate the table. Covers the `System.IO`
+            // and `Data.Text.IO` variants alike (qualifier stripped).
             Some(n)
                 if args.len() == 1 && matches!(strip_qualifier(n), "readFile" | "readFile'") =>
             {
-                instrs.push(WasmInstr::I32Const(1));
-                instrs.push(WasmInstr::GlobalSet(self.runtime.exn_flag_idx));
-                instrs.push(WasmInstr::I32Const(0));
+                self.lower_expr(args[0], instrs, locals, local_count, false)?; // path
+                instrs.push(WasmInstr::Call(self.runtime.file_read_idx));
+            }
+            Some(n) if args.len() == 2 && strip_qualifier(n) == "writeFile" => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?; // path
+                self.lower_expr(args[1], instrs, locals, local_count, false)?; // content
+                instrs.push(WasmInstr::Call(self.runtime.file_write_idx));
+                instrs.push(WasmInstr::I32Const(0)); // ()
+            }
+            Some(n) if args.len() == 2 && strip_qualifier(n) == "appendFile" => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?; // path
+                self.lower_expr(args[1], instrs, locals, local_count, false)?; // content
+                instrs.push(WasmInstr::Call(self.runtime.file_append_idx));
+                instrs.push(WasmInstr::I32Const(0)); // ()
             }
             // `catch action handler`: run the action; if it raised, clear the flag
             // and run the handler applied to a dummy exception value.

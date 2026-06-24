@@ -850,6 +850,162 @@ pub fn generate_int_to_str(alloc_idx: u32) -> WasmFunc {
     func
 }
 
+/// Generate `file_write(path, content)`: store `content` for `path` in the
+/// in-memory file table, replacing any existing entry. Paths are compared by
+/// pointer (interned string literals share a pointer). Each node is
+/// `[path | content | next]` (12 bytes).
+pub fn generate_file_write(alloc_idx: u32, file_table_idx: u32) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(
+        vec![WasmType::I32, WasmType::I32], // path, content
+        vec![],
+    ));
+    func.name = Some("file_write".to_string());
+    func.exported = true;
+    let cur = func.add_local(WasmType::I32);
+    let node = func.add_local(WasmType::I32);
+
+    func.emit(WasmInstr::GlobalGet(file_table_idx));
+    func.emit(WasmInstr::LocalSet(cur));
+    func.emit(WasmInstr::Block(None)); // depth 1: break => not found => prepend
+    func.emit(WasmInstr::Loop(None)); // depth 0
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::BrIf(1)); // cur == 0 -> exit to prepend
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Load(2, 0)); // node.path
+    func.emit(WasmInstr::LocalGet(0)); // path
+    func.emit(WasmInstr::I32Eq);
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::LocalGet(1)); // content
+    func.emit(WasmInstr::I32Store(2, 4)); // node.content = content
+    func.emit(WasmInstr::Return);
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Load(2, 8)); // node.next
+    func.emit(WasmInstr::LocalSet(cur));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End); // loop
+    func.emit(WasmInstr::End); // block
+                               // Prepend a new node {path, content, old head}.
+    func.emit(WasmInstr::I32Const(12));
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(node));
+    func.emit(WasmInstr::LocalGet(node));
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Store(2, 0));
+    func.emit(WasmInstr::LocalGet(node));
+    func.emit(WasmInstr::LocalGet(1));
+    func.emit(WasmInstr::I32Store(2, 4));
+    func.emit(WasmInstr::LocalGet(node));
+    func.emit(WasmInstr::GlobalGet(file_table_idx));
+    func.emit(WasmInstr::I32Store(2, 8));
+    func.emit(WasmInstr::LocalGet(node));
+    func.emit(WasmInstr::GlobalSet(file_table_idx));
+    func.emit(WasmInstr::End);
+    func
+}
+
+/// Generate `file_read(path) -> content`: look up the in-memory file table by
+/// pointer. A missing path raises (sets `exn_flag`) and returns a dummy 0 —
+/// modelling "file not found".
+pub fn generate_file_read(file_table_idx: u32, exn_flag_idx: u32) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(
+        vec![WasmType::I32], // path
+        vec![WasmType::I32], // content
+    ));
+    func.name = Some("file_read".to_string());
+    func.exported = true;
+    let cur = func.add_local(WasmType::I32);
+
+    func.emit(WasmInstr::GlobalGet(file_table_idx));
+    func.emit(WasmInstr::LocalSet(cur));
+    func.emit(WasmInstr::Block(None)); // depth 1: break => not found
+    func.emit(WasmInstr::Loop(None)); // depth 0
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::BrIf(1)); // cur == 0 -> not found
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Load(2, 0)); // node.path
+    func.emit(WasmInstr::LocalGet(0)); // path
+    func.emit(WasmInstr::I32Eq);
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Load(2, 4)); // node.content
+    func.emit(WasmInstr::Return);
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Load(2, 8)); // node.next
+    func.emit(WasmInstr::LocalSet(cur));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End); // loop
+    func.emit(WasmInstr::End); // block
+                               // Not found: raise and return a dummy value.
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::GlobalSet(exn_flag_idx));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::End);
+    func
+}
+
+/// Generate `file_append(path, content)`: append `content` to an existing file's
+/// contents (via `concat_str`), or create the file if it is absent.
+pub fn generate_file_append(alloc_idx: u32, concat_str_idx: u32, file_table_idx: u32) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(
+        vec![WasmType::I32, WasmType::I32], // path, content
+        vec![],
+    ));
+    func.name = Some("file_append".to_string());
+    func.exported = true;
+    let cur = func.add_local(WasmType::I32);
+    let node = func.add_local(WasmType::I32);
+
+    func.emit(WasmInstr::GlobalGet(file_table_idx));
+    func.emit(WasmInstr::LocalSet(cur));
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::BrIf(1));
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Eq);
+    func.emit(WasmInstr::If(None));
+    // node.content = concat_str(node.content, content)
+    func.emit(WasmInstr::LocalGet(cur)); // store address
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Load(2, 4)); // old content
+    func.emit(WasmInstr::LocalGet(1)); // new content
+    func.emit(WasmInstr::Call(concat_str_idx));
+    func.emit(WasmInstr::I32Store(2, 4));
+    func.emit(WasmInstr::Return);
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::LocalGet(cur));
+    func.emit(WasmInstr::I32Load(2, 8));
+    func.emit(WasmInstr::LocalSet(cur));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End); // loop
+    func.emit(WasmInstr::End); // block
+                               // Absent: prepend a new node {path, content, old head}.
+    func.emit(WasmInstr::I32Const(12));
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(node));
+    func.emit(WasmInstr::LocalGet(node));
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Store(2, 0));
+    func.emit(WasmInstr::LocalGet(node));
+    func.emit(WasmInstr::LocalGet(1));
+    func.emit(WasmInstr::I32Store(2, 4));
+    func.emit(WasmInstr::LocalGet(node));
+    func.emit(WasmInstr::GlobalGet(file_table_idx));
+    func.emit(WasmInstr::I32Store(2, 8));
+    func.emit(WasmInstr::LocalGet(node));
+    func.emit(WasmInstr::GlobalSet(file_table_idx));
+    func.emit(WasmInstr::End);
+    func
+}
+
 /// Generate a `print_pstr` function that prints a length-prefixed string.
 ///
 /// The parameter points to a `[len: i32 | bytes...]` block (the runtime

@@ -262,6 +262,14 @@ fn test_tier2_show_types_wasm() {
     run_wasm_test("tier2_functions/show_types", Profile::Default);
 }
 
+// The BHC prelude `showInt`/`showBool`/`showChar` builtins: `showInt` renders an
+// Int via the integer formatter, `showBool` from the runtime tag, and `showChar`
+// wraps a one-char string in single quotes.
+#[test]
+fn test_tier3_show_types_wasm() {
+    run_wasm_test("tier3_io/show_types", Profile::Default);
+}
+
 // =============================================================================
 // Floating point (boxed f64)
 // =============================================================================

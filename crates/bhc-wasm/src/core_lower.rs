@@ -3862,6 +3862,12 @@ impl<'a> WasmLowering<'a> {
                     instrs.push(WasmInstr::LocalGet(acc));
                 }
             }
+            // showInt n = show (n :: Int): an Int is a raw i32, so render it
+            // directly with the integer formatter.
+            Some(n) if args.len() == 1 && strip_qualifier(n) == "showInt" => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
+            }
             // showDouble x = show (x :: Double): render via the double formatter.
             Some(n) if args.len() == 1 && strip_qualifier(n) == "showDouble" => {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;

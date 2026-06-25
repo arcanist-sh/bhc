@@ -5064,8 +5064,22 @@ impl<'a> WasmLowering<'a> {
         local_count: &mut u32,
         is_main: bool,
     ) -> WasmResult<()> {
+        // A `case` matching cons/nil patterns (`(c:cs)` / `[]`) may be fed a
+        // String, which has the length-prefixed `pstr` representation rather than
+        // a cons-`[Char]`. Normalize a pstr scrutinee to a cons list first so
+        // user-defined recursive string functions (parsers, `stringEq`, …) match
+        // correctly; real cons lists and `nil` pass through unchanged (only a
+        // marker check), and once a string is converted its cons tail recurses
+        // without re-converting.
+        let is_list_match = alts.iter().any(|a| {
+            matches!(&a.con, AltCon::DataCon(dc) if matches!(strip_qualifier(dc.name.as_str()), ":" | "[]"))
+        });
         // Evaluate scrutinee and store in a local
-        self.lower_expr(scrut, instrs, locals, local_count, false)?;
+        if is_list_match {
+            self.emit_ensure_charlist(scrut, instrs, locals, local_count)?;
+        } else {
+            self.lower_expr(scrut, instrs, locals, local_count, false)?;
+        }
         let scrut_local = *local_count;
         *local_count += 1;
         instrs.push(WasmInstr::LocalSet(scrut_local));

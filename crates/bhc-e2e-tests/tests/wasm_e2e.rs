@@ -957,6 +957,14 @@ fn test_tier3_integer_large_wasm() {
     run_wasm_test("tier3_io/integer_large", Profile::Default);
 }
 
+// A larger JSON-ish key/value parser (recursive descent over Strings). Exercises
+// the pstr->cons normalization at cons/nil case scrutinees (so user functions
+// can pattern-match string literals as [Char]) and short-circuiting &&/||.
+#[test]
+fn test_tier3_milestone_e_json_wasm() {
+    run_wasm_test("tier3_io/milestone_e_json", Profile::Default);
+}
+
 // data family / data instance: the instance constructors are harvested from
 // their patterns (the frontend does not surface them into Core), and an
 // accessor's erased Bool result is recovered from its binding signature so

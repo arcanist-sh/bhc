@@ -3199,6 +3199,14 @@ impl<'a> WasmLowering<'a> {
             if !self.inlining.contains(&var.name) {
                 if let Some((param_ids, body)) = self.inline_bodies.get(&var.name).cloned() {
                     if args.len() == param_ids.len() {
+                        // Alpha-rename the body's bound variables (params and any
+                        // local binders) to fresh ids before inlining. Without
+                        // this, a callee parameter id can collide with a caller
+                        // parameter id (VarIds are not unique across modules), so
+                        // the `subst` map aliases them into a self-referential
+                        // substitution and inlining loops forever (e.g. a
+                        // transitive multi-module call chain).
+                        let (param_ids, body) = self.alpha_rename_for_inline(&param_ids, &body);
                         self.inlining.insert(var.name);
                         let result = self.inline_call(
                             &param_ids,
@@ -3229,6 +3237,126 @@ impl<'a> WasmLowering<'a> {
         }
 
         Ok(false)
+    }
+
+    /// Produce a copy of an inlinable function body with all of its bound
+    /// variables — the parameters and any `let`/lambda/`case` binders — renamed
+    /// to fresh ids, returning the renamed parameter ids alongside. This keeps an
+    /// inlined callee's variables disjoint from the caller's, which matters
+    /// because VarIds are not unique across modules.
+    fn alpha_rename_for_inline(
+        &mut self,
+        param_ids: &[VarId],
+        body: &Expr,
+    ) -> (Vec<VarId>, Expr) {
+        let mut map: FxHashMap<VarId, VarId> = FxHashMap::default();
+        let new_params: Vec<VarId> = param_ids
+            .iter()
+            .map(|id| {
+                let fresh = VarId::new(self.fresh_id());
+                map.insert(*id, fresh);
+                fresh
+            })
+            .collect();
+        let new_body = self.rename_expr(body, &mut map);
+        (new_params, new_body)
+    }
+
+    /// Rename bound-variable references in `expr` per `map`, allocating fresh ids
+    /// for binders introduced within `expr` (lambda params, `let` binders, `case`
+    /// alternative binders). References not in `map` (top-level names, the
+    /// already-renamed params) are left as-is.
+    fn rename_expr(&mut self, expr: &Expr, map: &mut FxHashMap<VarId, VarId>) -> Expr {
+        match expr {
+            Expr::Var(v, sp) => {
+                if let Some(&new) = map.get(&v.id) {
+                    let mut nv = v.clone();
+                    nv.id = new;
+                    Expr::Var(nv, *sp)
+                } else {
+                    expr.clone()
+                }
+            }
+            Expr::App(f, a, sp) => Expr::App(
+                Box::new(self.rename_expr(f, map)),
+                Box::new(self.rename_expr(a, map)),
+                *sp,
+            ),
+            Expr::TyApp(inner, ty, sp) => {
+                Expr::TyApp(Box::new(self.rename_expr(inner, map)), ty.clone(), *sp)
+            }
+            Expr::TyLam(tv, inner, sp) => {
+                Expr::TyLam(tv.clone(), Box::new(self.rename_expr(inner, map)), *sp)
+            }
+            Expr::Cast(inner, co, sp) => {
+                Expr::Cast(Box::new(self.rename_expr(inner, map)), co.clone(), *sp)
+            }
+            Expr::Tick(t, inner, sp) => {
+                Expr::Tick(t.clone(), Box::new(self.rename_expr(inner, map)), *sp)
+            }
+            Expr::Lazy(inner, sp) => Expr::Lazy(Box::new(self.rename_expr(inner, map)), *sp),
+            Expr::Lam(param, inner, sp) => {
+                let mut np = param.clone();
+                np.id = VarId::new(self.fresh_id());
+                map.insert(param.id, np.id);
+                Expr::Lam(np, Box::new(self.rename_expr(inner, map)), *sp)
+            }
+            Expr::Let(bind, inner, sp) => {
+                let new_bind = match bind.as_ref() {
+                    Bind::NonRec(v, rhs) => {
+                        // RHS is in the outer scope; the binder is fresh for the body.
+                        let new_rhs = self.rename_expr(rhs, map);
+                        let mut nv = v.clone();
+                        nv.id = VarId::new(self.fresh_id());
+                        map.insert(v.id, nv.id);
+                        Bind::NonRec(nv, Box::new(new_rhs))
+                    }
+                    Bind::Rec(binds) => {
+                        // Binders are in scope for all RHSs (and the body).
+                        let new_vars: Vec<Var> = binds
+                            .iter()
+                            .map(|(v, _)| {
+                                let mut nv = v.clone();
+                                nv.id = VarId::new(self.fresh_id());
+                                map.insert(v.id, nv.id);
+                                nv
+                            })
+                            .collect();
+                        let new_binds = new_vars
+                            .into_iter()
+                            .zip(binds.iter())
+                            .map(|(nv, (_, rhs))| (nv, Box::new(self.rename_expr(rhs, map))))
+                            .collect();
+                        Bind::Rec(new_binds)
+                    }
+                };
+                Expr::Let(Box::new(new_bind), Box::new(self.rename_expr(inner, map)), *sp)
+            }
+            Expr::Case(scrut, alts, ty, sp) => {
+                let new_scrut = self.rename_expr(scrut, map);
+                let new_alts = alts
+                    .iter()
+                    .map(|alt| {
+                        let mut new_alt = alt.clone();
+                        new_alt.binders = alt
+                            .binders
+                            .iter()
+                            .map(|b| {
+                                let mut nb = b.clone();
+                                nb.id = VarId::new(self.fresh_id());
+                                map.insert(b.id, nb.id);
+                                nb
+                            })
+                            .collect();
+                        new_alt.rhs = self.rename_expr(&alt.rhs, map);
+                        new_alt
+                    })
+                    .collect();
+                Expr::Case(Box::new(new_scrut), new_alts, ty.clone(), *sp)
+            }
+            // Leaf / type-only nodes: no bound variables to rename.
+            Expr::Lit(..) | Expr::Type(..) | Expr::Coercion(..) => expr.clone(),
+        }
     }
 
     /// Inline a call: bind each parameter to its argument expression in

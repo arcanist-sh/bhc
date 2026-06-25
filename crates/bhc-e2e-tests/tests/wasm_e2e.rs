@@ -391,6 +391,14 @@ fn test_tier2_multimodule_shadow_wasm() {
     run_wasm_test("tier2_functions/multimodule_shadow", Profile::Default);
 }
 
+// A transitive import chain (Main -> Middle -> Base): inlining a callee across
+// modules alpha-renames its body, since VarIds are not unique across modules
+// (otherwise the substitution aliases and inlining loops).
+#[test]
+fn test_tier2_multimodule_chain_wasm() {
+    run_wasm_test("tier2_functions/multimodule_chain", Profile::Default);
+}
+
 // List `++` and `reverse` over cons cells, dispatched away from string concat
 // by operand kind (literal list / concrete non-Char list type / list-returning
 // function). String `++` is unaffected.

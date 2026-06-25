@@ -1542,6 +1542,10 @@ impl<'a> WasmLowering<'a> {
                 return Ok(());
             }
         }
+        // A `Ratio Int` renders as `"num % den"` from its normalized pair.
+        if is_rational_expr(arg) {
+            return self.emit_show_rational(arg, instrs, locals, local_count);
+        }
         // A `Maybe`-returning call (`readMaybe`) is rendered by walking the
         // runtime value: `Nothing` (the nullary tag 0) or `Just <field>`.
         {
@@ -2928,6 +2932,221 @@ impl<'a> WasmLowering<'a> {
         self.apply_closure_on_stack(&[&dummy], instrs, locals, local_count)
     }
 
+    /// Lower a binary arithmetic operation on two `Ratio Int` operands. Loads
+    /// `(n1,d1)` and `(n2,d2)`, computes the raw numerator/denominator for `op`,
+    /// and normalizes the result via `make_rational`.
+    fn emit_rational_binop(
+        &mut self,
+        op: &str,
+        a: &Expr,
+        b: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let n1 = *local_count;
+        let d1 = *local_count + 1;
+        let n2 = *local_count + 2;
+        let d2 = *local_count + 3;
+        let p = *local_count + 4;
+        *local_count += 5;
+        // p = a; n1=[p], d1=[p+4]
+        self.lower_expr(a, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalTee(p));
+        instrs.push(WasmInstr::I32Load(2, 0));
+        instrs.push(WasmInstr::LocalSet(n1));
+        instrs.push(WasmInstr::LocalGet(p));
+        instrs.push(WasmInstr::I32Load(2, 4));
+        instrs.push(WasmInstr::LocalSet(d1));
+        // p = b; n2=[p], d2=[p+4]
+        self.lower_expr(b, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalTee(p));
+        instrs.push(WasmInstr::I32Load(2, 0));
+        instrs.push(WasmInstr::LocalSet(n2));
+        instrs.push(WasmInstr::LocalGet(p));
+        instrs.push(WasmInstr::I32Load(2, 4));
+        instrs.push(WasmInstr::LocalSet(d2));
+
+        // Push raw numerator then denominator for `make_rational`.
+        match op {
+            "+" | "-" => {
+                // num = n1*d2 (-/+) n2*d1
+                instrs.push(WasmInstr::LocalGet(n1));
+                instrs.push(WasmInstr::LocalGet(d2));
+                instrs.push(WasmInstr::I32Mul);
+                instrs.push(WasmInstr::LocalGet(n2));
+                instrs.push(WasmInstr::LocalGet(d1));
+                instrs.push(WasmInstr::I32Mul);
+                instrs.push(if op == "+" {
+                    WasmInstr::I32Add
+                } else {
+                    WasmInstr::I32Sub
+                });
+                // den = d1*d2
+                instrs.push(WasmInstr::LocalGet(d1));
+                instrs.push(WasmInstr::LocalGet(d2));
+                instrs.push(WasmInstr::I32Mul);
+            }
+            "*" => {
+                instrs.push(WasmInstr::LocalGet(n1));
+                instrs.push(WasmInstr::LocalGet(n2));
+                instrs.push(WasmInstr::I32Mul);
+                instrs.push(WasmInstr::LocalGet(d1));
+                instrs.push(WasmInstr::LocalGet(d2));
+                instrs.push(WasmInstr::I32Mul);
+            }
+            _ => {
+                // "/": (n1*d2) / (d1*n2)
+                instrs.push(WasmInstr::LocalGet(n1));
+                instrs.push(WasmInstr::LocalGet(d2));
+                instrs.push(WasmInstr::I32Mul);
+                instrs.push(WasmInstr::LocalGet(d1));
+                instrs.push(WasmInstr::LocalGet(n2));
+                instrs.push(WasmInstr::I32Mul);
+            }
+        }
+        instrs.push(WasmInstr::Call(self.runtime.make_rational_idx));
+        Ok(())
+    }
+
+    /// Lower `==`/`/=` on two normalized `Ratio Int` values: equal iff their
+    /// numerators and denominators match. Leaves a `Bool` tag (0/1) on the stack.
+    fn emit_rational_eq(
+        &mut self,
+        negate: bool,
+        a: &Expr,
+        b: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let pa = *local_count;
+        let pb = *local_count + 1;
+        *local_count += 2;
+        self.lower_expr(a, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalSet(pa));
+        self.lower_expr(b, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalSet(pb));
+        // (n1==n2) & (d1==d2)
+        instrs.push(WasmInstr::LocalGet(pa));
+        instrs.push(WasmInstr::I32Load(2, 0));
+        instrs.push(WasmInstr::LocalGet(pb));
+        instrs.push(WasmInstr::I32Load(2, 0));
+        instrs.push(WasmInstr::I32Eq);
+        instrs.push(WasmInstr::LocalGet(pa));
+        instrs.push(WasmInstr::I32Load(2, 4));
+        instrs.push(WasmInstr::LocalGet(pb));
+        instrs.push(WasmInstr::I32Load(2, 4));
+        instrs.push(WasmInstr::I32Eq);
+        instrs.push(WasmInstr::I32And);
+        if negate {
+            instrs.push(WasmInstr::I32Eqz);
+        }
+        Ok(())
+    }
+
+    /// Lower `negate`/`abs`/`signum` on a `Ratio Int`.
+    fn emit_rational_unary(
+        &mut self,
+        op: &str,
+        a: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let p = *local_count;
+        *local_count += 1;
+        self.lower_expr(a, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalSet(p));
+        match op {
+            "negate" => {
+                // make_rational(-num, den)
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::LocalGet(p));
+                instrs.push(WasmInstr::I32Load(2, 0));
+                instrs.push(WasmInstr::I32Sub);
+                instrs.push(WasmInstr::LocalGet(p));
+                instrs.push(WasmInstr::I32Load(2, 4));
+                instrs.push(WasmInstr::Call(self.runtime.make_rational_idx));
+            }
+            "abs" => {
+                // num >= 0 ? num : -num, over den
+                let num = *local_count;
+                *local_count += 1;
+                instrs.push(WasmInstr::LocalGet(p));
+                instrs.push(WasmInstr::I32Load(2, 0));
+                instrs.push(WasmInstr::LocalSet(num));
+                instrs.push(WasmInstr::LocalGet(num));
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::I32LtS);
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::LocalGet(num));
+                instrs.push(WasmInstr::I32Sub);
+                instrs.push(WasmInstr::Else);
+                instrs.push(WasmInstr::LocalGet(num));
+                instrs.push(WasmInstr::End);
+                instrs.push(WasmInstr::LocalGet(p));
+                instrs.push(WasmInstr::I32Load(2, 4));
+                instrs.push(WasmInstr::Call(self.runtime.make_rational_idx));
+            }
+            _ => {
+                // signum: (num<0 ? -1 : num>0 ? 1 : 0) % 1
+                let num = *local_count;
+                *local_count += 1;
+                instrs.push(WasmInstr::LocalGet(p));
+                instrs.push(WasmInstr::I32Load(2, 0));
+                instrs.push(WasmInstr::LocalSet(num));
+                instrs.push(WasmInstr::LocalGet(num));
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::I32GtS);
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::I32Const(1));
+                instrs.push(WasmInstr::Else);
+                instrs.push(WasmInstr::LocalGet(num));
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::I32LtS);
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::I32Const(-1));
+                instrs.push(WasmInstr::Else);
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::End);
+                instrs.push(WasmInstr::End);
+                instrs.push(WasmInstr::I32Const(1));
+                instrs.push(WasmInstr::Call(self.runtime.make_rational_idx));
+            }
+        }
+        Ok(())
+    }
+
+    /// Render a `Ratio Int` under `show` as `"num % den"`, leaving the pstr
+    /// pointer on the stack.
+    fn emit_show_rational(
+        &mut self,
+        a: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let p = *local_count;
+        *local_count += 1;
+        self.lower_expr(a, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalSet(p));
+        // int_to_str(num)
+        instrs.push(WasmInstr::LocalGet(p));
+        instrs.push(WasmInstr::I32Load(2, 0));
+        instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
+        // ++ " % "
+        self.emit_pstr_lit(" % ", instrs);
+        instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+        // ++ int_to_str(den)
+        instrs.push(WasmInstr::LocalGet(p));
+        instrs.push(WasmInstr::I32Load(2, 4));
+        instrs.push(WasmInstr::Call(self.runtime.int_to_str_idx));
+        instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+        Ok(())
+    }
+
     /// Lower a function application chain.
     ///
     /// This is the core dispatch logic. We collect the function and all its
@@ -3502,7 +3721,9 @@ impl<'a> WasmLowering<'a> {
         // `/` is Fractional, so it is always float; the others are dispatched
         // by operand type.
         if let Some(name) = func_name {
-            if args.len() == 2 {
+            // `Ratio Int` operands take the rational arms in the match below, not
+            // the float path (`/` would otherwise always be treated as f64).
+            if args.len() == 2 && !is_rational_expr(args[0]) && !is_rational_expr(args[1]) {
                 let is_float = expr_is_float(args[0]) || expr_is_float(args[1]);
                 let binop = match name {
                     "+" | "GHC.Num.+" if is_float => Some(WasmInstr::F64Add),
@@ -3563,6 +3784,63 @@ impl<'a> WasmLowering<'a> {
         }
 
         match func_name {
+            // Rational (`Ratio Int`) operations. A Rational is a normalized heap
+            // pair `[num|den]`. Types are erased, so rationality is detected
+            // structurally: the `%` constructor, or an overloaded operator with a
+            // rational operand. These arms precede the Int arithmetic arms; their
+            // guards fall through to Int when no operand is rational.
+            Some(n) if args.len() == 2 && strip_qualifier(n) == "%" => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?; // numerator
+                self.lower_expr(args[1], instrs, locals, local_count, false)?; // denominator
+                instrs.push(WasmInstr::Call(self.runtime.make_rational_idx));
+            }
+            Some(n)
+                if args.len() == 2
+                    && matches!(strip_qualifier(n), "+" | "-" | "*" | "/")
+                    && (is_rational_expr(args[0]) || is_rational_expr(args[1])) =>
+            {
+                self.emit_rational_binop(
+                    strip_qualifier(n),
+                    args[0],
+                    args[1],
+                    instrs,
+                    locals,
+                    local_count,
+                )?;
+            }
+            Some(n)
+                if args.len() == 2
+                    && matches!(strip_qualifier(n), "==" | "/=")
+                    && (is_rational_expr(args[0]) || is_rational_expr(args[1])) =>
+            {
+                self.emit_rational_eq(
+                    strip_qualifier(n) == "/=",
+                    args[0],
+                    args[1],
+                    instrs,
+                    locals,
+                    local_count,
+                )?;
+            }
+            Some(n)
+                if args.len() == 1
+                    && matches!(strip_qualifier(n), "negate" | "abs" | "signum")
+                    && is_rational_expr(args[0]) =>
+            {
+                self.emit_rational_unary(strip_qualifier(n), args[0], instrs, locals, local_count)?;
+            }
+            Some(n)
+                if args.len() == 1 && matches!(strip_qualifier(n), "numerator" | "denominator") =>
+            {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                let off = if strip_qualifier(n) == "numerator" {
+                    0
+                } else {
+                    4
+                };
+                instrs.push(WasmInstr::I32Load(2, off));
+            }
+
             // Arithmetic primitives
             Some("+" | "plus#" | "plusInt#" | "GHC.Num.+") if args.len() == 2 => {
                 self.lower_expr(args[0], instrs, locals, local_count, false)?;
@@ -5301,6 +5579,27 @@ fn plam(v: Var, body: Expr) -> Expr {
 }
 fn pint(n: i64) -> Expr {
     Expr::Lit(Literal::Int(n), Ty::Error, Span::default())
+}
+
+/// Whether an expression evaluates to a `Ratio Int` (a Rational). Types are
+/// erased, so detect structurally: the `%` constructor, or an overloaded
+/// `Num`/`Fractional` operator with a rational operand.
+fn is_rational_expr(expr: &Expr) -> bool {
+    let (head, args) = collect_app_spine(expr);
+    if let Expr::Var(v, _) = head {
+        let name = strip_qualifier(v.name.as_str());
+        if name == "%" {
+            return true;
+        }
+        if matches!(
+            name,
+            "+" | "-" | "*" | "/" | "negate" | "abs" | "signum" | "recip"
+        ) && args.iter().any(|a| is_rational_expr(a))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether a let-binding RHS is a bottom value — a call to `error`/`undefined`/

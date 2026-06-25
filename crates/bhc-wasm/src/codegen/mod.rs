@@ -119,6 +119,9 @@ pub struct RuntimeIndices {
     /// Index of `file_append` (path, content): append to an existing file's
     /// contents, or create it if absent.
     pub file_append_idx: u32,
+    /// Index of `make_rational` (num, den) -> ptr: build a normalized
+    /// `Ratio Int` (`[num|den]`).
+    pub make_rational_idx: u32,
     /// Offset of the newline byte in the data segment.
     pub newline_offset: u32,
 }
@@ -696,6 +699,10 @@ impl WasmModule {
             wasi::generate_file_append(alloc_idx, concat_str_idx, file_table_idx);
         let file_append_idx = self.add_function(file_append_func);
 
+        // Rational (Ratio Int) constructor.
+        let make_rational_func = wasi::generate_make_rational(alloc_idx);
+        let make_rational_idx = self.add_function(make_rational_func);
+
         RuntimeIndices {
             fd_write_idx,
             proc_exit_idx,
@@ -717,6 +724,7 @@ impl WasmModule {
             file_write_idx,
             file_read_idx,
             file_append_idx,
+            make_rational_idx,
             newline_offset,
         }
     }

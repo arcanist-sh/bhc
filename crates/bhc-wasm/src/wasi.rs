@@ -128,6 +128,99 @@ fn emit_exn_guard(func: &mut WasmFunc, exn_flag_idx: Option<u32>) {
 
 /// Generate the heap pointer global variable.
 ///
+/// Generate `make_rational(a, b) -> ptr`: build a normalized `Ratio Int`
+/// (`[num | den]`, 8 bytes) from a raw numerator/denominator. The denominator is
+/// made positive and the pair is reduced by their gcd (Euclid).
+pub fn generate_make_rational(alloc_idx: u32) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(
+        vec![WasmType::I32, WasmType::I32], // a (num), b (den)
+        vec![WasmType::I32],                // pointer to [num|den]
+    ));
+    func.name = Some("make_rational".to_string());
+    func.exported = true;
+    let a = 0;
+    let b = 1;
+    let x = func.add_local(WasmType::I32);
+    let y = func.add_local(WasmType::I32);
+    let t = func.add_local(WasmType::I32);
+    let ptr = func.add_local(WasmType::I32);
+
+    // Make the denominator positive: if b < 0 then a = -a, b = -b.
+    func.emit(WasmInstr::LocalGet(b));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::I32LtS);
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalGet(a));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::LocalSet(a));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalGet(b));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::LocalSet(b));
+    func.emit(WasmInstr::End);
+
+    // x = |a|
+    func.emit(WasmInstr::LocalGet(a));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::I32LtS);
+    func.emit(WasmInstr::If(Some(WasmType::I32)));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalGet(a));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::Else);
+    func.emit(WasmInstr::LocalGet(a));
+    func.emit(WasmInstr::End);
+    func.emit(WasmInstr::LocalSet(x));
+    // y = b
+    func.emit(WasmInstr::LocalGet(b));
+    func.emit(WasmInstr::LocalSet(y));
+
+    // Euclid: while y != 0 { t = y; y = x % y; x = t }. x ends as gcd(|a|, b).
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    func.emit(WasmInstr::LocalGet(y));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::BrIf(1));
+    func.emit(WasmInstr::LocalGet(y));
+    func.emit(WasmInstr::LocalSet(t));
+    func.emit(WasmInstr::LocalGet(x));
+    func.emit(WasmInstr::LocalGet(y));
+    func.emit(WasmInstr::I32RemS);
+    func.emit(WasmInstr::LocalSet(y));
+    func.emit(WasmInstr::LocalGet(t));
+    func.emit(WasmInstr::LocalSet(x));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End); // loop
+    func.emit(WasmInstr::End); // block
+
+    // Guard against a zero gcd (0 % 0): treat as 1.
+    func.emit(WasmInstr::LocalGet(x));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::LocalSet(x));
+    func.emit(WasmInstr::End);
+
+    // ptr = alloc(8); [ptr] = a/x; [ptr+4] = b/x.
+    func.emit(WasmInstr::I32Const(8));
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(ptr));
+    func.emit(WasmInstr::LocalGet(ptr));
+    func.emit(WasmInstr::LocalGet(a));
+    func.emit(WasmInstr::LocalGet(x));
+    func.emit(WasmInstr::I32DivS);
+    func.emit(WasmInstr::I32Store(2, 0));
+    func.emit(WasmInstr::LocalGet(ptr));
+    func.emit(WasmInstr::LocalGet(b));
+    func.emit(WasmInstr::LocalGet(x));
+    func.emit(WasmInstr::I32DivS);
+    func.emit(WasmInstr::I32Store(2, 4));
+    func.emit(WasmInstr::LocalGet(ptr));
+    func.emit(WasmInstr::End);
+    func
+}
+
 /// This global tracks the current end of the heap for allocation.
 /// Initial value points after static data (e.g., at 64KB = 65536).
 pub fn generate_heap_pointer_global() -> WasmGlobal {

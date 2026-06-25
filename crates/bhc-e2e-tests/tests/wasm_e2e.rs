@@ -365,6 +365,14 @@ fn test_tier2_take_while_wasm() {
     run_wasm_test("tier2_functions/take_while", Profile::Default);
 }
 
+// Rational (Ratio Int) as a normalized [num|den] pair: `%` construction with
+// gcd reduction, +/-/*// arithmetic, negate/abs/signum, ==, numerator/
+// denominator, and `show` as "n % d".
+#[test]
+fn test_tier2_rational_wasm() {
+    run_wasm_test("tier2_functions/rational", Profile::Default);
+}
+
 // =============================================================================
 // Multimodule compilation
 // =============================================================================

@@ -173,10 +173,67 @@ pub fn lower_core_module(
         }
     }
     let ctx_stacks = lowering.ctx_stacks.clone();
+
+    // Transitive monad-kind inference. A binding is in monad M if it directly
+    // uses an M operation (get/put, ask, tell, throwE…) OR references another
+    // top-level binding already known to be in M. This is needed because a
+    // do-block of sub-actions (e.g. `parseCSV = do { h <- parseLine; … }`)
+    // needn't mention any characteristic op itself — without this, such a
+    // binding is left as plain IO and its state/environment is not threaded.
+    let bind_entries: Vec<(&Var, &Expr)> = core
+        .bindings
+        .iter()
+        .flat_map(|b| match b {
+            Bind::NonRec(v, e) => vec![(v, e.as_ref())],
+            Bind::Rec(bs) => bs.iter().map(|(v, e)| (v, e.as_ref())).collect(),
+        })
+        .collect();
+    let mut monad_kinds: FxHashMap<String, MonadKind> = FxHashMap::default();
+    for (v, e) in &bind_entries {
+        if let Some(kind) = infer_monad_kind(e) {
+            monad_kinds.insert(strip_qualifier(v.name.as_str()).to_string(), kind);
+        }
+    }
+    loop {
+        let mut changed = false;
+        for (v, e) in &bind_entries {
+            let key = strip_qualifier(v.name.as_str());
+            if monad_kinds.contains_key(key) {
+                continue;
+            }
+            let mut names: FxHashSet<Symbol> = FxHashSet::default();
+            collect_var_names(e, &mut names);
+            // A binding that *runs* a transformer (via an eliminator like
+            // `evalStateT`) is plain IO, not that monad — even though it
+            // references the monadic action it eliminates. Don't propagate into
+            // it, or `main` would be mis-tagged from the action it runs.
+            if names.iter().any(|n| is_monad_eliminator(n.as_str())) {
+                continue;
+            }
+            if let Some(kind) = names
+                .iter()
+                .find_map(|n| monad_kinds.get(strip_qualifier(n.as_str())).copied())
+            {
+                monad_kinds.insert(key.to_string(), kind);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
     let binds: Vec<Bind> = core
         .bindings
         .iter()
-        .map(|b| rewrite_bind_monads(b, &ctx_stacks, &mut lowering.next_synthetic_id))
+        .map(|b| {
+            rewrite_bind_monads(
+                b,
+                &ctx_stacks,
+                &monad_kinds,
+                &mut lowering.next_synthetic_id,
+            )
+        })
         .collect();
 
     // Record non-recursive top-level functions so saturated calls can be
@@ -2367,6 +2424,44 @@ impl<'a> WasmLowering<'a> {
         instrs.push(WasmInstr::LocalGet(result));
     }
 
+    /// Lower a String operand and leave a length-prefixed `pstr` on the stack: a
+    /// marked `pstr` passes through, `nil` becomes the empty `pstr`, and a runtime
+    /// cons-`[Char]` (e.g. a string built char-by-char with `c : rest`) is
+    /// converted. Used so `concat_str` (which requires `pstr` operands) handles
+    /// either String representation under `++`.
+    fn emit_string_as_pstr(
+        &mut self,
+        s: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let v = *local_count;
+        *local_count += 1;
+        self.lower_expr(s, instrs, locals, local_count, false)?;
+        instrs.push(WasmInstr::LocalSet(v));
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::I32Eqz);
+        instrs.push(WasmInstr::If(Some(WasmType::I32)));
+        // nil / empty
+        let empty = self.intern_pstr("") as i32;
+        instrs.push(WasmInstr::I32Const(empty));
+        instrs.push(WasmInstr::Else);
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::I32Load(2, 0));
+        instrs.push(WasmInstr::I32Const(crate::wasi::PSTR_MARKER));
+        instrs.push(WasmInstr::I32And);
+        instrs.push(WasmInstr::If(Some(WasmType::I32)));
+        // already a pstr
+        instrs.push(WasmInstr::LocalGet(v));
+        instrs.push(WasmInstr::Else);
+        // cons-[Char] -> pstr
+        self.emit_charlist_to_pstr(v, instrs, local_count);
+        instrs.push(WasmInstr::End);
+        instrs.push(WasmInstr::End);
+        Ok(())
+    }
+
     /// Lower `s` and leave a cons-`[Char]` on the stack: a marked `pstr` is
     /// converted (so cons-based list ops like filter/map can walk a String); a
     /// cons list or nil passes through unchanged.
@@ -4275,14 +4370,19 @@ impl<'a> WasmLowering<'a> {
             Some("++" | "GHC.Base.++" | "Data.List.++" | "Data.List.NonEmpty.++")
                 if args.len() == 2 =>
             {
-                self.lower_expr(args[0], instrs, locals, local_count, false)?;
-                self.lower_expr(args[1], instrs, locals, local_count, false)?;
-                let idx = if is_list_operand(args[0]) || is_list_operand(args[1]) {
-                    self.runtime.append_list_idx
+                if is_list_operand(args[0]) || is_list_operand(args[1]) {
+                    // Cons-list append.
+                    self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                    self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                    instrs.push(WasmInstr::Call(self.runtime.append_list_idx));
                 } else {
-                    self.runtime.concat_str_idx
-                };
-                instrs.push(WasmInstr::Call(idx));
+                    // String concat: `concat_str` needs `pstr` operands, but a
+                    // String built char-by-char (`c : rest`) is a cons-`[Char]`,
+                    // so normalize each operand first.
+                    self.emit_string_as_pstr(args[0], instrs, locals, local_count)?;
+                    self.emit_string_as_pstr(args[1], instrs, locals, local_count)?;
+                    instrs.push(WasmInstr::Call(self.runtime.concat_str_idx));
+                }
             }
 
             // `reverse` on a cons-list (string reversal is not supported).
@@ -5361,6 +5461,45 @@ fn expr_uses_name(expr: &Expr, name: Symbol) -> bool {
     }
 }
 
+/// Collect every variable name referenced anywhere in `expr` (bound or free).
+/// Used by transitive monad-kind inference to find which top-level bindings a
+/// body references.
+fn collect_var_names(expr: &Expr, out: &mut FxHashSet<Symbol>) {
+    match expr {
+        Expr::Var(v, _) => {
+            out.insert(v.name);
+        }
+        Expr::Lit(_, _, _) | Expr::Type(_, _) | Expr::Coercion(_, _) => {}
+        Expr::App(f, a, _) => {
+            collect_var_names(f, out);
+            collect_var_names(a, out);
+        }
+        Expr::TyApp(inner, _, _)
+        | Expr::TyLam(_, inner, _)
+        | Expr::Lam(_, inner, _)
+        | Expr::Lazy(inner, _)
+        | Expr::Cast(inner, _, _)
+        | Expr::Tick(_, inner, _) => collect_var_names(inner, out),
+        Expr::Let(bind, body, _) => {
+            match bind.as_ref() {
+                Bind::NonRec(_, rhs) => collect_var_names(rhs, out),
+                Bind::Rec(bs) => {
+                    for (_, rhs) in bs {
+                        collect_var_names(rhs, out);
+                    }
+                }
+            }
+            collect_var_names(body, out);
+        }
+        Expr::Case(scrut, alts, _, _) => {
+            collect_var_names(scrut, out);
+            for a in alts {
+                collect_var_names(&a.rhs, out);
+            }
+        }
+    }
+}
+
 /// Collect the free variables of `expr` (in first-occurrence order), skipping
 /// any bound within it. `bound` tracks variables in scope; `seen` deduplicates.
 fn collect_free_vars(
@@ -5830,6 +5969,27 @@ enum MonadKind {
     Except,
 }
 
+/// Whether `name` is a transformer eliminator (`runStateT`/`evalStateT`/…). A
+/// binding that calls one is running a transformer, not composing in it.
+fn is_monad_eliminator(name: &str) -> bool {
+    matches!(
+        strip_qualifier(name),
+        "runStateT"
+            | "evalStateT"
+            | "execStateT"
+            | "runState"
+            | "evalState"
+            | "execState"
+            | "runReaderT"
+            | "runReader"
+            | "runWriterT"
+            | "execWriterT"
+            | "runWriter"
+            | "runExceptT"
+            | "runExcept"
+    )
+}
+
 /// The transformer a characteristic operation belongs to.
 fn monad_op_kind(name: &str) -> Option<MonadKind> {
     match strip_qualifier(name) {
@@ -5867,7 +6027,12 @@ fn infer_monad_kind(expr: &Expr) -> Option<MonadKind> {
 
 /// Rewrite a binding's body into its monad representation, preserving leading
 /// value-parameter lambdas. Non-transformer bindings are cloned unchanged.
-fn rewrite_bind_monads(bind: &Bind, ctx_stacks: &FxHashMap<String, bool>, id: &mut usize) -> Bind {
+fn rewrite_bind_monads(
+    bind: &Bind,
+    ctx_stacks: &FxHashMap<String, bool>,
+    monad_kinds: &FxHashMap<String, MonadKind>,
+    id: &mut usize,
+) -> Bind {
     let rewrite = |v: &Var, e: &Expr, id: &mut usize| -> (Var, Expr) {
         // Peel the binding's value parameters; rewrite the monadic body.
         let mut params: Vec<Var> = Vec::new();
@@ -5877,13 +6042,17 @@ fn rewrite_bind_monads(bind: &Bind, ctx_stacks: &FxHashMap<String, bool>, id: &m
             cur = b;
         }
         // A two-context Reader+State stack (detected up front) takes priority,
-        // then a data-outer `lift` stack, then single-layer inference.
+        // then a data-outer `lift` stack, then the binding's (transitively
+        // inferred) single-layer monad kind.
         let rewritten = if let Some(&state_outer) = ctx_stacks.get(v.name.as_str()) {
             Some(rewrite_ctx_stack(state_outer, cur, id))
         } else if let Some((outer, inner)) = infer_stack(cur) {
             Some(rewrite_stack(outer, inner, cur, id))
         } else {
-            infer_monad_kind(cur).map(|kind| rewrite_monad(kind, cur, id))
+            monad_kinds
+                .get(strip_qualifier(v.name.as_str()))
+                .copied()
+                .map(|kind| rewrite_monad(kind, cur, id))
         };
         match rewritten {
             Some(mut body) => {

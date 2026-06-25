@@ -965,6 +965,14 @@ fn test_tier3_milestone_e_json_wasm() {
     run_wasm_test("tier3_io/milestone_e_json", Profile::Default);
 }
 
+// A StateT-based CSV parser. Exercises transitive monad-kind inference (the
+// do-blocks of sub-parsers thread State without naming get/put themselves) and
+// `++` over cons-[Char] strings built char-by-char.
+#[test]
+fn test_tier3_milestone_d_csv_parser_wasm() {
+    run_wasm_test("tier3_io/milestone_d_csv_parser", Profile::Default);
+}
+
 // data family / data instance: the instance constructors are harvested from
 // their patterns (the frontend does not surface them into Core), and an
 // accessor's erased Bool result is recovered from its binding signature so

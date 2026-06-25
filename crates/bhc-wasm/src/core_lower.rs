@@ -3912,6 +3912,26 @@ impl<'a> WasmLowering<'a> {
         }
 
         match func_name {
+            // Short-circuiting boolean operators. A `Bool` value is a 0/1 tag
+            // (its nullary constructor's runtime value), so `If` tests it
+            // directly. `&&`/`||` are lazy in the second operand, so it is lowered
+            // inside the taken branch.
+            Some(n) if args.len() == 2 && strip_qualifier(n) == "&&" => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::Else);
+                instrs.push(WasmInstr::I32Const(0));
+                instrs.push(WasmInstr::End);
+            }
+            Some(n) if args.len() == 2 && strip_qualifier(n) == "||" => {
+                self.lower_expr(args[0], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::If(Some(WasmType::I32)));
+                instrs.push(WasmInstr::I32Const(1));
+                instrs.push(WasmInstr::Else);
+                self.lower_expr(args[1], instrs, locals, local_count, false)?;
+                instrs.push(WasmInstr::End);
+            }
             // Rational (`Ratio Int`) operations. A Rational is a normalized heap
             // pair `[num|den]`. Types are erased, so rationality is detected
             // structurally: the `%` constructor, or an overloaded operator with a

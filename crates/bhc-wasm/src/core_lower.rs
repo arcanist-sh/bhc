@@ -3244,11 +3244,7 @@ impl<'a> WasmLowering<'a> {
     /// to fresh ids, returning the renamed parameter ids alongside. This keeps an
     /// inlined callee's variables disjoint from the caller's, which matters
     /// because VarIds are not unique across modules.
-    fn alpha_rename_for_inline(
-        &mut self,
-        param_ids: &[VarId],
-        body: &Expr,
-    ) -> (Vec<VarId>, Expr) {
+    fn alpha_rename_for_inline(&mut self, param_ids: &[VarId], body: &Expr) -> (Vec<VarId>, Expr) {
         let mut map: FxHashMap<VarId, VarId> = FxHashMap::default();
         let new_params: Vec<VarId> = param_ids
             .iter()
@@ -3330,7 +3326,11 @@ impl<'a> WasmLowering<'a> {
                         Bind::Rec(new_binds)
                     }
                 };
-                Expr::Let(Box::new(new_bind), Box::new(self.rename_expr(inner, map)), *sp)
+                Expr::Let(
+                    Box::new(new_bind),
+                    Box::new(self.rename_expr(inner, map)),
+                    *sp,
+                )
             }
             Expr::Case(scrut, alts, ty, sp) => {
                 let new_scrut = self.rename_expr(scrut, map);

@@ -1187,6 +1187,20 @@ impl LowerContext {
         self.constructor_map.values().find(|info| info.name == name)
     }
 
+    /// Look up constructor info by `DefId`, falling back to the constructor's
+    /// name. A cross-module reference to a constructor can carry a different
+    /// `DefId` than the one it was registered under (in the defining module), so
+    /// the direct `DefId` lookup misses; the by-name fallback then finds the
+    /// canonical metadata — crucially its position-based `tag` — keeping
+    /// construction and matching agreed on the same tag across modules.
+    #[must_use]
+    pub fn lookup_constructor_or_by_name(&self, def_id: DefId) -> Option<&ConstructorInfo> {
+        self.lookup_constructor(def_id).or_else(|| {
+            self.lookup_var(def_id)
+                .and_then(|v| self.lookup_constructor_by_name(v.name))
+        })
+    }
+
     /// Register a field selector function.
     pub fn register_field_selector(&mut self, field_name: Symbol, info: FieldSelectorInfo) {
         self.field_selector_map.insert(field_name, info);

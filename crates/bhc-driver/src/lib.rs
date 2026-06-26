@@ -1641,17 +1641,18 @@ impl Compiler {
                     } else {
                         uq_con.unwrap_or(def_info.name)
                     };
-                    // Look up the actual type constructor name and tag from HIR data defs
-                    let (type_con_name, type_param_count, tag) = if let Some((name, params, tag)) =
+                    // Look up the actual type constructor name and tag from this
+                    // module's HIR data defs. A miss means the module only
+                    // references the constructor (imported or stub), not defines
+                    // it — so we cannot know its real tag. Skip it rather than
+                    // fabricate tag 0: the defining module exports it with the
+                    // correct tag, and the importer collects constructors from
+                    // every module, so a fabricated entry would only clobber the
+                    // correct one (cross-module tag mismatch).
+                    let Some(&(type_con_name, type_param_count, tag)) =
                         con_type_info.get(&def_info.id)
-                    {
-                        (*name, *params, *tag)
-                    } else if let Some(info) = def_info.type_con_name.zip(def_info.type_param_count)
-                    {
-                        (info.0, info.1, 0)
-                    } else {
-                        // Fallback: use constructor's own name (should not happen)
-                        (def_info.name, 0, 0)
+                    else {
+                        continue;
                     };
                     let arity = def_info.arity.unwrap_or_else(|| {
                         // Try to get arity from HIR con def fields

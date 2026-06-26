@@ -158,7 +158,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
             // Create the data constructor
             // Look up the constructor metadata from the context
             let (con_name, type_name, tag, existential_dict_count) =
-                if let Some(info) = ctx.lookup_constructor(def_ref.def_id) {
+                if let Some(info) = ctx.lookup_constructor_or_by_name(def_ref.def_id) {
                     (
                         info.name,
                         info.type_name,
@@ -218,7 +218,7 @@ pub fn lower_pat_to_alt_with_fallthrough(
 
             // Get constructor metadata
             let (con_name, type_name, tag, canonical_fields) =
-                if let Some(info) = ctx.lookup_constructor(def_ref.def_id) {
+                if let Some(info) = ctx.lookup_constructor_or_by_name(def_ref.def_id) {
                     (
                         info.name,
                         info.type_name,
@@ -658,7 +658,7 @@ fn pat_head(ctx: &LowerContext, pat: &hir::Pat) -> PatHead {
         Pat::Wild(_) | Pat::Var(_, _, _) => PatHead::Wild,
         Pat::Lit(lit, _) => PatHead::Lit(literal_key(lit)),
         Pat::Con(def_ref, sub_pats, _) => {
-            if let Some(info) = ctx.lookup_constructor(def_ref.def_id) {
+            if let Some(info) = ctx.lookup_constructor_or_by_name(def_ref.def_id) {
                 PatHead::Con(info.type_name, info.name, info.tag, info.arity)
             } else {
                 // Fallback: use name-based lookup
@@ -670,7 +670,7 @@ fn pat_head(ctx: &LowerContext, pat: &hir::Pat) -> PatHead {
             }
         }
         Pat::RecordCon(def_ref, field_pats, _) => {
-            if let Some(info) = ctx.lookup_constructor(def_ref.def_id) {
+            if let Some(info) = ctx.lookup_constructor_or_by_name(def_ref.def_id) {
                 PatHead::Con(info.type_name, info.name, info.tag, info.arity)
             } else {
                 let name = ctx
@@ -1839,7 +1839,7 @@ pub fn lower_pat_with_or_to_alts(
 fn get_existential_classes_from_pat(ctx: &LowerContext, pat: &hir::Pat) -> Vec<Symbol> {
     match pat {
         hir::Pat::Con(def_ref, _, _) | hir::Pat::RecordCon(def_ref, _, _) => {
-            if let Some(info) = ctx.lookup_constructor(def_ref.def_id) {
+            if let Some(info) = ctx.lookup_constructor_or_by_name(def_ref.def_id) {
                 if info.existential_dict_count > 0 {
                     return info.existential_classes.clone();
                 }

@@ -643,10 +643,12 @@ impl Scheduler {
             // Set the cancellation flag in TLS so check_cancelled() can read it dynamically
             set_cancelled_flag(Some(Arc::clone(&cancelled_for_task)));
 
-            // Check for early cancellation
+            // Check for early cancellation. Store the result before publishing
+            // the terminal state, for the same reason as the completion path
+            // below.
             if cancelled_for_task.load(Ordering::Acquire) {
-                *inner.state.lock() = TaskState::Cancelled;
                 *inner.result.lock() = Some(TaskResult::Cancelled);
+                *inner.state.lock() = TaskState::Cancelled;
                 inner.condvar.notify_all();
                 active_tasks.fetch_sub(1, Ordering::Relaxed);
 
@@ -667,21 +669,29 @@ impl Scheduler {
             // Run the task
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
 
-            // Check for cancellation after execution
+            // Check for cancellation after execution.
+            //
+            // Store the result BEFORE publishing the terminal state. An awaiter
+            // that observes a terminal state stops waiting and immediately takes
+            // the result; if the state were published first, it could lock the
+            // result slot in the window before it was filled and panic on the
+            // missing value. Writing the result first, then the state, means the
+            // state mutex's release/acquire guarantees the result is visible to
+            // any awaiter that sees the terminal state.
             let final_state = if cancelled_for_task.load(Ordering::Acquire) {
-                *inner.state.lock() = TaskState::Cancelled;
                 *inner.result.lock() = Some(TaskResult::Cancelled);
+                *inner.state.lock() = TaskState::Cancelled;
                 TaskState::Cancelled
             } else {
                 match outcome {
                     Ok(value) => {
-                        *inner.state.lock() = TaskState::Completed;
                         *inner.result.lock() = Some(TaskResult::Ok(value));
+                        *inner.state.lock() = TaskState::Completed;
                         TaskState::Completed
                     }
                     Err(panic) => {
-                        *inner.state.lock() = TaskState::Failed;
                         *inner.result.lock() = Some(TaskResult::Panicked(panic));
+                        *inner.state.lock() = TaskState::Failed;
                         TaskState::Failed
                     }
                 }

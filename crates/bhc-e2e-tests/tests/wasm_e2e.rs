@@ -973,6 +973,15 @@ fn test_tier3_milestone_d_csv_parser_wasm() {
     run_wasm_test("tier3_io/milestone_d_csv_parser", Profile::Default);
 }
 
+// A 4-module markdown->HTML renderer. Exercises cross-module constructor tags
+// (Parser builds Block values, Render matches them) and the guard that keeps a
+// top-level function whose VarId collides with a local from being applied as a
+// closure.
+#[test]
+fn test_tier3_milestone_c_markdown_wasm() {
+    run_wasm_test("tier3_io/milestone_c_markdown", Profile::Default);
+}
+
 // data family / data instance: the instance constructors are harvested from
 // their patterns (the frontend does not surface them into Core), and an
 // accessor's erased Bool result is recovered from its binding signature so

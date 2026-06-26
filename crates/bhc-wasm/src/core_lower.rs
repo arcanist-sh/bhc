@@ -3934,9 +3934,17 @@ impl<'a> WasmLowering<'a> {
         // Application of a closure value held in a local (a function-typed
         // parameter, a case binder, a let binding): call it indirectly.
         if let Expr::Var(var, _) = peel_head(func_expr) {
-            if let Some(&slot) = locals.get(&var.id) {
-                instrs.push(WasmInstr::LocalGet(slot));
-                return self.apply_closure_on_stack(&args, instrs, locals, local_count);
+            // Apply a closure value held in a local — but NOT if the head is a
+            // known top-level function. VarIds are not unique across modules, so
+            // a top-level function's id can collide with a local slot in another
+            // module; without this guard such a call would be (mis)applied as a
+            // closure via `call_indirect`. A genuine local closure never shares a
+            // (module-qualified) top-level function's name.
+            if !self.func_map.contains_key(&var.name) {
+                if let Some(&slot) = locals.get(&var.id) {
+                    instrs.push(WasmInstr::LocalGet(slot));
+                    return self.apply_closure_on_stack(&args, instrs, locals, local_count);
+                }
             }
         }
 

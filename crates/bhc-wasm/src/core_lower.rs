@@ -619,6 +619,9 @@ impl<'a> WasmLowering<'a> {
         if let Expr::Var(hv, _) = head {
             match strip_qualifier(hv.name.as_str()) {
                 "succ" | "pred" if args.len() == 1 => return self.enum_names_of_expr(args[0]),
+                // `max`/`min` (Ord methods) return one of their arguments, so the
+                // result has the same enum type — recover it from the first arg.
+                "max" | "min" if args.len() == 2 => return self.enum_names_of_expr(args[0]),
                 "toEnum" | "minBound" | "maxBound" | "read" => return self.sole_enum().cloned(),
                 _ => {}
             }

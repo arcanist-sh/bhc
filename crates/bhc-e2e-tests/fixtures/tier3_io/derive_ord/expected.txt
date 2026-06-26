@@ -7,3 +7,6 @@ yes
 no
 yes
 yes
+LT
+Green
+Blue

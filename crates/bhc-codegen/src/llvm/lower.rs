@@ -14886,6 +14886,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             | ShowCoerce::EitherOf
                             | ShowCoerce::Tuple2Of
                             | ShowCoerce::StringList
+                            // `Ordering` (LT/EQ/GT) is a heap-allocated ADT whose
+                            // type is erased to `Error` by codegen — without this
+                            // it falls through to the boxed-int branch and prints
+                            // the constructor pointer instead of "LT"/"EQ"/"GT".
+                            // The show machinery's descriptor tag 7 reads the tag.
+                            | ShowCoerce::Ordering
                     )
                 ) || self.is_list_type(&expr_ty)
                     || self.expr_looks_like_list(val_expr)
@@ -26224,11 +26230,84 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     // ====================================================================
 
     /// Lower `min` - returns the smaller of two Ints.
+    /// Select between two operands of `min`/`max` when they are user ADTs with a
+    /// derived `Ord`. The integer path used otherwise compares the raw pointer
+    /// representations, which for heap-allocated constructors are addresses, not
+    /// `Ord` values — so it must not be used for ADTs. Dispatches through the
+    /// type's derived `compare` (the same path `compare` itself uses) and selects
+    /// per Haskell's defaults: `min x y = if x <= y then x else y`,
+    /// `max x y = if x <= y then y else x`. Returns `None` for non-ADT operands
+    /// so the caller falls back to the integer comparison.
+    fn lower_min_max_adt(
+        &mut self,
+        a_expr: &Expr,
+        b_expr: &Expr,
+        want_max: bool,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let adt_type = Self::is_user_adt_expr(a_expr, &self.constructor_metadata)
+            .or_else(|| Self::is_user_adt_expr(b_expr, &self.constructor_metadata));
+        let Some(type_name) = adt_type else {
+            return Ok(None);
+        };
+        let Some(cmp_var_id) = self.derived_compare_fns.get(&type_name).copied() else {
+            return Ok(None);
+        };
+        let Some(cmp_fn) = self.functions.get(&cmp_var_id).copied() else {
+            return Ok(None);
+        };
+        let lhs = self
+            .lower_expr(a_expr)?
+            .ok_or_else(|| CodegenError::Internal("min/max: no lhs".to_string()))?;
+        let rhs = self
+            .lower_expr(b_expr)?
+            .ok_or_else(|| CodegenError::Internal("min/max: no rhs".to_string()))?;
+        let null_env = self.type_mapper().ptr_type().const_null();
+        let fn_ptr = cmp_fn.as_global_value().as_pointer_value();
+        let fn_type = self.type_mapper().ptr_type().fn_type(
+            &[
+                self.type_mapper().ptr_type().into(),
+                self.type_mapper().ptr_type().into(),
+                self.type_mapper().ptr_type().into(),
+            ],
+            false,
+        );
+        let result = self
+            .builder()
+            .build_indirect_call(
+                fn_type,
+                fn_ptr,
+                &[null_env.into(), lhs.into(), rhs.into()],
+                "minmax_compare",
+            )
+            .map_err(|e| CodegenError::Internal(format!("min/max compare: {:?}", e)))?;
+        let ordering_ptr = result
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("min/max compare returned void".to_string()))?
+            .into_pointer_value();
+        // Ordering ADT tag: 0=LT, 1=EQ, 2=GT. `a <= b` iff the tag is not GT.
+        let tag = self.extract_adt_tag(ordering_ptr)?;
+        let gt = self.type_mapper().i64_type().const_int(2, false);
+        let a_le_b = self
+            .builder()
+            .build_int_compare(inkwell::IntPredicate::NE, tag, gt, "minmax_a_le_b")
+            .map_err(|e| CodegenError::Internal(format!("min/max le: {:?}", e)))?;
+        let (on_le, on_gt) = if want_max { (rhs, lhs) } else { (lhs, rhs) };
+        let selected = self
+            .builder()
+            .build_select(a_le_b, on_le, on_gt, "minmax_sel")
+            .map_err(|e| CodegenError::Internal(format!("min/max select: {:?}", e)))?;
+        Ok(Some(selected))
+    }
+
     fn lower_builtin_min(
         &mut self,
         a_expr: &Expr,
         b_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(v) = self.lower_min_max_adt(a_expr, b_expr, false)? {
+            return Ok(Some(v));
+        }
         let a_val = self
             .lower_expr(a_expr)?
             .ok_or_else(|| CodegenError::Internal("min: a has no value".to_string()))?;
@@ -26254,6 +26333,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         a_expr: &Expr,
         b_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(v) = self.lower_min_max_adt(a_expr, b_expr, true)? {
+            return Ok(Some(v));
+        }
         let a_val = self
             .lower_expr(a_expr)?
             .ok_or_else(|| CodegenError::Internal("max: a has no value".to_string()))?;
@@ -42663,6 +42745,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // read — use single-derived-read heuristic
                     if fname == "read" && self.derived_read_fns.len() == 1 {
                         return Some(self.derived_read_fns.keys().next().unwrap().clone());
+                    }
+                }
+                // `max`/`min` are Ord methods returning the same type as their
+                // arguments, so `max Red Green :: Color`. Structure is
+                // `App(App(Var("max"), x), _y)` — recover the ADT type from `x`
+                // so a user ADT result renders via its derived Show instead of
+                // printing the result pointer.
+                if let Expr::App(inner_f, x, _) = f.as_ref() {
+                    if let Expr::Var(fv, _) = inner_f.as_ref() {
+                        if matches!(fv.name.as_str(), "max" | "min") {
+                            return self.infer_adt_type_from_expr(x);
+                        }
                     }
                 }
                 self.infer_adt_type_from_expr(f)

@@ -18,3 +18,7 @@ main = do
     -- compare different type
     putStrLn (if Low < High then "yes" else "no")
     putStrLn (if High > Medium then "yes" else "no")
+    -- print the results of Ord methods directly (compare -> Ordering, min/max -> Color)
+    print (compare Green Blue)
+    print (min Blue Green)
+    print (max Red Blue)

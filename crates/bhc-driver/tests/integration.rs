@@ -1442,7 +1442,6 @@ main = if MkPair 1 2 == MkPair 1 3 then 0 else 1
 // =========================================================================
 
 #[test]
-#[ignore = "Ord operators (<, >, etc.) need dictionary-based dispatch for user-defined types"]
 fn test_deriving_ord_enum() {
     // Derived Ord for enum: uses constructor order
     let source = r#"
@@ -1454,7 +1453,6 @@ main = if Red < Blue then 1 else 0
 }
 
 #[test]
-#[ignore = "Ord operators (<, >, etc.) need dictionary-based dispatch for user-defined types"]
 fn test_deriving_ord_enum_not_less() {
     let source = r#"
 data Color = Red | Green | Blue deriving (Eq, Ord)
@@ -1507,7 +1505,6 @@ main = describe 42
 // =========================================================================
 
 #[test]
-#[ignore = "Default methods require full dictionary passing for user-defined classes"]
 fn test_class_default_method() {
     // Default method using another class method
     let source = r#"

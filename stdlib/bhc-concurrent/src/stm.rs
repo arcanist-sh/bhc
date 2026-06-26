@@ -135,12 +135,29 @@ impl<T: Clone + Send + Sync + 'static> TVar<T> {
         self.inner.value.read().clone()
     }
 
+    /// Read the value and its version as one consistent snapshot.
+    ///
+    /// Both are read while holding the value read-lock. A commit updates the
+    /// value and bumps the version under the matching write-lock, so this can
+    /// never observe a new value paired with the old version (or vice versa) —
+    /// which would let a stale read pass commit validation and lose an update.
+    fn read_with_version(&self) -> (T, u64) {
+        let guard = self.inner.value.read();
+        let version = self.inner.version.load(Ordering::Acquire);
+        (guard.clone(), version)
+    }
+
     /// Write a value directly (outside a transaction).
     ///
     /// **Warning**: This provides no atomicity guarantees with other writes.
     pub fn write_direct(&self, value: T) {
-        *self.inner.value.write() = value;
-        self.inner.version.fetch_add(1, Ordering::Release);
+        // Bump the version while still holding the write-lock so readers using
+        // `read_with_version` always see a consistent (value, version) pair.
+        {
+            let mut guard = self.inner.value.write();
+            *guard = value;
+            self.inner.version.fetch_add(1, Ordering::Release);
+        }
         self.wake_waiters();
     }
 
@@ -233,8 +250,13 @@ impl<T: Clone + Send + Sync + 'static> TVarOps for TVar<T> {
 
     fn commit(&self, value: Box<dyn Any + Send + Sync>) {
         if let Ok(val) = value.downcast::<T>() {
-            *self.inner.value.write() = *val;
-            self.inner.version.fetch_add(1, Ordering::Release);
+            // Update value and bump version under the same write-lock so a
+            // concurrent `read_with_version` observes them atomically.
+            {
+                let mut guard = self.inner.value.write();
+                *guard = *val;
+                self.inner.version.fetch_add(1, Ordering::Release);
+            }
             self.wake_waiters();
         }
     }
@@ -285,9 +307,10 @@ impl Transaction {
             }
         }
 
-        // Read from TVar and record in read set.
-        let value = tvar.read_direct();
-        let version = tvar.version();
+        // Read from TVar and record in read set. Value and version must be read
+        // as one consistent snapshot, else a stale value could be paired with a
+        // post-commit version and slip through commit validation (lost update).
+        let (value, version) = tvar.read_with_version();
 
         self.reads.insert(
             id,
@@ -821,13 +844,39 @@ mod tests {
         assert_eq!(atomically(|| var2.read_tx()), 250);
     }
 
-    // Quarantined: flaky under high contention. The transaction commit path has
-    // an intermittent lost-update race (10×100 concurrent increments occasionally
-    // total <1000), so this assertion is non-deterministic and was repeatedly
-    // failing CI. The underlying STM commit race is tracked separately; run this
-    // test on demand with `cargo test -- --ignored`.
+    // High-contention regression test for the commit lost-update race: many
+    // threads each run read-modify-write transactions on a shared counter, so a
+    // stale read slipping past commit validation would drop increments. Reliably
+    // failed before the value+version reads/commits were made atomic.
     #[test]
-    #[ignore = "flaky: intermittent lost-update race in STM commit under contention"]
+    fn test_concurrent_increment_stress() {
+        for round in 0..25 {
+            let counter = TVar::new(0);
+            let threads: Vec<_> = (0..16)
+                .map(|_| {
+                    let counter = counter.clone();
+                    thread::spawn(move || {
+                        for _ in 0..500 {
+                            atomically(|| {
+                                let n = counter.read_tx()?;
+                                counter.write_tx(n + 1)
+                            });
+                        }
+                    })
+                })
+                .collect();
+            for t in threads {
+                t.join().unwrap();
+            }
+            assert_eq!(
+                atomically(|| counter.read_tx()),
+                16 * 500,
+                "lost update at round {round}"
+            );
+        }
+    }
+
+    #[test]
     fn test_concurrent_increment() {
         let counter = TVar::new(0);
         let threads: Vec<_> = (0..10)

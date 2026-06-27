@@ -981,14 +981,16 @@ mod tests {
         let sum = Arc::new(AtomicI32::new(0));
 
         let queue_producer = queue.clone();
+        let done_producer = done.clone();
         let producer = thread::spawn(move || {
             for i in 1..=10 {
                 atomically(|| queue_producer.write(i));
             }
-            atomically(|| done.write_tx(true));
+            atomically(|| done_producer.write_tx(true));
         });
 
         let queue_consumer = queue.clone();
+        let done_consumer = done.clone();
         let sum_consumer = Arc::clone(&sum);
         let consumer = thread::spawn(move || {
             loop {
@@ -998,15 +1000,18 @@ mod tests {
                         sum_consumer.fetch_add(n, Ordering::SeqCst);
                     }
                     None => {
-                        // Check if done.
-                        thread::sleep(std::time::Duration::from_millis(1));
-                        let result: Option<i32> = atomically(|| queue_consumer.try_read());
-                        if result.is_none() {
+                        // Queue momentarily empty. Stop only once the producer
+                        // has signalled `done` — and even then drain anything
+                        // it committed before setting the flag (the writes
+                        // happen-before the `done` write). A plain "two empty
+                        // reads => stop" loop races the producer and drops items.
+                        if atomically(|| done_consumer.read_tx()) {
+                            while let Some(n) = atomically(|| queue_consumer.try_read()) {
+                                sum_consumer.fetch_add(n, Ordering::SeqCst);
+                            }
                             break;
                         }
-                        if let Some(n) = result {
-                            sum_consumer.fetch_add(n, Ordering::SeqCst);
-                        }
+                        thread::yield_now();
                     }
                 }
             }

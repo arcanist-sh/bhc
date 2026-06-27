@@ -1490,7 +1490,17 @@ impl<'src> Parser<'src> {
 
     /// Parse data constructors.
     fn parse_constructors(&mut self) -> ParseResult<Vec<ConDecl>> {
-        let mut constrs = vec![self.parse_constructor()?];
+        // A Haddock comment may precede the first constructor, between `=` and
+        // the constructor name (e.g. `data T\n  = -- | doc\n    A | ...`). The
+        // `|`-separated constructors below already collect a preceding doc; do
+        // the same for the first, otherwise parse_constructor sees the doc token
+        // instead of the name and the whole constructor list is lost.
+        let leading_doc = self.collect_doc_comments();
+        let mut first = self.parse_constructor()?;
+        if first.doc.is_none() {
+            first.doc = leading_doc;
+        }
+        let mut constrs = vec![first];
         // Collect trailing doc comments after constructor (e.g., `-- ^ description`)
         if let Some(trailing_doc) = self.collect_doc_comments() {
             // Attach trailing doc to the last constructor

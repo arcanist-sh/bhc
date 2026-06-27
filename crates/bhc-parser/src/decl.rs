@@ -438,6 +438,8 @@ impl<'src> Parser<'src> {
                     TokenKind::QualOperator(_, sym) => Ident::new(*sym),
                     TokenKind::QualConOperator(_, sym) => Ident::new(*sym),
                     // Special tokens that are valid operators when in parentheses
+                    TokenKind::Star => Ident::new(Symbol::intern("*")),
+                    TokenKind::Minus => Ident::new(Symbol::intern("-")),
                     TokenKind::Dot => Ident::new(Symbol::intern(".")),
                     TokenKind::Bang => Ident::new(Symbol::intern("!")),
                     TokenKind::At => Ident::new(Symbol::intern("@")),
@@ -670,6 +672,8 @@ impl<'src> Parser<'src> {
                     TokenKind::QualOperator(_, sym) => Ident::new(*sym),
                     TokenKind::QualConOperator(_, sym) => Ident::new(*sym),
                     // Special tokens that are valid operators when in parentheses
+                    TokenKind::Star => Ident::new(Symbol::intern("*")),
+                    TokenKind::Minus => Ident::new(Symbol::intern("-")),
                     TokenKind::Dot => Ident::new(Symbol::intern(".")),
                     TokenKind::Bang => Ident::new(Symbol::intern("!")),
                     TokenKind::At => Ident::new(Symbol::intern("@")),

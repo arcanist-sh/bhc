@@ -328,6 +328,11 @@ impl<'src> Parser<'src> {
 
         if !self.check(&TokenKind::RParen) {
             exports.push(self.parse_export()?);
+            // Skip doc comments after an export and before the comma/`)` (e.g.
+            // a `-- * Section` / `-- | …` Haddock block between an item and the
+            // next comma) — otherwise `eat(Comma)` sees the doc and the list
+            // terminates early, failing at the close paren.
+            self.skip_doc_comments();
             while self.eat(&TokenKind::Comma) {
                 // Skip doc comments between export items (Haddock section headers)
                 self.skip_doc_comments();
@@ -335,6 +340,7 @@ impl<'src> Parser<'src> {
                     break;
                 }
                 exports.push(self.parse_export()?);
+                self.skip_doc_comments();
             }
         }
 
@@ -549,13 +555,19 @@ impl<'src> Parser<'src> {
         self.expect(&TokenKind::LParen)?;
         let mut imports = Vec::new();
 
+        // Doc comments may appear between items (Haddock on re-exports); skip
+        // them everywhere an item or separator is expected.
+        self.skip_doc_comments();
         if !self.check(&TokenKind::RParen) {
             imports.push(self.parse_import_item()?);
+            self.skip_doc_comments();
             while self.eat(&TokenKind::Comma) {
+                self.skip_doc_comments();
                 if self.check(&TokenKind::RParen) {
                     break;
                 }
                 imports.push(self.parse_import_item()?);
+                self.skip_doc_comments();
             }
         }
 

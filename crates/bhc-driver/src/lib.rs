@@ -880,8 +880,43 @@ impl Compiler {
 
         match maybe_module {
             Some(module) => Ok(module),
-            None => Err(CompileError::ParseError(diagnostics.len())),
+            None => {
+                // Surface each parse error's message and location — otherwise
+                // callers only see "parse error: N errors" with no clue what or
+                // where the offending syntax is.
+                for diag in &diagnostics {
+                    let loc = diag
+                        .labels
+                        .first()
+                        .map(|l| {
+                            let (line, col) =
+                                Self::byte_to_line_col(&source, l.span.span.lo.0 as usize);
+                            format!(" at {line}:{col}")
+                        })
+                        .unwrap_or_default();
+                    eprintln!("  parse error{loc}: {}", diag.message);
+                }
+                Err(CompileError::ParseError(diagnostics.len()))
+            }
         }
+    }
+
+    /// Map a byte offset in `src` to a 1-based (line, column).
+    fn byte_to_line_col(src: &str, off: usize) -> (usize, usize) {
+        let mut line = 1usize;
+        let mut col = 1usize;
+        for (i, ch) in src.char_indices() {
+            if i >= off {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        (line, col)
     }
 
     /// Lower an AST module to HIR, returning both the HIR and the lowering context.

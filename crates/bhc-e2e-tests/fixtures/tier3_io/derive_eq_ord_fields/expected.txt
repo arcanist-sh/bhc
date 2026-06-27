@@ -11,3 +11,9 @@ LT
 GT
 True
 True
+True
+False
+LT
+GT
+True
+LT

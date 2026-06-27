@@ -1838,6 +1838,42 @@ impl LowerContext {
         let mut bindings = Vec::new();
         let mut deriv_ctx = DerivingContext::new();
 
+        // Pre-scan which data types derive Eq/Ord (stock-style) so a derived
+        // comparison can recurse into a field of a sibling user ADT via that
+        // type's own `$derived_eq_/$derived_compare_` — only safe for types
+        // whose binding is generated here. Newtypes are intentionally excluded
+        // (they derive via the identity path).
+        {
+            let mut local_eq = rustc_hash::FxHashSet::default();
+            let mut local_ord = rustc_hash::FxHashSet::default();
+            for item in &module.items {
+                if let Item::Data(data_def) = item {
+                    for clause in &data_def.deriving {
+                        if matches!(
+                            clause.strategy,
+                            bhc_hir::DerivingStrategy::Stock
+                                | bhc_hir::DerivingStrategy::Default
+                                | bhc_hir::DerivingStrategy::Newtype
+                        ) {
+                            match clause.class.as_str() {
+                                "Eq" => {
+                                    local_eq.insert(data_def.name);
+                                }
+                                "Ord" => {
+                                    // `$derived_eq_` is keyed off an explicit
+                                    // `Eq` clause (always present for a valid
+                                    // `Ord` deriver), handled by the arm above.
+                                    local_ord.insert(data_def.name);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            deriv_ctx.set_local_derives(local_eq, local_ord);
+        }
+
         for item in &module.items {
             match item {
                 Item::Value(value_def) => {

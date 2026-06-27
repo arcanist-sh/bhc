@@ -1,5 +1,8 @@
 data Shape = Circle Int | Square Int deriving (Eq, Ord, Show)
 data Pair = Pair Int Int deriving (Eq, Ord, Show)
+data Color = Red | Green | Blue deriving (Eq, Ord, Show)
+data Rec = Rec Int Color deriving (Eq, Ord, Show)
+data Tree = Leaf | Node Tree Int Tree deriving (Eq, Ord, Show)
 
 main :: IO ()
 main = do
@@ -19,3 +22,11 @@ main = do
   print (compare (Pair 2 1) (Pair 1 9))   -- GT
   print (Pair 1 2 == Pair 1 2)            -- True
   print (Pair 3 4 <= Pair 3 4)            -- True
+  -- nested ADT field (record with a Color field) compares by value
+  print (Rec 2 Green == Rec 2 Green)      -- True
+  print (Rec 2 Green == Rec 2 Blue)       -- False
+  print (compare (Rec 1 Red) (Rec 1 Blue))-- LT (Red < Blue)
+  print (compare (Rec 1 Blue) (Rec 1 Red))-- GT
+  -- recursive type
+  print (Node Leaf 1 Leaf == Node Leaf 1 Leaf)          -- True
+  print (compare (Node Leaf 1 Leaf) (Node Leaf 2 Leaf)) -- LT

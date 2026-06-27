@@ -26,7 +26,7 @@ use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
 use bhc_types::{Kind, Ty, TyCon, TyVar};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::dictionary::InstanceInfo;
 
@@ -42,6 +42,19 @@ pub struct DerivedInstance {
 pub struct DerivingContext {
     /// Fresh variable counter.
     fresh_counter: u32,
+    /// Type names that derive `Eq` in the current module (stock/default).
+    /// Used to decide when a derived comparison can recurse into a field of a
+    /// user ADT via that field type's own `$derived_eq_<T>` — only safe for
+    /// types whose binding is generated in this module.
+    local_eq: FxHashSet<Symbol>,
+    /// Type names that derive `Ord` in the current module (stock/default).
+    local_ord: FxHashSet<Symbol>,
+    /// Type name -> its `$derived_eq_<T>` binding variable. Cached so a field
+    /// reference and the field type's own binding share one `Var` (matching
+    /// VarId for the native backend, name for WASM).
+    eq_vars: FxHashMap<Symbol, Var>,
+    /// Type name -> its `$derived_compare_<T>` binding variable.
+    compare_vars: FxHashMap<Symbol, Var>,
 }
 
 impl DerivingContext {
@@ -50,6 +63,71 @@ impl DerivingContext {
     pub fn new() -> Self {
         Self {
             fresh_counter: 50000, // Start above all fixed DefId ranges (highest is ~11273)
+            local_eq: FxHashSet::default(),
+            local_ord: FxHashSet::default(),
+            eq_vars: FxHashMap::default(),
+            compare_vars: FxHashMap::default(),
+        }
+    }
+
+    /// Record which types derive `Eq`/`Ord` in this module. Must be called
+    /// before deriving any instance so field comparisons can resolve sibling
+    /// types regardless of derivation order.
+    pub fn set_local_derives(&mut self, eq: FxHashSet<Symbol>, ord: FxHashSet<Symbol>) {
+        self.local_eq = eq;
+        self.local_ord = ord;
+    }
+
+    /// The (cached) `$derived_eq_<T>` binding variable for a type.
+    fn eq_var_for(&mut self, ty_name: Symbol) -> Var {
+        if let Some(v) = self.eq_vars.get(&ty_name) {
+            return v.clone();
+        }
+        let v = self.fresh_var(&format!("$derived_eq_{}", ty_name.as_str()), Ty::Error);
+        self.eq_vars.insert(ty_name, v.clone());
+        v
+    }
+
+    /// The (cached) `$derived_compare_<T>` binding variable for a type.
+    fn compare_var_for(&mut self, ty_name: Symbol) -> Var {
+        if let Some(v) = self.compare_vars.get(&ty_name) {
+            return v.clone();
+        }
+        let v = self.fresh_var(&format!("$derived_compare_{}", ty_name.as_str()), Ty::Error);
+        self.compare_vars.insert(ty_name, v.clone());
+        v
+    }
+
+    /// If `ty`'s head is a user ADT that derives `Eq` in this module, its name.
+    fn local_eq_field_type(&self, ty: &Ty) -> Option<Symbol> {
+        Self::head_type_con(ty).filter(|n| self.local_eq.contains(n))
+    }
+
+    /// If `ty`'s head is a user ADT that derives `Ord` in this module, its name.
+    fn local_ord_field_type(&self, ty: &Ty) -> Option<Symbol> {
+        Self::head_type_con(ty).filter(|n| self.local_ord.contains(n))
+    }
+
+    /// The head type-constructor name of a field type, for a directly-named
+    /// user ADT (`Color`, `Tree`). Parameterized types (`Maybe a`, `[a]`,
+    /// tuples) and type variables return `None` — those keep the generic
+    /// `==`/`compare`, which the library/backends handle.
+    fn head_type_con(ty: &Ty) -> Option<Symbol> {
+        let mut t = ty;
+        while let Ty::Forall(_, inner) = t {
+            t = inner;
+        }
+        match t {
+            Ty::Con(c) => Some(c.name),
+            _ => None,
+        }
+    }
+
+    /// The field types of a constructor, in positional order.
+    fn con_field_types(fields: &ConFields) -> Vec<Ty> {
+        match fields {
+            ConFields::Positional(tys) => tys.clone(),
+            ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
         }
     }
 
@@ -749,11 +827,9 @@ impl DerivingContext {
         // Build the instance type: the data type applied to its parameters
         let instance_type = self.build_instance_type(data_def.name, &data_def.params);
 
-        // Generate the (==) method
-        let eq_method_var = self.fresh_var(
-            &format!("$derived_eq_{}", data_def.name.as_str()),
-            Ty::Error,
-        );
+        // Generate the (==) method. Use the cached var so a sibling type that
+        // has a field of this type references the same binding.
+        let eq_method_var = self.eq_var_for(data_def.name);
         let eq_body = self.generate_eq_body(data_def, span);
 
         let mut methods = FxHashMap::default();
@@ -886,10 +962,11 @@ impl DerivingContext {
                 .collect();
 
             // Generate the comparison: x0 == y0 && x1 == y1 && ...
+            let field_tys = Self::con_field_types(&con.fields);
             let comparison = if field_count == 0 {
                 true_expr.clone()
             } else {
-                self.generate_field_comparisons(&x_fields, &y_fields, span)
+                self.generate_field_comparisons(&x_fields, &y_fields, &field_tys, span)
             };
 
             // Inner case: match y with the same constructor
@@ -925,6 +1002,7 @@ impl DerivingContext {
         &mut self,
         x_fields: &[Var],
         y_fields: &[Var],
+        field_tys: &[Ty],
         span: Span,
     ) -> core::Expr {
         assert_eq!(x_fields.len(), y_fields.len());
@@ -934,26 +1012,31 @@ impl DerivingContext {
         }
 
         // Start with the last comparison and work backwards with &&
-        let mut result = self.make_eq_call(
-            &x_fields[x_fields.len() - 1],
-            &y_fields[y_fields.len() - 1],
-            span,
-        );
+        let last = x_fields.len() - 1;
+        let mut result =
+            self.make_eq_call(&x_fields[last], &y_fields[last], field_tys.get(last), span);
 
         for i in (0..x_fields.len() - 1).rev() {
-            let eq_call = self.make_eq_call(&x_fields[i], &y_fields[i], span);
+            let eq_call = self.make_eq_call(&x_fields[i], &y_fields[i], field_tys.get(i), span);
             result = self.make_and(eq_call, result, span);
         }
 
         result
     }
 
-    /// Make a call to (==) for two variables.
-    fn make_eq_call(&self, x: &Var, y: &Var, span: Span) -> core::Expr {
-        let eq_var = Var {
-            name: Symbol::intern("=="),
-            id: VarId::new(0),
-            ty: Ty::Error,
+    /// Make a call to (==) for two variables. When `field_ty` is a user ADT that
+    /// derives `Eq` in this module, dispatch to that type's `$derived_eq_<T>`
+    /// directly — a generic `==` can't recurse into a nested ADT field, because
+    /// the field type is erased and (on native) nullary constructors are heap
+    /// values that a bare comparison would treat as pointers.
+    fn make_eq_call(&mut self, x: &Var, y: &Var, field_ty: Option<&Ty>, span: Span) -> core::Expr {
+        let eq_var = match field_ty.and_then(|t| self.local_eq_field_type(t)) {
+            Some(ty_name) => self.eq_var_for(ty_name),
+            None => Var {
+                name: Symbol::intern("=="),
+                id: VarId::new(0),
+                ty: Ty::Error,
+            },
         };
         let eq_expr = core::Expr::Var(eq_var, span);
         let app1 = core::Expr::App(
@@ -1009,7 +1092,7 @@ impl DerivingContext {
         };
 
         // case x of { Con inner_x -> case y of { Con inner_y -> inner_x == inner_y } }
-        let eq_call = self.make_eq_call(&inner_x, &inner_y, span);
+        let eq_call = self.make_eq_call(&inner_x, &inner_y, None, span);
 
         let inner_case = self.make_case(
             core::Expr::Var(y_var.clone(), span),
@@ -1067,10 +1150,7 @@ impl DerivingContext {
         let span = data_def.span;
         let instance_type = self.build_instance_type(data_def.name, &data_def.params);
 
-        let compare_method_var = self.fresh_var(
-            &format!("$derived_compare_{}", data_def.name.as_str()),
-            Ty::Error,
-        );
+        let compare_method_var = self.compare_var_for(data_def.name);
 
         let compare_body = self.generate_compare_body(data_def, span);
 
@@ -1232,7 +1312,8 @@ impl DerivingContext {
                     gt_ordering.clone()
                 } else {
                     // Same constructor, compare fields lexicographically
-                    self.generate_field_comparisons_ord(&x_fields, &y_fields, span)
+                    let field_tys = Self::con_field_types(&x_con.fields);
+                    self.generate_field_comparisons_ord(&x_fields, &y_fields, &field_tys, span)
                 };
 
                 inner_alts.push(Alt {
@@ -1259,6 +1340,7 @@ impl DerivingContext {
         &mut self,
         x_fields: &[Var],
         y_fields: &[Var],
+        field_tys: &[Ty],
         span: Span,
     ) -> core::Expr {
         if x_fields.is_empty() {
@@ -1288,7 +1370,8 @@ impl DerivingContext {
         let mut result = self.make_ordering("EQ", span);
 
         for i in (0..x_fields.len()).rev() {
-            let cmp_call = self.make_compare_call(&x_fields[i], &y_fields[i], span);
+            let cmp_call =
+                self.make_compare_call(&x_fields[i], &y_fields[i], field_tys.get(i), span);
 
             result = self.make_case(
                 cmp_call,
@@ -1316,12 +1399,24 @@ impl DerivingContext {
         result
     }
 
-    /// Make a call to compare for two variables.
-    fn make_compare_call(&self, x: &Var, y: &Var, span: Span) -> core::Expr {
-        let compare_var = Var {
-            name: Symbol::intern("compare"),
-            id: VarId::new(0),
-            ty: Ty::Error,
+    /// Make a call to compare for two variables. When `field_ty` is a user ADT
+    /// that derives `Ord` in this module, dispatch to that type's structural
+    /// `$derived_compare_<T>` directly rather than a generic `compare`, so a
+    /// nested ADT field is ordered by value, not by its (erased) pointer.
+    fn make_compare_call(
+        &mut self,
+        x: &Var,
+        y: &Var,
+        field_ty: Option<&Ty>,
+        span: Span,
+    ) -> core::Expr {
+        let compare_var = match field_ty.and_then(|t| self.local_ord_field_type(t)) {
+            Some(ty_name) => self.compare_var_for(ty_name),
+            None => Var {
+                name: Symbol::intern("compare"),
+                id: VarId::new(0),
+                ty: Ty::Error,
+            },
         };
         let compare_expr = core::Expr::Var(compare_var, span);
         let app1 = core::Expr::App(
@@ -1359,7 +1454,7 @@ impl DerivingContext {
             arity: 1,
         };
 
-        let compare_call = self.make_compare_call(&inner_x, &inner_y, span);
+        let compare_call = self.make_compare_call(&inner_x, &inner_y, None, span);
 
         let inner_case = self.make_case(
             core::Expr::Var(y_var.clone(), span),

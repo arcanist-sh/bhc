@@ -1316,6 +1316,13 @@ impl<'src> Parser<'src> {
             (name, params)
         };
 
+        // A Haddock comment may sit between the head and the `=` (it documents
+        // the first constructor, e.g. `data T\n  -- | doc\n  = Con1 ...`). Skip
+        // it so the form below is recognized — otherwise `eat(Eq)` sees the doc
+        // token, fails, and the declaration is wrongly parsed as EmptyDataDecls
+        // (no constructors), making every constructor unbound at use sites.
+        self.skip_doc_comments();
+
         // Three forms:
         // 1. H98: `data T a = Con1 a | Con2`
         // 2. GADT: `data T a where Con1 :: a -> T a; ...`

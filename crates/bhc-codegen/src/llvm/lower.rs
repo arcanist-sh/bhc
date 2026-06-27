@@ -14903,12 +14903,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     self.print_via_show_desc(p, val_expr)?;
                 } else if let Some(adt_type) = self
                     .infer_adt_type_from_expr(val_expr)
+                    .or_else(|| Self::adt_type_name_from_ty(&expr_ty))
                     .filter(|tn| self.derived_show_fns.contains_key(tn))
                 {
                     // A user-defined ADT with derived Show. Detected
-                    // structurally because its type is usually erased to `Error`
-                    // by codegen (otherwise the boxed-int branch below would
-                    // print its pointer).
+                    // structurally (constructor application) or, for a runtime
+                    // value whose type survived codegen (a `let`-bound var, a
+                    // function result), from the expression's type — otherwise
+                    // the boxed-int branch below would print its pointer.
                     self.print_adt_via_derived_show(p, &adt_type)?;
                 } else if self.is_bool_type(&expr_ty) || self.expr_looks_like_bool(val_expr) {
                     // Bool value - use extract_bool_tag which handles both Bool ADT
@@ -42703,6 +42705,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.tag_constructors_with_type(arg, type_name);
             }
             _ => {}
+        }
+    }
+
+    /// The head type-constructor name of a type, if it is a (possibly applied)
+    /// named type. Used as a fallback for `print`/`show` dispatch when the value
+    /// is a runtime ADT (a `let`-bound var, a function result) that the
+    /// structural `infer_adt_type_from_expr` can't see through, but whose type
+    /// survived to codegen.
+    fn adt_type_name_from_ty(ty: &Ty) -> Option<String> {
+        match ty {
+            Ty::Con(con) => Some(con.name.as_str().to_string()),
+            Ty::App(f, _) => Self::adt_type_name_from_ty(f),
+            Ty::Forall(_, inner) => Self::adt_type_name_from_ty(inner),
+            _ => None,
         }
     }
 

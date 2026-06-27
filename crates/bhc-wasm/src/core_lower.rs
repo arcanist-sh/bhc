@@ -392,6 +392,11 @@ struct WasmLowering<'a> {
     /// constructor application) be shown structurally when its type can be
     /// recovered, instead of printing the heap pointer.
     derived_show: FxHashMap<String, Symbol>,
+    /// `let`-bound variables holding a user-ADT value with a derived `Show`,
+    /// mapped to the type name. Scoped: inserted while lowering the `let` body
+    /// and removed afterwards. Lets `show`/`print` of such a variable render
+    /// structurally even though its type is erased at the use site.
+    let_adt_show: FxHashMap<VarId, String>,
     /// Newtype constructor names. A newtype is identity at runtime, so both
     /// `C x` (construction) and the `C n` pattern unwrap to the field directly —
     /// essential for GeneralizedNewtypeDeriving, where derived Num/Eq/Ord
@@ -462,6 +467,7 @@ impl<'a> WasmLowering<'a> {
             derived_eq: FxHashMap::default(),
             derived_ord: FxHashMap::default(),
             derived_show: FxHashMap::default(),
+            let_adt_show: FxHashMap::default(),
             derived_foldable: FxHashMap::default(),
             newtype_cons: FxHashSet::default(),
             bottom_vars: FxHashSet::default(),
@@ -1249,8 +1255,18 @@ impl<'a> WasmLowering<'a> {
                             *local_count += 1;
                             instrs.push(WasmInstr::LocalSet(local_idx));
                             locals.insert(var.id, local_idx);
+                            // Track an ADT-with-derived-Show binding so `print`/
+                            // `show` of this variable in the body renders
+                            // structurally rather than printing the pointer.
+                            let tracked_adt = self.let_adt_show_type(rhs);
+                            if let Some(ty) = tracked_adt.clone() {
+                                self.let_adt_show.insert(var.id, ty);
+                            }
                             // Evaluate body
                             self.lower_expr(body, instrs, locals, local_count, is_main)?;
+                            if tracked_adt.is_some() {
+                                self.let_adt_show.remove(&var.id);
+                            }
                         }
                     }
                     Bind::Rec(bindings) => {
@@ -3741,7 +3757,24 @@ impl<'a> WasmLowering<'a> {
     /// pick a `$derived_show_<T>` for a value that isn't a literal constructor
     /// application. Returns `None` otherwise (the generic show path handles the
     /// compile-time-known and scalar cases).
+    /// The type of an ADT-with-derived-Show value bound by a `let`, for
+    /// tracking in `let_adt_show`: recovered structurally (a constructor
+    /// application / max-min / etc. RHS) or from the RHS type, and only when a
+    /// `$derived_show_<T>` exists for it.
+    fn let_adt_show_type(&self, rhs: &Expr) -> Option<String> {
+        let ty = self
+            .container_type_name(rhs)
+            .or_else(|| self.runtime_show_adt_type(rhs))
+            .or_else(|| Self::ty_head_con_name(&rhs.ty()))?;
+        self.derived_show.contains_key(&ty).then_some(ty)
+    }
+
     fn runtime_show_adt_type(&self, expr: &Expr) -> Option<String> {
+        if let Expr::Var(v, _) = expr {
+            if let Some(ty) = self.let_adt_show.get(&v.id) {
+                return Some(ty.clone());
+            }
+        }
         let (head, args) = collect_app_spine(expr);
         if let Expr::Var(hv, _) = head {
             if matches!(strip_qualifier(hv.name.as_str()), "max" | "min") && args.len() == 2 {

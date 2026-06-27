@@ -365,6 +365,11 @@ pub struct Lowering<'ctx, 'm> {
     /// E.45: Set of variable IDs that hold Integer (arbitrary precision) values.
     /// Used by show dispatch to route to bhc_integer_show instead of show_int.
     integer_vars: FxHashSet<VarId>,
+    /// Variable IDs bound to a user-ADT value with a derived `Show`, mapped to
+    /// the type name. Lets `print`/`show` of a `let`-bound ADT render via the
+    /// derived show instead of printing the pointer, when the binding's type
+    /// would otherwise be erased at the use site.
+    adt_show_vars: FxHashMap<VarId, String>,
     /// Cache of generated stub functions for unimplemented external package functions.
     /// When a stub variable is referenced, we lazily generate an LLVM function that
     /// calls bhc_error with the stub name and cache it here.
@@ -406,6 +411,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
             integer_vars: FxHashSet::default(),
+            adt_show_vars: FxHashMap::default(),
             stub_functions: FxHashMap::default(),
         };
         lowering.declare_rts_functions();
@@ -454,6 +460,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
             integer_vars: FxHashSet::default(),
+            adt_show_vars: FxHashMap::default(),
             stub_functions: FxHashMap::default(),
         };
         lowering.declare_rts_functions();
@@ -14904,6 +14911,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 } else if let Some(adt_type) = self
                     .infer_adt_type_from_expr(val_expr)
                     .or_else(|| Self::adt_type_name_from_ty(&expr_ty))
+                    .or_else(|| match val_expr {
+                        Expr::Var(v, _) => self.adt_show_vars.get(&v.id).cloned(),
+                        _ => None,
+                    })
                     .filter(|tn| self.derived_show_fns.contains_key(tn))
                 {
                     // A user-defined ADT with derived Show. Detected
@@ -42722,6 +42733,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// The type name of `expr` if it evaluates to a user ADT that has a derived
+    /// `Show` — structurally (constructor application, max/min, …) or from its
+    /// type. Used to record `let`-bound ADT values for later `print`/`show`.
+    fn adt_show_type_of(&self, expr: &Expr) -> Option<String> {
+        self.infer_adt_type_from_expr(expr)
+            .or_else(|| Self::adt_type_name_from_ty(&expr.ty()))
+            .filter(|tn| self.derived_show_fns.contains_key(tn))
+    }
+
     /// Infer the user ADT type name from an expression, for derived method dispatch.
     fn infer_adt_type_from_expr(&self, expr: &Expr) -> Option<String> {
         match expr {
@@ -48643,6 +48663,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // Thunk non-trivial expressions for lazy evaluation.
                 // Trivial expressions (literals, vars, lambdas) are evaluated eagerly.
                 let should_thunk = !Self::is_trivial_expr(rhs.as_ref());
+
+                // Track a binding to a user-ADT value with derived Show, so a
+                // later `print`/`show` of this var renders structurally rather
+                // than printing the pointer (its type is often erased at the use
+                // site). Detected structurally or from the RHS type.
+                if let Some(ty) = self.adt_show_type_of(rhs.as_ref()) {
+                    self.adt_show_vars.insert(var.id, ty);
+                }
 
                 if should_thunk {
                     // E.45: Track Integer variables BEFORE thunking

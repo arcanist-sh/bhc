@@ -17,3 +17,5 @@ LT
 GT
 True
 LT
+Circle 9
+Square 3

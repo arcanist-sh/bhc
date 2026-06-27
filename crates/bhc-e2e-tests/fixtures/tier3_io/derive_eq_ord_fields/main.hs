@@ -30,3 +30,6 @@ main = do
   -- recursive type
   print (Node Leaf 1 Leaf == Node Leaf 1 Leaf)          -- True
   print (compare (Node Leaf 1 Leaf) (Node Leaf 2 Leaf)) -- LT
+  -- show a runtime field-constructor value (result of max/min)
+  print (max (Circle 1) (Circle 9))       -- Circle 9
+  print (min (Square 3) (Square 8))       -- Square 3

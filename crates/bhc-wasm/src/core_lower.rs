@@ -387,6 +387,11 @@ struct WasmLowering<'a> {
     /// binding. Lets `compare`/`<`/`<=`/`>`/`>=` on field constructors dispatch
     /// to the structural (tag-then-fields) comparison.
     derived_ord: FxHashMap<String, Symbol>,
+    /// Derived `Show` instances: type name -> the `$derived_show_<Type>`
+    /// binding. Lets a runtime ADT value (one not written as a compile-time
+    /// constructor application) be shown structurally when its type can be
+    /// recovered, instead of printing the heap pointer.
+    derived_show: FxHashMap<String, Symbol>,
     /// Newtype constructor names. A newtype is identity at runtime, so both
     /// `C x` (construction) and the `C n` pattern unwrap to the field directly —
     /// essential for GeneralizedNewtypeDeriving, where derived Num/Eq/Ord
@@ -456,6 +461,7 @@ impl<'a> WasmLowering<'a> {
             derived_functor: FxHashMap::default(),
             derived_eq: FxHashMap::default(),
             derived_ord: FxHashMap::default(),
+            derived_show: FxHashMap::default(),
             derived_foldable: FxHashMap::default(),
             newtype_cons: FxHashSet::default(),
             bottom_vars: FxHashSet::default(),
@@ -579,6 +585,9 @@ impl<'a> WasmLowering<'a> {
                     .insert(strip_counter_suffix(rest).to_string(), var.name);
             } else if let Some(rest) = name.strip_prefix("$derived_compare_") {
                 self.derived_ord
+                    .insert(strip_counter_suffix(rest).to_string(), var.name);
+            } else if let Some(rest) = name.strip_prefix("$derived_show_") {
+                self.derived_show
                     .insert(strip_counter_suffix(rest).to_string(), var.name);
             }
         };
@@ -1674,6 +1683,19 @@ impl<'a> WasmLowering<'a> {
                     );
                 }
                 return self.emit_show_constructor(name, &fields, instrs, locals, local_count);
+            }
+        }
+
+        // A runtime ADT value whose type can be recovered structurally (e.g.
+        // `max a b`/`min a b`, which return one of their arguments): render it
+        // through the type's `$derived_show_<T>`, which walks the heap value at
+        // runtime — otherwise infer_show falls through to Int and prints the
+        // pointer.
+        if let Some(ty) = self.runtime_show_adt_type(arg) {
+            if let Some(sym) = self.derived_show.get(&ty).copied() {
+                if self.emit_known_call(sym, &[arg], instrs, locals, local_count)? {
+                    return Ok(());
+                }
             }
         }
 
@@ -3708,6 +3730,24 @@ impl<'a> WasmLowering<'a> {
             }
             if let Some(bound) = self.subst.get(&hv.id) {
                 return self.field_ctor_type(bound);
+            }
+        }
+        None
+    }
+
+    /// The data type of a runtime ADT value whose type is recoverable without
+    /// type information: `max a b`/`min a b` return one of their (same-typed)
+    /// arguments, so the result type is the argument's constructor type. Used to
+    /// pick a `$derived_show_<T>` for a value that isn't a literal constructor
+    /// application. Returns `None` otherwise (the generic show path handles the
+    /// compile-time-known and scalar cases).
+    fn runtime_show_adt_type(&self, expr: &Expr) -> Option<String> {
+        let (head, args) = collect_app_spine(expr);
+        if let Expr::Var(hv, _) = head {
+            if matches!(strip_qualifier(hv.name.as_str()), "max" | "min") && args.len() == 2 {
+                return self
+                    .container_type_name(args[0])
+                    .or_else(|| self.container_type_name(args[1]));
             }
         }
         None

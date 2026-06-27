@@ -27,6 +27,12 @@ impl<'src> Parser<'src> {
         // Optional module header
         let (name, exports) = if self.eat(&TokenKind::Module) {
             let name = self.parse_module_name()?;
+            // `module M {-# DEPRECATED "..." #-} (..) where` — skip a module-
+            // level deprecation/warning pragma between the name and the export
+            // list / `where`.
+            while matches!(self.current_kind(), Some(TokenKind::Pragma(_))) {
+                self.advance();
+            }
             // Skip virtual tokens between module name and export list `(` —
             // when the `(` starts at column 1 the layout rule emits VirtualSemi.
             self.skip_virtual_tokens();
@@ -440,6 +446,7 @@ impl<'src> Parser<'src> {
                     // Special tokens that are valid operators when in parentheses
                     TokenKind::Star => Ident::new(Symbol::intern("*")),
                     TokenKind::Minus => Ident::new(Symbol::intern("-")),
+                    TokenKind::Percent => Ident::new(Symbol::intern("%")),
                     TokenKind::Dot => Ident::new(Symbol::intern(".")),
                     TokenKind::Bang => Ident::new(Symbol::intern("!")),
                     TokenKind::At => Ident::new(Symbol::intern("@")),
@@ -455,6 +462,13 @@ impl<'src> Parser<'src> {
                 self.advance();
 
                 let end = self.expect(&TokenKind::RParen)?;
+                // A type/constructor operator can carry a subspec listing its
+                // constructors/members: `(:*)(..)`, `(:+:)(L1, R1)`.
+                if self.check(&TokenKind::LParen) {
+                    let constrs = self.parse_subspec()?;
+                    let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+                    return Ok(Export::Type(ident, Some(constrs), span));
+                }
                 let span = start.to(end.span);
                 Ok(Export::Var(ident, span))
             }
@@ -674,6 +688,7 @@ impl<'src> Parser<'src> {
                     // Special tokens that are valid operators when in parentheses
                     TokenKind::Star => Ident::new(Symbol::intern("*")),
                     TokenKind::Minus => Ident::new(Symbol::intern("-")),
+                    TokenKind::Percent => Ident::new(Symbol::intern("%")),
                     TokenKind::Dot => Ident::new(Symbol::intern(".")),
                     TokenKind::Bang => Ident::new(Symbol::intern("!")),
                     TokenKind::At => Ident::new(Symbol::intern("@")),

@@ -402,6 +402,26 @@ impl<'src> Parser<'src> {
                 let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
                 Ok(Export::Type(ident, constrs, span))
             }
+            // Re-exports by qualified name: `module M (Foo.bar, Foo.Baz(..))`,
+            // valid when the entity is in scope only qualified (common in
+            // mtl/transformers re-export modules). Export the unqualified entity.
+            TokenKind::QualIdent(_, sym) => {
+                let ident = Ident::new(*sym);
+                let span = tok.span;
+                self.advance();
+                Ok(Export::Var(ident, span))
+            }
+            TokenKind::QualConId(_, sym) => {
+                let ident = Ident::new(*sym);
+                self.advance();
+                let constrs = if self.check(&TokenKind::LParen) {
+                    Some(self.parse_subspec()?)
+                } else {
+                    None
+                };
+                let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+                Ok(Export::Type(ident, constrs, span))
+            }
             // Handle operators in parentheses: module Foo ((+), (.), (!)) where
             TokenKind::LParen => {
                 self.advance(); // consume (
@@ -414,6 +434,9 @@ impl<'src> Parser<'src> {
                 let ident = match &op_tok.node.kind {
                     TokenKind::Operator(sym) => Ident::new(*sym),
                     TokenKind::ConOperator(sym) => Ident::new(*sym),
+                    // Qualified operator re-export, e.g. `(Foo.<>)`.
+                    TokenKind::QualOperator(_, sym) => Ident::new(*sym),
+                    TokenKind::QualConOperator(_, sym) => Ident::new(*sym),
                     // Special tokens that are valid operators when in parentheses
                     TokenKind::Dot => Ident::new(Symbol::intern(".")),
                     TokenKind::Bang => Ident::new(Symbol::intern("!")),
@@ -511,6 +534,14 @@ impl<'src> Parser<'src> {
     pub fn parse_import(&mut self) -> ParseResult<ImportDecl> {
         let start = self.current_span();
         self.expect(&TokenKind::Import)?;
+
+        // `import {-# SOURCE #-} M` — the SOURCE annotation marks an import of a
+        // module's `.hs-boot` interface (to break mutual recursion). BHC doesn't
+        // distinguish boot imports, but the pragma must be skipped so the import
+        // parses rather than failing with "expected module name".
+        while matches!(self.current_kind(), Some(TokenKind::Pragma(_))) {
+            self.advance();
+        }
 
         let qualified = self.eat(&TokenKind::Qualified);
         let module = self.parse_module_name()?;
@@ -635,6 +666,9 @@ impl<'src> Parser<'src> {
                 let ident = match &op_tok.node.kind {
                     TokenKind::Operator(sym) => Ident::new(*sym),
                     TokenKind::ConOperator(sym) => Ident::new(*sym),
+                    // Qualified operator re-export, e.g. `(Foo.<>)`.
+                    TokenKind::QualOperator(_, sym) => Ident::new(*sym),
+                    TokenKind::QualConOperator(_, sym) => Ident::new(*sym),
                     // Special tokens that are valid operators when in parentheses
                     TokenKind::Dot => Ident::new(Symbol::intern(".")),
                     TokenKind::Bang => Ident::new(Symbol::intern("!")),

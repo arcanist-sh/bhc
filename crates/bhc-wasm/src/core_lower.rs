@@ -379,6 +379,14 @@ struct WasmLowering<'a> {
     /// Derived `Foldable` instances: type name -> the `$derived_foldr_<Type>`
     /// binding symbol. Lets `foldr` dispatch to the generated method.
     derived_foldable: FxHashMap<String, Symbol>,
+    /// Derived `Eq` instances: type name -> the `$derived_eq_<Type>` binding.
+    /// Lets `==`/`/=` on constructors *with fields* dispatch to the structural
+    /// comparison instead of comparing heap pointers as ints.
+    derived_eq: FxHashMap<String, Symbol>,
+    /// Derived `Ord` instances: type name -> the `$derived_compare_<Type>`
+    /// binding. Lets `compare`/`<`/`<=`/`>`/`>=` on field constructors dispatch
+    /// to the structural (tag-then-fields) comparison.
+    derived_ord: FxHashMap<String, Symbol>,
     /// Newtype constructor names. A newtype is identity at runtime, so both
     /// `C x` (construction) and the `C n` pattern unwrap to the field directly —
     /// essential for GeneralizedNewtypeDeriving, where derived Num/Eq/Ord
@@ -446,6 +454,8 @@ impl<'a> WasmLowering<'a> {
             enum_of_ctor: FxHashMap::default(),
             ctor_type: FxHashMap::default(),
             derived_functor: FxHashMap::default(),
+            derived_eq: FxHashMap::default(),
+            derived_ord: FxHashMap::default(),
             derived_foldable: FxHashMap::default(),
             newtype_cons: FxHashSet::default(),
             bottom_vars: FxHashSet::default(),
@@ -563,6 +573,12 @@ impl<'a> WasmLowering<'a> {
                     .insert(strip_counter_suffix(rest).to_string(), var.name);
             } else if let Some(rest) = name.strip_prefix("$derived_foldr_") {
                 self.derived_foldable
+                    .insert(strip_counter_suffix(rest).to_string(), var.name);
+            } else if let Some(rest) = name.strip_prefix("$derived_eq_") {
+                self.derived_eq
+                    .insert(strip_counter_suffix(rest).to_string(), var.name);
+            } else if let Some(rest) = name.strip_prefix("$derived_compare_") {
+                self.derived_ord
                     .insert(strip_counter_suffix(rest).to_string(), var.name);
             }
         };
@@ -3665,6 +3681,113 @@ impl<'a> WasmLowering<'a> {
         None
     }
 
+    /// The data type name of `expr` if its spine head is a user constructor that
+    /// has at least one field (arity > 0). Used to decide when `==`/`compare`
+    /// must use structural comparison: nullary constructors compare correctly as
+    /// raw tags, but field constructors are heap pointers, so a bare int/pointer
+    /// comparison would compare addresses. Returns `None` for non-constructors
+    /// and nullary constructors (leaving the working int path untouched).
+    fn field_ctor_type(&self, expr: &Expr) -> Option<String> {
+        let mut e = expr;
+        loop {
+            e = match e {
+                Expr::TyApp(inner, _, _)
+                | Expr::Cast(inner, _, _)
+                | Expr::Tick(_, inner, _)
+                | Expr::Lazy(inner, _) => inner,
+                _ => break,
+            };
+        }
+        let (head, _) = collect_app_spine(e);
+        if let Expr::Var(hv, _) = head {
+            let name = hv.name.as_str();
+            if let Some(ci) = self.con_map.get(name) {
+                if ci.arity > 0 {
+                    return self.ctor_type.get(name).cloned();
+                }
+            }
+            if let Some(bound) = self.subst.get(&hv.id) {
+                return self.field_ctor_type(bound);
+            }
+        }
+        None
+    }
+
+    /// Route `==`/`/=`/`compare`/`<`/`<=`/`>`/`>=` on a constructor *with fields*
+    /// to the generated `$derived_eq_<Type>` / `$derived_compare_<Type>`
+    /// function, which compares structurally (tag, then fields lexicographically)
+    /// rather than comparing the operands' heap pointers as integers. Returns
+    /// `Ok(true)` if it emitted the call; `Ok(false)` leaves the application for
+    /// the normal path (the int/pointer comparison, correct for Ints and nullary
+    /// enums). Detection is structural (a field-constructor operand), so it only
+    /// fires where one operand is a literal `C x …`; that is the common direct
+    /// case, and the derived functions themselves recurse on their fields.
+    fn try_lower_eq_ord(
+        &mut self,
+        name: &str,
+        args: &[&Expr],
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<bool> {
+        if args.len() != 2 {
+            return Ok(false);
+        }
+        let op = strip_qualifier(name);
+        if !matches!(op, "==" | "/=" | "<" | "<=" | ">" | ">=" | "compare") {
+            return Ok(false);
+        }
+        let Some(ty) = self
+            .field_ctor_type(args[0])
+            .or_else(|| self.field_ctor_type(args[1]))
+        else {
+            return Ok(false);
+        };
+        match op {
+            "==" | "/=" => {
+                let Some(sym) = self.derived_eq.get(&ty).copied() else {
+                    return Ok(false);
+                };
+                if !self.emit_known_call(sym, args, instrs, locals, local_count)? {
+                    return Ok(false);
+                }
+                // Derived eq yields a Bool (i32 0/1). `/=` negates it.
+                if op == "/=" {
+                    instrs.push(WasmInstr::I32Eqz);
+                }
+                Ok(true)
+            }
+            // Ordering operators go through the structural compare, whose result
+            // is the Ordering tag (0=LT, 1=EQ, 2=GT). Adapt the tag per operator.
+            _ => {
+                let Some(sym) = self.derived_ord.get(&ty).copied() else {
+                    return Ok(false);
+                };
+                if !self.emit_known_call(sym, args, instrs, locals, local_count)? {
+                    return Ok(false);
+                }
+                match op {
+                    "<" => instrs.push(WasmInstr::I32Eqz), // tag == LT(0)
+                    ">=" => {
+                        instrs.push(WasmInstr::I32Const(0));
+                        instrs.push(WasmInstr::I32Ne); // tag != LT(0)
+                    }
+                    ">" => {
+                        instrs.push(WasmInstr::I32Const(2));
+                        instrs.push(WasmInstr::I32Eq); // tag == GT(2)
+                    }
+                    "<=" => {
+                        instrs.push(WasmInstr::I32Const(2));
+                        instrs.push(WasmInstr::I32Ne); // tag != GT(2)
+                    }
+                    "compare" => {} // result is the Ordering tag already
+                    _ => unreachable!(),
+                }
+                Ok(true)
+            }
+        }
+    }
+
     fn lower_app(
         &mut self,
         expr: &Expr,
@@ -3711,6 +3834,12 @@ impl<'a> WasmLowering<'a> {
         };
         if let Some(name) = peeled_name {
             if self.try_lower_functor_foldable(name, &args, instrs, locals, local_count)? {
+                return Ok(());
+            }
+            // Derived `Eq`/`Ord` on field constructors: route ==/compare/< etc.
+            // to the structural `$derived_eq_`/`$derived_compare_` functions
+            // before the int/pointer-comparison primitives below claim them.
+            if self.try_lower_eq_ord(name, &args, instrs, locals, local_count)? {
                 return Ok(());
             }
             // Derived `Read` for an enum: `read "Green" :: Color` resolves to the

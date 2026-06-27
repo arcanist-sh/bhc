@@ -1,0 +1,13 @@
+GT
+LT
+LT
+True
+False
+True
+False
+True
+False
+LT
+GT
+True
+True

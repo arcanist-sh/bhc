@@ -47174,9 +47174,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                                             "derived eq returned void".to_string(),
                                         )
                                     })?;
-                                // Derived eq returns Bool ADT (tag 0=False, 1=True).
-                                // Extract tag to get i64 result expected by comparison operators.
-                                let tag = self.extract_adt_tag(bool_ptr.into_pointer_value())?;
+                                // Derived eq returns a Bool. For enums it's the
+                                // True/False constructors (a heap Bool ADT), but
+                                // for constructors with fields the body ends in a
+                                // field `==`, which is a tagged-int-as-pointer
+                                // (0/1) — not a heap ADT. extract_bool_tag handles
+                                // both; extract_adt_tag would deref the tagged int
+                                // and segfault.
+                                let tag = self.extract_bool_tag(bool_ptr.into_pointer_value())?;
                                 if matches!(op, PrimOp::Ne) {
                                     // Invert: 0→1, 1→0
                                     let one = self.type_mapper().i64_type().const_int(1, false);

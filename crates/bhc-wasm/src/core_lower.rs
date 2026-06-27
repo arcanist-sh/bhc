@@ -3745,12 +3745,30 @@ impl<'a> WasmLowering<'a> {
         let (head, args) = collect_app_spine(expr);
         if let Expr::Var(hv, _) = head {
             if matches!(strip_qualifier(hv.name.as_str()), "max" | "min") && args.len() == 2 {
-                return self
+                if let Some(ty) = self
                     .container_type_name(args[0])
-                    .or_else(|| self.container_type_name(args[1]));
+                    .or_else(|| self.container_type_name(args[1]))
+                {
+                    return Some(ty);
+                }
             }
         }
-        None
+        // Fallback: the value's own type, when it survived to the backend (e.g.
+        // a function result whose return type is a user ADT). Many values reach
+        // here with an erased type, in which case this yields nothing and the
+        // generic show path handles it.
+        Self::ty_head_con_name(&expr.ty())
+    }
+
+    /// The head type-constructor name of a type (peeling `Forall` and type
+    /// application to the leftmost `Con`), if any.
+    fn ty_head_con_name(ty: &Ty) -> Option<String> {
+        match ty {
+            Ty::Con(c) => Some(c.name.as_str().to_string()),
+            Ty::App(f, _) => Self::ty_head_con_name(f),
+            Ty::Forall(_, inner) => Self::ty_head_con_name(inner),
+            _ => None,
+        }
     }
 
     /// Route `==`/`/=`/`compare`/`<`/`<=`/`>`/`>=` on a constructor *with fields*

@@ -5937,6 +5937,8 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "Data.Set.difference",
     "Data.Set.filter",
     "Data.Set.foldr",
+    "Data.Set.toList",
+    "Data.Set.elems",
     "Data.IntSet.fromList",
     "Data.IntSet.size",
     "Data.IntSet.member",
@@ -5947,6 +5949,8 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "Data.IntSet.difference",
     "Data.IntSet.filter",
     "Data.IntSet.foldr",
+    "Data.IntSet.toList",
+    "Data.IntSet.elems",
     // Data.Sequence (list-backed)
     "Data.Sequence.empty",
     "Data.Sequence.singleton",
@@ -7791,6 +7795,12 @@ fn build_container_fn(name: &str, id: &mut usize) -> Option<Expr> {
                         ),
                     ),
                 )
+            }
+            // The set's runtime rep is a deduplicated but unsorted list;
+            // toList/elems must return it ascending to match Data.Set.
+            "toList" | "elems" => {
+                let s = pv("s", fresh(id));
+                plam(s.clone(), papp(pref("sort", id), pev(&s)))
             }
             _ => return None,
         }

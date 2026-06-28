@@ -19,4 +19,6 @@ main = do
     putStrLn (show (Set.size evens))
     let total = Set.foldr (+) 0 s1
     putStrLn (show total)
+    putStrLn (show (Set.toList s1))
+    putStrLn (show (Set.elems s4))
     putStrLn "done"

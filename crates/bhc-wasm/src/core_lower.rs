@@ -6064,6 +6064,9 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "sort",
     "intercalate",
     "mapMaybe",
+    "foldl'",
+    "unwords",
+    "unlines",
     "groupBy",
     "insert",
     "unionBy",
@@ -6178,6 +6181,14 @@ fn palt(name: &str, tag: u32, arity: u32, binders: Vec<Var>, rhs: Expr) -> Alt {
 fn pstr_empty() -> Expr {
     Expr::Lit(
         Literal::String(Symbol::intern("")),
+        Ty::Error,
+        Span::default(),
+    )
+}
+/// A `String` literal.
+fn pstr(s: &str) -> Expr {
+    Expr::Lit(
+        Literal::String(Symbol::intern(s)),
         Ty::Error,
         Span::default(),
     )
@@ -9573,6 +9584,51 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
                 ),
             )
         }
+        // foldl' f z xs = foldl f z xs  (eager WASM backend == foldl)
+        "foldl'" => {
+            let f = pv("f", fresh(id));
+            let z = pv("z", fresh(id));
+            let xs = pv("xs", fresh(id));
+            plam(
+                f.clone(),
+                plam(
+                    z.clone(),
+                    plam(
+                        xs.clone(),
+                        papp(papp2(pref("foldl", id), pev(&f), pev(&z)), pev(&xs)),
+                    ),
+                ),
+            )
+        }
+        // unwords = intercalate " "
+        "unwords" => {
+            let xss = pv("xss", fresh(id));
+            plam(
+                xss.clone(),
+                papp2(pref("intercalate", id), pstr(" "), pev(&xss)),
+            )
+        }
+        // unlines xs = foldr (\x acc -> x ++ "\n" ++ acc) [] xs
+        "unlines" => {
+            let xs = pv("xs", fresh(id));
+            let x = pv("x", fresh(id));
+            let acc = pv("acc", fresh(id));
+            let step = plam(
+                x.clone(),
+                plam(
+                    acc.clone(),
+                    papp2(
+                        pref("__listAppend", id),
+                        pev(&x),
+                        papp2(pref("__listAppend", id), pstr("\n"), pev(&acc)),
+                    ),
+                ),
+            );
+            plam(
+                xs.clone(),
+                papp(papp2(pref("foldr", id), step, pref("[]", id)), pev(&xs)),
+            )
+        }
         // groupBy eq xs = case xs of
         //   [] -> []
         //   (y:ys) -> case span (eq y) ys of (g, rest) -> (y : g) : groupBy eq rest
@@ -10693,6 +10749,8 @@ fn is_list_returning_fn(name: &str) -> bool {
             | "drop"
             | "zip"
             | "zipWith"
+            | "zipWith3"
+            | "zip3"
             | "replicate"
             | "enumFromTo"
             | "takeWhile"

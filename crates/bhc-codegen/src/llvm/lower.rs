@@ -14871,6 +14871,35 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     })?;
             }
             BasicValueEnum::PointerValue(p) => {
+                // A Rational renders as "n % d" via bhc_rational_show — otherwise
+                // it falls through to the boxed-int branch and prints its pointer
+                // (print x = putStrLn (show x)). `show` of a Rational already
+                // does this; `print` must too.
+                if self.is_rational_expr(val_expr) {
+                    let show_fn = *self.functions.get(&VarId::new(1000915)).ok_or_else(|| {
+                        CodegenError::Internal("bhc_rational_show not declared".to_string())
+                    })?;
+                    let cstr = self
+                        .builder()
+                        .build_call(show_fn, &[p.into()], "show_rational")
+                        .map_err(|e| {
+                            CodegenError::Internal(format!("show_rational call: {:?}", e))
+                        })?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| {
+                            CodegenError::Internal("show_rational returned void".to_string())
+                        })?;
+                    let print_ln = *self.functions.get(&VarId::new(1000002)).ok_or_else(|| {
+                        CodegenError::Internal("bhc_print_string_ln not declared".to_string())
+                    })?;
+                    self.builder()
+                        .build_call(print_ln, &[cstr.into_pointer_value().into()], "")
+                        .map_err(|e| {
+                            CodegenError::Internal(format!("print_string_ln call: {:?}", e))
+                        })?;
+                    return Ok(Some(self.type_mapper().ptr_type().const_null().into()));
+                }
                 // Pointer could be a boxed value from closure call, string, or ADT.
                 // Use the expression's type to decide how to print.
                 // Check list first - by type or by expression structure (for when type is Error)

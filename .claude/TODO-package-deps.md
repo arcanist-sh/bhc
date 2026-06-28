@@ -123,8 +123,16 @@ All in `crates/bhc-driver/src/lib.rs`:
    match hx's `compile_module` expectation. Verified against a synthetic `.conf`
    matching hx `generate_registration_file` exactly (driver test
    `test_package_db_conf_import_dirs_resolve_check`).
-   Remaining: (a) verify against a *real* hx-built DB end-to-end (needs hx +
-   Hackage); (b) honor `exposed-modules:` / `depends:` for visibility scoping —
+   (a) Real hx-built DB end-to-end — DONE. Drove hx's actual
+   `hx_bhc::package_build::build_package` on a local cabal package with this BHC
+   binary (per-module `bhc -c`, static lib, `.conf` generation) → then
+   `bhc check --package-db <db>` resolves a consumer with the dep source absent.
+   This surfaced and fixed a real hx bug: `build_package` left `.bhi` in
+   `<build>/hi` while the `.conf` declares `import-dirs: <install>/lib` and never
+   installed them — fixed in hx (`fix/bhc-install-interfaces`, new
+   `install_interfaces`). Gated test (BHC_PATH): hx-bhc
+   `test_build_package_then_check_consumer`.
+   Remaining: (b) honor `exposed-modules:` / `depends:` for visibility scoping —
    currently any `.bhi` found under an import-dir resolves; (c) **flag mismatch:**
    hx (`hx/crates/hx-bhc/src/compile.rs`) passes `-package-id` (single dash) but
    BHC defines `--package-id` (double dash) and does not consume it yet — reconcile

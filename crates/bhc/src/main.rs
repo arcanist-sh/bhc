@@ -708,12 +708,27 @@ fn start_repl(cli: &Cli) -> Result<()> {
     let bhc_exe = std::env::current_exe()?;
     let bhci_exe = bhc_exe.with_file_name("bhci");
 
-    let mut args = vec![];
+    let mut args: Vec<String> = Vec::new();
     match cli.profile {
-        Profile::Numeric => args.extend(["--profile", "numeric"]),
-        Profile::Server => args.extend(["--profile", "server"]),
-        Profile::Edge => args.extend(["--profile", "edge"]),
+        Profile::Numeric => args.extend(["--profile".into(), "numeric".into()]),
+        Profile::Server => args.extend(["--profile".into(), "server".into()]),
+        Profile::Edge => args.extend(["--profile".into(), "edge".into()]),
         Profile::Default => {}
+    }
+    // Forward package databases, exposed package ids, and import paths so the
+    // REPL resolves imports against the same separate-compilation interfaces as
+    // `bhc check`/`build`.
+    for path in &cli.import_paths {
+        args.push("--import-path".into());
+        args.push(path.display().to_string());
+    }
+    for db in &cli.package_dbs {
+        args.push("--package-db".into());
+        args.push(db.display().to_string());
+    }
+    for id in &cli.package_ids {
+        args.push("--package-id".into());
+        args.push(id.clone());
     }
 
     let status = Command::new(&bhci_exe)

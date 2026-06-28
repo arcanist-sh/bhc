@@ -61,6 +61,18 @@ struct Cli {
     /// Enable verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Additional import paths for resolving `:load` targets
+    #[arg(short = 'I', long = "import-path", value_name = "DIR")]
+    import_paths: Vec<PathBuf>,
+
+    /// Package databases (dirs of compiled `.bhi` interfaces)
+    #[arg(long = "package-db", value_name = "PATH")]
+    package_dbs: Vec<PathBuf>,
+
+    /// Expose a dependency by package ID
+    #[arg(long = "package-id", value_name = "ID")]
+    package_ids: Vec<String>,
 }
 
 /// REPL errors
@@ -110,6 +122,12 @@ struct ReplState {
     accumulated_imports: Vec<bhc_ast::ImportDecl>,
     /// Shared identifier list for tab-completion
     completion_identifiers: Arc<Mutex<Vec<String>>>,
+    /// Import paths used to resolve `:load` targets not found relative to cwd.
+    import_paths: Vec<PathBuf>,
+    /// Package databases of compiled `.bhi` interfaces (from `--package-db`).
+    package_dbs: Vec<PathBuf>,
+    /// Exposed dependency package ids (from `--package-id`).
+    package_ids: Vec<String>,
 }
 
 /// REPL configuration options
@@ -166,6 +184,9 @@ impl ReplState {
             multiline_buffer: None,
             accumulated_imports: Vec::new(),
             completion_identifiers: Arc::new(Mutex::new(identifiers)),
+            import_paths: Vec::new(),
+            package_dbs: Vec::new(),
+            package_ids: Vec::new(),
         }
     }
 
@@ -411,6 +432,9 @@ fn main() -> Result<()> {
 
     // Create REPL state
     let mut state = ReplState::new(profile, cli.verbose);
+    state.import_paths = cli.import_paths.clone();
+    state.package_dbs = cli.package_dbs.clone();
+    state.package_ids = cli.package_ids.clone();
 
     // Load prelude
     if !cli.no_prelude {
@@ -769,6 +793,7 @@ fn handle_show(state: &ReplState, args: &str) {
         "bindings" | "b" => show_bindings(state),
         "imports" | "i" => show_repl_imports(state),
         "modules" | "m" => show_modules_in_scope(state),
+        "packages" | "p" => show_repl_packages(state),
         "" => {
             println!("Profile: {:?}", state.profile);
             println!();
@@ -778,8 +803,25 @@ fn handle_show(state: &ReplState, args: &str) {
         }
         other => {
             println!("Unknown :show target: {}", other);
-            println!("Usage: :show [bindings|imports|modules]");
+            println!("Usage: :show [bindings|imports|modules|packages]");
         }
+    }
+}
+
+fn show_repl_packages(state: &ReplState) {
+    if state.package_dbs.is_empty() && state.package_ids.is_empty() && state.import_paths.is_empty()
+    {
+        println!("No package databases, package ids, or import paths configured.");
+        return;
+    }
+    for db in &state.package_dbs {
+        println!("  package-db: {}", db.display());
+    }
+    for id in &state.package_ids {
+        println!("  package-id: {}", id);
+    }
+    for dir in &state.import_paths {
+        println!("  import-path: {}", dir.display());
     }
 }
 
@@ -1462,9 +1504,20 @@ fn show_info(state: &mut ReplState, name: &str) {
 }
 
 fn load_file(state: &mut ReplState, path: &PathBuf) -> Result<(), ReplError> {
-    if !path.exists() {
+    // Resolve relative to cwd first, then against the configured import paths.
+    let resolved = if path.exists() {
+        path.clone()
+    } else if let Some(found) = state
+        .import_paths
+        .iter()
+        .map(|dir| dir.join(path))
+        .find(|candidate| candidate.exists())
+    {
+        found
+    } else {
         return Err(ReplError::FileNotFound(path.clone()));
-    }
+    };
+    let path = &resolved;
 
     println!("[1 of 1] Compiling {}...", path.display());
 

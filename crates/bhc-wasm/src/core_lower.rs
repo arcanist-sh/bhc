@@ -1647,12 +1647,13 @@ impl<'a> WasmLowering<'a> {
         if is_rational_expr(arg) {
             return self.emit_show_rational(arg, instrs, locals, local_count);
         }
-        // A `Maybe`-returning call (`readMaybe`) is rendered by walking the
-        // runtime value: `Nothing` (the nullary tag 0) or `Just <field>`.
+        // A `Maybe`-returning call (`readMaybe`, `find`, `lookup`, `elemIndex`,
+        // …) is rendered by walking the runtime value: `Nothing` (the nullary
+        // tag 0) or `Just <field>` (the field shown as Int, the common case).
         {
             let (h, _) = collect_app_spine(arg);
             if let Expr::Var(v, _) = h {
-                if strip_qualifier(v.name.as_str()) == "readMaybe" {
+                if returns_maybe_fn(strip_qualifier(v.name.as_str())) {
                     return self.emit_show_maybe(arg, instrs, locals, local_count);
                 }
             }
@@ -6014,6 +6015,7 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "splitAt",
     "span",
     "break",
+    "find",
     "findIndex",
     "elemIndex",
     "isPrefixOf",
@@ -8589,6 +8591,47 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
         //   (y:ys) -> case p y of
         //     True  -> Just 0
         //     False -> case findIndex p ys of { Nothing -> Nothing; Just i -> Just (i+1) }
+        // find p xs = case xs of
+        //   [] -> Nothing
+        //   (y:ys) -> case p y of { True -> Just y; False -> find p ys }
+        "find" => {
+            let p = pv("p", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let cons_rhs = pcase(
+                papp(pev(&p), pev(&y)),
+                vec![
+                    palt(
+                        "False",
+                        0,
+                        0,
+                        vec![],
+                        papp2(pref("find", id), pev(&p), pev(&ys)),
+                    ),
+                    palt(
+                        "True",
+                        1,
+                        0,
+                        vec![],
+                        papp(pref("Just", id), pev(&y)),
+                    ),
+                ],
+            );
+            plam(
+                p.clone(),
+                plam(
+                    xs.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt("[]", 0, 0, vec![], pref("Nothing", id)),
+                            palt(":", 1, 2, vec![y.clone(), ys.clone()], cons_rhs),
+                        ],
+                    ),
+                ),
+            )
+        }
         "findIndex" => {
             let p = pv("p", fresh(id));
             let xs = pv("xs", fresh(id));
@@ -10732,6 +10775,16 @@ fn is_nonstring_list_ty(ty: &Ty) -> bool {
 /// Whether a function always returns a cons-list (used to classify an operand
 /// of `++` as a list). Excludes `++`/`reverse`/`show`, whose result kind is
 /// ambiguous (string vs list).
+/// Functions whose result is a `Maybe` of a scalar (renderable as `Just <Int>`
+/// / `Nothing` by walking the runtime value). The element type is erased, so —
+/// as with runtime lists — the field is shown as Int, the common case.
+fn returns_maybe_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "readMaybe" | "find" | "lookup" | "elemIndex" | "findIndex"
+    )
+}
+
 fn is_list_returning_fn(name: &str) -> bool {
     matches!(
         strip_qualifier(name),

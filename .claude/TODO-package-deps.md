@@ -151,8 +151,19 @@ All in `crates/bhc-driver/src/lib.rs`:
    selecting a dependency does not expose its dependents). `ConfPackage.depends`
    parsed from the `.conf`; hx's `generate_registration_file` already emits
    `depends:`. Test: driver `test_package_db_depends_transitive_visibility`.
-   Still open: the REPL path (`hx/crates/hx-bhc/src/repl.rs`) still uses
-   single-dash `-package-db=` (targets bhci, separate tool).
+   REPL flag reconcile — DONE. hx's repl.rs ran the non-existent `bhc
+   --interactive` with GHC-style `-package-db=`/`-i<dir>`/`--tensor-fusion`; it
+   now invokes `bhc repl` with BHC spellings (`--profile`, `--import-path`,
+   `--package-db`). `bhc repl` (`start_repl`) forwards `--package-db`/
+   `--package-id`/`--import-path` to bhci; bhci now accepts those flags, resolves
+   `:load` targets against `--import-path`, and lists them under `:show packages`.
+   (bhci's evaluator is still stubbed and does not consume `.bhi` for import
+   *resolution* — that's the separate REPL-eval gap, not this flag reconcile.)
+   Tests: hx `test_repl_args_construction`/`test_repl_args_minimal`; verified
+   `:load Foo.hs` resolves via `--import-path` end-to-end.
+   Note: hx `compile.rs`/`native_builder` still pass `--tensor-fusion` (when
+   enabled) which `bhc` does not define — a latent compile-path flag mismatch
+   (orthogonal; only triggers when tensor_fusion is on).
 3. **hx-driven fetch + build of transitive deps**, then check/compile the target
    against them. Reuse hx-solver (`.cabal` parse, Hackage fetch, solver) + the
    `-c`/`.bhi` pipeline. This is the real end-to-end Hackage milestone. The

@@ -169,11 +169,24 @@ All in `crates/bhc-driver/src/lib.rs`:
    double-dash spelling, so no hx change needed. Verified: hx-style
    `bhc -c --tensor-fusion`, `bhc check --tensor-fusion`, and a full default-
    profile build with `--tensor-fusion` all succeed (exe runs).
-3. **hx-driven fetch + build of transitive deps**, then check/compile the target
-   against them. Reuse hx-solver (`.cabal` parse, Hackage fetch, solver) + the
-   `-c`/`.bhi` pipeline. This is the real end-to-end Hackage milestone. The
-   BHC-side pieces it needs (per-module `-c` → `.bhi` into a DB, and
-   check/compile consuming that DB) are now in place from milestone 2.
+3. **hx-driven build of transitive deps**, then check/compile the target against
+   them — core DONE (non-network). hx's `BhcFullNativeBuilder::build_project`
+   (`hx/crates/hx-bhc/src/full_native.rs`) already walks the resolved build plan
+   in topological order: builds each package with `build_package`, registers its
+   `.conf` in a `BhcPackageDb`, then builds the local project with `--package-db`
+   + `--package-id` per dep. Fixed a real bug: `build_dependency` now threads the
+   in-progress package DB into each dependency's `--package-db`, so a dep can
+   resolve already-built deps (it previously only passed user DBs). Verified
+   end-to-end over a local `Data.Base <- Data.Mid <- app` chain (gated test
+   `test_transitive_dependency_build_and_check`): libbase then libmid (libmid's
+   compile resolves Data.Base via the DB), then `bhc check app --package-db <db>
+   --package-id <libmid>` resolves the whole `depends:` closure.
+   Remaining (network): the Hackage **fetch** half — `build_project` consumes
+   `FetchResult`s from `fetch_packages` and a `BuildPlan` from the solver; that
+   path (solver → Hackage fetch → tarball extract) needs network and a real
+   index, so it's untested here. Also: wire `BhcFullNativeBuilder` into the
+   `hx build --backend bhc` CLI path (the CLI's `run_full_native_build` currently
+   drives the GHC builder).
 
 ---
 

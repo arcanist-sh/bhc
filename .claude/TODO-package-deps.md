@@ -1,6 +1,21 @@
 # Feature brief: Package dependency resolution for `bhc check` / compile
 
-**Status:** Not started. Self-contained brief for a fresh session.
+**Status:** Milestone 1 done (no-network dependency roots). Milestones 2–3 (hx
+package DB consumption, hx-driven fetch) not started. Self-contained brief.
+
+**Milestone 1 (landed):** `bhc check` accepts `--package-dir <DIR>` (repeatable,
+global so it works before or after the subcommand). Each dir's `.hs` modules are
+parsed/ordered/checked alongside the target so the target's imports resolve, but
+the dependency modules are **not** reported in the results — only modules reached
+from the target paths are. Implementation: `Compiler::check_files_ordered_reporting`
+(driver) takes a `report_only: Option<&FxHashSet<Utf8PathBuf>>` filter; the public
+`check_with_discovery_with_deps(paths, dep_roots)` collects dep `.hs` files,
+prepends them to the file set, and passes the target set as the report filter.
+The registry/`ModuleCache` (topological order) already makes dep exports available
+to importers; package dirs are also added to `import_paths` for on-disk fallback.
+Validated: a 2-module target importing a `Data.Split` dep goes from 2 skipped →
+2 OK with the dep unreported (driver test
+`test_package_dir_deps_resolve_and_are_unreported`).
 **Why:** When checking a real package, most modules come back **SKIPPED**, not
 failed — they import modules from *other packages* (dependencies) that aren't
 on disk in the package's own `src/`, so the driver can't satisfy the import and
@@ -64,16 +79,13 @@ All in `crates/bhc-driver/src/lib.rs`:
 
 ## What to build (suggested increments)
 
-1. **Dependency module roots in the check path (no network).** Let `bhc check`
-   take dependency source roots (e.g. `--package-dir <dir>` repeatable, or read
-   a package DB) and include their modules in discovery so imports resolve.
-   Concretely: thread extra source roots into `check_with_discovery` /
-   `check_files_ordered` so `local_names` includes dep modules and `search_paths`
-   includes their dirs. Re-measure a package's skipped count.
-   - Quick validation harness without hx: `bhc check <pkg>/src <dep1>/src <dep2>/src …`
-     should already pull deps in as "local" (multi-path discovery). Try this
-     first to confirm the registry/import path works before adding flags — it
-     may "just work" for vendored deps and quantify the upside.
+1. **Dependency module roots in the check path (no network). — DONE.**
+   Implemented as `--package-dir <dir>` (repeatable, global). See the
+   Milestone 1 note at the top. The multi-path harness
+   (`bhc check <pkg>/src <dep>/src`) also works and was confirmed — but it
+   *reports* the dep modules too; `--package-dir` is the version that keeps the
+   target's result set clean. Next: re-measure a real Hackage package's skipped
+   count by pointing `--package-dir` at its (vendored/already-fetched) deps.
 2. **Consume hx's package DB.** Have `bhc check`/compile read hx's
    filesystem package DB (compiled `.bhi` + artifacts) so a `cabal`-resolved dep
    set is used. hx already builds this; wire BHC to consult it for imports.

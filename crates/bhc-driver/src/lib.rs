@@ -3972,11 +3972,40 @@ impl Compiler {
         &self,
         paths: &[Utf8PathBuf],
     ) -> CompileResult<Vec<(String, Result<(), CompileError>)>> {
+        self.check_files_ordered_reporting(paths, None)
+    }
+
+    /// Like [`check_files_ordered`], but only reports results for the modules
+    /// whose source path is in `report_only`.
+    ///
+    /// All files in `paths` are still parsed, ordered, and type-checked so that
+    /// their exports are registered for downstream import resolution. When
+    /// `report_only` is `Some`, modules whose path is *not* in the set are
+    /// treated purely as dependencies: they are checked and registered but their
+    /// pass/fail/skip results are omitted from the returned vector. This is how
+    /// `--package-dir` dependency roots resolve a target package's imports
+    /// without polluting its reported check results.
+    ///
+    /// When `report_only` is `None`, every module is reported (the original
+    /// [`check_files_ordered`] behavior).
+    pub fn check_files_ordered_reporting(
+        &self,
+        paths: &[Utf8PathBuf],
+        report_only: Option<&rustc_hash::FxHashSet<Utf8PathBuf>>,
+    ) -> CompileResult<Vec<(String, Result<(), CompileError>)>> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
 
+        // Whether a given source path should appear in the reported results.
+        let should_report = |p: &Utf8PathBuf| report_only.is_none_or(|s| s.contains(p));
+
         if paths.len() == 1 {
+            if !should_report(&paths[0]) {
+                // The lone module is a dependency root with nothing to report.
+                let _ = self.check_file(&paths[0]);
+                return Ok(Vec::new());
+            }
             let unit = CompilationUnit::from_path(paths[0].clone())?;
             let name = unit.module_name.clone();
             let result = self.check_file(&paths[0]);
@@ -3986,7 +4015,7 @@ impl Compiler {
         // Phase 1: Parse all files to extract module names and imports
         // Parse errors are recorded but don't abort the entire check.
         let mut module_info: Vec<(Utf8PathBuf, String, Vec<String>)> = Vec::new();
-        let mut parse_failures: Vec<(String, CompileError)> = Vec::new();
+        let mut parse_failures: Vec<(Utf8PathBuf, String, CompileError)> = Vec::new();
         let file_id = FileId::new(0);
 
         for path in paths {
@@ -3994,14 +4023,14 @@ impl Compiler {
                 Ok(u) => u,
                 Err(e) => {
                     let name = path.file_stem().unwrap_or("unknown").to_string();
-                    parse_failures.push((name, e));
+                    parse_failures.push((path.clone(), name, e));
                     continue;
                 }
             };
             let ast = match self.parse(&unit, file_id) {
                 Ok(a) => a,
                 Err(e) => {
-                    parse_failures.push((unit.module_name.clone(), e));
+                    parse_failures.push((path.clone(), unit.module_name.clone(), e));
                     continue;
                 }
             };
@@ -4065,6 +4094,9 @@ impl Compiler {
         for idx in &ordered {
             let (ref path, ref mod_name, ref imports) = module_info[*idx];
 
+            // Dependency-root modules are checked and registered but not reported.
+            let report = should_report(path);
+
             // Pre-register exports for cyclic modules when we first encounter one.
             // Extract export names directly from the AST (no lowering needed).
             if cyclic_indices.contains(idx) && !cycle_preregistered {
@@ -4099,13 +4131,15 @@ impl Compiler {
                     })
                     .map(|s| s.as_str())
                     .collect();
-                results.push((
-                    mod_name.clone(),
-                    Err(CompileError::Other(format!(
-                        "skipped: unresolved imports: {}",
-                        missing.join(", ")
-                    ))),
-                ));
+                if report {
+                    results.push((
+                        mod_name.clone(),
+                        Err(CompileError::Other(format!(
+                            "skipped: unresolved imports: {}",
+                            missing.join(", ")
+                        ))),
+                    ));
+                }
                 failed_modules.insert(mod_name.clone());
                 continue;
             }
@@ -4120,12 +4154,14 @@ impl Compiler {
                     .iter()
                     .any(|imp| failed_modules.contains(imp.as_str()));
             if dep_failed {
-                results.push((
-                    mod_name.clone(),
-                    Err(CompileError::Other(
-                        "skipped: dependency failed".to_string(),
-                    )),
-                ));
+                if report {
+                    results.push((
+                        mod_name.clone(),
+                        Err(CompileError::Other(
+                            "skipped: dependency failed".to_string(),
+                        )),
+                    ));
+                }
                 failed_modules.insert(mod_name.clone());
                 continue;
             }
@@ -4134,7 +4170,9 @@ impl Compiler {
             match self.check_unit_for_multimodule(unit, mod_name, &registry) {
                 Ok(compiled_info) => {
                     registry.modules.insert(mod_name.clone(), compiled_info);
-                    results.push((mod_name.clone(), Ok(())));
+                    if report {
+                        results.push((mod_name.clone(), Ok(())));
+                    }
                 }
                 Err(CompileError::TypeErrorWithInfo { count, info }) => {
                     // Type checking failed, but parsing and lowering succeeded.
@@ -4143,18 +4181,25 @@ impl Compiler {
                     registry.modules.insert(mod_name.clone(), info);
                     // Still mark as failed for reporting purposes, but do NOT
                     // add to failed_modules so downstream modules aren't skipped.
-                    results.push((mod_name.clone(), Err(CompileError::TypeError(count))));
+                    if report {
+                        results.push((mod_name.clone(), Err(CompileError::TypeError(count))));
+                    }
                 }
                 Err(e) => {
                     failed_modules.insert(mod_name.clone());
-                    results.push((mod_name.clone(), Err(e)));
+                    if report {
+                        results.push((mod_name.clone(), Err(e)));
+                    }
                 }
             }
         }
 
-        // Append parse failures to results
-        for (name, err) in parse_failures {
-            results.push((name, Err(err)));
+        // Append parse failures to results (dependency-root parse failures are
+        // silent — they only matter if they break a reported module's imports).
+        for (path, name, err) in parse_failures {
+            if should_report(&path) {
+                results.push((name, Err(err)));
+            }
         }
 
         Ok(results)
@@ -4183,6 +4228,65 @@ impl Compiler {
         }
 
         self.check_files_ordered(&all_files)
+    }
+
+    /// Type-check the target `paths` with dependency source roots available for
+    /// import resolution.
+    ///
+    /// Each entry in `dep_roots` is a directory (e.g. a dependency package's
+    /// `src/`) whose `.hs` modules are parsed, ordered, and checked alongside the
+    /// target so that imports referencing them resolve instead of being skipped.
+    /// Dependency modules are *not* included in the returned results — only the
+    /// modules reachable from `paths` are reported. This is the no-network
+    /// milestone of package dependency resolution: point `bhc check` at already
+    /// on-disk dependency sources and watch the target's skipped count drop.
+    ///
+    /// A file that appears under both a target path and a dependency root is
+    /// treated as a target (reported).
+    pub fn check_with_discovery_with_deps(
+        &self,
+        paths: &[Utf8PathBuf],
+        dep_roots: &[Utf8PathBuf],
+    ) -> CompileResult<Vec<(String, Result<(), CompileError>)>> {
+        // Collect target files (these are the ones we report on).
+        let mut target_files: Vec<Utf8PathBuf> = Vec::new();
+        for path in paths {
+            if path.as_std_path().is_dir() {
+                Self::collect_hs_files(path.as_std_path(), &mut target_files)?;
+            } else {
+                target_files.push(path.clone());
+            }
+        }
+
+        if target_files.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let report_only: rustc_hash::FxHashSet<Utf8PathBuf> =
+            target_files.iter().cloned().collect();
+
+        // Collect dependency files, skipping any that are already targets.
+        let mut dep_files: Vec<Utf8PathBuf> = Vec::new();
+        for root in dep_roots {
+            if root.as_std_path().is_dir() {
+                Self::collect_hs_files(root.as_std_path(), &mut dep_files)?;
+            } else {
+                dep_files.push(root.clone());
+            }
+        }
+        dep_files.retain(|f| !report_only.contains(f));
+
+        if dep_files.is_empty() {
+            // No usable dependency sources — behave like a plain discovery check.
+            return self.check_files_ordered(&target_files);
+        }
+
+        // Dependencies first so they register before the target modules that
+        // import them (the topological sort handles intra-set ordering).
+        let mut all_files = dep_files;
+        all_files.extend(target_files);
+
+        self.check_files_ordered_reporting(&all_files, Some(&report_only))
     }
 
     /// Recursively collect all `.hs` files under a directory.

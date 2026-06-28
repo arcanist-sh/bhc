@@ -71,6 +71,12 @@ struct Cli {
     #[arg(short = 'I', long = "import-path", value_name = "DIR")]
     import_paths: Vec<PathBuf>,
 
+    /// Dependency source roots (e.g. a dependency package's `src/`). Their
+    /// modules resolve the target's imports during `check` but are not reported.
+    /// May be given before or after the subcommand.
+    #[arg(long = "package-dir", value_name = "DIR", global = true)]
+    package_dirs: Vec<PathBuf>,
+
     /// Hackage packages to include (format: "name:version")
     #[arg(long = "package", value_name = "PKG:VER")]
     packages: Vec<String>,
@@ -420,6 +426,20 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
         );
     }
 
+    // Dependency source roots also act as import search paths so on-disk
+    // resolution can find their modules in addition to the registry cache.
+    let package_dirs: Vec<Utf8PathBuf> = cli
+        .package_dirs
+        .iter()
+        .map(|p| {
+            Utf8PathBuf::from_path_buf(p.clone())
+                .map_err(|p| anyhow::anyhow!("Invalid UTF-8 in package dir: {}", p.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for dir in &package_dirs {
+        builder = builder.import_path(dir.clone());
+    }
+
     for def in &cli.defines {
         builder = builder.define(def);
     }
@@ -438,9 +458,14 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     // Check if any argument is a directory or we have multiple files
     let has_directory = utf8_paths.iter().any(|p| p.as_std_path().is_dir());
 
-    if has_directory || utf8_paths.len() > 1 {
-        // Multi-module check with directory expansion
-        let results = compiler.check_with_discovery(&utf8_paths)?;
+    if has_directory || utf8_paths.len() > 1 || !package_dirs.is_empty() {
+        // Multi-module check with directory expansion. Dependency roots, when
+        // provided, resolve the target's imports without being reported.
+        let results = if package_dirs.is_empty() {
+            compiler.check_with_discovery(&utf8_paths)?
+        } else {
+            compiler.check_with_discovery_with_deps(&utf8_paths, &package_dirs)?
+        };
 
         let mut passed = 0usize;
         let mut failed = 0usize;

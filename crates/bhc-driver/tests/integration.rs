@@ -1332,6 +1332,86 @@ fn test_multi_file_basic_import() {
     assert!(matches!(result.0, Value::Int(42)));
 }
 
+#[test]
+fn test_package_dir_deps_resolve_and_are_unreported() {
+    // A target package whose modules import a dependency package. Without the
+    // dependency, the importing module (and its dependents) are skipped. With
+    // the dependency provided as a package dir, the target's modules check, and
+    // the dependency itself is resolved but NOT reported.
+    use camino::Utf8PathBuf;
+
+    let dep_dir = tempfile::tempdir().unwrap();
+    let app_dir = tempfile::tempdir().unwrap();
+
+    // Dependency: Data.Split (depends only on builtins).
+    let data_dir = dep_dir.path().join("Data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(
+        data_dir.join("Split.hs"),
+        r#"module Data.Split (splitOnComma) where
+splitOnComma :: String -> [String]
+splitOnComma s = case break (== ',') s of
+  (a, []) -> [a]
+  (a, _ : rest) -> a : splitOnComma rest
+"#,
+    )
+    .unwrap();
+
+    // Target: Helper imports the dep, Main imports Helper.
+    std::fs::write(
+        app_dir.path().join("Helper.hs"),
+        r#"module Helper (shout) where
+import Data.Split (splitOnComma)
+shout :: String -> [String]
+shout = map (++ "!") . splitOnComma
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        app_dir.path().join("Main.hs"),
+        r#"module Main (main) where
+import Helper (shout)
+main :: IO ()
+main = mapM_ putStrLn (shout "a,b,c")
+"#,
+    )
+    .unwrap();
+
+    let compiler = Compiler::with_defaults().unwrap();
+    let app = Utf8PathBuf::from(app_dir.path().to_str().unwrap());
+    let dep = Utf8PathBuf::from(dep_dir.path().to_str().unwrap());
+
+    // Without the dependency: both target modules are skipped (cascade).
+    let bare = compiler.check_with_discovery(&[app.clone()]).unwrap();
+    let bare_skipped = bare
+        .iter()
+        .filter(|(_, r)| {
+            r.as_ref()
+                .err()
+                .is_some_and(|e| e.to_string().starts_with("skipped:"))
+        })
+        .count();
+    assert_eq!(bare_skipped, 2, "expected both modules skipped: {bare:?}");
+
+    // With the dependency provided: target modules check, dep is unreported.
+    let resolved = compiler
+        .check_with_discovery_with_deps(&[app], &[dep])
+        .unwrap();
+    let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(
+        names.contains(&"Main") && names.contains(&"Helper"),
+        "target modules should be reported: {names:?}"
+    );
+    assert!(
+        !names.contains(&"Data.Split"),
+        "dependency module should not be reported: {names:?}"
+    );
+    assert!(
+        resolved.iter().all(|(_, r)| r.is_ok()),
+        "all target modules should check OK: {resolved:?}"
+    );
+}
+
 // =========================================================================
 // Implicit Prelude Tests
 // =========================================================================

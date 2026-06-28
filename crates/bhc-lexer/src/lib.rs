@@ -94,6 +94,10 @@ pub struct Lexer<'src> {
     prev_token_kind: Option<TokenKind>,
     /// Whether this is the first real token (skip VirtualSemi before it).
     first_token: bool,
+    /// Whether the `MagicHash` extension is enabled (set when a
+    /// `{-# LANGUAGE MagicHash #-}` pragma is lexed). When on, identifiers and
+    /// constructors may end in `#` (`I#`, `chr#`).
+    magic_hash: bool,
 }
 
 impl<'src> Lexer<'src> {
@@ -121,6 +125,7 @@ impl<'src> Lexer<'src> {
             column: 1,
             eof_returned: false,
             prev_token_kind: None,
+            magic_hash: false,
         }
     }
 
@@ -549,6 +554,11 @@ impl<'src> Lexer<'src> {
                     self.advance(); // -
                     self.advance(); // }
                     let content = self.src[content_start..content_end].trim().to_string();
+                    // Enable MagicHash lexing as soon as the pragma is seen (it
+                    // precedes any `#`-suffixed identifier in the module body).
+                    if content.contains("MagicHash") {
+                        self.magic_hash = true;
+                    }
                     return Token::new(TokenKind::Pragma(content));
                 }
                 Some(_) => {
@@ -602,6 +612,11 @@ impl<'src> Lexer<'src> {
     fn lex_ident_or_qualified(&mut self, start: usize) -> Token {
         // Collect the identifier
         self.advance_while(Self::is_ident_continue);
+        // MagicHash: a trailing `#` (or `##`) is part of the name (`I#`, `chr#`),
+        // but only when it is not the start of a qualified name component.
+        if self.magic_hash && self.peek() == Some('#') {
+            self.advance_while(|c| c == '#');
+        }
         let first_part = &self.src[start..self.pos];
 
         // Check for qualified name: Foo.Bar.baz or Foo.Bar.Baz

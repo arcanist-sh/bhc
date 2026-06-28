@@ -526,6 +526,17 @@ impl<'src> Parser<'src> {
 
                 let ident = match &op_tok.node.kind {
                     TokenKind::Operator(sym) | TokenKind::ConOperator(sym) => Ident::new(*sym),
+                    TokenKind::QualOperator(_, sym) | TokenKind::QualConOperator(_, sym) => {
+                        Ident::new(*sym)
+                    }
+                    // Operators that lex as their own special tokens.
+                    TokenKind::Dot => Ident::new(Symbol::intern(".")),
+                    TokenKind::Bang => Ident::new(Symbol::intern("!")),
+                    TokenKind::Star => Ident::new(Symbol::intern("*")),
+                    TokenKind::Minus => Ident::new(Symbol::intern("-")),
+                    TokenKind::Percent => Ident::new(Symbol::intern("%")),
+                    TokenKind::At => Ident::new(Symbol::intern("@")),
+                    TokenKind::Tilde => Ident::new(Symbol::intern("~")),
                     _ => {
                         return Err(ParseError::Unexpected {
                             found: op_tok.node.kind.description().to_string(),
@@ -711,6 +722,14 @@ impl<'src> Parser<'src> {
                 self.advance();
 
                 let end = self.expect(&TokenKind::RParen)?;
+                // A type/constructor operator can carry a subspec listing its
+                // constructors/members: `(:*:)(..)`, `(:+:)(L1, R1)`
+                // (e.g. GHC.Generics imports).
+                if self.check(&TokenKind::LParen) {
+                    let constrs = self.parse_subspec()?;
+                    let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+                    return Ok(Import::Type(ident, Some(constrs), span));
+                }
                 let span = start.to(end.span);
                 Ok(Import::Var(ident, span))
             }

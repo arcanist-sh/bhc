@@ -1061,29 +1061,35 @@ impl<'src> Lexer<'src> {
         // Special single-char handling
         let first = self.peek().unwrap();
 
+        // Reserved two-char operators (`->`, `<-`, `=>`, `::`, `..`) are only
+        // reserved when they are the *complete* operator. By maximal munch,
+        // `->-`, `=>=`, `:::`, `..<` etc. are ordinary user operators — so only
+        // emit the reserved token when no further operator char follows.
+        let next_is_op = self.peek3().is_some_and(Self::is_operator_char);
+
         // Handle special two/three char sequences first
         match (first, self.peek2()) {
-            ('-', Some('>')) => {
+            ('-', Some('>')) if !next_is_op => {
                 self.advance();
                 self.advance();
                 return Token::new(TokenKind::Arrow);
             }
-            ('<', Some('-')) => {
+            ('<', Some('-')) if !next_is_op => {
                 self.advance();
                 self.advance();
                 return Token::new(TokenKind::LeftArrow);
             }
-            ('=', Some('>')) => {
+            ('=', Some('>')) if !next_is_op => {
                 self.advance();
                 self.advance();
                 return Token::new(TokenKind::FatArrow);
             }
-            (':', Some(':')) => {
+            (':', Some(':')) if !next_is_op => {
                 self.advance();
                 self.advance();
                 return Token::new(TokenKind::DoubleColon);
             }
-            ('.', Some('.')) => {
+            ('.', Some('.')) if !next_is_op => {
                 self.advance();
                 self.advance();
                 return Token::new(TokenKind::DotDot);

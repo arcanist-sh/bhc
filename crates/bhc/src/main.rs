@@ -51,6 +51,11 @@ struct Cli {
     #[arg(long)]
     kernel_report: bool,
 
+    /// Explicitly enable the tensor fusion pipeline (regardless of profile).
+    /// The Numeric profile always fuses; accepted for toolchain compatibility.
+    #[arg(long = "tensor-fusion", global = true)]
+    tensor_fusion: bool,
+
     /// Dump intermediate representations
     #[arg(long)]
     dump_ir: Option<IrStage>,
@@ -70,6 +75,12 @@ struct Cli {
     /// Additional import paths for module search
     #[arg(short = 'I', long = "import-path", value_name = "DIR")]
     import_paths: Vec<PathBuf>,
+
+    /// Dependency source roots (e.g. a dependency package's `src/`). Their
+    /// modules resolve the target's imports during `check` but are not reported.
+    /// May be given before or after the subcommand.
+    #[arg(long = "package-dir", value_name = "DIR", global = true)]
+    package_dirs: Vec<PathBuf>,
 
     /// Hackage packages to include (format: "name:version")
     #[arg(long = "package", value_name = "PKG:VER")]
@@ -91,12 +102,15 @@ struct Cli {
     #[arg(long = "hidir", value_name = "DIR")]
     hidir: Option<PathBuf>,
 
-    /// Package database paths
-    #[arg(long = "package-db", value_name = "PATH")]
+    /// Package database paths (dirs of compiled `.bhi` interfaces). Imports
+    /// resolve from these via separate compilation. May be given before or
+    /// after the subcommand.
+    #[arg(long = "package-db", value_name = "PATH", global = true)]
     package_dbs: Vec<PathBuf>,
 
-    /// Expose a dependency by package ID
-    #[arg(long = "package-id", value_name = "ID")]
+    /// Expose a dependency by package ID, scoping which package-DB packages are
+    /// visible. May be given before or after the subcommand.
+    #[arg(long = "package-id", value_name = "ID", global = true)]
     package_ids: Vec<String>,
 
     /// Enable language extensions (e.g., -XOverloadedStrings)
@@ -321,7 +335,8 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     let mut builder = CompilerBuilder::new()
         .profile(profile)
         .output_type(output_type)
-        .emit_kernel_report(cli.kernel_report);
+        .emit_kernel_report(cli.kernel_report)
+        .tensor_fusion(cli.tensor_fusion);
 
     // Set target if specified
     if let Some(ref target) = cli.target {
@@ -349,6 +364,30 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
         builder = builder.hackage_package(pkg.clone());
     }
 
+    // Compile-only mode and its output directories (-c, --odir, --hidir), plus
+    // package databases for resolving imports via compiled `.bhi` interfaces.
+    if cli.compile_only {
+        builder = builder.compile_only(true);
+    }
+    if let Some(ref odir) = cli.odir {
+        builder = builder.odir(
+            Utf8PathBuf::from_path_buf(odir.clone())
+                .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in odir path"))?,
+        );
+    }
+    if let Some(ref hidir) = cli.hidir {
+        builder = builder.hidir(
+            Utf8PathBuf::from_path_buf(hidir.clone())
+                .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in hidir path"))?,
+        );
+    }
+    for db in &cli.package_dbs {
+        builder = builder.package_db(
+            Utf8PathBuf::from_path_buf(db.clone())
+                .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in package-db path"))?,
+        );
+    }
+
     // Add CPP defines
     for def in &cli.defines {
         builder = builder.define(def);
@@ -367,11 +406,18 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // Use ordered compilation for multiple files, or auto-discovery for single file
+    // Use ordered compilation for multiple files, or auto-discovery for single file.
+    // In compile-only mode a single file goes through compile_module_only, which
+    // honors --odir/--hidir and emits a `.bhi` interface (used to populate an hx
+    // package database).
     let compile_result = if utf8_paths.len() > 1 {
         compiler.compile_files_ordered(utf8_paths.iter().map(|p| p.as_path()))
     } else if utf8_paths.len() == 1 {
-        compiler.compile_with_discovery(utf8_paths[0].as_path())
+        if cli.compile_only {
+            compiler.compile_module_only(utf8_paths[0].as_path()).map(|o| vec![o])
+        } else {
+            compiler.compile_with_discovery(utf8_paths[0].as_path())
+        }
     } else {
         compiler.compile_files(utf8_paths.iter().map(|p| p.as_path()))
     };
@@ -420,6 +466,40 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
         );
     }
 
+    // Dependency source roots also act as import search paths so on-disk
+    // resolution can find their modules in addition to the registry cache.
+    let package_dirs: Vec<Utf8PathBuf> = cli
+        .package_dirs
+        .iter()
+        .map(|p| {
+            Utf8PathBuf::from_path_buf(p.clone())
+                .map_err(|p| anyhow::anyhow!("Invalid UTF-8 in package dir: {}", p.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for dir in &package_dirs {
+        builder = builder.import_path(dir.clone());
+    }
+
+    // Package databases (compiled `.bhi` interfaces, e.g. an hx-built DB) and
+    // the interface output dir let imports resolve via separate compilation.
+    for db in &cli.package_dbs {
+        builder = builder.package_db(
+            Utf8PathBuf::from_path_buf(db.clone())
+                .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in package-db path"))?,
+        );
+    }
+    // Restrict which package-DB packages are visible (by package id). When none
+    // are given, every registered package in the DBs is visible.
+    for id in &cli.package_ids {
+        builder = builder.package_id(id.clone());
+    }
+    if let Some(ref hidir) = cli.hidir {
+        builder = builder.hidir(
+            Utf8PathBuf::from_path_buf(hidir.clone())
+                .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in hidir path"))?,
+        );
+    }
+
     for def in &cli.defines {
         builder = builder.define(def);
     }
@@ -438,9 +518,14 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     // Check if any argument is a directory or we have multiple files
     let has_directory = utf8_paths.iter().any(|p| p.as_std_path().is_dir());
 
-    if has_directory || utf8_paths.len() > 1 {
-        // Multi-module check with directory expansion
-        let results = compiler.check_with_discovery(&utf8_paths)?;
+    if has_directory || utf8_paths.len() > 1 || !package_dirs.is_empty() {
+        // Multi-module check with directory expansion. Dependency roots, when
+        // provided, resolve the target's imports without being reported.
+        let results = if package_dirs.is_empty() {
+            compiler.check_with_discovery(&utf8_paths)?
+        } else {
+            compiler.check_with_discovery_with_deps(&utf8_paths, &package_dirs)?
+        };
 
         let mut passed = 0usize;
         let mut failed = 0usize;
@@ -547,7 +632,8 @@ fn compile_modules_only(files: &[PathBuf], cli: &Cli) -> Result<()> {
         .profile(profile)
         .compile_only(true)
         .output_type(bhc_session::OutputType::Object)
-        .emit_kernel_report(cli.kernel_report);
+        .emit_kernel_report(cli.kernel_report)
+        .tensor_fusion(cli.tensor_fusion);
 
     if let Some(ref target) = cli.target {
         builder = builder.target(target.clone());
@@ -629,12 +715,27 @@ fn start_repl(cli: &Cli) -> Result<()> {
     let bhc_exe = std::env::current_exe()?;
     let bhci_exe = bhc_exe.with_file_name("bhci");
 
-    let mut args = vec![];
+    let mut args: Vec<String> = Vec::new();
     match cli.profile {
-        Profile::Numeric => args.extend(["--profile", "numeric"]),
-        Profile::Server => args.extend(["--profile", "server"]),
-        Profile::Edge => args.extend(["--profile", "edge"]),
+        Profile::Numeric => args.extend(["--profile".into(), "numeric".into()]),
+        Profile::Server => args.extend(["--profile".into(), "server".into()]),
+        Profile::Edge => args.extend(["--profile".into(), "edge".into()]),
         Profile::Default => {}
+    }
+    // Forward package databases, exposed package ids, and import paths so the
+    // REPL resolves imports against the same separate-compilation interfaces as
+    // `bhc check`/`build`.
+    for path in &cli.import_paths {
+        args.push("--import-path".into());
+        args.push(path.display().to_string());
+    }
+    for db in &cli.package_dbs {
+        args.push("--package-db".into());
+        args.push(db.display().to_string());
+    }
+    for id in &cli.package_ids {
+        args.push("--package-id".into());
+        args.push(id.clone());
     }
 
     let status = Command::new(&bhci_exe)

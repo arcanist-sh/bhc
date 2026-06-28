@@ -1647,12 +1647,13 @@ impl<'a> WasmLowering<'a> {
         if is_rational_expr(arg) {
             return self.emit_show_rational(arg, instrs, locals, local_count);
         }
-        // A `Maybe`-returning call (`readMaybe`) is rendered by walking the
-        // runtime value: `Nothing` (the nullary tag 0) or `Just <field>`.
+        // A `Maybe`-returning call (`readMaybe`, `find`, `lookup`, `elemIndex`,
+        // …) is rendered by walking the runtime value: `Nothing` (the nullary
+        // tag 0) or `Just <field>` (the field shown as Int, the common case).
         {
             let (h, _) = collect_app_spine(arg);
             if let Expr::Var(v, _) = h {
-                if strip_qualifier(v.name.as_str()) == "readMaybe" {
+                if returns_maybe_fn(strip_qualifier(v.name.as_str())) {
                     return self.emit_show_maybe(arg, instrs, locals, local_count);
                 }
             }
@@ -5937,6 +5938,8 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "Data.Set.difference",
     "Data.Set.filter",
     "Data.Set.foldr",
+    "Data.Set.toList",
+    "Data.Set.elems",
     "Data.IntSet.fromList",
     "Data.IntSet.size",
     "Data.IntSet.member",
@@ -5947,6 +5950,8 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "Data.IntSet.difference",
     "Data.IntSet.filter",
     "Data.IntSet.foldr",
+    "Data.IntSet.toList",
+    "Data.IntSet.elems",
     // Data.Sequence (list-backed)
     "Data.Sequence.empty",
     "Data.Sequence.singleton",
@@ -6010,6 +6015,7 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "splitAt",
     "span",
     "break",
+    "find",
     "findIndex",
     "elemIndex",
     "isPrefixOf",
@@ -6056,6 +6062,13 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "deleteBy",
     "intersectBy",
     "nubBy",
+    "nub",
+    "sort",
+    "intercalate",
+    "mapMaybe",
+    "foldl'",
+    "unwords",
+    "unlines",
     "groupBy",
     "insert",
     "unionBy",
@@ -6170,6 +6183,14 @@ fn palt(name: &str, tag: u32, arity: u32, binders: Vec<Var>, rhs: Expr) -> Alt {
 fn pstr_empty() -> Expr {
     Expr::Lit(
         Literal::String(Symbol::intern("")),
+        Ty::Error,
+        Span::default(),
+    )
+}
+/// A `String` literal.
+fn pstr(s: &str) -> Expr {
+    Expr::Lit(
+        Literal::String(Symbol::intern(s)),
         Ty::Error,
         Span::default(),
     )
@@ -7788,6 +7809,12 @@ fn build_container_fn(name: &str, id: &mut usize) -> Option<Expr> {
                     ),
                 )
             }
+            // The set's runtime rep is a deduplicated but unsorted list;
+            // toList/elems must return it ascending to match Data.Set.
+            "toList" | "elems" => {
+                let s = pv("s", fresh(id));
+                plam(s.clone(), papp(pref("sort", id), pev(&s)))
+            }
             _ => return None,
         }
     };
@@ -8564,6 +8591,47 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
         //   (y:ys) -> case p y of
         //     True  -> Just 0
         //     False -> case findIndex p ys of { Nothing -> Nothing; Just i -> Just (i+1) }
+        // find p xs = case xs of
+        //   [] -> Nothing
+        //   (y:ys) -> case p y of { True -> Just y; False -> find p ys }
+        "find" => {
+            let p = pv("p", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let cons_rhs = pcase(
+                papp(pev(&p), pev(&y)),
+                vec![
+                    palt(
+                        "False",
+                        0,
+                        0,
+                        vec![],
+                        papp2(pref("find", id), pev(&p), pev(&ys)),
+                    ),
+                    palt(
+                        "True",
+                        1,
+                        0,
+                        vec![],
+                        papp(pref("Just", id), pev(&y)),
+                    ),
+                ],
+            );
+            plam(
+                p.clone(),
+                plam(
+                    xs.clone(),
+                    pcase(
+                        pev(&xs),
+                        vec![
+                            palt("[]", 0, 0, vec![], pref("Nothing", id)),
+                            palt(":", 1, 2, vec![y.clone(), ys.clone()], cons_rhs),
+                        ],
+                    ),
+                ),
+            )
+        }
         "findIndex" => {
             let p = pv("p", fresh(id));
             let xs = pv("xs", fresh(id));
@@ -9466,6 +9534,142 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
                         ],
                     ),
                 ),
+            )
+        }
+        // nub xs = nubBy (==) xs
+        "nub" => {
+            let xs = pv("xs", fresh(id));
+            plam(
+                xs.clone(),
+                papp2(pref("nubBy", id), pref("==", id), pev(&xs)),
+            )
+        }
+        // sort xs = foldr insert [] xs  (insertion sort over the ordered `insert`)
+        "sort" => {
+            let xs = pv("xs", fresh(id));
+            plam(
+                xs.clone(),
+                papp(
+                    papp2(pref("foldr", id), pref("insert", id), pref("[]", id)),
+                    pev(&xs),
+                ),
+            )
+        }
+        // intercalate sep xss = case xss of
+        //   [] -> []
+        //   (y:ys) -> y ++ foldr (\x acc -> sep ++ x ++ acc) [] ys
+        "intercalate" => {
+            let sep = pv("sep", fresh(id));
+            let xss = pv("xss", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let x = pv("x", fresh(id));
+            let acc = pv("acc", fresh(id));
+            // \x acc -> sep ++ x ++ acc
+            let step = plam(
+                x.clone(),
+                plam(
+                    acc.clone(),
+                    papp2(
+                        pref("__listAppend", id),
+                        pev(&sep),
+                        papp2(pref("__listAppend", id), pev(&x), pev(&acc)),
+                    ),
+                ),
+            );
+            // y ++ foldr step [] ys
+            let body = papp2(
+                pref("__listAppend", id),
+                pev(&y),
+                papp(papp2(pref("foldr", id), step, pref("[]", id)), pev(&ys)),
+            );
+            plam(
+                sep.clone(),
+                plam(
+                    xss.clone(),
+                    pcase(
+                        pev(&xss),
+                        vec![
+                            palt("[]", 0, 0, vec![], pref("[]", id)),
+                            palt(":", 1, 2, vec![y.clone(), ys.clone()], body),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // mapMaybe f xs =
+        //   foldr (\x acc -> case f x of { Nothing -> acc; Just y -> y : acc }) [] xs
+        "mapMaybe" => {
+            let f = pv("f", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let x = pv("x", fresh(id));
+            let acc = pv("acc", fresh(id));
+            let y = pv("y", fresh(id));
+            let body = pcase(
+                papp(pev(&f), pev(&x)),
+                vec![
+                    palt("Nothing", 0, 0, vec![], pev(&acc)),
+                    palt(
+                        "Just",
+                        1,
+                        1,
+                        vec![y.clone()],
+                        papp2(pref(":", id), pev(&y), pev(&acc)),
+                    ),
+                ],
+            );
+            let step = plam(x.clone(), plam(acc.clone(), body));
+            plam(
+                f.clone(),
+                plam(
+                    xs.clone(),
+                    papp(papp2(pref("foldr", id), step, pref("[]", id)), pev(&xs)),
+                ),
+            )
+        }
+        // foldl' f z xs = foldl f z xs  (eager WASM backend == foldl)
+        "foldl'" => {
+            let f = pv("f", fresh(id));
+            let z = pv("z", fresh(id));
+            let xs = pv("xs", fresh(id));
+            plam(
+                f.clone(),
+                plam(
+                    z.clone(),
+                    plam(
+                        xs.clone(),
+                        papp(papp2(pref("foldl", id), pev(&f), pev(&z)), pev(&xs)),
+                    ),
+                ),
+            )
+        }
+        // unwords = intercalate " "
+        "unwords" => {
+            let xss = pv("xss", fresh(id));
+            plam(
+                xss.clone(),
+                papp2(pref("intercalate", id), pstr(" "), pev(&xss)),
+            )
+        }
+        // unlines xs = foldr (\x acc -> x ++ "\n" ++ acc) [] xs
+        "unlines" => {
+            let xs = pv("xs", fresh(id));
+            let x = pv("x", fresh(id));
+            let acc = pv("acc", fresh(id));
+            let step = plam(
+                x.clone(),
+                plam(
+                    acc.clone(),
+                    papp2(
+                        pref("__listAppend", id),
+                        pev(&x),
+                        papp2(pref("__listAppend", id), pstr("\n"), pev(&acc)),
+                    ),
+                ),
+            );
+            plam(
+                xs.clone(),
+                papp(papp2(pref("foldr", id), step, pref("[]", id)), pev(&xs)),
             )
         }
         // groupBy eq xs = case xs of
@@ -10571,6 +10775,16 @@ fn is_nonstring_list_ty(ty: &Ty) -> bool {
 /// Whether a function always returns a cons-list (used to classify an operand
 /// of `++` as a list). Excludes `++`/`reverse`/`show`, whose result kind is
 /// ambiguous (string vs list).
+/// Functions whose result is a `Maybe` of a scalar (renderable as `Just <Int>`
+/// / `Nothing` by walking the runtime value). The element type is erased, so —
+/// as with runtime lists — the field is shown as Int, the common case.
+fn returns_maybe_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "readMaybe" | "find" | "lookup" | "elemIndex" | "findIndex"
+    )
+}
+
 fn is_list_returning_fn(name: &str) -> bool {
     matches!(
         strip_qualifier(name),
@@ -10588,6 +10802,8 @@ fn is_list_returning_fn(name: &str) -> bool {
             | "drop"
             | "zip"
             | "zipWith"
+            | "zipWith3"
+            | "zip3"
             | "replicate"
             | "enumFromTo"
             | "takeWhile"
@@ -10600,7 +10816,10 @@ fn is_list_returning_fn(name: &str) -> bool {
             | "concat"
             | "concatMap"
             | "sortOn"
+            | "sort"
             | "nubBy"
+            | "nub"
+            | "mapMaybe"
             | "deleteBy"
             | "unionBy"
             | "intersectBy"

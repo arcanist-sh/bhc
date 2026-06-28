@@ -1332,6 +1332,445 @@ fn test_multi_file_basic_import() {
     assert!(matches!(result.0, Value::Int(42)));
 }
 
+#[test]
+fn test_package_dir_deps_resolve_and_are_unreported() {
+    // A target package whose modules import a dependency package. Without the
+    // dependency, the importing module (and its dependents) are skipped. With
+    // the dependency provided as a package dir, the target's modules check, and
+    // the dependency itself is resolved but NOT reported.
+    use camino::Utf8PathBuf;
+
+    let dep_dir = tempfile::tempdir().unwrap();
+    let app_dir = tempfile::tempdir().unwrap();
+
+    // Dependency: Data.Split (depends only on builtins).
+    let data_dir = dep_dir.path().join("Data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(
+        data_dir.join("Split.hs"),
+        r#"module Data.Split (splitOnComma) where
+splitOnComma :: String -> [String]
+splitOnComma s = case break (== ',') s of
+  (a, []) -> [a]
+  (a, _ : rest) -> a : splitOnComma rest
+"#,
+    )
+    .unwrap();
+
+    // Target: Helper imports the dep, Main imports Helper.
+    std::fs::write(
+        app_dir.path().join("Helper.hs"),
+        r#"module Helper (shout) where
+import Data.Split (splitOnComma)
+shout :: String -> [String]
+shout = map (++ "!") . splitOnComma
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        app_dir.path().join("Main.hs"),
+        r#"module Main (main) where
+import Helper (shout)
+main :: IO ()
+main = mapM_ putStrLn (shout "a,b,c")
+"#,
+    )
+    .unwrap();
+
+    let compiler = Compiler::with_defaults().unwrap();
+    let app = Utf8PathBuf::from(app_dir.path().to_str().unwrap());
+    let dep = Utf8PathBuf::from(dep_dir.path().to_str().unwrap());
+
+    // Without the dependency: both target modules are skipped (cascade).
+    let bare = compiler.check_with_discovery(&[app.clone()]).unwrap();
+    let bare_skipped = bare
+        .iter()
+        .filter(|(_, r)| {
+            r.as_ref()
+                .err()
+                .is_some_and(|e| e.to_string().starts_with("skipped:"))
+        })
+        .count();
+    assert_eq!(bare_skipped, 2, "expected both modules skipped: {bare:?}");
+
+    // With the dependency provided: target modules check, dep is unreported.
+    let resolved = compiler
+        .check_with_discovery_with_deps(&[app], &[dep])
+        .unwrap();
+    let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(
+        names.contains(&"Main") && names.contains(&"Helper"),
+        "target modules should be reported: {names:?}"
+    );
+    assert!(
+        !names.contains(&"Data.Split"),
+        "dependency module should not be reported: {names:?}"
+    );
+    assert!(
+        resolved.iter().all(|(_, r)| r.is_ok()),
+        "all target modules should check OK: {resolved:?}"
+    );
+}
+
+#[test]
+fn test_package_db_bhi_roundtrip_resolves_check() {
+    // Build a dependency to a `.bhi` interface in a package DB, then check a
+    // consumer against that DB with the dependency *source* absent. The import
+    // must resolve from the interface alone (separate compilation).
+    use bhc_driver::CompilerBuilder;
+    use camino::Utf8PathBuf;
+
+    let dep_src = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let odir = tempfile::tempdir().unwrap();
+    let app = tempfile::tempdir().unwrap();
+
+    // Dependency Data.Split, compiled with -c into the package DB.
+    let data_dir = dep_src.path().join("Data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(
+        data_dir.join("Split.hs"),
+        r#"module Data.Split (splitOnComma) where
+splitOnComma :: String -> [String]
+splitOnComma s = case break (== ',') s of
+  (a, []) -> [a]
+  (a, _ : rest) -> a : splitOnComma rest
+"#,
+    )
+    .unwrap();
+
+    let db_path = Utf8PathBuf::from(db.path().to_str().unwrap());
+    let producer = CompilerBuilder::new()
+        .compile_only(true)
+        .odir(Utf8PathBuf::from(odir.path().to_str().unwrap()))
+        .hidir(db_path.clone())
+        .build()
+        .unwrap();
+    let dep_hs = Utf8PathBuf::from(data_dir.join("Split.hs").to_str().unwrap());
+    producer
+        .compile_module_only(&dep_hs)
+        .expect("dep should compile to object + interface");
+
+    // The interface must land at the import-resolvable path.
+    let bhi = db.path().join("Data").join("Split.bhi");
+    assert!(bhi.exists(), "expected interface at {}", bhi.display());
+
+    // Consumer imports Data.Split; its source is NOT present here.
+    let main_hs = app.path().join("Main.hs");
+    std::fs::write(
+        &main_hs,
+        r#"module Main (main) where
+import Data.Split (splitOnComma)
+main :: IO ()
+main = mapM_ putStrLn (splitOnComma "a,b,c")
+"#,
+    )
+    .unwrap();
+
+    // Without the DB the import is unresolved; with it, the check succeeds.
+    let consumer = CompilerBuilder::new()
+        .package_db(db_path)
+        .build()
+        .unwrap();
+    let main_path = Utf8PathBuf::from(main_hs.to_str().unwrap());
+    let result = consumer.check_file(&main_path);
+    assert!(
+        result.is_ok(),
+        "consumer should check against package DB interface: {:?}",
+        result.err()
+    );
+
+    let bare = Compiler::with_defaults().unwrap();
+    assert!(
+        bare.check_file(&main_path).is_err(),
+        "without the package DB the import should be unresolved"
+    );
+}
+
+#[test]
+fn test_package_db_conf_import_dirs_resolve_check() {
+    // hx's package DB layout: the DB directory holds `<id>.conf` registration
+    // files whose `import-dirs:` point at where the `.bhi` interfaces actually
+    // live (not the DB dir itself). Check must follow that indirection.
+    use bhc_driver::CompilerBuilder;
+    use camino::Utf8PathBuf;
+
+    let dep_src = tempfile::tempdir().unwrap();
+    let install = tempfile::tempdir().unwrap(); // import-dirs target (.bhi here)
+    let pkgdb = tempfile::tempdir().unwrap(); // DB dir: only .conf files
+    let odir = tempfile::tempdir().unwrap();
+    let app = tempfile::tempdir().unwrap();
+
+    // Build the dependency, emitting its interface into the install/lib dir.
+    let data_dir = dep_src.path().join("Data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(
+        data_dir.join("Split.hs"),
+        r#"module Data.Split (splitOnComma) where
+splitOnComma :: String -> [String]
+splitOnComma s = case break (== ',') s of
+  (a, []) -> [a]
+  (a, _ : rest) -> a : splitOnComma rest
+"#,
+    )
+    .unwrap();
+    let lib_dir = Utf8PathBuf::from(install.path().to_str().unwrap());
+    let producer = CompilerBuilder::new()
+        .compile_only(true)
+        .odir(Utf8PathBuf::from(odir.path().to_str().unwrap()))
+        .hidir(lib_dir.clone())
+        .build()
+        .unwrap();
+    producer
+        .compile_module_only(&Utf8PathBuf::from(
+            data_dir.join("Split.hs").to_str().unwrap(),
+        ))
+        .unwrap();
+    assert!(install.path().join("Data").join("Split.bhi").exists());
+
+    // Registration file in the DB dir points at the interface dir. No `.bhi`
+    // lives directly under the DB dir.
+    std::fs::write(
+        pkgdb.path().join("mysplit-1.0.0-abc123.conf"),
+        format!(
+            "name: mysplit\nversion: 1.0.0\nid: mysplit-1.0.0-abc123\n\
+             import-dirs: {lib}\nexposed-modules: Data.Split\n",
+            lib = lib_dir
+        ),
+    )
+    .unwrap();
+
+    // Consumer; its dependency's source is absent.
+    let main_hs = app.path().join("Main.hs");
+    std::fs::write(
+        &main_hs,
+        r#"module Main (main) where
+import Data.Split (splitOnComma)
+main :: IO ()
+main = mapM_ putStrLn (splitOnComma "a,b,c")
+"#,
+    )
+    .unwrap();
+
+    let consumer = CompilerBuilder::new()
+        .package_db(Utf8PathBuf::from(pkgdb.path().to_str().unwrap()))
+        .build()
+        .unwrap();
+    let result = consumer.check_file(&Utf8PathBuf::from(main_hs.to_str().unwrap()));
+    assert!(
+        result.is_ok(),
+        "consumer should resolve import via .conf import-dirs: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_package_db_scoping_and_exposed_modules() {
+    // A package DB with a `.conf` that exposes only one module and is identified
+    // by a package id. Verifies (b) exposed-modules gating and (c) --package-id
+    // visibility scoping.
+    use bhc_driver::CompilerBuilder;
+    use camino::Utf8PathBuf;
+
+    let dep_src = tempfile::tempdir().unwrap();
+    let install = tempfile::tempdir().unwrap();
+    let pkgdb = tempfile::tempdir().unwrap();
+    let odir = tempfile::tempdir().unwrap();
+    let app = tempfile::tempdir().unwrap();
+
+    // Build two modules into the interface dir: one will be exposed, one not.
+    let data_dir = dep_src.path().join("Data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(
+        data_dir.join("Public.hs"),
+        "module Data.Public (pub) where\npub :: Int\npub = 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        data_dir.join("Hidden.hs"),
+        "module Data.Hidden (hidden) where\nhidden :: Int\nhidden = 2\n",
+    )
+    .unwrap();
+    let lib_dir = Utf8PathBuf::from(install.path().to_str().unwrap());
+    let producer = CompilerBuilder::new()
+        .compile_only(true)
+        .odir(Utf8PathBuf::from(odir.path().to_str().unwrap()))
+        .hidir(lib_dir.clone())
+        .build()
+        .unwrap();
+    for m in ["Public", "Hidden"] {
+        producer
+            .compile_module_only(&Utf8PathBuf::from(
+                data_dir.join(format!("{m}.hs")).to_str().unwrap(),
+            ))
+            .unwrap();
+    }
+    assert!(install.path().join("Data").join("Public.bhi").exists());
+    assert!(install.path().join("Data").join("Hidden.bhi").exists());
+
+    // .conf exposes ONLY Data.Public, under id `mypkg-1.0.0-abc123`.
+    std::fs::write(
+        pkgdb.path().join("mypkg-1.0.0-abc123.conf"),
+        format!(
+            "name: mypkg\nversion: 1.0.0\nid: mypkg-1.0.0-abc123\n\
+             import-dirs: {lib}\nexposed-modules: Data.Public\n",
+            lib = lib_dir
+        ),
+    )
+    .unwrap();
+    let db = Utf8PathBuf::from(pkgdb.path().to_str().unwrap());
+
+    // The body uses the imported binding so resolution actually matters (an
+    // unresolved import only errors when one of its names is referenced).
+    let write_main = |module: &str, sym: &str| -> Utf8PathBuf {
+        let p = app.path().join("Main.hs");
+        std::fs::write(
+            &p,
+            format!(
+                "module Main (main) where\nimport {module} ({sym})\n\
+                 main :: IO ()\nmain = print {sym}\n"
+            ),
+        )
+        .unwrap();
+        Utf8PathBuf::from(p.to_str().unwrap())
+    };
+
+    let checker = |ids: &[&str]| {
+        let mut b = CompilerBuilder::new().package_db(db.clone());
+        for id in ids {
+            b = b.package_id((*id).to_string());
+        }
+        b.build().unwrap()
+    };
+    // Exposed module resolves.
+    assert!(
+        checker(&[])
+            .check_file(&write_main("Data.Public", "pub"))
+            .is_ok(),
+        "exposed module should resolve"
+    );
+    // Non-exposed module does NOT resolve even though its .bhi exists.
+    assert!(
+        checker(&[])
+            .check_file(&write_main("Data.Hidden", "hidden"))
+            .is_err(),
+        "non-exposed module must not resolve"
+    );
+    // Matching --package-id keeps it visible.
+    assert!(
+        checker(&["mypkg-1.0.0-abc123"])
+            .check_file(&write_main("Data.Public", "pub"))
+            .is_ok(),
+        "exposed module should resolve when its package id is selected"
+    );
+    // A non-matching --package-id hides the package entirely.
+    assert!(
+        checker(&["other-9.9-zzz"])
+            .check_file(&write_main("Data.Public", "pub"))
+            .is_err(),
+        "package must be hidden when only an unrelated package id is selected"
+    );
+}
+
+#[test]
+fn test_package_db_depends_transitive_visibility() {
+    // Two packages: P (exposes Data.P, depends on Q) and Q (exposes Data.Q).
+    // Selecting only P's id must make Q visible transitively, but selecting only
+    // Q's id must NOT make P visible.
+    use bhc_driver::CompilerBuilder;
+    use camino::Utf8PathBuf;
+
+    let src = tempfile::tempdir().unwrap();
+    let lib_p = tempfile::tempdir().unwrap();
+    let lib_q = tempfile::tempdir().unwrap();
+    let pkgdb = tempfile::tempdir().unwrap();
+    let odir = tempfile::tempdir().unwrap();
+    let app = tempfile::tempdir().unwrap();
+
+    let data = src.path().join("Data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join("P.hs"),
+        "module Data.P (valP) where\nvalP :: Int\nvalP = 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        data.join("Q.hs"),
+        "module Data.Q (valQ) where\nvalQ :: Int\nvalQ = 2\n",
+    )
+    .unwrap();
+
+    let dir_p = Utf8PathBuf::from(lib_p.path().to_str().unwrap());
+    let dir_q = Utf8PathBuf::from(lib_q.path().to_str().unwrap());
+    let build = |module: &str, hidir: &Utf8PathBuf| {
+        CompilerBuilder::new()
+            .compile_only(true)
+            .odir(Utf8PathBuf::from(odir.path().to_str().unwrap()))
+            .hidir(hidir.clone())
+            .build()
+            .unwrap()
+            .compile_module_only(&Utf8PathBuf::from(
+                data.join(format!("{module}.hs")).to_str().unwrap(),
+            ))
+            .unwrap();
+    };
+    build("P", &dir_p);
+    build("Q", &dir_q);
+
+    std::fs::write(
+        pkgdb.path().join("p-1.0-aaa.conf"),
+        format!("name: p\nversion: 1.0\nid: p-1.0-aaa\nimport-dirs: {dir_p}\nexposed-modules: Data.P\ndepends: q-1.0-bbb\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        pkgdb.path().join("q-1.0-bbb.conf"),
+        format!("name: q\nversion: 1.0\nid: q-1.0-bbb\nimport-dirs: {dir_q}\nexposed-modules: Data.Q\ndepends:\n"),
+    )
+    .unwrap();
+    let db = Utf8PathBuf::from(pkgdb.path().to_str().unwrap());
+
+    let write_main = |module: &str, sym: &str| -> Utf8PathBuf {
+        let p = app.path().join("Main.hs");
+        std::fs::write(
+            &p,
+            format!(
+                "module Main (main) where\nimport {module} ({sym})\n\
+                 main :: IO ()\nmain = print {sym}\n"
+            ),
+        )
+        .unwrap();
+        Utf8PathBuf::from(p.to_str().unwrap())
+    };
+    let checker = |id: &str| {
+        CompilerBuilder::new()
+            .package_db(db.clone())
+            .package_id(id.to_string())
+            .build()
+            .unwrap()
+    };
+
+    // Selecting P exposes P, and Q transitively via depends.
+    assert!(
+        checker("p-1.0-aaa")
+            .check_file(&write_main("Data.P", "valP"))
+            .is_ok(),
+        "selected package P should resolve"
+    );
+    assert!(
+        checker("p-1.0-aaa")
+            .check_file(&write_main("Data.Q", "valQ"))
+            .is_ok(),
+        "P's transitive dependency Q should resolve"
+    );
+    // Selecting only Q must not expose P (no reverse edge).
+    assert!(
+        checker("q-1.0-bbb")
+            .check_file(&write_main("Data.P", "valP"))
+            .is_err(),
+        "selecting only Q must not expose its dependent P"
+    );
+}
+
 // =========================================================================
 // Implicit Prelude Tests
 // =========================================================================

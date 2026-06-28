@@ -387,8 +387,11 @@ impl Compiler {
         // Phase 1: Parse
         let ast = self.parse(&unit, file_id)?;
 
-        // Phase 2: Lower AST to HIR
-        let (hir, lower_ctx) = self.lower(&ast)?;
+        // Phase 2: Lower AST to HIR. Use the registry-aware lowering with an
+        // empty registry so that imports backed by `.bhi` interfaces (in a
+        // package DB or hidir) resolve via separate compilation. With no
+        // package DBs / hidir configured this behaves identically to `lower`.
+        let (hir, lower_ctx) = self.lower_with_registry(&ast, &ModuleRegistry::default())?;
 
         // Phase 3: Type check
         let _typed = self.type_check(&hir, file_id, &lower_ctx)?;
@@ -421,10 +424,12 @@ impl Compiler {
         self.callbacks
             .on_phase_complete(CompilePhase::Parse, &unit.module_name);
 
-        // Phase 2: Lower AST to HIR
+        // Phase 2: Lower AST to HIR. Registry-aware (empty registry) so imports
+        // backed by `.bhi` interfaces in a package DB / hidir resolve via
+        // separate compilation — symmetric with `check_file`.
         self.callbacks
             .on_phase_start(CompilePhase::TypeCheck, &unit.module_name);
-        let (hir, lower_ctx) = self.lower(&ast)?;
+        let (hir, lower_ctx) = self.lower_with_registry(&ast, &ModuleRegistry::default())?;
 
         // Phase 2b: Type check HIR
         let typed = self.type_check(&hir, file_id, &lower_ctx)?;
@@ -438,6 +443,22 @@ impl Compiler {
         self.callbacks
             .on_phase_complete(CompilePhase::CoreLower, &unit.module_name);
 
+        // The module name declared in the source (e.g. `Data.Split`), not the
+        // file stem. Object and interface artifacts are laid out by this name's
+        // path (`Data/Split.o`, `Data/Split.bhi`) so a package manager (hx) that
+        // expects per-module-path artifacts finds them.
+        let module_name = ast.name.as_ref().map_or_else(
+            || unit.module_name.clone(),
+            |n| {
+                n.parts
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            },
+        );
+        let module_rel_path = module_name.replace('.', "/");
+
         // Phase 4: Code generation (to object file only)
         self.callbacks
             .on_phase_start(CompilePhase::Codegen, &unit.module_name);
@@ -445,11 +466,14 @@ impl Compiler {
         self.callbacks
             .on_phase_complete(CompilePhase::Codegen, &unit.module_name);
 
-        // Move object to odir if configured
+        // Move object to odir if configured, nested by module path.
         let final_object_path = if let Some(ref odir) = self.session.options.output_object_dir {
-            let dest = odir.join(format!("{}.o", unit.module_name));
-            std::fs::create_dir_all(odir.as_std_path())
-                .map_err(|e| CompileError::CodegenError(format!("failed to create odir: {}", e)))?;
+            let dest = odir.join(format!("{}.o", module_rel_path));
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent.as_std_path()).map_err(|e| {
+                    CompileError::CodegenError(format!("failed to create odir: {}", e))
+                })?;
+            }
             std::fs::rename(&object_path, dest.as_std_path())
                 .or_else(|_| std::fs::copy(&object_path, dest.as_std_path()).map(|_| ()))
                 .map_err(|e| {
@@ -460,11 +484,12 @@ impl Compiler {
             Utf8PathBuf::from(object_path.to_str().unwrap_or_default())
         };
 
-        // Generate interface file if hidir is configured
+        // Generate interface file if hidir is configured. Uses the declared
+        // module name so the `.bhi` lands at the import-resolvable path
+        // (`<hidir>/Data/Split.bhi`).
         if let Some(ref hidir) = self.session.options.output_interface_dir {
-            let iface =
-                bhc_interface::generate::generate_interface(&unit.module_name, &ast, &typed);
-            let iface_path = bhc_interface::interface_path(hidir, &unit.module_name);
+            let iface = bhc_interface::generate::generate_interface(&module_name, &ast, &typed);
+            let iface_path = bhc_interface::interface_path(hidir, &module_name);
             if let Some(parent) = iface_path.parent() {
                 std::fs::create_dir_all(parent.as_std_path()).map_err(|e| {
                     CompileError::CodegenError(format!("failed to create hidir: {}", e))
@@ -536,7 +561,7 @@ impl Compiler {
         // Store Tensor IR kernels for GPU codegen
         let mut tensor_kernels_for_gpu: Vec<bhc_tensor_ir::Kernel> = Vec::new();
 
-        if self.session.profile() == Profile::Numeric {
+        if self.session.profile() == Profile::Numeric || self.session.options.tensor_fusion {
             self.callbacks
                 .on_phase_start(CompilePhase::TensorLower, &unit.module_name);
 
@@ -2146,6 +2171,9 @@ impl Compiler {
                 search_paths.push(env_path);
             }
         }
+        // Parity with `lower`: include Hackage `--package` source dirs so the
+        // registry path resolves the same imports the single-module path does.
+        search_paths.extend(self.resolve_hackage_packages()?);
 
         // Pre-seed module cache with already-compiled modules.
         // IMPORTANT: We must remap DefIds from the exporting module to fresh IDs
@@ -2233,6 +2261,78 @@ impl Compiler {
         Ok((hir, ctx))
     }
 
+    /// Collect the interface sources available for import resolution from the
+    /// configured `--hidir` and `--package-db` directories.
+    ///
+    /// Returns `(flat_dirs, packages)`:
+    /// - `flat_dirs`: the `--hidir` and each `--package-db` directory itself —
+    ///   the flat layout emitted by `bhc -c --hidir <db>`, where interfaces live
+    ///   directly under the directory (`<db>/Data/Split.bhi`). These have no
+    ///   package identity or module list, so any `.bhi` present resolves.
+    /// - `packages`: registered packages parsed from `<id>.conf` files inside the
+    ///   package DBs — the layout the hx package manager produces. Each carries
+    ///   its `id`, `exposed-modules`, and `import-dirs`. A module resolves from a
+    ///   package only if it is exposed by that package. When `--package-id` flags
+    ///   are given, the visible set is the transitive closure of those ids over
+    ///   `depends:` (so a selected package's dependencies resolve too); otherwise
+    ///   every registered package is visible.
+    fn collect_package_interfaces(&self) -> (Vec<Utf8PathBuf>, Vec<ConfPackage>) {
+        let mut flat_dirs: Vec<Utf8PathBuf> = Vec::new();
+        if let Some(ref hidir) = self.session.options.output_interface_dir {
+            flat_dirs.push(hidir.clone());
+        }
+
+        // Parse every registered package across the DBs (preserving discovery
+        // order), then apply --package-id scoping.
+        let mut all: Vec<ConfPackage> = Vec::new();
+        for db in &self.session.options.package_dbs {
+            if !flat_dirs.contains(db) {
+                flat_dirs.push(db.clone());
+            }
+            let Ok(entries) = std::fs::read_dir(db.as_std_path()) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("conf") {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    all.push(parse_conf_package(&content));
+                }
+            }
+        }
+
+        let visible_ids = &self.session.options.package_ids;
+        if visible_ids.is_empty() {
+            return (flat_dirs, all);
+        }
+
+        // Transitive closure of the requested ids over `depends:`.
+        let by_id: FxHashMap<&str, &ConfPackage> =
+            all.iter().map(|p| (p.id.as_str(), p)).collect();
+        let mut visible: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+        let mut stack: Vec<String> = visible_ids.clone();
+        while let Some(id) = stack.pop() {
+            if !visible.insert(id.clone()) {
+                continue;
+            }
+            if let Some(pkg) = by_id.get(id.as_str()) {
+                for dep in &pkg.depends {
+                    if !visible.contains(dep) {
+                        stack.push(dep.clone());
+                    }
+                }
+            }
+        }
+
+        let packages = all
+            .into_iter()
+            .filter(|p| visible.contains(&p.id))
+            .collect();
+        (flat_dirs, packages)
+    }
+
     /// Search for `.bhi` interface files for imported modules not already in the
     /// module cache. Converts loaded interfaces to `ModuleExports` and seeds
     /// the cache so the lowering phase can resolve cross-module imports.
@@ -2243,16 +2343,10 @@ impl Compiler {
         cache: &mut ModuleCache,
         ctx: &mut LowerContext,
     ) {
-        // Collect interface search directories: hidir + package_dbs
-        let mut iface_dirs: Vec<Utf8PathBuf> = Vec::new();
-        if let Some(ref hidir) = self.session.options.output_interface_dir {
-            iface_dirs.push(hidir.clone());
-        }
-        for db_path in &self.session.options.package_dbs {
-            iface_dirs.push(db_path.clone());
-        }
-
-        if iface_dirs.is_empty() {
+        // Interface sources: flat dirs (hidir + package-db dirs) and registered
+        // `.conf` packages (scoped by --package-id, gated by exposed-modules).
+        let (flat_dirs, packages) = self.collect_package_interfaces();
+        if flat_dirs.is_empty() && packages.is_empty() {
             return;
         }
 
@@ -2275,30 +2369,26 @@ impl Compiler {
                 continue;
             }
 
-            // Try to find a .bhi interface file
-            for dir in &iface_dirs {
-                let iface_path = bhc_interface::interface_path(dir, &module_name);
-                if iface_path.as_std_path().exists() {
-                    match bhc_interface::ModuleInterface::read_from_file(&iface_path) {
-                        Ok(iface) => {
-                            debug!(
-                                module = %module_name,
-                                interface = %iface_path,
-                                "loaded interface file for import"
-                            );
-                            let exports =
-                                Self::interface_to_module_exports(&iface, &module_name, ctx);
-                            cache.insert(sym, exports);
-                            break; // Found it, stop searching
-                        }
-                        Err(e) => {
-                            debug!(
-                                module = %module_name,
-                                error = %e,
-                                "failed to read interface file"
-                            );
-                        }
-                    }
+            // Resolve the module's interface file honoring exposed-modules.
+            let Some(iface_path) = resolve_interface_in(&module_name, &flat_dirs, &packages) else {
+                continue;
+            };
+            match bhc_interface::ModuleInterface::read_from_file(&iface_path) {
+                Ok(iface) => {
+                    debug!(
+                        module = %module_name,
+                        interface = %iface_path,
+                        "loaded interface file for import"
+                    );
+                    let exports = Self::interface_to_module_exports(&iface, &module_name, ctx);
+                    cache.insert(sym, exports);
+                }
+                Err(e) => {
+                    debug!(
+                        module = %module_name,
+                        error = %e,
+                        "failed to read interface file"
+                    );
                 }
             }
         }
@@ -2993,7 +3083,15 @@ impl Compiler {
             .collect();
 
         if paths.len() <= 1 {
-            // Single file or empty — no ordering needed
+            // Single file or empty — no ordering needed. In compile-only mode use
+            // compile_module_only so --odir/--hidir are honored and a `.bhi` is
+            // emitted (compile_files goes through the full executable path).
+            if self.session.options.compile_only {
+                return match paths.first() {
+                    Some(p) => Ok(vec![self.compile_module_only(p)?]),
+                    None => Ok(Vec::new()),
+                };
+            }
             return self.compile_files(paths);
         }
 
@@ -3972,11 +4070,40 @@ impl Compiler {
         &self,
         paths: &[Utf8PathBuf],
     ) -> CompileResult<Vec<(String, Result<(), CompileError>)>> {
+        self.check_files_ordered_reporting(paths, None)
+    }
+
+    /// Like [`check_files_ordered`], but only reports results for the modules
+    /// whose source path is in `report_only`.
+    ///
+    /// All files in `paths` are still parsed, ordered, and type-checked so that
+    /// their exports are registered for downstream import resolution. When
+    /// `report_only` is `Some`, modules whose path is *not* in the set are
+    /// treated purely as dependencies: they are checked and registered but their
+    /// pass/fail/skip results are omitted from the returned vector. This is how
+    /// `--package-dir` dependency roots resolve a target package's imports
+    /// without polluting its reported check results.
+    ///
+    /// When `report_only` is `None`, every module is reported (the original
+    /// [`check_files_ordered`] behavior).
+    pub fn check_files_ordered_reporting(
+        &self,
+        paths: &[Utf8PathBuf],
+        report_only: Option<&rustc_hash::FxHashSet<Utf8PathBuf>>,
+    ) -> CompileResult<Vec<(String, Result<(), CompileError>)>> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
 
+        // Whether a given source path should appear in the reported results.
+        let should_report = |p: &Utf8PathBuf| report_only.is_none_or(|s| s.contains(p));
+
         if paths.len() == 1 {
+            if !should_report(&paths[0]) {
+                // The lone module is a dependency root with nothing to report.
+                let _ = self.check_file(&paths[0]);
+                return Ok(Vec::new());
+            }
             let unit = CompilationUnit::from_path(paths[0].clone())?;
             let name = unit.module_name.clone();
             let result = self.check_file(&paths[0]);
@@ -3986,7 +4113,7 @@ impl Compiler {
         // Phase 1: Parse all files to extract module names and imports
         // Parse errors are recorded but don't abort the entire check.
         let mut module_info: Vec<(Utf8PathBuf, String, Vec<String>)> = Vec::new();
-        let mut parse_failures: Vec<(String, CompileError)> = Vec::new();
+        let mut parse_failures: Vec<(Utf8PathBuf, String, CompileError)> = Vec::new();
         let file_id = FileId::new(0);
 
         for path in paths {
@@ -3994,14 +4121,14 @@ impl Compiler {
                 Ok(u) => u,
                 Err(e) => {
                     let name = path.file_stem().unwrap_or("unknown").to_string();
-                    parse_failures.push((name, e));
+                    parse_failures.push((path.clone(), name, e));
                     continue;
                 }
             };
             let ast = match self.parse(&unit, file_id) {
                 Ok(a) => a,
                 Err(e) => {
-                    parse_failures.push((unit.module_name.clone(), e));
+                    parse_failures.push((path.clone(), unit.module_name.clone(), e));
                     continue;
                 }
             };
@@ -4040,13 +4167,25 @@ impl Compiler {
             .map(|(_, name, _)| name.as_str())
             .collect();
 
-        // Filter: skip modules whose imports can't be satisfied
-        // (not in local set and not a builtin)
+        // A module whose import is provided as a compiled `.bhi` in the hidir or
+        // a package DB is satisfiable even without its source present — lowering
+        // loads the interface from disk (separate compilation). This is what lets
+        // `bhc check --package-db <db>` resolve dependencies from an hx-built
+        // package database (honoring its `.conf` exposed-modules and --package-id
+        // scoping).
+        let (flat_dirs, packages) = self.collect_package_interfaces();
+        let package_provides =
+            |module: &str| resolve_interface_in(module, &flat_dirs, &packages).is_some();
+
+        // Filter: skip modules whose imports can't be satisfied (not in the local
+        // set, not a builtin, and not provided by a package DB interface).
         let satisfiable: Vec<bool> = module_info
             .iter()
             .map(|(_, _, imports)| {
                 imports.iter().all(|imp| {
-                    local_names.contains(imp.as_str()) || builtins.contains(imp.as_str())
+                    local_names.contains(imp.as_str())
+                        || builtins.contains(imp.as_str())
+                        || package_provides(imp)
                 })
             })
             .collect();
@@ -4064,6 +4203,9 @@ impl Compiler {
 
         for idx in &ordered {
             let (ref path, ref mod_name, ref imports) = module_info[*idx];
+
+            // Dependency-root modules are checked and registered but not reported.
+            let report = should_report(path);
 
             // Pre-register exports for cyclic modules when we first encounter one.
             // Extract export names directly from the AST (no lowering needed).
@@ -4095,17 +4237,21 @@ impl Compiler {
                 let missing: Vec<&str> = imports
                     .iter()
                     .filter(|imp| {
-                        !local_names.contains(imp.as_str()) && !builtins.contains(imp.as_str())
+                        !local_names.contains(imp.as_str())
+                            && !builtins.contains(imp.as_str())
+                            && !package_provides(imp)
                     })
                     .map(|s| s.as_str())
                     .collect();
-                results.push((
-                    mod_name.clone(),
-                    Err(CompileError::Other(format!(
-                        "skipped: unresolved imports: {}",
-                        missing.join(", ")
-                    ))),
-                ));
+                if report {
+                    results.push((
+                        mod_name.clone(),
+                        Err(CompileError::Other(format!(
+                            "skipped: unresolved imports: {}",
+                            missing.join(", ")
+                        ))),
+                    ));
+                }
                 failed_modules.insert(mod_name.clone());
                 continue;
             }
@@ -4120,12 +4266,14 @@ impl Compiler {
                     .iter()
                     .any(|imp| failed_modules.contains(imp.as_str()));
             if dep_failed {
-                results.push((
-                    mod_name.clone(),
-                    Err(CompileError::Other(
-                        "skipped: dependency failed".to_string(),
-                    )),
-                ));
+                if report {
+                    results.push((
+                        mod_name.clone(),
+                        Err(CompileError::Other(
+                            "skipped: dependency failed".to_string(),
+                        )),
+                    ));
+                }
                 failed_modules.insert(mod_name.clone());
                 continue;
             }
@@ -4134,7 +4282,9 @@ impl Compiler {
             match self.check_unit_for_multimodule(unit, mod_name, &registry) {
                 Ok(compiled_info) => {
                     registry.modules.insert(mod_name.clone(), compiled_info);
-                    results.push((mod_name.clone(), Ok(())));
+                    if report {
+                        results.push((mod_name.clone(), Ok(())));
+                    }
                 }
                 Err(CompileError::TypeErrorWithInfo { count, info }) => {
                     // Type checking failed, but parsing and lowering succeeded.
@@ -4143,18 +4293,25 @@ impl Compiler {
                     registry.modules.insert(mod_name.clone(), info);
                     // Still mark as failed for reporting purposes, but do NOT
                     // add to failed_modules so downstream modules aren't skipped.
-                    results.push((mod_name.clone(), Err(CompileError::TypeError(count))));
+                    if report {
+                        results.push((mod_name.clone(), Err(CompileError::TypeError(count))));
+                    }
                 }
                 Err(e) => {
                     failed_modules.insert(mod_name.clone());
-                    results.push((mod_name.clone(), Err(e)));
+                    if report {
+                        results.push((mod_name.clone(), Err(e)));
+                    }
                 }
             }
         }
 
-        // Append parse failures to results
-        for (name, err) in parse_failures {
-            results.push((name, Err(err)));
+        // Append parse failures to results (dependency-root parse failures are
+        // silent — they only matter if they break a reported module's imports).
+        for (path, name, err) in parse_failures {
+            if should_report(&path) {
+                results.push((name, Err(err)));
+            }
         }
 
         Ok(results)
@@ -4185,6 +4342,65 @@ impl Compiler {
         self.check_files_ordered(&all_files)
     }
 
+    /// Type-check the target `paths` with dependency source roots available for
+    /// import resolution.
+    ///
+    /// Each entry in `dep_roots` is a directory (e.g. a dependency package's
+    /// `src/`) whose `.hs` modules are parsed, ordered, and checked alongside the
+    /// target so that imports referencing them resolve instead of being skipped.
+    /// Dependency modules are *not* included in the returned results — only the
+    /// modules reachable from `paths` are reported. This is the no-network
+    /// milestone of package dependency resolution: point `bhc check` at already
+    /// on-disk dependency sources and watch the target's skipped count drop.
+    ///
+    /// A file that appears under both a target path and a dependency root is
+    /// treated as a target (reported).
+    pub fn check_with_discovery_with_deps(
+        &self,
+        paths: &[Utf8PathBuf],
+        dep_roots: &[Utf8PathBuf],
+    ) -> CompileResult<Vec<(String, Result<(), CompileError>)>> {
+        // Collect target files (these are the ones we report on).
+        let mut target_files: Vec<Utf8PathBuf> = Vec::new();
+        for path in paths {
+            if path.as_std_path().is_dir() {
+                Self::collect_hs_files(path.as_std_path(), &mut target_files)?;
+            } else {
+                target_files.push(path.clone());
+            }
+        }
+
+        if target_files.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let report_only: rustc_hash::FxHashSet<Utf8PathBuf> =
+            target_files.iter().cloned().collect();
+
+        // Collect dependency files, skipping any that are already targets.
+        let mut dep_files: Vec<Utf8PathBuf> = Vec::new();
+        for root in dep_roots {
+            if root.as_std_path().is_dir() {
+                Self::collect_hs_files(root.as_std_path(), &mut dep_files)?;
+            } else {
+                dep_files.push(root.clone());
+            }
+        }
+        dep_files.retain(|f| !report_only.contains(f));
+
+        if dep_files.is_empty() {
+            // No usable dependency sources — behave like a plain discovery check.
+            return self.check_files_ordered(&target_files);
+        }
+
+        // Dependencies first so they register before the target modules that
+        // import them (the topological sort handles intra-set ordering).
+        let mut all_files = dep_files;
+        all_files.extend(target_files);
+
+        self.check_files_ordered_reporting(&all_files, Some(&report_only))
+    }
+
     /// Recursively collect all `.hs` files under a directory.
     fn collect_hs_files(dir: &std::path::Path, out: &mut Vec<Utf8PathBuf>) -> CompileResult<()> {
         let entries = std::fs::read_dir(dir).map_err(|e| CompileError::SourceReadError {
@@ -4209,6 +4425,80 @@ impl Compiler {
 
         Ok(())
     }
+}
+
+/// A package registered in a package DB, parsed from its `.conf` file.
+#[derive(Debug, Default, Clone)]
+struct ConfPackage {
+    /// The package identifier (`id:` field), e.g. `text-2.1.0-<hash>`.
+    id: String,
+    /// Modules the package exposes (`exposed-modules:` field).
+    exposed_modules: rustc_hash::FxHashSet<String>,
+    /// Directories holding the package's compiled interfaces (`import-dirs:`).
+    import_dirs: Vec<Utf8PathBuf>,
+    /// Package ids this package depends on (`depends:` field).
+    depends: Vec<String>,
+}
+
+/// Parse a GHC/BHC package `.conf` file into a [`ConfPackage`].
+///
+/// Reads the `id:`, `import-dirs:`, `exposed-modules:`, and `depends:` fields.
+/// The list fields are taken from their single declaring line (the layout the
+/// hx package manager emits), split on whitespace and commas. Multi-line
+/// continuations are not parsed.
+fn parse_conf_package(content: &str) -> ConfPackage {
+    let mut pkg = ConfPackage::default();
+    let split = |rest: &str| -> Vec<String> {
+        rest.split([' ', '\t', ','])
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("id:") {
+            pkg.id = rest.trim().to_string();
+        } else if let Some(rest) = trimmed.strip_prefix("import-dirs:") {
+            pkg.import_dirs = split(rest).into_iter().map(Utf8PathBuf::from).collect();
+        } else if let Some(rest) = trimmed.strip_prefix("exposed-modules:") {
+            pkg.exposed_modules = split(rest).into_iter().collect();
+        } else if let Some(rest) = trimmed.strip_prefix("depends:") {
+            pkg.depends = split(rest);
+        }
+    }
+    pkg
+}
+
+/// Resolve the `.bhi` interface path for `module` from the available interface
+/// sources, or `None` if it is not provided.
+///
+/// `flat_dirs` (hidir + package-db dirs) have no module list, so any `.bhi`
+/// present resolves. Registered `packages` only provide a module when it is in
+/// their `exposed-modules` (and the `.bhi` exists under one of their
+/// `import-dirs`).
+fn resolve_interface_in(
+    module: &str,
+    flat_dirs: &[Utf8PathBuf],
+    packages: &[ConfPackage],
+) -> Option<Utf8PathBuf> {
+    for dir in flat_dirs {
+        let path = bhc_interface::interface_path(dir, module);
+        if path.as_std_path().exists() {
+            return Some(path);
+        }
+    }
+    for pkg in packages {
+        if !pkg.exposed_modules.contains(module) {
+            continue;
+        }
+        for dir in &pkg.import_dirs {
+            let path = bhc_interface::interface_path(dir, module);
+            if path.as_std_path().exists() {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 /// Count the number of leading lambda parameters in an expression (free function).
@@ -4368,6 +4658,13 @@ impl CompilerBuilder {
         self
     }
 
+    /// Explicitly enable the tensor fusion pipeline (regardless of profile).
+    #[must_use]
+    pub fn tensor_fusion(mut self, enable: bool) -> Self {
+        self.options.tensor_fusion = enable;
+        self
+    }
+
     /// Enable compile-only mode (produce .o files without linking).
     #[must_use]
     pub fn compile_only(mut self, enable: bool) -> Self {
@@ -4423,6 +4720,44 @@ impl CompilerBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_conf_package() {
+        let conf = "\
+name: text
+version: 2.1.0
+id: text-2.1.0-abc123
+import-dirs: /cache/text-2.1.0/lib /cache/text-2.1.0/extra
+exposed-modules: Data.Text Data.Text.Internal
+";
+        let pkg = parse_conf_package(conf);
+        assert_eq!(pkg.id, "text-2.1.0-abc123");
+        assert_eq!(
+            pkg.import_dirs,
+            vec![
+                Utf8PathBuf::from("/cache/text-2.1.0/lib"),
+                Utf8PathBuf::from("/cache/text-2.1.0/extra"),
+            ]
+        );
+        assert!(pkg.exposed_modules.contains("Data.Text"));
+        assert!(pkg.exposed_modules.contains("Data.Text.Internal"));
+        assert!(!pkg.exposed_modules.contains("Data.Text.Hidden"));
+    }
+
+    #[test]
+    fn test_resolve_interface_in_honors_exposed_modules() {
+        // A module not in any package's exposed-modules does not resolve, even
+        // if a stray `.bhi` exists under an import-dir.
+        let pkg = ConfPackage {
+            id: "p-1.0-x".to_string(),
+            exposed_modules: ["Data.Public".to_string()].into_iter().collect(),
+            import_dirs: vec![Utf8PathBuf::from("/nonexistent")],
+            depends: Vec::new(),
+        };
+        assert!(resolve_interface_in("Data.Hidden", &[], std::slice::from_ref(&pkg)).is_none());
+        // Exposed but the file is absent → still None (no panic).
+        assert!(resolve_interface_in("Data.Public", &[], &[pkg]).is_none());
+    }
 
     #[test]
     fn test_compile_unit_creation() {

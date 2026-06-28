@@ -160,6 +160,9 @@ pub struct Options {
     pub deny_warnings: bool,
     /// Generate kernel reports (Numeric profile).
     pub emit_kernel_report: bool,
+    /// Explicitly enable the tensor fusion pipeline regardless of profile.
+    /// The Numeric profile always fuses; this requests fusion otherwise.
+    pub tensor_fusion: bool,
     /// Dump intermediate representations.
     pub dump_ir: IrDumpOptions,
     /// Path to the BHC standard library.
@@ -199,6 +202,7 @@ impl Default for Options {
             warn_all: false,
             deny_warnings: false,
             emit_kernel_report: false,
+            tensor_fusion: false,
             dump_ir: IrDumpOptions::default(),
             stdlib_path: None,
             hackage_packages: Vec::new(),

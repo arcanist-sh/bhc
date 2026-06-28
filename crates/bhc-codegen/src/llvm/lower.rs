@@ -23667,6 +23667,25 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 if self.expr_looks_like_list(f) {
                     return Some((ShowCoerce::List, 1000093, "show_list"));
                 }
+                // Functions that return Maybe, FULLY APPLIED: a 2-arg call like
+                // `find p xs` has `f = App(find, p)` (not a bare Var), so match on
+                // the spine head rather than `f` directly.
+                if let Some(head) = self.app_head_var_name(expr) {
+                    if matches!(
+                        head,
+                        "readMaybe"
+                            | "lookupEnv"
+                            | "find"
+                            | "lookup"
+                            | "elemIndex"
+                            | "findIndex"
+                            | "listToMaybe"
+                            | "Data.Map.lookup"
+                            | "Data.Map.Strict.lookup"
+                    ) {
+                        return Some((ShowCoerce::MaybeOf, 1000094, "show_maybe"));
+                    }
+                }
                 match f.as_ref() {
                     // Just x
                     Expr::Var(var, _) if var.name.as_str() == "Just" => {

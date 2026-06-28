@@ -23,7 +23,33 @@ use crate::LowerError;
 ///
 /// Returns the `DefId` if found, or records an error and returns `None`.
 /// If the resolved definition is a stub, emits a warning.
+/// MagicHash Int# primop -> the boxed operation it desugars to (boxed
+/// approximation: an `Int#` is just a boxed `Int`). Returns `None` for
+/// non-primop names.
+fn magic_hash_primop_alias(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "+#" => "+",
+        "-#" => "-",
+        "*#" => "*",
+        "quotInt#" => "quot",
+        "remInt#" => "rem",
+        "==#" => "==",
+        "/=#" => "/=",
+        "<#" => "<",
+        ">#" => ">",
+        "<=#" => "<=",
+        ">=#" => ">=",
+        "negateInt#" => "negate",
+        _ => return None,
+    })
+}
+
 pub fn resolve_var(ctx: &mut LowerContext, name: Symbol, span: Span) -> Option<DefId> {
+    // MagicHash: desugar an Int# primop to its boxed counterpart before lookup,
+    // so it resolves to the ordinary builtin and never reaches typeck/codegen.
+    if let Some(alias) = magic_hash_primop_alias(name.as_str()) {
+        return ctx.lookup_value(Symbol::intern(alias));
+    }
     if let Some(def_id) = ctx.lookup_value(name) {
         // Warn if this is a stub (external package placeholder)
         ctx.warn_if_stub(def_id, name.as_str(), span);

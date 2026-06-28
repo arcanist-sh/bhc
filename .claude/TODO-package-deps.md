@@ -1,7 +1,34 @@
 # Feature brief: Package dependency resolution for `bhc check` / compile
 
-**Status:** Milestone 1 done (no-network dependency roots). Milestones 2–3 (hx
-package DB consumption, hx-driven fetch) not started. Self-contained brief.
+**Status:** Milestones 1 & 2 done (no-network dependency roots + package DB
+`.bhi` consumption). Milestone 3 (hx-driven fetch/build of transitive deps) not
+started. Self-contained brief.
+
+**Milestone 2 (landed):** `bhc check` resolves imports from a package DB of
+compiled `.bhi` interfaces (separate compilation), and the compile side actually
+produces such a DB.
+- Read side: the satisfiability filter in `check_files_ordered_reporting` now
+  treats an import as satisfiable if a `.bhi` for it exists in any
+  `--package-db <dir>` or the `--hidir` (predicate `package_provides`), so the
+  module is checked instead of skipped; lowering loads the interface via the
+  existing `load_interfaces_for_imports`. `check_file` (single-file path) now
+  uses `lower_with_registry` (empty registry) so it loads interfaces too.
+  `--package-db` is global (works before/after the subcommand) and is wired into
+  the `check` CLI builder.
+- Write side: single-file `bhc -c Foo.hs --hidir <db> --odir <o>` now routes to
+  `compile_module_only` (was falling through to the executable path, ignoring
+  both dirs and emitting no `.bhi`). Two fixes made this work: (a)
+  `compile_files_ordered` honors `compile_only` in its ≤1-file branch; (b)
+  `compile_module_only` writes the interface using the **AST module name**
+  (`Data.Split` → `<db>/Data/Split.bhi`), not the file stem. `compile_module_only`
+  also uses `lower_with_registry` so a dep that imports an already-built dep
+  resolves from the DB. The `build` subcommand path (`compile_files`) now also
+  wires `-c`/`--odir`/`--hidir`/`--package-db`.
+- Validated end-to-end: build `Data.Split` into a DB with `-c`, then check a
+  consumer (and a 2-module Helper/Main package, source of the dep absent) against
+  `--package-db` → resolves OK. Driver tests
+  `test_package_db_bhi_roundtrip_resolves_check` and
+  `test_package_dir_deps_resolve_and_are_unreported`.
 
 **Milestone 1 (landed):** `bhc check` accepts `--package-dir <DIR>` (repeatable,
 global so it works before or after the subcommand). Each dir's `.hs` modules are
@@ -86,12 +113,19 @@ All in `crates/bhc-driver/src/lib.rs`:
    *reports* the dep modules too; `--package-dir` is the version that keeps the
    target's result set clean. Next: re-measure a real Hackage package's skipped
    count by pointing `--package-dir` at its (vendored/already-fetched) deps.
-2. **Consume hx's package DB.** Have `bhc check`/compile read hx's
-   filesystem package DB (compiled `.bhi` + artifacts) so a `cabal`-resolved dep
-   set is used. hx already builds this; wire BHC to consult it for imports.
+2. **Consume hx's package DB. — DONE.** `bhc check`/`-c` now read a package DB
+   of `.bhi` interfaces (`--package-db`, global) and the `-c` path produces one
+   (`--hidir`). See the Milestone 2 note at the top. Remaining polish: the DB is
+   currently a flat dir of `<Module/Path>.bhi`; hx's real DB layout (per-package
+   subdirs, `.conf`/manifest, object archives) may need a small adapter, and
+   `--package-id` is parsed but not yet used to scope which DB entries are
+   visible. Next concrete step: point `bhc check --package-db` at an actual
+   hx-built DB and reconcile the directory layout.
 3. **hx-driven fetch + build of transitive deps**, then check/compile the target
    against them. Reuse hx-solver (`.cabal` parse, Hackage fetch, solver) + the
-   `-c`/`.bhi` pipeline. This is the real end-to-end Hackage milestone.
+   `-c`/`.bhi` pipeline. This is the real end-to-end Hackage milestone. The
+   BHC-side pieces it needs (per-module `-c` → `.bhi` into a DB, and
+   check/compile consuming that DB) are now in place from milestone 2.
 
 ---
 

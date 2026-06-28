@@ -1412,6 +1412,81 @@ main = mapM_ putStrLn (shout "a,b,c")
     );
 }
 
+#[test]
+fn test_package_db_bhi_roundtrip_resolves_check() {
+    // Build a dependency to a `.bhi` interface in a package DB, then check a
+    // consumer against that DB with the dependency *source* absent. The import
+    // must resolve from the interface alone (separate compilation).
+    use bhc_driver::CompilerBuilder;
+    use camino::Utf8PathBuf;
+
+    let dep_src = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let odir = tempfile::tempdir().unwrap();
+    let app = tempfile::tempdir().unwrap();
+
+    // Dependency Data.Split, compiled with -c into the package DB.
+    let data_dir = dep_src.path().join("Data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(
+        data_dir.join("Split.hs"),
+        r#"module Data.Split (splitOnComma) where
+splitOnComma :: String -> [String]
+splitOnComma s = case break (== ',') s of
+  (a, []) -> [a]
+  (a, _ : rest) -> a : splitOnComma rest
+"#,
+    )
+    .unwrap();
+
+    let db_path = Utf8PathBuf::from(db.path().to_str().unwrap());
+    let producer = CompilerBuilder::new()
+        .compile_only(true)
+        .odir(Utf8PathBuf::from(odir.path().to_str().unwrap()))
+        .hidir(db_path.clone())
+        .build()
+        .unwrap();
+    let dep_hs = Utf8PathBuf::from(data_dir.join("Split.hs").to_str().unwrap());
+    producer
+        .compile_module_only(&dep_hs)
+        .expect("dep should compile to object + interface");
+
+    // The interface must land at the import-resolvable path.
+    let bhi = db.path().join("Data").join("Split.bhi");
+    assert!(bhi.exists(), "expected interface at {}", bhi.display());
+
+    // Consumer imports Data.Split; its source is NOT present here.
+    let main_hs = app.path().join("Main.hs");
+    std::fs::write(
+        &main_hs,
+        r#"module Main (main) where
+import Data.Split (splitOnComma)
+main :: IO ()
+main = mapM_ putStrLn (splitOnComma "a,b,c")
+"#,
+    )
+    .unwrap();
+
+    // Without the DB the import is unresolved; with it, the check succeeds.
+    let consumer = CompilerBuilder::new()
+        .package_db(db_path)
+        .build()
+        .unwrap();
+    let main_path = Utf8PathBuf::from(main_hs.to_str().unwrap());
+    let result = consumer.check_file(&main_path);
+    assert!(
+        result.is_ok(),
+        "consumer should check against package DB interface: {:?}",
+        result.err()
+    );
+
+    let bare = Compiler::with_defaults().unwrap();
+    assert!(
+        bare.check_file(&main_path).is_err(),
+        "without the package DB the import should be unresolved"
+    );
+}
+
 // =========================================================================
 // Implicit Prelude Tests
 // =========================================================================

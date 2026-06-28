@@ -97,8 +97,10 @@ struct Cli {
     #[arg(long = "hidir", value_name = "DIR")]
     hidir: Option<PathBuf>,
 
-    /// Package database paths
-    #[arg(long = "package-db", value_name = "PATH")]
+    /// Package database paths (dirs of compiled `.bhi` interfaces). Imports
+    /// resolve from these via separate compilation. May be given before or
+    /// after the subcommand.
+    #[arg(long = "package-db", value_name = "PATH", global = true)]
     package_dbs: Vec<PathBuf>,
 
     /// Expose a dependency by package ID
@@ -355,6 +357,30 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
         builder = builder.hackage_package(pkg.clone());
     }
 
+    // Compile-only mode and its output directories (-c, --odir, --hidir), plus
+    // package databases for resolving imports via compiled `.bhi` interfaces.
+    if cli.compile_only {
+        builder = builder.compile_only(true);
+    }
+    if let Some(ref odir) = cli.odir {
+        builder = builder.odir(
+            Utf8PathBuf::from_path_buf(odir.clone())
+                .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in odir path"))?,
+        );
+    }
+    if let Some(ref hidir) = cli.hidir {
+        builder = builder.hidir(
+            Utf8PathBuf::from_path_buf(hidir.clone())
+                .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in hidir path"))?,
+        );
+    }
+    for db in &cli.package_dbs {
+        builder = builder.package_db(
+            Utf8PathBuf::from_path_buf(db.clone())
+                .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in package-db path"))?,
+        );
+    }
+
     // Add CPP defines
     for def in &cli.defines {
         builder = builder.define(def);
@@ -373,11 +399,18 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // Use ordered compilation for multiple files, or auto-discovery for single file
+    // Use ordered compilation for multiple files, or auto-discovery for single file.
+    // In compile-only mode a single file goes through compile_module_only, which
+    // honors --odir/--hidir and emits a `.bhi` interface (used to populate an hx
+    // package database).
     let compile_result = if utf8_paths.len() > 1 {
         compiler.compile_files_ordered(utf8_paths.iter().map(|p| p.as_path()))
     } else if utf8_paths.len() == 1 {
-        compiler.compile_with_discovery(utf8_paths[0].as_path())
+        if cli.compile_only {
+            compiler.compile_module_only(utf8_paths[0].as_path()).map(|o| vec![o])
+        } else {
+            compiler.compile_with_discovery(utf8_paths[0].as_path())
+        }
     } else {
         compiler.compile_files(utf8_paths.iter().map(|p| p.as_path()))
     };
@@ -438,6 +471,21 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     for dir in &package_dirs {
         builder = builder.import_path(dir.clone());
+    }
+
+    // Package databases (compiled `.bhi` interfaces, e.g. an hx-built DB) and
+    // the interface output dir let imports resolve via separate compilation.
+    for db in &cli.package_dbs {
+        builder = builder.package_db(
+            Utf8PathBuf::from_path_buf(db.clone())
+                .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in package-db path"))?,
+        );
+    }
+    if let Some(ref hidir) = cli.hidir {
+        builder = builder.hidir(
+            Utf8PathBuf::from_path_buf(hidir.clone())
+                .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in hidir path"))?,
+        );
     }
 
     for def in &cli.defines {

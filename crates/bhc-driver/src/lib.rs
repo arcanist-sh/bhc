@@ -387,8 +387,11 @@ impl Compiler {
         // Phase 1: Parse
         let ast = self.parse(&unit, file_id)?;
 
-        // Phase 2: Lower AST to HIR
-        let (hir, lower_ctx) = self.lower(&ast)?;
+        // Phase 2: Lower AST to HIR. Use the registry-aware lowering with an
+        // empty registry so that imports backed by `.bhi` interfaces (in a
+        // package DB or hidir) resolve via separate compilation. With no
+        // package DBs / hidir configured this behaves identically to `lower`.
+        let (hir, lower_ctx) = self.lower_with_registry(&ast, &ModuleRegistry::default())?;
 
         // Phase 3: Type check
         let _typed = self.type_check(&hir, file_id, &lower_ctx)?;
@@ -421,10 +424,12 @@ impl Compiler {
         self.callbacks
             .on_phase_complete(CompilePhase::Parse, &unit.module_name);
 
-        // Phase 2: Lower AST to HIR
+        // Phase 2: Lower AST to HIR. Registry-aware (empty registry) so imports
+        // backed by `.bhi` interfaces in a package DB / hidir resolve via
+        // separate compilation — symmetric with `check_file`.
         self.callbacks
             .on_phase_start(CompilePhase::TypeCheck, &unit.module_name);
-        let (hir, lower_ctx) = self.lower(&ast)?;
+        let (hir, lower_ctx) = self.lower_with_registry(&ast, &ModuleRegistry::default())?;
 
         // Phase 2b: Type check HIR
         let typed = self.type_check(&hir, file_id, &lower_ctx)?;
@@ -460,11 +465,22 @@ impl Compiler {
             Utf8PathBuf::from(object_path.to_str().unwrap_or_default())
         };
 
-        // Generate interface file if hidir is configured
+        // Generate interface file if hidir is configured. Use the module name
+        // declared in the source (e.g. `Data.Split`), not the file stem, so the
+        // `.bhi` lands at the import-resolvable path (`<hidir>/Data/Split.bhi`).
         if let Some(ref hidir) = self.session.options.output_interface_dir {
-            let iface =
-                bhc_interface::generate::generate_interface(&unit.module_name, &ast, &typed);
-            let iface_path = bhc_interface::interface_path(hidir, &unit.module_name);
+            let module_name = ast.name.as_ref().map_or_else(
+                || unit.module_name.clone(),
+                |n| {
+                    n.parts
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                },
+            );
+            let iface = bhc_interface::generate::generate_interface(&module_name, &ast, &typed);
+            let iface_path = bhc_interface::interface_path(hidir, &module_name);
             if let Some(parent) = iface_path.parent() {
                 std::fs::create_dir_all(parent.as_std_path()).map_err(|e| {
                     CompileError::CodegenError(format!("failed to create hidir: {}", e))
@@ -2146,6 +2162,9 @@ impl Compiler {
                 search_paths.push(env_path);
             }
         }
+        // Parity with `lower`: include Hackage `--package` source dirs so the
+        // registry path resolves the same imports the single-module path does.
+        search_paths.extend(self.resolve_hackage_packages()?);
 
         // Pre-seed module cache with already-compiled modules.
         // IMPORTANT: We must remap DefIds from the exporting module to fresh IDs
@@ -2993,7 +3012,15 @@ impl Compiler {
             .collect();
 
         if paths.len() <= 1 {
-            // Single file or empty — no ordering needed
+            // Single file or empty — no ordering needed. In compile-only mode use
+            // compile_module_only so --odir/--hidir are honored and a `.bhi` is
+            // emitted (compile_files goes through the full executable path).
+            if self.session.options.compile_only {
+                return match paths.first() {
+                    Some(p) => Ok(vec![self.compile_module_only(p)?]),
+                    None => Ok(Vec::new()),
+                };
+            }
             return self.compile_files(paths);
         }
 
@@ -4069,13 +4096,36 @@ impl Compiler {
             .map(|(_, name, _)| name.as_str())
             .collect();
 
-        // Filter: skip modules whose imports can't be satisfied
-        // (not in local set and not a builtin)
+        // Interface search dirs: a module whose import is provided as a compiled
+        // `.bhi` in the hidir or a package DB is satisfiable even without its
+        // source present — lowering loads the interface from disk (separate
+        // compilation). This is what lets `bhc check --package-db <db>` resolve
+        // dependencies from an hx-built package database.
+        let iface_dirs: Vec<Utf8PathBuf> = self
+            .session
+            .options
+            .output_interface_dir
+            .iter()
+            .cloned()
+            .chain(self.session.options.package_dbs.iter().cloned())
+            .collect();
+        let package_provides = |module: &str| {
+            iface_dirs.iter().any(|dir| {
+                bhc_interface::interface_path(dir, module)
+                    .as_std_path()
+                    .exists()
+            })
+        };
+
+        // Filter: skip modules whose imports can't be satisfied (not in the local
+        // set, not a builtin, and not provided by a package DB interface).
         let satisfiable: Vec<bool> = module_info
             .iter()
             .map(|(_, _, imports)| {
                 imports.iter().all(|imp| {
-                    local_names.contains(imp.as_str()) || builtins.contains(imp.as_str())
+                    local_names.contains(imp.as_str())
+                        || builtins.contains(imp.as_str())
+                        || package_provides(imp)
                 })
             })
             .collect();
@@ -4127,7 +4177,9 @@ impl Compiler {
                 let missing: Vec<&str> = imports
                     .iter()
                     .filter(|imp| {
-                        !local_names.contains(imp.as_str()) && !builtins.contains(imp.as_str())
+                        !local_names.contains(imp.as_str())
+                            && !builtins.contains(imp.as_str())
+                            && !package_provides(imp)
                     })
                     .map(|s| s.as_str())
                     .collect();

@@ -181,12 +181,19 @@ All in `crates/bhc-driver/src/lib.rs`:
    `test_transitive_dependency_build_and_check`): libbase then libmid (libmid's
    compile resolves Data.Base via the DB), then `bhc check app --package-db <db>
    --package-id <libmid>` resolves the whole `depends:` closure.
-   Remaining (network): the Hackage **fetch** half — `build_project` consumes
-   `FetchResult`s from `fetch_packages` and a `BuildPlan` from the solver; that
-   path (solver → Hackage fetch → tarball extract) needs network and a real
-   index, so it's untested here. Also: wire `BhcFullNativeBuilder` into the
-   `hx build --backend bhc` CLI path (the CLI's `run_full_native_build` currently
-   drives the GHC builder).
+   CLI wiring — DONE. `hx build --backend bhc --native` (`run_bhc_native_build`)
+   now calls `try_bhc_full_native_build`: when the project has external deps and
+   a cached resolution (`hx lock`), it resolves → fetches → plans → drives
+   `BhcFullNativeBuilder::build_project` into a `BhcPackageDb`, then links the
+   project against it. BHC builtins are marked pre-installed (from
+   `builtin_packages()`) so they aren't fetched/built. It falls back to the
+   local-only build when there are no deps, no lockfile, or fetch fails (so the
+   no-network/no-lock case is unchanged). `BhcCompilerConfig` gained `Clone`.
+   Remaining (network only): an actual run against real Hackage — the
+   solver→fetch→extract path needs network + a populated index, so the
+   dependency branch is compile-checked and fallback-verified here but not
+   executed end-to-end. Run `hx lock && hx build --backend bhc --native` on a
+   machine with network to exercise it.
 
 ---
 

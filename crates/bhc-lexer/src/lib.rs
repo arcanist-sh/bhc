@@ -793,7 +793,12 @@ impl<'src> Lexer<'src> {
 
             // Check for suffix
             let suffix = self.lex_num_suffix();
-            let text = self.src[start..self.pos - suffix.as_ref().map_or(0, |_| 1)].to_string();
+            let suffix_len = match suffix {
+                Some(NumSuffix::Hash) => 1,
+                Some(NumSuffix::DoubleHash) => 2,
+                None => 0,
+            };
+            let text = self.src[start..self.pos - suffix_len].to_string();
 
             return Token::new(TokenKind::FloatLit(FloatLiteral { text, suffix }));
         }
@@ -808,14 +813,26 @@ impl<'src> Lexer<'src> {
                 self.advance_while(|c| c.is_ascii_digit() || c == '_');
 
                 let suffix = self.lex_num_suffix();
-                let text = self.src[start..self.pos].to_string();
+                let suffix_len = match suffix {
+                    Some(NumSuffix::Hash) => 1,
+                    Some(NumSuffix::DoubleHash) => 2,
+                    None => 0,
+                };
+                let text = self.src[start..self.pos - suffix_len].to_string();
                 return Token::new(TokenKind::FloatLit(FloatLiteral { text, suffix }));
             }
         }
 
         // Integer
         let suffix = self.lex_num_suffix();
-        let text = self.src[start..self.pos].to_string();
+        // Exclude any MagicHash suffix (`#`/`##`) from the literal text so the
+        // numeric value parses cleanly; the suffix is retained separately.
+        let suffix_len = match suffix {
+            Some(NumSuffix::Hash) => 1,
+            Some(NumSuffix::DoubleHash) => 2,
+            None => 0,
+        };
+        let text = self.src[start..self.pos - suffix_len].to_string();
 
         Token::new(TokenKind::IntLit(IntLiteral { text, base, suffix }))
     }

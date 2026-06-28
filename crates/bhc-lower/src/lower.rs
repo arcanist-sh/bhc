@@ -6674,6 +6674,14 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
         }
 
         ast::Expr::App(fun, arg, span) => {
+            // MagicHash: a boxing constructor application `I# e` is the identity
+            // `e` (boxed approximation of unboxed values) — lower the argument
+            // directly so the `#` constructor never needs to resolve.
+            if let ast::Expr::Con(ident, _) = fun.as_ref() {
+                if is_magic_hash_box_con(ident.name.as_str()) {
+                    return lower_expr(ctx, arg);
+                }
+            }
             let f = lower_expr(ctx, fun);
             let a = lower_expr(ctx, arg);
             hir::Expr::App(Box::new(f), Box::new(a), *span)
@@ -7261,6 +7269,11 @@ fn lower_pat(ctx: &mut LowerContext, pat: &ast::Pat) -> hir::Pat {
 
         ast::Pat::Con(ident, pats, span) => {
             let con_name = ident.name;
+            // MagicHash: a boxing-constructor pattern `I# n` is identity — bind
+            // `n` to the (boxed) scrutinee directly.
+            if is_magic_hash_box_con(con_name.as_str()) && pats.len() == 1 {
+                return lower_pat(ctx, &pats[0]);
+            }
             // Check if this is a pattern synonym and expand it
             if let Some((syn_args, syn_pat)) = ctx.lookup_pattern_synonym(con_name).cloned() {
                 let expanded = substitute_pattern_synonym(&syn_pat, &syn_args, pats, *span);
@@ -7501,6 +7514,13 @@ fn desugar_list_pat(ctx: &mut LowerContext, pats: &[ast::Pat], span: Span) -> hi
 }
 
 /// Lower a literal.
+/// Whether `name` is a MagicHash boxing constructor (`I#`, `C#`, `D#`, `F#`,
+/// `W#`). Under the boxed approximation these are identity wrappers: `I# x` is
+/// `x` and the pattern `I# n` binds `n` to the scrutinee.
+fn is_magic_hash_box_con(name: &str) -> bool {
+    matches!(name, "I#" | "C#" | "D#" | "F#" | "W#")
+}
+
 fn lower_lit(lit: &ast::Lit) -> hir::Lit {
     match lit {
         ast::Lit::Int(n) => hir::Lit::Int(i128::from(*n)),

@@ -1686,6 +1686,30 @@ impl<'src> Parser<'src> {
             }
         }
 
+        // Infix data constructor: `btype consym btype` — e.g. `a :* b`,
+        // `Tree a :^: Tree b`. The constructor is the operator and its two
+        // operands are the fields. Try this before the prefix form and
+        // backtrack if no constructor operator follows, so `MkP a b` still
+        // parses as a prefix constructor.
+        let infix_save = self.pos;
+        if self.is_atype_start() {
+            let left = self.parse_applied_atypes()?;
+            if let Some(TokenKind::ConOperator(op)) = self.current_kind().cloned() {
+                self.advance();
+                let right = self.parse_applied_atypes()?;
+                let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+                return Ok(ConDecl {
+                    doc: None,
+                    name: Ident::new(op),
+                    fields: ConFields::Positional(vec![left, right]),
+                    existential_vars,
+                    existential_context,
+                    span,
+                });
+            }
+            self.pos = infix_save;
+        }
+
         let name = self.parse_conid_or_op()?;
 
         let fields = if self.check(&TokenKind::LBrace) {
@@ -1713,6 +1737,19 @@ impl<'src> Parser<'src> {
             types.push(self.parse_atype()?);
         }
         Ok(types)
+    }
+
+    /// Parse one or more atypes as a left-associated application (a "btype"):
+    /// `Tree a b` -> `App(App(Tree, a), b)`. Used for the operands of an infix
+    /// data constructor. Requires at least one atype.
+    fn parse_applied_atypes(&mut self) -> ParseResult<Type> {
+        let mut ty = self.parse_atype()?;
+        while self.is_atype_start() {
+            let arg = self.parse_atype()?;
+            let span = ty.span().to(arg.span());
+            ty = Type::App(Box::new(ty), Box::new(arg), span);
+        }
+        Ok(ty)
     }
 
     /// Parse record fields.

@@ -1487,6 +1487,83 @@ main = mapM_ putStrLn (splitOnComma "a,b,c")
     );
 }
 
+#[test]
+fn test_package_db_conf_import_dirs_resolve_check() {
+    // hx's package DB layout: the DB directory holds `<id>.conf` registration
+    // files whose `import-dirs:` point at where the `.bhi` interfaces actually
+    // live (not the DB dir itself). Check must follow that indirection.
+    use bhc_driver::CompilerBuilder;
+    use camino::Utf8PathBuf;
+
+    let dep_src = tempfile::tempdir().unwrap();
+    let install = tempfile::tempdir().unwrap(); // import-dirs target (.bhi here)
+    let pkgdb = tempfile::tempdir().unwrap(); // DB dir: only .conf files
+    let odir = tempfile::tempdir().unwrap();
+    let app = tempfile::tempdir().unwrap();
+
+    // Build the dependency, emitting its interface into the install/lib dir.
+    let data_dir = dep_src.path().join("Data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(
+        data_dir.join("Split.hs"),
+        r#"module Data.Split (splitOnComma) where
+splitOnComma :: String -> [String]
+splitOnComma s = case break (== ',') s of
+  (a, []) -> [a]
+  (a, _ : rest) -> a : splitOnComma rest
+"#,
+    )
+    .unwrap();
+    let lib_dir = Utf8PathBuf::from(install.path().to_str().unwrap());
+    let producer = CompilerBuilder::new()
+        .compile_only(true)
+        .odir(Utf8PathBuf::from(odir.path().to_str().unwrap()))
+        .hidir(lib_dir.clone())
+        .build()
+        .unwrap();
+    producer
+        .compile_module_only(&Utf8PathBuf::from(
+            data_dir.join("Split.hs").to_str().unwrap(),
+        ))
+        .unwrap();
+    assert!(install.path().join("Data").join("Split.bhi").exists());
+
+    // Registration file in the DB dir points at the interface dir. No `.bhi`
+    // lives directly under the DB dir.
+    std::fs::write(
+        pkgdb.path().join("mysplit-1.0.0-abc123.conf"),
+        format!(
+            "name: mysplit\nversion: 1.0.0\nid: mysplit-1.0.0-abc123\n\
+             import-dirs: {lib}\nexposed-modules: Data.Split\n",
+            lib = lib_dir
+        ),
+    )
+    .unwrap();
+
+    // Consumer; its dependency's source is absent.
+    let main_hs = app.path().join("Main.hs");
+    std::fs::write(
+        &main_hs,
+        r#"module Main (main) where
+import Data.Split (splitOnComma)
+main :: IO ()
+main = mapM_ putStrLn (splitOnComma "a,b,c")
+"#,
+    )
+    .unwrap();
+
+    let consumer = CompilerBuilder::new()
+        .package_db(Utf8PathBuf::from(pkgdb.path().to_str().unwrap()))
+        .build()
+        .unwrap();
+    let result = consumer.check_file(&Utf8PathBuf::from(main_hs.to_str().unwrap()));
+    assert!(
+        result.is_ok(),
+        "consumer should resolve import via .conf import-dirs: {:?}",
+        result.err()
+    );
+}
+
 // =========================================================================
 // Implicit Prelude Tests
 // =========================================================================

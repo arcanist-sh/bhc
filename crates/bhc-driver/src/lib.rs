@@ -443,6 +443,22 @@ impl Compiler {
         self.callbacks
             .on_phase_complete(CompilePhase::CoreLower, &unit.module_name);
 
+        // The module name declared in the source (e.g. `Data.Split`), not the
+        // file stem. Object and interface artifacts are laid out by this name's
+        // path (`Data/Split.o`, `Data/Split.bhi`) so a package manager (hx) that
+        // expects per-module-path artifacts finds them.
+        let module_name = ast.name.as_ref().map_or_else(
+            || unit.module_name.clone(),
+            |n| {
+                n.parts
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            },
+        );
+        let module_rel_path = module_name.replace('.', "/");
+
         // Phase 4: Code generation (to object file only)
         self.callbacks
             .on_phase_start(CompilePhase::Codegen, &unit.module_name);
@@ -450,11 +466,14 @@ impl Compiler {
         self.callbacks
             .on_phase_complete(CompilePhase::Codegen, &unit.module_name);
 
-        // Move object to odir if configured
+        // Move object to odir if configured, nested by module path.
         let final_object_path = if let Some(ref odir) = self.session.options.output_object_dir {
-            let dest = odir.join(format!("{}.o", unit.module_name));
-            std::fs::create_dir_all(odir.as_std_path())
-                .map_err(|e| CompileError::CodegenError(format!("failed to create odir: {}", e)))?;
+            let dest = odir.join(format!("{}.o", module_rel_path));
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent.as_std_path()).map_err(|e| {
+                    CompileError::CodegenError(format!("failed to create odir: {}", e))
+                })?;
+            }
             std::fs::rename(&object_path, dest.as_std_path())
                 .or_else(|_| std::fs::copy(&object_path, dest.as_std_path()).map(|_| ()))
                 .map_err(|e| {
@@ -465,20 +484,10 @@ impl Compiler {
             Utf8PathBuf::from(object_path.to_str().unwrap_or_default())
         };
 
-        // Generate interface file if hidir is configured. Use the module name
-        // declared in the source (e.g. `Data.Split`), not the file stem, so the
-        // `.bhi` lands at the import-resolvable path (`<hidir>/Data/Split.bhi`).
+        // Generate interface file if hidir is configured. Uses the declared
+        // module name so the `.bhi` lands at the import-resolvable path
+        // (`<hidir>/Data/Split.bhi`).
         if let Some(ref hidir) = self.session.options.output_interface_dir {
-            let module_name = ast.name.as_ref().map_or_else(
-                || unit.module_name.clone(),
-                |n| {
-                    n.parts
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(".")
-                },
-            );
             let iface = bhc_interface::generate::generate_interface(&module_name, &ast, &typed);
             let iface_path = bhc_interface::interface_path(hidir, &module_name);
             if let Some(parent) = iface_path.parent() {
@@ -2252,6 +2261,46 @@ impl Compiler {
         Ok((hir, ctx))
     }
 
+    /// Directories to search for `.bhi` interface files.
+    ///
+    /// Covers both supported package-DB layouts:
+    /// - the configured `--hidir`, and each `--package-db` directory itself —
+    ///   the flat layout emitted by `bhc -c --hidir <db>` where interfaces live
+    ///   directly under the directory (`<db>/Data/Split.bhi`);
+    /// - any `import-dirs` declared by `.conf` registration files inside a
+    ///   package DB — the layout the hx package manager produces, where the DB
+    ///   directory holds `<package-id>.conf` files that point at each package's
+    ///   installed interface directory.
+    fn package_interface_dirs(&self) -> Vec<Utf8PathBuf> {
+        let mut dirs: Vec<Utf8PathBuf> = Vec::new();
+        if let Some(ref hidir) = self.session.options.output_interface_dir {
+            dirs.push(hidir.clone());
+        }
+        for db in &self.session.options.package_dbs {
+            if !dirs.contains(db) {
+                dirs.push(db.clone());
+            }
+            // Parse any `.conf` registration files for their interface dirs.
+            let Ok(entries) = std::fs::read_dir(db.as_std_path()) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("conf") {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    for dir in parse_conf_import_dirs(&content) {
+                        if !dirs.contains(&dir) {
+                            dirs.push(dir);
+                        }
+                    }
+                }
+            }
+        }
+        dirs
+    }
+
     /// Search for `.bhi` interface files for imported modules not already in the
     /// module cache. Converts loaded interfaces to `ModuleExports` and seeds
     /// the cache so the lowering phase can resolve cross-module imports.
@@ -2262,15 +2311,9 @@ impl Compiler {
         cache: &mut ModuleCache,
         ctx: &mut LowerContext,
     ) {
-        // Collect interface search directories: hidir + package_dbs
-        let mut iface_dirs: Vec<Utf8PathBuf> = Vec::new();
-        if let Some(ref hidir) = self.session.options.output_interface_dir {
-            iface_dirs.push(hidir.clone());
-        }
-        for db_path in &self.session.options.package_dbs {
-            iface_dirs.push(db_path.clone());
-        }
-
+        // Interface search directories: hidir, package DBs, and any interface
+        // dirs declared by `.conf` registration files within them.
+        let iface_dirs = self.package_interface_dirs();
         if iface_dirs.is_empty() {
             return;
         }
@@ -4100,15 +4143,9 @@ impl Compiler {
         // `.bhi` in the hidir or a package DB is satisfiable even without its
         // source present — lowering loads the interface from disk (separate
         // compilation). This is what lets `bhc check --package-db <db>` resolve
-        // dependencies from an hx-built package database.
-        let iface_dirs: Vec<Utf8PathBuf> = self
-            .session
-            .options
-            .output_interface_dir
-            .iter()
-            .cloned()
-            .chain(self.session.options.package_dbs.iter().cloned())
-            .collect();
+        // dependencies from an hx-built package database (including its
+        // `.conf`-declared interface dirs).
+        let iface_dirs = self.package_interface_dirs();
         let package_provides = |module: &str| {
             iface_dirs.iter().any(|dir| {
                 bhc_interface::interface_path(dir, module)
@@ -4367,6 +4404,20 @@ impl Compiler {
     }
 }
 
+/// Parse the `import-dirs:` field from a GHC/BHC package `.conf` file into a
+/// list of interface search directories.
+///
+/// `import-dirs` is a space-separated list of directories that hold a package's
+/// compiled module interfaces. Returns an empty vector if the field is absent.
+fn parse_conf_import_dirs(content: &str) -> Vec<Utf8PathBuf> {
+    for line in content.lines() {
+        if let Some(rest) = line.trim().strip_prefix("import-dirs:") {
+            return rest.split_whitespace().map(Utf8PathBuf::from).collect();
+        }
+    }
+    Vec::new()
+}
+
 /// Count the number of leading lambda parameters in an expression (free function).
 fn count_lambda_params_static(expr: &Expr) -> usize {
     let mut count = 0;
@@ -4579,6 +4630,25 @@ impl CompilerBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_conf_import_dirs() {
+        let conf = "\
+name: text
+version: 2.1.0
+id: text-2.1.0-abc123
+import-dirs: /cache/text-2.1.0/lib /cache/text-2.1.0/extra
+exposed-modules: Data.Text
+";
+        assert_eq!(
+            parse_conf_import_dirs(conf),
+            vec![
+                Utf8PathBuf::from("/cache/text-2.1.0/lib"),
+                Utf8PathBuf::from("/cache/text-2.1.0/extra"),
+            ]
+        );
+        assert!(parse_conf_import_dirs("name: foo\nversion: 1\n").is_empty());
+    }
 
     #[test]
     fn test_compile_unit_creation() {

@@ -113,14 +113,22 @@ All in `crates/bhc-driver/src/lib.rs`:
    *reports* the dep modules too; `--package-dir` is the version that keeps the
    target's result set clean. Next: re-measure a real Hackage package's skipped
    count by pointing `--package-dir` at its (vendored/already-fetched) deps.
-2. **Consume hx's package DB. — DONE.** `bhc check`/`-c` now read a package DB
-   of `.bhi` interfaces (`--package-db`, global) and the `-c` path produces one
-   (`--hidir`). See the Milestone 2 note at the top. Remaining polish: the DB is
-   currently a flat dir of `<Module/Path>.bhi`; hx's real DB layout (per-package
-   subdirs, `.conf`/manifest, object archives) may need a small adapter, and
-   `--package-id` is parsed but not yet used to scope which DB entries are
-   visible. Next concrete step: point `bhc check --package-db` at an actual
-   hx-built DB and reconcile the directory layout.
+2. **Consume hx's package DB. — DONE (incl. hx `.conf` layout).** `bhc check`/`-c`
+   read a package DB of `.bhi` interfaces (`--package-db`, global) and `-c`
+   produces them. Both layouts are supported (driver `package_interface_dirs`):
+   the flat `<db>/Module/Path.bhi` layout from `bhc -c --hidir <db>`, AND hx's
+   layout where the DB dir holds `<package-id>.conf` files and the actual `.bhi`
+   live in each conf's `import-dirs:` (parsed by `parse_conf_import_dirs`). `-c`
+   now also writes the object nested by module path (`<odir>/Data/Split.o`) to
+   match hx's `compile_module` expectation. Verified against a synthetic `.conf`
+   matching hx `generate_registration_file` exactly (driver test
+   `test_package_db_conf_import_dirs_resolve_check`).
+   Remaining: (a) verify against a *real* hx-built DB end-to-end (needs hx +
+   Hackage); (b) honor `exposed-modules:` / `depends:` for visibility scoping —
+   currently any `.bhi` found under an import-dir resolves; (c) **flag mismatch:**
+   hx (`hx/crates/hx-bhc/src/compile.rs`) passes `-package-id` (single dash) but
+   BHC defines `--package-id` (double dash) and does not consume it yet — reconcile
+   the spelling and wire `--package-id` to scope visible DB packages.
 3. **hx-driven fetch + build of transitive deps**, then check/compile the target
    against them. Reuse hx-solver (`.cabal` parse, Hackage fetch, solver) + the
    `-c`/`.bhi` pipeline. This is the real end-to-end Hackage milestone. The

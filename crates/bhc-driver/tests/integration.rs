@@ -1564,6 +1564,114 @@ main = mapM_ putStrLn (splitOnComma "a,b,c")
     );
 }
 
+#[test]
+fn test_package_db_scoping_and_exposed_modules() {
+    // A package DB with a `.conf` that exposes only one module and is identified
+    // by a package id. Verifies (b) exposed-modules gating and (c) --package-id
+    // visibility scoping.
+    use bhc_driver::CompilerBuilder;
+    use camino::Utf8PathBuf;
+
+    let dep_src = tempfile::tempdir().unwrap();
+    let install = tempfile::tempdir().unwrap();
+    let pkgdb = tempfile::tempdir().unwrap();
+    let odir = tempfile::tempdir().unwrap();
+    let app = tempfile::tempdir().unwrap();
+
+    // Build two modules into the interface dir: one will be exposed, one not.
+    let data_dir = dep_src.path().join("Data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(
+        data_dir.join("Public.hs"),
+        "module Data.Public (pub) where\npub :: Int\npub = 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        data_dir.join("Hidden.hs"),
+        "module Data.Hidden (hidden) where\nhidden :: Int\nhidden = 2\n",
+    )
+    .unwrap();
+    let lib_dir = Utf8PathBuf::from(install.path().to_str().unwrap());
+    let producer = CompilerBuilder::new()
+        .compile_only(true)
+        .odir(Utf8PathBuf::from(odir.path().to_str().unwrap()))
+        .hidir(lib_dir.clone())
+        .build()
+        .unwrap();
+    for m in ["Public", "Hidden"] {
+        producer
+            .compile_module_only(&Utf8PathBuf::from(
+                data_dir.join(format!("{m}.hs")).to_str().unwrap(),
+            ))
+            .unwrap();
+    }
+    assert!(install.path().join("Data").join("Public.bhi").exists());
+    assert!(install.path().join("Data").join("Hidden.bhi").exists());
+
+    // .conf exposes ONLY Data.Public, under id `mypkg-1.0.0-abc123`.
+    std::fs::write(
+        pkgdb.path().join("mypkg-1.0.0-abc123.conf"),
+        format!(
+            "name: mypkg\nversion: 1.0.0\nid: mypkg-1.0.0-abc123\n\
+             import-dirs: {lib}\nexposed-modules: Data.Public\n",
+            lib = lib_dir
+        ),
+    )
+    .unwrap();
+    let db = Utf8PathBuf::from(pkgdb.path().to_str().unwrap());
+
+    // The body uses the imported binding so resolution actually matters (an
+    // unresolved import only errors when one of its names is referenced).
+    let write_main = |module: &str, sym: &str| -> Utf8PathBuf {
+        let p = app.path().join("Main.hs");
+        std::fs::write(
+            &p,
+            format!(
+                "module Main (main) where\nimport {module} ({sym})\n\
+                 main :: IO ()\nmain = print {sym}\n"
+            ),
+        )
+        .unwrap();
+        Utf8PathBuf::from(p.to_str().unwrap())
+    };
+
+    let checker = |ids: &[&str]| {
+        let mut b = CompilerBuilder::new().package_db(db.clone());
+        for id in ids {
+            b = b.package_id((*id).to_string());
+        }
+        b.build().unwrap()
+    };
+    // Exposed module resolves.
+    assert!(
+        checker(&[])
+            .check_file(&write_main("Data.Public", "pub"))
+            .is_ok(),
+        "exposed module should resolve"
+    );
+    // Non-exposed module does NOT resolve even though its .bhi exists.
+    assert!(
+        checker(&[])
+            .check_file(&write_main("Data.Hidden", "hidden"))
+            .is_err(),
+        "non-exposed module must not resolve"
+    );
+    // Matching --package-id keeps it visible.
+    assert!(
+        checker(&["mypkg-1.0.0-abc123"])
+            .check_file(&write_main("Data.Public", "pub"))
+            .is_ok(),
+        "exposed module should resolve when its package id is selected"
+    );
+    // A non-matching --package-id hides the package entirely.
+    assert!(
+        checker(&["other-9.9-zzz"])
+            .check_file(&write_main("Data.Public", "pub"))
+            .is_err(),
+        "package must be hidden when only an unrelated package id is selected"
+    );
+}
+
 // =========================================================================
 // Implicit Prelude Tests
 // =========================================================================

@@ -2261,26 +2261,32 @@ impl Compiler {
         Ok((hir, ctx))
     }
 
-    /// Directories to search for `.bhi` interface files.
+    /// Collect the interface sources available for import resolution from the
+    /// configured `--hidir` and `--package-db` directories.
     ///
-    /// Covers both supported package-DB layouts:
-    /// - the configured `--hidir`, and each `--package-db` directory itself —
-    ///   the flat layout emitted by `bhc -c --hidir <db>` where interfaces live
-    ///   directly under the directory (`<db>/Data/Split.bhi`);
-    /// - any `import-dirs` declared by `.conf` registration files inside a
-    ///   package DB — the layout the hx package manager produces, where the DB
-    ///   directory holds `<package-id>.conf` files that point at each package's
-    ///   installed interface directory.
-    fn package_interface_dirs(&self) -> Vec<Utf8PathBuf> {
-        let mut dirs: Vec<Utf8PathBuf> = Vec::new();
+    /// Returns `(flat_dirs, packages)`:
+    /// - `flat_dirs`: the `--hidir` and each `--package-db` directory itself —
+    ///   the flat layout emitted by `bhc -c --hidir <db>`, where interfaces live
+    ///   directly under the directory (`<db>/Data/Split.bhi`). These have no
+    ///   package identity or module list, so any `.bhi` present resolves.
+    /// - `packages`: registered packages parsed from `<id>.conf` files inside the
+    ///   package DBs — the layout the hx package manager produces. Each carries
+    ///   its `id`, `exposed-modules`, and `import-dirs`. A module resolves from a
+    ///   package only if it is exposed by that package. When `--package-id` flags
+    ///   are given, only packages whose id matches are visible; otherwise every
+    ///   registered package is visible.
+    fn collect_package_interfaces(&self) -> (Vec<Utf8PathBuf>, Vec<ConfPackage>) {
+        let mut flat_dirs: Vec<Utf8PathBuf> = Vec::new();
         if let Some(ref hidir) = self.session.options.output_interface_dir {
-            dirs.push(hidir.clone());
+            flat_dirs.push(hidir.clone());
         }
+
+        let visible_ids = &self.session.options.package_ids;
+        let mut packages: Vec<ConfPackage> = Vec::new();
         for db in &self.session.options.package_dbs {
-            if !dirs.contains(db) {
-                dirs.push(db.clone());
+            if !flat_dirs.contains(db) {
+                flat_dirs.push(db.clone());
             }
-            // Parse any `.conf` registration files for their interface dirs.
             let Ok(entries) = std::fs::read_dir(db.as_std_path()) else {
                 continue;
             };
@@ -2289,16 +2295,18 @@ impl Compiler {
                 if path.extension().and_then(|e| e.to_str()) != Some("conf") {
                     continue;
                 }
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    for dir in parse_conf_import_dirs(&content) {
-                        if !dirs.contains(&dir) {
-                            dirs.push(dir);
-                        }
-                    }
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let pkg = parse_conf_package(&content);
+                // Scope by --package-id when any are given.
+                if !visible_ids.is_empty() && !visible_ids.contains(&pkg.id) {
+                    continue;
                 }
+                packages.push(pkg);
             }
         }
-        dirs
+        (flat_dirs, packages)
     }
 
     /// Search for `.bhi` interface files for imported modules not already in the
@@ -2311,10 +2319,10 @@ impl Compiler {
         cache: &mut ModuleCache,
         ctx: &mut LowerContext,
     ) {
-        // Interface search directories: hidir, package DBs, and any interface
-        // dirs declared by `.conf` registration files within them.
-        let iface_dirs = self.package_interface_dirs();
-        if iface_dirs.is_empty() {
+        // Interface sources: flat dirs (hidir + package-db dirs) and registered
+        // `.conf` packages (scoped by --package-id, gated by exposed-modules).
+        let (flat_dirs, packages) = self.collect_package_interfaces();
+        if flat_dirs.is_empty() && packages.is_empty() {
             return;
         }
 
@@ -2337,30 +2345,26 @@ impl Compiler {
                 continue;
             }
 
-            // Try to find a .bhi interface file
-            for dir in &iface_dirs {
-                let iface_path = bhc_interface::interface_path(dir, &module_name);
-                if iface_path.as_std_path().exists() {
-                    match bhc_interface::ModuleInterface::read_from_file(&iface_path) {
-                        Ok(iface) => {
-                            debug!(
-                                module = %module_name,
-                                interface = %iface_path,
-                                "loaded interface file for import"
-                            );
-                            let exports =
-                                Self::interface_to_module_exports(&iface, &module_name, ctx);
-                            cache.insert(sym, exports);
-                            break; // Found it, stop searching
-                        }
-                        Err(e) => {
-                            debug!(
-                                module = %module_name,
-                                error = %e,
-                                "failed to read interface file"
-                            );
-                        }
-                    }
+            // Resolve the module's interface file honoring exposed-modules.
+            let Some(iface_path) = resolve_interface_in(&module_name, &flat_dirs, &packages) else {
+                continue;
+            };
+            match bhc_interface::ModuleInterface::read_from_file(&iface_path) {
+                Ok(iface) => {
+                    debug!(
+                        module = %module_name,
+                        interface = %iface_path,
+                        "loaded interface file for import"
+                    );
+                    let exports = Self::interface_to_module_exports(&iface, &module_name, ctx);
+                    cache.insert(sym, exports);
+                }
+                Err(e) => {
+                    debug!(
+                        module = %module_name,
+                        error = %e,
+                        "failed to read interface file"
+                    );
                 }
             }
         }
@@ -4139,20 +4143,15 @@ impl Compiler {
             .map(|(_, name, _)| name.as_str())
             .collect();
 
-        // Interface search dirs: a module whose import is provided as a compiled
-        // `.bhi` in the hidir or a package DB is satisfiable even without its
-        // source present — lowering loads the interface from disk (separate
-        // compilation). This is what lets `bhc check --package-db <db>` resolve
-        // dependencies from an hx-built package database (including its
-        // `.conf`-declared interface dirs).
-        let iface_dirs = self.package_interface_dirs();
-        let package_provides = |module: &str| {
-            iface_dirs.iter().any(|dir| {
-                bhc_interface::interface_path(dir, module)
-                    .as_std_path()
-                    .exists()
-            })
-        };
+        // A module whose import is provided as a compiled `.bhi` in the hidir or
+        // a package DB is satisfiable even without its source present — lowering
+        // loads the interface from disk (separate compilation). This is what lets
+        // `bhc check --package-db <db>` resolve dependencies from an hx-built
+        // package database (honoring its `.conf` exposed-modules and --package-id
+        // scoping).
+        let (flat_dirs, packages) = self.collect_package_interfaces();
+        let package_provides =
+            |module: &str| resolve_interface_in(module, &flat_dirs, &packages).is_some();
 
         // Filter: skip modules whose imports can't be satisfied (not in the local
         // set, not a builtin, and not provided by a package DB interface).
@@ -4404,18 +4403,74 @@ impl Compiler {
     }
 }
 
-/// Parse the `import-dirs:` field from a GHC/BHC package `.conf` file into a
-/// list of interface search directories.
+/// A package registered in a package DB, parsed from its `.conf` file.
+#[derive(Debug, Default, Clone)]
+struct ConfPackage {
+    /// The package identifier (`id:` field), e.g. `text-2.1.0-<hash>`.
+    id: String,
+    /// Modules the package exposes (`exposed-modules:` field).
+    exposed_modules: rustc_hash::FxHashSet<String>,
+    /// Directories holding the package's compiled interfaces (`import-dirs:`).
+    import_dirs: Vec<Utf8PathBuf>,
+}
+
+/// Parse a GHC/BHC package `.conf` file into a [`ConfPackage`].
 ///
-/// `import-dirs` is a space-separated list of directories that hold a package's
-/// compiled module interfaces. Returns an empty vector if the field is absent.
-fn parse_conf_import_dirs(content: &str) -> Vec<Utf8PathBuf> {
+/// Reads the `id:`, `import-dirs:`, and `exposed-modules:` fields. The two list
+/// fields are taken from their single declaring line (the layout the hx package
+/// manager emits), split on whitespace and commas. Multi-line continuations are
+/// not parsed.
+fn parse_conf_package(content: &str) -> ConfPackage {
+    let mut pkg = ConfPackage::default();
+    let split = |rest: &str| -> Vec<String> {
+        rest.split([' ', '\t', ','])
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
     for line in content.lines() {
-        if let Some(rest) = line.trim().strip_prefix("import-dirs:") {
-            return rest.split_whitespace().map(Utf8PathBuf::from).collect();
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("id:") {
+            pkg.id = rest.trim().to_string();
+        } else if let Some(rest) = trimmed.strip_prefix("import-dirs:") {
+            pkg.import_dirs = split(rest).into_iter().map(Utf8PathBuf::from).collect();
+        } else if let Some(rest) = trimmed.strip_prefix("exposed-modules:") {
+            pkg.exposed_modules = split(rest).into_iter().collect();
         }
     }
-    Vec::new()
+    pkg
+}
+
+/// Resolve the `.bhi` interface path for `module` from the available interface
+/// sources, or `None` if it is not provided.
+///
+/// `flat_dirs` (hidir + package-db dirs) have no module list, so any `.bhi`
+/// present resolves. Registered `packages` only provide a module when it is in
+/// their `exposed-modules` (and the `.bhi` exists under one of their
+/// `import-dirs`).
+fn resolve_interface_in(
+    module: &str,
+    flat_dirs: &[Utf8PathBuf],
+    packages: &[ConfPackage],
+) -> Option<Utf8PathBuf> {
+    for dir in flat_dirs {
+        let path = bhc_interface::interface_path(dir, module);
+        if path.as_std_path().exists() {
+            return Some(path);
+        }
+    }
+    for pkg in packages {
+        if !pkg.exposed_modules.contains(module) {
+            continue;
+        }
+        for dir in &pkg.import_dirs {
+            let path = bhc_interface::interface_path(dir, module);
+            if path.as_std_path().exists() {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 /// Count the number of leading lambda parameters in an expression (free function).
@@ -4632,22 +4687,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_conf_import_dirs() {
+    fn test_parse_conf_package() {
         let conf = "\
 name: text
 version: 2.1.0
 id: text-2.1.0-abc123
 import-dirs: /cache/text-2.1.0/lib /cache/text-2.1.0/extra
-exposed-modules: Data.Text
+exposed-modules: Data.Text Data.Text.Internal
 ";
+        let pkg = parse_conf_package(conf);
+        assert_eq!(pkg.id, "text-2.1.0-abc123");
         assert_eq!(
-            parse_conf_import_dirs(conf),
+            pkg.import_dirs,
             vec![
                 Utf8PathBuf::from("/cache/text-2.1.0/lib"),
                 Utf8PathBuf::from("/cache/text-2.1.0/extra"),
             ]
         );
-        assert!(parse_conf_import_dirs("name: foo\nversion: 1\n").is_empty());
+        assert!(pkg.exposed_modules.contains("Data.Text"));
+        assert!(pkg.exposed_modules.contains("Data.Text.Internal"));
+        assert!(!pkg.exposed_modules.contains("Data.Text.Hidden"));
+    }
+
+    #[test]
+    fn test_resolve_interface_in_honors_exposed_modules() {
+        // A module not in any package's exposed-modules does not resolve, even
+        // if a stray `.bhi` exists under an import-dir.
+        let pkg = ConfPackage {
+            id: "p-1.0-x".to_string(),
+            exposed_modules: ["Data.Public".to_string()].into_iter().collect(),
+            import_dirs: vec![Utf8PathBuf::from("/nonexistent")],
+        };
+        assert!(resolve_interface_in("Data.Hidden", &[], std::slice::from_ref(&pkg)).is_none());
+        // Exposed but the file is absent → still None (no panic).
+        assert!(resolve_interface_in("Data.Public", &[], &[pkg]).is_none());
     }
 
     #[test]

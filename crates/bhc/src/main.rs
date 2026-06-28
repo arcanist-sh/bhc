@@ -103,8 +103,9 @@ struct Cli {
     #[arg(long = "package-db", value_name = "PATH", global = true)]
     package_dbs: Vec<PathBuf>,
 
-    /// Expose a dependency by package ID
-    #[arg(long = "package-id", value_name = "ID")]
+    /// Expose a dependency by package ID, scoping which package-DB packages are
+    /// visible. May be given before or after the subcommand.
+    #[arg(long = "package-id", value_name = "ID", global = true)]
     package_ids: Vec<String>,
 
     /// Enable language extensions (e.g., -XOverloadedStrings)
@@ -480,6 +481,11 @@ fn check_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
             Utf8PathBuf::from_path_buf(db.clone())
                 .map_err(|_| anyhow::anyhow!("Invalid UTF-8 in package-db path"))?,
         );
+    }
+    // Restrict which package-DB packages are visible (by package id). When none
+    // are given, every registered package in the DBs is visible.
+    for id in &cli.package_ids {
+        builder = builder.package_id(id.clone());
     }
     if let Some(ref hidir) = cli.hidir {
         builder = builder.hidir(

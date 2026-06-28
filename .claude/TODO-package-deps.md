@@ -132,11 +132,23 @@ All in `crates/bhc-driver/src/lib.rs`:
    installed them — fixed in hx (`fix/bhc-install-interfaces`, new
    `install_interfaces`). Gated test (BHC_PATH): hx-bhc
    `test_build_package_then_check_consumer`.
-   Remaining: (b) honor `exposed-modules:` / `depends:` for visibility scoping —
-   currently any `.bhi` found under an import-dir resolves; (c) **flag mismatch:**
-   hx (`hx/crates/hx-bhc/src/compile.rs`) passes `-package-id` (single dash) but
-   BHC defines `--package-id` (double dash) and does not consume it yet — reconcile
-   the spelling and wire `--package-id` to scope visible DB packages.
+   (b) exposed-modules gating + (c) --package-id scoping — DONE. Driver
+   `collect_package_interfaces` returns flat dirs (hidir + db dirs, any `.bhi`
+   resolves — backward compat) and parsed `.conf` packages
+   (`ConfPackage`/`parse_conf_package`: id, exposed-modules, import-dirs).
+   `resolve_interface_in` only resolves a module from a package if it is in that
+   package's `exposed-modules`; when `--package-id` flags are given only matching
+   package ids are visible (empty ⇒ all visible). `--package-id` is now global and
+   wired into `check`. hx reconciled to pass `--package-id` (double dash) in
+   compile/native_builder/full_native (was `-package-id`). Tests: driver
+   `test_package_db_scoping_and_exposed_modules`, `test_parse_conf_package`,
+   `test_resolve_interface_in_honors_exposed_modules`; hx e2e
+   `test_build_package_then_check_consumer` now asserts positive + negative
+   `--package-id` scoping.
+   Still open: honor `depends:` (transitive visibility) — currently each
+   `--package-id` exposes only that package, not its declared deps; and the REPL
+   path (`hx/crates/hx-bhc/src/repl.rs`) still uses single-dash `-package-db=`
+   (targets bhci, separate tool).
 3. **hx-driven fetch + build of transitive deps**, then check/compile the target
    against them. Reuse hx-solver (`.cabal` parse, Hackage fetch, solver) + the
    `-c`/`.bhi` pipeline. This is the real end-to-end Hackage milestone. The

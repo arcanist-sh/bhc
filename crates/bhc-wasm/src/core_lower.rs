@@ -6056,6 +6056,10 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "deleteBy",
     "intersectBy",
     "nubBy",
+    "nub",
+    "sort",
+    "intercalate",
+    "mapMaybe",
     "groupBy",
     "insert",
     "unionBy",
@@ -9468,6 +9472,97 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
                 ),
             )
         }
+        // nub xs = nubBy (==) xs
+        "nub" => {
+            let xs = pv("xs", fresh(id));
+            plam(
+                xs.clone(),
+                papp2(pref("nubBy", id), pref("==", id), pev(&xs)),
+            )
+        }
+        // sort xs = foldr insert [] xs  (insertion sort over the ordered `insert`)
+        "sort" => {
+            let xs = pv("xs", fresh(id));
+            plam(
+                xs.clone(),
+                papp(
+                    papp2(pref("foldr", id), pref("insert", id), pref("[]", id)),
+                    pev(&xs),
+                ),
+            )
+        }
+        // intercalate sep xss = case xss of
+        //   [] -> []
+        //   (y:ys) -> y ++ foldr (\x acc -> sep ++ x ++ acc) [] ys
+        "intercalate" => {
+            let sep = pv("sep", fresh(id));
+            let xss = pv("xss", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let x = pv("x", fresh(id));
+            let acc = pv("acc", fresh(id));
+            // \x acc -> sep ++ x ++ acc
+            let step = plam(
+                x.clone(),
+                plam(
+                    acc.clone(),
+                    papp2(
+                        pref("__listAppend", id),
+                        pev(&sep),
+                        papp2(pref("__listAppend", id), pev(&x), pev(&acc)),
+                    ),
+                ),
+            );
+            // y ++ foldr step [] ys
+            let body = papp2(
+                pref("__listAppend", id),
+                pev(&y),
+                papp(papp2(pref("foldr", id), step, pref("[]", id)), pev(&ys)),
+            );
+            plam(
+                sep.clone(),
+                plam(
+                    xss.clone(),
+                    pcase(
+                        pev(&xss),
+                        vec![
+                            palt("[]", 0, 0, vec![], pref("[]", id)),
+                            palt(":", 1, 2, vec![y.clone(), ys.clone()], body),
+                        ],
+                    ),
+                ),
+            )
+        }
+        // mapMaybe f xs =
+        //   foldr (\x acc -> case f x of { Nothing -> acc; Just y -> y : acc }) [] xs
+        "mapMaybe" => {
+            let f = pv("f", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let x = pv("x", fresh(id));
+            let acc = pv("acc", fresh(id));
+            let y = pv("y", fresh(id));
+            let body = pcase(
+                papp(pev(&f), pev(&x)),
+                vec![
+                    palt("Nothing", 0, 0, vec![], pev(&acc)),
+                    palt(
+                        "Just",
+                        1,
+                        1,
+                        vec![y.clone()],
+                        papp2(pref(":", id), pev(&y), pev(&acc)),
+                    ),
+                ],
+            );
+            let step = plam(x.clone(), plam(acc.clone(), body));
+            plam(
+                f.clone(),
+                plam(
+                    xs.clone(),
+                    papp(papp2(pref("foldr", id), step, pref("[]", id)), pev(&xs)),
+                ),
+            )
+        }
         // groupBy eq xs = case xs of
         //   [] -> []
         //   (y:ys) -> case span (eq y) ys of (g, rest) -> (y : g) : groupBy eq rest
@@ -10600,7 +10695,10 @@ fn is_list_returning_fn(name: &str) -> bool {
             | "concat"
             | "concatMap"
             | "sortOn"
+            | "sort"
             | "nubBy"
+            | "nub"
+            | "mapMaybe"
             | "deleteBy"
             | "unionBy"
             | "intersectBy"

@@ -560,6 +560,13 @@ impl<'src> Parser<'src> {
         }
 
         let qualified = self.eat(&TokenKind::Qualified);
+
+        // PackageImports: `import [qualified] "pkg-name" Module`. BHC resolves
+        // modules by name, so skip the package-name string literal.
+        if matches!(self.current_kind(), Some(TokenKind::StringLit(_))) {
+            self.advance();
+        }
+
         let module = self.parse_module_name()?;
 
         // Check for "as Alias" - 'as' is a context-sensitive keyword

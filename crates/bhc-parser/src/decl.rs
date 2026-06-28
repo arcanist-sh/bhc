@@ -364,6 +364,11 @@ impl<'src> Parser<'src> {
             return Ok(Export::Module(name, span));
         }
 
+        // ExplicitNamespaces: a `type`/`data` namespace keyword may prefix an
+        // export item (`module M (type (~), data D)`). BHC resolves by name, so
+        // skip the namespace marker and parse the item itself.
+        let _ = self.eat(&TokenKind::Type) || self.eat(&TokenKind::Data);
+
         // Check for `pattern` prefix (context-sensitive keyword for pattern synonym exports)
         if self.check_ident_str("pattern") {
             let pat_start = self.current_span();
@@ -642,6 +647,10 @@ impl<'src> Parser<'src> {
 
     /// Parse a single import item.
     fn parse_import_item(&mut self) -> ParseResult<Import> {
+        // ExplicitNamespaces: skip a `type`/`data` namespace marker prefixing an
+        // import item (`import M (type (~))`).
+        let _ = self.eat(&TokenKind::Type) || self.eat(&TokenKind::Data);
+
         // Check for `pattern` prefix (context-sensitive keyword for pattern synonym imports)
         if self.check_ident_str("pattern") {
             let start = self.current_span();

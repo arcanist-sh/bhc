@@ -161,9 +161,14 @@ All in `crates/bhc-driver/src/lib.rs`:
    *resolution* — that's the separate REPL-eval gap, not this flag reconcile.)
    Tests: hx `test_repl_args_construction`/`test_repl_args_minimal`; verified
    `:load Foo.hs` resolves via `--import-path` end-to-end.
-   Note: hx `compile.rs`/`native_builder` still pass `--tensor-fusion` (when
-   enabled) which `bhc` does not define — a latent compile-path flag mismatch
-   (orthogonal; only triggers when tensor_fusion is on).
+   `--tensor-fusion` flag mismatch — DONE. `bhc` now defines `--tensor-fusion`
+   (global; `Options.tensor_fusion`, builder setter, wired into both compile
+   paths). It OR's into the `compile_unit` tensor-pipeline gate
+   (`profile == Numeric || tensor_fusion`); on the `-c` per-module path it is
+   simply accepted (that path has no tensor block). hx already passes the
+   double-dash spelling, so no hx change needed. Verified: hx-style
+   `bhc -c --tensor-fusion`, `bhc check --tensor-fusion`, and a full default-
+   profile build with `--tensor-fusion` all succeed (exe runs).
 3. **hx-driven fetch + build of transitive deps**, then check/compile the target
    against them. Reuse hx-solver (`.cabal` parse, Hackage fetch, solver) + the
    `-c`/`.bhi` pipeline. This is the real end-to-end Hackage milestone. The

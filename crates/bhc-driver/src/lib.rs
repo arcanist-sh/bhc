@@ -561,7 +561,7 @@ impl Compiler {
         // Store Tensor IR kernels for GPU codegen
         let mut tensor_kernels_for_gpu: Vec<bhc_tensor_ir::Kernel> = Vec::new();
 
-        if self.session.profile() == Profile::Numeric {
+        if self.session.profile() == Profile::Numeric || self.session.options.tensor_fusion {
             self.callbacks
                 .on_phase_start(CompilePhase::TensorLower, &unit.module_name);
 
@@ -4655,6 +4655,13 @@ impl CompilerBuilder {
     #[must_use]
     pub fn emit_kernel_report(mut self, enable: bool) -> Self {
         self.options.emit_kernel_report = enable;
+        self
+    }
+
+    /// Explicitly enable the tensor fusion pipeline (regardless of profile).
+    #[must_use]
+    pub fn tensor_fusion(mut self, enable: bool) -> Self {
+        self.options.tensor_fusion = enable;
         self
     }
 

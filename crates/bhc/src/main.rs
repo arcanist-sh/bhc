@@ -51,6 +51,11 @@ struct Cli {
     #[arg(long)]
     kernel_report: bool,
 
+    /// Explicitly enable the tensor fusion pipeline (regardless of profile).
+    /// The Numeric profile always fuses; accepted for toolchain compatibility.
+    #[arg(long = "tensor-fusion", global = true)]
+    tensor_fusion: bool,
+
     /// Dump intermediate representations
     #[arg(long)]
     dump_ir: Option<IrStage>,
@@ -330,7 +335,8 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
     let mut builder = CompilerBuilder::new()
         .profile(profile)
         .output_type(output_type)
-        .emit_kernel_report(cli.kernel_report);
+        .emit_kernel_report(cli.kernel_report)
+        .tensor_fusion(cli.tensor_fusion);
 
     // Set target if specified
     if let Some(ref target) = cli.target {
@@ -626,7 +632,8 @@ fn compile_modules_only(files: &[PathBuf], cli: &Cli) -> Result<()> {
         .profile(profile)
         .compile_only(true)
         .output_type(bhc_session::OutputType::Object)
-        .emit_kernel_report(cli.kernel_report);
+        .emit_kernel_report(cli.kernel_report)
+        .tensor_fusion(cli.tensor_fusion);
 
     if let Some(ref target) = cli.target {
         builder = builder.target(target.clone());

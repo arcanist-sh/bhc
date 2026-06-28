@@ -145,10 +145,14 @@ All in `crates/bhc-driver/src/lib.rs`:
    `test_resolve_interface_in_honors_exposed_modules`; hx e2e
    `test_build_package_then_check_consumer` now asserts positive + negative
    `--package-id` scoping.
-   Still open: honor `depends:` (transitive visibility) — currently each
-   `--package-id` exposes only that package, not its declared deps; and the REPL
-   path (`hx/crates/hx-bhc/src/repl.rs`) still uses single-dash `-package-db=`
-   (targets bhci, separate tool).
+   `depends:` transitive visibility — DONE. `collect_package_interfaces` parses
+   every `.conf` in the DBs, and when `--package-id` ids are given the visible set
+   is the transitive closure over `depends:` (selecting P also exposes P's deps;
+   selecting a dependency does not expose its dependents). `ConfPackage.depends`
+   parsed from the `.conf`; hx's `generate_registration_file` already emits
+   `depends:`. Test: driver `test_package_db_depends_transitive_visibility`.
+   Still open: the REPL path (`hx/crates/hx-bhc/src/repl.rs`) still uses
+   single-dash `-package-db=` (targets bhci, separate tool).
 3. **hx-driven fetch + build of transitive deps**, then check/compile the target
    against them. Reuse hx-solver (`.cabal` parse, Hackage fetch, solver) + the
    `-c`/`.bhi` pipeline. This is the real end-to-end Hackage milestone. The

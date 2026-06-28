@@ -1672,6 +1672,105 @@ fn test_package_db_scoping_and_exposed_modules() {
     );
 }
 
+#[test]
+fn test_package_db_depends_transitive_visibility() {
+    // Two packages: P (exposes Data.P, depends on Q) and Q (exposes Data.Q).
+    // Selecting only P's id must make Q visible transitively, but selecting only
+    // Q's id must NOT make P visible.
+    use bhc_driver::CompilerBuilder;
+    use camino::Utf8PathBuf;
+
+    let src = tempfile::tempdir().unwrap();
+    let lib_p = tempfile::tempdir().unwrap();
+    let lib_q = tempfile::tempdir().unwrap();
+    let pkgdb = tempfile::tempdir().unwrap();
+    let odir = tempfile::tempdir().unwrap();
+    let app = tempfile::tempdir().unwrap();
+
+    let data = src.path().join("Data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join("P.hs"),
+        "module Data.P (valP) where\nvalP :: Int\nvalP = 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        data.join("Q.hs"),
+        "module Data.Q (valQ) where\nvalQ :: Int\nvalQ = 2\n",
+    )
+    .unwrap();
+
+    let dir_p = Utf8PathBuf::from(lib_p.path().to_str().unwrap());
+    let dir_q = Utf8PathBuf::from(lib_q.path().to_str().unwrap());
+    let build = |module: &str, hidir: &Utf8PathBuf| {
+        CompilerBuilder::new()
+            .compile_only(true)
+            .odir(Utf8PathBuf::from(odir.path().to_str().unwrap()))
+            .hidir(hidir.clone())
+            .build()
+            .unwrap()
+            .compile_module_only(&Utf8PathBuf::from(
+                data.join(format!("{module}.hs")).to_str().unwrap(),
+            ))
+            .unwrap();
+    };
+    build("P", &dir_p);
+    build("Q", &dir_q);
+
+    std::fs::write(
+        pkgdb.path().join("p-1.0-aaa.conf"),
+        format!("name: p\nversion: 1.0\nid: p-1.0-aaa\nimport-dirs: {dir_p}\nexposed-modules: Data.P\ndepends: q-1.0-bbb\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        pkgdb.path().join("q-1.0-bbb.conf"),
+        format!("name: q\nversion: 1.0\nid: q-1.0-bbb\nimport-dirs: {dir_q}\nexposed-modules: Data.Q\ndepends:\n"),
+    )
+    .unwrap();
+    let db = Utf8PathBuf::from(pkgdb.path().to_str().unwrap());
+
+    let write_main = |module: &str, sym: &str| -> Utf8PathBuf {
+        let p = app.path().join("Main.hs");
+        std::fs::write(
+            &p,
+            format!(
+                "module Main (main) where\nimport {module} ({sym})\n\
+                 main :: IO ()\nmain = print {sym}\n"
+            ),
+        )
+        .unwrap();
+        Utf8PathBuf::from(p.to_str().unwrap())
+    };
+    let checker = |id: &str| {
+        CompilerBuilder::new()
+            .package_db(db.clone())
+            .package_id(id.to_string())
+            .build()
+            .unwrap()
+    };
+
+    // Selecting P exposes P, and Q transitively via depends.
+    assert!(
+        checker("p-1.0-aaa")
+            .check_file(&write_main("Data.P", "valP"))
+            .is_ok(),
+        "selected package P should resolve"
+    );
+    assert!(
+        checker("p-1.0-aaa")
+            .check_file(&write_main("Data.Q", "valQ"))
+            .is_ok(),
+        "P's transitive dependency Q should resolve"
+    );
+    // Selecting only Q must not expose P (no reverse edge).
+    assert!(
+        checker("q-1.0-bbb")
+            .check_file(&write_main("Data.P", "valP"))
+            .is_err(),
+        "selecting only Q must not expose its dependent P"
+    );
+}
+
 // =========================================================================
 // Implicit Prelude Tests
 // =========================================================================

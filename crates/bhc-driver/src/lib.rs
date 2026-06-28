@@ -2273,16 +2273,18 @@ impl Compiler {
     ///   package DBs — the layout the hx package manager produces. Each carries
     ///   its `id`, `exposed-modules`, and `import-dirs`. A module resolves from a
     ///   package only if it is exposed by that package. When `--package-id` flags
-    ///   are given, only packages whose id matches are visible; otherwise every
-    ///   registered package is visible.
+    ///   are given, the visible set is the transitive closure of those ids over
+    ///   `depends:` (so a selected package's dependencies resolve too); otherwise
+    ///   every registered package is visible.
     fn collect_package_interfaces(&self) -> (Vec<Utf8PathBuf>, Vec<ConfPackage>) {
         let mut flat_dirs: Vec<Utf8PathBuf> = Vec::new();
         if let Some(ref hidir) = self.session.options.output_interface_dir {
             flat_dirs.push(hidir.clone());
         }
 
-        let visible_ids = &self.session.options.package_ids;
-        let mut packages: Vec<ConfPackage> = Vec::new();
+        // Parse every registered package across the DBs (preserving discovery
+        // order), then apply --package-id scoping.
+        let mut all: Vec<ConfPackage> = Vec::new();
         for db in &self.session.options.package_dbs {
             if !flat_dirs.contains(db) {
                 flat_dirs.push(db.clone());
@@ -2295,17 +2297,39 @@ impl Compiler {
                 if path.extension().and_then(|e| e.to_str()) != Some("conf") {
                     continue;
                 }
-                let Ok(content) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                let pkg = parse_conf_package(&content);
-                // Scope by --package-id when any are given.
-                if !visible_ids.is_empty() && !visible_ids.contains(&pkg.id) {
-                    continue;
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    all.push(parse_conf_package(&content));
                 }
-                packages.push(pkg);
             }
         }
+
+        let visible_ids = &self.session.options.package_ids;
+        if visible_ids.is_empty() {
+            return (flat_dirs, all);
+        }
+
+        // Transitive closure of the requested ids over `depends:`.
+        let by_id: FxHashMap<&str, &ConfPackage> =
+            all.iter().map(|p| (p.id.as_str(), p)).collect();
+        let mut visible: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+        let mut stack: Vec<String> = visible_ids.clone();
+        while let Some(id) = stack.pop() {
+            if !visible.insert(id.clone()) {
+                continue;
+            }
+            if let Some(pkg) = by_id.get(id.as_str()) {
+                for dep in &pkg.depends {
+                    if !visible.contains(dep) {
+                        stack.push(dep.clone());
+                    }
+                }
+            }
+        }
+
+        let packages = all
+            .into_iter()
+            .filter(|p| visible.contains(&p.id))
+            .collect();
         (flat_dirs, packages)
     }
 
@@ -4412,14 +4436,16 @@ struct ConfPackage {
     exposed_modules: rustc_hash::FxHashSet<String>,
     /// Directories holding the package's compiled interfaces (`import-dirs:`).
     import_dirs: Vec<Utf8PathBuf>,
+    /// Package ids this package depends on (`depends:` field).
+    depends: Vec<String>,
 }
 
 /// Parse a GHC/BHC package `.conf` file into a [`ConfPackage`].
 ///
-/// Reads the `id:`, `import-dirs:`, and `exposed-modules:` fields. The two list
-/// fields are taken from their single declaring line (the layout the hx package
-/// manager emits), split on whitespace and commas. Multi-line continuations are
-/// not parsed.
+/// Reads the `id:`, `import-dirs:`, `exposed-modules:`, and `depends:` fields.
+/// The list fields are taken from their single declaring line (the layout the
+/// hx package manager emits), split on whitespace and commas. Multi-line
+/// continuations are not parsed.
 fn parse_conf_package(content: &str) -> ConfPackage {
     let mut pkg = ConfPackage::default();
     let split = |rest: &str| -> Vec<String> {
@@ -4436,6 +4462,8 @@ fn parse_conf_package(content: &str) -> ConfPackage {
             pkg.import_dirs = split(rest).into_iter().map(Utf8PathBuf::from).collect();
         } else if let Some(rest) = trimmed.strip_prefix("exposed-modules:") {
             pkg.exposed_modules = split(rest).into_iter().collect();
+        } else if let Some(rest) = trimmed.strip_prefix("depends:") {
+            pkg.depends = split(rest);
         }
     }
     pkg
@@ -4717,6 +4745,7 @@ exposed-modules: Data.Text Data.Text.Internal
             id: "p-1.0-x".to_string(),
             exposed_modules: ["Data.Public".to_string()].into_iter().collect(),
             import_dirs: vec![Utf8PathBuf::from("/nonexistent")],
+            depends: Vec::new(),
         };
         assert!(resolve_interface_in("Data.Hidden", &[], std::slice::from_ref(&pkg)).is_none());
         // Exposed but the file is absent → still None (no panic).

@@ -205,6 +205,9 @@ pub unsafe extern "C" fn bhc_free(ptr: *mut u8, size: usize) {
 /// `s` must be a valid null-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_print_string(s: *const c_char) {
+    if bhc_exception_pending() {
+        return;
+    }
     if !s.is_null() {
         let cstr = unsafe { CStr::from_ptr(s) };
         if let Ok(str) = cstr.to_str() {
@@ -224,6 +227,9 @@ pub unsafe extern "C" fn bhc_print_string(s: *const c_char) {
 /// `s` must be a valid null-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_print_string_ln(s: *const c_char) {
+    if bhc_exception_pending() {
+        return;
+    }
     if !s.is_null() {
         let cstr = unsafe { CStr::from_ptr(s) };
         if let Ok(str) = cstr.to_str() {
@@ -243,6 +249,9 @@ pub unsafe extern "C" fn bhc_print_string_ln(s: *const c_char) {
 /// This function is safe to call from C code.
 #[no_mangle]
 pub extern "C" fn bhc_print_int(n: i64) {
+    if bhc_exception_pending() {
+        return;
+    }
     print!("{}", n);
 }
 
@@ -257,6 +266,9 @@ pub extern "C" fn bhc_print_int(n: i64) {
 /// This function is safe to call from C code.
 #[no_mangle]
 pub extern "C" fn bhc_print_int_ln(n: i64) {
+    if bhc_exception_pending() {
+        return;
+    }
     println!("{}", n);
 }
 
@@ -271,6 +283,9 @@ pub extern "C" fn bhc_print_int_ln(n: i64) {
 /// This function is safe to call from C code.
 #[no_mangle]
 pub extern "C" fn bhc_print_double(d: f64) {
+    if bhc_exception_pending() {
+        return;
+    }
     print!("{}", format_double(d));
 }
 
@@ -312,6 +327,9 @@ fn format_double(n: f64) -> String {
 /// This function is safe to call from C code.
 #[no_mangle]
 pub extern "C" fn bhc_print_double_ln(d: f64) {
+    if bhc_exception_pending() {
+        return;
+    }
     println!("{}", format_double(d));
 }
 
@@ -326,6 +344,9 @@ pub extern "C" fn bhc_print_double_ln(d: f64) {
 /// This function is safe to call from C code.
 #[no_mangle]
 pub extern "C" fn bhc_print_char(c: i32) {
+    if bhc_exception_pending() {
+        return;
+    }
     if let Some(ch) = char::from_u32(c as u32) {
         print!("{}", ch);
     }
@@ -342,6 +363,9 @@ pub extern "C" fn bhc_print_char(c: i32) {
 /// This function is safe to call from C code.
 #[no_mangle]
 pub extern "C" fn bhc_print_bool(b: i64) {
+    if bhc_exception_pending() {
+        return;
+    }
     if b == 0 {
         print!("False");
     } else {
@@ -360,6 +384,9 @@ pub extern "C" fn bhc_print_bool(b: i64) {
 /// This function is safe to call from C code.
 #[no_mangle]
 pub extern "C" fn bhc_print_bool_ln(b: i64) {
+    if bhc_exception_pending() {
+        return;
+    }
     if b == 0 {
         println!("False");
     } else {
@@ -2148,6 +2175,9 @@ pub extern "C" fn bhc_readFile(path: *const c_char) -> *mut c_char {
 /// Write a C string to a file, replacing its contents.
 #[no_mangle]
 pub extern "C" fn bhc_writeFile(path: *const c_char, content: *const c_char) {
+    if bhc_exception_pending() {
+        return;
+    }
     if path.is_null() || content.is_null() {
         return;
     }
@@ -2159,6 +2189,9 @@ pub extern "C" fn bhc_writeFile(path: *const c_char, content: *const c_char) {
 /// Append a C string to a file, creating it if needed.
 #[no_mangle]
 pub extern "C" fn bhc_appendFile(path: *const c_char, content: *const c_char) {
+    if bhc_exception_pending() {
+        return;
+    }
     if path.is_null() || content.is_null() {
         return;
     }
@@ -2280,6 +2313,9 @@ pub extern "C" fn bhc_string_unwords(list: *const u8) -> *mut c_char {
 /// Print a newline to stdout
 #[no_mangle]
 pub extern "C" fn bhc_print_newline() {
+    if bhc_exception_pending() {
+        return;
+    }
     println!();
 }
 
@@ -2335,6 +2371,20 @@ thread_local! {
 /// Sentinel return value used by bhc_throw to indicate an exception was thrown.
 /// bhc_catch checks for pending exceptions after the action returns.
 const BHC_EXCEPTION_SENTINEL: *mut u8 = ptr::null_mut();
+
+/// Whether a Haskell exception is currently pending — thrown (recorded in
+/// `BHC_EXCEPTION` by `bhc_throw`/`error`) but not yet caught or reported.
+///
+/// bhc's exception model returns a sentinel instead of unwinding the stack, so
+/// IO actions sequenced after a throw via `>>`/`>>=` still execute. To emulate
+/// the short-circuit GHC gets from unwinding, the effectful IO primitives below
+/// consult this and no-op while an exception is pending; the top-level
+/// `bhc_handle_uncaught_exception` then reports it and exits non-zero. (Mirrors
+/// the WASM backend's exception guard on its output functions.)
+#[inline]
+fn bhc_exception_pending() -> bool {
+    BHC_EXCEPTION.with(|cell| cell.get().is_some())
+}
 
 // ============================================================================
 // SomeException — Tagged Exception Type
@@ -4320,6 +4370,35 @@ mod tests {
         }
         let result = bhc_catch(action, ptr::null_mut(), handler, ptr::null_mut());
         assert_eq!(result as usize, 77);
+    }
+
+    #[test]
+    fn test_exception_pending_reflects_state() {
+        // `bhc_exception_pending` gates the effectful IO primitives so actions
+        // sequenced after `error`/`throwIO` no-op until the exception is caught
+        // or reported. It must track the thread-local exception state exactly.
+        assert!(!bhc_exception_pending());
+        BHC_EXCEPTION.with(|c| c.set(Some(1usize as *mut u8)));
+        assert!(bhc_exception_pending());
+        BHC_EXCEPTION.with(|c| c.set(None));
+        assert!(!bhc_exception_pending());
+    }
+
+    #[test]
+    fn test_exception_pending_cleared_after_catch() {
+        // After `bhc_catch` handles a thrown exception, nothing is pending, so
+        // the guard stops suppressing output (recovered programs print again).
+        extern "C" fn thrower(_env: *mut u8) -> *mut u8 {
+            bhc_throw(bhc_make_some_exception(
+                EXC_TAG_SOME_EXCEPTION,
+                1usize as *mut u8,
+            ))
+        }
+        extern "C" fn handler(_env: *mut u8, _exc: *mut u8) -> *mut u8 {
+            ptr::null_mut()
+        }
+        let _ = bhc_catch(thrower, ptr::null_mut(), handler, ptr::null_mut());
+        assert!(!bhc_exception_pending());
     }
 
     #[test]

@@ -46330,6 +46330,34 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 Ok(Some(self.int_to_ptr(extended)?.into()))
             }
 
+            // System.Exit — these are arity-0/1 IO actions that reach this
+            // direct dispatcher when used as bare values (e.g. `main = exitFailure`),
+            // so they must be handled here as well as in `lower_builtin`. Without
+            // these arms they fall through to the generic "stub: <name> not
+            // implemented" runtime panic.
+            "exitSuccess" => self.lower_builtin_exit_success(),
+            "exitFailure" => self.lower_builtin_exit_failure(),
+            "exitWith" => {
+                // args are already lowered here (unlike lower_builtin's Expr path).
+                let int_val = self.coerce_to_int(args[0])?;
+                let code_i32 = self
+                    .builder()
+                    .build_int_truncate(int_val, self.type_mapper().i32_type(), "exit_code")
+                    .map_err(|e| {
+                        CodegenError::Internal(format!("exitWith: truncate failed: {:?}", e))
+                    })?;
+                let rts_fn = self.functions.get(&VarId::new(1000065)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_exit not declared".to_string())
+                })?;
+                self.builder()
+                    .build_call(*rts_fn, &[code_i32.into()], "")
+                    .map_err(|e| CodegenError::Internal(format!("exitWith failed: {:?}", e)))?;
+                self.builder()
+                    .build_unreachable()
+                    .map_err(|e| CodegenError::Internal(format!("unreachable failed: {:?}", e)))?;
+                Ok(Some(self.type_mapper().ptr_type().const_null().into()))
+            }
+
             // Async exception masking
             "getMaskingState" => self.lower_builtin_get_masking_state(),
             "mask_" => {

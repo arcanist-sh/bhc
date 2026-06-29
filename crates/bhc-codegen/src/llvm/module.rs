@@ -137,6 +137,12 @@ impl<'ctx> LlvmModule<'ctx> {
             .module
             .add_function("bhc_shutdown", shutdown_type, None);
 
+        // Declare bhc_handle_uncaught_exception()
+        let uncaught_type = void_type.fn_type(&[], false);
+        let handle_uncaught =
+            self.module
+                .add_function("bhc_handle_uncaught_exception", uncaught_type, None);
+
         // Create entry block
         let entry = self
             .type_mapper
@@ -164,6 +170,14 @@ impl<'ctx> LlvmModule<'ctx> {
         self.builder
             .build_call(haskell_main, &[null_env.into()], "")
             .map_err(|e| CodegenError::Internal(format!("failed to build call: {:?}", e)))?;
+
+        // Handle any uncaught exception (e.g. `error`) that escaped to the top
+        // level: print it and exit non-zero before normal shutdown.
+        self.builder
+            .build_call(handle_uncaught, &[], "")
+            .map_err(|e| {
+                CodegenError::Internal(format!("failed to build uncaught-handler call: {:?}", e))
+            })?;
 
         // Call bhc_shutdown()
         self.builder.build_call(shutdown, &[], "").map_err(|e| {

@@ -23100,19 +23100,65 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(self.type_mapper().ptr_type().const_null().into()))
     }
 
+    /// Peel type applications, ticks, and casts off an expression.
+    fn peel_expr(e: &Expr) -> &Expr {
+        let mut cur = e;
+        loop {
+            cur = match cur {
+                Expr::TyApp(inner, _, _)
+                | Expr::Cast(inner, _, _)
+                | Expr::Tick(_, inner, _) => inner.as_ref(),
+                other => return other,
+            };
+        }
+    }
+
+    /// If `e` is (a wrapped) variable/constructor reference, return its name.
+    fn head_var_name(e: &Expr) -> Option<&str> {
+        match Self::peel_expr(e) {
+            Expr::Var(v, _) => Some(v.name.as_str()),
+            _ => None,
+        }
+    }
+
     /// Lower `exitWith`.
+    ///
+    /// `ExitCode` has no dedicated runtime representation, so its constructors
+    /// are interpreted directly: `ExitSuccess` is status 0 and `ExitFailure n`
+    /// is status `n`. Anything else falls back to coercing the value to an int.
     fn lower_builtin_exit_with(
         &mut self,
         code_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let code_val = self
-            .lower_expr(code_expr)?
-            .ok_or_else(|| CodegenError::Internal("exitWith: no code".to_string()))?;
-        let int_val = self.coerce_to_int(code_val)?;
-        let code_i32 = self
-            .builder()
-            .build_int_truncate(int_val, self.type_mapper().i32_type(), "exit_code")
-            .map_err(|e| CodegenError::Internal(format!("exitWith: truncate failed: {:?}", e)))?;
+        let i32_type = self.type_mapper().i32_type();
+
+        // Determine the exit status, recognizing the ExitCode constructors.
+        let code_i32 = match Self::peel_expr(code_expr) {
+            Expr::Var(v, _) if v.name.as_str() == "ExitSuccess" => i32_type.const_int(0, true),
+            Expr::App(f, arg, _) if Self::head_var_name(f) == Some("ExitFailure") => {
+                let val = self
+                    .lower_expr(arg)?
+                    .ok_or_else(|| CodegenError::Internal("exitWith: no code".to_string()))?;
+                let int_val = self.coerce_to_int(val)?;
+                self.builder()
+                    .build_int_truncate(int_val, i32_type, "exit_code")
+                    .map_err(|e| {
+                        CodegenError::Internal(format!("exitWith: truncate failed: {:?}", e))
+                    })?
+            }
+            _ => {
+                let code_val = self
+                    .lower_expr(code_expr)?
+                    .ok_or_else(|| CodegenError::Internal("exitWith: no code".to_string()))?;
+                let int_val = self.coerce_to_int(code_val)?;
+                self.builder()
+                    .build_int_truncate(int_val, i32_type, "exit_code")
+                    .map_err(|e| {
+                        CodegenError::Internal(format!("exitWith: truncate failed: {:?}", e))
+                    })?
+            }
+        };
+
         let rts_fn = self
             .functions
             .get(&VarId::new(1000065))

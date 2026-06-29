@@ -2453,6 +2453,33 @@ pub extern "C" fn bhc_show_exception(exc: *mut u8) -> *mut u8 {
         .unwrap_or(ptr::null_mut())
 }
 
+/// Handle an uncaught Haskell exception at the top level.
+///
+/// `error`, `throwIO`, and friends record the thrown exception in thread-local
+/// storage and return a sentinel rather than unwinding. Generated code calls
+/// this after `main` returns: if an exception is still pending (it escaped all
+/// `catch` scopes), print it to stderr and terminate with a non-zero status,
+/// mirroring GHC's behavior for an uncaught exception. If nothing is pending it
+/// returns and normal shutdown proceeds.
+#[no_mangle]
+pub extern "C" fn bhc_handle_uncaught_exception() {
+    let pending = BHC_EXCEPTION.with(|cell| cell.replace(None));
+    if let Some(exc) = pending {
+        let msg_ptr = bhc_show_exception(exc);
+        let msg = if msg_ptr.is_null() {
+            "<<exception>>".to_string()
+        } else {
+            unsafe { CStr::from_ptr(msg_ptr as *const c_char) }
+                .to_str()
+                .unwrap_or("<invalid utf8>")
+                .to_string()
+        };
+        eprintln!("{}", msg);
+        bhc_shutdown();
+        std::process::exit(1);
+    }
+}
+
 /// Type-filtered exception catch.
 ///
 /// Runs `action_fn(action_env)`. If an exception is thrown, checks its type tag

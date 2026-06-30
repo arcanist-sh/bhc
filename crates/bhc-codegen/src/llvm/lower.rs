@@ -23736,6 +23736,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     ) {
                         return Some((ShowCoerce::MaybeOf, 1000094, "show_maybe"));
                     }
+                    // Functions returning a 2-tuple of lists (([a],[a])), fully
+                    // applied — recognized by spine head (type erased at the
+                    // show site); build_tuple_elem_descriptors gives both
+                    // components a List descriptor.
+                    if matches!(head, "span" | "break" | "partition" | "splitAt") {
+                        return Some((ShowCoerce::Tuple2Of, 1000096, "show_tuple2"));
+                    }
                 }
                 match f.as_ref() {
                     // Just x
@@ -24084,6 +24091,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     }
                 }
             }
+        }
+        // span/break/partition/splitAt return a 2-tuple of lists ([a],[a]); the
+        // type is erased at the call site, so give both components a List
+        // descriptor (Int element, the common case) rather than the Int default.
+        if matches!(
+            self.app_head_var_name(tuple_expr),
+            Some("span" | "break" | "partition" | "splitAt")
+        ) {
+            let elem1 = self.get_primitive_show_desc(0);
+            let list1 = self.create_show_desc_global(10, Some(elem1), None);
+            let elem2 = self.get_primitive_show_desc(0);
+            let list2 = self.create_show_desc_global(10, Some(elem2), None);
+            return (list1, list2);
         }
         let d0 = self.get_primitive_show_desc(0);
         let d0b = self.get_primitive_show_desc(0);

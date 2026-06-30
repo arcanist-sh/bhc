@@ -1656,6 +1656,15 @@ impl<'a> WasmLowering<'a> {
                 if returns_maybe_fn(strip_qualifier(v.name.as_str())) {
                     return self.emit_show_maybe(arg, instrs, locals, local_count);
                 }
+                // span/break/partition/splitAt return a 2-tuple of lists; the
+                // type is erased at the show site, so render it by walking the
+                // runtime tuple's two list fields.
+                if matches!(
+                    strip_qualifier(v.name.as_str()),
+                    "span" | "break" | "partition" | "splitAt"
+                ) {
+                    return self.emit_show_tuple_of_lists(arg, instrs, locals, local_count);
+                }
             }
         }
         // A String value renders quoted and escaped (`show "a\"b" == "\"a\\\"b\""`),
@@ -2611,15 +2620,28 @@ impl<'a> WasmLowering<'a> {
         locals: &mut FxHashMap<VarId, u32>,
         local_count: &mut u32,
     ) -> WasmResult<()> {
-        let true_ptr = self.intern_pstr("True");
-        let false_ptr = self.intern_pstr("False");
-        let concat = self.runtime.concat_str_idx;
-
-        // cur = list
         self.lower_expr(list, instrs, locals, local_count, false)?;
         let cur = *local_count;
         *local_count += 1;
         instrs.push(WasmInstr::LocalSet(cur));
+        self.emit_runtime_list_walk(cur, kind, instrs, local_count);
+        Ok(())
+    }
+
+    /// Walk a runtime cons-list whose pointer is already in local `cur`, leaving
+    /// the rendered `"[..]"` string pointer on the stack. Shared by
+    /// emit_show_runtime_list and the runtime tuple-of-lists show.
+    fn emit_runtime_list_walk(
+        &mut self,
+        cur: u32,
+        kind: ElemKind,
+        instrs: &mut Vec<WasmInstr>,
+        local_count: &mut u32,
+    ) {
+        let true_ptr = self.intern_pstr("True");
+        let false_ptr = self.intern_pstr("False");
+        let concat = self.runtime.concat_str_idx;
+
         // acc = "["
         self.emit_pstr_lit("[", instrs);
         let acc = *local_count;
@@ -2689,6 +2711,44 @@ impl<'a> WasmLowering<'a> {
         // acc ++ "]"
         instrs.push(WasmInstr::LocalGet(acc));
         self.emit_pstr_lit("]", instrs);
+        instrs.push(WasmInstr::Call(concat));
+    }
+
+    /// Show a runtime 2-tuple whose two fields are lists (`([a],[a])`), e.g. the
+    /// result of span/break/partition/splitAt. Renders `"(L0,L1)"` by walking
+    /// each field as a runtime Int list. Leaves the string pointer on the stack.
+    fn emit_show_tuple_of_lists(
+        &mut self,
+        expr: &Expr,
+        instrs: &mut Vec<WasmInstr>,
+        locals: &mut FxHashMap<VarId, u32>,
+        local_count: &mut u32,
+    ) -> WasmResult<()> {
+        let concat = self.runtime.concat_str_idx;
+        // t = tuple pointer ([tag | field0 | field1])
+        self.lower_expr(expr, instrs, locals, local_count, false)?;
+        let t = *local_count;
+        *local_count += 1;
+        instrs.push(WasmInstr::LocalSet(t));
+        let f0 = *local_count;
+        let f1 = *local_count + 1;
+        *local_count += 2;
+        instrs.push(WasmInstr::LocalGet(t));
+        instrs.push(WasmInstr::I32Load(2, 4));
+        instrs.push(WasmInstr::LocalSet(f0));
+        instrs.push(WasmInstr::LocalGet(t));
+        instrs.push(WasmInstr::I32Load(2, 8));
+        instrs.push(WasmInstr::LocalSet(f1));
+
+        // "(" ++ show f0 ++ "," ++ show f1 ++ ")"
+        self.emit_pstr_lit("(", instrs);
+        self.emit_runtime_list_walk(f0, ElemKind::Int, instrs, local_count);
+        instrs.push(WasmInstr::Call(concat));
+        self.emit_pstr_lit(",", instrs);
+        instrs.push(WasmInstr::Call(concat));
+        self.emit_runtime_list_walk(f1, ElemKind::Int, instrs, local_count);
+        instrs.push(WasmInstr::Call(concat));
+        self.emit_pstr_lit(")", instrs);
         instrs.push(WasmInstr::Call(concat));
         Ok(())
     }
@@ -6015,6 +6075,7 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "splitAt",
     "span",
     "break",
+    "partition",
     "find",
     "findIndex",
     "elemIndex",
@@ -8528,6 +8589,27 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
         }
         // span/break p xs: split at the first element where the predicate
         // changes. span keeps the prefix where p holds; break keeps the prefix
+        // partition p xs = (filter p xs, filter (\x -> not (p x)) xs)
+        "partition" => {
+            let p = pv("p", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let x = pv("x", fresh(id));
+            let notp = plam(
+                x.clone(),
+                papp(pref("not", id), papp(pev(&p), pev(&x))),
+            );
+            plam(
+                p.clone(),
+                plam(
+                    xs.clone(),
+                    papp2(
+                        pref("(,)", id),
+                        papp2(pref("filter", id), pev(&p), pev(&xs)),
+                        papp2(pref("filter", id), notp, pev(&xs)),
+                    ),
+                ),
+            )
+        }
         // where p does *not* hold.
         "span" | "break" => {
             let p = pv("p", fresh(id));

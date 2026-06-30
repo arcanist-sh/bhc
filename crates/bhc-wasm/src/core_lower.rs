@@ -8594,10 +8594,7 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
             let p = pv("p", fresh(id));
             let xs = pv("xs", fresh(id));
             let x = pv("x", fresh(id));
-            let notp = plam(
-                x.clone(),
-                papp(pref("not", id), papp(pev(&p), pev(&x))),
-            );
+            let notp = plam(x.clone(), papp(pref("not", id), papp(pev(&p), pev(&x))));
             plam(
                 p.clone(),
                 plam(

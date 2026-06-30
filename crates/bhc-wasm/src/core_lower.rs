@@ -6046,6 +6046,7 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "scanl",
     "scanl1",
     "scanr",
+    "scanr1",
     "not",
     "reverse",
     "tails",
@@ -9153,6 +9154,38 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
                 ),
             )
         }
+        // scanr1 f xs = case reverse xs of
+        //   [] -> []
+        //   (y:ys) -> reverse (scanl (\acc x -> f x acc) y ys)
+        // (reverse + scanl-with-flipped-f avoids a self-recursive case that
+        // scrutinizes and then recurses on the same list — a WASM codegen bug.)
+        "scanr1" => {
+            let f = pv("f", fresh(id));
+            let xs = pv("xs", fresh(id));
+            let y = pv("y", fresh(id));
+            let ys = pv("ys", fresh(id));
+            let acc = pv("acc", fresh(id));
+            let x = pv("x", fresh(id));
+            let step = plam(
+                acc.clone(),
+                plam(x.clone(), papp2(pev(&f), pev(&x), pev(&acc))),
+            );
+            let scanned = papp(papp2(pref("scanl", id), step, pev(&y)), pev(&ys));
+            let revd = papp(pref("reverse", id), scanned);
+            plam(
+                f.clone(),
+                plam(
+                    xs.clone(),
+                    pcase(
+                        papp(pref("reverse", id), pev(&xs)),
+                        vec![
+                            palt("[]", 0, 0, vec![], pref("[]", id)),
+                            palt(":", 1, 2, vec![y.clone(), ys.clone()], revd),
+                        ],
+                    ),
+                ),
+            )
+        }
         // not b = case b of { True -> False; False -> True }
         "not" => {
             let b = pv("b", fresh(id));
@@ -10807,6 +10840,7 @@ fn is_list_returning_fn(name: &str) -> bool {
             | "scanl"
             | "scanl1"
             | "scanr"
+            | "scanr1"
             | "concat"
             | "concatMap"
             | "sortOn"

@@ -15707,6 +15707,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         | "insert"
                         | "concat"
                         | "concatMap"
+                        | "scanl"
+                        | "scanl1"
+                        | "scanr"
+                        | "scanr1"
                         | "zip"
                         | "zipWith"
                         | "zip3"
@@ -43775,11 +43779,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let ptr_type = tm.ptr_type();
         let _i64_type = tm.i64_type();
 
-        // Create a unique name for the wrapper function
-        let wrapper_name = format!(
-            "primop_wrapper_{}",
-            name.replace(|c: char| !c.is_alphanumeric(), "_")
-        );
+        // Create a unique name for the wrapper function, keyed by the PrimOp
+        // variant. The source name must NOT be used directly: operator names
+        // like "+", "-", "*" all collapse to the same string once their
+        // non-alphanumeric characters are replaced with "_" ("primop_wrapper__"),
+        // so they would share one wrapper — making every bare operator section
+        // reuse the first one's operation (a miscompile in higher-order use,
+        // e.g. `foldl (+)` followed by `foldl (-)` both ran `+`).
+        let wrapper_name = format!("primop_wrapper_{primop:?}");
+        let _ = name;
 
         // Check if wrapper already exists
         let wrapper_fn = if let Some(existing) =

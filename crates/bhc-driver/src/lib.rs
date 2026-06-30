@@ -2309,8 +2309,7 @@ impl Compiler {
         }
 
         // Transitive closure of the requested ids over `depends:`.
-        let by_id: FxHashMap<&str, &ConfPackage> =
-            all.iter().map(|p| (p.id.as_str(), p)).collect();
+        let by_id: FxHashMap<&str, &ConfPackage> = all.iter().map(|p| (p.id.as_str(), p)).collect();
         let mut visible: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
         let mut stack: Vec<String> = visible_ids.clone();
         while let Some(id) = stack.pop() {
@@ -4073,8 +4072,8 @@ impl Compiler {
         self.check_files_ordered_reporting(paths, None)
     }
 
-    /// Like [`check_files_ordered`], but only reports results for the modules
-    /// whose source path is in `report_only`.
+    /// Like [`Self::check_files_ordered`], but only reports results for the
+    /// modules whose source path is in `report_only`.
     ///
     /// All files in `paths` are still parsed, ordered, and type-checked so that
     /// their exports are registered for downstream import resolution. When
@@ -4085,7 +4084,7 @@ impl Compiler {
     /// without polluting its reported check results.
     ///
     /// When `report_only` is `None`, every module is reported (the original
-    /// [`check_files_ordered`] behavior).
+    /// [`Self::check_files_ordered`] behavior).
     pub fn check_files_ordered_reporting(
         &self,
         paths: &[Utf8PathBuf],

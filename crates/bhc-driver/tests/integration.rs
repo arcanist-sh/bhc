@@ -1382,7 +1382,9 @@ main = mapM_ putStrLn (shout "a,b,c")
     let dep = Utf8PathBuf::from(dep_dir.path().to_str().unwrap());
 
     // Without the dependency: both target modules are skipped (cascade).
-    let bare = compiler.check_with_discovery(&[app.clone()]).unwrap();
+    let bare = compiler
+        .check_with_discovery(std::slice::from_ref(&app))
+        .unwrap();
     let bare_skipped = bare
         .iter()
         .filter(|(_, r)| {
@@ -1468,10 +1470,7 @@ main = mapM_ putStrLn (splitOnComma "a,b,c")
     .unwrap();
 
     // Without the DB the import is unresolved; with it, the check succeeds.
-    let consumer = CompilerBuilder::new()
-        .package_db(db_path)
-        .build()
-        .unwrap();
+    let consumer = CompilerBuilder::new().package_db(db_path).build().unwrap();
     let main_path = Utf8PathBuf::from(main_hs.to_str().unwrap());
     let result = consumer.check_file(&main_path);
     assert!(
@@ -1522,7 +1521,7 @@ splitOnComma s = case break (== ',') s of
         .build()
         .unwrap();
     producer
-        .compile_module_only(&Utf8PathBuf::from(
+        .compile_module_only(Utf8PathBuf::from(
             data_dir.join("Split.hs").to_str().unwrap(),
         ))
         .unwrap();
@@ -1556,7 +1555,7 @@ main = mapM_ putStrLn (splitOnComma "a,b,c")
         .package_db(Utf8PathBuf::from(pkgdb.path().to_str().unwrap()))
         .build()
         .unwrap();
-    let result = consumer.check_file(&Utf8PathBuf::from(main_hs.to_str().unwrap()));
+    let result = consumer.check_file(Utf8PathBuf::from(main_hs.to_str().unwrap()));
     assert!(
         result.is_ok(),
         "consumer should resolve import via .conf import-dirs: {:?}",
@@ -1600,7 +1599,7 @@ fn test_package_db_scoping_and_exposed_modules() {
         .unwrap();
     for m in ["Public", "Hidden"] {
         producer
-            .compile_module_only(&Utf8PathBuf::from(
+            .compile_module_only(Utf8PathBuf::from(
                 data_dir.join(format!("{m}.hs")).to_str().unwrap(),
             ))
             .unwrap();
@@ -1645,28 +1644,28 @@ fn test_package_db_scoping_and_exposed_modules() {
     // Exposed module resolves.
     assert!(
         checker(&[])
-            .check_file(&write_main("Data.Public", "pub"))
+            .check_file(write_main("Data.Public", "pub"))
             .is_ok(),
         "exposed module should resolve"
     );
     // Non-exposed module does NOT resolve even though its .bhi exists.
     assert!(
         checker(&[])
-            .check_file(&write_main("Data.Hidden", "hidden"))
+            .check_file(write_main("Data.Hidden", "hidden"))
             .is_err(),
         "non-exposed module must not resolve"
     );
     // Matching --package-id keeps it visible.
     assert!(
         checker(&["mypkg-1.0.0-abc123"])
-            .check_file(&write_main("Data.Public", "pub"))
+            .check_file(write_main("Data.Public", "pub"))
             .is_ok(),
         "exposed module should resolve when its package id is selected"
     );
     // A non-matching --package-id hides the package entirely.
     assert!(
         checker(&["other-9.9-zzz"])
-            .check_file(&write_main("Data.Public", "pub"))
+            .check_file(write_main("Data.Public", "pub"))
             .is_err(),
         "package must be hidden when only an unrelated package id is selected"
     );
@@ -1709,7 +1708,7 @@ fn test_package_db_depends_transitive_visibility() {
             .hidir(hidir.clone())
             .build()
             .unwrap()
-            .compile_module_only(&Utf8PathBuf::from(
+            .compile_module_only(Utf8PathBuf::from(
                 data.join(format!("{module}.hs")).to_str().unwrap(),
             ))
             .unwrap();
@@ -1752,20 +1751,20 @@ fn test_package_db_depends_transitive_visibility() {
     // Selecting P exposes P, and Q transitively via depends.
     assert!(
         checker("p-1.0-aaa")
-            .check_file(&write_main("Data.P", "valP"))
+            .check_file(write_main("Data.P", "valP"))
             .is_ok(),
         "selected package P should resolve"
     );
     assert!(
         checker("p-1.0-aaa")
-            .check_file(&write_main("Data.Q", "valQ"))
+            .check_file(write_main("Data.Q", "valQ"))
             .is_ok(),
         "P's transitive dependency Q should resolve"
     );
     // Selecting only Q must not expose P (no reverse edge).
     assert!(
         checker("q-1.0-bbb")
-            .check_file(&write_main("Data.P", "valP"))
+            .check_file(write_main("Data.P", "valP"))
             .is_err(),
         "selecting only Q must not expose its dependent P"
     );

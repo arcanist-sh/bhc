@@ -10832,6 +10832,7 @@ fn is_list_returning_fn(name: &str) -> bool {
             | "zipWith3"
             | "zip3"
             | "replicate"
+            | "unfoldr"
             | "enumFromTo"
             | "takeWhile"
             | "dropWhile"

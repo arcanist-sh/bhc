@@ -2309,8 +2309,7 @@ impl Compiler {
         }
 
         // Transitive closure of the requested ids over `depends:`.
-        let by_id: FxHashMap<&str, &ConfPackage> =
-            all.iter().map(|p| (p.id.as_str(), p)).collect();
+        let by_id: FxHashMap<&str, &ConfPackage> = all.iter().map(|p| (p.id.as_str(), p)).collect();
         let mut visible: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
         let mut stack: Vec<String> = visible_ids.clone();
         while let Some(id) = stack.pop() {

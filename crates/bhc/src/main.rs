@@ -414,7 +414,9 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
         compiler.compile_files_ordered(utf8_paths.iter().map(|p| p.as_path()))
     } else if utf8_paths.len() == 1 {
         if cli.compile_only {
-            compiler.compile_module_only(utf8_paths[0].as_path()).map(|o| vec![o])
+            compiler
+                .compile_module_only(utf8_paths[0].as_path())
+                .map(|o| vec![o])
         } else {
             compiler.compile_with_discovery(utf8_paths[0].as_path())
         }

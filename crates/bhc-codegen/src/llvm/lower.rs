@@ -23105,9 +23105,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let mut cur = e;
         loop {
             cur = match cur {
-                Expr::TyApp(inner, _, _)
-                | Expr::Cast(inner, _, _)
-                | Expr::Tick(_, inner, _) => inner.as_ref(),
+                Expr::TyApp(inner, _, _) | Expr::Cast(inner, _, _) | Expr::Tick(_, inner, _) => {
+                    inner.as_ref()
+                }
                 other => return other,
             };
         }
@@ -46392,9 +46392,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .map_err(|e| {
                         CodegenError::Internal(format!("exitWith: truncate failed: {:?}", e))
                     })?;
-                let rts_fn = self.functions.get(&VarId::new(1000065)).ok_or_else(|| {
-                    CodegenError::Internal("bhc_exit not declared".to_string())
-                })?;
+                let rts_fn = self
+                    .functions
+                    .get(&VarId::new(1000065))
+                    .ok_or_else(|| CodegenError::Internal("bhc_exit not declared".to_string()))?;
                 self.builder()
                     .build_call(*rts_fn, &[code_i32.into()], "")
                     .map_err(|e| CodegenError::Internal(format!("exitWith failed: {:?}", e)))?;

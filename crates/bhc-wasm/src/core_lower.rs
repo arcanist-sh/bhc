@@ -8609,13 +8609,7 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
                         vec![],
                         papp2(pref("find", id), pev(&p), pev(&ys)),
                     ),
-                    palt(
-                        "True",
-                        1,
-                        0,
-                        vec![],
-                        papp(pref("Just", id), pev(&y)),
-                    ),
+                    palt("True", 1, 0, vec![], papp(pref("Just", id), pev(&y))),
                 ],
             );
             plam(

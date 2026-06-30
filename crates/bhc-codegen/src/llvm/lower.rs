@@ -28495,16 +28495,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("findIndex: pred returned void".to_string()))?;
 
-        // Check Bool result tag
-        let result_tag = match pred_result {
-            BasicValueEnum::PointerValue(p) => self.extract_adt_tag(p)?,
-            BasicValueEnum::IntValue(i) => i,
-            _ => {
-                return Err(CodegenError::TypeError(
-                    "findIndex: pred should return Bool".to_string(),
-                ))
-            }
-        };
+        // The predicate returns a Bool, which may be a tagged-int-as-pointer
+        // (0/1, e.g. from `>`/`==`) rather than a heap ADT — extract_adt_tag
+        // would dereference it and segfault. Use extract_bool_tag, which
+        // discriminates the two (as `find`/`filter`/`all`/`any` do).
+        let result_tag = self.extract_bool_tag(pred_result.into_pointer_value())?;
+        // extract_bool_tag may split the current block, so the loop back-edge
+        // branches from this block, not the original loop_body — capture it for
+        // the PHI predecessors below.
+        let body_end_block = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("findIndex: no current block".to_string()))?;
         let is_true = self
             .builder()
             .build_int_compare(
@@ -28526,10 +28528,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_conditional_branch(is_true, found_block, loop_header)
             .map_err(|e| CodegenError::Internal(format!("findIndex: branch: {:?}", e)))?;
 
-        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail, loop_body)]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail, body_end_block)]);
         counter_phi.add_incoming(&[
             (&i64_type.const_zero(), entry_block),
-            (&next_counter, loop_body),
+            (&next_counter, body_end_block),
         ]);
 
         // Found: return Just counter

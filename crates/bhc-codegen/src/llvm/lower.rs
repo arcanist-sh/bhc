@@ -15707,6 +15707,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         | "insert"
                         | "concat"
                         | "concatMap"
+                        | "unfoldr"
                         | "scanl"
                         | "scanl1"
                         | "scanr"

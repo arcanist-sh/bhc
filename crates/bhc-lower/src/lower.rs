@@ -525,6 +525,8 @@ fn register_standard_module_exports(
         | "Data.Map.Strict.Internal"
         | "Data.Map.Internal" => &[
             "Map",
+            "fromAscList",
+            "foldMapWithKey",
             "empty",
             "singleton",
             "insert",
@@ -653,6 +655,8 @@ fn register_standard_module_exports(
         ],
         "Data.Sequence" => &[
             "Seq",
+            "dropWhileL",
+            "dropWhileR",
             "empty",
             "singleton",
             "null",
@@ -898,6 +902,7 @@ fn register_standard_module_exports(
         ],
         "Data.Traversable" => &[
             "traverse",
+            "fmapDefault",
             "sequenceA",
             "mapM",
             "sequence",
@@ -1895,6 +1900,12 @@ fn register_standard_module_exports(
             "Options",
             "SumEncoding",
             "camelTo2",
+            "toEncoding",
+            // SumEncoding's TaggedObject constructor + its record fields
+            // (used by hand-written ToJSON instances, e.g. pandoc-types).
+            "TaggedObject",
+            "tagFieldName",
+            "contentsFieldName",
         ],
         // === Network ===
         "Network.URI" => &[
@@ -3728,6 +3739,7 @@ fn register_standard_module_exports(
             "Typeable",
             "Generic",
             "everywhere",
+            "everywhere'",
             "everything",
             "mkT",
             "mkQ",

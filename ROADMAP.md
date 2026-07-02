@@ -4,7 +4,7 @@ This document provides a detailed implementation plan to deliver all features pr
 
 ## Current Status
 
-**Beta** — The compiler builds cleanly and compiles real Haskell programs to native executables. E2E tests confirm native compilation works for hello world, arithmetic, fibonacci, IO sequencing, and more. WASM and GPU backends have substantial code but are not yet producing valid output.
+**Beta** — The compiler builds cleanly and compiles real Haskell programs to native executables. E2E tests confirm native compilation works for hello world, arithmetic, fibonacci, IO sequencing, and more. **WASM update (2026-07-02, measured):** the WASM/WASI backend produces valid binaries that run in wasmtime and is at parity with native across the differential suite — **236 of 243 fixtures produce byte-identical output on both backends** (the harness now stages fixture data files and runs `wasmtime --dir=.`). File IO is **host-backed** via WASI `path_open`/`fd_read`/`fd_write` (needs a `--dir` preopen at runtime): `readFile` reads real files, `writeFile` persists to disk, with an in-memory table backing round-trips when no `--dir` is given; `lines`/`words` are synthesized so "read a file, process its lines, write it back" works. Remaining WASM divergences are **general stdlib coverage**, not filesystem plumbing: the `Handle` API (`openFile`/`hGetLine`/`hClose`) and `System.Directory` (`doesFileExist`) unimplemented, plus the long-standing `show_types` native erased-type case and stdin fixtures the harness can't feed. The old "WASM binaries fail wasmtime validation" claim below is stale. GPU backend remains mock-validated only.
 
 | Component | Status | Test Evidence |
 |-----------|--------|---------------|
@@ -15,23 +15,30 @@ This document provides a detailed implementation plan to deliver all features pr
 | Tensor IR | ✅ Complete | Lowering, fusion, all 4 patterns |
 | Loop IR | ✅ Complete | Vectorization, parallelization |
 | Native Codegen | ✅ Complete | 6/6 E2E tests pass (hello, arithmetic, fibonacci, IO) |
-| WASM Codegen | 🟡 70% | Emitter exists but WASM binaries fail wasmtime validation |
+| WASM Codegen | 🟢 ~95% | Valid binaries; run in wasmtime; 232/243 differential fixtures byte-identical to native (2026-07-02). Gap: file IO not host-backed (in-memory shim) |
 | GPU Codegen | 🟡 80% | PTX mock validation passes; requires CUDA hardware for real test |
-| Runtime | ✅ Complete | Generational GC, incremental GC, arena, scheduler (18 tests pass) |
+| Runtime | 🟡 Partial | Arena + scheduler + STM + thunks work. **GC is NOT live for compiled code** — `bhc_alloc` is a leak-allocator and the collector is a stub; the generational/incremental GC exists only as an isolated, unit-tested module (see spec/BHC-REVIEW-0001 §5.1). Safe-but-leaks; adequate for short-lived batch, not long-running programs. |
 | REPL (bhci) | 🟡 Compiles | Builds but evaluation is stubbed (returns placeholder values) |
 | Package Manager | 🟡 Partial | Code exists, some test imports broken |
 | LSP Server | 🟡 Exists | Code present, not independently verified |
 | Documentation | 🟡 Partial | User docs exist, API docs incomplete |
 
-### Test Summary (Jan 29, 2026)
+### Test Summary (Jan 29, 2026 — STALE; see 2026-07-02 differential note below)
 
 | Suite | Passed | Failed | Ignored | Notes |
 |-------|--------|--------|---------|-------|
 | Workspace unit tests | 217 | 9 | 0 | 9 failures are interpreter IO capture |
 | E2E Native | 6 | 0 | 1 | Numeric profile test ignored |
-| E2E WASM | 0 | 6 | 1 | WASM translation error |
+| E2E WASM | 0 | 6 | 1 | STALE — "WASM translation error" no longer reproduces |
 | E2E GPU | 2 | 0 | 0 | Mock mode only |
 | **Total** | **225** | **15** | **2** | |
+
+> **Differential sweep (2026-07-02, `crates/bhc-e2e-tests/differential.py`, 243 fixtures):**
+> native vs WASM — **232 agree (byte-identical), 11 divergences.** None of the divergences
+> are WASM failing where native succeeds on compute/stdout. The divergences are: file-IO
+> fixtures (harness doesn't stage the input file, so native errors while WASM silently returns
+> empty — see the file-IO gap above) and 1 fixture wrong on both. The old "E2E WASM 0/6" row
+> is obsolete. NOTE: WASM file IO is not host-backed — do not read "232 agree" as full IO parity.
 
 ---
 
@@ -82,16 +89,19 @@ Tasks:
 - [x] Create RTS static library for linking
 - [x] Test: Link a trivial program with RTS
 
-### 1.4 Basic GC ✅
+### 1.4 Basic GC 🟡 (module only — NOT wired to compiled code)
 
 **Crate:** `bhc-rts-gc`
 
-Tasks:
-- [x] Implement root set tracking
-- [x] Implement mark phase
-- [x] Implement sweep phase
-- [x] Add GC trigger (allocation threshold)
-- [x] Test: Allocate objects, trigger GC, verify live objects survive
+> **Correction (2026-07-02, spec/BHC-REVIEW-0001 §5.1):** The tasks below are complete *as an isolated, unit-tested module*, but the collector is **not on the compiled-code path**. `bhc_alloc` (`rts/bhc-rts/src/ffi.rs`) is a raw malloc; `major_collect`/`minor_collect` are stubs that free nothing; native codegen emits no roots and no info tables. Compiled programs leak all heap allocations. "Root set tracking" / "GC trigger" / "live objects survive" hold only inside the crate's own tests, not for real programs.
+
+Tasks (module-level, in isolation):
+- [x] Implement root set tracking *(module type only; not populated by codegen)*
+- [x] Implement mark phase *(over an abstract GcPtr graph in tests)*
+- [x] Implement sweep phase *(over an abstract GcPtr graph in tests)*
+- [x] Add GC trigger (allocation threshold) *(not wired: `bhc_alloc` never triggers it)*
+- [x] Test: Allocate objects, trigger GC, verify live objects survive *(unit test only)*
+- [ ] **Wire to compiled heap** (info tables + rooting + real collect) — deferred; see review §5.1
 
 ### 1.5 Linker Integration ✅
 
@@ -424,9 +434,9 @@ Hello, World!
 
 **LLVM 21 Support:** Upgraded inkwell from 0.5 (LLVM 18) to 0.8 (LLVM 21). Commit `db4368f`.
 
-**Status (Jan 29, 2026):** All 6 WASM E2E tests fail with "WebAssembly translation error" — the WASM binary emitter produces output that wasmtime cannot validate. The emitter, WASI integration, and driver wiring are complete, but the generated WASM binary format has structural issues that need debugging.
+**Status (Jan 29, 2026 — STALE, superseded 2026-07-02):** ~~All 6 WASM E2E tests fail with "WebAssembly translation error"~~. This no longer reproduces. As of 2026-07-02 the WASM binaries are valid, run in wasmtime, and match native output on 232/243 differential fixtures (compute, stdout, closures, thunks, ADTs, typeclasses, fusion — not just numeric kernels). The validation issue was resolved (type-index/alignment encoding, see the "Recent Fixes" section).
 
-**Remaining effort:** Debug WASM binary format validation errors; all WASM E2E tests currently fail
+**Remaining effort (2026-07-02):** (1) ~~Host-backed file IO~~ **DONE** — `readFile`/`writeFile`/`readFile'` go through WASI `path_open`/`fd_read`/`fd_write` (fd-3 preopen; `generate_file_read_host`/`generate_file_write_host` in `wasi.rs`), with the in-memory table as a no-`--dir` fallback. differential.py stages fixture data files + runs `wasmtime --dir=.`. (2) ~~`lines`/`words`~~ **DONE** — synthesized in `core_lower.rs` `build_list_fn` (break/dropWhile/isSpace-based; arg coerced via `emit_ensure_charlist`); flipped file_stats/file_reverse to agree. (3) TODO: `Handle` API (`openFile`/`hGetLine`/`hClose`) and `System.Directory` (`doesFileExist`/`doesDirectoryExist`) — larger, still unimplemented on WASM (fixtures handle_io/system_ops).
 
 ---
 

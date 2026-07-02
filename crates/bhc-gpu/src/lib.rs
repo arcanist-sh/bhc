@@ -308,6 +308,61 @@ impl GpuBackend {
             .iter()
             .any(|d| matches!(d.kind, DeviceKind::Rocm))
     }
+
+    /// Whether a real (non-mock) Metal GPU is available for offload.
+    #[must_use]
+    pub fn has_metal(&self) -> bool {
+        self.devices
+            .iter()
+            .any(|d| matches!(d.kind, DeviceKind::Metal))
+    }
+}
+
+/// End-to-end GPU offload on Apple silicon.
+///
+/// This is the connective path from the compiler's kernel representation to real
+/// GPU execution: a Tensor IR [`Kernel`](bhc_tensor_ir::Kernel) is lowered to MSL
+/// by [`codegen::metal`], then compiled and executed on the Metal GPU by
+/// [`runtime::metal`]. Previously the two halves existed but nothing joined them.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+impl GpuBackend {
+    /// Lower `kernel` to MSL, execute it on the Apple GPU, and return the `f32`
+    /// output.
+    ///
+    /// The `f32` input slices are bound in order to the kernel's input buffers;
+    /// the single output buffer of `out_len` elements is read back. Supports the
+    /// element-wise / `zipWith` kernels the numeric pipeline fuses (one thread
+    /// per element).
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError::NotSupported`] if no Metal device is present;
+    /// [`GpuError::CompilationError`] if MSL generation yields no entry point;
+    /// [`GpuError::LaunchError`] if runtime compilation or dispatch fails.
+    pub fn run_kernel_metal_f32(
+        &self,
+        kernel: &bhc_tensor_ir::Kernel,
+        inputs: &[&[f32]],
+        out_len: usize,
+    ) -> GpuResult<Vec<f32>> {
+        let device = self
+            .devices
+            .iter()
+            .find(|d| matches!(d.kind, DeviceKind::Metal))
+            .ok_or_else(|| GpuError::NotSupported("no Metal device available".to_string()))?;
+
+        let module = codegen::metal::compile_kernel(kernel, device)?;
+        let entry =
+            module.entry_points.first().cloned().ok_or_else(|| {
+                GpuError::CompilationError("kernel has no entry point".to_string())
+            })?;
+        let msl = String::from_utf8_lossy(&module.code);
+
+        let rt = runtime::metal::MetalRuntime::new()
+            .ok_or_else(|| GpuError::NotSupported("no Metal device available".to_string()))?;
+        rt.run_elementwise_f32(&msl, &entry, inputs, out_len)
+            .map_err(GpuError::LaunchError)
+    }
 }
 
 /// GPU codegen context.

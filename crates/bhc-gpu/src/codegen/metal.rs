@@ -86,21 +86,13 @@ fn generate_kernel_function(
         writeln!(code, "    device const {}* in{} [[buffer({})]],", ty, i, i).unwrap();
     }
 
-    // Output buffers
+    // Output buffers. The thread-position parameters (`gid`/`tid`/`tgid`) always
+    // follow the outputs in the signature, so every output needs a trailing
+    // comma — omitting it on the last output produces invalid MSL.
     for (i, output) in params.outputs.iter().enumerate() {
         let ty = dtype_to_metal_type(output.dtype);
         let binding = params.inputs.len() + i;
-        let comma = if i == params.outputs.len() - 1 {
-            ""
-        } else {
-            ","
-        };
-        writeln!(
-            code,
-            "    device {}* out{} [[buffer({})]]{}",
-            ty, i, binding, comma
-        )
-        .unwrap();
+        writeln!(code, "    device {}* out{} [[buffer({})]],", ty, i, binding).unwrap();
     }
 
     // Thread position

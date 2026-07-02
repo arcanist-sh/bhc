@@ -716,6 +716,27 @@ mod tests {
         assert!(suitability.parallelism.is_some());
     }
 
+    /// End-to-end offload: a Tensor IR `Map (*2)` kernel — the shape the numeric
+    /// pipeline fuses — lowered to MSL and executed on the Apple GPU via
+    /// `GpuBackend::run_kernel_metal_f32`, validated against the CPU result.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn test_metal_offload_map_kernel_runs_on_gpu() {
+        let kernel = make_test_kernel(); // Map "mul_2" over [1024] f32
+        let Some(backend) = crate::GpuBackend::new() else {
+            eprintln!("no GPU backend; skipping");
+            return;
+        };
+        let input: Vec<f32> = (0..1024).map(|i| i as f32).collect();
+        let out = backend
+            .run_kernel_metal_f32(&kernel, &[&input], input.len())
+            .expect("metal offload");
+        assert_eq!(out.len(), input.len());
+        for (i, &v) in out.iter().enumerate() {
+            assert_eq!(v, input[i] * 2.0, "mismatch at {i}");
+        }
+    }
+
     #[test]
     fn test_compute_launch_config() {
         let kernel = make_test_kernel();

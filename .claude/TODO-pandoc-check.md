@@ -76,13 +76,33 @@ types (cascade from their defining module failing).
 
 ## Workplan (priority order)
 
-### P1 — pandoc-types (`Text.Pandoc.Definition`) — HIGHEST LEVERAGE
-Provide the real `Inline`/`Block`/`Pandoc`/`Meta`/`Attr`/`Format`/`ListNumber*`/
-`Alignment`/`MathType`/`QuoteType`/`Citation*`/`Caption`/`Row`/`Cell`/… ADTs so
-their constructors resolve for both construction and pattern matching (correct
-arities required). Either vendor the pandoc-types source as extra `.hs` modules
-in the check set, or hand-author a stub module. Re-measure after — expect a
-large jump as reader/writer modules unblock.
+### P1 — pandoc-types (`Text.Pandoc.Definition`) — IN PROGRESS (2026-07-02)
+Approach that works: `bhc check --package-dir <pandoc-types>/src <pandoc>/src`
+(package-dir modules resolve imports but aren't scored). Fetched pandoc-types
+1.23.1 from Hackage to `/Users/zara/Development/pandoc-types-1.23.1`.
+
+Blockers found + resolved so this loads:
+- `Definition` imports `Paths_pandoc_types` (Cabal autogen module) → stubbed a
+  minimal `Paths_pandoc_types.hs` (`version = makeVersion [1,23,1]`). **General
+  issue**: many Hackage pkgs import `Paths_<pkg>`; a real fix is auto-synthesizing
+  it in bhc.
+- `Definition`/`Builder`/`Generic` used unstubbed external symbols (aeson
+  `toEncoding`/`TaggedObject`, `Seq.dropWhileL/R`, `Map.fromAscList`/
+  `foldMapWithKey`, `Traversable.fmapDefault`, `everywhere'`) → **added to the
+  stub lists** (bhc-lower, commit 7ca995e).
+- **Real parser bug fixed** (commit 30d519a): `(Many xs) <> (Many ys) = … where …`
+  (infix operator def with parenthesized operands) was misparsed as a pattern
+  binding, unbinding the body's `where`/`let` vars. This alone took Builder from
+  22 lowering errors → OK.
+- Curated the vendored `Definition.hs` to ADT-only (removed the aeson TH splice +
+  hand-written JSON instances + `pandocTypesVersion`) since bhc can't yet load
+  TH/aeson-heavy source. **Definition/Builder/Generic now load OK.**
+
+**Result: pandoc 79 → 82 passed (89 → 84 failed).** Modest because the jump is
+capped by the rest of the cluster: `Walk` (13 *type* errors — deeper than stubs,
+likely stub-type mismatches / typeck gaps) and `JSON` (4 lowering errors) still
+fail, and both are widely imported → cascade skips. NEXT: get `Walk` typechecking
+(then re-measure — expect a bigger jump). Then P2.
 
 ### P2 — Cascade-critical internal modules
 Once pandoc-types resolves, re-run and find which remaining failures are
@@ -106,3 +126,5 @@ interaction with OverloadedStrings / list literals in a numeric context.
 |------|--------|--------|---------|
 | (old, stale) | 10 | 195 | 16 |
 | 2026-06-27 | 79 | 90 | 52 |
+| 2026-07-02 (bare `src`) | 79 | 89 | 53 |
+| 2026-07-02 (+pandoc-types package-dir, Def/Builder/Generic loading) | 82 | 84 | 55 |

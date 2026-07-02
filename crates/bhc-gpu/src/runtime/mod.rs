@@ -31,6 +31,11 @@ pub mod cuda;
 #[cfg(feature = "rocm")]
 pub mod rocm;
 
+// Apple Metal runtime: the one GPU backend that actually executes on developer
+// hardware (Apple silicon). macOS-only; the `metal` crate is target-gated.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub mod metal;
+
 use crate::device::{DeviceId, DeviceInfo};
 // Only referenced by the cuda/rocm match arms below.
 #[cfg(any(feature = "cuda", feature = "rocm"))]

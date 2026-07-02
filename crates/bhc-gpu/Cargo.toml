@@ -15,6 +15,10 @@ default = []
 cuda = []
 # AMD ROCm/HIP support
 rocm = []
+# Apple Metal support (macOS only). The `metal` crate is target-gated below, so
+# enabling this feature on a non-macOS target is a harmless no-op (the runtime
+# module is also `cfg(target_os = "macos")`).
+metal = []
 
 [dependencies]
 # Internal crates
@@ -36,6 +40,11 @@ smallvec.workspace = true
 serde.workspace = true
 tracing.workspace = true
 libloading = "0.8"
+
+# Apple Metal runtime binding (macOS only). Compiled only when building for
+# macOS; the `metal` feature gates the runtime code that uses it.
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.29"
 
 [dev-dependencies]
 proptest.workspace = true

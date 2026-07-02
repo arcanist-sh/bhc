@@ -126,6 +126,32 @@ impl MetalRuntime {
     }
 }
 
+/// Enumerate the system-default Apple GPU as a [`DeviceInfo`].
+///
+/// Returns a single-element vector describing the Metal device
+/// (`DeviceKind::Metal`, real product name, unified memory), or an empty vector
+/// if no Metal device is available. This is what lets [`crate::available_devices`]
+/// surface a *real* GPU on macOS instead of falling back to the mock device — so
+/// the `DeviceKind::Metal` branch of the code generator is reached with actual
+/// hardware.
+///
+/// Non-Metal-specific limits reuse [`DeviceInfo::mock`]'s conservative defaults;
+/// querying exact device limits is a follow-up.
+#[must_use]
+pub fn enumerate_devices() -> Vec<crate::device::DeviceInfo> {
+    let Some(rt) = MetalRuntime::new() else {
+        return Vec::new();
+    };
+    let mut info = crate::device::DeviceInfo::mock();
+    info.kind = crate::device::DeviceKind::Metal;
+    info.name = rt.device_name();
+    info.warp_size = 32; // Apple GPU SIMD-group width
+    info.unified_memory = true; // Apple silicon shares CPU/GPU memory
+    info.pci_bus_id = None; // integrated GPU
+    info.compute_capability = (3, 0); // Metal 3
+    vec![info]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +245,24 @@ kernel void scale2(device const float* in0 [[buffer(0)]],
         for (i, &v) in out.iter().enumerate() {
             assert_eq!(v, input[i] * input[i], "mismatch at {i}");
         }
+    }
+
+    /// The Apple GPU is enumerated as a real `Metal` device (not the mock), and
+    /// `available_devices()` surfaces it.
+    #[test]
+    fn enumerates_real_metal_device() {
+        use crate::device::DeviceKind;
+        let devices = enumerate_devices();
+        if devices.is_empty() {
+            eprintln!("no Metal device; skipping");
+            return;
+        }
+        assert_eq!(devices[0].kind, DeviceKind::Metal);
+        assert!(!devices[0].name.is_empty());
+        assert!(devices[0].unified_memory);
+        // The top-level enumeration must include a non-mock device now.
+        let all = crate::available_devices();
+        assert!(all.iter().any(|d| d.kind == DeviceKind::Metal));
     }
 
     /// A malformed MSL source must surface the compiler diagnostic, not panic.

@@ -203,6 +203,11 @@ pub fn available_devices() -> Vec<DeviceInfo> {
     #[cfg(feature = "rocm")]
     devices.extend(runtime::rocm::enumerate_devices().unwrap_or_default());
 
+    // Apple silicon: the Metal GPU is a real, executable device (see
+    // `runtime::metal`), so surface it rather than falling back to the mock.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    devices.extend(runtime::metal::enumerate_devices());
+
     // Fall back to a mock device when no real GPU was found. This covers both
     // the case where no GPU runtime is compiled in and the case where a runtime
     // is present but no hardware is available (e.g. CI / CPU-only machines),

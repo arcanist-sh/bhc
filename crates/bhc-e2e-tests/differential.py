@@ -16,7 +16,7 @@ Usage:
 Requires a built `target/debug/bhc`, `wasmtime` on PATH, and (for the native
 backend) LLVM_SYS_211_PREFIX set.
 """
-import os, sys, subprocess, glob
+import os, sys, subprocess, glob, shutil
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BHC = os.path.join(ROOT, "target/debug/bhc")
@@ -70,9 +70,27 @@ def main():
         ef = os.path.join(d, "expected.txt")
         expected = open(ef).read() if os.path.exists(ef) else None
 
+        # Stage the fixture's data files (e.g. input.txt for readFile) into the
+        # work dir so BOTH backends can open them: native runs with cwd=WORK, and
+        # wasm runs under `wasmtime --dir=.` (WORK). Harness metadata and sources
+        # are excluded. Stale data from a prior fixture is cleared first.
+        META = {"expected.txt", "stdin.txt", "test.toml"}
+        for old in os.listdir(WORK):
+            if old not in ("out", "out.wasm"):
+                try:
+                    os.remove(os.path.join(WORK, old))
+                except OSError:
+                    pass
+        for f in os.listdir(d):
+            if f in META or f.endswith(".hs"):
+                continue
+            src = os.path.join(d, f)
+            if os.path.isfile(src):
+                shutil.copy(src, os.path.join(WORK, f))
+
         n_ok, n_out = backend_output(srcs, [], lambda a: [a], stdin)
         w_ok, w_out = backend_output(srcs, ["--target=wasm32-wasi"],
-                                     lambda a: ["wasmtime", a], stdin)
+                                     lambda a: ["wasmtime", "--dir=.", a], stdin)
 
         if n_ok and w_ok:
             if n_out == w_out:

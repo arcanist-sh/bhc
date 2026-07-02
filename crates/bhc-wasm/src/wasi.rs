@@ -92,6 +92,35 @@ pub fn generate_wasi_imports() -> Vec<WasmImport> {
                 vec![WasmType::I32],
             )),
         },
+        // path_open(dirfd, dirflags, path, path_len, oflags,
+        //           fs_rights_base: u64, fs_rights_inheriting: u64,
+        //           fdflags, opened_fd_out) -> errno
+        // Opens a file relative to a preopened directory fd. Backs host-backed
+        // readFile/writeFile (requires a `--dir` preopen at runtime).
+        WasmImport {
+            module: "wasi_snapshot_preview1".to_string(),
+            name: "path_open".to_string(),
+            kind: WasmImportKind::Func(WasmFuncType::new(
+                vec![
+                    WasmType::I32, // dirfd
+                    WasmType::I32, // dirflags
+                    WasmType::I32, // path ptr
+                    WasmType::I32, // path len
+                    WasmType::I32, // oflags
+                    WasmType::I64, // fs_rights_base
+                    WasmType::I64, // fs_rights_inheriting
+                    WasmType::I32, // fdflags
+                    WasmType::I32, // opened_fd out ptr
+                ],
+                vec![WasmType::I32],
+            )),
+        },
+        // fd_close(fd) -> errno
+        WasmImport {
+            module: "wasi_snapshot_preview1".to_string(),
+            name: "fd_close".to_string(),
+            kind: WasmImportKind::Func(WasmFuncType::new(vec![WasmType::I32], vec![WasmType::I32])),
+        },
     ]
 }
 
@@ -109,6 +138,27 @@ pub const ARGS_GET_IDX: u32 = 4;
 pub const ENVIRON_SIZES_GET_IDX: u32 = 5;
 /// Index of environ_get in imports.
 pub const ENVIRON_GET_IDX: u32 = 6;
+/// Index of path_open in imports.
+pub const PATH_OPEN_IDX: u32 = 7;
+/// Index of fd_close in imports.
+pub const FD_CLOSE_IDX: u32 = 8;
+
+/// The file descriptor of the first `--dir` preopen. WASI runtimes assign
+/// preopened directories starting at fd 3; a program run with `--dir=.` gets the
+/// current directory here. Host-backed file IO opens paths relative to it.
+const PREOPEN_FD: i32 = 3;
+/// `path_open` scratch: 4-byte cell receiving the opened file descriptor.
+const FILE_FD_OUT: i32 = 1036;
+/// `lookupflags`: follow symlinks during path resolution.
+const LOOKUP_SYMLINK_FOLLOW: i32 = 1;
+/// `oflags` bit: create the file if it does not exist.
+const OFLAGS_CREAT: i32 = 1;
+/// `oflags` bit: truncate the file to zero length on open.
+const OFLAGS_TRUNC: i32 = 8;
+/// `rights` bit for `fd_read` (minimal rights requested for reads).
+const RIGHTS_FD_READ: i64 = 2;
+/// `rights` bit for `fd_write` (minimal rights requested for writes).
+const RIGHTS_FD_WRITE: i64 = 64;
 
 /// Stdout file descriptor.
 pub const STDOUT_FD: i32 = 1;
@@ -944,11 +994,230 @@ pub fn generate_int_to_str(alloc_idx: u32) -> WasmFunc {
     func
 }
 
-/// Generate `file_write(path, content)`: store `content` for `path` in the
-/// in-memory file table, replacing any existing entry. Paths are compared by
-/// pointer (interned string literals share a pointer). Each node is
-/// `[path | content | next]` (12 bytes).
-pub fn generate_file_write(alloc_idx: u32, file_table_idx: u32) -> WasmFunc {
+/// Generate `file_read_host(path) -> content | 0`: open `path` relative to the
+/// first `--dir` preopen (fd 3) and read its entire contents into a
+/// length-prefixed string `[len | bytes...]`. Returns 0 if the file cannot be
+/// opened — no preopen (program run without `--dir`) or the path is absent — so
+/// the caller can fall back to the in-memory table or raise. The read loop
+/// mirrors `read_all` but over the opened fd; the fd is closed before returning.
+pub fn generate_file_read_host(
+    path_open_idx: u32,
+    fd_read_idx: u32,
+    fd_close_idx: u32,
+    alloc_idx: u32,
+    heap_ptr_global: u32,
+) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(vec![WasmType::I32], vec![WasmType::I32]));
+    func.name = Some("file_read_host".to_string());
+    func.exported = true;
+
+    let fd = func.add_local(WasmType::I32);
+    let buf = func.add_local(WasmType::I32);
+    let count = func.add_local(WasmType::I32);
+    let cap = func.add_local(WasmType::I32);
+    let want = func.add_local(WasmType::I32);
+    let n = func.add_local(WasmType::I32);
+
+    // path_open(PREOPEN_FD, SYMLINK_FOLLOW, path+4, len, oflags=0 (read existing),
+    //           RIGHTS_FD_READ, RIGHTS_FD_READ, fdflags=0, &FILE_FD_OUT)
+    func.emit(WasmInstr::I32Const(PREOPEN_FD));
+    func.emit(WasmInstr::I32Const(LOOKUP_SYMLINK_FOLLOW));
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::I32Const(PSTR_LEN_MASK));
+    func.emit(WasmInstr::I32And);
+    func.emit(WasmInstr::I32Const(0)); // oflags: open existing for read
+    func.emit(WasmInstr::I64Const(RIGHTS_FD_READ));
+    func.emit(WasmInstr::I64Const(RIGHTS_FD_READ));
+    func.emit(WasmInstr::I32Const(0)); // fdflags
+    func.emit(WasmInstr::I32Const(FILE_FD_OUT));
+    func.emit(WasmInstr::Call(path_open_idx));
+    // errno != 0 -> return 0 (open failed)
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::Return);
+    func.emit(WasmInstr::End);
+    // fd = [FILE_FD_OUT]
+    func.emit(WasmInstr::I32Const(FILE_FD_OUT));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::LocalSet(fd));
+
+    // buf = alloc(READ_CHUNK); cap = READ_CHUNK - 4; count = 0
+    func.emit(WasmInstr::I32Const(READ_CHUNK));
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::LocalSet(buf));
+    func.emit(WasmInstr::I32Const(READ_CHUNK - 4));
+    func.emit(WasmInstr::LocalSet(cap));
+    func.emit(WasmInstr::I32Const(0));
+    func.emit(WasmInstr::LocalSet(count));
+
+    func.emit(WasmInstr::Block(None));
+    func.emit(WasmInstr::Loop(None));
+    // Grow the reservation when full (contiguous chunk; only the bump matters).
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::LocalGet(cap));
+    func.emit(WasmInstr::I32GeU);
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::I32Const(READ_CHUNK));
+    func.emit(WasmInstr::Call(alloc_idx));
+    func.emit(WasmInstr::Drop);
+    func.emit(WasmInstr::LocalGet(cap));
+    func.emit(WasmInstr::I32Const(READ_CHUNK));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(cap));
+    func.emit(WasmInstr::End);
+    // want = cap - count
+    func.emit(WasmInstr::LocalGet(cap));
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Sub);
+    func.emit(WasmInstr::LocalSet(want));
+    // iovec.ptr = buf + 4 + count
+    func.emit(WasmInstr::I32Const(READ_IOVEC_PTR));
+    func.emit(WasmInstr::LocalGet(buf));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Store(2, 0));
+    // iovec.len = want
+    func.emit(WasmInstr::I32Const(READ_IOVEC_LEN));
+    func.emit(WasmInstr::LocalGet(want));
+    func.emit(WasmInstr::I32Store(2, 0));
+    // fd_read(fd, iovec, 1, &nread); break on error
+    func.emit(WasmInstr::LocalGet(fd));
+    func.emit(WasmInstr::I32Const(READ_IOVEC_PTR));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Const(READ_NREAD));
+    func.emit(WasmInstr::Call(fd_read_idx));
+    func.emit(WasmInstr::BrIf(1));
+    // n = nread; if n == 0 (EOF) break
+    func.emit(WasmInstr::I32Const(READ_NREAD));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::LocalSet(n));
+    func.emit(WasmInstr::LocalGet(n));
+    func.emit(WasmInstr::I32Eqz);
+    func.emit(WasmInstr::BrIf(1));
+    // count += n
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::LocalGet(n));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalSet(count));
+    func.emit(WasmInstr::Br(0));
+    func.emit(WasmInstr::End); // loop
+    func.emit(WasmInstr::End); // block
+
+    // Close the fd (ignore errno).
+    func.emit(WasmInstr::LocalGet(fd));
+    func.emit(WasmInstr::Call(fd_close_idx));
+    func.emit(WasmInstr::Drop);
+
+    // [buf] = count | marker
+    func.emit(WasmInstr::LocalGet(buf));
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Const(PSTR_MARKER));
+    func.emit(WasmInstr::I32Or);
+    func.emit(WasmInstr::I32Store(2, 0));
+    // Reclaim the unused tail: heap_ptr = align8(buf + 4 + count).
+    func.emit(WasmInstr::LocalGet(buf));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(count));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Const(7));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Const(-8));
+    func.emit(WasmInstr::I32And);
+    func.emit(WasmInstr::GlobalSet(heap_ptr_global));
+
+    func.emit(WasmInstr::LocalGet(buf));
+    func.emit(WasmInstr::End);
+    func
+}
+
+/// Generate `file_write_host(path, content)`: create/truncate `path` relative to
+/// the first `--dir` preopen (fd 3) and write `content`'s bytes. Best-effort: if
+/// `path_open` fails (no preopen), it returns without error so the caller's
+/// in-memory table still holds the write. Requires `--dir` at runtime to persist.
+pub fn generate_file_write_host(
+    path_open_idx: u32,
+    fd_write_idx: u32,
+    fd_close_idx: u32,
+) -> WasmFunc {
+    let mut func = WasmFunc::new(WasmFuncType::new(
+        vec![WasmType::I32, WasmType::I32], // path, content
+        vec![],
+    ));
+    func.name = Some("file_write_host".to_string());
+    func.exported = true;
+    let fd = func.add_local(WasmType::I32);
+
+    // path_open(PREOPEN_FD, SYMLINK_FOLLOW, path+4, len, CREAT|TRUNC,
+    //           RIGHTS_FD_WRITE, RIGHTS_FD_WRITE, fdflags=0, &FILE_FD_OUT)
+    func.emit(WasmInstr::I32Const(PREOPEN_FD));
+    func.emit(WasmInstr::I32Const(LOOKUP_SYMLINK_FOLLOW));
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::I32Const(PSTR_LEN_MASK));
+    func.emit(WasmInstr::I32And);
+    func.emit(WasmInstr::I32Const(OFLAGS_CREAT | OFLAGS_TRUNC));
+    func.emit(WasmInstr::I64Const(RIGHTS_FD_WRITE));
+    func.emit(WasmInstr::I64Const(RIGHTS_FD_WRITE));
+    func.emit(WasmInstr::I32Const(0)); // fdflags
+    func.emit(WasmInstr::I32Const(FILE_FD_OUT));
+    func.emit(WasmInstr::Call(path_open_idx));
+    // errno != 0 -> give up (no host FS); in-memory table still has the write
+    func.emit(WasmInstr::If(None));
+    func.emit(WasmInstr::Return);
+    func.emit(WasmInstr::End);
+    // fd = [FILE_FD_OUT]
+    func.emit(WasmInstr::I32Const(FILE_FD_OUT));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::LocalSet(fd));
+    // iovec.ptr = content + 4
+    func.emit(WasmInstr::I32Const(READ_IOVEC_PTR));
+    func.emit(WasmInstr::LocalGet(1));
+    func.emit(WasmInstr::I32Const(4));
+    func.emit(WasmInstr::I32Add);
+    func.emit(WasmInstr::I32Store(2, 0));
+    // iovec.len = [content] & MASK
+    func.emit(WasmInstr::I32Const(READ_IOVEC_LEN));
+    func.emit(WasmInstr::LocalGet(1));
+    func.emit(WasmInstr::I32Load(2, 0));
+    func.emit(WasmInstr::I32Const(PSTR_LEN_MASK));
+    func.emit(WasmInstr::I32And);
+    func.emit(WasmInstr::I32Store(2, 0));
+    // fd_write(fd, iovec, 1, &nwritten)
+    func.emit(WasmInstr::LocalGet(fd));
+    func.emit(WasmInstr::I32Const(READ_IOVEC_PTR));
+    func.emit(WasmInstr::I32Const(1));
+    func.emit(WasmInstr::I32Const(READ_NREAD));
+    func.emit(WasmInstr::Call(fd_write_idx));
+    func.emit(WasmInstr::Drop);
+    // fd_close(fd)
+    func.emit(WasmInstr::LocalGet(fd));
+    func.emit(WasmInstr::Call(fd_close_idx));
+    func.emit(WasmInstr::Drop);
+    func.emit(WasmInstr::End);
+    func
+}
+
+/// Generate `file_write(path, content)`: persist `content` to the host
+/// filesystem (best-effort, via `file_write_host`) AND store it in the in-memory
+/// file table, replacing any existing entry. Paths are compared by pointer
+/// (interned string literals share a pointer). Each node is
+/// `[path | content | next]` (12 bytes). The in-memory table guarantees
+/// `writeFile`→`readFile` round-trips even without a `--dir` preopen.
+pub fn generate_file_write(
+    alloc_idx: u32,
+    file_table_idx: u32,
+    file_write_host_idx: u32,
+) -> WasmFunc {
     let mut func = WasmFunc::new(WasmFuncType::new(
         vec![WasmType::I32, WasmType::I32], // path, content
         vec![],
@@ -957,6 +1226,11 @@ pub fn generate_file_write(alloc_idx: u32, file_table_idx: u32) -> WasmFunc {
     func.exported = true;
     let cur = func.add_local(WasmType::I32);
     let node = func.add_local(WasmType::I32);
+
+    // Persist to the host filesystem first (no-op without a --dir preopen).
+    func.emit(WasmInstr::LocalGet(0));
+    func.emit(WasmInstr::LocalGet(1));
+    func.emit(WasmInstr::Call(file_write_host_idx));
 
     func.emit(WasmInstr::GlobalGet(file_table_idx));
     func.emit(WasmInstr::LocalSet(cur));
@@ -1003,7 +1277,11 @@ pub fn generate_file_write(alloc_idx: u32, file_table_idx: u32) -> WasmFunc {
 /// Generate `file_read(path) -> content`: look up the in-memory file table by
 /// pointer. A missing path raises (sets `exn_flag`) and returns a dummy 0 —
 /// modelling "file not found".
-pub fn generate_file_read(file_table_idx: u32, exn_flag_idx: u32) -> WasmFunc {
+pub fn generate_file_read(
+    file_table_idx: u32,
+    exn_flag_idx: u32,
+    file_read_host_idx: u32,
+) -> WasmFunc {
     let mut func = WasmFunc::new(WasmFuncType::new(
         vec![WasmType::I32], // path
         vec![WasmType::I32], // content
@@ -1011,6 +1289,7 @@ pub fn generate_file_read(file_table_idx: u32, exn_flag_idx: u32) -> WasmFunc {
     func.name = Some("file_read".to_string());
     func.exported = true;
     let cur = func.add_local(WasmType::I32);
+    let hostres = func.add_local(WasmType::I32);
 
     func.emit(WasmInstr::GlobalGet(file_table_idx));
     func.emit(WasmInstr::LocalSet(cur));
@@ -1034,7 +1313,15 @@ pub fn generate_file_read(file_table_idx: u32, exn_flag_idx: u32) -> WasmFunc {
     func.emit(WasmInstr::Br(0));
     func.emit(WasmInstr::End); // loop
     func.emit(WasmInstr::End); // block
-                               // Not found: raise and return a dummy value.
+                               // Not in the in-memory table: try the host filesystem.
+    func.emit(WasmInstr::LocalGet(0)); // path
+    func.emit(WasmInstr::Call(file_read_host_idx));
+    func.emit(WasmInstr::LocalTee(hostres));
+    func.emit(WasmInstr::If(None)); // host read succeeded (nonzero) -> return it
+    func.emit(WasmInstr::LocalGet(hostres));
+    func.emit(WasmInstr::Return);
+    func.emit(WasmInstr::End);
+    // Host miss too: raise and return a dummy value.
     func.emit(WasmInstr::I32Const(1));
     func.emit(WasmInstr::GlobalSet(exn_flag_idx));
     func.emit(WasmInstr::I32Const(0));

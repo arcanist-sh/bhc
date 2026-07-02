@@ -4158,6 +4158,16 @@ impl<'a> WasmLowering<'a> {
                     return Ok(());
                 }
             }
+            // `lines`/`words` split a String: coerce the (possibly `pstr`) argument
+            // to a cons-`[Char]` so the cons-based synthesized fn can walk it.
+            if args.len() == 1 && matches!(strip_qualifier(name), "lines" | "words") {
+                let sym = Symbol::intern(strip_qualifier(name));
+                if let Some(&idx) = self.func_map.get(&sym) {
+                    self.emit_ensure_charlist(args[0], instrs, locals, local_count)?;
+                    instrs.push(WasmInstr::Call(idx));
+                    return Ok(());
+                }
+            }
             // `length` works on both string representations: a marked `pstr`
             // returns its stored length; a cons list (incl. cons-`[Char]`) is
             // walked. This keeps `length` correct whether its argument is a
@@ -6131,6 +6141,8 @@ const LIST_PRELUDE_NAMES: &[&str] = &[
     "foldl'",
     "unwords",
     "unlines",
+    "lines",
+    "words",
     "groupBy",
     "insert",
     "unionBy",
@@ -9776,6 +9788,89 @@ fn build_list_fn(name: &str, id: &mut usize) -> Option<(Var, Expr)> {
             plam(
                 xs.clone(),
                 papp(papp2(pref("foldr", id), step, pref("[]", id)), pev(&xs)),
+            )
+        }
+        // lines s = case s of
+        //   [] -> []
+        //   _  -> case break (\c -> c == '\n') s of
+        //           (l, rest) -> l : (case rest of
+        //                               [] -> []            -- trailing '\n' => no empty tail
+        //                               (_:t) -> lines t)
+        "lines" => {
+            let s = pv("s", fresh(id));
+            let c = pv("c", fresh(id));
+            let l = pv("l", fresh(id));
+            let rest = pv("rest", fresh(id));
+            let u = pv("u", fresh(id)); // dropped '\n'
+            let t = pv("t", fresh(id));
+            let h = pv("h", fresh(id));
+            let tl = pv("tl", fresh(id));
+            // \c -> c == '\n' (10)
+            let is_nl = plam(c.clone(), papp2(pref("==", id), pev(&c), pint(10)));
+            let tail_cont = pcase(
+                pev(&rest),
+                vec![
+                    palt("[]", 0, 0, vec![], pref("[]", id)),
+                    palt(
+                        ":",
+                        1,
+                        2,
+                        vec![u.clone(), t.clone()],
+                        papp(pref("lines", id), pev(&t)),
+                    ),
+                ],
+            );
+            let split = pcase(
+                papp2(pref("break", id), is_nl, pev(&s)),
+                vec![palt(
+                    "(,)",
+                    0,
+                    2,
+                    vec![l.clone(), rest.clone()],
+                    papp2(pref(":", id), pev(&l), tail_cont),
+                )],
+            );
+            plam(
+                s.clone(),
+                pcase(
+                    pev(&s),
+                    vec![
+                        palt("[]", 0, 0, vec![], pref("[]", id)),
+                        palt(":", 1, 2, vec![h.clone(), tl.clone()], split),
+                    ],
+                ),
+            )
+        }
+        // words s = case dropWhile isSpace s of
+        //   [] -> []
+        //   (h:tl) -> case break isSpace (h:tl) of (w, s'') -> w : words s''
+        "words" => {
+            let s = pv("s", fresh(id));
+            let h = pv("h", fresh(id));
+            let tl = pv("tl", fresh(id));
+            let w = pv("w", fresh(id));
+            let s2 = pv("s2", fresh(id));
+            // reconstruct the non-empty remainder as (h:tl) so break sees the whole run
+            let sp_list = papp2(pref(":", id), pev(&h), pev(&tl));
+            let split = pcase(
+                papp2(pref("break", id), pref("isSpace", id), sp_list),
+                vec![palt(
+                    "(,)",
+                    0,
+                    2,
+                    vec![w.clone(), s2.clone()],
+                    papp2(pref(":", id), pev(&w), papp(pref("words", id), pev(&s2))),
+                )],
+            );
+            plam(
+                s.clone(),
+                pcase(
+                    papp2(pref("dropWhile", id), pref("isSpace", id), pev(&s)),
+                    vec![
+                        palt("[]", 0, 0, vec![], pref("[]", id)),
+                        palt(":", 1, 2, vec![h.clone(), tl.clone()], split),
+                    ],
+                ),
             )
         }
         // groupBy eq xs = case xs of

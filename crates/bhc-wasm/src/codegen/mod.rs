@@ -690,10 +690,27 @@ impl WasmModule {
         let show_string_func = wasi::generate_show_string(alloc_idx, heap_ptr_idx);
         let show_string_idx = self.add_function(show_string_func);
 
-        // In-memory file table operations.
-        let file_write_func = wasi::generate_file_write(alloc_idx, file_table_idx);
+        // Host-backed file IO (WASI path_open/fd_read/fd_write via a --dir
+        // preopen). Built first so file_read/file_write can call them.
+        let file_read_host_func = wasi::generate_file_read_host(
+            wasi::PATH_OPEN_IDX,
+            wasi::FD_READ_IDX,
+            wasi::FD_CLOSE_IDX,
+            alloc_idx,
+            heap_ptr_idx,
+        );
+        let file_read_host_idx = self.add_function(file_read_host_func);
+        let file_write_host_func =
+            wasi::generate_file_write_host(wasi::PATH_OPEN_IDX, fd_write_idx, wasi::FD_CLOSE_IDX);
+        let file_write_host_idx = self.add_function(file_write_host_func);
+
+        // File table operations: host filesystem first (when a --dir preopen is
+        // present), with an in-memory table backing round-trips without one.
+        let file_write_func =
+            wasi::generate_file_write(alloc_idx, file_table_idx, file_write_host_idx);
         let file_write_idx = self.add_function(file_write_func);
-        let file_read_func = wasi::generate_file_read(file_table_idx, exn_flag_idx);
+        let file_read_func =
+            wasi::generate_file_read(file_table_idx, exn_flag_idx, file_read_host_idx);
         let file_read_idx = self.add_function(file_read_func);
         let file_append_func =
             wasi::generate_file_append(alloc_idx, concat_str_idx, file_table_idx);

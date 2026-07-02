@@ -889,7 +889,18 @@ impl<'src> Parser<'src> {
                         | TokenKind::Tilde
                 );
                 if is_pattern_start {
-                    // This is a pattern binding like (a, b) = expr
+                    // Could be a pattern binding `(a, b) = expr` OR an infix
+                    // operator definition whose first operand is parenthesized,
+                    // e.g. `(W a) <> (W b) = rhs`. Speculatively parse the
+                    // parenthesized pattern; if an infix variable operator
+                    // follows, it is the latter (otherwise, a pattern binding).
+                    let saved = self.pos;
+                    if let Ok(left_pat) = self.parse_pattern() {
+                        if self.is_infix_var_op_start() {
+                            return self.finish_infix_op_def(start, doc.clone(), left_pat);
+                        }
+                    }
+                    self.pos = saved;
                     return self.parse_pattern_binding(start);
                 }
             }
@@ -911,41 +922,8 @@ impl<'src> Parser<'src> {
             // Try parsing a pattern (e.g., `Box f`)
             if let Ok(left_pat) = self.parse_pattern() {
                 if self.is_infix_var_op_start() {
-                    // This is an infix operator definition: pat varop pat = rhs
-                    let op_name = self.parse_infix_op()?;
-                    let right_pat = self.parse_pattern()?;
-
-                    let mut extra_pats = Vec::new();
-                    while self.is_apat_start() {
-                        extra_pats.push(self.parse_atom_pattern()?);
-                    }
-
-                    let rhs = self.parse_binding_rhs()?;
-
-                    let wheres = if self.eat(&TokenKind::Where) {
-                        self.parse_local_decls()?
-                    } else {
-                        vec![]
-                    };
-
-                    let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
-
-                    let mut pats = vec![left_pat, right_pat];
-                    pats.extend(extra_pats);
-
-                    let clause = Clause {
-                        pats,
-                        rhs,
-                        wheres,
-                        span,
-                    };
-
-                    return Ok(Decl::FunBind(FunBind {
-                        doc: doc.clone(),
-                        name: op_name,
-                        clauses: vec![clause],
-                        span,
-                    }));
+                    // Infix operator definition: pat varop pat = rhs
+                    return self.finish_infix_op_def(start, doc.clone(), left_pat);
                 } else if self.check(&TokenKind::Eq) {
                     // Pattern binding: `ConPat = expr`
                     self.expect(&TokenKind::Eq)?;
@@ -1104,6 +1082,55 @@ impl<'src> Parser<'src> {
                 span,
             }))
         }
+    }
+
+    /// Finish parsing an infix operator definition of the form
+    /// `left_pat <op> right_pat [apat...] = rhs [where ...]`, given the
+    /// already-parsed `left_pat`. The cursor must be positioned at the infix
+    /// operator. Shared by the constructor-LHS and parenthesized-LHS paths so
+    /// that both `W a <> W b = ...` and `(W a) <> (W b) = ...` are handled
+    /// identically (previously the parenthesized form was misparsed as a
+    /// pattern binding, which broke `where`/`let` scoping in the body).
+    fn finish_infix_op_def(
+        &mut self,
+        start: Span,
+        doc: Option<DocComment>,
+        left_pat: Pat,
+    ) -> ParseResult<Decl> {
+        let op_name = self.parse_infix_op()?;
+        let right_pat = self.parse_pattern()?;
+
+        let mut extra_pats = Vec::new();
+        while self.is_apat_start() {
+            extra_pats.push(self.parse_atom_pattern()?);
+        }
+
+        let rhs = self.parse_binding_rhs()?;
+
+        let wheres = if self.eat(&TokenKind::Where) {
+            self.parse_local_decls()?
+        } else {
+            vec![]
+        };
+
+        let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+
+        let mut pats = vec![left_pat, right_pat];
+        pats.extend(extra_pats);
+
+        let clause = Clause {
+            pats,
+            rhs,
+            wheres,
+            span,
+        };
+
+        Ok(Decl::FunBind(FunBind {
+            doc,
+            name: op_name,
+            clauses: vec![clause],
+            span,
+        }))
     }
 
     /// Parse a pattern binding: `(a, b) = expr` or `!pat = expr`

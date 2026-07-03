@@ -35,7 +35,8 @@
 //!    default-vs-numeric comparison (which also varies RTS/GC config).
 
 use super::expr_util::fresh_var_id;
-use crate::{Alt, AltCon, Bind, DataCon, Expr, Literal, Ty, Var};
+use super::subst::substitute_single;
+use crate::{Alt, AltCon, Bind, DataCon, Expr, Literal, Ty, Var, VarId};
 use bhc_types::{Kind, TyCon};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
@@ -266,13 +267,15 @@ fn fresh_var(prefix: &str, ty: Ty) -> Var {
 }
 
 /// Build the top-level counting-loop function and the call that replaces a
-/// matched `sum (enumFromTo a b)`.
+/// matched `sum (enumFromTo a b)` or `sum (map f (enumFromTo a b))`.
 ///
-/// Returns `(go_var, go_lambda, replacement)` where `go_lambda` is:
+/// `make_elem(i)` produces the value summed for index `i`: `i` itself for a plain
+/// `sum (enumFromTo …)`, or `f` inlined at `i` (i.e. `f`'s body with its binder
+/// substituted by `i`) for the `map` case. Returns `(go_var, go_lambda, replacement)`:
 ///
 /// ```text
 /// go = \b acc i -> case (i <= b) of
-///                    True  -> go b (acc + i) (i + 1)
+///                    True  -> go b (acc + make_elem(i)) (i + 1)
 ///                    False -> acc
 /// ```
 ///
@@ -280,7 +283,7 @@ fn fresh_var(prefix: &str, ty: Ty) -> Var {
 /// parameter so `go` is **closed** and can live at top level — bhc codegen only
 /// turns *top-level* self-recursive functions into loops (a local `let rec`/
 /// `where` helper does not bind its params: `stub: acc not implemented`).
-fn build_sum_enum_loop(a: &Expr, b: &Expr) -> (Var, Expr, Expr) {
+fn build_sum_enum_loop(a: &Expr, b: &Expr, make_elem: impl Fn(&Expr) -> Expr) -> (Var, Expr, Expr) {
     let go = fresh_var("$sumloop", Ty::Error);
     let bnd = fresh_var("$b", int_ty());
     let acc = fresh_var("$acc", int_ty());
@@ -293,8 +296,8 @@ fn build_sum_enum_loop(a: &Expr, b: &Expr) -> (Var, Expr, Expr) {
 
     // i <= b
     let cond = app2(builtin_var("<="), i_ref(), b_ref());
-    // go b (acc + i) (i + 1)  — a 3-argument application
-    let next_acc = app2(builtin_var("+"), acc_ref(), i_ref());
+    // go b (acc + make_elem(i)) (i + 1)  — a 3-argument application
+    let next_acc = app2(builtin_var("+"), acc_ref(), make_elem(&i_ref()));
     let next_i = app2(builtin_var("+"), i_ref(), int_lit(1));
     let recur = app3(go_ref(), b_ref(), next_acc, next_i);
     // case (i <= b) of True -> recur; False -> acc
@@ -314,8 +317,67 @@ fn build_sum_enum_loop(a: &Expr, b: &Expr) -> (Var, Expr, Expr) {
     (go, go_lam, replacement)
 }
 
-/// Module-level fusion pass: rewrite every `sum (enumFromTo a b)` into a call to
-/// a freshly-generated top-level counting loop, appending those loops to the
+/// Names of primops that are closed over `Int` (map `Int`/`Int,Int` to `Int`) and
+/// that native codegen lowers directly to `i64` machine ops. Used to recognise a
+/// map function that is *manifestly* `Int -> Int` without any type information.
+///
+/// Deliberately excludes `/` (fractional), `fromIntegral`/`realToFrac` (coercions),
+/// and unary `Num` methods whose codegen dispatch is less certain.
+fn is_int_arith_prim(name: &str) -> bool {
+    // Accept both bare operators and their qualified forms (e.g. `GHC.Num.+`).
+    let base = name.rsplit('.').next().unwrap_or(name);
+    matches!(base, "+" | "-" | "*" | "div" | "mod" | "quot" | "rem")
+}
+
+/// Decompose an application into `(head, args)` (left-to-right).
+fn app_spine(e: &Expr) -> (&Expr, Vec<&Expr>) {
+    let mut args = Vec::new();
+    let mut cur = e;
+    while let Expr::App(f, a, _) = cur {
+        args.push(a.as_ref());
+        cur = f.as_ref();
+    }
+    args.reverse();
+    (cur, args)
+}
+
+/// True if `e` computes an `Int` purely from the single binder `x`, `Int`
+/// literals, and [`is_int_arith_prim`] applications — hence, given the loop feeds
+/// it an `i64` (from `enumFromTo`), it yields an `i64`. Any other variable
+/// (unknown function, captured value, potential coercion like `fromIntegral`),
+/// non-`Int` literal, or non-arithmetic node makes it return `false`. Because the
+/// only permitted variable is the binder, a body that passes is also **closed**
+/// (modulo name-dispatched primops), so it can be inlined into a top-level loop.
+fn is_int_arith_body(e: &Expr, x: VarId) -> bool {
+    match e {
+        Expr::Var(v, _) => v.id == x,
+        Expr::Lit(Literal::Int(_), _, _) => true,
+        Expr::App(..) => {
+            let (head, args) = app_spine(e);
+            !args.is_empty()
+                && matches!(head, Expr::Var(v, _) if is_int_arith_prim(v.name.as_str()))
+                && args.iter().all(|a| is_int_arith_body(a, x))
+        }
+        _ => false,
+    }
+}
+
+/// If `f` is a lambda `\x -> body` whose `body` is manifestly `Int -> Int`
+/// ([`is_int_arith_body`]), return `(binder_id, body)` so the caller can inline it
+/// into the counting loop. Returns `None` for anything else (bare functions like
+/// `fromIntegral`, multi-argument lambdas, captures, non-arithmetic bodies).
+fn as_int_map_fn(f: &Expr) -> Option<(VarId, &Expr)> {
+    if let Expr::Lam(x, body, _) = f {
+        if is_int_arith_body(body, x.id) {
+            return Some((x.id, body));
+        }
+    }
+    None
+}
+
+/// Module-level fusion pass: rewrite every `sum (enumFromTo a b)` — and every
+/// `sum (map f (enumFromTo a b))` with a manifestly `Int -> Int` `f` — into a call
+/// to a freshly-generated top-level counting loop, appending those loops to the
 /// module. Returns the number of rewrites performed.
 ///
 /// # Why this is safe without types (unlike [`try_fuse_sum_map`])
@@ -324,9 +386,14 @@ fn build_sum_enum_loop(a: &Expr, b: &Expr) -> (Var, Expr, Expr) {
 /// is `i64`, boxing via `int_to_ptr`; a `Double` range like `[1.0..3.0]` is a
 /// different producer). So `sum (enumFromTo a b)` is always an `i64` sum, and the
 /// generated loop reproduces exactly that — seed `0`, accumulate with `i64 +`,
-/// compare with `i64 <=` — independent of the erased Core types. There is no
-/// `map`: a type-changing `map` such as `fromIntegral` would make the accumulator
-/// `Double`, which cannot be detected here without types, so it is not handled.
+/// compare with `i64 <=` — independent of the erased Core types.
+///
+/// The `map` case is admitted **only** when [`as_int_map_fn`] proves `f` is
+/// manifestly `Int -> Int` (its body is built solely from the binder, `Int`
+/// literals, and `Int`-closed primops). This structurally excludes the one hazard
+/// a type-free rewrite would otherwise hit — a type-changing map such as
+/// `fromIntegral`, which would make the accumulator `Double`. `f` is inlined at
+/// the loop index, so the loop stays a tight `i64` loop.
 ///
 /// Measured: `sum [1..100M]` drops from ~2.5s to ~40ms (the top-level loop is
 /// TCO'd to a tight native loop by LLVM).
@@ -385,8 +452,22 @@ fn rewrite_sum_enum(e: &mut Expr, hoisted: &mut Vec<Bind>) {
 
     // Now try to rewrite this node.
     if let Some(list_arg) = as_named_app1(e, "sum") {
+        // Case 1: sum (map f (enumFromTo a b)), f manifestly Int -> Int.
+        if let Some((_, f, inner)) = as_map_app(list_arg) {
+            if let (Some((a, b)), Some((xid, body))) =
+                (as_enum_from_to(inner), as_int_map_fn(f))
+            {
+                let body = body.clone();
+                let (go, go_lam, replacement) =
+                    build_sum_enum_loop(a, b, |i| substitute_single(body.clone(), xid, i));
+                hoisted.push(Bind::NonRec(go, Box::new(go_lam)));
+                *e = replacement;
+                return;
+            }
+        }
+        // Case 2: sum (enumFromTo a b).
         if let Some((a, b)) = as_enum_from_to(list_arg) {
-            let (go, go_lam, replacement) = build_sum_enum_loop(a, b);
+            let (go, go_lam, replacement) = build_sum_enum_loop(a, b, |i| i.clone());
             hoisted.push(Bind::NonRec(go, Box::new(go_lam)));
             *e = replacement;
         }
@@ -569,6 +650,68 @@ mod tests {
             Span::default(),
         );
         let mut m = one_binding_module(body);
+        assert_eq!(fuse_sum_enum_module(&mut m), 0);
+        assert_eq!(m.bindings.len(), 1);
+    }
+
+    fn enum_1_10() -> Expr {
+        app2(var("enumFromTo", 30, Ty::Error), int_lit(1), int_lit(10))
+    }
+
+    /// `sum (map (\x -> <body>) (enumFromTo 1 10))` with the given lambda body.
+    fn sum_map_enum(binder: Var, body: Expr) -> Expr {
+        let f = Expr::Lam(binder, Box::new(body), Span::default());
+        Expr::App(
+            Box::new(var("sum", 42, Ty::Error)),
+            Box::new(map_app(f, enum_1_10())),
+            Span::default(),
+        )
+    }
+
+    #[test]
+    fn fuses_sum_map_enum_when_fn_is_int_arith() {
+        // sum (map (\x -> x * 2) (enumFromTo 1 10)) — fires.
+        let x = Var::new(Symbol::intern("x"), VarId::new(40), int_ty());
+        let body = app2(
+            var("*", 41, Ty::Error),
+            Expr::Var(x.clone(), Span::default()),
+            int_lit(2),
+        );
+        let mut m = one_binding_module(sum_map_enum(x, body));
+        assert_eq!(fuse_sum_enum_module(&mut m), 1);
+        assert_eq!(m.bindings.len(), 2);
+        let Bind::NonRec(_, main_body) = &m.bindings[0] else {
+            panic!("expected main NonRec");
+        };
+        assert!(head_name(main_body).unwrap().starts_with("$sumloop"));
+    }
+
+    #[test]
+    fn does_not_fuse_sum_map_enum_unknown_fn() {
+        // sum (map (\x -> g x) (enumFromTo 1 10)) — unknown `g` (could be a
+        // coercion like fromIntegral) must decline.
+        let x = Var::new(Symbol::intern("x"), VarId::new(40), int_ty());
+        let body = Expr::App(
+            Box::new(var("g", 41, Ty::Error)),
+            Box::new(Expr::Var(x.clone(), Span::default())),
+            Span::default(),
+        );
+        let mut m = one_binding_module(sum_map_enum(x, body));
+        assert_eq!(fuse_sum_enum_module(&mut m), 0);
+        assert_eq!(m.bindings.len(), 1);
+    }
+
+    #[test]
+    fn does_not_fuse_sum_map_enum_free_capture() {
+        // sum (map (\x -> x + k) (enumFromTo 1 10)) — `k` is not the binder, so
+        // the body is not closed and must decline (inlining would free `k`).
+        let x = Var::new(Symbol::intern("x"), VarId::new(40), int_ty());
+        let body = app2(
+            var("+", 41, Ty::Error),
+            Expr::Var(x.clone(), Span::default()),
+            var("k", 43, int_ty()),
+        );
+        let mut m = one_binding_module(sum_map_enum(x, body));
         assert_eq!(fuse_sum_enum_module(&mut m), 0);
         assert_eq!(m.bindings.len(), 1);
     }

@@ -16,6 +16,7 @@ pub mod case;
 pub mod dead;
 pub mod expr_util;
 pub mod fold;
+pub mod fuse;
 pub mod inline;
 pub mod occurrence;
 pub mod subst;
@@ -39,6 +40,9 @@ pub struct SimplifyConfig {
     pub constant_fold: bool,
     /// Whether to enable case-of-case (default true).
     pub case_of_case: bool,
+    /// Whether to enable list-fusion rewrites (the guaranteed fusion patterns).
+    /// The driver enables this only for the Numeric profile. Default false.
+    pub fuse_lists: bool,
     /// Names exported from the module. `None` means all top-level bindings
     /// are treated as exported (conservative). `Some(set)` enables dead
     /// binding elimination for non-exported, non-protected bindings.
@@ -53,6 +57,7 @@ impl Default for SimplifyConfig {
             case_of_case_budget: 100,
             constant_fold: true,
             case_of_case: true,
+            fuse_lists: false,
             exported_names: None,
         }
     }
@@ -107,6 +112,8 @@ pub struct SimplifyStats {
     pub constant_folds: usize,
     /// Number of inlines performed.
     pub inlines: usize,
+    /// Number of list-fusion rewrites performed (Numeric profile).
+    pub list_fusions: usize,
 }
 
 /// Simplify a Core module in place.
@@ -296,6 +303,16 @@ fn simplify_expr(
             }
 
             let result = Expr::App(Box::new(f), Box::new(a), span);
+
+            // Try list fusion (Numeric profile): map f (map g xs) -> map (f.g) xs.
+            // Re-simplify the fused form so the composed lambda beta-reduces and
+            // any newly-exposed nested map/map fuses on this pass.
+            if config.fuse_lists {
+                if let Some(fused) = fuse::try_fuse_map_map(&result) {
+                    stats.list_fusions += 1;
+                    return simplify_expr(fused, inline_env, config, stats);
+                }
+            }
 
             // Try constant folding
             if config.constant_fold {

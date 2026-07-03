@@ -1111,6 +1111,9 @@ impl Compiler {
             });
             let config = bhc_core::simplify::SimplifyConfig {
                 exported_names,
+                // Enable the guaranteed list-fusion patterns only in the Numeric
+                // profile (its performance contract).
+                fuse_lists: self.session.profile() == Profile::Numeric,
                 ..bhc_core::simplify::SimplifyConfig::from_opt_level(self.session.options.opt_level)
             };
             let stats = bhc_core::simplify::simplify_module(&mut core, &config);

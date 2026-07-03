@@ -438,7 +438,7 @@ The compiler builds cleanly (33 crates, 0 errors) and compiles real Haskell prog
 | 3.8 Pinned Buffers | 🟢 | bhc-rts-alloc | PinnedAllocator, PinnedBuffer, FFI API |
 | 3.9 Kernel Reports | 🟢 | bhc-tensor-ir | Fusion report generation |
 
-**Exit Criteria:** `sum (map (*2) [1..1000000])` fuses to single loop, runs 10x faster than interpreted.
+**Exit Criteria:** `sum (map (*2) [1..1000000])` fuses to single loop, runs 10x faster than interpreted. **⚠️ NOT MET on native (measured 2026-07-03):** the kernel report shows 0 fused/0 kernels for this program and numeric-profile timing equals default — bhc has no native list fusion (the Tensor/Loop fusion pipeline only feeds GPU/WASM + the report; native compiles Core→LLVM unfused, and `lower_module` recognizes 0 ops for list code). Making the numeric profile an honest native perf contract needs a Core→Core fusion pass for the 4 guaranteed patterns (+ enumFromTo elimination). See ROADMAP Phase 3 exit criteria.
 
 ### Phase 4: WASM Backend 🟡 70% COMPLETE
 

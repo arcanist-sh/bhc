@@ -352,18 +352,31 @@ Tasks:
 - [x] Implement reference counting for pinned
 - [x] Test: FFI buffer survives GC
 
-### Phase 3 Exit Criteria ✅
+### Phase 3 Exit Criteria — 🔴 NOT MET on native (corrected 2026-07-03)
 
 ```haskell
 {-# OPTIONS_BHC -profile=numeric #-}
 main = print $ sum $ map (*2) [1..10000000]
 ```
 
-- ✅ Fuses to single loop
-- ✅ `--kernel-report` shows fusion occurred
-- ✅ Generated code uses SIMD
+**Measured reality (2026-07-03):** for this exact program the numeric profile does
+NOT fuse on the native target:
+- `--kernel-report` shows **0 fused / 0 loops / 0 kernels** (empty).
+- Runtime is **identical to the default profile** (`sum (map (*2) (map (+1) [1..20M]))`
+  takes ~7 s under both — a fused strict loop would take tens of ms).
+- Root cause: (1) `bhc_tensor_ir::lower::lower_module` recognizes **0 ops** for
+  standard list programs (it only lowers actual tensor ops), and (2) even when it
+  does, the **native codegen ignores the fused Loop IR** — the Tensor/Loop pipeline
+  in `bhc-driver` feeds only GPU (`tensor_kernels_for_gpu`) and WASM
+  (`loop_irs_for_wasm`) + the kernel report; native still compiles Core→LLVM
+  unfused. bhc has **no list fusion in the Core simplifier** at all.
 
-**Completed!** Commit `312f08c`
+So the numeric profile is currently a behavioral/config selector without the
+native fusion performance contract it advertises. Making it honest needs a
+Core→Core fusion pass (the 4 guaranteed patterns + enumFromTo elimination) that
+native codegen already consumes — a real feature, tracked as the next Numeric
+work. The prior "✅ Completed, commit 312f08c" claim was not validated against a
+run.
 
 ---
 
@@ -760,7 +773,7 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 |-------|-------------|--------|------------|---------------|
 | 1 | Native Hello World | ✅ Complete | 100% | 6/6 E2E tests pass |
 | 2 | Language Completeness | ✅ Complete | 100% | 59/59 interpreter tests pass |
-| 3 | Numeric Profile | ✅ Complete | 100% | Fusion passes, vectorization, parallelization implemented |
+| 3 | Numeric Profile | 🟡 Partial | ~60% | Fusion/vectorize/parallelize passes exist + feed GPU/WASM + kernel report, BUT native list fusion is NOT delivered: 0 kernels for `sum (map f xs)`, timing == default, native codegen ignores the fused Loop IR (2026-07-03 measurement). Not an honest native perf contract yet — see Phase 3 exit criteria. |
 | 4 | WASM Backend | 🟡 In Progress | 75% | Valid WASM binaries; 0/6 E2E output tests pass (needs Core IR → WASM lowering) |
 | 5 | Server Profile | ✅ Complete | 100% | Scheduler, STM, cancellation, deadlines all tested |
 | 6 | GPU Backend | 🟡 In Progress | 80% | 2/2 mock tests pass; needs CUDA hardware |

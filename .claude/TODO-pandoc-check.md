@@ -110,9 +110,18 @@ Walk STILL has the same 13 errors, rooted in **3× `expected MetaValue, found [B
 in `walkMetaValueM'`/`queryMetaValue'` — these use the STUBBED `M.fromAscList`/
 `M.foldMapWithKey`/`M.toAscList`, whose imprecise stub *types* mis-infer (MetaValue
 has a `MetaBlocks [Block]` ctor), and the `No instance for Walkable Block [Block]`
-errors cascade from that. So the real Walk blocker is **stub functions need
-correct types (or real Data.Map)** — a deeper effort than name-only stubs. NEXT
-decision: typed-stub mechanism vs vendor real Data.Map vs move to other modules.
+errors cascade from that. **Typed stubs added** (commit 46c94c3): `Data.Map.fromAscList`/`fromDistinctAscList`
+(→ fromList group) and `foldMapWithKey :: (k->v->m) -> Map k v -> m`, via the
+existing typed-stub match in `bhc-typeck/src/context.rs` (~line 3876+). Verified
+in isolation. **But this did NOT change Walk's 13 errors** — so the `[Block]`
+mis-inference is NOT the Map stubs. The real Walk blocker is DEEPER: a typeck
+inference bug in the recursive multi-param `Walkable`/`MetaValue` handling
+(`walkMetaValueM'`/`queryMetaValue'`, Walk.hs ~L544/566) where bhc infers
+`[Block]` where `MetaValue` is expected — likely conflating types across
+`Walkable MetaValue MetaValue` instance resolution (MetaValue has a
+`MetaBlocks [Block]` ctor). This is a genuine typeck investigation, not a stub or
+matcher fix. NEXT decision: root-cause that typeck bug (deep) vs pivot to
+Walk-independent pandoc modules (P2) vs reassess.
 
 ### P2 — Cascade-critical internal modules
 Once pandoc-types resolves, re-run and find which remaining failures are

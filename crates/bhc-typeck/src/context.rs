@@ -4338,7 +4338,7 @@ impl TyCtxt {
                         Ty::fun(map_kv, Ty::List(Box::new(Ty::Var(b.clone())))),
                     )
                 }
-                "Data.Map.fromList" => {
+                "Data.Map.fromList" | "Data.Map.fromAscList" | "Data.Map.fromDistinctAscList" => {
                     // fromList :: Ord k => [(k, v)] -> Map k v
                     let k = a.clone();
                     let v = b.clone();
@@ -4358,6 +4358,35 @@ impl TyCtxt {
                     );
                     let pair = Ty::Tuple(vec![Ty::Var(k.clone()), Ty::Var(v.clone())]);
                     Scheme::poly(vec![k, v], Ty::fun(Ty::List(Box::new(pair)), map_kv))
+                }
+                "Data.Map.foldMapWithKey" => {
+                    // foldMapWithKey :: Monoid m => (k -> v -> m) -> Map k v -> m
+                    let k = a.clone();
+                    let v = b.clone();
+                    let m = TyVar::new_star(0xFFFF_0003);
+                    let map_con = TyCon::new(
+                        Symbol::intern("Map"),
+                        Kind::Arrow(
+                            Box::new(Kind::Star),
+                            Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+                        ),
+                    );
+                    let map_kv = Ty::App(
+                        Box::new(Ty::App(
+                            Box::new(Ty::Con(map_con)),
+                            Box::new(Ty::Var(k.clone())),
+                        )),
+                        Box::new(Ty::Var(v.clone())),
+                    );
+                    // (k -> v -> m) -> Map k v -> m
+                    let f = Ty::fun(
+                        Ty::Var(k.clone()),
+                        Ty::fun(Ty::Var(v.clone()), Ty::Var(m.clone())),
+                    );
+                    Scheme::poly(
+                        vec![k, v, m.clone()],
+                        Ty::fun(f, Ty::fun(map_kv, Ty::Var(m))),
+                    )
                 }
                 "Data.Map.fromListWith" => {
                     // fromListWith :: Ord k => (v -> v -> v) -> [(k, v)] -> Map k v

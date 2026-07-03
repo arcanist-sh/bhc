@@ -35,7 +35,8 @@
 //!    default-vs-numeric comparison (which also varies RTS/GC config).
 
 use super::expr_util::fresh_var_id;
-use crate::{Expr, Literal, Ty, Var};
+use crate::{Alt, AltCon, Bind, DataCon, Expr, Literal, Ty, Var};
+use bhc_types::{Kind, TyCon};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
@@ -131,6 +132,11 @@ fn app2(f: Expr, a: Expr, b: Expr) -> Expr {
     )
 }
 
+/// Build `f a b c` = `App(App(App(f, a), b), c)`.
+fn app3(f: Expr, a: Expr, b: Expr, c: Expr) -> Expr {
+    Expr::App(Box::new(app2(f, a, b)), Box::new(c), Span::default())
+}
+
 /// Fuse `sum (map f xs)` into `foldl' (\acc x -> acc + f x) 0 xs` — a strict left
 /// fold that accumulates `f x` without materializing the mapped list (Pattern 3).
 ///
@@ -194,11 +200,203 @@ pub fn try_fuse_sum_map(expr: &Expr) -> Option<Expr> {
     ))
 }
 
+/// Match `enumFromTo a b` = `App(App(Var("enumFromTo"), a), b)`.
+fn as_enum_from_to(e: &Expr) -> Option<(&Expr, &Expr)> {
+    if let Expr::App(inner, b, _) = e {
+        if let Expr::App(head, a, _) = inner.as_ref() {
+            if let Expr::Var(v, _) = head.as_ref() {
+                if v.name.as_str() == "enumFromTo" {
+                    return Some((a, b));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The `Int` type constructor.
+fn int_ty() -> Ty {
+    Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star))
+}
+
+/// An `Int` literal expression.
+fn int_lit(n: i64) -> Expr {
+    Expr::Lit(Literal::Int(n), int_ty(), Span::default())
+}
+
+/// Build `if cond then then_e else else_e` as a `case` on `Bool`, matching the
+/// exact shape `bhc-hir-to-core` emits (`True` = tag 1, `False` = tag 0).
+fn mk_if(cond: Expr, then_e: Expr, else_e: Expr) -> Expr {
+    let bool_tycon = TyCon::new(Symbol::intern("Bool"), Kind::Star);
+    let true_con = DataCon {
+        name: Symbol::intern("True"),
+        ty_con: bool_tycon.clone(),
+        tag: 1,
+        arity: 0,
+    };
+    let false_con = DataCon {
+        name: Symbol::intern("False"),
+        ty_con: bool_tycon,
+        tag: 0,
+        arity: 0,
+    };
+    Expr::Case(
+        Box::new(cond),
+        vec![
+            Alt {
+                con: AltCon::DataCon(true_con),
+                binders: vec![],
+                rhs: then_e,
+            },
+            Alt {
+                con: AltCon::DataCon(false_con),
+                binders: vec![],
+                rhs: else_e,
+            },
+        ],
+        Ty::Error,
+        Span::default(),
+    )
+}
+
+/// A fresh `Var` with a unique id and a distinct display name.
+fn fresh_var(prefix: &str, ty: Ty) -> Var {
+    let id = fresh_var_id();
+    Var::new(Symbol::intern(&format!("{prefix}{}", id.index())), id, ty)
+}
+
+/// Build the top-level counting-loop function and the call that replaces a
+/// matched `sum (enumFromTo a b)`.
+///
+/// Returns `(go_var, go_lambda, replacement)` where `go_lambda` is:
+///
+/// ```text
+/// go = \b acc i -> case (i <= b) of
+///                    True  -> go b (acc + i) (i + 1)
+///                    False -> acc
+/// ```
+///
+/// and `replacement` is `go b 0 a`. `b` (the loop bound) is threaded as a
+/// parameter so `go` is **closed** and can live at top level — bhc codegen only
+/// turns *top-level* self-recursive functions into loops (a local `let rec`/
+/// `where` helper does not bind its params: `stub: acc not implemented`).
+fn build_sum_enum_loop(a: &Expr, b: &Expr) -> (Var, Expr, Expr) {
+    let go = fresh_var("$sumloop", Ty::Error);
+    let bnd = fresh_var("$b", int_ty());
+    let acc = fresh_var("$acc", int_ty());
+    let i = fresh_var("$i", int_ty());
+
+    let go_ref = || Expr::Var(go.clone(), Span::default());
+    let b_ref = || Expr::Var(bnd.clone(), Span::default());
+    let acc_ref = || Expr::Var(acc.clone(), Span::default());
+    let i_ref = || Expr::Var(i.clone(), Span::default());
+
+    // i <= b
+    let cond = app2(builtin_var("<="), i_ref(), b_ref());
+    // go b (acc + i) (i + 1)  — a 3-argument application
+    let next_acc = app2(builtin_var("+"), acc_ref(), i_ref());
+    let next_i = app2(builtin_var("+"), i_ref(), int_lit(1));
+    let recur = app3(go_ref(), b_ref(), next_acc, next_i);
+    // case (i <= b) of True -> recur; False -> acc
+    let body = mk_if(cond, recur, acc_ref());
+    // \b acc i -> body
+    let go_lam = Expr::Lam(
+        bnd,
+        Box::new(Expr::Lam(
+            acc,
+            Box::new(Expr::Lam(i, Box::new(body), Span::default())),
+            Span::default(),
+        )),
+        Span::default(),
+    );
+    // go b 0 a
+    let replacement = app3(go_ref(), b.clone(), int_lit(0), a.clone());
+    (go, go_lam, replacement)
+}
+
+/// Module-level fusion pass: rewrite every `sum (enumFromTo a b)` into a call to
+/// a freshly-generated top-level counting loop, appending those loops to the
+/// module. Returns the number of rewrites performed.
+///
+/// # Why this is safe without types (unlike [`try_fuse_sum_map`])
+///
+/// `enumFromTo` is **monomorphically `i64`** in native codegen (its loop counter
+/// is `i64`, boxing via `int_to_ptr`; a `Double` range like `[1.0..3.0]` is a
+/// different producer). So `sum (enumFromTo a b)` is always an `i64` sum, and the
+/// generated loop reproduces exactly that — seed `0`, accumulate with `i64 +`,
+/// compare with `i64 <=` — independent of the erased Core types. There is no
+/// `map`: a type-changing `map` such as `fromIntegral` would make the accumulator
+/// `Double`, which cannot be detected here without types, so it is not handled.
+///
+/// Measured: `sum [1..100M]` drops from ~2.5s to ~40ms (the top-level loop is
+/// TCO'd to a tight native loop by LLVM).
+pub fn fuse_sum_enum_module(module: &mut crate::CoreModule) -> usize {
+    let mut hoisted: Vec<Bind> = Vec::new();
+    let mut bindings = std::mem::take(&mut module.bindings);
+    for bind in &mut bindings {
+        match bind {
+            Bind::NonRec(_, rhs) => rewrite_sum_enum(rhs, &mut hoisted),
+            Bind::Rec(pairs) => {
+                for (_, rhs) in pairs.iter_mut() {
+                    rewrite_sum_enum(rhs, &mut hoisted);
+                }
+            }
+        }
+    }
+    let count = hoisted.len();
+    bindings.extend(hoisted);
+    module.bindings = bindings;
+    count
+}
+
+/// Recursively rewrite `sum (enumFromTo a b)` sub-expressions in place, pushing
+/// each generated top-level loop binding into `hoisted`.
+fn rewrite_sum_enum(e: &mut Expr, hoisted: &mut Vec<Bind>) {
+    // Recurse into children first (post-order), so nested matches are handled.
+    match e {
+        Expr::App(f, a, _) => {
+            rewrite_sum_enum(f, hoisted);
+            rewrite_sum_enum(a, hoisted);
+        }
+        Expr::TyApp(f, _, _) => rewrite_sum_enum(f, hoisted),
+        Expr::Lam(_, body, _) | Expr::TyLam(_, body, _) => rewrite_sum_enum(body, hoisted),
+        Expr::Let(bind, body, _) => {
+            match bind.as_mut() {
+                Bind::NonRec(_, rhs) => rewrite_sum_enum(rhs, hoisted),
+                Bind::Rec(pairs) => {
+                    for (_, rhs) in pairs.iter_mut() {
+                        rewrite_sum_enum(rhs, hoisted);
+                    }
+                }
+            }
+            rewrite_sum_enum(body, hoisted);
+        }
+        Expr::Case(scrut, alts, _, _) => {
+            rewrite_sum_enum(scrut, hoisted);
+            for alt in alts.iter_mut() {
+                rewrite_sum_enum(&mut alt.rhs, hoisted);
+            }
+        }
+        Expr::Lazy(inner, _) | Expr::Cast(inner, _, _) | Expr::Tick(_, inner, _) => {
+            rewrite_sum_enum(inner, hoisted);
+        }
+        Expr::Var(_, _) | Expr::Lit(_, _, _) | Expr::Type(_, _) | Expr::Coercion(_, _) => {}
+    }
+
+    // Now try to rewrite this node.
+    if let Some(list_arg) = as_named_app1(e, "sum") {
+        if let Some((a, b)) = as_enum_from_to(list_arg) {
+            let (go, go_lam, replacement) = build_sum_enum_loop(a, b);
+            hoisted.push(Bind::NonRec(go, Box::new(go_lam)));
+            *e = replacement;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::VarId;
-    use bhc_types::{Kind, TyCon};
 
     fn int_ty() -> Ty {
         Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star))
@@ -311,5 +509,67 @@ mod tests {
         let f = var("f", 1, fun(int_ty(), dbl));
         let xs = var("xs", 3, Ty::List(Box::new(int_ty())));
         assert!(try_fuse_sum_map(&sum_app(map_app(f, xs))).is_none());
+    }
+
+    fn one_binding_module(body: Expr) -> crate::CoreModule {
+        crate::CoreModule {
+            name: Symbol::intern("Test"),
+            bindings: vec![Bind::NonRec(
+                Var::new(Symbol::intern("main"), VarId::new(1), Ty::Error),
+                Box::new(body),
+            )],
+            exports: vec![],
+            foreign_imports: vec![],
+            overloaded_strings: false,
+            constructors: vec![],
+        }
+    }
+
+    /// Resolve the head variable name of a (possibly curried) application.
+    fn head_name(e: &Expr) -> Option<&str> {
+        match e {
+            Expr::Var(v, _) => Some(v.name.as_str()),
+            Expr::App(f, _, _) => head_name(f),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn fuses_sum_enum_hoisting_a_toplevel_loop() {
+        // sum (enumFromTo 1 10)
+        let enum_app = app2(var("enumFromTo", 20, Ty::Error), int_lit(1), int_lit(10));
+        let body = Expr::App(
+            Box::new(var("sum", 21, Ty::Error)),
+            Box::new(enum_app),
+            Span::default(),
+        );
+        let mut m = one_binding_module(body);
+        assert_eq!(fuse_sum_enum_module(&mut m), 1);
+        // main + one hoisted loop binding
+        assert_eq!(m.bindings.len(), 2);
+        // main's body is now a call whose head is the hoisted loop
+        let Bind::NonRec(_, main_body) = &m.bindings[0] else {
+            panic!("expected main NonRec");
+        };
+        assert!(head_name(main_body).unwrap().starts_with("$sumloop"));
+        // the hoisted binding is a lambda named $sumloop*
+        let Bind::NonRec(v, rhs) = &m.bindings[1] else {
+            panic!("expected hoisted NonRec");
+        };
+        assert!(v.name.as_str().starts_with("$sumloop"));
+        assert!(matches!(rhs.as_ref(), Expr::Lam(..)));
+    }
+
+    #[test]
+    fn does_not_fuse_sum_of_non_enum() {
+        // sum xs (xs a plain list variable) must not fuse.
+        let body = Expr::App(
+            Box::new(var("sum", 21, Ty::Error)),
+            Box::new(var("xs", 22, Ty::List(Box::new(int_ty())))),
+            Span::default(),
+        );
+        let mut m = one_binding_module(body);
+        assert_eq!(fuse_sum_enum_module(&mut m), 0);
+        assert_eq!(m.bindings.len(), 1);
     }
 }

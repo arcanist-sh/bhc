@@ -827,6 +827,19 @@ pub fn types_match_with_subst(pattern: &Ty, target: &Ty, subst: &mut Subst) -> b
         // List types: match element types
         (Ty::List(e1), Ty::List(e2)) => types_match_with_subst(e1, e2, subst),
 
+        // A list `[e]` is sugar for `[] e`, so an application pattern `f a` can
+        // match it (and vice-versa): match `f` against the list type constructor
+        // and `a` against the element. This lets a higher-kinded instance head
+        // like `Walkable a (t b)` resolve against a concrete `Walkable a [b]`.
+        (Ty::App(f, a), Ty::List(e)) => {
+            let list_con = Ty::Con(TyCon::new(Symbol::intern("[]"), Kind::star_to_star()));
+            types_match_with_subst(f, &list_con, subst) && types_match_with_subst(a, e, subst)
+        }
+        (Ty::List(e), Ty::App(f, a)) => {
+            let list_con = Ty::Con(TyCon::new(Symbol::intern("[]"), Kind::star_to_star()));
+            types_match_with_subst(&list_con, f, subst) && types_match_with_subst(e, a, subst)
+        }
+
         // Forall types: match bodies (simplified, no alpha-renaming)
         (Ty::Forall(_, body1), Ty::Forall(_, body2)) => types_match_with_subst(body1, body2, subst),
 

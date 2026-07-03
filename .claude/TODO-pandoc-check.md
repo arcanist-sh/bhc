@@ -99,10 +99,20 @@ Blockers found + resolved so this loads:
   TH/aeson-heavy source. **Definition/Builder/Generic now load OK.**
 
 **Result: pandoc 79 → 82 passed (89 → 84 failed).** Modest because the jump is
-capped by the rest of the cluster: `Walk` (13 *type* errors — deeper than stubs,
-likely stub-type mismatches / typeck gaps) and `JSON` (4 lowering errors) still
-fail, and both are widely imported → cascade skips. NEXT: get `Walk` typechecking
-(then re-measure — expect a bigger jump). Then P2.
+capped by the rest of the cluster: `Walk` (13 type errors) and `JSON` (4 lowering
+errors) still fail, and both are widely imported → cascade skips.
+
+`Walk` investigation (2026-07-02/03): its `Walkable a b` multi-param class has a
+flexible catch-all `instance (Foldable t, Traversable t, Walkable a b) => Walkable a (t b)`.
+bhc couldn't match that head against concrete `[b]` — **FIXED** (commit 3fca571,
+`types_match_with_subst` App-vs-List; verified in isolation, general win). But
+Walk STILL has the same 13 errors, rooted in **3× `expected MetaValue, found [Block]`**
+in `walkMetaValueM'`/`queryMetaValue'` — these use the STUBBED `M.fromAscList`/
+`M.foldMapWithKey`/`M.toAscList`, whose imprecise stub *types* mis-infer (MetaValue
+has a `MetaBlocks [Block]` ctor), and the `No instance for Walkable Block [Block]`
+errors cascade from that. So the real Walk blocker is **stub functions need
+correct types (or real Data.Map)** — a deeper effort than name-only stubs. NEXT
+decision: typed-stub mechanism vs vendor real Data.Map vs move to other modules.
 
 ### P2 — Cascade-critical internal modules
 Once pandoc-types resolves, re-run and find which remaining failures are

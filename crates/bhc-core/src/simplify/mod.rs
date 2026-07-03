@@ -304,11 +304,15 @@ fn simplify_expr(
 
             let result = Expr::App(Box::new(f), Box::new(a), span);
 
-            // Try list fusion (Numeric profile): map f (map g xs) -> map (f.g) xs.
-            // Re-simplify the fused form so the composed lambda beta-reduces and
-            // any newly-exposed nested map/map fuses on this pass.
+            // Try list fusion (Numeric profile): the guaranteed patterns
+            // `map f (map g xs)` -> `map (f.g) xs` and `sum (map f xs)` ->
+            // `foldl' (\acc x -> acc + f x) 0 xs`. Re-simplify the fused form so
+            // the composed lambda beta-reduces and any newly-exposed pattern
+            // (e.g. sum over a just-fused map) fuses on this pass.
             if config.fuse_lists {
-                if let Some(fused) = fuse::try_fuse_map_map(&result) {
+                if let Some(fused) =
+                    fuse::try_fuse_map_map(&result).or_else(|| fuse::try_fuse_sum_map(&result))
+                {
                     stats.list_fusions += 1;
                     return simplify_expr(fused, inline_env, config, stats);
                 }

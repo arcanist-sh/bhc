@@ -13,7 +13,7 @@
 //!   The composed lambda is a beta-redex the simplifier reduces on the next pass.
 
 use super::expr_util::fresh_var_id;
-use crate::{Expr, Ty, Var};
+use crate::{Expr, Literal, Ty, Var};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
@@ -74,6 +74,94 @@ pub fn try_fuse_map_map(expr: &Expr) -> Option<Expr> {
             Box::new(fused_fn),
             Span::default(),
         )),
+        Box::new(xs.clone()),
+        Span::default(),
+    ))
+}
+
+/// Match `f x` = `App(Var(name), x)`, returning the argument.
+fn as_named_app1<'a>(e: &'a Expr, name: &str) -> Option<&'a Expr> {
+    if let Expr::App(head, arg, _) = e {
+        if let Expr::Var(v, _) = head.as_ref() {
+            if v.name.as_str() == name {
+                return Some(arg);
+            }
+        }
+    }
+    None
+}
+
+/// A reference to a name-dispatched builtin (`+`, `foldl'`, …). Codegen resolves
+/// these by name, so a fresh `VarId` and placeholder type are fine.
+fn builtin_var(name: &str) -> Expr {
+    Expr::Var(
+        Var::new(Symbol::intern(name), fresh_var_id(), Ty::Error),
+        Span::default(),
+    )
+}
+
+/// Build `f a b` = `App(App(f, a), b)`.
+fn app2(f: Expr, a: Expr, b: Expr) -> Expr {
+    Expr::App(
+        Box::new(Expr::App(Box::new(f), Box::new(a), Span::default())),
+        Box::new(b),
+        Span::default(),
+    )
+}
+
+/// Fuse `sum (map f xs)` into `foldl' (\acc x -> acc + f x) 0 xs` — a strict left
+/// fold that accumulates `f x` without materializing the mapped list (Pattern 3).
+///
+/// Scoped to **integer** sums: only fires when `f`'s codomain is `Int`, so the
+/// `0` literal and `+` are unambiguous. Returns `None` otherwise (non-`Int`
+/// sums fall back to the unfused form, which is correct, just slower).
+pub fn try_fuse_sum_map(expr: &Expr) -> Option<Expr> {
+    let list_arg = as_named_app1(expr, "sum")?;
+    let (_map, f, xs) = as_map_app(list_arg)?;
+
+    // f : elem -> acc.  acc is the sum's element type; require it to be Int.
+    let (elem_ty, acc_ty) = match f.ty() {
+        Ty::Fun(dom, cod) => (*dom, *cod),
+        _ => return None,
+    };
+    if !matches!(&acc_ty, Ty::Con(c) if c.name.as_str() == "Int") {
+        return None;
+    }
+
+    let acc_id = fresh_var_id();
+    let acc = Var::new(
+        Symbol::intern(&format!("$acc{}", acc_id.index())),
+        acc_id,
+        acc_ty.clone(),
+    );
+    let x_id = fresh_var_id();
+    let x = Var::new(
+        Symbol::intern(&format!("$x{}", x_id.index())),
+        x_id,
+        elem_ty,
+    );
+
+    // acc + f x
+    let fx = Expr::App(
+        Box::new(f.clone()),
+        Box::new(Expr::Var(x.clone(), Span::default())),
+        Span::default(),
+    );
+    let add = app2(
+        builtin_var("+"),
+        Expr::Var(acc.clone(), Span::default()),
+        fx,
+    );
+    // \acc x -> acc + f x
+    let op = Expr::Lam(
+        acc,
+        Box::new(Expr::Lam(x, Box::new(add), Span::default())),
+        Span::default(),
+    );
+    // foldl' op (0 :: Int) xs
+    let zero = Expr::Lit(Literal::Int(0), acc_ty, Span::default());
+    Some(Expr::App(
+        Box::new(app2(builtin_var("foldl'"), op, zero)),
         Box::new(xs.clone()),
         Span::default(),
     ))
@@ -158,5 +246,43 @@ mod tests {
             Span::default(),
         );
         assert!(try_fuse_map_map(&filter).is_none());
+    }
+
+    fn sum_app(e: Expr) -> Expr {
+        Expr::App(
+            Box::new(var("sum", 9, Ty::Error)),
+            Box::new(e),
+            Span::default(),
+        )
+    }
+
+    #[test]
+    fn fuses_sum_map_int_to_foldl() {
+        let f = var("f", 1, fun(int_ty(), int_ty()));
+        let xs = var("xs", 3, Ty::List(Box::new(int_ty())));
+        let fused = try_fuse_sum_map(&sum_app(map_app(f, xs))).expect("should fuse");
+        // fused == foldl' (\acc x -> acc + f x) 0 xs
+        if let Expr::App(inner, _xs, _) = &fused {
+            if let Expr::App(inner2, zero, _) = inner.as_ref() {
+                assert!(matches!(zero.as_ref(), Expr::Lit(Literal::Int(0), ..)));
+                if let Expr::App(head, lam, _) = inner2.as_ref() {
+                    assert!(
+                        matches!(head.as_ref(), Expr::Var(v, _) if v.name.as_str() == "foldl'")
+                    );
+                    assert!(matches!(lam.as_ref(), Expr::Lam(..)));
+                    return;
+                }
+            }
+        }
+        panic!("unexpected fused shape: {fused:?}");
+    }
+
+    #[test]
+    fn does_not_fuse_sum_map_non_int() {
+        // Non-Int accumulator (Double) must fall back to the unfused form.
+        let dbl = Ty::Con(TyCon::new(Symbol::intern("Double"), Kind::Star));
+        let f = var("f", 1, fun(int_ty(), dbl));
+        let xs = var("xs", 3, Ty::List(Box::new(int_ty())));
+        assert!(try_fuse_sum_map(&sum_app(map_app(f, xs))).is_none());
     }
 }

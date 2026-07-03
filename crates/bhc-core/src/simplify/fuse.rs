@@ -2,15 +2,37 @@
 //!
 //! These implement the "guaranteed fusion patterns" (H26-SPEC Section 8) as
 //! semantics-preserving Core→Core rewrites. Because native codegen consumes Core
-//! directly, fusing here removes intermediate list allocation on every backend
-//! without touching codegen.
-//!
-//! Gated on [`SimplifyConfig::fuse_lists`](super::SimplifyConfig), which the
-//! driver enables only for the Numeric profile.
+//! directly, fusing here removes intermediate list allocation without touching
+//! codegen. Gated on [`SimplifyConfig::fuse_lists`](super::SimplifyConfig), which
+//! the driver enables only for the Numeric profile.
 //!
 //! Currently implemented:
 //! - **Pattern 1** — `map f (map g xs)` → `map (\v -> f (g v)) xs` (one traversal).
 //!   The composed lambda is a beta-redex the simplifier reduces on the next pass.
+//! - **Pattern 3** — `sum (map f xs)` → `foldl' (\acc x -> acc + f x) 0 xs`.
+//!
+//! # Known limitations (measured 2026-07-03 — do not trust without re-measuring)
+//!
+//! Core **erases types** before the simplifier runs: a real lambda's
+//! [`Expr::ty`] returns `Fun(Error, Error)`, not its source type. This has two
+//! consequences the caller must understand:
+//!
+//! 1. **`try_fuse_sum_map` does not fire on real programs.** It gates on `f`'s
+//!    codomain being `Int` (so the `0` literal and `+` are unambiguous), but the
+//!    erased type is `Error`, so the gate always fails and it returns `None`. It
+//!    fires only in the unit tests below, which construct expressions with
+//!    explicit `Int` types. Making it fire needs type information the Core IR does
+//!    not currently preserve — see `rules/007-ir-design.md` (typed Core IR).
+//! 2. **`try_fuse_map_map` does fire** (it is type-agnostic — it only needs `g`'s
+//!    type to be *some* `Fun`), and it is correct, but it does **not** by itself
+//!    make numeric loops fast: codegen boxes every `Int`, so the per-element
+//!    boxing — not intermediate lists — dominates the flagship
+//!    `sum (map f [1..N])`. An honest Numeric performance contract is blocked on
+//!    **unboxed codegen** as well as type preservation, neither of which this
+//!    pass provides. This code is retained as correct scaffolding for when those
+//!    land. Any perf claim about these rewrites must come from an isolated
+//!    numeric-with-fusion vs numeric-without-fusion measurement, not a
+//!    default-vs-numeric comparison (which also varies RTS/GC config).
 
 use super::expr_util::fresh_var_id;
 use crate::{Expr, Literal, Ty, Var};
@@ -113,8 +135,13 @@ fn app2(f: Expr, a: Expr, b: Expr) -> Expr {
 /// fold that accumulates `f x` without materializing the mapped list (Pattern 3).
 ///
 /// Scoped to **integer** sums: only fires when `f`'s codomain is `Int`, so the
-/// `0` literal and `+` are unambiguous. Returns `None` otherwise (non-`Int`
-/// sums fall back to the unfused form, which is correct, just slower).
+/// `0` literal and `+` are unambiguous. Returns `None` otherwise.
+///
+/// **This does not fire on real programs today.** Core erases types before the
+/// simplifier runs, so `f.ty()` is `Fun(Error, Error)` and the `Int` gate always
+/// fails — see the module header. The rewrite is exercised only by the unit tests
+/// below (which supply explicit `Int` types) and is retained as scaffolding for
+/// when Core preserves types.
 pub fn try_fuse_sum_map(expr: &Expr) -> Option<Expr> {
     let list_arg = as_named_app1(expr, "sum")?;
     let (_map, f, xs) = as_map_app(list_arg)?;

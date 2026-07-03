@@ -372,11 +372,28 @@ NOT fuse on the native target:
   unfused. bhc has **no list fusion in the Core simplifier** at all.
 
 So the numeric profile is currently a behavioral/config selector without the
-native fusion performance contract it advertises. Making it honest needs a
-Core→Core fusion pass (the 4 guaranteed patterns + enumFromTo elimination) that
-native codegen already consumes — a real feature, tracked as the next Numeric
-work. The prior "✅ Completed, commit 312f08c" claim was not validated against a
-run.
+native fusion performance contract it advertises. The prior "✅ Completed,
+commit 312f08c" claim was not validated against a run.
+
+**Attempted, and what it revealed (2026-07-03).** A Core→Core fusion pass was
+built in `crates/bhc-core/src/simplify/fuse.rs` (gated on `fuse_lists`, numeric
+only), and it exposed that a fusion pass *alone cannot make this honest*:
+
+- **Core erases types.** By the time the simplifier runs, a lambda's type is
+  `Fun(Error, Error)` — the element/result types are gone. So type-dependent
+  patterns cannot fire: `sum (map f xs)` → `foldl'` needs to know the accumulator
+  is `Int` (to emit `0`/`+`), and that information is not there. Only the
+  type-agnostic `map f (map g xs)` → `map (f∘g) xs` rewrite fires.
+- **Codegen boxes every `Int`.** Even when a rewrite fires, the flagship
+  `sum (map f [1..N])` is unchanged (~6–11 s at `-O2` and `-O3`, both profiles):
+  per-element boxing, not intermediate lists, dominates.
+
+So an honest native numeric perf contract is blocked on two deeper properties —
+**Core type preservation** (typed Core IR, per `rules/007-ir-design.md`) and
+**unboxed numeric codegen** — not on the fusion pass. The `map/map` and `sum/map`
+rewrites are retained as correct scaffolding (`map/map` fires; `sum/map` is inert
+until Core preserves types); do not attribute any speedup to them without an
+isolated numeric-with-fusion vs numeric-without-fusion measurement.
 
 ---
 
@@ -773,7 +790,7 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 |-------|-------------|--------|------------|---------------|
 | 1 | Native Hello World | ✅ Complete | 100% | 6/6 E2E tests pass |
 | 2 | Language Completeness | ✅ Complete | 100% | 59/59 interpreter tests pass |
-| 3 | Numeric Profile | 🟡 Partial | ~60% | Fusion/vectorize/parallelize passes exist + feed GPU/WASM + kernel report, BUT native list fusion is NOT delivered: 0 kernels for `sum (map f xs)`, timing == default, native codegen ignores the fused Loop IR (2026-07-03 measurement). Not an honest native perf contract yet — see Phase 3 exit criteria. |
+| 3 | Numeric Profile | 🟡 Partial | ~55% | Tensor/Loop fusion feeds GPU/WASM + kernel report. A Core→Core list-fusion pass exists (`simplify/fuse.rs`, numeric-gated) but only `map/map` fires — `sum/map` is inert because Core erases types (`Fun(Error,Error)`), and even a firing rewrite gives no speedup because codegen boxes every `Int`. Honest native perf contract is blocked on typed Core IR + unboxed codegen, NOT a fusion pass (2026-07-03 measurement). See Phase 3 exit criteria. |
 | 4 | WASM Backend | 🟡 In Progress | 75% | Valid WASM binaries; 0/6 E2E output tests pass (needs Core IR → WASM lowering) |
 | 5 | Server Profile | ✅ Complete | 100% | Scheduler, STM, cancellation, deadlines all tested |
 | 6 | GPU Backend | 🟡 In Progress | 80% | 2/2 mock tests pass; needs CUDA hardware |

@@ -35,12 +35,13 @@
 //!    default-vs-numeric comparison (which also varies RTS/GC config).
 
 use super::expr_util::fresh_var_id;
-use super::subst::substitute_single;
+use super::subst::{substitute, substitute_single};
 use crate::{Alt, AltCon, Bind, DataCon, Expr, Literal, Ty, Var, VarId};
 use bhc_types::{Kind, TyCon};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
+use rustc_hash::FxHashMap;
 
 /// Match `map arg1 arg2` = `App(App(Var("map"), arg1), arg2)`, returning the
 /// `map` variable and its two arguments.
@@ -288,8 +289,8 @@ fn fresh_var(prefix: &str, ty: Ty) -> Var {
 fn build_fold_enum_loop(
     a: &Expr,
     b: &Expr,
-    op: &str,
-    seed: i64,
+    seed: Expr,
+    combine: impl Fn(&Expr, Expr) -> Expr,
     make_elem: impl Fn(&Expr) -> Expr,
 ) -> (Var, Expr, Expr) {
     let go = fresh_var("$foldloop", Ty::Error);
@@ -304,9 +305,9 @@ fn build_fold_enum_loop(
 
     // i <= b
     let cond = app2(builtin_var("<="), i_ref(), b_ref());
-    // go b (acc `op` make_elem(i)) (i + 1)  — a 3-argument application.
-    // The counter step is always `+ 1`; only the accumulator uses `op`.
-    let next_acc = app2(builtin_var(op), acc_ref(), make_elem(&i_ref()));
+    // go b (combine acc make_elem(i)) (i + 1)  — a 3-argument application.
+    // The counter step is always `+ 1`; only the accumulator uses `combine`.
+    let next_acc = combine(&acc_ref(), make_elem(&i_ref()));
     let next_i = app2(builtin_var("+"), i_ref(), int_lit(1));
     let recur = app3(go_ref(), b_ref(), next_acc, next_i);
     // case (i <= b) of True -> recur; False -> acc
@@ -322,8 +323,41 @@ fn build_fold_enum_loop(
         Span::default(),
     );
     // go b seed a
-    let replacement = app3(go_ref(), b.clone(), int_lit(seed), a.clone());
+    let replacement = app3(go_ref(), b.clone(), seed, a.clone());
     (go, go_lam, replacement)
+}
+
+/// Fuse `<fold> (enumFromTo a b)` or `<fold> (map f (enumFromTo a b))` (f
+/// manifestly `Int -> Int`) into a hoisted counting loop with initial accumulator
+/// `seed` and per-step combiner `combine(acc, elem)`. Pushes the generated
+/// top-level loop into `hoisted` and returns the replacement call, or `None` if
+/// `list_arg` is neither an `enumFromTo` nor an Int-safe `map` over one.
+fn fuse_fold_over_list(
+    list_arg: &Expr,
+    seed: Expr,
+    combine: impl Fn(&Expr, Expr) -> Expr,
+    hoisted: &mut Vec<Bind>,
+) -> Option<Expr> {
+    // map f (enumFromTo a b), f manifestly Int -> Int (inlined at the index).
+    if let Some((_, f, inner)) = as_map_app(list_arg) {
+        if let (Some((a, b)), Some((xid, fbody))) = (as_enum_from_to(inner), as_int_map_fn(f)) {
+            let fbody = fbody.clone();
+            let (go, go_lam, repl) =
+                build_fold_enum_loop(a, b, seed, combine, |i| {
+                    substitute_single(fbody.clone(), xid, i)
+                });
+            hoisted.push(Bind::NonRec(go, Box::new(go_lam)));
+            return Some(repl);
+        }
+        return None;
+    }
+    // plain enumFromTo a b.
+    if let Some((a, b)) = as_enum_from_to(list_arg) {
+        let (go, go_lam, repl) = build_fold_enum_loop(a, b, seed, combine, |i| i.clone());
+        hoisted.push(Bind::NonRec(go, Box::new(go_lam)));
+        return Some(repl);
+    }
+    None
 }
 
 /// A strict `i64` range reducer we can fuse: its `(op, seed)` where `op` is the
@@ -337,6 +371,18 @@ fn fold_consumer(name: &str) -> Option<(&'static str, i64)> {
         "product" => Some(("*", 1)),
         _ => None,
     }
+}
+
+/// Match `foldl' op z list` = `App(App(App(Var("foldl'"), op), z), list)`.
+fn as_foldl3(e: &Expr) -> Option<(&Expr, &Expr, &Expr)> {
+    let (head, args) = app_spine(e);
+    if let Expr::Var(v, _) = head {
+        let base = v.name.as_str().rsplit('.').next().unwrap_or("");
+        if (base == "foldl'" || base == "foldl") && args.len() == 3 {
+            return Some((args[0], args[1], args[2]));
+        }
+    }
+    None
 }
 
 /// Names of primops that are closed over `Int` (map `Int`/`Int,Int` to `Int`) and
@@ -363,45 +409,65 @@ fn app_spine(e: &Expr) -> (&Expr, Vec<&Expr>) {
     (cur, args)
 }
 
-/// True if `e` computes an `Int` purely from the single binder `x`, `Int`
-/// literals, and [`is_int_arith_prim`] applications — hence, given the loop feeds
-/// it an `i64` (from `enumFromTo`), it yields an `i64`. Any other variable
-/// (unknown function, captured value, potential coercion like `fromIntegral`),
-/// non-`Int` literal, or non-arithmetic node makes it return `false`. Because the
-/// only permitted variable is the binder, a body that passes is also **closed**
-/// (modulo name-dispatched primops), so it can be inlined into a top-level loop.
-fn is_int_arith_body(e: &Expr, x: VarId) -> bool {
+/// True if `e` computes an `Int` purely from the `allowed` binders, `Int`
+/// literals, and [`is_int_arith_prim`] applications — hence, fed `i64`s for those
+/// binders (from the loop), it yields an `i64`. Any other variable (unknown
+/// function, captured value, potential coercion like `fromIntegral`), non-`Int`
+/// literal, or non-arithmetic node makes it return `false`. Because the only
+/// permitted variables are the `allowed` binders, a body that passes is also
+/// **closed** (modulo name-dispatched primops), so it can be inlined into a
+/// top-level loop.
+fn is_int_arith_expr(e: &Expr, allowed: &[VarId]) -> bool {
     match e {
-        Expr::Var(v, _) => v.id == x,
+        Expr::Var(v, _) => allowed.contains(&v.id),
         Expr::Lit(Literal::Int(_), _, _) => true,
         Expr::App(..) => {
             let (head, args) = app_spine(e);
             !args.is_empty()
                 && matches!(head, Expr::Var(v, _) if is_int_arith_prim(v.name.as_str()))
-                && args.iter().all(|a| is_int_arith_body(a, x))
+                && args.iter().all(|a| is_int_arith_expr(a, allowed))
         }
         _ => false,
     }
 }
 
 /// If `f` is a lambda `\x -> body` whose `body` is manifestly `Int -> Int`
-/// ([`is_int_arith_body`]), return `(binder_id, body)` so the caller can inline it
+/// ([`is_int_arith_expr`]), return `(binder_id, body)` so the caller can inline it
 /// into the counting loop. Returns `None` for anything else (bare functions like
 /// `fromIntegral`, multi-argument lambdas, captures, non-arithmetic bodies).
 fn as_int_map_fn(f: &Expr) -> Option<(VarId, &Expr)> {
     if let Expr::Lam(x, body, _) = f {
-        if is_int_arith_body(body, x.id) {
+        if is_int_arith_expr(body, &[x.id]) {
             return Some((x.id, body));
         }
     }
     None
 }
 
+/// If `op` is a curried two-argument lambda `\acc x -> body` whose `body` is
+/// manifestly `Int`-arithmetic over both binders ([`is_int_arith_expr`]), return
+/// `(acc_id, x_id, body)` so the caller can inline it as the fold combiner.
+/// Returns `None` otherwise (captures, non-arithmetic, wrong arity).
+fn as_int_fold_op(op: &Expr) -> Option<(VarId, VarId, &Expr)> {
+    if let Expr::Lam(acc, inner, _) = op {
+        if let Expr::Lam(x, body, _) = inner.as_ref() {
+            if is_int_arith_expr(body, &[acc.id, x.id]) {
+                return Some((acc.id, x.id, body));
+            }
+        }
+    }
+    None
+}
+
 /// Module-level fusion pass. Rewrites every strict `i64`-range reduction over an
-/// `enumFromTo` — `sum`/`product (enumFromTo a b)`, and the same with an
-/// interposed manifestly-`Int -> Int` `map f` — into a call to a freshly-generated
-/// top-level counting loop, appending those loops to the module. Returns the
-/// number of rewrites performed.
+/// `enumFromTo` into a call to a freshly-generated top-level counting loop,
+/// appending those loops to the module. Handled reductions:
+/// - `sum`/`product (enumFromTo a b)` (see [`fold_consumer`]);
+/// - `foldl' op z (enumFromTo a b)` with a manifestly `Int`-arithmetic `op`
+///   (`\acc x -> …`, see [`as_int_fold_op`]) and an `Int`-literal `z`;
+/// - any of the above with an interposed manifestly-`Int -> Int` `map f`.
+///
+/// Returns the number of rewrites performed.
 ///
 /// # Why this is safe without types (unlike [`try_fuse_sum_map`])
 ///
@@ -474,29 +540,43 @@ fn rewrite_fold_enum(e: &mut Expr, hoisted: &mut Vec<Bind>) {
         Expr::Var(_, _) | Expr::Lit(_, _, _) | Expr::Type(_, _) | Expr::Coercion(_, _) => {}
     }
 
-    // Now try to rewrite this node: `<consumer> <list_arg>` where consumer is a
-    // fusible i64-range reducer (sum/product).
+    // (A) foldl' op z (list), op a manifestly Int-arithmetic `\acc x -> …` and
+    // z an Int literal (so the accumulator is i64). Inline op as the combiner.
+    if let Some((op_expr, z, list_arg)) = as_foldl3(e) {
+        if let (Some((acc_id, x_id, op_body)), true) =
+            (as_int_fold_op(op_expr), matches!(z, Expr::Lit(Literal::Int(_), _, _)))
+        {
+            let op_body = op_body.clone();
+            let seed = z.clone();
+            if let Some(repl) = fuse_fold_over_list(
+                list_arg,
+                seed,
+                |acc, elem| {
+                    let mut m = FxHashMap::default();
+                    m.insert(acc_id, acc.clone());
+                    m.insert(x_id, elem);
+                    substitute(op_body.clone(), &m)
+                },
+                hoisted,
+            ) {
+                *e = repl;
+            }
+        }
+        return;
+    }
+
+    // (B) `<consumer> <list_arg>` where consumer is a 1-arg i64-range reducer
+    // (sum/product); combine with its named primop and identity seed.
     let Expr::App(head, list_arg, _) = e else { return };
     let Expr::Var(cv, _) = head.as_ref() else { return };
     let Some((op, seed)) = fold_consumer(cv.name.as_str()) else { return };
-    let list_arg = list_arg.as_ref();
-
-    // Case 1: <consumer> (map f (enumFromTo a b)), f manifestly Int -> Int.
-    if let Some((_, f, inner)) = as_map_app(list_arg) {
-        if let (Some((a, b)), Some((xid, body))) = (as_enum_from_to(inner), as_int_map_fn(f)) {
-            let body = body.clone();
-            let (go, go_lam, replacement) =
-                build_fold_enum_loop(a, b, op, seed, |i| substitute_single(body.clone(), xid, i));
-            hoisted.push(Bind::NonRec(go, Box::new(go_lam)));
-            *e = replacement;
-            return;
-        }
-    }
-    // Case 2: <consumer> (enumFromTo a b).
-    if let Some((a, b)) = as_enum_from_to(list_arg) {
-        let (go, go_lam, replacement) = build_fold_enum_loop(a, b, op, seed, |i| i.clone());
-        hoisted.push(Bind::NonRec(go, Box::new(go_lam)));
-        *e = replacement;
+    if let Some(repl) = fuse_fold_over_list(
+        list_arg.as_ref(),
+        int_lit(seed),
+        |acc, elem| app2(builtin_var(op), acc.clone(), elem),
+        hoisted,
+    ) {
+        *e = repl;
     }
 }
 
@@ -757,5 +837,66 @@ mod tests {
             panic!("expected main NonRec");
         };
         assert!(head_name(main_body).unwrap().starts_with("$foldloop"));
+    }
+
+    /// `foldl' (\acc x -> <op_body>) z (enumFromTo 1 10)`.
+    fn foldl_enum(acc: Var, x: Var, op_body: Expr, z: Expr) -> Expr {
+        let op = Expr::Lam(
+            acc,
+            Box::new(Expr::Lam(x, Box::new(op_body), Span::default())),
+            Span::default(),
+        );
+        app3(var("foldl'", 60, Ty::Error), op, z, enum_1_10())
+    }
+
+    #[test]
+    fn fuses_foldl_enum_int_op_and_literal_seed() {
+        // foldl' (\acc x -> acc + x) 0 (enumFromTo 1 10) — fires.
+        let acc = Var::new(Symbol::intern("acc"), VarId::new(61), int_ty());
+        let x = Var::new(Symbol::intern("x"), VarId::new(62), int_ty());
+        let op_body = app2(
+            var("+", 63, Ty::Error),
+            Expr::Var(acc.clone(), Span::default()),
+            Expr::Var(x.clone(), Span::default()),
+        );
+        let mut m = one_binding_module(foldl_enum(acc, x, op_body, int_lit(0)));
+        assert_eq!(fuse_fold_enum_module(&mut m), 1);
+        assert_eq!(m.bindings.len(), 2);
+        let Bind::NonRec(_, main_body) = &m.bindings[0] else {
+            panic!("expected main NonRec");
+        };
+        assert!(head_name(main_body).unwrap().starts_with("$foldloop"));
+    }
+
+    #[test]
+    fn does_not_fuse_foldl_enum_non_int_op() {
+        // foldl' (\acc x -> g acc x) 0 (enumFromTo 1 10) — unknown `g` declines.
+        let acc = Var::new(Symbol::intern("acc"), VarId::new(61), int_ty());
+        let x = Var::new(Symbol::intern("x"), VarId::new(62), int_ty());
+        let op_body = app2(
+            var("g", 63, Ty::Error),
+            Expr::Var(acc.clone(), Span::default()),
+            Expr::Var(x.clone(), Span::default()),
+        );
+        let mut m = one_binding_module(foldl_enum(acc, x, op_body, int_lit(0)));
+        assert_eq!(fuse_fold_enum_module(&mut m), 0);
+        assert_eq!(m.bindings.len(), 1);
+    }
+
+    #[test]
+    fn does_not_fuse_foldl_enum_non_literal_seed() {
+        // foldl' (\acc x -> acc + x) z (enumFromTo 1 10) — non-literal seed `z`
+        // (its type is unknown, so the accumulator may not be i64) declines.
+        let acc = Var::new(Symbol::intern("acc"), VarId::new(61), int_ty());
+        let x = Var::new(Symbol::intern("x"), VarId::new(62), int_ty());
+        let op_body = app2(
+            var("+", 63, Ty::Error),
+            Expr::Var(acc.clone(), Span::default()),
+            Expr::Var(x.clone(), Span::default()),
+        );
+        let z = var("z", 64, int_ty()); // a variable, not a Lit
+        let mut m = one_binding_module(foldl_enum(acc, x, op_body, z));
+        assert_eq!(fuse_fold_enum_module(&mut m), 0);
+        assert_eq!(m.bindings.len(), 1);
     }
 }

@@ -1185,13 +1185,14 @@ impl Compiler {
                 );
             }
 
-            // Numeric list fusion: rewrite `sum (enumFromTo a b)` into a hoisted
+            // Numeric list fusion: rewrite `sum`/`product` over `enumFromTo`
+            // (optionally through a manifestly Int->Int `map f`) into a hoisted
             // top-level counting loop, eliminating the intermediate cons list.
             // Runs last so no later simplifier pass inlines the recursive loop.
             if self.session.profile() == Profile::Numeric {
-                let fused = bhc_core::simplify::fuse::fuse_sum_enum_module(&mut core);
+                let fused = bhc_core::simplify::fuse::fuse_fold_enum_module(&mut core);
                 if fused > 0 {
-                    debug!(fused, "sum/enumFromTo fusion complete");
+                    debug!(fused, "fold/enumFromTo fusion complete");
                 }
             }
         }

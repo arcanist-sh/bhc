@@ -267,24 +267,32 @@ fn fresh_var(prefix: &str, ty: Ty) -> Var {
 }
 
 /// Build the top-level counting-loop function and the call that replaces a
-/// matched `sum (enumFromTo a b)` or `sum (map f (enumFromTo a b))`.
+/// matched `fold (enumFromTo a b)` or `fold (map f (enumFromTo a b))`, where
+/// `fold` is a strict `i64` reduction with binary primop `op` and identity `seed`
+/// (`sum` → `("+", 0)`, `product` → `("*", 1)`).
 ///
-/// `make_elem(i)` produces the value summed for index `i`: `i` itself for a plain
-/// `sum (enumFromTo …)`, or `f` inlined at `i` (i.e. `f`'s body with its binder
+/// `make_elem(i)` produces the value combined for index `i`: `i` itself for a
+/// plain `fold (enumFromTo …)`, or `f` inlined at `i` (its body with the binder
 /// substituted by `i`) for the `map` case. Returns `(go_var, go_lambda, replacement)`:
 ///
 /// ```text
 /// go = \b acc i -> case (i <= b) of
-///                    True  -> go b (acc + make_elem(i)) (i + 1)
+///                    True  -> go b (acc `op` make_elem(i)) (i + 1)
 ///                    False -> acc
 /// ```
 ///
-/// and `replacement` is `go b 0 a`. `b` (the loop bound) is threaded as a
+/// and `replacement` is `go b seed a`. `b` (the loop bound) is threaded as a
 /// parameter so `go` is **closed** and can live at top level — bhc codegen only
 /// turns *top-level* self-recursive functions into loops (a local `let rec`/
 /// `where` helper does not bind its params: `stub: acc not implemented`).
-fn build_sum_enum_loop(a: &Expr, b: &Expr, make_elem: impl Fn(&Expr) -> Expr) -> (Var, Expr, Expr) {
-    let go = fresh_var("$sumloop", Ty::Error);
+fn build_fold_enum_loop(
+    a: &Expr,
+    b: &Expr,
+    op: &str,
+    seed: i64,
+    make_elem: impl Fn(&Expr) -> Expr,
+) -> (Var, Expr, Expr) {
+    let go = fresh_var("$foldloop", Ty::Error);
     let bnd = fresh_var("$b", int_ty());
     let acc = fresh_var("$acc", int_ty());
     let i = fresh_var("$i", int_ty());
@@ -296,8 +304,9 @@ fn build_sum_enum_loop(a: &Expr, b: &Expr, make_elem: impl Fn(&Expr) -> Expr) ->
 
     // i <= b
     let cond = app2(builtin_var("<="), i_ref(), b_ref());
-    // go b (acc + make_elem(i)) (i + 1)  — a 3-argument application
-    let next_acc = app2(builtin_var("+"), acc_ref(), make_elem(&i_ref()));
+    // go b (acc `op` make_elem(i)) (i + 1)  — a 3-argument application.
+    // The counter step is always `+ 1`; only the accumulator uses `op`.
+    let next_acc = app2(builtin_var(op), acc_ref(), make_elem(&i_ref()));
     let next_i = app2(builtin_var("+"), i_ref(), int_lit(1));
     let recur = app3(go_ref(), b_ref(), next_acc, next_i);
     // case (i <= b) of True -> recur; False -> acc
@@ -312,9 +321,22 @@ fn build_sum_enum_loop(a: &Expr, b: &Expr, make_elem: impl Fn(&Expr) -> Expr) ->
         )),
         Span::default(),
     );
-    // go b 0 a
-    let replacement = app3(go_ref(), b.clone(), int_lit(0), a.clone());
+    // go b seed a
+    let replacement = app3(go_ref(), b.clone(), int_lit(seed), a.clone());
     (go, go_lam, replacement)
+}
+
+/// A strict `i64` range reducer we can fuse: its `(op, seed)` where `op` is the
+/// binary primop codegen lowers to `i64` and `seed` is the fold identity.
+///
+/// Both are airtight over `enumFromTo` (monomorphically `i64`): `sum` of an `i64`
+/// range is an `i64` sum (empty → 0); `product` is an `i64` product (empty → 1).
+fn fold_consumer(name: &str) -> Option<(&'static str, i64)> {
+    match name {
+        "sum" => Some(("+", 0)),
+        "product" => Some(("*", 1)),
+        _ => None,
+    }
 }
 
 /// Names of primops that are closed over `Int` (map `Int`/`Int,Int` to `Int`) and
@@ -375,18 +397,20 @@ fn as_int_map_fn(f: &Expr) -> Option<(VarId, &Expr)> {
     None
 }
 
-/// Module-level fusion pass: rewrite every `sum (enumFromTo a b)` — and every
-/// `sum (map f (enumFromTo a b))` with a manifestly `Int -> Int` `f` — into a call
-/// to a freshly-generated top-level counting loop, appending those loops to the
-/// module. Returns the number of rewrites performed.
+/// Module-level fusion pass. Rewrites every strict `i64`-range reduction over an
+/// `enumFromTo` — `sum`/`product (enumFromTo a b)`, and the same with an
+/// interposed manifestly-`Int -> Int` `map f` — into a call to a freshly-generated
+/// top-level counting loop, appending those loops to the module. Returns the
+/// number of rewrites performed.
 ///
 /// # Why this is safe without types (unlike [`try_fuse_sum_map`])
 ///
 /// `enumFromTo` is **monomorphically `i64`** in native codegen (its loop counter
 /// is `i64`, boxing via `int_to_ptr`; a `Double` range like `[1.0..3.0]` is a
-/// different producer). So `sum (enumFromTo a b)` is always an `i64` sum, and the
-/// generated loop reproduces exactly that — seed `0`, accumulate with `i64 +`,
-/// compare with `i64 <=` — independent of the erased Core types.
+/// different producer). So a `sum`/`product` over `enumFromTo a b` is always an
+/// `i64` reduction, and the generated loop reproduces exactly that — seed the
+/// `op` identity, combine with the `i64` `op`, compare with `i64 <=` —
+/// independent of the erased Core types. See [`fold_consumer`].
 ///
 /// The `map` case is admitted **only** when [`as_int_map_fn`] proves `f` is
 /// manifestly `Int -> Int` (its body is built solely from the binder, `Int`
@@ -395,17 +419,17 @@ fn as_int_map_fn(f: &Expr) -> Option<(VarId, &Expr)> {
 /// `fromIntegral`, which would make the accumulator `Double`. `f` is inlined at
 /// the loop index, so the loop stays a tight `i64` loop.
 ///
-/// Measured: `sum [1..100M]` drops from ~2.5s to ~40ms (the top-level loop is
-/// TCO'd to a tight native loop by LLVM).
-pub fn fuse_sum_enum_module(module: &mut crate::CoreModule) -> usize {
+/// Measured: `sum [1..100M]` and `sum (map (*2) [1..100M])` drop from ~2.5s / ~9.8s
+/// to ~0 (the top-level loop is TCO'd and closed-formed by LLVM).
+pub fn fuse_fold_enum_module(module: &mut crate::CoreModule) -> usize {
     let mut hoisted: Vec<Bind> = Vec::new();
     let mut bindings = std::mem::take(&mut module.bindings);
     for bind in &mut bindings {
         match bind {
-            Bind::NonRec(_, rhs) => rewrite_sum_enum(rhs, &mut hoisted),
+            Bind::NonRec(_, rhs) => rewrite_fold_enum(rhs, &mut hoisted),
             Bind::Rec(pairs) => {
                 for (_, rhs) in pairs.iter_mut() {
-                    rewrite_sum_enum(rhs, &mut hoisted);
+                    rewrite_fold_enum(rhs, &mut hoisted);
                 }
             }
         }
@@ -416,61 +440,63 @@ pub fn fuse_sum_enum_module(module: &mut crate::CoreModule) -> usize {
     count
 }
 
-/// Recursively rewrite `sum (enumFromTo a b)` sub-expressions in place, pushing
-/// each generated top-level loop binding into `hoisted`.
-fn rewrite_sum_enum(e: &mut Expr, hoisted: &mut Vec<Bind>) {
+/// Recursively rewrite `sum`/`product` over `enumFromTo` sub-expressions in place,
+/// pushing each generated top-level loop binding into `hoisted`.
+fn rewrite_fold_enum(e: &mut Expr, hoisted: &mut Vec<Bind>) {
     // Recurse into children first (post-order), so nested matches are handled.
     match e {
         Expr::App(f, a, _) => {
-            rewrite_sum_enum(f, hoisted);
-            rewrite_sum_enum(a, hoisted);
+            rewrite_fold_enum(f, hoisted);
+            rewrite_fold_enum(a, hoisted);
         }
-        Expr::TyApp(f, _, _) => rewrite_sum_enum(f, hoisted),
-        Expr::Lam(_, body, _) | Expr::TyLam(_, body, _) => rewrite_sum_enum(body, hoisted),
+        Expr::TyApp(f, _, _) => rewrite_fold_enum(f, hoisted),
+        Expr::Lam(_, body, _) | Expr::TyLam(_, body, _) => rewrite_fold_enum(body, hoisted),
         Expr::Let(bind, body, _) => {
             match bind.as_mut() {
-                Bind::NonRec(_, rhs) => rewrite_sum_enum(rhs, hoisted),
+                Bind::NonRec(_, rhs) => rewrite_fold_enum(rhs, hoisted),
                 Bind::Rec(pairs) => {
                     for (_, rhs) in pairs.iter_mut() {
-                        rewrite_sum_enum(rhs, hoisted);
+                        rewrite_fold_enum(rhs, hoisted);
                     }
                 }
             }
-            rewrite_sum_enum(body, hoisted);
+            rewrite_fold_enum(body, hoisted);
         }
         Expr::Case(scrut, alts, _, _) => {
-            rewrite_sum_enum(scrut, hoisted);
+            rewrite_fold_enum(scrut, hoisted);
             for alt in alts.iter_mut() {
-                rewrite_sum_enum(&mut alt.rhs, hoisted);
+                rewrite_fold_enum(&mut alt.rhs, hoisted);
             }
         }
         Expr::Lazy(inner, _) | Expr::Cast(inner, _, _) | Expr::Tick(_, inner, _) => {
-            rewrite_sum_enum(inner, hoisted);
+            rewrite_fold_enum(inner, hoisted);
         }
         Expr::Var(_, _) | Expr::Lit(_, _, _) | Expr::Type(_, _) | Expr::Coercion(_, _) => {}
     }
 
-    // Now try to rewrite this node.
-    if let Some(list_arg) = as_named_app1(e, "sum") {
-        // Case 1: sum (map f (enumFromTo a b)), f manifestly Int -> Int.
-        if let Some((_, f, inner)) = as_map_app(list_arg) {
-            if let (Some((a, b)), Some((xid, body))) =
-                (as_enum_from_to(inner), as_int_map_fn(f))
-            {
-                let body = body.clone();
-                let (go, go_lam, replacement) =
-                    build_sum_enum_loop(a, b, |i| substitute_single(body.clone(), xid, i));
-                hoisted.push(Bind::NonRec(go, Box::new(go_lam)));
-                *e = replacement;
-                return;
-            }
-        }
-        // Case 2: sum (enumFromTo a b).
-        if let Some((a, b)) = as_enum_from_to(list_arg) {
-            let (go, go_lam, replacement) = build_sum_enum_loop(a, b, |i| i.clone());
+    // Now try to rewrite this node: `<consumer> <list_arg>` where consumer is a
+    // fusible i64-range reducer (sum/product).
+    let Expr::App(head, list_arg, _) = e else { return };
+    let Expr::Var(cv, _) = head.as_ref() else { return };
+    let Some((op, seed)) = fold_consumer(cv.name.as_str()) else { return };
+    let list_arg = list_arg.as_ref();
+
+    // Case 1: <consumer> (map f (enumFromTo a b)), f manifestly Int -> Int.
+    if let Some((_, f, inner)) = as_map_app(list_arg) {
+        if let (Some((a, b)), Some((xid, body))) = (as_enum_from_to(inner), as_int_map_fn(f)) {
+            let body = body.clone();
+            let (go, go_lam, replacement) =
+                build_fold_enum_loop(a, b, op, seed, |i| substitute_single(body.clone(), xid, i));
             hoisted.push(Bind::NonRec(go, Box::new(go_lam)));
             *e = replacement;
+            return;
         }
+    }
+    // Case 2: <consumer> (enumFromTo a b).
+    if let Some((a, b)) = as_enum_from_to(list_arg) {
+        let (go, go_lam, replacement) = build_fold_enum_loop(a, b, op, seed, |i| i.clone());
+        hoisted.push(Bind::NonRec(go, Box::new(go_lam)));
+        *e = replacement;
     }
 }
 
@@ -625,19 +651,19 @@ mod tests {
             Span::default(),
         );
         let mut m = one_binding_module(body);
-        assert_eq!(fuse_sum_enum_module(&mut m), 1);
+        assert_eq!(fuse_fold_enum_module(&mut m), 1);
         // main + one hoisted loop binding
         assert_eq!(m.bindings.len(), 2);
         // main's body is now a call whose head is the hoisted loop
         let Bind::NonRec(_, main_body) = &m.bindings[0] else {
             panic!("expected main NonRec");
         };
-        assert!(head_name(main_body).unwrap().starts_with("$sumloop"));
+        assert!(head_name(main_body).unwrap().starts_with("$foldloop"));
         // the hoisted binding is a lambda named $sumloop*
         let Bind::NonRec(v, rhs) = &m.bindings[1] else {
             panic!("expected hoisted NonRec");
         };
-        assert!(v.name.as_str().starts_with("$sumloop"));
+        assert!(v.name.as_str().starts_with("$foldloop"));
         assert!(matches!(rhs.as_ref(), Expr::Lam(..)));
     }
 
@@ -650,7 +676,7 @@ mod tests {
             Span::default(),
         );
         let mut m = one_binding_module(body);
-        assert_eq!(fuse_sum_enum_module(&mut m), 0);
+        assert_eq!(fuse_fold_enum_module(&mut m), 0);
         assert_eq!(m.bindings.len(), 1);
     }
 
@@ -678,12 +704,12 @@ mod tests {
             int_lit(2),
         );
         let mut m = one_binding_module(sum_map_enum(x, body));
-        assert_eq!(fuse_sum_enum_module(&mut m), 1);
+        assert_eq!(fuse_fold_enum_module(&mut m), 1);
         assert_eq!(m.bindings.len(), 2);
         let Bind::NonRec(_, main_body) = &m.bindings[0] else {
             panic!("expected main NonRec");
         };
-        assert!(head_name(main_body).unwrap().starts_with("$sumloop"));
+        assert!(head_name(main_body).unwrap().starts_with("$foldloop"));
     }
 
     #[test]
@@ -697,7 +723,7 @@ mod tests {
             Span::default(),
         );
         let mut m = one_binding_module(sum_map_enum(x, body));
-        assert_eq!(fuse_sum_enum_module(&mut m), 0);
+        assert_eq!(fuse_fold_enum_module(&mut m), 0);
         assert_eq!(m.bindings.len(), 1);
     }
 
@@ -712,7 +738,24 @@ mod tests {
             var("k", 43, int_ty()),
         );
         let mut m = one_binding_module(sum_map_enum(x, body));
-        assert_eq!(fuse_sum_enum_module(&mut m), 0);
+        assert_eq!(fuse_fold_enum_module(&mut m), 0);
         assert_eq!(m.bindings.len(), 1);
+    }
+
+    #[test]
+    fn fuses_product_enum() {
+        // product (enumFromTo 1 10) — fires with op `*`, seed 1.
+        let body = Expr::App(
+            Box::new(var("product", 50, Ty::Error)),
+            Box::new(enum_1_10()),
+            Span::default(),
+        );
+        let mut m = one_binding_module(body);
+        assert_eq!(fuse_fold_enum_module(&mut m), 1);
+        assert_eq!(m.bindings.len(), 2);
+        let Bind::NonRec(_, main_body) = &m.bindings[0] else {
+            panic!("expected main NonRec");
+        };
+        assert!(head_name(main_body).unwrap().starts_with("$foldloop"));
     }
 }

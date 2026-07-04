@@ -487,6 +487,12 @@ pub struct CoreConstructor {
     pub type_name: Option<String>,
     /// Whether this constructor is a newtype constructor (identity at runtime).
     pub is_newtype: bool,
+    /// The declared type of each field, in order (from the data declaration).
+    /// Codegen uses these to recover a pattern-bound field's type (which is
+    /// otherwise erased) so `show`/`print` dispatches correctly. May be empty
+    /// for builtins / constructors whose field types were not recorded.
+    #[serde(default)]
+    pub field_types: Vec<Ty>,
 }
 
 /// A Core module containing definitions.

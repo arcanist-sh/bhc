@@ -80,6 +80,9 @@ pub struct LowerContext {
     /// Constructor metadata (`DefId` -> `ConstructorInfo`).
     /// This maps constructor `DefIds` to their metadata including tag and type.
     constructor_map: FxHashMap<DefId, ConstructorInfo>,
+    /// Declared field types per constructor name, from user data declarations.
+    /// Threaded into `CoreConstructor::field_types` for codegen `show` dispatch.
+    constructor_field_types: FxHashMap<Symbol, Vec<Ty>>,
 
     /// Field selector metadata (field name -> `FieldSelectorInfo`).
     /// This maps field names to their selector information for generating field access code.
@@ -130,6 +133,7 @@ impl LowerContext {
             var_map: FxHashMap::default(),
             type_schemes: FxHashMap::default(),
             constructor_map: FxHashMap::default(),
+            constructor_field_types: FxHashMap::default(),
             field_selector_map: FxHashMap::default(),
             dict_scope: vec![FxHashMap::default()], // Start with empty root scope
             class_registry: ClassRegistry::new(),
@@ -1917,6 +1921,17 @@ impl LowerContext {
                             }
                         };
 
+                        // Record declared field types (already `bhc_types::Ty`)
+                        // so codegen can recover a pattern-bound field's type for
+                        // `show`/`print` dispatch (otherwise erased).
+                        let field_tys: Vec<Ty> = match &con.fields {
+                            bhc_hir::ConFields::Positional(tys) => tys.clone(),
+                            bhc_hir::ConFields::Named(fs) => {
+                                fs.iter().map(|f| f.ty.clone()).collect()
+                            }
+                        };
+                        self.constructor_field_types.insert(con.name, field_tys);
+
                         // Register constructor metadata
                         // Only count user-defined class constraints for dict fields.
                         // Builtin classes (Show, Eq, etc.) use codegen dispatch, not dicts.
@@ -2275,6 +2290,11 @@ impl LowerContext {
                 arity: info.arity,
                 type_name: Some(info.type_name.as_str().to_string()),
                 is_newtype: info.is_newtype,
+                field_types: self
+                    .constructor_field_types
+                    .get(&info.name)
+                    .cloned()
+                    .unwrap_or_default(),
             })
             .collect();
 

@@ -370,6 +370,13 @@ pub struct Lowering<'ctx, 'm> {
     /// derived show instead of printing the pointer, when the binding's type
     /// would otherwise be erased at the use site.
     adt_show_vars: FxHashMap<VarId, String>,
+    /// Declared field types per constructor name (from `CoreConstructor`). Used to
+    /// recover a pattern-bound field's (otherwise erased) type for `show` dispatch.
+    con_field_types: FxHashMap<String, Vec<Ty>>,
+    /// Type recovered for a case-pattern binder from its constructor's field type,
+    /// keyed by the binder's `VarId`. Consulted by `print`/`show` dispatch so a
+    /// non-`Int` field (e.g. `Bool`) is not misprinted as an integer.
+    binder_field_types: FxHashMap<VarId, Ty>,
     /// Cache of generated stub functions for unimplemented external package functions.
     /// When a stub variable is referenced, we lazily generate an LLVM function that
     /// calls bhc_error with the stub name and cache it here.
@@ -412,6 +419,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             thunked_vars: FxHashSet::default(),
             integer_vars: FxHashSet::default(),
             adt_show_vars: FxHashMap::default(),
+            con_field_types: FxHashMap::default(),
+            binder_field_types: FxHashMap::default(),
             stub_functions: FxHashMap::default(),
         };
         lowering.declare_rts_functions();
@@ -461,6 +470,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             thunked_vars: FxHashSet::default(),
             integer_vars: FxHashSet::default(),
             adt_show_vars: FxHashMap::default(),
+            con_field_types: FxHashMap::default(),
+            binder_field_types: FxHashMap::default(),
             stub_functions: FxHashMap::default(),
         };
         lowering.declare_rts_functions();
@@ -14811,8 +14822,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         val_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        // Get the type of the expression to decide how to print
-        let expr_ty = val_expr.ty();
+        // Get the type of the expression to decide how to print. For a bare
+        // pattern-bound variable whose type is erased, recover the constructor
+        // field type recorded at case-binding so a non-Int field (e.g. Bool)
+        // isn't misprinted as an integer.
+        let expr_ty = match val_expr {
+            Expr::Var(v, _) if matches!(val_expr.ty(), Ty::Error) => self
+                .binder_field_types
+                .get(&v.id)
+                .cloned()
+                .unwrap_or(Ty::Error),
+            _ => val_expr.ty(),
+        };
 
         let val = self
             .lower_expr(val_expr)?
@@ -42472,6 +42493,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // even if they are only used as values (not in case alternatives).
         for con in &core_module.constructors {
             self.register_constructor(&con.name, con.tag, con.arity);
+            if !con.field_types.is_empty() {
+                self.con_field_types
+                    .insert(con.name.clone(), con.field_types.clone());
+            }
             if let Some(meta) = self.constructor_metadata.get_mut(&con.name) {
                 if let Some(ref type_name) = con.type_name {
                     if meta.type_name.is_none() {
@@ -50437,6 +50462,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         } else {
                             binder.ty.clone()
                         };
+
+                        // Record this binder's declared field type (from the data
+                        // decl) so a later `print`/`show` of it dispatches on the
+                        // real type instead of defaulting to Int.
+                        let recorded_ty = self
+                            .con_field_types
+                            .get(con.name.as_str())
+                            .and_then(|tys| tys.get(field_idx))
+                            .cloned()
+                            .unwrap_or_else(|| field_ty.clone());
+                        if !matches!(&recorded_ty, Ty::Error) {
+                            self.binder_field_types.insert(binder.id, recorded_ty);
+                        }
 
                         // Determine if we need to unbox the field
                         let field_val = self.ptr_to_value(field_ptr, &field_ty)?;

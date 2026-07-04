@@ -473,8 +473,9 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
             ast::Decl::Fixity(_)
             | ast::Decl::InstanceDecl(_)
             | ast::Decl::PragmaDecl(_)
-            | ast::Decl::StandaloneDeriving(_) => {
-                // These don't introduce new names
+            | ast::Decl::StandaloneDeriving(_)
+            | ast::Decl::Splice(_, _) => {
+                // These don't introduce new names (splices are expanded earlier)
             }
 
             ast::Decl::PatternSynonym(ps) => {

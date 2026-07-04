@@ -49,6 +49,7 @@ mod desugar;
 pub mod loader;
 mod lower;
 mod resolve;
+mod th_expand;
 
 pub use context::{DefKind, DefMap, LowerContext, Scope, ScopeId};
 pub use loader::{ConstructorInfo, LoadError, ModuleCache, ModuleExports};

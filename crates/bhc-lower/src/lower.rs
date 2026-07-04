@@ -59,6 +59,20 @@ pub fn lower_module_with_cache(
 ) -> LowerResult<hir::Module> {
     let mut cache = cache;
 
+    // Expand recognized Template Haskell declaration splices (e.g.
+    // `$(makeLenses ''T)`) into real declarations before any resolution pass.
+    // Only clones the module when a splice is actually present.
+    let expanded_holder;
+    let module = if module.decls.iter().any(|d| matches!(d, ast::Decl::Splice(_, _))) {
+        expanded_holder = ast::Module {
+            decls: crate::th_expand::expand_th_splices(module.decls.clone()),
+            ..module.clone()
+        };
+        &expanded_holder
+    } else {
+        module
+    };
+
     // Determine if we should inject an implicit Prelude import.
     // Skip if:
     // 1. The module is the Prelude itself
@@ -5647,6 +5661,10 @@ fn lower_decl(ctx: &mut LowerContext, decl: &ast::Decl) -> LowerResult<Vec<hir::
 
         // Type signatures are associated with their definitions
         ast::Decl::TypeSig(_) => Ok(vec![]),
+
+        // TH declaration splices are expanded before lowering; any left here
+        // (unrecognized deriver) produce no items.
+        ast::Decl::Splice(_, _) => Ok(vec![]),
 
         // Pragmas in declarations are handled at parse time or ignored
         ast::Decl::PragmaDecl(_) => Ok(vec![]),

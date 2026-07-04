@@ -591,6 +591,10 @@ pub enum Decl {
     DataFamilyDecl(DataFamilyDecl),
     /// Data family instance: `data instance F Int = Con1 Int | Con2`
     DataInstanceDecl(DataInstanceDecl),
+    /// Top-level Template Haskell declaration splice: `$(deriveJSON opts ''T)`.
+    /// The boxed expression is the splice body (the deriver application). A
+    /// post-parse pass expands recognized derivers into real declarations.
+    Splice(Box<Expr>, Span),
 }
 
 /// A standalone deriving declaration: `deriving instance Show Foo`

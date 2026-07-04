@@ -781,12 +781,24 @@ impl<'src> Parser<'src> {
                 // Operator type signature or binding: (<+>) :: ... or (<+>) = ...
                 self.parse_value_decl_with_doc(doc)
             }
+            // Top-level Template Haskell declaration splice: `$(deriver ... ''T)`.
+            TokenKind::Operator(sym) if sym.as_str() == "$" => self.parse_decl_splice(),
             _ => Err(ParseError::Unexpected {
                 found: tok.node.kind.description().to_string(),
                 expected: "declaration".to_string(),
                 span: tok.span,
             }),
         }
+    }
+
+    /// Parse a top-level declaration splice `$( <expr> )`.
+    fn parse_decl_splice(&mut self) -> ParseResult<Decl> {
+        let start = self.current().map_or_else(Span::default, |t| t.span);
+        self.advance(); // `$`
+        self.expect(&TokenKind::LParen)?;
+        let body = self.parse_expr()?;
+        let end = self.expect(&TokenKind::RParen)?;
+        Ok(Decl::Splice(Box::new(body), start.to(end.span)))
     }
 
     /// Parse local declarations (in let or where).

@@ -138,6 +138,10 @@ pub enum TokenKind {
     PipeRBracket,
     /// `'[` (promoted list - M9 dependent types)
     TickLBracket,
+    /// `'` before a name — Template Haskell value-name quote (`'foo`).
+    Tick,
+    /// `''` before a name — Template Haskell type-name quote (`''T`).
+    DoubleTick,
     /// `{`
     LBrace,
     /// `}`
@@ -508,6 +512,8 @@ impl TokenKind {
             Self::LBracketPipe => "`[|`",
             Self::PipeRBracket => "`|]`",
             Self::TickLBracket => "`'[`",
+            Self::Tick => "`'` (name quote)",
+            Self::DoubleTick => "`''` (type-name quote)",
             Self::LBrace => "`{`",
             Self::RBrace => "`}`",
             Self::Comma => "`,`",

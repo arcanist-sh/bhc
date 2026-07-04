@@ -276,6 +276,8 @@ impl<'src> Parser<'src> {
                 | TokenKind::Case
                 | TokenKind::Do
                 | TokenKind::Underscore // For holes/wildcards in patterns that are parsed as expressions first
+                | TokenKind::Tick // TH value-name quote `'foo`
+                | TokenKind::DoubleTick // TH type-name quote `''T`
         )
     }
 
@@ -367,6 +369,14 @@ impl<'src> Parser<'src> {
                 let s = s.clone();
                 self.advance();
                 Ok(Expr::Lit(Lit::String(s), span))
+            }
+
+            // Template Haskell name quotes: `'foo` / `''T`. The declaration-splice
+            // deriver only needs the quoted name, so parse them transparently as
+            // the underlying `Var`/`Con` (the marker was emitted by the lexer).
+            TokenKind::Tick | TokenKind::DoubleTick => {
+                self.advance();
+                self.parse_atom_expr()
             }
 
             TokenKind::LParen => self.parse_paren_expr(),

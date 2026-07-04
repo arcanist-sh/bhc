@@ -1020,6 +1020,22 @@ impl<'src> Lexer<'src> {
     fn lex_char(&mut self, _start: usize) -> Token {
         self.advance(); // Opening '
 
+        // Template Haskell name quotes (`'name`, `''Name`), distinguished from
+        // char literals: `''` is always a type-name quote; a single `'` followed
+        // by an identifier that is NOT a one-char-then-`'` char literal (e.g.
+        // `'foo`, `'True`, `'x` at end) is a value-name quote. The following name
+        // is lexed by the next `next_token` call, so we only emit the marker.
+        if self.peek() == Some('\'') {
+            self.advance(); // second '
+            return Token::new(TokenKind::DoubleTick);
+        }
+        if let Some(c) = self.peek() {
+            // `'x'` (peek2 == `'`) is a char literal; `'x`/`'xs`/`'True` are quotes.
+            if Self::is_ident_start(c) && self.peek2() != Some('\'') {
+                return Token::new(TokenKind::Tick);
+            }
+        }
+
         // M9: Check for promoted list syntax '[ vs char literal '['
         if self.peek() == Some('[') {
             // Lookahead: '[' followed by closing quote means char literal '['
@@ -1755,6 +1771,19 @@ mod tests {
         assert_eq!(kinds[0], TokenKind::CharLit('a'));
         assert_eq!(kinds[1], TokenKind::CharLit('\n'));
         assert_eq!(kinds[2], TokenKind::CharLit('\''));
+    }
+
+    #[test]
+    fn test_th_name_quotes() {
+        // `''T` -> DoubleTick, ConId ; `'foo` -> Tick, Ident ; and char literals
+        // and primed identifiers are unaffected.
+        let kinds = lex_kinds_no_layout("''T 'foo 'a' foldl'");
+        assert_eq!(kinds[0], TokenKind::DoubleTick);
+        assert!(matches!(&kinds[1], TokenKind::ConId(s) if s.as_str() == "T"));
+        assert_eq!(kinds[2], TokenKind::Tick);
+        assert!(matches!(&kinds[3], TokenKind::Ident(s) if s.as_str() == "foo"));
+        assert_eq!(kinds[4], TokenKind::CharLit('a'));
+        assert!(matches!(&kinds[5], TokenKind::Ident(s) if s.as_str() == "foldl'"));
     }
 
     #[test]

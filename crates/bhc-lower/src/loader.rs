@@ -576,9 +576,11 @@ fn collect_decl_exports(
         | ast::Decl::TypeFamilyDecl(_)
         | ast::Decl::TypeInstanceDecl(_)
         | ast::Decl::DataFamilyDecl(_)
-        | ast::Decl::DataInstanceDecl(_) => {
+        | ast::Decl::DataInstanceDecl(_)
+        | ast::Decl::Splice(_, _) => {
             // These don't create exports (data/type families are type-level only,
-            // constructors from data instances are handled via their family name)
+            // constructors from data instances are handled via their family name;
+            // TH splices are expanded before this pass)
         }
     }
 }

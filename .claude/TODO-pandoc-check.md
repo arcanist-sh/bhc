@@ -2,18 +2,28 @@
 
 **Goal:** `bhc check` succeeds on Pandoc's library modules (excluding Template Haskell).
 
-**Measurement (2026-06-27, Pandoc 3.6.4):**
+**Current measurement (reconfirmed 2026-07-04, Pandoc 3.6.4):**
 
 ```
-79 passed, 90 failed, 52 skipped  (of 221 modules)
+bare src:                 79 passed, 89 failed, 53 skipped  (of 221 modules)
++pandoc-types package-dir: 82 passed, 84 failed, 55 skipped
 ```
 
-Reproduce from the Pandoc source tree (`/Users/zara/Development/pandoc-3.6.4`):
+Reproduce (Pandoc tree `/Users/zara/Development/pandoc-3.6.4`, pandoc-types
+`/Users/zara/Development/pandoc-types-1.23.1`):
 
 ```
-LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm@21 \
-  <bhc-repo>/target/debug/bhc check src 2>err.log | tail -1
+BHC=<bhc-repo>/target/debug/bhc
+PT=/Users/zara/Development/pandoc-types-1.23.1/src
+P=/Users/zara/Development/pandoc-3.6.4/src
+LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm@21 $BHC check "$P" 2>/dev/null | tail -1               # 79
+LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm@21 $BHC --package-dir "$PT" check "$P" 2>/dev/null | tail -1  # 82
 ```
+
+The `--package-dir <pandoc-types>/src` form is the recommended invocation: it binds
+the pandoc-types `Text.Pandoc.Definition` constructor family (`Str`/`Div`/`Para`/
+`Align*`/…) for the whole tree. The +3 gain is capped because `Walk` and `JSON`
+(pandoc-types modules that many Pandoc modules import) still fail → cascade skips.
 
 > **Note:** this supersedes the previous baseline ("10 passed / 195 failed").
 > That figure and its "Category A" workplan are obsolete — most of the gap has
@@ -102,26 +112,49 @@ Blockers found + resolved so this loads:
 capped by the rest of the cluster: `Walk` (13 type errors) and `JSON` (4 lowering
 errors) still fail, and both are widely imported → cascade skips.
 
-`Walk` investigation (2026-07-02/03): its `Walkable a b` multi-param class has a
-flexible catch-all `instance (Foldable t, Traversable t, Walkable a b) => Walkable a (t b)`.
-bhc couldn't match that head against concrete `[b]` — **FIXED** (commit 3fca571,
-`types_match_with_subst` App-vs-List; verified in isolation, general win). But
-Walk STILL has the same 13 errors, rooted in **3× `expected MetaValue, found [Block]`**
-in `walkMetaValueM'`/`queryMetaValue'` — these use the STUBBED `M.fromAscList`/
-`M.foldMapWithKey`/`M.toAscList`, whose imprecise stub *types* mis-infer (MetaValue
-has a `MetaBlocks [Block]` ctor), and the `No instance for Walkable Block [Block]`
-errors cascade from that. **Typed stubs added** (commit 46c94c3): `Data.Map.fromAscList`/`fromDistinctAscList`
-(→ fromList group) and `foldMapWithKey :: (k->v->m) -> Map k v -> m`, via the
-existing typed-stub match in `bhc-typeck/src/context.rs` (~line 3876+). Verified
-in isolation. **But this did NOT change Walk's 13 errors** — so the `[Block]`
-mis-inference is NOT the Map stubs. The real Walk blocker is DEEPER: a typeck
-inference bug in the recursive multi-param `Walkable`/`MetaValue` handling
-(`walkMetaValueM'`/`queryMetaValue'`, Walk.hs ~L544/566) where bhc infers
-`[Block]` where `MetaValue` is expected — likely conflating types across
-`Walkable MetaValue MetaValue` instance resolution (MetaValue has a
-`MetaBlocks [Block]` ctor). This is a genuine typeck investigation, not a stub or
-matcher fix. NEXT decision: root-cause that typeck bug (deep) vs pivot to
-Walk-independent pandoc modules (P2) vs reassess.
+`Walk` investigation — **prior fixes + exhaustive 2026-07-04 drill (10 synthetic repros, ALL PASS).**
+
+Earlier (2026-07-02/03): the `(t b)` catch-all head not matching concrete `[b]` was
+**FIXED** (commit 3fca571, `types_match_with_subst` App-vs-List). Typed Map stubs
+(`fromAscList`/`fromDistinctAscList`/`foldMapWithKey`) added (commit 46c94c3) — but
+neither changed Walk's 13 errors.
+
+**2026-07-04 — reproduced the state (82/221 with `--package-dir <pandoc-types>/src`;
+the `Str`/`Div`/`Para`/`Align` family now BINDS, gone from the unbound list) and
+drilled Walk hard. The 13 errors: 3× `expected MetaValue, found [Block]` + 10×
+`No instance for Walkable Block [Block]` cascade. Correction to the error location:
+the flagged spans are `walkMetaValueM'` (MetaMap/MetaList helper: `M.fromAscList`/
+`M.toAscList`/`mapM`) and `queryMetaValue'` (`M.foldMapWithKey`) — NOT the
+`MetaBlocks bs` case.**
+
+Ruled out via 10 minimal repros that each PASS `bhc check` in isolation:
+1. recursive `instance Walkable a b => Walkable a [b]`;
+2. `(t b)`-head `instance (Foldable t, Traversable t, Walkable a b) => Walkable a (t b)`;
+3. polymorphic given-derivation (`Walkable a Block` given ⟹ `Walkable a [Block]` wanted);
+4. the real 3-method class (`walk` default + `walkM` + `query`) with `walkMetaValueM`'s
+   exact signature `(Walkable a [Block], Walkable a [Inline], …)`;
+5. the use-site `instance Walkable Block MetaValue where walkM = walkMetaValueM`
+   (instantiates `a=Block`, forcing `Walkable Block [Block]` as an instance not a given);
+6. overlapping self-list instances `{-# OVERLAPPING #-} Walkable [Block] [Block]` /
+   `[Inline] [Inline]` alongside `(t b)`;
+7. direct overlap: `Walkable [Inline] [Inline]` matched by BOTH `(t b)` and the specific
+   OVERLAPPING instance, with a use forcing resolution;
+8. cross-module imported constructors (2-file repro, `MetaValue` imported via `--package-dir`);
+9/10. the exact `walkMetaValueM'`/`queryMetaValue'` code with `MetaValue = MetaMap (Map Text
+   MetaValue) | MetaList [MetaValue] | MetaBlocks [Block]` + the real Data.Map stubs.
+
+Also confirmed **bhc runs CPP** (`#define OVERLAPS {-# OVERLAPPING #-}` expands correctly).
+
+**Conclusion: the trigger is IRREDUCIBLY the full-module combination** of ~40
+specific/overlapping `Walkable` instances + the helper-fn constraint signatures — it
+does not survive extraction. The only remaining path is **brute mechanical reduction
+of the real `Walk.hs`**: bisect the instance blocks (`(t b)` @L140; specific/overlapping
+insts @L146–407; helper fns `walkInlineM`/`walkBlockM`/`walkMetaValueM`/`queryMetaValue`
+@L416–668) — deleting groups until it passes, keeping helper-fn deps satisfied (e.g.
+`walkInlineM`'s context needs the `Walkable a Citation` instances). **Do NOT re-derive
+synthetic repros — they are exhausted.** Start a fresh focused session at the brute
+reduction. NEXT decision: brute-reduce Walk (open-ended) vs pivot to Walk-independent
+modules (P2) vs reassess.
 
 ### P2 — Cascade-critical internal modules
 Once pandoc-types resolves, re-run and find which remaining failures are
@@ -147,3 +180,5 @@ interaction with OverloadedStrings / list literals in a numeric context.
 | 2026-06-27 | 79 | 90 | 52 |
 | 2026-07-02 (bare `src`) | 79 | 89 | 53 |
 | 2026-07-02 (+pandoc-types package-dir, Def/Builder/Generic loading) | 82 | 84 | 55 |
+| 2026-07-04 (reconfirmed bare `src`) | 79 | 89 | 53 |
+| 2026-07-04 (reconfirmed +pandoc-types package-dir) | 82 | 84 | 55 |

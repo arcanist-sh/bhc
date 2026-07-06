@@ -2551,7 +2551,7 @@ mod tests {
     #[test]
     fn test_generate_wasi_imports() {
         let imports = generate_wasi_imports();
-        assert_eq!(imports.len(), 7);
+        assert_eq!(imports.len(), 9);
         assert_eq!(imports[0].name, "fd_write");
         assert_eq!(imports[1].name, "proc_exit");
         assert_eq!(imports[2].name, "fd_read");
@@ -2559,6 +2559,8 @@ mod tests {
         assert_eq!(imports[4].name, "args_get");
         assert_eq!(imports[5].name, "environ_sizes_get");
         assert_eq!(imports[6].name, "environ_get");
+        assert_eq!(imports[7].name, "path_open");
+        assert_eq!(imports[8].name, "fd_close");
     }
 
     #[test]

@@ -161,10 +161,35 @@ Once pandoc-types resolves, re-run and find which remaining failures are
 internal cascade (e.g. the modules defining `FancyVal`/`EGrouped`/`Accent`).
 Fix the upstream module; downstream + skipped modules follow.
 
-### P3 — Resolver spot-check (`opts`/`st`/`B.<>`/`!`)
-Pick one module with an `unbound variable: opts`-style error that *should* be
-locally bound and confirm whether it is a genuine name-resolution bug
-(qualified operators, where-clause scoping, RecordWildCards) vs cascade.
+### P3 — Resolver spot-check (`opts`/`st`/`B.<>`/`!`) — DONE (2026-07-06): NO independent bug; collapses into P1
+Probed the top `unbound variable` (`ensureValidXmlIdentifiers`, 4×; also
+`showDim`, and the whole writer-module cluster `opts`/`classes`/`contents`/…).
+**Finding: not a name-resolution bug — it is cascade from the Walkable
+instance-resolution failure (same root cause as P1).**
+
+- `ensureValidXmlIdentifiers` is *defined* in `Text/Pandoc/Writers/Shared.hs`
+  and imported by EPUB/TEI/ICML/ODT/HTML/DocBook/FB2. Those importers report it
+  `unbound` **because Shared.hs itself FAILS**: `Writers.Shared FAILED: type
+  checking failed: 21 errors`, driven by `No instance for Walkable {Inline,Block}
+  [{Inline,Block}]`. Name resolution is fine; the exporting module never
+  type-checks, so its exports don't bind downstream.
+- Whole-tree total is only **10** `No instance for Walkable X [Y]` errors, all of
+  the canonical list shapes: `Walkable Inline [Inline]/[Block]`,
+  `Walkable Block [Inline]/[Block]`, `Walkable [Inline] [Inline]/[Block]`. Each
+  should resolve via `instance Walkable a b => Walkable a [b]` (e.g.
+  `Walkable Inline [Block]` ⇒ `Walkable Inline Block`, a real pandoc-types
+  instance). bhc fails to chain this in the full-module instance environment —
+  exactly the P1 Walk trigger, and it also surfaces in the smaller **Shared.hs**
+  (21 errors) which may be an easier reduction target than `Walk.hs`.
+
+**Net: P3 is not a separate lever. The single dominant Pandoc blocker is
+`Walkable a [b]` (a≠b) instance chaining in the full-module context. Next
+concrete step = brute-reduce `Writers/Shared.hs` (21 errors) or `Walk.hs` to the
+minimal instance set that still fails, per P1.**
+
+### P4 — `No instance for Num Text` / `Num [Int]`
+Investigate the 16 numeric-literal-defaulting type errors — likely a typeck
+interaction with OverloadedStrings / list literals in a numeric context.
 
 ### P4 — `No instance for Num Text` / `Num [Int]`
 Investigate the 16 numeric-literal-defaulting type errors — likely a typeck

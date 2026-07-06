@@ -24,6 +24,22 @@ use crate::diagnostics;
 use crate::env::{ClassInfo, InstanceInfo, TypeEnv};
 use crate::TypedModule;
 
+/// Extract the name of the head type constructor of a type, for recognizing
+/// container types regardless of how many arguments are applied.
+///
+/// Examples: `[]` and `[a]` → `"[]"`, `Maybe` → `"Maybe"`, `Either e` and
+/// `Either e a` → `"Either"`, `(a, b)` → `"(,)"`. Returns `None` for type
+/// variables, functions, and other non-constructor-headed types.
+fn container_head_name(ty: &Ty) -> Option<&str> {
+    match ty {
+        Ty::Con(tycon) => Some(tycon.name.as_str()),
+        Ty::List(_) => Some("[]"),
+        Ty::Tuple(_) => Some("(,)"),
+        Ty::App(f, _) => container_head_name(f),
+        _ => None,
+    }
+}
+
 /// Generator for fresh type variables.
 ///
 /// Produces unique type variable IDs during type inference.
@@ -684,6 +700,47 @@ impl TyCtxt {
             match ty {
                 Ty::Con(_) | Ty::App(_, _) | Ty::List(_) | Ty::Tuple(_) => return true,
                 _ => {}
+            }
+        }
+
+        // The standard higher-kinded classes (Functor/Foldable/Traversable/...)
+        // come from `base`, which BHC does not compile from source, so their
+        // instances for the ubiquitous container constructors are never in the
+        // instance environment. Recognize them here: without this, the widely
+        // used generic instance
+        //   instance (Foldable t, Traversable t, C a b) => C a (t b)
+        // (e.g. pandoc-types `Walkable a (t b)`) can never resolve when
+        // `t ~ []`, because its `Foldable t`/`Traversable t` context specializes
+        // to `Foldable []`/`Traversable []` and fails, producing a spurious
+        // `No instance for C a [b]`. Match by the head type constructor so both
+        // bare (`[]`, `Maybe`) and partially-applied (`Either e`, `Map k`) forms
+        // are accepted.
+        if matches!(
+            class_name,
+            "Functor"
+                | "Foldable"
+                | "Traversable"
+                | "Applicative"
+                | "Monad"
+                | "Alternative"
+                | "MonadPlus"
+                | "MonadFail"
+        ) {
+            if let Some(head) = container_head_name(ty) {
+                if matches!(
+                    head,
+                    "[]" | "Maybe"
+                        | "Identity"
+                        | "NonEmpty"
+                        | "Seq"
+                        | "IO"
+                        | "Either"
+                        | "Map"
+                        | "IntMap"
+                        | "(,)"
+                ) {
+                    return true;
+                }
             }
         }
 
@@ -7914,5 +7971,74 @@ mod tests {
             }
             _ => panic!("expected type variables"),
         }
+    }
+
+    fn con(name: &str, kind: Kind) -> Ty {
+        Ty::Con(TyCon::new(Symbol::intern(name), kind))
+    }
+
+    #[test]
+    fn test_container_head_name() {
+        // Bare constructor, list sugar, tuple, and applied constructors all
+        // reduce to their head.
+        assert_eq!(
+            container_head_name(&con("Maybe", Kind::star_to_star())),
+            Some("Maybe")
+        );
+        assert_eq!(
+            container_head_name(&Ty::List(Box::new(con("Int", Kind::Star)))),
+            Some("[]")
+        );
+        assert_eq!(
+            container_head_name(&Ty::Tuple(vec![
+                con("Int", Kind::Star),
+                con("Int", Kind::Star)
+            ])),
+            Some("(,)")
+        );
+        // `Either e` (partially applied) -> "Either"
+        let either_e = Ty::App(
+            Box::new(con("Either", Kind::star_to_star())),
+            Box::new(con("Int", Kind::Star)),
+        );
+        assert_eq!(container_head_name(&either_e), Some("Either"));
+        // Type variables have no head constructor.
+        assert_eq!(container_head_name(&Ty::Var(TyVar::new_star(1))), None);
+    }
+
+    #[test]
+    fn test_higher_kinded_container_instances() {
+        // Regression: the standard higher-kinded classes must be satisfiable for
+        // the ubiquitous container constructors, otherwise a generic instance
+        // like `Walkable a (t b)` (pandoc-types) can never resolve when `t ~ []`
+        // because its `Foldable t`/`Traversable t` context fails. See the
+        // `is_builtin_instance` note.
+        let ctx = TyCtxt::new(FileId::new(0));
+        let list_con = con("[]", Kind::star_to_star());
+        let maybe_con = con("Maybe", Kind::star_to_star());
+        let map_text = Ty::App(
+            Box::new(con("Map", Kind::star_to_star())),
+            Box::new(con("Text", Kind::Star)),
+        );
+
+        for class in ["Functor", "Foldable", "Traversable", "Applicative", "Monad"] {
+            let c = Symbol::intern(class);
+            assert!(
+                ctx.is_builtin_instance(c, &list_con),
+                "expected {class} [] to be a builtin instance"
+            );
+            assert!(
+                ctx.is_builtin_instance(c, &maybe_con),
+                "expected {class} Maybe to be a builtin instance"
+            );
+        }
+        // `Foldable`/`Traversable (Map k)` are needed for `Walkable a (Map k v)`.
+        assert!(ctx.is_builtin_instance(Symbol::intern("Foldable"), &map_text));
+        assert!(ctx.is_builtin_instance(Symbol::intern("Traversable"), &map_text));
+
+        // A non-container constructor is NOT a Functor/Foldable/etc.
+        let user_ty = con("MyRecord", Kind::Star);
+        assert!(!ctx.is_builtin_instance(Symbol::intern("Functor"), &user_ty));
+        assert!(!ctx.is_builtin_instance(Symbol::intern("Foldable"), &user_ty));
     }
 }

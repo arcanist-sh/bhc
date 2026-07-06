@@ -145,16 +145,50 @@ Ruled out via 10 minimal repros that each PASS `bhc check` in isolation:
 
 Also confirmed **bhc runs CPP** (`#define OVERLAPS {-# OVERLAPPING #-}` expands correctly).
 
-**Conclusion: the trigger is IRREDUCIBLY the full-module combination** of ~40
-specific/overlapping `Walkable` instances + the helper-fn constraint signatures — it
-does not survive extraction. The only remaining path is **brute mechanical reduction
-of the real `Walk.hs`**: bisect the instance blocks (`(t b)` @L140; specific/overlapping
-insts @L146–407; helper fns `walkInlineM`/`walkBlockM`/`walkMetaValueM`/`queryMetaValue`
-@L416–668) — deleting groups until it passes, keeping helper-fn deps satisfied (e.g.
-`walkInlineM`'s context needs the `Walkable a Citation` instances). **Do NOT re-derive
-synthetic repros — they are exhausted.** Start a fresh focused session at the brute
-reduction. NEXT decision: brute-reduce Walk (open-ended) vs pivot to Walk-independent
-modules (P2) vs reassess.
+**Conclusion (2026-07-04): the trigger is IRREDUCIBLY the full-module combination** —
+superseded in part by the 2026-07-06 root-cause below.
+
+**2026-07-06 — brute-reduced the real `Walk.hs` and split the 13 errors into TWO
+independent bugs. ONE IS FIXED.**
+
+Reproduce fast (checks Walk as scored target with Definition+Paths available):
+`bhc --package-dir <pandoc-types>/src check <pandoc-types>/src/Text/Pandoc/Walk.hs`
+→ was 13 errors (10× `No instance Walkable X [Y]` + 3× `expected MetaValue, found [Block]`).
+
+- **BUG 1 — `Walkable a [b]` (a≠b) instance resolution — FIXED.** Root cause found by
+  reading the solver, not more repros: the generic `instance (Foldable t, Traversable t,
+  Walkable a b) => Walkable a (t b)` matched the head fine (`types_match` already handles
+  App-vs-List), but discharging its **context** with `t ~ []` needs `Foldable []` /
+  `Traversable []`, and `is_builtin_instance` (context.rs) knew **no** Foldable/Traversable/
+  Functor/… instances at all → context failed → generic instance rejected → spurious
+  `No instance for Walkable Inline [Block]`. (Also why the earlier "add an explicit
+  `Walkable a [b]` instance" experiment couldn't help: `resolve_instance_multi` returns the
+  FIRST head-match with **no backtracking** — the generic instance shadows any added one and
+  its failing context kills resolution.) Fix: teach `is_builtin_instance` that the standard
+  container constructors (`[]`,`Maybe`,`Either`,`Map`,`IntMap`,`Seq`,`NonEmpty`,`Identity`,
+  `IO`,`(,)`) satisfy `Functor`/`Foldable`/`Traversable`/`Applicative`/`Monad`/… via a new
+  `container_head_name` helper. **Result: tree-wide `No instance Walkable` 10 → 0.**
+  Regression tests: `test_container_head_name`, `test_higher_kinded_container_instances`.
+
+- **BUG 2 — the 3× `expected MetaValue, found [Block]` — STILL OPEN, separate bug.**
+  Brute reduction localized it precisely: it comes ENTIRELY from the two primed MetaValue
+  helpers `walkMetaValueM'` (2 errors) and `queryMetaValue'` (1 error). Replacing both with
+  their trivial catch-all clauses makes **Walk.hs PASS**. Narrowed the query one to the single
+  clause `queryMetaValue' f (MetaList xs) = mconcat $ map (query f) xs`. A faithful minimal
+  repro of that exact clause (MetaValue with MetaList/MetaBlocks/MetaInlines, the 3-method
+  class, generic + concrete instances) **PASSES in isolation** → BUG 2 is again a
+  full-module-only constraint-solving phenomenon (large instance set + recursive helper
+  signatures), NOT reducible. It is unrelated to BUG 1 (pre-existed the fix). Because Walk
+  still fails on these 3, the pandoc score has NOT moved yet (82) — Walk is the keystone;
+  the 10 fixed errors were all inside Walk itself.
+
+**NEXT for Walk: crack BUG 2.** It's in the solver's handling of `map (query f) xs` /
+`mconcat` where the wanted `Walkable MetaValue MetaValue` (from `query f` at a list element)
+somehow unifies a result with `[Block]` — only when the full ~40-instance `Walkable` web is
+present. Instrument the constraint solver (dump wanted/given + chosen instance for the
+`queryMetaValue'`/`walkMetaValueM'` bindings) rather than reducing further; the `[Block]`
+must enter via a mis-selected instance method body. Fixing BUG 2 should let Walk pass and
+unblock its wide cascade (JSON, Writers/Shared, and the writer modules).
 
 ### P2 — Cascade-critical internal modules
 Once pandoc-types resolves, re-run and find which remaining failures are

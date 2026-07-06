@@ -170,25 +170,30 @@ Reproduce fast (checks Walk as scored target with Definition+Paths available):
   `container_head_name` helper. **Result: tree-wide `No instance Walkable` 10 → 0.**
   Regression tests: `test_container_head_name`, `test_higher_kinded_container_instances`.
 
-- **BUG 2 — the 3× `expected MetaValue, found [Block]` — STILL OPEN, separate bug.**
-  Brute reduction localized it precisely: it comes ENTIRELY from the two primed MetaValue
-  helpers `walkMetaValueM'` (2 errors) and `queryMetaValue'` (1 error). Replacing both with
-  their trivial catch-all clauses makes **Walk.hs PASS**. Narrowed the query one to the single
-  clause `queryMetaValue' f (MetaList xs) = mconcat $ map (query f) xs`. A faithful minimal
-  repro of that exact clause (MetaValue with MetaList/MetaBlocks/MetaInlines, the 3-method
-  class, generic + concrete instances) **PASSES in isolation** → BUG 2 is again a
-  full-module-only constraint-solving phenomenon (large instance set + recursive helper
-  signatures), NOT reducible. It is unrelated to BUG 1 (pre-existed the fix). Because Walk
-  still fails on these 3, the pandoc score has NOT moved yet (82) — Walk is the keystone;
-  the 10 fixed errors were all inside Walk itself.
+- **BUG 2 — the 3× `expected MetaValue, found [Block]` — FIXED (2026-07-06). It was a PARSER
+  bug, not a solver bug.** Instrumented `unify`/`bind_var`/the `Var` scheme lookup and traced
+  the `[Block]` back: the body's `query` reference resolved to **DefId of an instance method**
+  (`instance {-# OVERLAPPING #-} Walkable [Block] [Block]`'s `query`, scheme `([Block]->c)->[Block]->c`,
+  no class constraint) instead of the polymorphic class method — so `[Block]` flowed straight in.
+  Root: `query` was `bind_value`'d 4× in module scope; the extra 3 were the `query` methods of the
+  three `instance OVERLAPS …` instances. `parse_instance_decl_with_doc` did **not consume the
+  `{-# OVERLAPPING #-}` pragma** after `instance`; the head parse derailed and error recovery
+  reparsed each overlapping instance's `where` methods as **top-level `FunBind`s**, shadowing the
+  class method. (Only the `OVERLAPS`-pragma instances leaked; plain `instance … where` was fine.)
+  Fix: skip pragma tokens right after `expect(Instance)` in `crates/bhc-parser/src/decl.rs`.
+  Regression test: `crates/bhc-parser/tests/overlapping_instance.rs`. **Result: real unmodified
+  `Walk.hs` now PASSES `bhc check` (0 errors).** Full workspace `cargo test --all-features`: 2732/0.
 
-**NEXT for Walk: crack BUG 2.** It's in the solver's handling of `map (query f) xs` /
-`mconcat` where the wanted `Walkable MetaValue MetaValue` (from `query f` at a list element)
-somehow unifies a result with `[Block]` — only when the full ~40-instance `Walkable` web is
-present. Instrument the constraint solver (dump wanted/given + chosen instance for the
-`queryMetaValue'`/`walkMetaValueM'` bindings) rather than reducing further; the `[Block]`
-must enter via a mis-selected instance method body. Fixing BUG 2 should let Walk pass and
-unblock its wide cascade (JSON, Writers/Shared, and the writer modules).
+**IMPORTANT re-measurement (2026-07-06): fixing BOTH bugs did NOT move the pandoc score (still
+82/84/55).** Walk.hs passing standalone doesn't help because as a `--package-dir` module its
+typecheck result doesn't gate scored importers (exports register regardless), and both bugs lived
+in the pandoc-types package-dir modules, not the scored pandoc set. Only ONE scored module
+(`Text/Pandoc/Class/PandocMonad.hs`) and pandoc-types `Builder.hs` use the overlap pragma. So the
+real gate on the scored pandoc modules is ELSEWHERE — the `unbound variable`/`unbound constructor`
+cascades in the writer/reader modules (the P2/P3 territory), NOT Walk. **NEXT: stop treating Walk
+as the keystone; re-triage the scored failing modules directly** (pick a scored FAILED module,
+read its first few real errors) to find what actually gates the 84 failures. Both compiler fixes
+here are correct and general regardless of pandoc's score.
 
 ### P2 — Cascade-critical internal modules
 Once pandoc-types resolves, re-run and find which remaining failures are

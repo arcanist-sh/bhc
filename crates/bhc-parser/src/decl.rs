@@ -2690,6 +2690,16 @@ impl<'src> Parser<'src> {
         let start = self.current_span();
         self.expect(&TokenKind::Instance)?;
 
+        // Skip an overlap pragma between `instance` and the head, e.g.
+        // `instance {-# OVERLAPPING #-} C a => T a where …`. Without this the
+        // pragma token derails the head parse; error recovery then reparses the
+        // instance's `where` methods as TOP-LEVEL bindings, so an instance
+        // method named like a class method (`walkM`, `query`) shadows the real
+        // class method in module scope — silently mis-resolving overloaded uses.
+        while matches!(self.current_kind(), Some(TokenKind::Pragma(_))) {
+            self.advance();
+        }
+
         let context = self.parse_optional_context()?;
         let class = self.parse_conid()?;
         let ty = self.parse_type()?;

@@ -2,6 +2,21 @@
 
 **Goal:** `bhc check` succeeds on Pandoc's library modules (excluding Template Haskell).
 
+**2026-07-07 — mechanical stub sweep done; it is NOT a score lever (still 82/84/55).** Added
+missing stdlib exports (Data.Sequence breakl/…, Control.Monad `<$!>`, Text.XML.Light.Output
+ppc*/useShortEmptyTags/defaultConfigPP, TagSoup isTagOpenName/isTagCloseName; commit ecdde7e).
+They resolve their names but **flip ZERO modules**: every failing module has LAYERED blockers —
+clearing the top unbound name just reveals a type error or another unbound name beneath (e.g.
+`CSS` went `unbound isTagOpenName` → `type checking failed: 1`). **THE REAL LEVER (highest
+value found): ~10 modules are ONE unbound *local* away from passing** — `MediaWiki:n`,
+`Typst:st`, `Texinfo:v'`, `JATS.References:bodies/foot'`, `TEI:nestle`, `ODT.Arrows.Utils:dataFiles'`,
+`Citeproc.Data:arrow2`, plus DocBook/Ms whole-equation local drops (`opts/id'/lvl/divattrs/hclasses`).
+These all smell like ONE equation/where/let-lowering bug that drops locals; my minimal repros of the
+obvious constructs (string-literal cons pattern in a tuple) PASS in isolation → emergent, needs
+per-module reduction like the Walk bugs. **NEXT: hunt that single-local-drop lowering bug** (pick
+`MediaWiki` or `Texinfo` — 1 error each — and reduce which construct unbinds the local); cracking it
+could flip several near-passing modules at once. The stub sweep is exhausted as a lever.
+
 **Current measurement (reconfirmed 2026-07-04, Pandoc 3.6.4):**
 
 ```

@@ -63,7 +63,11 @@ pub fn lower_module_with_cache(
     // `$(makeLenses ''T)`) into real declarations before any resolution pass.
     // Only clones the module when a splice is actually present.
     let expanded_holder;
-    let module = if module.decls.iter().any(|d| matches!(d, ast::Decl::Splice(_, _))) {
+    let module = if module
+        .decls
+        .iter()
+        .any(|d| matches!(d, ast::Decl::Splice(_, _)))
+    {
         expanded_holder = ast::Module {
             decls: crate::th_expand::expand_th_splices(module.decls.clone()),
             ..module.clone()
@@ -671,6 +675,11 @@ fn register_standard_module_exports(
             "Seq",
             "dropWhileL",
             "dropWhileR",
+            "breakl",
+            "breakr",
+            "spanr",
+            "takeWhileL",
+            "takeWhileR",
             "empty",
             "singleton",
             "null",
@@ -779,6 +788,7 @@ fn register_standard_module_exports(
             "unless",
             "guard",
             "void",
+            "<$!>",
             "join",
             "filterM",
             "mapM",
@@ -3080,6 +3090,8 @@ fn register_standard_module_exports(
             "renderTagsOptions",
             "isTagOpen",
             "isTagClose",
+            "isTagOpenName",
+            "isTagCloseName",
             "isTagText",
             "isTagComment",
             "isTagWarning",
@@ -4895,6 +4907,11 @@ fn register_standard_module_exports(
             "ppContent",
             "showTopElement",
             "ppTopElement",
+            "ppcElement",
+            "ppcContent",
+            "ppcTopElement",
+            "useShortEmptyTags",
+            "defaultConfigPP",
         ],
         "Text.Show.Pretty" => &["ppShow", "ppDoc", "ppValue", "Value", "parseValue"],
         "Text.PrettyPrint" => &[

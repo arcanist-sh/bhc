@@ -913,6 +913,31 @@ mod tests {
     }
 
     #[test]
+    fn test_infix_definition_of_special_token_operator() {
+        // `.` (and `*`, `%`) lex as their own tokens, not `Operator`. An infix
+        // definition `x . y = ...` must still bind BOTH operands. Regression:
+        // previously the first operand was dropped, so a body reference to it
+        // was unbound (e.g. pandoc's `arrow2 . arrow1 = ...`).
+        for (src, op) in [
+            ("x . y = compose x y", "."),
+            ("x * y = mul x y", "*"),
+            ("x % y = mod x y", "%"),
+        ] {
+            let module = parse_module_ok(src);
+            if let bhc_ast::Decl::FunBind(fun) = &module.decls[0] {
+                assert_eq!(fun.name.name.as_str(), op, "operator name for {src:?}");
+                assert_eq!(
+                    fun.clauses[0].pats.len(),
+                    2,
+                    "both operands must be bound for {src:?}"
+                );
+            } else {
+                panic!("Expected FunBind for {src:?}");
+            }
+        }
+    }
+
+    #[test]
     fn test_where_clause() {
         // Simple where clause with single binding
         let module = parse_module_ok("f x = y where { y = x }");

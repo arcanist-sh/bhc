@@ -1284,7 +1284,16 @@ impl<'src> Parser<'src> {
     fn is_infix_var_op_start(&self) -> bool {
         matches!(
             self.current_kind(),
-            Some(TokenKind::Operator(_) | TokenKind::Backtick)
+            Some(
+                TokenKind::Operator(_)
+                    | TokenKind::Backtick
+                    // Operators that lex as their own special tokens, so that an
+                    // infix definition like `x . y = ...` (defining `.`) binds
+                    // both operands. Mirror the set `parse_infix_op` accepts.
+                    | TokenKind::Dot
+                    | TokenKind::Star
+                    | TokenKind::Percent
+            )
         )
     }
 
@@ -1307,6 +1316,20 @@ impl<'src> Parser<'src> {
                     let ident = Ident::new(*sym);
                     self.advance();
                     Ok(ident)
+                }
+                // Operators that lex as their own special tokens (e.g. defining
+                // `x . y = ...`). Mirror the set handled by `parse_var_or_op`.
+                TokenKind::Dot => {
+                    self.advance();
+                    Ok(Ident::new(Symbol::intern(".")))
+                }
+                TokenKind::Star => {
+                    self.advance();
+                    Ok(Ident::new(Symbol::intern("*")))
+                }
+                TokenKind::Percent => {
+                    self.advance();
+                    Ok(Ident::new(Symbol::intern("%")))
                 }
                 _ => Err(ParseError::Unexpected {
                     found: tok.node.kind.description().to_string(),

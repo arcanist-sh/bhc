@@ -2,6 +2,45 @@
 
 **Goal:** `bhc check` succeeds on Pandoc's library modules (excluding Template Haskell).
 
+**2026-07-11 — 82 → 85. Cross-module PATTERN SYNONYM export was the real blocker on the two
+1-error modules (MediaWiki, Texinfo), NOT a local drop.** Both failed on `unbound constructor:
+SimpleFigure` — a bidirectional pattern synonym in pandoc-types `Text.Pandoc.Definition`
+(`pattern SimpleFigure attr cap tgt <- Para [Image .. (isFigureTarget -> Just tgt)] where ..`).
+Root cause: pattern synonyms are bound locally (resolve.rs) and expanded inline in the DEFINING
+module, but were never propagated to a module's **exports**, so importers saw them as unbound. Inline
+expansion can't work cross-module anyway — the RHS uses the *unexported* helper `isFigureTarget`, so
+importers must treat the synonym **opaquely** (as GHC does). Fix: export a pattern synonym as an
+opaque constructor `forall f1..fn. f1 -> .. -> fn -> Result`, where `Result` is inherited from the
+RHS head constructor's data type (`Para` ⇒ `Block`); fields stay polymorphic. `check` stops after
+typeck (no codegen), so no real constructor tag is needed. Landed in three export paths:
+`bhc_lower::loader::collect_exports` (+ `pattern_synonym_con_shape`), and the driver's
+`build_module_exports_from_hir` (primary; pulls synonyms from `LowerContext::pattern_synonyms()`
+since HIR has no synonym item) and `build_module_exports_from_ast`. Result: **MediaWiki OK, Texinfo
+OK, XWiki SKIPPED→OK** (imports MediaWiki). Regression test
+`test_cross_module_pattern_synonym_resolves` (bhc-driver integration). Full workspace `cargo test
+--all-features`: **2733/0**. Score **85/82/54**.
+
+**2026-07-11b — infix operator definition `x . y = ...` operand-drop FIXED (general parser bug;
+score-neutral for pandoc).** `arrow2` (ODT.Arrows.State) was `arrow2 . arrow1 = ArrowState $ ..` —
+an infix definition of `.`. Root cause: `.`/`*`/`%` lex as their own tokens (`Dot`/`Star`/`Percent`),
+but `is_infix_var_op_start`/`parse_infix_op` (bhc-parser/src/decl.rs) only recognized
+`Operator`/`Backtick`, so `x . y = ..` missed the infix-definition branch and the FIRST operand was
+never bound (surfaced as `unbound variable` when the body used it). Fix: recognize `Dot`/`Star`/
+`Percent` in both (mirrors the set `parse_var_or_op` already accepts). Minimal repro `x . y = run x`
+now OK. Regression test `test_infix_definition_of_special_token_operator` (bhc-parser). **This did NOT
+move the score:** ODT.Arrows.State's lowering error is gone but it now hits `type checking failed: 15
+errors` (deeper blockers), and ODT.Generic.XMLConverter went SKIPPED→FAILED (now checkable, still
+fails). Score unchanged at 85 (85/83/53). Correct general fix regardless; necessary-not-sufficient
+for that module cluster.
+
+**NEXT (remaining 1-error modules):** mostly **TH / qualified-import**, out of the plain
+local-drop scope: `BakedIn:dataFiles'` (RHS is a TH splice `$(embedFile ..)`), `Typst:TM.writeTypst`
++ `Org.Inlines:MathMLEntityMap.getUnicode` (qualified imports of failing/absent modules),
+`TEI:ensureValidXmlIdentifiers` (cascade — defined in Writers.Shared which itself fails). Also
+`DokuWiki:splitInterwiki`, `Citeproc.Data:biblatexLocalizations` — verify whether where/let locals
+or cascade. The ODT.Arrows cluster needs its 15 type errors triaged (arrow instances / MPTC), not a
+single-local fix.
+
 **2026-07-07 — mechanical stub sweep done; it is NOT a score lever (still 82/84/55).** Added
 missing stdlib exports (Data.Sequence breakl/…, Control.Monad `<$!>`, Text.XML.Light.Output
 ppc*/useShortEmptyTags/defaultConfigPP, TagSoup isTagOpenName/isTagCloseName; commit ecdde7e).
@@ -261,3 +300,4 @@ interaction with OverloadedStrings / list literals in a numeric context.
 | 2026-07-02 (+pandoc-types package-dir, Def/Builder/Generic loading) | 82 | 84 | 55 |
 | 2026-07-04 (reconfirmed bare `src`) | 79 | 89 | 53 |
 | 2026-07-04 (reconfirmed +pandoc-types package-dir) | 82 | 84 | 55 |
+| 2026-07-11 (+cross-module pattern synonym export; MediaWiki/Texinfo/XWiki) | 85 | 82 | 54 |

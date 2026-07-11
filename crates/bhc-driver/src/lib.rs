@@ -1850,6 +1850,56 @@ impl Compiler {
             }
         }
 
+        // Export pattern synonyms as opaque constructors. HIR carries no
+        // pattern-synonym item, so the main loop above (which builds
+        // `con_type_info` only from HIR data defs) skips a synonym's synthetic
+        // Constructor def. Re-surface them from the lowering context, inheriting
+        // each synonym's result type from its RHS head constructor (now fully
+        // collected in `exports.constructors`). This is what lets importing
+        // modules resolve and typecheck opaque uses of the synonym.
+        for (name, args, pattern) in lower_ctx.pattern_synonyms() {
+            if exports.constructors.contains_key(&name) {
+                continue;
+            }
+            // Respect the export list (a synonym is listed like a value/con name).
+            if let Some((ref filter_names, ref filter_cons)) = export_filter {
+                if !(filter_names.contains(&name) || filter_cons.contains(&name)) {
+                    continue;
+                }
+            }
+            let Some((arity, type_con_name, type_param_count)) =
+                bhc_lower::loader::pattern_synonym_con_shape_from_parts(
+                    args.len(),
+                    pattern,
+                    &exports.constructors,
+                )
+            else {
+                continue;
+            };
+            // Reuse the synonym's own synthetic Constructor DefId from lowering.
+            let Some(def_id) = lower_ctx
+                .defs
+                .values()
+                .find(|d| d.name == name && d.kind == bhc_lower::DefKind::Constructor)
+                .map(|d| d.id)
+            else {
+                continue;
+            };
+            exports.constructors.insert(
+                name,
+                bhc_lower::loader::ConstructorInfo {
+                    def_id,
+                    arity,
+                    type_con_name,
+                    type_param_count,
+                    tag: 0,
+                    field_names: None,
+                    is_newtype: false,
+                },
+            );
+            exports.values.insert(name, def_id);
+        }
+
         exports
     }
 
@@ -1993,6 +2043,38 @@ impl Compiler {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // Second pass: export pattern synonyms as opaque constructors, now that
+        // all data constructors are collected (needed to infer each synonym's
+        // result type from its RHS head constructor). See
+        // `bhc_lower::loader::pattern_synonym_con_shape`.
+        for decl in &ast.decls {
+            if let bhc_ast::Decl::PatternSynonym(ps) = decl {
+                let name = ps.name.name;
+                if exports.constructors.contains_key(&name) {
+                    continue;
+                }
+                if let Some((arity, type_con_name, type_param_count)) =
+                    bhc_lower::loader::pattern_synonym_con_shape(ps, &exports.constructors)
+                {
+                    let con_id = bhc_hir::DefId::new(next_id);
+                    next_id += 1;
+                    exports.constructors.insert(
+                        name,
+                        LowerConInfo {
+                            def_id: con_id,
+                            arity,
+                            type_con_name,
+                            type_param_count,
+                            tag: 0,
+                            field_names: None,
+                            is_newtype: false,
+                        },
+                    );
+                    exports.values.insert(name, con_id);
+                }
             }
         }
 

@@ -2603,6 +2603,18 @@ impl LowerContext {
     pub fn lookup_pattern_synonym(&self, name: Symbol) -> Option<&(Vec<Symbol>, ast::Pat)> {
         self.pattern_synonyms.get(&name)
     }
+
+    /// Iterate over pattern synonyms defined while lowering this module,
+    /// yielding `(name, args, rhs_pattern)`.
+    ///
+    /// Pattern synonyms produce no HIR item, so consumers that build a module's
+    /// exports from HIR use this to re-surface them (exported as opaque
+    /// constructors — see `loader::pattern_synonym_con_shape_from_parts`).
+    pub fn pattern_synonyms(&self) -> impl Iterator<Item = (Symbol, &[Symbol], &ast::Pat)> {
+        self.pattern_synonyms
+            .iter()
+            .map(|(name, (args, pat))| (*name, args.as_slice(), pat))
+    }
 }
 
 #[cfg(test)]

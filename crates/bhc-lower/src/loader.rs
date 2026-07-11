@@ -258,6 +258,20 @@ pub fn collect_exports(
         collect_decl_exports(ctx, decl, &mut exports, export_all, &explicit_exports);
     }
 
+    // Second pass: pattern synonyms. Run after all data constructors are
+    // collected so each synonym's result type can be inherited from the head
+    // constructor of its RHS pattern (e.g. `pattern SimpleFigure .. <- Para [..]`
+    // has result type `Block`, the type of `Para`). A pattern synonym is
+    // exported as an opaque constructor `forall f1..fn. f1 -> .. -> fn -> Result`,
+    // so importing modules can resolve and typecheck uses of it without needing
+    // the synonym's (possibly private) RHS helpers in scope — matching GHC's
+    // opaque cross-module pattern-synonym semantics.
+    for decl in &module.decls {
+        if let ast::Decl::PatternSynonym(ps) = decl {
+            collect_pattern_synonym_export(ctx, ps, &mut exports, export_all, &explicit_exports);
+        }
+    }
+
     // Handle re-exported names: if the module has an explicit export list,
     // any exported name not yet in our exports map is likely re-exported from
     // an import. Create stub entries for these so downstream modules can
@@ -582,6 +596,120 @@ fn collect_decl_exports(
             // constructors from data instances are handled via their family name;
             // TH splices are expanded before this pass)
         }
+    }
+}
+
+/// Export a pattern synonym as an opaque constructor.
+///
+/// The synonym's result type is inferred from the head constructor of its RHS
+/// pattern (the constructor a match desugars to), and its fields are left
+/// polymorphic. For `pattern SimpleFigure attr cap tgt <- Para [Image ..]` this
+/// yields the scheme `forall a b c. a -> b -> c -> Block` (the type of `Para`).
+///
+/// This is enough for importing modules to resolve and typecheck uses of the
+/// synonym in both pattern and expression position. The full RHS is not
+/// propagated — importers treat the synonym opaquely (as GHC does), so private
+/// helpers used by the synonym's definition (e.g. view-pattern functions) need
+/// not be exported.
+///
+/// If the head constructor cannot be resolved to a known data type (e.g. it is
+/// itself imported and not in this module's collected constructors), the synonym
+/// is skipped: its uses stay unresolved, exactly as before this pass existed.
+fn collect_pattern_synonym_export(
+    ctx: &mut LowerContext,
+    ps: &ast::PatternSynonymDecl,
+    exports: &mut ModuleExports,
+    export_all: bool,
+    explicit_exports: &FxHashSet<Symbol>,
+) {
+    let name = ps.name.name;
+    if !(export_all || explicit_exports.contains(&name)) {
+        return;
+    }
+    // A real data constructor of the same name takes precedence.
+    if exports.constructors.contains_key(&name) {
+        return;
+    }
+    let Some((arity, type_con_name, type_param_count)) =
+        pattern_synonym_con_shape(ps, &exports.constructors)
+    else {
+        return;
+    };
+
+    let def_id = ctx.fresh_def_id();
+    ctx.define_constructor_with_type(
+        def_id,
+        name,
+        ps.span,
+        arity,
+        type_con_name,
+        type_param_count,
+        None,
+    );
+    exports.constructors.insert(
+        name,
+        ConstructorInfo {
+            def_id,
+            arity,
+            type_con_name,
+            type_param_count,
+            tag: 0,
+            field_names: None,
+            is_newtype: false,
+        },
+    );
+}
+
+/// Compute the opaque constructor shape to export for a pattern synonym.
+///
+/// Returns `(arity, result_type_constructor, result_type_param_count)` where the
+/// result type is inherited from the head constructor of the synonym's RHS
+/// pattern (looked up in `constructors`, which must already contain the module's
+/// data constructors). Returns `None` if the head constructor is absent or the
+/// RHS has no head constructor — in which case the synonym is left unexported.
+///
+/// The importer builds the scheme `forall f1..fn. f1 -> .. -> fn -> Result` from
+/// this, which is enough to resolve and typecheck opaque uses of the synonym.
+#[must_use]
+pub fn pattern_synonym_con_shape(
+    ps: &ast::PatternSynonymDecl,
+    constructors: &FxHashMap<Symbol, ConstructorInfo>,
+) -> Option<(usize, Symbol, usize)> {
+    pattern_synonym_con_shape_from_parts(ps.args.len(), &ps.pattern, constructors)
+}
+
+/// Like [`pattern_synonym_con_shape`], but taking the synonym's arity and RHS
+/// pattern directly rather than an AST decl. Used where synonyms are
+/// re-surfaced from the lowering context (which stores them decomposed) instead
+/// of from the AST.
+#[must_use]
+pub fn pattern_synonym_con_shape_from_parts(
+    arity: usize,
+    pattern: &ast::Pat,
+    constructors: &FxHashMap<Symbol, ConstructorInfo>,
+) -> Option<(usize, Symbol, usize)> {
+    let head = pattern_head_constructor(pattern)?;
+    let info = constructors.get(&head)?;
+    Some((arity, info.type_con_name, info.type_param_count))
+}
+
+/// Return the name of the outermost constructor of a pattern, if any.
+///
+/// Used to find the data type a pattern synonym's RHS matches, so the synonym
+/// can inherit that result type. Looks through parentheses and irrefutable/bang
+/// wrappers and annotations.
+fn pattern_head_constructor(pat: &ast::Pat) -> Option<Symbol> {
+    match pat {
+        ast::Pat::Con(ident, _, _) | ast::Pat::Record(ident, _, _, _) => Some(ident.name),
+        ast::Pat::QualCon(_, ident, _, _) | ast::Pat::QualRecord(_, ident, _, _, _) => {
+            Some(ident.name)
+        }
+        ast::Pat::Infix(_, op, _, _) => Some(op.name),
+        ast::Pat::Paren(inner, _)
+        | ast::Pat::Bang(inner, _)
+        | ast::Pat::Lazy(inner, _)
+        | ast::Pat::Ann(inner, _, _) => pattern_head_constructor(inner),
+        _ => None,
     }
 }
 

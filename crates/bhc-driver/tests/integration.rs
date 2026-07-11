@@ -1415,6 +1415,69 @@ main = mapM_ putStrLn (shout "a,b,c")
 }
 
 #[test]
+fn test_cross_module_pattern_synonym_resolves() {
+    // A pattern synonym exported by a dependency module must resolve in an
+    // importing module, in both pattern and expression position. Pandoc's
+    // `SimpleFigure` (from Text.Pandoc.Definition) is the real-world case: its
+    // RHS uses a private view-pattern helper, so it must be handled opaquely
+    // cross-module (via its result type), not by inline expansion. Regression
+    // for MediaWiki/Texinfo checking against pandoc-types.
+    use camino::Utf8PathBuf;
+
+    let dep_dir = tempfile::tempdir().unwrap();
+    let app_dir = tempfile::tempdir().unwrap();
+
+    // Dependency defines a bidirectional pattern synonym over its own data type.
+    // `untag` is intentionally NOT exported: an inline expansion in the importer
+    // would reference it and fail, so this locks in opaque cross-module handling.
+    std::fs::write(
+        dep_dir.path().join("Def.hs"),
+        r#"{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
+module Def (Block(..), pattern SimplePair) where
+
+data Block = MkBlock Int Int deriving (Show, Eq)
+
+untag :: Int -> Maybe Int
+untag n = Just n
+
+pattern SimplePair :: Int -> Int -> Block
+pattern SimplePair a b <- MkBlock a (untag -> Just b) where
+  SimplePair a b = MkBlock a b
+"#,
+    )
+    .unwrap();
+
+    // Importer matches (pattern position) and constructs (expression position).
+    std::fs::write(
+        app_dir.path().join("Use.hs"),
+        r#"module Use (describe, make) where
+import Def (Block(..), pattern SimplePair)
+
+describe :: Block -> Int
+describe (SimplePair a b) = a + b
+
+make :: Int -> Block
+make n = SimplePair n n
+"#,
+    )
+    .unwrap();
+
+    let compiler = Compiler::with_defaults().unwrap();
+    let app = Utf8PathBuf::from(app_dir.path().to_str().unwrap());
+    let dep = Utf8PathBuf::from(dep_dir.path().to_str().unwrap());
+
+    let resolved = compiler
+        .check_with_discovery_with_deps(&[app], &[dep])
+        .unwrap();
+    let use_result = resolved.iter().find(|(n, _)| n == "Use").map(|(_, r)| r);
+    assert!(
+        matches!(use_result, Some(Ok(()))),
+        "Use should check OK once the imported pattern synonym resolves: {resolved:?}"
+    );
+}
+
+#[test]
 fn test_package_db_bhi_roundtrip_resolves_check() {
     // Build a dependency to a `.bhi` interface in a package DB, then check a
     // consumer against that DB with the dependency *source* absent. The import

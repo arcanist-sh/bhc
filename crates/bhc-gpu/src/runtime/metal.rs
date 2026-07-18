@@ -126,7 +126,7 @@ impl MetalRuntime {
     }
 }
 
-/// Enumerate the system-default Apple GPU as a [`DeviceInfo`].
+/// Enumerate the system-default Apple GPU as a [`crate::device::DeviceInfo`].
 ///
 /// Returns a single-element vector describing the Metal device
 /// (`DeviceKind::Metal`, real product name, unified memory), or an empty vector
@@ -135,7 +135,7 @@ impl MetalRuntime {
 /// the `DeviceKind::Metal` branch of the code generator is reached with actual
 /// hardware.
 ///
-/// Non-Metal-specific limits reuse [`DeviceInfo::mock`]'s conservative defaults;
+/// Non-Metal-specific limits reuse [`crate::device::DeviceInfo::mock`]'s conservative defaults;
 /// querying exact device limits is a follow-up.
 #[must_use]
 pub fn enumerate_devices() -> Vec<crate::device::DeviceInfo> {

@@ -37,10 +37,10 @@
 use super::expr_util::fresh_var_id;
 use super::subst::{substitute, substitute_single};
 use crate::{Alt, AltCon, Bind, DataCon, Expr, Literal, Ty, Var, VarId};
-use bhc_types::{Kind, TyCon};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
+use bhc_types::{Kind, TyCon};
 use rustc_hash::FxHashMap;
 
 /// Match `map arg1 arg2` = `App(App(Var("map"), arg1), arg2)`, returning the
@@ -342,10 +342,9 @@ fn fuse_fold_over_list(
     if let Some((_, f, inner)) = as_map_app(list_arg) {
         if let (Some((a, b)), Some((xid, fbody))) = (as_enum_from_to(inner), as_int_map_fn(f)) {
             let fbody = fbody.clone();
-            let (go, go_lam, repl) =
-                build_fold_enum_loop(a, b, seed, combine, |i| {
-                    substitute_single(fbody.clone(), xid, i)
-                });
+            let (go, go_lam, repl) = build_fold_enum_loop(a, b, seed, combine, |i| {
+                substitute_single(fbody.clone(), xid, i)
+            });
             hoisted.push(Bind::NonRec(go, Box::new(go_lam)));
             return Some(repl);
         }
@@ -462,9 +461,9 @@ fn as_int_fold_op(op: &Expr) -> Option<(VarId, VarId, &Expr)> {
 /// Module-level fusion pass. Rewrites every strict `i64`-range reduction over an
 /// `enumFromTo` into a call to a freshly-generated top-level counting loop,
 /// appending those loops to the module. Handled reductions:
-/// - `sum`/`product (enumFromTo a b)` (see [`fold_consumer`]);
+/// - `sum`/`product (enumFromTo a b)` (see `fold_consumer`);
 /// - `foldl' op z (enumFromTo a b)` with a manifestly `Int`-arithmetic `op`
-///   (`\acc x -> …`, see [`as_int_fold_op`]) and an `Int`-literal `z`;
+///   (`\acc x -> …`, see `as_int_fold_op`) and an `Int`-literal `z`;
 /// - any of the above with an interposed manifestly-`Int -> Int` `map f`.
 ///
 /// Returns the number of rewrites performed.
@@ -476,9 +475,9 @@ fn as_int_fold_op(op: &Expr) -> Option<(VarId, VarId, &Expr)> {
 /// different producer). So a `sum`/`product` over `enumFromTo a b` is always an
 /// `i64` reduction, and the generated loop reproduces exactly that — seed the
 /// `op` identity, combine with the `i64` `op`, compare with `i64 <=` —
-/// independent of the erased Core types. See [`fold_consumer`].
+/// independent of the erased Core types. See `fold_consumer`.
 ///
-/// The `map` case is admitted **only** when [`as_int_map_fn`] proves `f` is
+/// The `map` case is admitted **only** when `as_int_map_fn` proves `f` is
 /// manifestly `Int -> Int` (its body is built solely from the binder, `Int`
 /// literals, and `Int`-closed primops). This structurally excludes the one hazard
 /// a type-free rewrite would otherwise hit — a type-changing map such as
@@ -543,9 +542,10 @@ fn rewrite_fold_enum(e: &mut Expr, hoisted: &mut Vec<Bind>) {
     // (A) foldl' op z (list), op a manifestly Int-arithmetic `\acc x -> …` and
     // z an Int literal (so the accumulator is i64). Inline op as the combiner.
     if let Some((op_expr, z, list_arg)) = as_foldl3(e) {
-        if let (Some((acc_id, x_id, op_body)), true) =
-            (as_int_fold_op(op_expr), matches!(z, Expr::Lit(Literal::Int(_), _, _)))
-        {
+        if let (Some((acc_id, x_id, op_body)), true) = (
+            as_int_fold_op(op_expr),
+            matches!(z, Expr::Lit(Literal::Int(_), _, _)),
+        ) {
             let op_body = op_body.clone();
             let seed = z.clone();
             if let Some(repl) = fuse_fold_over_list(
@@ -567,9 +567,15 @@ fn rewrite_fold_enum(e: &mut Expr, hoisted: &mut Vec<Bind>) {
 
     // (B) `<consumer> <list_arg>` where consumer is a 1-arg i64-range reducer
     // (sum/product); combine with its named primop and identity seed.
-    let Expr::App(head, list_arg, _) = e else { return };
-    let Expr::Var(cv, _) = head.as_ref() else { return };
-    let Some((op, seed)) = fold_consumer(cv.name.as_str()) else { return };
+    let Expr::App(head, list_arg, _) = e else {
+        return;
+    };
+    let Expr::Var(cv, _) = head.as_ref() else {
+        return;
+    };
+    let Some((op, seed)) = fold_consumer(cv.name.as_str()) else {
+        return;
+    };
     if let Some(repl) = fuse_fold_over_list(
         list_arg.as_ref(),
         int_lit(seed),

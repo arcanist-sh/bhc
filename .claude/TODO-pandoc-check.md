@@ -2,6 +2,37 @@
 
 **Goal:** `bhc check` succeeds on Pandoc's library modules (excluding Template Haskell).
 
+**2026-07-18 — the "single-local-drop lowering bug" was actually a PARSER bug: view patterns as
+tuple/list ELEMENTS dropped the whole enclosing declaration. SCORE-NEUTRAL (85→85), no regressions.**
+Triaged the current 1-error `lowering failed` modules; the only genuine local-drop candidates were
+`DokuWiki:splitInterwiki` and `Citeproc.Data:biblatexLocalizations` (the rest — `dataFiles'`,
+`MathMLEntityMap.getUnicode`, `TM.writeTypst`, `ensureValidXmlIdentifiers` — are TH splices /
+qualified cross-module imports / cascade). `biblatexLocalizations` is also a TH `$(embedDir ..)`.
+`splitInterwiki` was the real one: a clean top-level fn reported `unbound variable: splitInterwiki`
+at its use site with NO error on its own body — the classic silent-drop signature. Reduced to a
+30-line self-contained repro, then minimised: the trigger is a **view pattern nested inside a tuple
+(or list) pattern** — `(l, T.uncons -> Just ('>', r))` — where the enclosing fn is **referenced by
+any other top-level binding**. Root cause is in the **parser**, not lowering: view-pattern parsing
+(`expr -> pat`) lived only in `parse_paren_pattern` and assumed the view pattern was the *sole*
+paren content (it did `expect(RParen)` right after the result pattern). As a tuple element the view
+is parsed by the general `parse_pattern`, which stops at `->`; the tuple loop then sees `->` instead
+of `,`/`)`, `expect(RParen)` fails, and error recovery **silently discards the entire enclosing
+`FunBind`** (confirmed: `collect_module_definitions` saw `[TypeSig, TypeSig, FunBind(caller)]` — the
+`zog=` binding was gone). Downstream, every use of the dropped fn reports `unbound variable`. (Why it
+looked name-dependent while bisecting: `f` is a registered stub in `context.rs`, so a fn coincidentally
+named `f` resolved to the stub and masked the drop.) Fix (`bhc-parser/src/pattern.rs`): factored out
+`parse_pattern_or_view` (the existing simple + applied view logic, minus the `expect(RParen)`) and use
+it for every tuple element (`parse_paren_pattern`) and list element (`parse_list_pattern`); standalone
+`(e -> p)` still returns the bare `Pat::View`. Regression tests: `bhc-parser/tests/view_pattern_in_tuple.rs`
+(5 cases: 2nd/1st tuple element, list element, applied view `f k -> p`, standalone). Full workspace
+`cargo test --all-features`: **2740/0** (needs `LIBRARY_PATH=/opt/homebrew/opt/openblas/lib` for the
+driver lib-test link). Pandoc: **85/83/53, byte-identical module-status set vs before** — DokuWiki
+went `lowering failed: 1` → `type checking failed: 116 errors` (LAYERED BLOCKER: the reader machinery
+has deep type errors underneath; parser fix is necessary-not-sufficient). Correct general fix
+regardless. NEXT: the remaining near-passing modules are TH/qualified-import/cascade, not local drops;
+the real Pandoc score lever is still the `Walkable a [b]` instance-chaining / writer-module type-error
+cluster (see P1/P3 below), not lowering.
+
 **2026-07-11 — 82 → 85. Cross-module PATTERN SYNONYM export was the real blocker on the two
 1-error modules (MediaWiki, Texinfo), NOT a local drop.** Both failed on `unbound constructor:
 SimpleFigure` — a bidirectional pattern synonym in pandoc-types `Text.Pandoc.Definition`
@@ -301,3 +332,4 @@ interaction with OverloadedStrings / list literals in a numeric context.
 | 2026-07-04 (reconfirmed bare `src`) | 79 | 89 | 53 |
 | 2026-07-04 (reconfirmed +pandoc-types package-dir) | 82 | 84 | 55 |
 | 2026-07-11 (+cross-module pattern synonym export; MediaWiki/Texinfo/XWiki) | 85 | 82 | 54 |
+| 2026-07-18 (+view-pattern-in-tuple/list parser fix; DokuWiki past lowering) | 85 | 83 | 53 |

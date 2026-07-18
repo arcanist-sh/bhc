@@ -269,46 +269,11 @@ impl<'src> Parser<'src> {
             return Ok(Pat::Con(Ident::from_str("()"), vec![], span));
         }
 
-        let first = self.parse_pattern()?;
-
-        // Check for view pattern: (expr -> pat)
-        // ViewPatterns extension syntax
-        if self.eat(&TokenKind::Arrow) {
-            // Convert the pattern to an expression for the view function
-            let view_expr = self.pat_to_expr(&first)?;
-            let result_pat = self.parse_pattern()?;
-            let end = self.expect(&TokenKind::RParen)?;
-            let span = start.to(end.span);
-            return Ok(Pat::View(Box::new(view_expr), Box::new(result_pat), span));
-        }
-
-        // View pattern with function application: (f x y -> pat)
-        // If the first element is a variable (not a constructor) and the next
-        // token could be a function argument (not a separator/closer), try
-        // parsing as an applied view expression.
-        if matches!(&first, Pat::Var(..)) && self.is_apat_start() {
-            // Speculatively try to parse as view pattern with args
-            let save_pos = self.pos;
-            let mut args: Vec<Pat> = Vec::new();
-            while self.is_apat_start() && !self.check(&TokenKind::Arrow) {
-                args.push(self.parse_atom_pattern()?);
-            }
-            if self.eat(&TokenKind::Arrow) {
-                // It's a view pattern: build (f arg1 arg2 ... -> resultPat)
-                let mut view_expr = self.pat_to_expr(&first)?;
-                for arg in &args {
-                    let arg_expr = self.pat_to_expr(arg)?;
-                    let new_span = view_expr.span().to(arg_expr.span());
-                    view_expr = Expr::App(Box::new(view_expr), Box::new(arg_expr), new_span);
-                }
-                let result_pat = self.parse_pattern()?;
-                let end = self.expect(&TokenKind::RParen)?;
-                let span = start.to(end.span);
-                return Ok(Pat::View(Box::new(view_expr), Box::new(result_pat), span));
-            }
-            // Not a view pattern — backtrack
-            self.pos = save_pos;
-        }
+        // Parse the first element, allowing a view pattern (`expr -> pat`).
+        // Inside parens the surrounding delimiter disambiguates the `->`, so
+        // view patterns are legal both standalone `(e -> p)` and as tuple
+        // elements `(l, e -> p)`.
+        let first = self.parse_pattern_or_view()?;
 
         // Check for pattern type signature: (pat :: Type)
         if self.eat(&TokenKind::DoubleColon) {
@@ -319,10 +284,10 @@ impl<'src> Parser<'src> {
         }
 
         if self.eat(&TokenKind::Comma) {
-            // Tuple pattern
+            // Tuple pattern; each element may itself be a view pattern.
             let mut pats = vec![first];
             loop {
-                pats.push(self.parse_pattern()?);
+                pats.push(self.parse_pattern_or_view()?);
                 if !self.eat(&TokenKind::Comma) {
                     break;
                 }
@@ -331,11 +296,60 @@ impl<'src> Parser<'src> {
             let span = start.to(end.span);
             Ok(Pat::Tuple(pats, span))
         } else {
-            // Parenthesized pattern
             let end = self.expect(&TokenKind::RParen)?;
             let span = start.to(end.span);
-            Ok(Pat::Paren(Box::new(first), span))
+            match first {
+                // A standalone view pattern is returned as-is.
+                Pat::View(..) => Ok(first),
+                // Otherwise it's an ordinary parenthesized pattern.
+                _ => Ok(Pat::Paren(Box::new(first), span)),
+            }
         }
+    }
+
+    /// Parse a pattern that may be a view pattern (`expr -> pat` or
+    /// `f x -> pat`). Only used in delimited contexts (parenthesized /
+    /// tuple / list elements) where a surrounding delimiter disambiguates
+    /// the `->` from, e.g., a case-alternative arrow. In an undelimited
+    /// context (`parse_pattern` used by `parse_alt`) the `->` must remain the
+    /// alternative separator, which is why this handling is not folded into
+    /// `parse_pattern` itself.
+    fn parse_pattern_or_view(&mut self) -> ParseResult<Pat> {
+        let start = self.current_span();
+        let first = self.parse_pattern()?;
+
+        // Simple view pattern: `expr -> pat`
+        if self.check(&TokenKind::Arrow) {
+            self.advance();
+            let view_expr = self.pat_to_expr(&first)?;
+            let result_pat = self.parse_pattern()?;
+            let span = start.to(result_pat.span());
+            return Ok(Pat::View(Box::new(view_expr), Box::new(result_pat), span));
+        }
+
+        // Applied view pattern: `f x y -> pat`
+        if matches!(&first, Pat::Var(..)) && self.is_apat_start() {
+            let save_pos = self.pos;
+            let mut args: Vec<Pat> = Vec::new();
+            while self.is_apat_start() && !self.check(&TokenKind::Arrow) {
+                args.push(self.parse_atom_pattern()?);
+            }
+            if self.eat(&TokenKind::Arrow) {
+                let mut view_expr = self.pat_to_expr(&first)?;
+                for arg in &args {
+                    let arg_expr = self.pat_to_expr(arg)?;
+                    let new_span = view_expr.span().to(arg_expr.span());
+                    view_expr = Expr::App(Box::new(view_expr), Box::new(arg_expr), new_span);
+                }
+                let result_pat = self.parse_pattern()?;
+                let span = start.to(result_pat.span());
+                return Ok(Pat::View(Box::new(view_expr), Box::new(result_pat), span));
+            }
+            // Not a view pattern — backtrack.
+            self.pos = save_pos;
+        }
+
+        Ok(first)
     }
 
     /// Convert a pattern to an expression (for view patterns).
@@ -430,12 +444,14 @@ impl<'src> Parser<'src> {
             return Ok(Pat::List(vec![], span));
         }
 
-        let mut pats = vec![self.parse_pattern()?];
+        // Each element may be a view pattern (`[l, e -> p]`); the brackets
+        // disambiguate the `->` just as parens do for tuples.
+        let mut pats = vec![self.parse_pattern_or_view()?];
         while self.eat(&TokenKind::Comma) {
             if self.check(&TokenKind::RBracket) {
                 break;
             }
-            pats.push(self.parse_pattern()?);
+            pats.push(self.parse_pattern_or_view()?);
         }
 
         let end = self.expect(&TokenKind::RBracket)?;

@@ -2,6 +2,24 @@
 
 **Goal:** `bhc check` succeeds on Pandoc's library modules (excluding Template Haskell).
 
+**2026-07-18d — OPEN LEAD (not fixed): `optional` types as `Bool`, breaking ~10 parser modules.**
+The recurring tree-wide `type mismatch: expected (t t), found Bool` errors (CSS, Muse, and ~8 more
+parser modules) trace to the Applicative/Parsec combinator **`optional`**: standalone `g x = optional x`
+(x :: Maybe Int) infers `optional x :: Bool` (plus a spurious `expected Int found Char`), so any
+`p <* optional q` in a Parsec `do` fails. `optional` SHOULD be `Alternative f => f a -> f (Maybe a)`.
+The `Bool` source is ELUSIVE and NOT any of: the builtins.rs `register_primitive_ops` table (proven
+NOT consulted — replacing `optional`'s scheme there with `Int->Int` left the `Bool` error unchanged;
+that table's `optional` was list-specialized `[a]->[Maybe a]`, also wrong but dead); `register_lowered_builtins`
+(instrumented both passes — never fires for a def named `optional`, so it's not a program/interface
+def); the `Char->Bool` predicate list (context.rs:2379); or the 3 known `optional` handlers
+(builtins.rs:3069, context.rs:6635 `Text.Parsec.Combinator.optional`→`a->b`, context.rs:6938
+Options.Applicative StubValue-guarded→`a->b`). So `optional`'s `Bool` comes from a name-based env
+lookup / resolution path not yet traced — NEXT: instrument the `Expr::Var` type lookup itself (by
+DefId AND by name) to see which table hands back the `Bool` scheme. This is a MULTI-MODULE lever
+(~10 modules) but a real architecture dig, NOT a quick win. (Same story for `Writers.OOXML`'s single
+error: `QName{…}` record construction inferred as a partial function `Text -> Maybe t -> t` — a
+record-construction typing bug, also not quick.)
+
 **2026-07-18c — OPEN LEAD (not fixed): `Writers.Docx.Table` do-block scope break.** Its 15
 `unbound variable` errors (tablenum, ident, captionBlocks, colspecs, thead, tfoot, head', bodies,
 foot', gridCols, …) are NOT a decl-drop — the function `tableToOpenXML` is checked but its whole

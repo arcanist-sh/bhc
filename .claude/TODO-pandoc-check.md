@@ -2,6 +2,23 @@
 
 **Goal:** `bhc check` succeeds on Pandoc's library modules (excluding Template Haskell).
 
+**2026-07-18c — OPEN LEAD (not fixed): `Writers.Docx.Table` do-block scope break.** Its 15
+`unbound variable` errors (tablenum, ident, captionBlocks, colspecs, thead, tfoot, head', bodies,
+foot', gridCols, …) are NOT a decl-drop — the function `tableToOpenXML` is checked but its whole
+`do`-block loses scope. Mechanically reduced IN the real file (backup+restore; pandoc isn't git):
+the trigger is the statement `let (Grid.Table (ident,_,tableAttr) caption colspecs _rowheads thead
+tbodies tfoot) = gridTable` — deleting it restores scope to the entire rest of the block; keeping it
+(even with RHS on the same line, or the nested tuple flattened to one var) breaks it. The QUALIFIED
+constructor is load-bearing: swapping `Grid.Table`→unqualified `Table` changes the error to `unbound
+constructor: Table` and the scope break DISAPPEARS. BUT it did NOT reproduce standalone across ~8
+variants (qualified record ctor, 7 fields, positional match, `_`-prefixed var, leading stmt, dual
+qualified+unqualified import) — all pass in isolation, so it needs the full real-module import/decl
+environment. LOW cascade value (Docx.Table imported by only 1 module, Docx.OpenXML), so PARKED as a
+lead, not a lever. Note: `import Text.Pandoc.Writers.GridTable` (unqualified, no list) does NOT bring
+`Table` into scope unqualified in this module (hence the `unbound constructor: Table` when tried) —
+possible related import-resolution quirk worth a look. When revisiting: bisect what module-level
+context (which import / prior decl) is required to make the standalone repro fail.
+
 **2026-07-18b — 85 → 87. NESTED `let … in` LAYOUT double-close bug fixed (real SCORE LEVER, +2, no
 regressions).** Fresh triage corrected the stale notes: tree-wide `No instance for Walkable` is now
 **0** (the container-instance fix cleared it), so the dominant errors are 1289 type-mismatches + 401

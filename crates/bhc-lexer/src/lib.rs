@@ -1287,13 +1287,20 @@ impl<'src> Lexer<'src> {
 
     /// Handle layout rule: generate virtual tokens based on indentation.
     fn handle_layout(&mut self, token: &Token, column: u32) {
+        // Whether the indentation-dedent loop below already closed a `let`
+        // layout block for *this* `in` token. When it did, the dedicated `in`
+        // handler further down must NOT close a second `let` block, or a nested
+        // `let a = let x = .. in x` (with `in` on its own line) would
+        // prematurely terminate the *outer* let. See the `in` handler comment.
+        let mut in_closed_let_via_dedent = false;
+
         // Handle indentation at line start FIRST (before checking for layout keywords)
         // This ensures we insert VirtualSemi/VirtualRBrace before layout keywords like 'let'
         if self.at_line_start {
             self.at_line_start = false;
 
             // Compare with current layout context
-            while let Some(&(ctx_col, is_explicit, _is_let)) = self.layout_stack.last() {
+            while let Some(&(ctx_col, is_explicit, is_let)) = self.layout_stack.last() {
                 if is_explicit {
                     break; // Don't close explicit braces
                 }
@@ -1306,6 +1313,12 @@ impl<'src> Lexer<'src> {
                         Token::new(TokenKind::VirtualRBrace),
                         Span::from_raw(self.pos as u32, self.pos as u32),
                     ));
+                    // An `in` that dedents past a `let` block's indentation is
+                    // matched by (and closes) that block here; record it so the
+                    // `in` handler doesn't close another one.
+                    if is_let && token.kind == TokenKind::In {
+                        in_closed_let_via_dedent = true;
+                    }
                 } else if column == ctx_col {
                     // `where` at the same indentation as a non-module layout
                     // context (e.g. case-of, do) should close that context.
@@ -1320,6 +1333,15 @@ impl<'src> Lexer<'src> {
                         ));
                         // Continue the loop to check if more contexts need closing
                         continue;
+                    }
+
+                    // `in` at the same column as a layout context is a `let`
+                    // terminator, never a new binding item — don't insert a
+                    // VirtualSemi (the `in` handler / dedent closes the block).
+                    // Without this, `let a = let x = .. in x` with the inner
+                    // `in` aligned under the outer binding gets a spurious `;`.
+                    if token.kind == TokenKind::In {
+                        break;
                     }
 
                     // Same indentation: new item in the block
@@ -1368,7 +1390,7 @@ impl<'src> Lexer<'src> {
         // layout blocks — e.g. `let { x = 1 } in x` uses explicit braces so no
         // implicit `let` block is ever pushed, and we must not close the
         // surrounding module or `where` block.
-        if token.kind == TokenKind::In {
+        if token.kind == TokenKind::In && !in_closed_let_via_dedent {
             if let Some(&(_, is_explicit, is_let)) = self.layout_stack.last() {
                 if !is_explicit && is_let {
                     self.layout_stack.pop();
@@ -1949,6 +1971,36 @@ mod tests {
             lbrace_count, 2,
             "Should have 2 VirtualLBrace for nested lets"
         );
+    }
+
+    #[test]
+    fn test_layout_nested_let_multiline_in() {
+        // Regression: `let a = let x = 1 in x in a` with the inner `in` on its
+        // own line. The inner `in` dedents past the inner let (closing it via
+        // the indentation rule); the `in` handler must NOT then close a second
+        // (the outer) let block. A double-close produced an unbalanced extra
+        // VirtualRBrace, corrupting the layout so the whole binding was dropped.
+        for src in [
+            // inner `in` aligned under the inner `let`
+            "h = let a = let x = 1\n            in x\n    in a",
+            // inner `in` aligned under the outer binding column
+            "h = let a = let x = 1\n        in x\n    in a",
+        ] {
+            let kinds = lex_kinds(src);
+            let lbrace = kinds
+                .iter()
+                .filter(|k| **k == TokenKind::VirtualLBrace)
+                .count();
+            let rbrace = kinds
+                .iter()
+                .filter(|k| **k == TokenKind::VirtualRBrace)
+                .count();
+            assert_eq!(
+                lbrace, rbrace,
+                "virtual braces must balance for nested let/in; src = {src:?}"
+            );
+            assert_eq!(lbrace, 2, "expected 2 nested let blocks; src = {src:?}");
+        }
     }
 
     #[test]

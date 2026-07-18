@@ -2,6 +2,36 @@
 
 **Goal:** `bhc check` succeeds on Pandoc's library modules (excluding Template Haskell).
 
+**2026-07-18b — 85 → 87. NESTED `let … in` LAYOUT double-close bug fixed (real SCORE LEVER, +2, no
+regressions).** Fresh triage corrected the stale notes: tree-wide `No instance for Walkable` is now
+**0** (the container-instance fix cleared it), so the dominant errors are 1289 type-mismatches + 401
+unbound-var + 172 unbound-ctor. Many failing modules are 1–2 errors from passing. Spot-checked the
+`opts`/`emit`/`st`/`showDim`/`parStyle` unbound-variable cluster (the notes' "cascade or real
+binding bug?" question): `Writers.Textile:showDim` is a `let`-bound helper `showDim dir = let toCss
+… in case …`, referenced by a sibling `let` binding, yet reported unbound → the silent-drop
+signature again. Reduced to `h = let a = let x = 1` / `in x` / `in a` (inner `let`'s `in` on its own
+line). Root cause = **lexer layout**, `bhc-lexer/src/lib.rs` `handle_layout`: when `in` starts a line
+and dedents past the inner `let`, the indentation rule closes that inner `let` (emits `}`), and then
+the dedicated `in` handler *also* closed a second `let` (the outer one) — an unbalanced extra `}` that
+corrupted `let a = let x = … in x in a`, so error recovery dropped the whole enclosing declaration
+(hence downstream `unbound variable: showDim`, and the fn itself). This is the idiomatic
+`in`-under-`let` layout, so it hit many writers. Fix: (1) track when the indentation dedent already
+closed a `let` for this `in` and skip the `in` handler's close; (2) `in` at an equal-column boundary
+is a `let` terminator, never a new layout item, so suppress the spurious `VirtualSemi` there too.
+Regression tests: `bhc-lexer` `test_layout_nested_let_multiline_in` (virtual-brace balance) +
+`bhc-parser/tests/nested_let_layout.rs` (3 cases, declaration survives). Workspace
+`cargo test --all-features` **2744/0**. Pandoc **85→87 passed / 83→82 failed / 53→52 skipped**:
+`Writers.Textile` and `Writers.LaTeX.Util` flipped OK, **zero regressions**. NOTE: this is the SAME
+declaration-drop symptom class as the 2026-07-18 view-pattern bug and the 2026-07-02 parenthesized-
+infix-operator bug — parser/lexer bugs that silently drop a decl and masquerade as `unbound variable`.
+**When a clean top-level/where/let binding reports `unbound variable` at its use site with no error on
+its own body, suspect a parse/layout drop, not a resolver bug.** NEXT: the remaining
+`opts`/`emit`/`parStyle`/`ident` unbound clusters (ICML 24, Docx.Table 15, etc.) — check whether more
+are decl-drops (reduce one) vs genuine RecordWildCards/where locals; and the 1-type-error modules
+(`Class.IO`, `Class.PandocPure`, `CSS`, `Writers.OOXML`) are mostly external/stubbed-type mistypings
+(e.g. OOXML `QName{…}` record construction inferred as a partial function; PandocPure
+`getModificationTime` typed like `Map.lookup`).
+
 **2026-07-18 — the "single-local-drop lowering bug" was actually a PARSER bug: view patterns as
 tuple/list ELEMENTS dropped the whole enclosing declaration. SCORE-NEUTRAL (85→85), no regressions.**
 Triaged the current 1-error `lowering failed` modules; the only genuine local-drop candidates were
@@ -333,3 +363,4 @@ interaction with OverloadedStrings / list literals in a numeric context.
 | 2026-07-04 (reconfirmed +pandoc-types package-dir) | 82 | 84 | 55 |
 | 2026-07-11 (+cross-module pattern synonym export; MediaWiki/Texinfo/XWiki) | 85 | 82 | 54 |
 | 2026-07-18 (+view-pattern-in-tuple/list parser fix; DokuWiki past lowering) | 85 | 83 | 53 |
+| 2026-07-18b (+nested `let…in` layout double-close fix; Textile/LaTeX.Util) | 87 | 82 | 52 |

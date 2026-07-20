@@ -6632,7 +6632,18 @@ impl TyCtxt {
                 "Text.Parsec.Combinator.many1"
                 | "Text.Parsec.Combinator.skipMany"
                 | "Text.Parsec.Combinator.skipMany1"
-                | "Text.Parsec.Combinator.optional" => {
+                | "Text.Parsec.Combinator.optional"
+                // Unqualified `optional`/`optionMaybe` (Control.Applicative /
+                // Text.Parsec): the builtin `optional` (DefKind::Value) is NOT
+                // covered by the StubValue-guarded Options.Applicative arm below,
+                // so without this it keeps whatever scheme `register_primitive_ops`
+                // happens to assign its DefId — currently `[Char] -> Bool` due to
+                // builtin-list drift — making every `p <* optional q` in a parser
+                // fail with "expected (f a), found Bool". Permissive `a -> b`
+                // (the Alternative `f a -> f (Maybe a)`, loosely) matches the
+                // other combinators here and overrides that stale scheme.
+                | "optional"
+                | "optionMaybe" => {
                     // Parser a -> Parser [a] (use a -> b as permissive)
                     Scheme::poly(
                         vec![a.clone(), b.clone()],
@@ -6934,8 +6945,11 @@ impl TyCtxt {
 
                 // Options.Applicative functions — need polymorphic types
                 // Guard with StubValue to avoid matching user-defined functions with common names
+                // NOTE: `optional` is handled unconditionally by the parser-combinator
+                // arm above (it must fire for the builtin `DefKind::Value` too), so it
+                // is intentionally not repeated here.
                 "strOption" | "strArgument" | "switch" | "flag" | "flag'" | "argument" | "many"
-                | "some" | "optional" | "execParser" | "info" | "infoOption" | "helper"
+                | "some" | "execParser" | "info" | "infoOption" | "helper"
                 | "fullDesc" | "progDesc" | "header" | "footer" | "long" | "short" | "metavar"
                 | "value" | "showDefault" | "help" | "command" | "subparser" | "hsubparser"
                 | "str" | "auto" | "customExecParser" | "<**>"

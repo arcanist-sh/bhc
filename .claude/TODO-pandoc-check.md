@@ -2,7 +2,27 @@
 
 **Goal:** `bhc check` succeeds on Pandoc's library modules (excluding Template Haskell).
 
-**2026-07-18d — OPEN LEAD (not fixed): `optional` types as `Bool`, breaking ~10 parser modules.**
+**2026-07-20 — 87 → 88. `optional` mis-typed as `[Char]->Bool` FIXED (the 2026-07-18d lead); cleared
+ALL 37 tree-wide "found Bool" errors, +1 module (CSS flips), no regressions.** Root cause (traced via
+`infer.rs` Var-lookup instrumentation): `optional` resolves to `DefId(391)`, and typeck's
+`register_primitive_ops` assigns schemes to DefIds BY INDEX from an `ops` list (builtins.rs:621) that
+has **drifted out of order** vs bhc-lower's `builtin_funcs` list (context.rs:344) — they diverge at
+index 53 and differ in length (671 vs 343), despite the "Order MUST match" comment. So DefId 391,
+which lowering uses for `optional`, gets some *other* op's `[Char]->Bool` scheme. `register_lowered_builtins`
+(runs after, could override by name) didn't help: the builtin `optional` is `DefKind::Value`, the only
+`optional` arm was `DefKind::StubValue`-guarded, so it hit `_ => continue` (pass 1) and pass 2 skips
+already-registered DefIds. FIX (context.rs): add unqualified `"optional" | "optionMaybe"` to the
+UNGUARDED parser-combinator arm (permissive `a -> b`, like `many1`/`noneOf`), which overrides the stale
+scheme; removed the now-shadowed `optional` from the StubValue arm. Regression:
+`bhc-driver/tests/optional_scheme.rs` (2 cases: `optional x`, `p <* optional q`). Workspace
+`cargo test --all-features` **2746/0**. **The other ~9 modules with "found Bool" did NOT flip — layered
+blockers underneath** (their Bool errors cleared but deeper type errors remain). **SYSTEMIC NOTE: the
+lowering `builtin_funcs` ↔ typeck `register_primitive_ops` DefId-by-index drift is a latent bug — other
+builtins past index 53 may be silently mistyped and masked by `register_lowered_builtins` name-matching.
+A real fix would make the two lists a single source of truth; per-name overrides (as here) are the
+tactical patch.**
+
+**2026-07-18d — LEAD RESOLVED 2026-07-20 (see above): `optional` types as `Bool`, breaking ~10 parser modules.**
 The recurring tree-wide `type mismatch: expected (t t), found Bool` errors (CSS, Muse, and ~8 more
 parser modules) trace to the Applicative/Parsec combinator **`optional`**: standalone `g x = optional x`
 (x :: Maybe Int) infers `optional x :: Bool` (plus a spurious `expected Int found Char`), so any
@@ -399,3 +419,4 @@ interaction with OverloadedStrings / list literals in a numeric context.
 | 2026-07-11 (+cross-module pattern synonym export; MediaWiki/Texinfo/XWiki) | 85 | 82 | 54 |
 | 2026-07-18 (+view-pattern-in-tuple/list parser fix; DokuWiki past lowering) | 85 | 83 | 53 |
 | 2026-07-18b (+nested `let…in` layout double-close fix; Textile/LaTeX.Util) | 87 | 82 | 52 |
+| 2026-07-20 (+`optional` scheme fix; CSS flips, 37 "found Bool" cleared) | 88 | 81 | 52 |

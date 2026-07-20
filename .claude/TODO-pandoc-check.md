@@ -2,6 +2,22 @@
 
 **Goal:** `bhc check` succeeds on Pandoc's library modules (excluding Template Haskell).
 
+**2026-07-20b — 88 → 89. `getModificationTime` mis-typed (another builtin-list-drift victim) FIXED;
+`Class.PandocPure` flips.** Same root cause as `optional`: `Directory.getModificationTime`
+(`DefKind::Value` builtin) picked up an unrelated `Map String a -> Maybe a` scheme via the DefId-by-index
+drift; it had a correct `String -> IO String` scheme in `register_primitive_ops` but at the wrong DefId,
+and wasn't in the name-based `register_lowered_builtins` match. FIX (context.rs): add `getModificationTime`
+to the System.Directory arm typed `FilePath -> IO UTCTime` (UTCTime referenced by name — it's an imported
+type con, unifies with `FileInfo.infoFileMTime`; the `register_primitive_ops` version's `IO String` was
+wrong for real use), plus `getPermissions` (`String -> IO String`). Regression:
+`bhc-driver/tests/directory_builtin_scheme.rs`. Workspace 2747/0, no regressions. **This is the 2nd
+per-name patch for the builtin-list drift — confirms the whack-a-mole; the systemic fix (single source of
+truth for lowering `builtin_funcs` ↔ typeck `register_primitive_ops`) would clear a whole class at once.**
+Remaining 1-type-error modules: `Class.IO` (`report $ IgnoredIOError $ pack ...` — LogMessage ctor arity),
+`Data` (`expected Int, found ([Char]->t)` — under-applied fn), `Writers.OOXML` (`QName{…}` external-record
+construction inferred as a partial fn — distinct record-construction bug), `Parsing.Lists` (romanNumeral
+do-block monad inferred `IO` not `ParsecT` — monad inference).
+
 **2026-07-20 — 87 → 88. `optional` mis-typed as `[Char]->Bool` FIXED (the 2026-07-18d lead); cleared
 ALL 37 tree-wide "found Bool" errors, +1 module (CSS flips), no regressions.** Root cause (traced via
 `infer.rs` Var-lookup instrumentation): `optional` resolves to `DefId(391)`, and typeck's
@@ -420,3 +436,4 @@ interaction with OverloadedStrings / list literals in a numeric context.
 | 2026-07-18 (+view-pattern-in-tuple/list parser fix; DokuWiki past lowering) | 85 | 83 | 53 |
 | 2026-07-18b (+nested `let…in` layout double-close fix; Textile/LaTeX.Util) | 87 | 82 | 52 |
 | 2026-07-20 (+`optional` scheme fix; CSS flips, 37 "found Bool" cleared) | 88 | 81 | 52 |
+| 2026-07-20b (+`getModificationTime` scheme fix; PandocPure flips) | 89 | 80 | 52 |

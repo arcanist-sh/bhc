@@ -3159,6 +3159,29 @@ impl TyCtxt {
                     );
                     Scheme::mono(Ty::fun(self.builtins.string_ty.clone(), io_list_string))
                 }
+                // System.Directory.getModificationTime :: FilePath -> IO UTCTime.
+                // Pinned by name because the lowering/typeck builtin-list drift
+                // otherwise mis-assigns its DefId an unrelated
+                // `Map String a -> Maybe a` scheme (cf. the `optional` fix).
+                // `UTCTime` is an imported type con (not a bhc builtin); referring
+                // to it by name unifies with the `FileInfo` field that consumes it.
+                "getModificationTime" => {
+                    let utc_time = Ty::Con(TyCon::new(Symbol::intern("UTCTime"), Kind::Star));
+                    let io_utc = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(utc_time),
+                    );
+                    Scheme::mono(Ty::fun(self.builtins.string_ty.clone(), io_utc))
+                }
+                // System.Directory.getPermissions :: FilePath -> IO Permissions.
+                // Same drift issue; permissive enough as String -> IO String here.
+                "getPermissions" => {
+                    let io_string = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(self.builtins.string_ty.clone()),
+                    );
+                    Scheme::mono(Ty::fun(self.builtins.string_ty.clone(), io_string))
+                }
                 // E.19: System.FilePath — String -> String
                 "takeFileName" | "takeDirectory" | "takeExtension" | "dropExtension"
                 | "takeBaseName" => Scheme::mono(Ty::fun(

@@ -2,6 +2,26 @@
 
 **Goal:** `bhc check` succeeds on Pandoc's library modules (excluding Template Haskell).
 
+**2026-07-20c — 89 → 92. SYSTEMIC fix for the builtin-list DefId drift (collision-only re-alignment).**
+Root cause recap: `register_primitive_ops` registers builtin schemes at DefIds it GUESSES by index,
+assuming its `ops` list mirrors bhc-lower's `builtin_funcs`; they've drifted, so a builtin's real
+lowering DefId often carries an unrelated op's scheme (optional→`[Char]->Bool`, getModificationTime→
+`Map String a->Maybe a`, etc.). `register_value` ALSO records every op BY NAME, so in
+`register_lowered_builtins` (which has the real lowering DefId per name) we re-register builtins at
+their real DefId using the name-keyed scheme. **KEY: only re-align a DefId that ALREADY carries a
+scheme (a genuine collision).** The first attempt applied the name scheme to EVERY builtin def →
+89→**76** (−13, 14 regressions): builtins whose real DefId is unclaimed take the permissive fresh-var
+path (second pass), and forcing their often-wrong/incomplete ops-table scheme on them regresses
+widely. Guarding on `lookup_def_id(id).is_some()` (collision only) → 89→**92 (+3: Class.IO, Data,
+Readers.LaTeX.SIunitx), ZERO regressions**, workspace `cargo test --all-features` 2747/0. The
+per-name `optional`/`getModificationTime` big-match overrides are STILL needed (their name-keyed
+ops-table schemes — `[a]->[Maybe a]`, `IO String` — are themselves wrong; the big match runs after
+re-alignment and overrides). NOTE: no standalone unit test — the collision is context-dependent (it
+depends on the whole program's DefId assignment), so it can't be reproduced in isolation; validated
+by the Pandoc integration measurement + full suite. Fuller cleanup (make the two builtin lists a
+single source of truth, or fix the ops-table's wrong schemes) remains, but the collision class is now
+handled generally.
+
 **2026-07-20b — 88 → 89. `getModificationTime` mis-typed (another builtin-list-drift victim) FIXED;
 `Class.PandocPure` flips.** Same root cause as `optional`: `Directory.getModificationTime`
 (`DefKind::Value` builtin) picked up an unrelated `Map String a -> Maybe a` scheme via the DefId-by-index
@@ -437,3 +457,4 @@ interaction with OverloadedStrings / list literals in a numeric context.
 | 2026-07-18b (+nested `let…in` layout double-close fix; Textile/LaTeX.Util) | 87 | 82 | 52 |
 | 2026-07-20 (+`optional` scheme fix; CSS flips, 37 "found Bool" cleared) | 88 | 81 | 52 |
 | 2026-07-20b (+`getModificationTime` scheme fix; PandocPure flips) | 89 | 80 | 52 |
+| 2026-07-20c (+collision-only builtin DefId re-alignment; +3 modules) | 92 | 77 | 52 |

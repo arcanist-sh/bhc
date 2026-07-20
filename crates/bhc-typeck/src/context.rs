@@ -1915,6 +1915,48 @@ impl TyCtxt {
             )
         };
 
+        // Systemic re-alignment for the bhc-lower ↔ bhc-typeck builtin-list drift.
+        //
+        // `Builtins::register_primitive_ops` registers each builtin scheme at a
+        // DefId it GUESSES by index (`next_id + position`), assuming its `ops`
+        // list is in the same order as bhc-lower's `builtin_funcs`. The two lists
+        // have drifted, so a builtin's *real* lowering DefId frequently carries
+        // an unrelated op's scheme (this is how `optional` ended up typed as
+        // `[Char] -> Bool` and `getModificationTime` as `Map String a -> Maybe a`).
+        //
+        // `register_value` also records every op *by name* (in the outermost
+        // env scope), so here — where we have the real lowering DefId for each
+        // name — we re-register each known builtin at its REAL DefId using the
+        // name-keyed scheme. The curated `match name` below then overrides
+        // specific names that need a different scheme (e.g. `optional`).
+        for (_def_id, def_info) in defs.iter() {
+            if matches!(
+                def_info.kind,
+                DefKind::PatVar
+                    | DefKind::ImportedValue
+                    | DefKind::Constructor
+                    | DefKind::StubConstructor
+            ) {
+                continue;
+            }
+            // Never override a value the module defines itself.
+            if local_value_ids.contains(&def_info.id) {
+                continue;
+            }
+            // Only re-align when this DefId ALREADY carries a scheme from the
+            // index-based pass — i.e. a *collision*, where the drift landed some
+            // other op's scheme on this builtin's real DefId. Builtins whose real
+            // DefId is unclaimed take the permissive fresh-var path (second pass)
+            // and must be left alone: forcing their (often wrong/incomplete)
+            // ops-table scheme on them regresses widely.
+            if self.env.lookup_def_id(def_info.id).is_none() {
+                continue;
+            }
+            if let Some(scheme) = self.env.lookup_by_name(def_info.name).cloned() {
+                self.env.insert_global(def_info.id, scheme);
+            }
+        }
+
         // For each def in the lowering pass's def map, register it with a type
         for (_def_id, def_info) in defs.iter() {
             // Skip pattern variables (function parameters, let-bound vars) —

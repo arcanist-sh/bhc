@@ -2,6 +2,52 @@
 
 **Goal:** `bhc check` succeeds on Pandoc's library modules (excluding Template Haskell).
 
+**2026-07-21 — 92 → 93. External `QName` record construction FIXED (the 2026-07-20b OOXML lead).**
+`Text.Pandoc.XML.Light.QName` is stubbed by name only, so the generic constructor fallback
+(`context.rs`) gave it a bare fresh-var scheme with NO field defs. Record syntax
+`QName{ qName=.., qURI=.., qPrefix=.. }` then inferred as a partial function (`t -> t`) instead of
+`QName`, breaking `Text.Pandoc.Writers.OOXML`; positional `QName a b c` already worked via permissive
+fresh-var unification. FIX: register QName's constructor scheme (`Text -> Maybe Text -> Maybe Text ->
+QName`) AND its `con_field_defs` by name in the fallback's `match name` block. Regression:
+`bhc-driver/tests/qname_record_construction.rs` (record + positional). Workspace `cargo test
+--all-features` **2749/0** (needs `LIBRARY_PATH=/opt/homebrew/opt/openblas/lib` — openblas is keg-only;
+a bare `--all-features` fails to link `bhc-numeric`). `Writers.OOXML` flips → **93 passed, 76 failed,
+52 skipped**. Committed `cbfcbf5` (unpushed). This is the **4th per-name patch** for the builtin-list
+drift class — see the measured drift map + unification workplan below.
+
+**BUILTIN-LIST DRIFT — measured map + unification workplan (2026-07-21).** The recurring per-name
+patches (`optional`, `getModificationTime`, `QName`, …) are all symptoms of ONE structural bug:
+bhc-lower's `builtin_funcs` (`bhc-lower/src/context.rs:344`, whose iteration at :1098 assigns each
+builtin its REAL sequential `DefId`) and bhc-typeck's `ops` vec (`bhc-typeck/src/builtins.rs:621`,
+whose loop at :5842 registers scheme *i* at `DefId(next_id+i)`) are ASSUMED identical but have drifted.
+Static diff of the two ordered name lists (`scratchpad/drift.py`):
+- lowering `builtin_funcs` = **670** entries (source of truth for name→DefId); typeck `ops` = **343**.
+- **First divergence: index 53** — after `void` (52) lowering continues with the Reader/State family
+  (`liftIO, ask, asks, local, reader, get, gets, put, modify, …`) while typeck's ops continues with
+  the folding family (`filterM, foldM, foldM_, replicateM, replicateM_, zipWithM, …`). Shifted from
+  there on and never re-aligns.
+- **290 / 343 (84%) of positional entries land on the WRONG DefId** → a builtin's real DefId carries
+  some other op's scheme. This is the collision class the 07-20c re-alignment repairs.
+- 325 lowering names have no ops entry (permissive fresh-var path); 1 ops-only name (`getMaskingState`).
+
+Why the positional pass is vestigial-or-harmful: `register_value` records every op *by name* too, and
+`register_lowered_builtins` (`context.rs:1120`) applies those name-keyed schemes at the REAL lowering
+DefIds. So by-name registration is what actually types builtins; the positional `DefId(next_id+offset)`
+pass mostly just plants wrong schemes that the collision-only guard (`context.rs:1958`) then repairs.
+
+**The fix, two independent parts (score is the oracle — build `bhc`, re-check Pandoc each step):**
+- **Part 1 (structural):** stop assigning ops schemes at positional DefIds; register them ONLY by name
+  and let `register_lowered_builtins` apply at lowering's real DefId. Then no wrong scheme can land on
+  a real DefId and the collision-only guard becomes unnecessary. Net simplification.
+- **Part 2 (semantic — the trap):** making ops schemes authoritative-by-name EXPOSES every wrong ops
+  scheme previously masked by landing on the wrong DefId. The 07-20c experiment already hit this
+  (name-key every builtin → 89→76, 14 regressions): some names work ONLY by falling through to the
+  permissive path. So Part 1 must be gated by auditing **ops names whose real DefId is currently
+  unclaimed (permissive) AND whose ops scheme is wrong** (`optional`, `getModificationTime` are known
+  members). For each regression, add to a "keep-permissive" set + log it; once stable, delete the
+  positional assignment and the collision guard. Guard against re-drift with a unit test asserting
+  every ops name resolves in lowering's builtin set. Reproduce the map: `python3 .claude/drift-builtin-lists.py` from repo root.
+
 **2026-07-20c — 89 → 92. SYSTEMIC fix for the builtin-list DefId drift (collision-only re-alignment).**
 Root cause recap: `register_primitive_ops` registers builtin schemes at DefIds it GUESSES by index,
 assuming its `ops` list mirrors bhc-lower's `builtin_funcs`; they've drifted, so a builtin's real

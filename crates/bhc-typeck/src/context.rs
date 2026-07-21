@@ -1974,7 +1974,8 @@ impl TyCtxt {
             // other op's scheme on this builtin's real DefId. Builtins whose real
             // DefId is unclaimed take the permissive fresh-var path (second pass)
             // and must be left alone: forcing their (often wrong/incomplete)
-            // ops-table scheme on them regresses widely.
+            // ops-table scheme on them regresses widely (measured 2026-07-21:
+            // dropping this guard cascades via pandoc-types Builder.hs → 93→76).
             if self.env.lookup_def_id(def_info.id).is_none() {
                 continue;
             }

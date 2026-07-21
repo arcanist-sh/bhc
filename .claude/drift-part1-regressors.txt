@@ -1,0 +1,30 @@
+# Part 1 unification experiment (2026-07-21): removing the collision guard in
+# register_lowered_builtins (apply name-keyed scheme to EVERY builtin) => 93 -> 76.
+# Single cascade root: pandoc-types Text/Pandoc/Builder.hs fails typecheck (4 errs:
+#   3x `No instance Num [RowSpan]`, 1x `expected [ColSpec] found (Alignment,ColWidth)`),
+# so all its importers cascade. Culprit is among the 78 "newly-activated" ops names
+# (lowering index >= len(ops)=343) whose wrong ops-table scheme is applied for the
+# first time. NEXT: bisect that set against Builder.hs to the offending name(s),
+# fix their ops-table scheme (or add to a keep-permissive set), re-measure.
+# RULED OUT by inspection: replicate (collided idx 148, fine at baseline) and
+# groupBy (only newly-activated name used directly in Builder; its ops scheme
+# (a->a->Bool)->[a]->[[a]] is CORRECT). Culprit is transitive -> real bisect needed.
+#
+# 17 modules regressed (baseline OK -> experiment FAILED):
+Text.Pandoc.Citeproc.CslJson
+Text.Pandoc.Class.IO
+Text.Pandoc.ImageSize
+Text.Pandoc.MediaBag
+Text.Pandoc.Parsing.Capabilities
+Text.Pandoc.Parsing.Citations
+Text.Pandoc.Parsing.Smart
+Text.Pandoc.Process
+Text.Pandoc.Readers.LaTeX.SIunitx
+Text.Pandoc.Shared
+Text.Pandoc.Writers.AsciiDoc
+Text.Pandoc.Writers.DokuWiki
+Text.Pandoc.Writers.Haddock
+Text.Pandoc.Writers.OOXML
+Text.Pandoc.Writers.Texinfo
+Text.Pandoc.Writers.Textile
+Text.Pandoc.Writers.ZimWiki

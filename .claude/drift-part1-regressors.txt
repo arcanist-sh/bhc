@@ -8,7 +8,15 @@
 # fix their ops-table scheme (or add to a keep-permissive set), re-measure.
 # RULED OUT by inspection: replicate (collided idx 148, fine at baseline) and
 # groupBy (only newly-activated name used directly in Builder; its ops scheme
-# (a->a->Bool)->[a]->[[a]] is CORRECT). Culprit is transitive -> real bisect needed.
+# (a->a->Bool)->[a]->[[a]] is CORRECT).
+#
+# UPDATE (runtime bisection, 2026-07-21): NOT a single culprit. Affected universe
+# is 605 names (all by-name entries, incl. qualified Data.Map.*/Data.Text.* and
+# class methods), not 78. KEEP=all(605) -> 93 (zero gain); KEEP=left-303 -> 83;
+# 151 -> 80; 76 -> 77; 38 -> 76. Regressors are MANY & spread out -> the ops table
+# has dozens of wrong by-name schemes. The unification has no score upside; the
+# collision guard already extracts the safe value. See TODO-pandoc-check.md.
+# (The 17-module list below is the DROPALL=full regression set, kept for reference.)
 #
 # 17 modules regressed (baseline OK -> experiment FAILED):
 Text.Pandoc.Citeproc.CslJson

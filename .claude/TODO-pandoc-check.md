@@ -48,23 +48,28 @@ pass mostly just plants wrong schemes that the collision-only guard (`context.rs
   positional assignment and the collision guard. Guard against re-drift with a unit test asserting
   every ops name resolves in lowering's builtin set. Reproduce the map: `python3 .claude/drift-builtin-lists.py` from repo root.
 
-**EMPIRICAL (2026-07-21): the trap reproduces + is a SINGLE cascade.** Dropping the collision guard
-(`register_lowered_builtins` — apply name-keyed scheme to every builtin) → **93 → 76**, 0 newly
-passing, **17 regressed** (`.claude/drift-part1-regressors.txt`). Root cause is NOT 17 independent
-breakages: **pandoc-types `Text/Pandoc/Builder.hs` itself fails typecheck** (4 errs: 3× `No instance
-Num [RowSpan]`, 1× `expected [ColSpec] found (Alignment, ColWidth)` — a list-producing builtin's
-result collapsing to its element type), and every scored module imports Builder → identical cascade.
-So the whole 17-module regression is ONE wrong ops-table scheme among the **78 "newly-activated" ops
-names** (lowering index ≥ 343, applied for the first time when the guard is dropped). **NEXT for Part
-1:** bisect those 78 to the offending name(s). RULED OUT the eyeball candidates: `replicate` (lower
-idx 148, already collided/applied at baseline — fine) and the only newly-activated name used directly
-in Builder, `groupBy` (its ops scheme `(a→a→Bool)→[a]→[[a]]` is CORRECT). So the culprit is a
-*transitive* dependency of Builder's table code (`normalizeRows'`/`simpleTable`), reachable only by
-actual per-name bisection — not static eyeballing. Mechanics for a real bisect: partition the 78 into
-halves, keep the guard only for one half (extra `if HALF.contains(name) { continue }`), rebuild +
-`--package-dir` re-check Builder.hs, narrow. Once the wrong ops-table scheme is fixed (or the name
-added to a keep-permissive set), Builder passes and the 17 modules return; then the collision guard
-can be deleted. Family-by-family measured loop, not a one-shot.
+**EMPIRICAL (2026-07-21) — DECISIVE: the unification is a cleanup with NO score upside, MANY regressors.
+Do NOT pursue it as a score lever.** Ran a full runtime-hooked bisection (env vars `BHC_DROPALL`/
+`BHC_KEEP`/`BHC_DUMP` on the guard; enumerate + bisect against the real `--package-dir` full-tree
+score, not standalone Builder — standalone is unfaithful because claimed/unclaimed DefId status
+depends on the whole-program def map). Findings:
+- Dropping the guard for *all* unclaimed builtins → **93 → 76**. The affected universe is **605 names**
+  (not the 78 ops-only names — the by-name table also holds qualified `Data.Map.*`/`Data.Text.*`,
+  class methods, transformer/char builtins via `register_value`/`insert_global_by_name`).
+- **Name-keying the whole affected set nets ZERO gain: KEEP=all(605) → 93 = baseline.** So there is no
+  subset whose name-keying raises the score above 93; the mechanism only ever loses.
+- **Regressors are MANY and spread out, not one Builder culprit** (earlier "single cascade / 17 return
+  for free" was WRONG): KEEP=left-303 → 83, KEEP=151 → 80, KEEP=76 → 77, KEEP=38 → 76 … i.e. dozens of
+  builtins have wrong by-name schemes that only stay harmless because the collision guard never applies
+  them. A single-culprit binary search is invalid here (it walked to a meaningless endpoint).
+
+**Conclusion:** the collision guard is already extracting all the safe value from the drift; the ops
+table has *many* wrong schemes that a full unification would expose. Cleaning it up is a large
+correctness project (audit hundreds of schemes) with **no score payoff** — not the "highest
+score-per-effort lever" it was framed as. **Redirect:** score gains come from (a) targeted curated
+overrides in the `match name` block (QName/optional style, when a specific wrong scheme blocks a
+module) and (b) the deeper type-mismatch cluster (the ~1000 `expected…found…` errors), NOT from the
+builtin-list refactor. The drift map / scripts remain for whoever eventually does the cleanup.
 
 **2026-07-20c — 89 → 92. SYSTEMIC fix for the builtin-list DefId drift (collision-only re-alignment).**
 Root cause recap: `register_primitive_ops` registers builtin schemes at DefIds it GUESSES by index,

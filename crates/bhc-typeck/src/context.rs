@@ -1778,6 +1778,32 @@ impl TyCtxt {
                     Scheme::mono(Ty::Con(TyCon::new(Symbol::intern("Block"), Kind::Star)))
                 }
 
+                // Text.Pandoc.XML.Light.QName is an external record type stubbed
+                // by name only, so the generic fallback gives it a bare fresh-var
+                // scheme with no field defs — which makes RECORD construction
+                // (`QName{ qName = .., qURI = .., qPrefix = .. }`) infer as a
+                // partial function instead of `QName`. Register its real
+                // constructor scheme AND field definitions here so record syntax
+                // resolves (positional `QName a b c` already worked permissively).
+                "QName" | "Text.Pandoc.XML.Light.QName" | "Text.Pandoc.XML.Light.Types.QName" => {
+                    let text = self.builtins.text_ty.clone();
+                    let maybe_con = self.builtins.maybe_con.clone();
+                    let maybe_text = Ty::App(Box::new(Ty::Con(maybe_con)), Box::new(text.clone()));
+                    let qname_con = TyCon::new(Symbol::intern("QName"), Kind::Star);
+                    self.con_field_defs.insert(
+                        def_info.id,
+                        vec![
+                            (Symbol::intern("qName"), text.clone()),
+                            (Symbol::intern("qURI"), maybe_text.clone()),
+                            (Symbol::intern("qPrefix"), maybe_text.clone()),
+                        ],
+                    );
+                    Scheme::mono(Ty::fun(
+                        text,
+                        Ty::fun(maybe_text.clone(), Ty::fun(maybe_text, Ty::Con(qname_con))),
+                    ))
+                }
+
                 // For imported constructors that aren't known builtins,
                 // create a function type based on the constructor's arity.
                 // Mark as non-builtin so we only register by DefId (not by name),

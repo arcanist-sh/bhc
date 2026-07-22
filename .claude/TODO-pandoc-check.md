@@ -2,6 +2,28 @@
 
 **Goal:** `bhc check` succeeds on Pandoc's library modules (excluding Template Haskell).
 
+**2026-07-22 — 93 → 105 (+12). The #1-lever `try` fix landed (commit 740efc2).** `try` is overloaded
+(Control.Exception.try `IO a -> IO (Either e a)` vs Text.Parsec.try `ParsecT s u m a -> …`); the
+curated builtin handler (context.rs, was ~:3037) pinned it to the IO shape, poisoning every Parsec
+module that uses `try` (forced the parser monad to `IO`, injected `Either`). Traced via a faithful
+renamed copy of `CSV.hs` (`import Text.Pandoc.Parsing`) + in-context reduction: `escaped opts = try
+(char 'x')` FAILED while `char 'x'`, `char 'x' >> char 'y'`, `mzero` all PASSED → `try` is the poison.
+(A standalone `import Text.Parsec` repro passed because there `try` resolves to a permissive stub;
+the IO builtin only wins via the `Text.Pandoc.Parsing` re-export path.) FIX: give the curated `try`
+a permissive `a -> b` scheme — Parsec use preserves the parser type via the argument, Control.Exception
+uses still recover `IO (Either …)` from the surrounding case/bind. **+12 reader/parser modules (CSV,
+DokuWiki, HTML.Parsing, LaTeX.Citation, LaTeX.Math, Org.BlockStarts/DocumentTree/ExportSettings/Parsing,
+TikiWiki, Vimwiki, Docx.Fields), ZERO regressions, workspace 2749/0**, regression test
+`bhc-driver/tests/parsec_try_scheme.rs`. NOTE: the ops-table `try` (builtins.rs:1366) is still the IO
+scheme (untouched) — the curated handler is what fires for imported `try`; revisit only if needed.
+
+**Re-triage at 105 (new labeled output):** typecheck-failing categories now — **13 tuple/shape,
+8 Parsec-monad, 5 other, 4 No-instance, 1 Arrow, 1 RWS**. The remaining 8 Parsec-monad modules
+(`Parsing.Lists`, `Readers.LaTeX.Macro`, `Readers.HTML.Table`, …) STILL show `expected ParsecT…,
+found IO` but did NOT flip with the `try` fix → a DIFFERENT IO-leak source (do-block / `many` / `>>=`
+monad defaulting, or another concretely-IO-typed combinator). That 8-module cluster is the natural
+next sub-lever; then the 13 tuple/shape (`Format` splitExtension-context, `JATS.References`, `Chunks`).
+
 **2026-07-21/22 — TRIAGE of all 44 typecheck-failing modules (enabled by the new labeled error output,
 commit c13a9dd: batch `check` now prints `Type errors in <module>:`). #1 LEVER IDENTIFIED.** Categorized
 every failing module by its errors (`python3` over the labeled full-tree run). Distribution:

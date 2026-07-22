@@ -3035,24 +3035,20 @@ impl TyCtxt {
                 }
                 // try :: IO a -> IO (Either SomeException a)
                 "try" => {
-                    // try :: IO a -> IO (Either e a)
-                    let e = TyVar::new_star(998);
-                    let io_a = Ty::App(
-                        Box::new(Ty::Con(self.builtins.io_con.clone())),
-                        Box::new(Ty::Var(a.clone())),
-                    );
-                    let either_exc_a = Ty::App(
-                        Box::new(Ty::App(
-                            Box::new(Ty::Con(self.builtins.either_con.clone())),
-                            Box::new(Ty::Var(e.clone())),
-                        )),
-                        Box::new(Ty::Var(a.clone())),
-                    );
-                    let io_either = Ty::App(
-                        Box::new(Ty::Con(self.builtins.io_con.clone())),
-                        Box::new(either_exc_a),
-                    );
-                    Scheme::poly(vec![a.clone(), e], Ty::fun(io_a, io_either))
+                    // `try` is overloaded: Control.Exception.try
+                    // (`IO a -> IO (Either e a)`) vs Text.Parsec.try
+                    // (`ParsecT s u m a -> ParsecT s u m a`). A fixed IO scheme
+                    // poisons every Parsec module that uses `try` (forcing the
+                    // parser monad to `IO` and injecting `Either`). Give it a
+                    // permissive `a -> b` so it unifies to whichever context uses
+                    // it — the Parsec use preserves the parser type via the
+                    // argument, and Control.Exception uses still recover the
+                    // `IO (Either …)` shape from the surrounding `case`/bind.
+                    let b = TyVar::new_star(997);
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b)),
+                    )
                 }
                 // evaluate :: a -> IO a
                 "evaluate" => {

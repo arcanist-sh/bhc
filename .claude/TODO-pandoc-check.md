@@ -2,6 +2,31 @@
 
 **Goal:** `bhc check` succeeds on Pandoc's library modules (excluding Template Haskell).
 
+**2026-07-21/22 — TRIAGE of all 44 typecheck-failing modules (enabled by the new labeled error output,
+commit c13a9dd: batch `check` now prints `Type errors in <module>:`). #1 LEVER IDENTIFIED.** Categorized
+every failing module by its errors (`python3` over the labeled full-tree run). Distribution:
+- **23  Parsec-monad** — `expected ((ParsecT …)/(Parsec Text) …), found IO`. **THE dominant lever by
+  far.** Parser do-blocks / combinator expressions infer as `IO` instead of the `Parsec`/`ParsecT`
+  monad. Blocks `Parsing.Lists`, `CSV`, and ~21 more reader/parser modules. Fixing this one inference
+  bug could flip up to ~23 modules (modulo layered blockers) — worth far more than any per-name fix.
+- 14  tuple/shape (e.g. `Format`: `expected (t, Text) found Text` at `case splitExtension … of (_,"")`;
+  `JATS.References`: `expected (t Text) found (Text, Text)`)
+- 5   other-mismatch (under-applied fns, occurs-check/infinite type in `Parsing.GridTable`)
+- 2   No-instance;  1  RWS-monad;  1  Arrow (`ODT.Arrows.Utils`, Either/`***`/`>>^` stubs).
+
+**The Parsec-monad bug is EMERGENT — it does NOT isolate in minimal repros** (same pattern as `Format`
+and the old `Walk` saga): a standalone `Parser` using `try`/`char`/`noneOf`/`>>` type-checks fine, but
+the full module fails. Ruled out the obvious single cause: `try` IS globally schemed as
+`Control.Exception.try :: IO a -> IO (Either e a)` (builtins.rs:1366) which *looks* like the poison
+(the `found IO` + `found (Either t t)` errors match it exactly), and 23/23 Parsec-fail modules use
+`try` — BUT a minimal `Parser` using `try` still passes (it resolves to the Parsec `try` when
+`Text.Parsec` is imported). So the IO leak is a full-module interaction, not one combinator. **NEXT
+(the real #1 effort):** instrument the constraint solver on one mid-size Parsec module (e.g. `CSV`,
+`escaped`/`pCSVQuotedCell`) to see where `IO` first enters the parser's monad var — likely a builtin
+Parsec combinator whose scheme pins a concrete monad (IO) instead of a fresh `m`, OR `<|>`/`>>`/`mzero`
+defaulting. This is deep typeck work (a focused session), not a curated-scheme quick win, but it is
+the highest-payoff target on the board. Triage script + labeled output make re-running trivial.
+
 **2026-07-21 — 92 → 93. External `QName` record construction FIXED (the 2026-07-20b OOXML lead).**
 `Text.Pandoc.XML.Light.QName` is stubbed by name only, so the generic constructor fallback
 (`context.rs`) gave it a bare fresh-var scheme with NO field defs. Record syntax

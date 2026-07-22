@@ -39,3 +39,16 @@ fn try_preserves_non_io_result_type() {
         "f x = try x\n",
     ));
 }
+
+#[test]
+fn fail_is_monad_polymorphic() {
+    // Same bug class as `try`: the curated `fail` handler pinned `String -> IO a`,
+    // forcing any do-block using `fail`/`Prelude.fail` into IO (e.g. a Parsec
+    // `romanNumeral` ending in `Prelude.fail "…"`). `fail` must stay
+    // `MonadFail m => String -> m a`; here it must unify to `Maybe`.
+    check_ok(concat!(
+        "module M where\n",
+        "g :: Bool -> Maybe Int\n",
+        "g b = if b then fail \"no\" else return 1\n",
+    ));
+}

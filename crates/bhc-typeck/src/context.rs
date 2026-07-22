@@ -3024,13 +3024,19 @@ impl TyCtxt {
                 )),
                 // fail :: String -> m a  (stub: String -> IO a)
                 "fail" => {
-                    let io_a = Ty::App(
-                        Box::new(Ty::Con(self.builtins.io_con.clone())),
-                        Box::new(Ty::Var(a.clone())),
+                    // fail :: MonadFail m => String -> m a. Pinning it to `IO a`
+                    // (as before) forces any do-block using `fail`/`Prelude.fail`
+                    // into IO — e.g. a Parsec `romanNumeral` ending in
+                    // `Prelude.fail "…"` mis-inferred as IO, not ParsecT. Keep the
+                    // monad polymorphic (matches the ops-table `fail`).
+                    let m = TyVar::new(
+                        BUILTIN_TYVAR_M,
+                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
                     );
+                    let ma = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())));
                     Scheme::poly(
-                        vec![a.clone()],
-                        Ty::fun(self.builtins.string_ty.clone(), io_a),
+                        vec![m, a.clone()],
+                        Ty::fun(self.builtins.string_ty.clone(), ma),
                     )
                 }
                 // try :: IO a -> IO (Either SomeException a)

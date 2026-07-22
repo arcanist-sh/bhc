@@ -17,12 +17,22 @@ TikiWiki, Vimwiki, Docx.Fields), ZERO regressions, workspace 2749/0**, regressio
 `bhc-driver/tests/parsec_try_scheme.rs`. NOTE: the ops-table `try` (builtins.rs:1366) is still the IO
 scheme (untouched) — the curated handler is what fires for imported `try`; revisit only if needed.
 
-**Re-triage at 105 (new labeled output):** typecheck-failing categories now — **13 tuple/shape,
-8 Parsec-monad, 5 other, 4 No-instance, 1 Arrow, 1 RWS**. The remaining 8 Parsec-monad modules
-(`Parsing.Lists`, `Readers.LaTeX.Macro`, `Readers.HTML.Table`, …) STILL show `expected ParsecT…,
-found IO` but did NOT flip with the `try` fix → a DIFFERENT IO-leak source (do-block / `many` / `>>=`
-monad defaulting, or another concretely-IO-typed combinator). That 8-module cluster is the natural
-next sub-lever; then the 13 tuple/shape (`Format` splitExtension-context, `JATS.References`, `Chunks`).
+**2026-07-22 — 105 → 107 (+2). `fail` fix (commit 156884c), same bug class as `try`.** The remaining
+`found IO` Parsec modules traced to the curated `fail` handler (context.rs, was ~:3026) pinning
+`String -> IO a` — a do-block ending in `Prelude.fail "…"` (e.g. `romanNumeral`) forced IO. Restored
+`MonadFail m => String -> m a` (matches ops-table). +2 (`Parsing.Lists`, `Readers.LaTeX.Macro`), zero
+regressions, 2750/0, regression test `fail_is_monad_polymorphic`.
+
+**Re-triage at 107:** **13 tuple/shape, 6 other, 5 No-instance, 4 Parsec-monad, 1 Arrow, 1 RWS.** The
+easy "curated handler pins IO" batch is EXHAUSTED (try, fail were the two). Remaining levers are
+diverse/deeper, NOT single-combinator batches: the 4 Parsec-monad now have distinct causes
+(`Parsing.General`: `Parsec` vs `ParsecT Sources` — likely a `type Parsec s u = ParsecT s u Identity`
+alias-expansion gap; `LaTeX.Parsing`: `[]` vs NonEmpty/IntMap; infinite-type). The 13 tuple/shape are
+also diverse (`Format` splitExtension-context emergent; `JATS.References` `(t Text)` vs `(Text,Text)`;
+`Chunks` Tree vs fn). No obvious next batch — pick individual near-passing modules (`HTML.Table`:
+`expected Int found Double` numeric-defaulting; `Format`) or investigate the `Parsec` alias gap (could
+be a small multi-module lever). Scan of curated IO-pinned handlers (context.rs) found the rest are
+genuine IO fns (catch/bracket/openFile/…) — correctly pinned.
 
 **2026-07-21/22 — TRIAGE of all 44 typecheck-failing modules (enabled by the new labeled error output,
 commit c13a9dd: batch `check` now prints `Type errors in <module>:`). #1 LEVER IDENTIFIED.** Categorized

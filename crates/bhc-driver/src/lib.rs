@@ -2121,7 +2121,7 @@ impl Compiler {
                 None
             }
             Err(diagnostics) => {
-                eprintln!("Type errors:");
+                eprintln!("Type errors in {module_name}:");
                 for (i, diag) in diagnostics.iter().enumerate() {
                     let span_info = diag
                         .labels

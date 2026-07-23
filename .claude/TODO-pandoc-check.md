@@ -4,6 +4,8 @@
 
 **`GridTable` — NOT a clean win (2026-07-23). Occurs-check on `let rows = GT.rows blkTbl; mapM (mapM ..) rows`: the external `Text.GridTable` stub `GT.rows` gets the default StubValue scheme `forall a. a` (context.rs:~7128), which let-generalizes to bottom and occurs-checks in the nested `mapM`. DEAD END: changing the default to `forall a b. a->b` regresses 111->51 (value-stubs like `stderr`/`stdout`/constants NEED `forall a. a`). A targeted fix needs proper schemes for the gridtables accessors (`rows`::`a->[[b]]`, `mapCells`, `arrayTableColSpecs`, `Cell`/`RowSpan`/`ColSpan`), external-specific, ~1 module. Deferred.**
 
+**2026-07-23 — 111 → 112 (+1). `Data.Tree.Node` scheme FIXED (commit pending).** `Chunks` was mislabeled "emergent" — I'd tested PATTERN `Node` (works) but not CONSTRUCTION. `Data.Tree` is stubbed, so `Node` got the generic fresh-result fallback (`a->[b]->c`); `Node x [] :: Tree a` failed. Added curated `Node :: forall a. a -> [Tree a] -> Tree a` (context.rs StubConstructor arm). +1 (Chunks), zero regressions, test `data_tree_node.rs`. LESSON (again): test the exact failing construct — pattern vs construction differ.
+
 **2026-07-22 — 93 → 105 (+12). The #1-lever `try` fix landed (commit 740efc2).** `try` is overloaded
 (Control.Exception.try `IO a -> IO (Either e a)` vs Text.Parsec.try `ParsecT s u m a -> …`); the
 curated builtin handler (context.rs, was ~:3037) pinned it to the IO shape, poisoning every Parsec

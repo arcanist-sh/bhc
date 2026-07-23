@@ -1,0 +1,150 @@
+# BHC-BRIEF-0002 — Typed Core IR: populate the types Core already has room for
+
+**Document ID:** BHC-BRIEF-0002
+**Status:** Ready for implementation
+**Owner:** build agent
+**References:** `rules/007-ir-design.md` §2 ("Core IR MUST preserve types"); `ROADMAP.md` Phase 3 (fusion not met on native); `spec/BHC-REVIEW-0001` §4.1
+**Audited against source:** 2026-07-23
+
+---
+
+## Goal
+
+Make the Core IR actually carry the types it is designed to carry. Today the Core
+IR is **structurally typed** but **populated with `Ty::Error`** at nearly every
+node, so every type-directed pass downstream is blind. This brief scopes closing
+that gap.
+
+It is worth doing on its own — but it is also the **keystone that unblocks two
+otherwise-stuck efforts**:
+
+1. **The Numeric differentiator.** The guaranteed-fusion rewrite `sum (map f xs) →
+   foldl' (\acc x -> acc + f x) 0 xs` needs the element/accumulator types to emit
+   `0` and `+`. The pass exists (`bhc-core/src/simplify/fuse.rs`) and *documents its
+   own defeat*: "by the time the simplifier runs, `f.ty()` is `Fun(Error, Error)`
+   … the `Int` gate always [fails]" (fuse.rs:149,158). Only the type-agnostic
+   `map/map` rewrite can fire. **Typed Core is necessary for the rewrite to fire at
+   all.** (It is *not sufficient* for the perf contract — see Non-goals.)
+2. **The Pandoc / GHC-compat moat.** Several deep typeck/lowering bugs hit this
+   session trace to type erasure between phases. A Core IR that preserves types
+   removes a class of "the information was there, then thrown away" failures and
+   makes type-directed lowering (dictionary specialization, worker/wrapper,
+   pattern-match compilation) able to rely on real types.
+
+## Current reality (grounded, 2026-07-23)
+
+The structure is already there; only population is missing:
+
+- **Core IR holds types.** `bhc-core/src/lib.rs`: `Var { … ty: Ty }` (:103);
+  `Expr::Lit(Literal, Ty, Span)`; `Expr::ty()` (:211) computes a node's type. The
+  module doc even claims "Every expression carries its type explicitly" (:12).
+- **typeck computes every node's type.** `bhc-typeck` produces
+  `TypedModule { expr_types: FxHashMap<HirId, Ty>, def_schemes: FxHashMap<DefId,
+  Scheme> }` (`lib.rs:89`). `expr_types` is a per-HIR-node map; HIR nodes carry
+  `HirId` (`bhc-hir/src/lib.rs`, "every expression … has a unique HirId").
+- **The bridge drops `expr_types`.** The driver lowers with only definition-level
+  schemes: `lower_module_with_defs_and_constructors(&hir, defs, Some(&typed.def_schemes), …)`
+  (`bhc-driver/src/lib.rs:1096-1099`). `typed.expr_types` is never passed. So
+  `bhc-hir-to-core` has no per-expression types and fills placeholders.
+- **236 `Ty::Error` sites** in `bhc-hir-to-core` do the placeholder-filling
+  (deriving.rs 99, pattern.rs 42, expr.rs 37, context.rs 25, binding.rs 18,
+  dictionary.rs 10, lib.rs 5).
+- **`Expr::ty()` returns `Ty::Error`** for the compositional cases too (App/Lam,
+  lib.rs:220,235), so even where sub-terms were typed, the whole isn't.
+
+Net: the type of every intermediate expression *exists* right up to the
+HIR→Core boundary, and is discarded there. This is a **threading + population**
+task, not a redesign of Core IR.
+
+## The gate: Task 0 (go / no-go)
+
+Before touching 236 sites, prove the information survives to where it's needed.
+
+**Task 0 — coverage probe.** Instrument `lower_module_with_defs_and_constructors`
+(after threading `expr_types` in, Task 1) to count, per lowered `Expr`, whether a
+real type was found vs. fell back to `Ty::Error`, on ~10 `base`-style functions and
+the flagship `sum (map (*2) [1..N])`.
+
+- **Exit:** if ≥~90% of *real-expression* Core nodes (excluding desugaring temps)
+  get a non-`Error` type, proceed. If `expr_types` is sparse/miskeyed (e.g. keyed by
+  a HirId the lowering can't recover), STOP and fix the keying first — everything
+  downstream depends on the lookup working.
+
+## Tasks (in order)
+
+1. **Thread `expr_types` into lowering** *(bhc-hir-to-core / bhc-driver)*
+   Add an `expr_types: Option<&FxHashMap<HirId, Ty>>` parameter to
+   `lower_module_with_defs_and_constructors` (mirror how `type_schemes` is stored via
+   `ctx.set_type_schemes`, context.rs:154). Driver passes `Some(&typed.expr_types)`.
+   *Acceptance:* builds; existing tests green; `expr_types` reachable in the lowering
+   context.
+
+2. **Populate real-expression types** *(bhc-hir-to-core: expr.rs, then binding.rs)*
+   Where a Core `Expr`/`Var` is created directly from a HIR expression, replace
+   `Ty::Error` with `ctx.expr_types.get(&hir_id).cloned().unwrap_or(Ty::Error)`.
+   Do expr.rs (37 sites) and binding.rs (18) first — these are the ones the fusion
+   pass reads.
+   *Acceptance:* the coverage probe (Task 0) hits its threshold on the flagship
+   program; `f.ty()` in fuse.rs is `Fun(a, b)` with real `a,b` for `map (*2)`.
+
+3. **Fix `Expr::ty()` to be compositional** *(bhc-core/src/lib.rs)*
+   `App(f, x)` result = codomain of `f.ty()`; `Lam(v, body)` = `Fun(v.ty, body.ty())`;
+   `Let`/`Case` = branch type. Only fall back to `Error` when a child is genuinely
+   `Error`. This makes populated leaves propagate upward.
+   *Acceptance:* a unit test asserting `App(Lam(x:Int, x), 1).ty() == Int`.
+
+4. **Synthesize types for desugaring temporaries** *(pattern.rs 42, context.rs 25,
+   dictionary.rs 10)* — the vars with no HirId (wildcards, pattern binders, dict
+   args, case scrutinee temps). Derive from context: a pattern binder's type is the
+   corresponding field type from the constructor's scheme (`con_field_defs` already
+   exists in typeck); a scrutinee temp's type is the scrutinee expr's type; a dict
+   arg's type is the class's dictionary type. These need not be perfect on day one —
+   prioritize the ones on the fusion / worker-wrapper path.
+
+5. **Deriving** *(deriving.rs, 99 sites)* — lowest priority. Derived-method bodies
+   (Eq/Ord/Show/…) are synthesized Core; give them best-effort types but they don't
+   gate fusion. Can stay `Error` initially without blocking Tasks 1–4's payoff.
+
+6. **Prove the fusion rewrite fires** *(bhc-core/src/simplify/fuse.rs)*
+   With types populated, `sum (map f xs) → foldl'` should now fire (its `Int` gate
+   sees a real accumulator type). Add a Core-level test: input `sum (map f xs)`,
+   assert the output contains `foldl'`/the fused loop and no residual `map`.
+   *Acceptance:* the rewrite fires on the flagship program (verify via
+   `--dump-core-after-simpl` / `--kernel-report`).
+
+## Acceptance criteria (whole brief)
+
+- `bhc-hir-to-core` threads `expr_types`; real-expression Core nodes carry real
+  types (coverage probe ≥ threshold).
+- `Expr::ty()` is compositional, not `Error`-by-default.
+- The `sum/map → foldl'` fusion rewrite **fires** on `sum (map (*2) [1..N])`
+  (previously inert).
+- Workspace `cargo test --all-features` stays green; Pandoc `bhc check` score does
+  not regress (ideally a few modules improve as type-directed lowering gets real
+  types).
+
+## Non-goals / explicitly out of scope
+
+- **Numeric *performance* contract.** Making the fusion rewrite *fire* is this
+  brief. Making it *fast* additionally needs **unboxed numeric codegen** — the
+  flagship stays ~6–11 s because every `Int` is boxed even after a rewrite
+  (ROADMAP Phase 3). That is a separate, subsequent effort; do not claim a numeric
+  speedup from this brief without an isolated with-fusion vs without-fusion
+  measurement.
+- **Full type checking in Core.** We populate types from typeck; we do not add a
+  Core type-checker/verifier (a nice-to-have `verify(IR)` per rules/007, later).
+- **Polymorphism/System-F rigor.** `Expr::TyApp`/`TyLam` exist but this brief does
+  not require making them load-bearing; monomorphic-enough types for the rewrites
+  are the bar.
+
+## Risks
+
+- **Sparse/miskeyed `expr_types`** — the gate (Task 0) exists to catch this before
+  the 236-site grind. If HIR ids don't survive lowering, that keying is the real
+  first task.
+- **Regressions from now-non-`Error` types** — some code may currently *rely* on
+  `Ty::Error` acting as a permissive wildcard (unifies with anything). Populating
+  real types could surface latent mismatches. Mitigate: land Tasks 1–2 behind the
+  coverage probe, run the full suite + Pandoc score after each task, and keep the
+  `unwrap_or(Ty::Error)` fallback so anything unmapped degrades to today's behavior.
+- **Scope creep into unboxing** — resist. This brief ends at "the rewrite fires."

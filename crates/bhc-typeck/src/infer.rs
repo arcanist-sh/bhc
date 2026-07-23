@@ -27,6 +27,16 @@ use crate::instantiate::substitute;
 /// Returns the inferred type (which may contain type variables).
 #[allow(clippy::too_many_lines)]
 pub fn infer_expr(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
+    let ty = infer_expr_compute(ctx, expr);
+    // Record this node's type for typed Core IR (spec/BHC-BRIEF-0002), keyed by
+    // source span. `into_typed_module` applies the final substitution to the
+    // stored (possibly-unsolved) type. Recording the parent after its children
+    // means the outer node wins if a desugared child shares its span.
+    ctx.expr_types.insert(expr.span(), ty.clone());
+    ty
+}
+
+fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
     match expr {
         Expr::Lit(lit, span) => infer_lit(ctx, lit, *span),
 

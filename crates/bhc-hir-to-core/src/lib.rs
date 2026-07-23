@@ -21,7 +21,7 @@ mod expr;
 mod pattern;
 
 use bhc_core::CoreModule;
-use bhc_hir::{DefId, HirId, Module as HirModule};
+use bhc_hir::{DefId, Module as HirModule};
 use bhc_intern::Symbol;
 use bhc_span::Span;
 use bhc_types::{Scheme, Ty};
@@ -48,10 +48,11 @@ pub type DefMap = IndexMap<DefId, DefInfo>;
 /// Map from `DefId` to type scheme (from type checker).
 pub type TypeSchemeMap = FxHashMap<DefId, Scheme>;
 
-/// Map from a HIR node's `HirId` to its inferred type (from the type checker's
-/// `TypedModule::expr_types`). Threaded into lowering so Core `Var`/`Expr` nodes
-/// can carry real types instead of `Ty::Error` (see spec/BHC-BRIEF-0002).
-pub type ExprTypeMap = FxHashMap<HirId, Ty>;
+/// Map from a HIR expression's source `Span` to its inferred type (from the type
+/// checker's `TypedModule::expr_types`). Threaded into lowering so Core
+/// `Var`/`Expr` nodes can carry real types instead of `Ty::Error`
+/// (see spec/BHC-BRIEF-0002). Span is the stable id both phases can compute.
+pub type ExprTypeMap = FxHashMap<Span, Ty>;
 
 /// Map from `DefId` to constructor info (for imported constructors).
 pub type ConstructorInfoMap = FxHashMap<DefId, ConstructorInfo>;

@@ -10,8 +10,8 @@
 
 use bhc_diagnostics::{Diagnostic, DiagnosticHandler, FullSpan};
 use bhc_hir::{
-    Binding, ClassDef, ConFields, DataDef, DefId, Equation, HirId, InstanceDef, Item, Module,
-    NewtypeDef, Pat, ValueDef,
+    Binding, ClassDef, ConFields, DataDef, DefId, Equation, InstanceDef, Item, Module, NewtypeDef,
+    Pat, ValueDef,
 };
 use bhc_intern::Symbol;
 use bhc_span::{FileId, Span};
@@ -97,8 +97,8 @@ pub struct TyCtxt {
     /// Current file ID for error reporting.
     pub(crate) file_id: FileId,
 
-    /// Inferred types for expressions (`HirId` -> Ty).
-    pub(crate) expr_types: FxHashMap<HirId, Ty>,
+    /// Inferred types for expressions, keyed by source `Span` (spec/BHC-BRIEF-0002).
+    pub(crate) expr_types: FxHashMap<Span, Ty>,
 
     /// Type schemes for definitions (`DefId` -> Scheme).
     pub(crate) def_schemes: FxHashMap<DefId, Scheme>,

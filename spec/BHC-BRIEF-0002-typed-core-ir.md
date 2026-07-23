@@ -100,9 +100,35 @@ scaffolding half-exists):
 
 **Status of the original Task 1 (threading):** DONE and clean-compiling — the
 `expr_types` param on `lower_module_with_defs_and_constructors`, the
-`LowerContext.expr_types` field + `set_expr_types`, and the `expr_ty_opt(id)`
-lookup are all in place (the driver passes `&typed.expr_types`). It threads an
-empty map today; whichever path populates it, the plumbing is ready.
+`LowerContext.expr_types` field + `set_expr_types`, and the `expr_ty_opt` lookup
+are all in place (the driver passes `&typed.expr_types`).
+
+### Path A DONE (2026-07-23): produce + key per-node types (span-keyed) — gate now PASSES
+
+Chose the **side-table-keyed-by-span** variant of Path A (avoids adding a `HirId`
+to every `hir::Expr` variant — massive churn — for zero correctness loss on the
+cases that matter). `Span` derives `Copy/Eq/Hash` and every `hir::Expr` already
+exposes `span()`, so both typeck and lowering can compute the same key.
+
+- **Produce:** `bhc-typeck/src/infer.rs` — `infer_expr` now wraps
+  `infer_expr_compute` and records `expr_types.insert(expr.span(), ty)` for every
+  node. `into_typed_module` already applies the final substitution to the values.
+  Parents record after children, so the outer node wins on a shared (desugared)
+  span.
+- **Key:** `TypedModule::expr_types` and `hir-to-core::ExprTypeMap` re-keyed
+  `HirId → Span`. `LowerContext::expr_ty_opt(span)` is the lookup.
+- **Gate result:** a coverage probe (temporary, in `lower_expr`) measured **100%
+  HIT** — 31/31 on `sum (map (\x->x*2) xs)` + `1 - x`, and 55/55 on a program with
+  `case`/`where`/`do`/tuple/ADT construction. **0 MISS.** So real per-node types
+  now reach lowering. The probe was removed after validating (env-var check per
+  expr is a hot-path smell); re-add ~10 lines if needed.
+- **Inert w.r.t. behavior so far:** lowering does not yet *use* the types
+  (`Ty::Error` still emitted). Workspace tests green, Pandoc unchanged at 112.
+
+**Remaining (was Tasks 2–6):** populate Core `Var.ty`/`Expr` from
+`ctx.expr_ty_opt(expr.span())` (expr.rs + binding.rs first), make `Expr::ty()`
+compositional, synthesize types for desugaring temps, and prove `sum/map → foldl'`
+fires. The keystone — real types reaching lowering — is now in place.
 
 ## Tasks (in order)
 

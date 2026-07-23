@@ -71,9 +71,9 @@ pub use env::{DataConInfo, TypeEnv};
 pub use kind_check::KindEnv;
 
 use bhc_diagnostics::Diagnostic;
-use bhc_hir::{DefId, HirId, Module};
+use bhc_hir::{DefId, Module};
 use bhc_intern::Symbol;
-use bhc_span::FileId;
+use bhc_span::{FileId, Span};
 use bhc_types::{Scheme, Ty};
 use rustc_hash::FxHashMap;
 
@@ -85,8 +85,11 @@ use rustc_hash::FxHashMap;
 pub struct TypedModule {
     /// The original HIR module.
     pub hir: Module,
-    /// Inferred types for each expression (indexed by `HirId`).
-    pub expr_types: FxHashMap<HirId, Ty>,
+    /// Inferred types for each expression, keyed by source `Span` (a stable id
+    /// both typeck and HIR→Core lowering can compute). Populated during
+    /// inference (spec/BHC-BRIEF-0002); values have the final substitution
+    /// applied.
+    pub expr_types: FxHashMap<Span, Ty>,
     /// Type schemes for each definition (indexed by `DefId`).
     pub def_schemes: FxHashMap<DefId, Scheme>,
 }

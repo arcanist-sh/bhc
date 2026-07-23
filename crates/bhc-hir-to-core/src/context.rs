@@ -7,7 +7,7 @@
 //! - Constructor metadata for ADTs
 
 use bhc_core::{self as core, Bind, CoreConstructor, CoreModule, Var, VarId};
-use bhc_hir::{DefId, HirId, Item, Module as HirModule, ValueDef};
+use bhc_hir::{DefId, Item, Module as HirModule, ValueDef};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
@@ -77,13 +77,10 @@ pub struct LowerContext {
     /// Type schemes from the type checker (`DefId` -> Scheme).
     type_schemes: TypeSchemeMap,
 
-    /// Per-HIR-node inferred types from the type checker (`HirId` -> `Ty`).
-    /// Threaded in by the driver (spec/BHC-BRIEF-0002). NOTE (Task-0 finding,
-    /// 2026-07-23): this is currently always EMPTY — typeck never populates
-    /// `TypedModule::expr_types`, and HIR `Expr` carries no `HirId` to key it by.
-    /// The plumbing is in place; populating it is the real prerequisite (see the
-    /// brief). Read by `expr_ty_opt` so lowering can look up a type once
-    /// populated, degrading to `Ty::Error` (today's behavior) until then.
+    /// Per-HIR-node inferred types from the type checker, keyed by source `Span`
+    /// (spec/BHC-BRIEF-0002). Threaded in by the driver and populated by typeck's
+    /// `infer_expr` (Path A). Read via `expr_ty_opt(span)` so lowering can give
+    /// Core nodes real types; ~100% coverage measured on real-expression nodes.
     expr_types: crate::ExprTypeMap,
 
     /// Constructor metadata (`DefId` -> `ConstructorInfo`).
@@ -171,13 +168,13 @@ impl LowerContext {
         self.expr_types = expr_types;
     }
 
-    /// Look up a HIR node's inferred type by `HirId`, returning `None` if absent.
-    /// Ready for the type-population task (spec/BHC-BRIEF-0002); currently always
-    /// `None` because `expr_types` is unpopulated (see the field's note).
+    /// Look up a HIR expression's inferred type by its source `Span`, returning
+    /// `None` if absent (spec/BHC-BRIEF-0002). Populated by typeck as of Path A;
+    /// used to give Core nodes real types instead of `Ty::Error`.
     #[must_use]
     #[allow(dead_code)]
-    pub(crate) fn expr_ty_opt(&self, hir_id: HirId) -> Option<Ty> {
-        self.expr_types.get(&hir_id).cloned()
+    pub(crate) fn expr_ty_opt(&self, span: bhc_span::Span) -> Option<Ty> {
+        self.expr_types.get(&span).cloned()
     }
 
     /// Look up the type for a definition from the type checker.

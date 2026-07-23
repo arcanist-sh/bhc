@@ -456,9 +456,11 @@ The compiler builds cleanly (33 crates, 0 errors) and compiles real Haskell prog
 
 **Notes:** All 6 WASM E2E tests fail with "WebAssembly translation error". The emitter produces output but the WASM binary format is not valid.
 
-### Phase 5: Server Profile ✅ COMPLETE
+### Phase 5: Server Profile 🟡 RTS-COMPLETE, NOT WIRED to compiled code
 
 **Goal:** Structured concurrency with work-stealing scheduler.
+
+> The 🟢 rows below are the **Rust RTS** modules (real, tested). No compiled Haskell reaches them — `spawn`/`await`/`withScope`/`atomically` are unwired stdlib signatures, 0 concurrency E2E fixtures (spec/BHC-REVIEW-0001 §5.2).
 
 | Task | Status | Crate | Description |
 |------|--------|-------|-------------|
@@ -469,7 +471,7 @@ The compiler builds cleanly (33 crates, 0 errors) and compiles real Haskell prog
 | 5.5 Deadlines | 🟢 | bhc-concurrent | withDeadline, timeout, deadline propagation |
 | 5.6 Observability | 🟢 | bhc-rts-scheduler | TraceEvent system with 10+ event types |
 
-**Exit Criteria:** ✅ All M5 exit criteria tests pass (11 tests), structured concurrency guarantees verified.
+**Exit Criteria:** the 11 M5 tests pass **from Rust**; the compiled-Haskell exit criterion (a concurrent program that compiles and runs) is NOT met — wiring pending.
 
 ### Phase 6: GPU Backend 🟡 80% COMPLETE
 
@@ -487,13 +489,15 @@ The compiler builds cleanly (33 crates, 0 errors) and compiles real Haskell prog
 
 **Notes:** 2/2 GPU mock tests pass (PTX validation). End-to-end testing requires CUDA hardware.
 
-### Phase 7: Advanced Profiles ✅ IN PROGRESS
+### Phase 7: Advanced Profiles 🟡 IN PROGRESS (GC not wired)
 
 **Goal:** Realtime and Embedded profiles.
 
+> 7.1 GC is a unit-tested module NOT on the compiled-code path (`bhc_alloc` leaks; §5.1). Arena (7.2) and no-GC embedded (7.3) are real allocation paths.
+
 | Task | Status | Crate | Description |
 |------|--------|-------|-------------|
-| 7.1 Incremental GC | 🟢 | bhc-rts-gc | Pause measurement, tri-color marking, SATB barriers |
+| 7.1 Incremental GC | 🟢 module only, not wired | bhc-rts-gc | Pause measurement, tri-color marking, SATB barriers |
 | 7.2 Arena per-frame | 🟢 | bhc-rts-arena | FrameArena with begin/end lifecycle, double buffering |
 | 7.3 No-GC Mode | 🟢 | bhc-rts-alloc | StaticAllocator, BoundedAllocator, Embedded profile |
 | 7.4 Bare Metal | 🟡 | bhc-codegen | No-OS code generation (deferred - needs LLVM target work) |
@@ -533,9 +537,9 @@ The compiler builds cleanly (33 crates, 0 errors) and compiles real Haskell prog
 | 9.9 CPP Preprocessing | 🟢 | Built-in Rust preprocessor: `#ifdef`/`#if`/`#elif`/`#else`/`#endif`/`#define`/`#undef`, expression evaluator, macro expansion, predefined platform/version macros |
 | 9.10 Type Families | 🟢 | Standalone open/closed type families, type instances, associated type families with reduction; standalone data families with data instances |
 
-**Exit Criteria:** `bhc check` succeeds on Pandoc source files (excluding Template Haskell).
+**Exit Criteria:** `bhc check` succeeds on Pandoc source files (excluding Template Haskell). **Status (2026-07-23): 112 of 221 library modules pass** (up from ~10); remaining tail is deep typeck work. See `.claude/TODO-pandoc-check.md`.
 
-**Notes:** 175 E2E tests passing across 70 milestones (E.1–E.70). See `.claude/TODO-pandoc.md` for detailed Pandoc roadmap and `.claude/ROADMAP.md` for M11 tracking.
+**Notes:** 190 E2E tests passing across 70 milestones (E.1–E.70); workspace `cargo test --all-features` 2756/0. See `.claude/TODO-pandoc-check.md` for the current Pandoc grind.
 
 ---
 
@@ -551,10 +555,10 @@ The compiler builds cleanly (33 crates, 0 errors) and compiles real Haskell prog
 
 1. **Phase 1** — Without native codegen, nothing else matters ✅
 2. **Phase 2** — Language features needed for real programs ✅
-3. **Phase 3** — Numeric profile is our differentiator ✅
-4. **Phase 9** — Real-world Haskell compatibility (current focus)
-5. **Phase 4** — WASM opens new deployment targets
-6. **Phase 5** — Server profile for production services ✅
+3. **Phase 3** — Numeric profile is our differentiator 🟡 (IR built; native fusion NOT met — the differentiator is unvalidated)
+4. **Phase 9** — Real-world Haskell compatibility (**current focus**; Pandoc 112/221)
+5. **Phase 4** — WASM opens new deployment targets 🟢 (~95%, runs in wasmtime)
+6. **Phase 5** — Server profile for production services 🟡 (RTS done; not wired to compiled code)
 7. **Phase 6** — GPU for competitive numeric performance
 8. **Phase 7** — Advanced profiles for specialized use cases
 9. **Phase 8** — Polish and ecosystem

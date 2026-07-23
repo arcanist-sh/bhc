@@ -1789,6 +1789,37 @@ impl Compiler {
             }
         }
 
+        // `module X` re-exports: merge X's exports from X's OWN registry entry
+        // FIRST, so a same-named item from another module can't shadow them.
+        // This must precede the name-based merge below, which scans every module
+        // and would otherwise pick the wrong same-named constructor (e.g.
+        // `Text.Pandoc.Definition.Figure :: … -> Block` vs the intended
+        // `Text.Pandoc.Translations.Types.Figure :: Term`).
+        if let (Some(export_list), Some(reg)) = (hir.exports.as_ref(), registry) {
+            for export in export_list {
+                if !matches!(export.children, bhc_hir::ExportChildren::All) {
+                    continue;
+                }
+                // Only a genuine module re-export names a registry module.
+                let Some(compiled) = reg.modules.get(export.name.as_str()) else {
+                    continue;
+                };
+                for (&name, &def_id) in &compiled.exports.values {
+                    exports.values.entry(name).or_insert(def_id);
+                }
+                for (&name, &def_id) in &compiled.exports.types {
+                    exports.types.entry(name).or_insert(def_id);
+                }
+                for (name, con_info) in &compiled.exports.constructors {
+                    exports
+                        .constructors
+                        .entry(*name)
+                        .or_insert_with(|| con_info.clone());
+                    exports.values.entry(*name).or_insert(con_info.def_id);
+                }
+            }
+        }
+
         // For re-export modules: if the export filter allows items not found in
         // lower_ctx.defs (because they come from imported modules), merge them
         // from the registry.

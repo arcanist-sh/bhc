@@ -23,6 +23,13 @@ scheme (untouched) — the curated handler is what fires for imported `try`; rev
 `MonadFail m => String -> m a` (matches ops-table). +2 (`Parsing.Lists`, `Readers.LaTeX.Macro`), zero
 regressions, 2750/0, regression test `fail_is_monad_polymorphic`.
 
+**2026-07-23 — 107 → 108 (+1). Tuple-as-Functor unify fix (commit 3fc91d9).** bhc stores tuples as a
+dedicated `Ty::Tuple` variant, so `f a` (App) couldn't unify with `(x,y)` → `fmap`/`<$>` over a tuple
+failed. Added an `App(f,a)` ↔ `Ty::Tuple` bridge in the unifier (mirrors the existing App↔List bridge),
+treating `(x1..xn)` as `((,..,) x1..x_{n-1}) xn`. Flips `Writers.JATS.References`
+(`T.dropWhile … <$> T.break … val`). Zero regressions, 2751/0, test `tuple_functor.rs`. Individual-module
+fix (+1), as expected at this stage.
+
 **DEEP LEAD (characterized 2026-07-23, DEPRIORITIZED — low ROI now): premature `Num`→`Int` defaulting,
 operand-order-dependent.** Minimal repro: `f :: Double -> Double; f x = 1 - x` FAILS (`expected Double,
 found Int`) but `f x = x - 1`, `1 - (2.0::Double)`, `1 + 2.0` all PASS. Root cause: in binding-group

@@ -36,8 +36,7 @@ action `fixSourcePos` while `spec'` (2nd component) is the `parse` stream. Minim
 `fixSourcePos` with one that references `prefix` (e.g. `T.length prefix`) FAILS; one that doesn't
 PASSES. So it's an emergent pattern-binding/inference interaction — a where-bound tuple whose two
 components flow into a polymorphic parser context (one as the `Stream s`, one used at `Text`) collapses
-the tuple to `Text`. Deep typeck (pattern-binding monomorphism / stream-type propagation), not a
-curated-scheme win. Recorded; deprioritized.
+the tuple to `Text`. Deep typeck. SHARPENED (2026-07-23, unify instrumentation): the collapse is `Tuple([t, Text]) ~ Text` at the `(prefix, spec')` pattern binding (L139) — the `case splitExtension … of {(Text,Text) alts}` RHS is inferred as BARE `Text` instead of `(Text, Text)`, then clashes with the tuple pattern. Ruled out the OverloadedStrings string-pattern `(_, "")` (removing it doesn't help). Root = why the case-expression inference yields `Text` when a tuple-bound var (`spec'`) flows into the `parse` stream while the sibling (`prefix`) is used inside the parser action — resists further reduction; needs case/tuple pattern-binding inference work. Deprioritized.
 
 **2026-07-23 — 107 → 108 (+1). Tuple-as-Functor unify fix (commit 3fc91d9).** bhc stores tuples as a
 dedicated `Ty::Tuple` variant, so `f a` (App) couldn't unify with `(x,y)` → `fmap`/`<$>` over a tuple

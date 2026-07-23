@@ -21,10 +21,10 @@ mod expr;
 mod pattern;
 
 use bhc_core::CoreModule;
-use bhc_hir::{DefId, Module as HirModule};
+use bhc_hir::{DefId, HirId, Module as HirModule};
 use bhc_intern::Symbol;
 use bhc_span::Span;
-use bhc_types::Scheme;
+use bhc_types::{Scheme, Ty};
 use context::FieldSelectorInfo;
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
@@ -47,6 +47,11 @@ pub type DefMap = IndexMap<DefId, DefInfo>;
 
 /// Map from `DefId` to type scheme (from type checker).
 pub type TypeSchemeMap = FxHashMap<DefId, Scheme>;
+
+/// Map from a HIR node's `HirId` to its inferred type (from the type checker's
+/// `TypedModule::expr_types`). Threaded into lowering so Core `Var`/`Expr` nodes
+/// can carry real types instead of `Ty::Error` (see spec/BHC-BRIEF-0002).
+pub type ExprTypeMap = FxHashMap<HirId, Ty>;
 
 /// Map from `DefId` to constructor info (for imported constructors).
 pub type ConstructorInfoMap = FxHashMap<DefId, ConstructorInfo>;
@@ -116,7 +121,7 @@ pub fn lower_module_with_defs(
     defs: Option<&DefMap>,
     type_schemes: Option<&TypeSchemeMap>,
 ) -> LowerResult<CoreModule> {
-    lower_module_with_defs_and_constructors(module, defs, type_schemes, None)
+    lower_module_with_defs_and_constructors(module, defs, type_schemes, None, None)
 }
 
 /// Lower a HIR module to Core IR with optional definition mappings, type schemes,
@@ -130,6 +135,7 @@ pub fn lower_module_with_defs_and_constructors(
     defs: Option<&DefMap>,
     type_schemes: Option<&TypeSchemeMap>,
     imported_constructors: Option<&ConstructorInfoMap>,
+    expr_types: Option<&ExprTypeMap>,
 ) -> LowerResult<CoreModule> {
     let mut ctx = LowerContext::new();
 
@@ -142,6 +148,12 @@ pub fn lower_module_with_defs_and_constructors(
     // If we have type schemes from the type checker, use them
     if let Some(schemes) = type_schemes {
         ctx.set_type_schemes(schemes.clone());
+    }
+
+    // Per-HIR-node inferred types (spec/BHC-BRIEF-0002): lets lowering populate
+    // real types on Core nodes instead of `Ty::Error`.
+    if let Some(ets) = expr_types {
+        ctx.set_expr_types(ets.clone());
     }
 
     // If we have imported constructor metadata, register it

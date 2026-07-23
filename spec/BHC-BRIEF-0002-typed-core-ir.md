@@ -52,23 +52,57 @@ The structure is already there; only population is missing:
 - **`Expr::ty()` returns `Ty::Error`** for the compositional cases too (App/Lam,
   lib.rs:220,235), so even where sub-terms were typed, the whole isn't.
 
-Net: the type of every intermediate expression *exists* right up to the
-HIR→Core boundary, and is discarded there. This is a **threading + population**
-task, not a redesign of Core IR.
+Net: the Core IR *structure* holds types, but the per-node type map at the
+HIR→Core boundary is empty — see the Task 0 result below.
 
 ## The gate: Task 0 (go / no-go)
 
-Before touching 236 sites, prove the information survives to where it's needed.
+Before touching 236 sites, prove the per-node types actually exist and can be
+looked up at lowering time.
 
-**Task 0 — coverage probe.** Instrument `lower_module_with_defs_and_constructors`
-(after threading `expr_types` in, Task 1) to count, per lowered `Expr`, whether a
-real type was found vs. fell back to `Ty::Error`, on ~10 `base`-style functions and
-the flagship `sum (map (*2) [1..N])`.
+### Task 0 RESULT (2026-07-23): GATE FAILED — premise corrected, plan revised
 
-- **Exit:** if ≥~90% of *real-expression* Core nodes (excluding desugaring temps)
-  get a non-`Error` type, proceed. If `expr_types` is sparse/miskeyed (e.g. keyed by
-  a HirId the lowering can't recover), STOP and fix the keying first — everything
-  downstream depends on the lookup working.
+Task 1 (threading) was implemented, then Task 0 revealed the brief's premise
+("the info exists, just thread it") is **wrong**. The per-node types are neither
+produced nor keyed:
+
+- **`TypedModule::expr_types` is never populated.** In `bhc-typeck`, the only
+  references to `expr_types` are the field declaration, its `default()` init, and
+  the read in `into_typed_module` — **there is no `.insert` anywhere**. Inference
+  computes each node's type but discards it; the map ships empty.
+- **HIR `Expr` carries no `HirId`.** The `hir::Expr` enum (`bhc-hir/src/lib.rs`)
+  has a `span()` accessor but no id per variant. `bhc-lower` defines
+  `fresh_hir_id()` (context.rs:2185) but **never calls it** — HirIds are not
+  assigned to anything. So even if typeck recorded types, there is no key the
+  lowering could recover.
+
+So there is nothing to probe; the coverage would be 0%. This is exactly why Task 0
+is a gate. **Revised prerequisite (the real first work) below.**
+
+### Revised Task 0/1: produce + key per-node types
+
+Two viable paths; **Path A recommended** (it is the honest typed Core IR and the
+scaffolding half-exists):
+
+- **Path A — assign HirIds + record types.** (1) Wire the existing-but-unused
+  `fresh_hir_id()` into AST→HIR lowering and give `hir::Expr` an id (a field per
+  variant, or a thin `Typed<Expr>`/side-table keyed by a stable id). (2) In
+  `bhc-typeck/src/infer.rs`, at each `infer_expr`, record `expr_types[id] = ty`.
+  (3) Lowering looks up via the already-added `ctx.expr_ty_opt(id)`. Touches
+  bhc-hir, bhc-lower, bhc-typeck, bhc-hir-to-core — but it is the change the design
+  (rules/007) already assumes exists.
+- **Path C — top-down propagation at lowering, no HIR change.** `def_schemes`
+  *are* populated. Propagate types top-down during lowering: the enclosing
+  function's declared type gives its params' types; child expression types are
+  computed locally from applied function types. Avoids the HIR/typeck changes but
+  re-does propagation in the lowering and is weaker for polymorphic intermediates.
+  Reasonable if Path A's HIR churn is too costly.
+
+**Status of the original Task 1 (threading):** DONE and clean-compiling — the
+`expr_types` param on `lower_module_with_defs_and_constructors`, the
+`LowerContext.expr_types` field + `set_expr_types`, and the `expr_ty_opt(id)`
+lookup are all in place (the driver passes `&typed.expr_types`). It threads an
+empty map today; whichever path populates it, the plumbing is ready.
 
 ## Tasks (in order)
 

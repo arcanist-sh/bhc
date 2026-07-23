@@ -1098,6 +1098,7 @@ impl Compiler {
             Some(&def_map),
             Some(&typed.def_schemes),
             imported_constructors,
+            Some(&typed.expr_types),
         )
         .map_err(CompileError::from)?;
 

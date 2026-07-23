@@ -40,6 +40,8 @@ treating `(x1..xn)` as `((,..,) x1..x_{n-1}) xn`. Flips `Writers.JATS.References
 (`T.dropWhile … <$> T.break … val`). Zero regressions, 2751/0, test `tuple_functor.rs`. Individual-module
 fix (+1), as expected at this stage.
 
+**2026-07-23 — 109 → 110 (+1). Registered skylighting type aliases (`SyntaxMap = Map Text Syntax`, `SourceLine = [Token]`, `Token = (TokenType, Text)`) in the builtin-alias table (lib.rs) so they expand in the unifier → `Highlighting` flips. Zero regressions; test `skylighting_aliases.rs`.**
+
 **2026-07-23 — 108 → 109 (+1). `sum`/`product` were pinned `[Int] -> Int` (builtins.rs:1895 + context.rs curated); made `forall a. [a] -> a` so `sum [2.0,3.0] :: Double` works → `Readers.HTML.Table` flips. Corrects the earlier "premature Num defaulting" note — that was a MISDIAGNOSIS (instrumenting showed `Num` was already on `Double` at solve time, no defaulting fired); the solver's defaulting order is fine.**
 
 **Re-triage at 107:** **13 tuple/shape, 6 other, 5 No-instance, 4 Parsec-monad, 1 Arrow, 1 RWS.** The

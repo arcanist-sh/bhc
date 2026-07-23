@@ -4,6 +4,8 @@ This document provides a detailed implementation plan to deliver all features pr
 
 ## Current Status
 
+> **Truth pass (2026-07-23).** This document accumulated stale claims from January; corrected against measured reality below. Reality checks that override any older text: **GC is not live for compiled code** (leak-allocator; §5.1 of `spec/BHC-REVIEW-0001`), the **Numeric profile does not fuse on native** (Phase 3), the **Server profile is RTS-complete but not wired to compiled Haskell** (Phase 5), and **WASM runs real programs** (the old "0/6" rows are obsolete). Current headline: **workspace tests 2756/0**; the active focus is the **GHC-compatibility grind — `bhc check` passes 112 of 221 Pandoc library modules** (2026-07-23), up from ~10 at the start of that effort. See `.claude/TODO-pandoc-check.md`.
+
 **Beta** — The compiler builds cleanly and compiles real Haskell programs to native executables. E2E tests confirm native compilation works for hello world, arithmetic, fibonacci, IO sequencing, and more. **WASM update (2026-07-02, measured):** the WASM/WASI backend produces valid binaries that run in wasmtime and is at parity with native across the differential suite — **236 of 243 fixtures produce byte-identical output on both backends** (the harness now stages fixture data files and runs `wasmtime --dir=.`). File IO is **host-backed** via WASI `path_open`/`fd_read`/`fd_write` (needs a `--dir` preopen at runtime): `readFile` reads real files, `writeFile` persists to disk, with an in-memory table backing round-trips when no `--dir` is given; `lines`/`words` are synthesized so "read a file, process its lines, write it back" works. Remaining WASM divergences are **general stdlib coverage**, not filesystem plumbing: the `Handle` API (`openFile`/`hGetLine`/`hClose`) and `System.Directory` (`doesFileExist`) unimplemented, plus the long-standing `show_types` native erased-type case and stdin fixtures the harness can't feed. The old "WASM binaries fail wasmtime validation" claim below is stale. GPU backend remains mock-validated only.
 
 | Component | Status | Test Evidence |
@@ -15,7 +17,7 @@ This document provides a detailed implementation plan to deliver all features pr
 | Tensor IR | ✅ Complete | Lowering, fusion, all 4 patterns |
 | Loop IR | ✅ Complete | Vectorization, parallelization |
 | Native Codegen | ✅ Complete | 6/6 E2E tests pass (hello, arithmetic, fibonacci, IO) |
-| WASM Codegen | 🟢 ~95% | Valid binaries; run in wasmtime; 232/243 differential fixtures byte-identical to native (2026-07-02). Gap: file IO not host-backed (in-memory shim) |
+| WASM Codegen | 🟢 ~95% | Valid binaries; run in wasmtime; 236/243 differential fixtures byte-identical to native (2026-07-02); file IO host-backed via WASI. Gap: `Handle` API + `System.Directory` unimplemented (general stdlib coverage) |
 | GPU Codegen | 🟡 80% | PTX mock validation passes; requires CUDA hardware for real test |
 | Runtime | 🟡 Partial | Arena + scheduler + STM + thunks work. **GC is NOT live for compiled code** — `bhc_alloc` is a leak-allocator and the collector is a stub; the generational/incremental GC exists only as an isolated, unit-tested module (see spec/BHC-REVIEW-0001 §5.1). Safe-but-leaks; adequate for short-lived batch, not long-running programs. |
 | REPL (bhci) | 🟡 Compiles | Builds but evaluation is stubbed (returns placeholder values) |
@@ -23,22 +25,23 @@ This document provides a detailed implementation plan to deliver all features pr
 | LSP Server | 🟡 Exists | Code present, not independently verified |
 | Documentation | 🟡 Partial | User docs exist, API docs incomplete |
 
-### Test Summary (Jan 29, 2026 — STALE; see 2026-07-02 differential note below)
+### Test Summary (2026-07-23)
 
-| Suite | Passed | Failed | Ignored | Notes |
-|-------|--------|--------|---------|-------|
-| Workspace unit tests | 217 | 9 | 0 | 9 failures are interpreter IO capture |
-| E2E Native | 6 | 0 | 1 | Numeric profile test ignored |
-| E2E WASM | 0 | 6 | 1 | STALE — "WASM translation error" no longer reproduces |
-| E2E GPU | 2 | 0 | 0 | Mock mode only |
-| **Total** | **225** | **15** | **2** | |
+| Suite | Passed | Failed | Notes |
+|-------|--------|--------|-------|
+| Workspace `cargo test --all-features` | 2756 | 0 | needs `LIBRARY_PATH=<openblas>/lib` on macOS (keg-only) |
+| E2E Native | 6 | 0 | 1 ignored (numeric-profile fusion — not met, see Phase 3) |
+| Differential native↔WASM (243 fixtures) | 236 agree | 7 diverge | divergences are stdlib-coverage gaps, not WASM failing where native succeeds |
+| E2E GPU | 2 | 0 | mock mode only (no CUDA hardware) |
+| Pandoc `bhc check` (221 lib modules) | 112 | 57 (+52 skipped) | GHC-compatibility grind; see `.claude/TODO-pandoc-check.md` |
+
+> The old "Workspace 217/9" and "E2E WASM 0/6" rows are obsolete. The 9 interpreter-IO failures were fixed; WASM binaries are valid and run in wasmtime.
 
 > **Differential sweep (2026-07-02, `crates/bhc-e2e-tests/differential.py`, 243 fixtures):**
-> native vs WASM — **232 agree (byte-identical), 11 divergences.** None of the divergences
-> are WASM failing where native succeeds on compute/stdout. The divergences are: file-IO
-> fixtures (harness doesn't stage the input file, so native errors while WASM silently returns
-> empty — see the file-IO gap above) and 1 fixture wrong on both. The old "E2E WASM 0/6" row
-> is obsolete. NOTE: WASM file IO is not host-backed — do not read "232 agree" as full IO parity.
+> native vs WASM — **236 agree (byte-identical), 7 divergences.** None are WASM failing where
+> native succeeds on compute/stdout; the divergences are general stdlib-coverage gaps
+> (`Handle` API, `System.Directory`), the native `show_types` erased-type case, and stdin
+> fixtures the harness can't feed. File IO is host-backed via WASI (`--dir` preopen).
 
 ---
 
@@ -251,9 +254,11 @@ main = print (fib 30)
 
 ---
 
-## Phase 3: Numeric Profile ✅ COMPLETE
+## Phase 3: Numeric Profile 🟡 PARTIAL (~55%) — fusion NOT met on native
 
 **Objective:** Deliver promised numeric performance: fusion, SIMD, parallelism.
+
+> The Tensor/Loop IR machinery below is built and unit-tested, but it does **not** produce a native fusion speedup — see "Phase 3 Exit Criteria" for the measured reality. The subsection ✅ marks mean "the module exists and its own tests pass," not "the numeric performance contract holds end-to-end."
 
 ### 3.1 Core to Tensor IR Lowering ✅
 
@@ -397,9 +402,11 @@ isolated numeric-with-fusion vs numeric-without-fusion measurement.
 
 ---
 
-## Phase 4: WASM Backend 🟡 70% COMPLETE
+## Phase 4: WASM Backend 🟢 ~95% COMPLETE
 
 **Objective:** `bhc --target=wasi Main.hs` produces working WebAssembly.
+
+> Updated 2026-07-02: WASM binaries are valid, run in wasmtime, and match native on 236/243 differential fixtures (compute, stdout, closures, thunks, ADTs, typeclasses, host-backed file IO). The old "70% / placeholder main / needs Core IR → WASM lowering" framing is obsolete. Remaining gap is general stdlib coverage (`Handle` API, `System.Directory`).
 
 ### 4.1 WASM Emitter ✅
 
@@ -452,7 +459,7 @@ Tasks:
 - [x] Register wasm32-wasi target (detected via "wasm" in target triple)
 - [x] Generate `.wasm` output files (`write_wasm()` at line 525-527)
 - [x] Add `--target` and `--emit` CLI flags to bhc binary (commit `7db9592`)
-- [ ] Test: End-to-end compilation with wasmtime
+- [x] Test: End-to-end compilation with wasmtime (differential.py runs 243 fixtures under wasmtime; 236 match native)
 
 ### Phase 4 Exit Criteria
 
@@ -470,9 +477,11 @@ Hello, World!
 
 ---
 
-## Phase 5: Server Profile ✅ COMPLETE
+## Phase 5: Server Profile 🟡 RTS-COMPLETE, NOT WIRED to compiled code
 
 **Objective:** Structured concurrency with proper cancellation.
+
+> **Correction (spec/BHC-REVIEW-0001 §5.2).** The work-stealing scheduler, STM, cancellation, and deadlines below are real and well-tested — **from Rust**. But **no compiled Haskell code path reaches them**: `spawn`/`await`/`withScope`/`atomically` exist as stdlib type signatures with no codegen wiring, and **zero E2E fixtures exercise concurrency**. The "Exit Criteria" example does not actually run today. The ✅ marks below mean the Rust RTS modules pass their own tests, not that a user's concurrent Haskell compiles and runs. Wiring `spawn → bhc_task_spawn(fn_ptr, env)` FFI + at least one concurrent E2E fixture is the remaining work.
 
 ### 5.1 Task Scheduler ✅
 
@@ -548,9 +557,9 @@ main = withScope $ \scope -> do
   print (r1 + r2)
 ```
 
-**Blockers:** None - core functionality complete.
+**Status:** This example does **not** run today — `withScope`/`spawn`/`await` are unwired stdlib signatures (see the correction at the top of Phase 5). The Rust-side scheduler/STM/cancellation/deadlines it would call are complete and tested.
 
-**Remaining effort:** ~1 week (observability hooks, integration testing)
+**Remaining effort:** codegen wiring (`spawn` → scheduler FFI, scope objects) + at least one concurrent E2E fixture. Until then, mark this "RTS-ready, not wired," not "complete."
 
 ---
 
@@ -648,9 +657,11 @@ main = do
 
 ---
 
-## Phase 7: Advanced Profiles 🟡 90% COMPLETE
+## Phase 7: Advanced Profiles 🟡 modules built, GC not on the compiled-code path
 
-### 7.1 Realtime (Bounded GC) ✅
+> **Same caveat as Phase 1.4 / review §5.1:** the incremental (7.1) and generational (7.2) collectors are complete, unit-tested modules but are **not wired to compiled code** — `bhc_alloc` is a leak-allocator, codegen emits no roots/info-tables, so no compiled program is actually collected. The ✅ marks below are module-level. Arena (7.4) and the no-GC embedded allocator (7.3) *are* real allocation paths.
+
+### 7.1 Realtime (Bounded GC) ✅ (module only — not wired)
 
 **Crate:** `bhc-rts-gc`
 **Location:** `incremental.rs` (730 lines), `lib.rs` (1,500+ lines)
@@ -664,7 +675,7 @@ Tasks:
 - [x] Pause time measurement (via `PauseMeasurement`, `PauseStats`)
 - [x] Test: 32 tests pass including incremental GC cycle tests
 
-### 7.2 Generational GC ✅
+### 7.2 Generational GC ✅ (module only — not wired to compiled code)
 
 **Crate:** `bhc-rts-gc`
 **Location:** `lib.rs` (1,526 lines)
@@ -791,13 +802,13 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 | 1 | Native Hello World | ✅ Complete | 100% | 6/6 E2E tests pass |
 | 2 | Language Completeness | ✅ Complete | 100% | 59/59 interpreter tests pass |
 | 3 | Numeric Profile | 🟡 Partial | ~55% | Tensor/Loop fusion feeds GPU/WASM + kernel report. A Core→Core list-fusion pass exists (`simplify/fuse.rs`, numeric-gated) but only `map/map` fires — `sum/map` is inert because Core erases types (`Fun(Error,Error)`), and even a firing rewrite gives no speedup because codegen boxes every `Int`. Honest native perf contract is blocked on typed Core IR + unboxed codegen, NOT a fusion pass (2026-07-03 measurement). See Phase 3 exit criteria. |
-| 4 | WASM Backend | 🟡 In Progress | 75% | Valid WASM binaries; 0/6 E2E output tests pass (needs Core IR → WASM lowering) |
-| 5 | Server Profile | ✅ Complete | 100% | Scheduler, STM, cancellation, deadlines all tested |
-| 6 | GPU Backend | 🟡 In Progress | 80% | 2/2 mock tests pass; needs CUDA hardware |
-| 7 | Advanced Profiles | 🟡 In Progress | 90% | GC, arena, embedded allocator all tested |
-| 8 | Ecosystem | 🟡 In Progress | 60% | Tools compile but evaluation is stubbed |
+| 4 | WASM Backend | 🟢 ~95% | ~95% | Valid binaries run in wasmtime; 236/243 differential fixtures match native; host-backed file IO. Gap: `Handle`/`System.Directory` |
+| 5 | Server Profile | 🟡 RTS-only | Rust done, not wired | Scheduler/STM/cancellation/deadlines tested **from Rust**; no compiled Haskell reaches them, 0 concurrency E2E fixtures (§5.2) |
+| 6 | GPU Backend | 🟡 In Progress | ~80% | PTX/AMDGCN emit; 2/2 mock tests; needs CUDA/ROCm hardware for real runs |
+| 7 | Advanced Profiles | 🟡 modules built | GC not wired | Incremental/generational GC unit-tested but not on compiled-code path (§5.1); arena + embedded allocator are real |
+| 8 | Ecosystem | 🟡 In Progress | ~60% | Tools compile; REPL evaluation stubbed |
 
-**Overall: ~85% complete**
+> **"Overall % complete" is intentionally omitted** — it invites the kind of overstatement this pass is correcting. The honest summary: frontend + Core optimizer + native pipeline are solid and compile real programs (Pandoc: 112/221 modules `check`); the two headline differentiators (Numeric fusion, Server concurrency) are ahead of their wiring; there is no live GC. See `spec/BHC-REVIEW-0001` for the full assessment.
 
 ---
 
@@ -808,11 +819,8 @@ All 59 interpreter tests pass:
 - Fixed IO output capture: evaluator now buffers output from `putStrLn`/`print`/`putStr` operations
 - Fixed nested `where` clause lowering: inner where bindings are now properly scoped and emitted as `Let` expressions
 
-### Phase 4 (WASM) - Core IR → WASM Lowering Needed
-1. ~~Debug WASM binary validation~~ — **RESOLVED**: Fixed type index encoding (log2 alignment for memops, proper type table lookup for function/import sections, Drop for _start return value)
-2. WASM binaries are now **valid** and load/run in wasmtime
-3. **Remaining gap**: No Core IR → WASM lowering path exists. Only Loop IR → WASM (numeric kernels) is implemented. The `_start` entry point calls a placeholder main that returns 0
-4. Need to implement: Core IR expression evaluation → WASM instructions for general Haskell programs (closures, thunks, ADTs, IO actions)
+### Phase 4 (WASM) - ✅ largely done (2026-07-02)
+The "no Core IR → WASM lowering / placeholder main" gap listed here in January is **obsolete**: WASM now compiles general Haskell (closures, thunks, ADTs, IO, host-backed file IO) and matches native on 236/243 differential fixtures. Remaining gap is stdlib coverage only: `Handle` API (`openFile`/`hGetLine`/`hClose`) and `System.Directory` (`doesFileExist`).
 
 ### Phase 6 (GPU) - Hardware-Blocked
 1. End-to-end GPU test (requires CUDA hardware)
@@ -830,32 +838,17 @@ All 59 interpreter tests pass:
 
 ---
 
-## Immediate Next Steps
+## Immediate Next Steps (2026-07-23)
 
-**Build Status: ✅ CLEAN** (Jan 29, 2026)
-- All 33 workspace crates compile without errors
-- Fixed: `bhc-rts` non-exhaustive match (added `Realtime`/`Embedded` to `bhc_get_profile`)
-- Fixed: `bhc-session` missing `Realtime` profile variant
-- Fixed: `bhci` stale imports (`Value`, `TypeContext`, `Type`, `lower_expr`)
-- Fixed: `bhi` missing `Clone` derive on `Allocation`, type annotation on `current_indent`
-- Fixed: `bhc-package` missing `PackageIndex` import in tests
-- Fixed: `bhc-driver` temp directory race condition causing parallel test failures
-- Removed: `bhc-prelude` stale property tests referencing non-existent modules
-- Fixed: `bhc-core` evaluator IO output capture (putStrLn/print/putStr now buffer output)
-- Fixed: `bhc-lower` nested `where` clause scoping (inner where bindings properly lowered)
-- Fixed: `bhc-wasm` memory alignment encoding (byte alignment → log2 for WASM binary format)
-- Fixed: `bhc-wasm` function/import type index encoding (proper type table lookup)
-- Fixed: `bhc-wasm` _start function stack cleanup (Drop main return value)
+**Build/test:** clean; `cargo test --all-features` **2756/0** (needs `LIBRARY_PATH=<openblas>/lib` on macOS). The January "Core IR → WASM lowering" priority is **done**.
 
-**E2E Testing Framework: ✅ FUNCTIONAL**
-- Native E2E: 6/6 pass, 1 ignored (numeric profile)
-- WASM E2E: 0/6 output tests pass (binaries are valid, but placeholder main doesn't compile Haskell code)
-- GPU E2E: 2/2 pass (mock mode)
-- Integration tests: 59/59 pass
-- Tests now support parallel execution (fixed temp dir collision)
+**Current focus — the GHC-compatibility moat.** `bhc check` on Pandoc's library: **112/221** modules pass (up from ~10). The near-term grind is documented in `.claude/TODO-pandoc-check.md`; the remaining tail is deep typeck work (case/tuple pattern-binding inference, the `bhc-lower ↔ bhc-typeck` builtin-list drift, Parsec/Arrow combinator schemes) rather than easy wins.
 
-**Priority Order:**
-1. **Implement Core IR → WASM lowering** — Required for WASM backend to compile general Haskell programs
-2. **Wire REPL evaluation** — bhci compiles but doesn't evaluate
-3. **GPU hardware testing** — When CUDA hardware is available
-4. **Interpreter IO capture** — 9 failing interpreter tests
+**Recommended sequencing (from `spec/BHC-REVIEW-0001 §7`):**
+1. **Pandoc grind** — the compatibility moat; each fix compounds. Shift from per-module to per-cause on the deep tail.
+2. **One honest profile end-to-end (Numeric)** — the differentiator is *unvalidated*: fusion does not fire on native (Phase 3). Needs typed Core IR + unboxed numeric codegen (not just a fusion pass) + a benchmark vs GHC. This proves the profiles thesis.
+3. **Docs truth pass** — this file (in progress); keep status tables honest.
+4. **Deferred, by decision:** live GC (leak-allocator is safe for short-lived batch), Server-profile concurrency wiring (relabel "RTS-ready, not wired"), GPU real-hardware validation, REPL evaluation.
+5. **Longer horizon:** the Commons content-addressed store (`spec/BHC-BRIEF-0001`), gated on the canonical-binder hashing experiment (Task 0).
+
+**Deferred/parked (not abandoned):** REPL evaluation, LSP integration testing, package-manager end-to-end, bare-metal/GPU hardware runs.

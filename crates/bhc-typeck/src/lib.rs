@@ -269,6 +269,42 @@ pub fn type_check_module_full(
             (vec![], Ty::Tuple(vec![text_ty.clone(), text_ty.clone()])),
         );
 
+        // skylighting type aliases (external, stubbed opaquely otherwise):
+        //   type SyntaxMap  = Map Text Syntax
+        //   type Token      = (TokenType, Text)
+        //   type SourceLine = [Token]
+        let map_con = Ty::Con(bhc_types::TyCon::new(
+            Symbol::intern("Map"),
+            Kind::Arrow(
+                Box::new(Kind::Star),
+                Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+            ),
+        ));
+        let syntax_ty = Ty::Con(bhc_types::TyCon::new(Symbol::intern("Syntax"), Kind::Star));
+        ctx.type_aliases.insert(
+            Symbol::intern("SyntaxMap"),
+            (
+                vec![],
+                Ty::App(
+                    Box::new(Ty::App(Box::new(map_con), Box::new(text_ty.clone()))),
+                    Box::new(syntax_ty),
+                ),
+            ),
+        );
+        let token_tuple = Ty::Tuple(vec![
+            Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("TokenType"),
+                Kind::Star,
+            )),
+            text_ty.clone(),
+        ]);
+        ctx.type_aliases
+            .insert(Symbol::intern("Token"), (vec![], token_tuple.clone()));
+        ctx.type_aliases.insert(
+            Symbol::intern("SourceLine"),
+            (vec![], Ty::List(Box::new(token_tuple))),
+        );
+
         // type ColSpec = (Alignment, ColWidth)
         ctx.type_aliases.insert(
             Symbol::intern("ColSpec"),

@@ -406,6 +406,26 @@ fn extract_type_family_app(ty: &Ty) -> Option<(Symbol, Vec<Ty>)> {
     }
 }
 
+/// Decompose an n-tuple's elements into `(f, last)` where `f` is the tuple
+/// constructor partially applied to all but the last element (so the tuple
+/// `(x1,..,xn)` reads as the HKT application `f xn`). Used to unify a tuple
+/// against an `App(f, a)` shape (tuples are Functor/Foldable/Traversable in
+/// their last field). Requires `elems.len() >= 2`.
+fn tuple_as_app(elems: &[Ty]) -> (Ty, Ty) {
+    let n = elems.len();
+    let con_name = format!("({})", ",".repeat(n - 1)); // "(,)" for 2, "(,,)" for 3, …
+                                                       // Kind: `* -> * -> … -> *` with n arrows.
+    let mut kind = Kind::Star;
+    for _ in 0..n {
+        kind = Kind::Arrow(Box::new(Kind::Star), Box::new(kind));
+    }
+    let mut fpart = Ty::Con(TyCon::new(Symbol::intern(&con_name), kind));
+    for e in &elems[..n - 1] {
+        fpart = Ty::App(Box::new(fpart), Box::new(e.clone()));
+    }
+    (fpart, elems[n - 1].clone())
+}
+
 /// Unify two types, updating the substitution in the context.
 ///
 /// If unification fails, an error diagnostic is emitted and the types
@@ -528,6 +548,25 @@ fn unify_inner(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
             let elem_applied = ctx.apply_subst(elem);
             let a_applied = ctx.apply_subst(a);
             unify_inner(ctx, &elem_applied, &a_applied, span);
+        }
+
+        // Cross-type: App(f, a) vs Tuple(x1..xn) — treat the n-tuple as
+        // `((,..,) x1 .. x_{n-1}) xn`, so HKT types like `f a` unify with a
+        // tuple (tuples are Functor/Foldable/Traversable in their last field,
+        // e.g. `fmap` / `<$>` over `(,) c`). n >= 2.
+        (Ty::App(f, a), Ty::Tuple(elems)) if elems.len() >= 2 => {
+            let (fpart, last) = tuple_as_app(elems);
+            unify_inner(ctx, f, &fpart, span);
+            let a_applied = ctx.apply_subst(a);
+            let last_applied = ctx.apply_subst(&last);
+            unify_inner(ctx, &a_applied, &last_applied, span);
+        }
+        (Ty::Tuple(elems), Ty::App(f, a)) if elems.len() >= 2 => {
+            let (fpart, last) = tuple_as_app(elems);
+            unify_inner(ctx, &fpart, f, span);
+            let last_applied = ctx.apply_subst(&last);
+            let a_applied = ctx.apply_subst(a);
+            unify_inner(ctx, &last_applied, &a_applied, span);
         }
 
         // Forall types: instantiate with fresh variables before unifying.

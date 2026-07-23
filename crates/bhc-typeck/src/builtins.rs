@@ -1893,12 +1893,15 @@ impl Builtins {
                 )
             }),
             ("sum", {
-                let list_a = Ty::List(Box::new(self.int_ty.clone()));
-                Scheme::mono(Ty::fun(list_a, self.int_ty.clone()))
+                // Num a => [a] -> a (polymorphic — NOT pinned to Int, else
+                // `sum [2.0, 3.0] :: Double` fails). Matches the permissive
+                // arithmetic-builtin style (no explicit Num constraint).
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
             }),
             ("product", {
-                let list_a = Ty::List(Box::new(self.int_ty.clone()));
-                Scheme::mono(Ty::fun(list_a, self.int_ty.clone()))
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
             }),
             ("maximum", {
                 let list_a = Ty::List(Box::new(Ty::Var(a.clone())));

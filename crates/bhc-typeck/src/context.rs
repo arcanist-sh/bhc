@@ -2236,8 +2236,10 @@ impl TyCtxt {
                 }
                 // sum, product :: [Int] -> Int
                 "sum" | "product" => {
-                    let list_int = Ty::List(Box::new(self.builtins.int_ty.clone()));
-                    Scheme::mono(Ty::fun(list_int, self.builtins.int_ty.clone()))
+                    // Num a => [a] -> a (polymorphic — not pinned to Int, else
+                    // `sum [2.0,3.0] :: Double` fails). See builtins.rs `sum`.
+                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
                 }
                 // foldl :: (b -> a -> b) -> b -> c -> b
                 // Container arg is polymorphic so DeriveFoldable types work —

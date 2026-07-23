@@ -40,6 +40,8 @@ takeWhile (< 10) [1..]  -- Works on infinite list!
 
 Optimized for web services and long-running applications.
 
+> **Status (2026-07-23):** the scheduler, STM, cancellation, and deadlines are implemented and tested **in the Rust RTS**, but the `withScope`/`spawn`/`await`/`atomically` APIs below are **not yet wired to compiled Haskell** — no compiled program reaches the scheduler yet (spec/BHC-REVIEW-0001 §5.2). "Incremental GC" is likewise a unit-tested module that is **not on the compiled-code path** (there is no live GC; §5.1). Treat this section as the intended contract, not current behavior.
+
 ### Characteristics
 
 - **Structured concurrency** - `withScope`, `spawn`, `await` primitives
@@ -82,6 +84,8 @@ handleRequest req = withDeadline (seconds 30) $ \scope -> do
 ## Numeric Profile
 
 High-performance numeric computing with guaranteed optimization.
+
+> **Status (2026-07-23): the fusion contract below is the specified/normative goal, NOT yet realized on the native target.** Measured: for `sum (map (*2) [1..N])` the numeric profile shows **0 fused / 0 kernels** and runs at the same speed as the default profile. This is blocked on two deeper properties — a **typed Core IR** (Core currently erases types, so `sum/map → foldl'` can't fire) and **unboxed numeric codegen** (boxing dominates even when a rewrite fires) — not on the fusion pass itself. The Tensor/Loop IR fusion machinery exists and feeds the GPU/WASM paths + the kernel report, but native list programs are compiled unfused. See ROADMAP.md "Phase 3" for the full measurement. Treat the "fuses into a single pass" / "FUSED" claims here as the target, not current native behavior.
 
 ### Characteristics
 

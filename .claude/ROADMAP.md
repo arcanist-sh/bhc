@@ -2,7 +2,7 @@
 
 **Document ID:** BHC-ROAD-0003
 **Status:** Active
-**Last Updated:** 2026-03-04
+**Last Updated:** 2026-07-23 (Pandoc status refreshed; module-classification workplan below is from 2026-03-04)
 
 ---
 
@@ -14,9 +14,12 @@ via LLVM. **190+ E2E tests** across 70 milestones. Separate compilation pipeline
 complete (`.bhi` interfaces, `-c` mode, `--package-db`). The hx package manager
 integration is wired.
 
-**Pandoc check status:** 7 passed, 29 failed, 201 skipped out of 237 modules.
-The 201 skipped modules fail on unresolved imports from external packages. The
-29 failures are type-checking errors in modules whose imports do resolve.
+**Pandoc check status (2026-07-23):** **112 passed, 57 failed, 52 skipped** of 221
+library modules (measured with `--package-dir <pandoc-types>/src`). This supersedes
+the March figure of "7 passed / 29 failed / 201 skipped" — most of that gap closed
+via the stub mechanism, deriving, transformers, containers, and a long series of
+parser/typeck fixes. Current tracking is in `.claude/TODO-pandoc-check.md`; the
+remaining failures are deep typeck work, not unresolved imports.
 
 **~199 modules are stubbed** in `builtin_module_set()` to satisfy Pandoc's
 imports. Roughly half are GHC boot libraries that BHC should provide natively;

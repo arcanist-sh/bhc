@@ -23,6 +23,16 @@ scheme (untouched) — the curated handler is what fires for imported `try`; rev
 `MonadFail m => String -> m a` (matches ops-table). +2 (`Parsing.Lists`, `Readers.LaTeX.Macro`), zero
 regressions, 2750/0, regression test `fail_is_monad_polymorphic`.
 
+**`Format` localized (2026-07-23, DEEP — not a quick fix).** Faithful renamed-copy + in-context
+reduction of `parseFlavoredFormat`: the `expected (t, Text) found Text` on `(prefix, spec') = case
+splitExtension … of …` reproduces ONLY when `prefix` (1st tuple component) is USED inside the parser
+action `fixSourcePos` while `spec'` (2nd component) is the `parse` stream. Minimal trigger: replacing
+`fixSourcePos` with one that references `prefix` (e.g. `T.length prefix`) FAILS; one that doesn't
+PASSES. So it's an emergent pattern-binding/inference interaction — a where-bound tuple whose two
+components flow into a polymorphic parser context (one as the `Stream s`, one used at `Text`) collapses
+the tuple to `Text`. Deep typeck (pattern-binding monomorphism / stream-type propagation), not a
+curated-scheme win. Recorded; deprioritized.
+
 **2026-07-23 — 107 → 108 (+1). Tuple-as-Functor unify fix (commit 3fc91d9).** bhc stores tuples as a
 dedicated `Ty::Tuple` variant, so `f a` (App) couldn't unify with `(x,y)` → `fmap`/`<$>` over a tuple
 failed. Added an `App(f,a)` ↔ `Ty::Tuple` bridge in the unifier (mirrors the existing App↔List bridge),

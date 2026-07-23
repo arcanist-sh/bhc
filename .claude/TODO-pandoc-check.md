@@ -23,6 +23,21 @@ scheme (untouched) — the curated handler is what fires for imported `try`; rev
 `MonadFail m => String -> m a` (matches ops-table). +2 (`Parsing.Lists`, `Readers.LaTeX.Macro`), zero
 regressions, 2750/0, regression test `fail_is_monad_polymorphic`.
 
+**DEEP LEAD (characterized 2026-07-23, DEPRIORITIZED — low ROI now): premature `Num`→`Int` defaulting,
+operand-order-dependent.** Minimal repro: `f :: Double -> Double; f x = 1 - x` FAILS (`expected Double,
+found Int`) but `f x = x - 1`, `1 - (2.0::Double)`, `1 + 2.0` all PASS. Root cause: in binding-group
+generalization, `solve_constraints_partition` (context.rs:~7650) defaults a `Num`-constrained fresh var
+to `Int` (via `try_default_constraint`, context.rs:884 → int_ty) WHILE it is still `Ty::Var`, i.e.
+BEFORE the function signature's `Double` has been unified into it — so when the literal is the first
+operand its var defaults to Int, then the sig unify `Int ~ Double` fails. (The `constraints.sort_by_key`
+Fractional-before-Num hack at :397 only helps when the var also carries a Fractional constraint; a
+bare `Num` var from `literal - double` has none.) Real fix = defer numeric defaulting until after all
+unification for the binding group (default only truly-ambiguous vars at the very end), or bind params
+from the signature BEFORE inferring the body. This is a CORE constraint-solver change (risky, touches
+all generalization). **Payoff sizing: only 3 failing modules have Int↔Double mismatches and only
+`HTML.Table` (1/1) would flip; `GridTable` (1/2) and `LaTeX` (1/9) have other blockers → ~1 module.**
+Not worth the risk now; revisit if a numeric-heavy module cluster surfaces.
+
 **Re-triage at 107:** **13 tuple/shape, 6 other, 5 No-instance, 4 Parsec-monad, 1 Arrow, 1 RWS.** The
 easy "curated handler pins IO" batch is EXHAUSTED (try, fail were the two). Remaining levers are
 diverse/deeper, NOT single-combinator batches: the 4 Parsec-monad now have distinct causes

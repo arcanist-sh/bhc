@@ -167,12 +167,12 @@ bhc/
 |-----------|------|--------|
 | Phase 1 | Native Hello World | ✅ Complete |
 | Phase 2 | Language Completeness | ✅ Complete |
-| Phase 3 | Numeric Profile | ✅ Complete |
-| Phase 4 | WASM Backend | 🟡 70% |
-| Phase 5 | Server Profile | ✅ Complete |
-| Phase 6 | GPU Backend | 🟡 80% |
+| Phase 3 | Numeric Profile | 🟡 IR built; native fusion not yet met |
+| Phase 4 | WASM Backend | 🟢 ~95% (runs in wasmtime) |
+| Phase 5 | Server Profile | 🟡 RTS done; not yet wired to compiled code |
+| Phase 6 | GPU Backend | 🟡 ~80% (needs hardware) |
 
-See [ROADMAP.md](ROADMAP.md) for detailed milestone specifications. BHC is under active development — some language features, libraries, and targets are still incomplete.
+See [ROADMAP.md](ROADMAP.md) for detailed, measured status. BHC is under active development: the frontend, Core optimizer, and native + WASM pipelines compile real Haskell (e.g. 112/221 Pandoc library modules `check`), while the two headline differentiators — Numeric fusion and Server concurrency — are ahead of their codegen wiring, and there is no live GC yet (see [`spec/BHC-REVIEW-0001`](spec/BHC-REVIEW-0001-architecture-assessment.md)).
 
 ## Documentation
 

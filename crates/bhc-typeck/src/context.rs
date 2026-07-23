@@ -1367,6 +1367,23 @@ impl TyCtxt {
                     let list_inline = Ty::List(Box::new(Ty::Con(inline_con)));
                     Scheme::mono(Ty::fun(list_inline, block_ty))
                 }
+                "Node" if def_info.kind == DefKind::StubConstructor => {
+                    // Data.Tree.Node :: forall a. a -> [Tree a] -> Tree a.
+                    // Data.Tree is stubbed, so without this `Node` gets the
+                    // generic fresh-result fallback (`a -> [b] -> c`) and
+                    // construction like `Node x [] :: Tree a` fails.
+                    let a = TyVar::new_star(0xFFF0_0001);
+                    let tree_con = TyCon::new(
+                        Symbol::intern("Tree"),
+                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+                    );
+                    let tree_a = Ty::App(Box::new(Ty::Con(tree_con)), Box::new(Ty::Var(a.clone())));
+                    let list_tree_a = Ty::List(Box::new(tree_a.clone()));
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(list_tree_a, tree_a)),
+                    )
+                }
                 "LineBlock" if def_info.kind == DefKind::StubConstructor => {
                     // LineBlock :: [[Inline]] -> Block
                     let block_con = TyCon::new(Symbol::intern("Block"), Kind::Star);

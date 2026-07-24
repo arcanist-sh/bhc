@@ -2623,12 +2623,34 @@ impl<'src> Parser<'src> {
             None
         };
 
-        // Parse optional default type: `= Type`
+        // Parse optional default type: `= Type`.
+        //
+        // For an injective type family the `= <var>` names the result variable
+        // (e.g. `type Token x = a | a -> x`); BHC has no use for it beyond
+        // parsing, so recording it as a default `Ty::Var` is harmless.
         let default = if self.eat(&TokenKind::Eq) {
             Some(self.parse_type()?)
         } else {
             None
         };
+
+        // Parse and discard an optional injectivity annotation:
+        // `| <result_var> -> <arg_var>+`. BHC does not track injectivity, but it
+        // MUST consume the annotation — otherwise the trailing `| a -> x` is left
+        // for the class-body loop, which then stops early and silently drops
+        // every method declared after this associated type.
+        if self.eat(&TokenKind::Pipe) {
+            // result variable
+            if self.check_ident() {
+                self.advance();
+            }
+            // `->`
+            let _ = self.eat(&TokenKind::Arrow) || self.eat(&TokenKind::UnicodeArrow);
+            // one or more determined argument variables
+            while self.check_ident() {
+                self.advance();
+            }
+        }
 
         let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
         Ok(AssocType {

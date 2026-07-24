@@ -5366,6 +5366,14 @@ fn register_standard_module_exports(
     // (e.g., `import Data.Set (fromList)` should override OverloadedLists' fromList).
     let is_unqualified_import = import_decl.is_some_and(|imp| !imp.qualified);
 
+    // A `qualified` import brings ONLY `Alias.name` into scope, never the bare
+    // `name`. Registering the unqualified name for a qualified import leaks the
+    // module's bindings into the unqualified namespace — e.g. `import qualified
+    // Data.Text as T` would make bare `count` resolve to `Data.Text.count`
+    // (`Text -> Text -> Int`) and shadow `Text.Parsec.count`, forcing a parser's
+    // repeat count to `Text` and producing spurious `No instance Num Text`.
+    let is_qualified_import = import_decl.is_some_and(|imp| imp.qualified);
+
     // Build a set of explicitly imported names, if the import has an explicit list.
     // This prevents `import Data.Text (Text)` from overriding Prelude's `foldr` etc.
     let explicit_imports: Option<rustc_hash::FxHashSet<&str>> = import_decl.and_then(|imp| {
@@ -5542,13 +5550,28 @@ fn register_standard_module_exports(
         let is_explicitly_imported = explicit_imports
             .as_ref()
             .is_none_or(|names| names.contains(export));
+        // A `qualified` import must not leak the module's *typed* scheme into the
+        // unqualified namespace. Historically the bare stub was registered even
+        // for `import qualified Data.Text as T`, and with `has_typed_sigs` it got
+        // the typed name `Data.Text.count` — so bare `count` resolved to
+        // `Data.Text.count :: Text -> Text -> Int` and shadowed `Text.Parsec.count`,
+        // forcing a parser's repeat count to `Text` and producing spurious
+        // `No instance Num Text`. We still register the bare stub (some modules and
+        // the non-typed-sigs qualified-alias resolution rely on it existing), but
+        // for a *qualified* import we give it the permissive unqualified name so it
+        // carries a fresh-var scheme instead of the concrete typed one — see the
+        // `def_name` choices below.
         if !is_explicitly_imported {
-            // Skip unqualified registration — this name wasn't in the explicit import list.
-            // Qualified names (e.g., T.foldr) are still registered above.
+            // Skip unqualified registration — this name wasn't in the explicit
+            // import list. Qualified names (e.g., T.foldr) are still registered above.
         } else if ctx.lookup_value(unqualified).is_none() {
             // No existing binding — create a stub for this imported name.
             let def_id = ctx.fresh_def_id();
-            let def_name = if has_typed_sigs {
+            // For a QUALIFIED import, back the bare name with the permissive
+            // unqualified scheme (fresh vars) rather than the module's concrete
+            // typed scheme: the bare name is only a leak/alias-backing and must not
+            // shadow a real binding with a wrong type (e.g. `Data.Text.count`).
+            let def_name = if has_typed_sigs && !is_qualified_import {
                 Symbol::intern(&format!("{module_name}.{export}"))
             } else {
                 unqualified

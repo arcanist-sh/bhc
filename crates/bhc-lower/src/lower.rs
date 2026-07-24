@@ -2948,6 +2948,7 @@ fn register_standard_module_exports(
             "endBy",
             "endBy1",
             "eof",
+            "anyToken",
             "sepEndBy",
             "sepEndBy1",
             "getState",

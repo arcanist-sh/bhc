@@ -1023,3 +1023,10 @@ fn test_tier3_dict_sibling_inferred_wasm() {
 fn test_tier4_sum_map_named_wasm() {
     run_wasm_test("tier4_fusion/sum_map_named", Profile::Numeric);
 }
+
+// `foldl' (+) 0 (map (\x -> x*2) xs)` fuses (H26-SPEC 8.1 Pattern 4, type-
+// agnostic so a lambda mapper works) and codegens correctly on wasm too.
+#[test]
+fn test_tier4_foldl_map_lambda_wasm() {
+    run_wasm_test("tier4_fusion/foldl_map_lambda", Profile::Numeric);
+}

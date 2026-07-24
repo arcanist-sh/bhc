@@ -10,6 +10,9 @@
 //! - **Pattern 1** — `map f (map g xs)` → `map (\v -> f (g v)) xs` (one traversal).
 //!   The composed lambda is a beta-redex the simplifier reduces on the next pass.
 //! - **Pattern 3** — `sum (map f xs)` → `foldl' (\acc x -> acc + f x) 0 xs`.
+//! - **Pattern 4** — `foldl' op z (map f xs)` → `foldl' (\acc x -> op acc (f x)) z xs`.
+//!   Type-agnostic (like Pattern 1): `op`/`z` come from the source, so it fires
+//!   for any `f` including lambdas, with no dependence on populated types.
 //!
 //! # Type dependence and known limitations (measured 2026-07-24 — re-measure before trusting)
 //!
@@ -210,6 +213,81 @@ pub fn try_fuse_sum_map(expr: &Expr) -> Option<Expr> {
     let zero = Expr::Lit(Literal::Int(0), acc_ty, Span::default());
     Some(Expr::App(
         Box::new(app2(builtin_var("foldl'"), op, zero)),
+        Box::new(xs.clone()),
+        Span::default(),
+    ))
+}
+
+/// Match `foldl' op z lst` = `App(App(App(Var("foldl'"), op), z), lst)`,
+/// returning `(op, z, lst)`.
+fn as_foldl_app(e: &Expr) -> Option<(&Expr, &Expr, &Expr)> {
+    if let Expr::App(inner2, lst, _) = e {
+        if let Expr::App(inner1, z, _) = inner2.as_ref() {
+            if let Expr::App(head, op, _) = inner1.as_ref() {
+                if let Expr::Var(v, _) = head.as_ref() {
+                    if v.name.as_str() == "foldl'" {
+                        return Some((op, z, lst));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Fuse `foldl' op z (map f xs)` into `foldl' (\acc x -> op acc (f x)) z xs` —
+/// one strict left fold that applies `f` inline without materializing the mapped
+/// list (H26-SPEC 8.1 Pattern 4).
+///
+/// Unlike [`try_fuse_sum_map`], this is **type-agnostic**: `op` and `z` come
+/// straight from the source, so no element/accumulator type is required and it
+/// fires for any `f` — a named function *or* a lambda. Valid because `map` is
+/// pure: `foldl' op z . map f == foldl' (\acc x -> op acc (f x)) z`, preserving
+/// order and strictness. Returns `None` unless the fold's list argument is
+/// exactly `map f xs`.
+///
+/// Complements the whole-module [`fuse_fold_enum_module`] pass: that one
+/// specializes `foldl'/sum/product` over an `enumFromTo` *range* (± a `map`)
+/// into a hoisted counting loop; this one handles a `foldl'` over a `map` of
+/// **any** list (e.g. a list literal or a variable), leaving a plain `foldl'`.
+/// The two compose — for a range, this may fire first and the range pass then
+/// hoists the resulting `foldl'`-over-range.
+pub fn try_fuse_foldl_map(expr: &Expr) -> Option<Expr> {
+    let (op, z, lst) = as_foldl_app(expr)?;
+    let (_map, f, xs) = as_map_app(lst)?;
+
+    // The fused element binder takes `f`'s domain when it is known; `Error` is
+    // acceptable otherwise (a fold binder's type is not gated on, and codegen
+    // handles `Error`-typed binders as it did before typed Core IR).
+    let x_ty = match f.ty() {
+        Ty::Fun(dom, _) => *dom,
+        _ => Ty::Error,
+    };
+    let acc_id = fresh_var_id();
+    let acc = Var::new(
+        Symbol::intern(&format!("$acc{}", acc_id.index())),
+        acc_id,
+        Ty::Error,
+    );
+    let x_id = fresh_var_id();
+    let x = Var::new(Symbol::intern(&format!("$x{}", x_id.index())), x_id, x_ty);
+
+    // op acc (f x)
+    let fx = Expr::App(
+        Box::new(f.clone()),
+        Box::new(Expr::Var(x.clone(), Span::default())),
+        Span::default(),
+    );
+    let body = app2(op.clone(), Expr::Var(acc.clone(), Span::default()), fx);
+    // \acc x -> op acc (f x)
+    let new_op = Expr::Lam(
+        acc,
+        Box::new(Expr::Lam(x, Box::new(body), Span::default())),
+        Span::default(),
+    );
+    // foldl' new_op z xs
+    Some(Expr::App(
+        Box::new(app2(builtin_var("foldl'"), new_op, z.clone())),
         Box::new(xs.clone()),
         Span::default(),
     ))
@@ -715,6 +793,74 @@ mod tests {
         let f = var("f", 1, fun(int_ty(), dbl));
         let xs = var("xs", 3, Ty::List(Box::new(int_ty())));
         assert!(try_fuse_sum_map(&sum_app(map_app(f, xs))).is_none());
+    }
+
+    fn foldl_app(op: Expr, z: Expr, lst: Expr) -> Expr {
+        Expr::App(
+            Box::new(app2(var("foldl'", 20, Ty::Error), op, z)),
+            Box::new(lst),
+            Span::default(),
+        )
+    }
+
+    #[test]
+    fn fuses_foldl_map_to_single_foldl() {
+        // foldl' plus 0 (map f xs)  ->  foldl' (\acc x -> plus acc (f x)) 0 xs
+        let op = var("plus", 1, Ty::Error);
+        let z = Expr::Lit(Literal::Int(0), int_ty(), Span::default());
+        let f = var("f", 2, fun(int_ty(), int_ty()));
+        let xs = var("xs", 3, Ty::List(Box::new(int_ty())));
+        let fused = try_fuse_foldl_map(&foldl_app(op, z, map_app(f, xs))).expect("should fuse");
+        // fused == foldl' <lam> 0 xs
+        if let Expr::App(inner, tail, _) = &fused {
+            assert!(matches!(tail.as_ref(), Expr::Var(v, _) if v.name.as_str() == "xs"));
+            if let Expr::App(inner2, zero, _) = inner.as_ref() {
+                assert!(matches!(zero.as_ref(), Expr::Lit(Literal::Int(0), ..)));
+                if let Expr::App(head, lam, _) = inner2.as_ref() {
+                    assert!(
+                        matches!(head.as_ref(), Expr::Var(v, _) if v.name.as_str() == "foldl'")
+                    );
+                    assert!(matches!(lam.as_ref(), Expr::Lam(..)));
+                    return;
+                }
+            }
+        }
+        panic!("unexpected fused shape: {fused:?}");
+    }
+
+    #[test]
+    fn fuses_foldl_map_with_lambda_mapper() {
+        // Type-agnostic: fires even when the mapper is a lambda with no known
+        // type (`f.ty()` is not a `Fun`) — the fused binder just takes `Error`.
+        let op = var("plus", 1, Ty::Error);
+        let z = Expr::Lit(Literal::Int(0), int_ty(), Span::default());
+        let x = Var::new(Symbol::intern("x"), VarId::new(7), Ty::Error);
+        let lam = Expr::Lam(
+            x.clone(),
+            Box::new(Expr::Var(x, Span::default())),
+            Span::default(),
+        ); // \x -> x, untyped
+        let xs = var("xs", 3, Ty::List(Box::new(int_ty())));
+        assert!(try_fuse_foldl_map(&foldl_app(op, z, map_app(lam, xs))).is_some());
+    }
+
+    #[test]
+    fn does_not_fuse_foldl_non_map() {
+        // foldl' op z (filter p xs) must not fuse.
+        let op = var("plus", 1, Ty::Error);
+        let z = Expr::Lit(Literal::Int(0), int_ty(), Span::default());
+        let p = var("p", 2, fun(int_ty(), int_ty()));
+        let xs = var("xs", 3, Ty::List(Box::new(int_ty())));
+        let filtered = Expr::App(
+            Box::new(Expr::App(
+                Box::new(var("filter", 5, Ty::Error)),
+                Box::new(p),
+                Span::default(),
+            )),
+            Box::new(xs),
+            Span::default(),
+        );
+        assert!(try_fuse_foldl_map(&foldl_app(op, z, filtered)).is_none());
     }
 
     fn one_binding_module(body: Expr) -> crate::CoreModule {

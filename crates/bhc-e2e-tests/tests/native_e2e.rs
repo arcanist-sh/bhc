@@ -1231,3 +1231,12 @@ fn test_tier1_arithmetic_numeric_profile() {
 fn test_tier4_sum_map_named_numeric() {
     run_native_test("tier4_fusion/sum_map_named", Profile::Numeric);
 }
+
+/// `foldl' (+) 0 (map (\x -> x*2) xs)` fuses to a single strict `foldl'`
+/// (H26-SPEC 8.1 Pattern 4). Type-agnostic — `op`/`z` come from source — so it
+/// fires even for a lambda mapper (which Pattern 3 cannot fuse) and stays
+/// correct.
+#[test]
+fn test_tier4_foldl_map_lambda_numeric() {
+    run_native_test("tier4_fusion/foldl_map_lambda", Profile::Numeric);
+}

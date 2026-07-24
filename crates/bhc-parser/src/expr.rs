@@ -446,7 +446,10 @@ impl<'src> Parser<'src> {
             "*" | "/" | "`div`" | "`mod`" => (7, Assoc::Left),
             "+" | "-" => (6, Assoc::Left),
             "<>" => (6, Assoc::Right),
-            ":" | "++" => (5, Assoc::Right),
+            // `:|` is `Data.List.NonEmpty`'s cons — `infixr 5`, like `:`. Without
+            // this it defaults to `infixl 9` and `x :| y : z` mis-parses as
+            // `(x :| y) : z`, forcing `y :: [a]` (e.g. `Num [Int]`).
+            ":" | "++" | ":|" => (5, Assoc::Right),
             "==" | "/=" | "<" | "<=" | ">" | ">=" | "`elem`" | "`notElem`" => (4, Assoc::None),
             "<$>" | "<*>" | "<*" | "*>" => (4, Assoc::Left),
             "<$" => (4, Assoc::Left),

@@ -1218,3 +1218,16 @@ fn test_tier3_context_keywords_native() {
 fn test_tier1_arithmetic_numeric_profile() {
     run_native_test("tier1_simple/arithmetic", Profile::Numeric);
 }
+
+// =============================================================================
+// Tier 4: Fusion (Numeric Profile)
+// =============================================================================
+
+/// `sum (map dbl xs)` with a named `dbl :: Int -> Int` fuses to a strict
+/// `foldl'` (H26-SPEC 8.1 Pattern 3) and stays correct. This exercises the
+/// typed-Core-IR path (spec/BHC-BRIEF-0002): the fusion gate reads the mapped
+/// function's `Var` type, which lowering now populates from the type checker.
+#[test]
+fn test_tier4_sum_map_named_numeric() {
+    run_native_test("tier4_fusion/sum_map_named", Profile::Numeric);
+}

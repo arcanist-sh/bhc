@@ -172,7 +172,6 @@ impl LowerContext {
     /// `None` if absent (spec/BHC-BRIEF-0002). Populated by typeck as of Path A;
     /// used to give Core nodes real types instead of `Ty::Error`.
     #[must_use]
-    #[allow(dead_code)]
     pub(crate) fn expr_ty_opt(&self, span: bhc_span::Span) -> Option<Ty> {
         self.expr_types.get(&span).cloned()
     }

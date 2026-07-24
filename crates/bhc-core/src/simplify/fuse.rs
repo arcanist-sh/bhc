@@ -11,28 +11,31 @@
 //!   The composed lambda is a beta-redex the simplifier reduces on the next pass.
 //! - **Pattern 3** — `sum (map f xs)` → `foldl' (\acc x -> acc + f x) 0 xs`.
 //!
-//! # Known limitations (measured 2026-07-03 — do not trust without re-measuring)
+//! # Type dependence and known limitations (measured 2026-07-24 — re-measure before trusting)
 //!
-//! Core **erases types** before the simplifier runs: a real lambda's
-//! [`Expr::ty`] returns `Fun(Error, Error)`, not its source type. This has two
-//! consequences the caller must understand:
+//! `try_fuse_sum_map` gates on `f`'s codomain being `Int` (so the `0` literal and
+//! `+` are unambiguous). That gate reads [`Expr::ty`], which the typed-Core-IR
+//! work (BHC-BRIEF-0002) now populates from typeck's per-node `expr_types`:
 //!
-//! 1. **`try_fuse_sum_map` does not fire on real programs.** It gates on `f`'s
-//!    codomain being `Int` (so the `0` literal and `+` are unambiguous), but the
-//!    erased type is `Error`, so the gate always fails and it returns `None`. It
-//!    fires only in the unit tests below, which construct expressions with
-//!    explicit `Int` types. Making it fire needs type information the Core IR does
-//!    not currently preserve — see `rules/007-ir-design.md` (typed Core IR).
-//! 2. **`try_fuse_map_map` does fire** (it is type-agnostic — it only needs `g`'s
-//!    type to be *some* `Fun`), and it is correct, but it does **not** by itself
-//!    make numeric loops fast: codegen boxes every `Int`, so the per-element
-//!    boxing — not intermediate lists — dominates the flagship
-//!    `sum (map f [1..N])`. An honest Numeric performance contract is blocked on
-//!    **unboxed codegen** as well as type preservation, neither of which this
-//!    pass provides. This code is retained as correct scaffolding for when those
-//!    land. Any perf claim about these rewrites must come from an isolated
-//!    numeric-with-fusion vs numeric-without-fusion measurement, not a
-//!    default-vs-numeric comparison (which also varies RTS/GC config).
+//! 1. **`try_fuse_sum_map` fires for a *named* mapped function.** For
+//!    `sum (map dbl xs)` where `dbl :: Int -> Int`, `f.ty()` is a real
+//!    `Fun(Int, Int)`, the gate passes, and the rewrite to strict `foldl'`
+//!    fires (verified end-to-end: the flagship compiles and prints the right
+//!    answer). It still returns `None` for a **lambda**-mapped function
+//!    (`map (\x -> x*2) xs`): the lambda's parameter type is an unsolved var and
+//!    the `*` operator's result is not yet annotated, so `f.ty()` is
+//!    `Fun(Var, Error)`. Closing that needs operator-var annotation plus
+//!    monomorphizing the recorded lambda type — a leaf-population refinement, not
+//!    a Core redesign.
+//! 2. **`try_fuse_map_map` fires** (it is type-agnostic — it only needs `g`'s type
+//!    to be *some* `Fun`), and it is correct, but it does **not** by itself make
+//!    numeric loops fast: codegen boxes every `Int`, so the per-element boxing —
+//!    not intermediate lists — dominates the flagship `sum (map f [1..N])`. An
+//!    honest Numeric performance contract is blocked on **unboxed codegen** as
+//!    well; that is out of scope here. Any perf claim about these rewrites must
+//!    come from an isolated numeric-with-fusion vs numeric-without-fusion
+//!    measurement, not a default-vs-numeric comparison (which also varies RTS/GC
+//!    config).
 
 use super::expr_util::fresh_var_id;
 use super::subst::{substitute, substitute_single};
@@ -145,11 +148,14 @@ fn app3(f: Expr, a: Expr, b: Expr, c: Expr) -> Expr {
 /// Scoped to **integer** sums: only fires when `f`'s codomain is `Int`, so the
 /// `0` literal and `+` are unambiguous. Returns `None` otherwise.
 ///
-/// **This does not fire on real programs today.** Core erases types before the
-/// simplifier runs, so `f.ty()` is `Fun(Error, Error)` and the `Int` gate always
-/// fails — see the module header. The rewrite is exercised only by the unit tests
-/// below (which supply explicit `Int` types) and is retained as scaffolding for
-/// when Core preserves types.
+/// **Fires when `f` is a named function** whose type reaches Core. The
+/// typed-Core-IR work (BHC-BRIEF-0002) populates a function-typed `Var`'s slot
+/// during lowering, so for `sum (map dbl xs)` with `dbl :: Int -> Int`, `f.ty()`
+/// is a real `Fun(Int, Int)`, the `Int` gate passes, and the rewrite fires
+/// (verified end-to-end). It still returns `None` for a **lambda**-mapped
+/// function, whose parameter/operator types are not yet annotated — see the
+/// module header. The unit tests below supply explicit `Int` types and so
+/// exercise the rewrite regardless.
 pub fn try_fuse_sum_map(expr: &Expr) -> Option<Expr> {
     let list_arg = as_named_app1(expr, "sum")?;
     let (_map, f, xs) = as_map_app(list_arg)?;

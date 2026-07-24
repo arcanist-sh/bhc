@@ -69,6 +69,51 @@ fn make_error_expr(msg: &str, span: Span) -> core::Expr {
 
 /// Lower a HIR expression to Core.
 pub fn lower_expr(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<core::Expr> {
+    let span = expr.span();
+    let core = lower_expr_inner(ctx, expr)?;
+    Ok(annotate_ty(ctx, span, core))
+}
+
+/// Populate a lowered Core `Var`'s type slot from the type checker's per-node
+/// types (spec/BHC-BRIEF-0002, Task 2), keyed by source span. `Expr::ty()` is
+/// already compositional, so filling a function-typed `Var` (e.g. the `f` in
+/// `map f xs`) makes `f.ty()` return a real `Fun(elem, acc)` instead of
+/// `Fun(Error, Error)` — which is exactly what the numeric fusion rewrites gate
+/// on (`fuse::try_fuse_sum_map` reads the mapped function's codomain).
+///
+/// Scope is deliberately narrow. We annotate **only `Var` nodes whose recorded
+/// type is a function type**, for two reasons:
+///
+///   1. That is the only shape the simplifier's fusion gate inspects.
+///   2. Codegen was written assuming Core carries `Ty::Error` and reads leaf
+///      *scalar* types to pick integer widths. Populating scalar `Lit`/`Var`
+///      types feeds it data it never consumed, and mismatched widths surface as
+///      LLVM `icmp` type errors (e.g. `icmp eq i32 %c, i64 58` for a char-code
+///      compare). Function types carry no width, so annotating them is inert for
+///      codegen. Full leaf population is future work gated on codegen learning
+///      to consume these types.
+///
+/// Conservative: only fills a slot that is currently `Ty::Error`, so anything
+/// lowering already typed correctly (e.g. constructor schemes) is preserved.
+fn annotate_ty(ctx: &LowerContext, span: bhc_span::Span, core: core::Expr) -> core::Expr {
+    let Some(ty) = ctx.expr_ty_opt(span) else {
+        return core;
+    };
+    if !matches!(ty, Ty::Fun(_, _)) {
+        return core;
+    }
+    match core {
+        core::Expr::Var(mut v, s) => {
+            if matches!(v.ty, Ty::Error) {
+                v.ty = ty;
+            }
+            core::Expr::Var(v, s)
+        }
+        other => other,
+    }
+}
+
+fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<core::Expr> {
     match expr {
         Expr::Lit(lit, span) => lower_lit(lit, *span),
 

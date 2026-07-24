@@ -1,7 +1,7 @@
 # BHC-BRIEF-0002 — Typed Core IR: populate the types Core already has room for
 
 **Document ID:** BHC-BRIEF-0002
-**Status:** Ready for implementation
+**Status:** Core payoff DELIVERED (2026-07-24, commit 82ba0b7) — Path A + Tasks 2/3/6 done; `sum/map → foldl'` fusion fires. Remaining: Tasks 4–5 (desugaring temps, deriving) and full leaf population, both gated on codegen consuming Core types. See the "Tasks 2 + 6 RESULT" note below.
 **Owner:** build agent
 **References:** `rules/007-ir-design.md` §2 ("Core IR MUST preserve types"); `ROADMAP.md` Phase 3 (fusion not met on native); `spec/BHC-REVIEW-0001` §4.1
 **Audited against source:** 2026-07-23
@@ -171,6 +171,31 @@ fires. The keystone — real types reaching lowering — is now in place.
    assert the output contains `foldl'`/the fused loop and no residual `map`.
    *Acceptance:* the rewrite fires on the flagship program (verify via
    `--dump-core-after-simpl` / `--kernel-report`).
+
+### Tasks 2 + 6 RESULT (2026-07-24, commit 82ba0b7): THE REWRITE FIRES ✅
+
+Done together, narrower than the plan above. `lower_expr` wraps
+`lower_expr_inner` with `annotate_ty(ctx, span, core)`, which fills a Core
+`Var`'s type from `ctx.expr_ty_opt(span)`. For `sum (map dbl xs)` with
+`dbl :: Int -> Int`, `f.ty()` is now a real `Fun(Int, Int)`, the `Int` gate
+passes, and the rewrite fires (verified end-to-end: flagship compiles under
+`--profile=numeric` and prints the right answer; a temporary `BHC_FUSE_DBG`
+probe confirmed "FIRED"). Regression guard: `tier4_fusion/sum_map_named`
+fixture + `test_tier4_sum_map_named_numeric`.
+
+**Key deviation — codegen is NOT ready for full leaf population.** The plan
+(Task 2) said replace `Ty::Error` on every expr-derived `Var`/`Lit`. Doing so
+broke codegen: native emitted mismatched-width LLVM (`icmp eq i32 %c, i64 58`
+on a char-code compare) and wasm produced invalid binaries, because codegen
+was written assuming Core carries `Ty::Error` and infers scalar integer widths
+from context. So `annotate_ty` is scoped to **`Var` nodes whose type is
+`Ty::Fun`** — the only shape the fusion gate reads, and one that carries no
+scalar width so codegen stays inert. Task 3 (`Expr::ty()` compositional) was
+already satisfied in `bhc-core` (App→codomain, Lam→`Fun(x.ty, body.ty())`).
+Tasks 4–5 (desugaring temps, deriving) remain, and **full leaf population is
+blocked on codegen learning to consume Core types** — do not broaden
+`annotate_ty` before then. Lambda-mapped fusion (`map (\x->x*2) xs`) also
+remains: operator vars unannotated + lambda type var unmonomorphized.
 
 ## Acceptance criteria (whole brief)
 

@@ -5007,25 +5007,34 @@ impl TyCtxt {
                         ),
                     ),
                 ),
+                // `insert :: Int -> a -> IntMap a -> IntMap a`. These curated
+                // schemes model the map itself as an opaque type variable (there
+                // is no first-class `IntMap` type here), so the map must be a
+                // DISTINCT var `b` from the value `a` — otherwise `insert k v tbl`
+                // returns the *value* type and clashes with `tbl`'s concrete map
+                // type (e.g. `expected IntMap FontFamily, found FontFamily`).
                 "Data.IntMap.insert" => Scheme::poly(
-                    vec![a.clone()],
+                    vec![a.clone(), b.clone()],
                     Ty::fun(
                         self.builtins.int_ty.clone(),
                         Ty::fun(
                             Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                            Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
                         ),
                     ),
                 ),
+                // `insertWith :: (a -> a -> a) -> Int -> a -> IntMap a -> IntMap a`.
+                // Same as `insert`: the map is a distinct var `b` from the value
+                // `a`, so the result is the map type, not the value type.
                 "Data.IntMap.insertWith" => Scheme::poly(
-                    vec![a.clone()],
+                    vec![a.clone(), b.clone()],
                     Ty::fun(
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
                         Ty::fun(
                             self.builtins.int_ty.clone(),
                             Ty::fun(
                                 Ty::Var(a.clone()),
-                                Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                                Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
                             ),
                         ),
                     ),

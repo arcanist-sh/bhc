@@ -1010,3 +1010,16 @@ fn test_tier3_print_string_wasm() {
 fn test_tier3_dict_sibling_inferred_wasm() {
     run_wasm_test("tier3_io/dict_sibling_inferred", Profile::Default);
 }
+
+// =============================================================================
+// Tier 4: Fusion (Numeric Profile)
+// =============================================================================
+
+// `sum (map dbl xs)` with a named `dbl :: Int -> Int` fuses to a strict
+// `foldl'` (typed Core IR, spec/BHC-BRIEF-0002) and stays correct on wasm — the
+// fusion is a shared Core->Core pass, so the wasm backend must codegen the
+// fused form correctly too.
+#[test]
+fn test_tier4_sum_map_named_wasm() {
+    run_wasm_test("tier4_fusion/sum_map_named", Profile::Numeric);
+}

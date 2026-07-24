@@ -17,16 +17,23 @@
 //! `+` are unambiguous). That gate reads [`Expr::ty`], which the typed-Core-IR
 //! work (BHC-BRIEF-0002) now populates from typeck's per-node `expr_types`:
 //!
-//! 1. **`try_fuse_sum_map` fires for a *named* mapped function.** For
-//!    `sum (map dbl xs)` where `dbl :: Int -> Int`, `f.ty()` is a real
-//!    `Fun(Int, Int)`, the gate passes, and the rewrite to strict `foldl'`
-//!    fires (verified end-to-end: the flagship compiles and prints the right
-//!    answer). It still returns `None` for a **lambda**-mapped function
-//!    (`map (\x -> x*2) xs`): the lambda's parameter type is an unsolved var and
-//!    the `*` operator's result is not yet annotated, so `f.ty()` is
-//!    `Fun(Var, Error)`. Closing that needs operator-var annotation plus
-//!    monomorphizing the recorded lambda type — a leaf-population refinement, not
-//!    a Core redesign.
+//! 1. **`try_fuse_sum_map` fires for a *named* mapped function** (verified on
+//!    both native and wasm). For `sum (map dbl xs)` where `dbl :: Int -> Int`,
+//!    `f.ty()` is a real `Fun(Int, Int)`, the gate passes, and the rewrite to
+//!    strict `foldl'` fires (the flagship compiles and prints the right answer).
+//!    It still returns `None` for a **lambda**-mapped function
+//!    (`map (\x -> x*2) xs`), where `f.ty()` is `Fun(Error, Error)`. Root cause
+//!    (measured): for a lambda, `Expr::ty()` composes `Fun(param.ty, body.ty())`,
+//!    and both stay `Error` — the parameter is a scalar `Int` that `annotate_ty`
+//!    deliberately leaves alone (codegen infers scalar widths from `Ty::Error`),
+//!    and `body = x * 2` cannot compose to `Int` because the `*` operator `Var`
+//!    **shares the source span of the whole `x * 2` application**, so span-keyed
+//!    typeck records that span's type as the application's *result* (`Int`, a
+//!    `Con`) rather than the operator's function type. `annotate_ty` (Fun-only)
+//!    then skips it and `body.ty()` is `Error`. Closing this needs operator-span
+//!    disambiguation (or a `Lam`/`App` type slot) — not a leaf tweak, and it
+//!    overlaps the codegen-consumes-types work; do not force it via scalar
+//!    annotation.
 //! 2. **`try_fuse_map_map` fires** (it is type-agnostic — it only needs `g`'s type
 //!    to be *some* `Fun`), and it is correct, but it does **not** by itself make
 //!    numeric loops fast: codegen boxes every `Int`, so the per-element boxing —

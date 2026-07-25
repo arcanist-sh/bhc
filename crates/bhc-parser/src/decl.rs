@@ -891,6 +891,13 @@ impl<'src> Parser<'src> {
                     next.node.kind,
                     TokenKind::Ident(_)
                         | TokenKind::ConId(_)
+                        // A *qualified* constructor also starts a pattern, e.g.
+                        // `(Ann.Cell specs colnum cell) = …`. Without this, a
+                        // parenthesized qualified-constructor pattern binding
+                        // isn't recognized and falls through to a mis-parse — in a
+                        // do-block `let` it collapses the layout and drops the
+                        // pattern's field bindings.
+                        | TokenKind::QualConId(_, _)
                         | TokenKind::Underscore
                         | TokenKind::IntLit(_)
                         | TokenKind::CharLit(_)

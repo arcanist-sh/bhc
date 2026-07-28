@@ -3014,15 +3014,19 @@ impl TyCtxt {
                         Ty::fun(io_a.clone(), Ty::fun(io_b, io_a)),
                     )
                 }
-                // throwIO :: e -> IO a  (simplified: String -> IO a)
+                // throwIO :: Exception e => e -> IO a. The exception is ANY type
+                // (a user `PandocError`, an `IOException`, …), so the argument
+                // must be a fresh var, not `String` — otherwise `throwIO
+                // (PandocFilterError …)` fails with `expected [Char], found
+                // PandocError`.
                 "throwIO" | "throw" => {
                     let io_a = Ty::App(
                         Box::new(Ty::Con(self.builtins.io_con.clone())),
                         Box::new(Ty::Var(a.clone())),
                     );
                     Scheme::poly(
-                        vec![a.clone()],
-                        Ty::fun(self.builtins.string_ty.clone(), io_a),
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(Ty::Var(b.clone()), io_a),
                     )
                 }
                 // ioError :: IOError -> IO a  (polymorphic first arg since no real IOError type)

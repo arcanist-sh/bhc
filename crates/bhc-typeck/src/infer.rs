@@ -168,11 +168,20 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                 let mut var_ids = Vec::new();
                 extract_var_ids(&binding.pat, &mut var_ids);
 
-                // Register by both name and DefId (like pattern checking does)
-                let scheme = Scheme::mono(fresh_ty.clone());
+                // Register EACH variable with its OWN fresh type var — not the
+                // shared whole-binding type. For a multi-variable pattern (tuple,
+                // constructor, …) the variables have DIFFERENT types (the pattern's
+                // components); `check_pattern` in Step 2 unifies each with the
+                // matching part of the RHS. Sharing one type var made every
+                // variable of `(pre, sp) = …` take the whole binding type, so a
+                // forward reference — e.g. `h = pre` appearing before the tuple
+                // binding — resolved `pre` to the entire tuple (`expected Int,
+                // found (t, t)`).
                 for (name, def_id) in &var_ids {
+                    let var_ty = ctx.fresh_ty();
+                    let scheme = Scheme::mono(var_ty);
                     ctx.env.insert_local(*name, scheme.clone());
-                    ctx.env.insert_global(*def_id, scheme.clone());
+                    ctx.env.insert_global(*def_id, scheme);
                 }
                 binding_types.push((var_ids, fresh_ty));
             }

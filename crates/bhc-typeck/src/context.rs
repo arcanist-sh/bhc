@@ -2988,14 +2988,17 @@ impl TyCtxt {
                     )
                 }
                 // handle :: (SomeException -> IO a) -> IO a -> IO a
+                // handle :: Exception e => (e -> IO a) -> IO a -> IO a. Like
+                // `catch` (above), the handler's exception is ANY type — a fresh
+                // var `b`, not `String`.
                 "handle" => {
                     let io_a = Ty::App(
                         Box::new(Ty::Con(self.builtins.io_con.clone())),
                         Box::new(Ty::Var(a.clone())),
                     );
-                    let handler = Ty::fun(self.builtins.string_ty.clone(), io_a.clone());
+                    let handler = Ty::fun(Ty::Var(b.clone()), io_a.clone());
                     Scheme::poly(
-                        vec![a.clone()],
+                        vec![a.clone(), b.clone()],
                         Ty::fun(handler, Ty::fun(io_a.clone(), io_a)),
                     )
                 }

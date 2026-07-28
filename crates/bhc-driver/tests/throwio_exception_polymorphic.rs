@@ -38,3 +38,17 @@ fn throwio_accepts_non_string_exception() {
         "f = E.throwIO (MyErr 5)\n",
     ));
 }
+
+#[test]
+fn handle_handler_accepts_non_string_exception() {
+    // `handle :: Exception e => (e -> IO a) -> IO a -> IO a`. Its curated handler
+    // had the same String pin as `throwIO`, so a handler matching a user
+    // exception failed with `expected [Char], found MyErr`.
+    check_ok(concat!(
+        "module M where\n",
+        "import qualified Control.Exception as E\n",
+        "data MyErr = MyErr Int\n",
+        "f :: IO Int -> IO Int\n",
+        "f act = E.handle (\\(MyErr n) -> return n) act\n",
+    ));
+}

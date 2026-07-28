@@ -272,6 +272,18 @@ pub fn type_check_module_full(
             (vec![], Ty::Tuple(vec![text_ty.clone(), text_ty.clone()])),
         );
 
+        // Approximate `NonEmpty a` as `[a]`. BHC already models the `:|`
+        // constructor and the `Data.List.NonEmpty` operations as list-valued
+        // (see context.rs `":|"`), so the *type* must agree — otherwise a
+        // signature like `multicolumnDescriptor :: … -> NonEmpty ColWidth -> …`
+        // stays a distinct `NonEmpty` con and clashes with the list values it
+        // receives (`expected NonEmpty, found []`). A real NonEmpty type would
+        // need Foldable-generic reductions; this keeps the approximation coherent.
+        ctx.type_aliases.insert(
+            Symbol::intern("NonEmpty"),
+            (vec![a.clone()], Ty::List(Box::new(Ty::Var(a.clone())))),
+        );
+
         // skylighting type aliases (external, stubbed opaquely otherwise):
         //   type SyntaxMap  = Map Text Syntax
         //   type Token      = (TokenType, Text)

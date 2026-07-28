@@ -7666,11 +7666,21 @@ impl TyCtxt {
 
                 for item in items {
                     if let Item::Value(value_def) = item {
-                        let ty = value_def
-                            .sig
-                            .as_ref()
-                            .map_or_else(|| self.fresh_ty(), |scheme| scheme.ty.clone());
-                        let scheme = Scheme::mono(ty);
+                        // A def WITH an explicit signature is registered with its
+                        // full POLYMORPHIC scheme, so recursive calls instantiate
+                        // fresh type variables (an explicit signature licenses
+                        // polymorphic recursion). Registering only `mono(sig.ty)`
+                        // shared the signature's variables across the body and every
+                        // recursive call, which for a self-referential result type
+                        // produces a spurious `infinite type` (occurs check) — e.g.
+                        // `bulletListItemsUntil` feeding its own result back through
+                        // `listItemContentsUntil` in the Muse reader. Signature-less
+                        // defs stay monomorphic (Haskell forbids their polymorphic
+                        // recursion) and get generalized after the group.
+                        let scheme = match &value_def.sig {
+                            Some(sig) => sig.clone(),
+                            None => Scheme::mono(self.fresh_ty()),
+                        };
                         temp_schemes.push((value_def.id, scheme.clone()));
                         self.env.insert_global(value_def.id, scheme);
                     }

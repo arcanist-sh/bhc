@@ -3673,11 +3673,29 @@ impl TyCtxt {
                 )),
                 // Data.Text.Lazy.Encoding: BL.ByteString -> TL.Text
                 "Data.Text.Lazy.Encoding.decodeUtf8"
-                | "Data.Text.Lazy.Encoding.decodeUtf8With"
-                | "Data.Text.Lazy.Encoding.decodeUtf8'" => Scheme::mono(Ty::fun(
+                | "Data.Text.Lazy.Encoding.decodeUtf8With" => Scheme::mono(Ty::fun(
                     self.builtins.bytestring_ty.clone(),
                     self.builtins.text_ty.clone(),
                 )),
+                // The `'` (prime) decoders are total: they return
+                // `Either UnicodeException Text` rather than throwing. bhc does
+                // not model `UnicodeException`, so the error side is left
+                // polymorphic (a wildcard `Left _` binds it to anything).
+                "Data.Text.Encoding.decodeUtf8'"
+                | "Data.Text.Lazy.Encoding.decodeUtf8'" => {
+                    // ByteString -> Either e Text
+                    let either_ty = Ty::App(
+                        Box::new(Ty::App(
+                            Box::new(Ty::Con(self.builtins.either_con.clone())),
+                            Box::new(Ty::Var(a.clone())),
+                        )),
+                        Box::new(self.builtins.text_ty.clone()),
+                    );
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(self.builtins.bytestring_ty.clone(), either_ty),
+                    )
+                }
                 // E.20: Data.ByteString — ByteString (constant)
                 "Data.ByteString.empty" => Scheme::mono(self.builtins.bytestring_ty.clone()),
                 // Data.ByteString: Int -> ByteString

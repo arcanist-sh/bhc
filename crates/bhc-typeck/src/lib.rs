@@ -284,6 +284,44 @@ pub fn type_check_module_full(
             (vec![a.clone()], Ty::List(Box::new(Ty::Var(a.clone())))),
         );
 
+        // type Parsec s u = ParsecT s u Identity
+        // The parsec monad specialized to the Identity base functor. Without
+        // this alias `Parsec Sources st a` (e.g. the argument of
+        // `Text.Pandoc.Parsing.General`'s `readWith`) stays a distinct head and
+        // won't unify with `ParsecT Sources st Identity a` (what `readWithM`
+        // produces at `m = Identity`). Two params; the trailing result arg is
+        // applied to the expansion (`Parsec s u a` → `ParsecT s u Identity a`).
+        {
+            let s = TyVar::new_star(0xFFFE_0001);
+            let u = TyVar::new_star(0xFFFE_0002);
+            let star_to_star = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+            // ParsecT :: * -> * -> (* -> *) -> * -> *
+            let parsect_kind = Kind::Arrow(
+                Box::new(Kind::Star),
+                Box::new(Kind::Arrow(
+                    Box::new(Kind::Star),
+                    Box::new(Kind::Arrow(
+                        Box::new(star_to_star.clone()),
+                        Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+                    )),
+                )),
+            );
+            let parsect_con =
+                Ty::Con(bhc_types::TyCon::new(Symbol::intern("ParsecT"), parsect_kind));
+            let identity_con =
+                Ty::Con(bhc_types::TyCon::new(Symbol::intern("Identity"), star_to_star));
+            // ParsecT s u Identity
+            let expansion = Ty::App(
+                Box::new(Ty::App(
+                    Box::new(Ty::App(Box::new(parsect_con), Box::new(Ty::Var(s.clone())))),
+                    Box::new(Ty::Var(u.clone())),
+                )),
+                Box::new(identity_con),
+            );
+            ctx.type_aliases
+                .insert(Symbol::intern("Parsec"), (vec![s, u], expansion));
+        }
+
         // skylighting type aliases (external, stubbed opaquely otherwise):
         //   type SyntaxMap  = Map Text Syntax
         //   type Token      = (TokenType, Text)

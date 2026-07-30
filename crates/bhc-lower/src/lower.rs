@@ -5582,6 +5582,16 @@ fn register_standard_module_exports(
                 ctx.define(def_id, def_name, DefKind::StubValue, Span::default());
             }
             ctx.bind_value(unqualified, def_id);
+            // Bind the qualified alias directly to this stub as well. Otherwise
+            // `Qualifier.name` resolves only through the shadowable unqualified
+            // indirection (`register_qualified_name` above), so a module that
+            // *locally* defines `name` (e.g. `Text.Pandoc.Class.PandocMonad`'s
+            // `trace` class method vs. imported `Debug.Trace.trace`) would have
+            // its qualified use hijacked by the local binding. A direct value
+            // binding wins in `resolve_qualified_var` before that indirection.
+            if ctx.lookup_value(aliased_qualified).is_none() {
+                ctx.bind_value(aliased_qualified, def_id);
+            }
         } else if is_unqualified_import && module_name != "GHC.Generics" {
             // There's already a binding. Create a fresh DefId to avoid sharing
             // DefIds across function boundaries in multi-module compilation

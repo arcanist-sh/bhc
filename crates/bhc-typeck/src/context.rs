@@ -1878,6 +1878,48 @@ impl TyCtxt {
                     Scheme::mono(Ty::fun(self.builtins.text_ty.clone(), Ty::Con(content_con)))
                 }
 
+                // Text.HTML.TagSoup `Tag str` constructors. Same split-registration
+                // hazard as `Elem`/`CRef`: without a DefId-keyed scheme the arity
+                // fallback disagrees with the pattern side, so using e.g. `TagText`
+                // as both a pattern and an expression in one clause
+                // (SelfContained's `\case TagText s -> TagText . toText <$> ..`)
+                // produced an infinite type. `str` is polymorphic; the attribute
+                // list is left permissive (`[b]`).
+                "TagText"
+                | "Text.HTML.TagSoup.TagText"
+                | "TagClose"
+                | "Text.HTML.TagSoup.TagClose"
+                | "TagComment"
+                | "Text.HTML.TagSoup.TagComment"
+                | "TagWarning"
+                | "Text.HTML.TagSoup.TagWarning" => {
+                    // TagText/TagClose/TagComment/TagWarning :: str -> Tag str
+                    let a = TyVar::new_star(0xFFFF_0000);
+                    let tag_con = TyCon::new(
+                        Symbol::intern("Tag"),
+                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+                    );
+                    let tag_a =
+                        Ty::App(Box::new(Ty::Con(tag_con)), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), tag_a))
+                }
+                "TagOpen" | "Text.HTML.TagSoup.TagOpen" => {
+                    // TagOpen :: str -> [Attribute str] -> Tag str
+                    let a = TyVar::new_star(0xFFFF_0000);
+                    let b = TyVar::new_star(0xFFFF_0001);
+                    let tag_con = TyCon::new(
+                        Symbol::intern("Tag"),
+                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+                    );
+                    let tag_a =
+                        Ty::App(Box::new(Ty::Con(tag_con)), Box::new(Ty::Var(a.clone())));
+                    let attrs = Ty::List(Box::new(Ty::Var(b.clone())));
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(attrs, tag_a)),
+                    )
+                }
+
                 // For imported constructors that aren't known builtins,
                 // create a function type based on the constructor's arity.
                 // Mark as non-builtin so we only register by DefId (not by name),

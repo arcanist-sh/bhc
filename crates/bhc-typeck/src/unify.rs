@@ -569,6 +569,35 @@ fn unify_inner(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
             unify_inner(ctx, &last_applied, &a_applied, span);
         }
 
+        // Cross-type: App(f, a) vs Fun(from, to) — treat the function arrow as
+        // `((->) from) to`, so an arrow-polymorphic HKT like `a x y`
+        // (`ArrowChoice a => a (Either b c) d`) can unify with a plain function
+        // `x -> y` by choosing `a := (->)`. There is an `Arrow (->)` instance, so
+        // this is sound; it also covers the Reader functor (`f a` ~ `r -> a`).
+        // E.g. Text.Pandoc.Readers.ODT.Arrows.Utils' `a >>^ (Left ^|||^ Right . f)`.
+        (Ty::App(f, a), Ty::Fun(from, to)) => {
+            let arrow_con = Ty::Con(TyCon::new(
+                Symbol::intern("->"),
+                Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::star_to_star())),
+            ));
+            let inner = Ty::App(Box::new(arrow_con), Box::new(from.as_ref().clone()));
+            unify_inner(ctx, f, &inner, span);
+            let a_applied = ctx.apply_subst(a);
+            let to_applied = ctx.apply_subst(to);
+            unify_inner(ctx, &a_applied, &to_applied, span);
+        }
+        (Ty::Fun(from, to), Ty::App(f, a)) => {
+            let arrow_con = Ty::Con(TyCon::new(
+                Symbol::intern("->"),
+                Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::star_to_star())),
+            ));
+            let inner = Ty::App(Box::new(arrow_con), Box::new(from.as_ref().clone()));
+            unify_inner(ctx, &inner, f, span);
+            let to_applied = ctx.apply_subst(to);
+            let a_applied = ctx.apply_subst(a);
+            unify_inner(ctx, &to_applied, &a_applied, span);
+        }
+
         // Forall types: instantiate with fresh variables before unifying.
         // This ensures each use of a polymorphic type gets independent type vars.
         (Ty::Forall(vars, body), t2) => {

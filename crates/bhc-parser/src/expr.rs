@@ -455,7 +455,16 @@ impl<'src> Parser<'src> {
             "<$" => (4, Assoc::Left),
             "<|>" => (3, Assoc::Left),
             "&&" => (3, Assoc::Right),
+            // Control.Arrow: `infixr 3 ***, &&&` and `infixr 2 +++, |||`.
+            "***" | "&&&" => (3, Assoc::Right),
+            "+++" | "|||" => (2, Assoc::Right),
             "||" => (2, Assoc::Right),
+            // Control.Category / Control.Arrow composition & lifting are all
+            // `infixr 1`: `>>>`, `<<<`, `^>>`, `>>^`, `<<^`, `^<<`. Without these
+            // they default to `infixl 9`, so e.g. `a >>^ f ^|||^ g` mis-groups as
+            // `(a >>^ f) ^|||^ g` and feeds `^|||^` an arrow where it wants a
+            // function (Text.Pandoc.Readers.ODT.Arrows.Utils).
+            ">>>" | "<<<" | "^>>" | ">>^" | "<<^" | "^<<" => (1, Assoc::Right),
             ">>=" | ">>" => (1, Assoc::Left),
             "=<<" => (1, Assoc::Right),
             "$" | "$!" => (0, Assoc::Right),

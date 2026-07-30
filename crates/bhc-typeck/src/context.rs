@@ -1247,6 +1247,27 @@ impl TyCtxt {
                         ),
                     )
                 }
+                // Tuple constructors of arity 4..7. Without these, the on-the-fly
+                // constructor (`ensure_tuple_constructor`) hit the arity fallback,
+                // which gives the result type `Tuple4 a b c d` (a bare `Con`) with
+                // field vars UNRELATED to the tuple components — so a tuple pattern
+                // did not tie its bound variables to the corresponding component
+                // types. That surfaced when a where/let-bound MULTI-CLAUSE function
+                // desugars to `\args -> case (a,..) of (p,..) -> ..` (a 4-tuple
+                // scrutinee + tuple patterns), e.g. Writers.AnnotatedTable's
+                // `annotateBodySection` (`expected ColNumber, found [(RowSpan,
+                // ColSpec)]`). Each must be `a1 -> .. -> an -> (a1, .., an)`.
+                "(,,,)" | "(,,,,)" | "(,,,,,)" | "(,,,,,,)" => {
+                    let arity = name.matches(',').count() + 1;
+                    let vars: Vec<TyVar> =
+                        (0..arity).map(|i| TyVar::new_star(0xFFFF_0000 + i as u32)).collect();
+                    let tuple_ty = Ty::Tuple(vars.iter().map(|v| Ty::Var(v.clone())).collect());
+                    let con_ty = vars
+                        .iter()
+                        .rev()
+                        .fold(tuple_ty, |acc, v| Ty::fun(Ty::Var(v.clone()), acc));
+                    Scheme::poly(vars, con_ty)
+                }
 
                 // NonEmpty constructor
                 ":|" => {

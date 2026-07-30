@@ -1859,6 +1859,25 @@ impl TyCtxt {
                     Scheme::poly(vec![a.clone()], Ty::fun(map_text_val, context_a))
                 }
 
+                // Text.Pandoc.XML.Light `Content` constructors. These have
+                // curated schemes in the by-name builtin match too, but that only
+                // reaches expression uses; the DefId-keyed registration here must
+                // also carry the right scheme, otherwise the arity fallback below
+                // gives a *different* (wrong-arity) scheme for the same
+                // constructor. Using `Elem` as both a pattern and an expression in
+                // one clause (`unwrapContent (Elem e) = map Elem (..)` in
+                // Readers.Docx.Parse) then unified the two, producing an infinite
+                // type (`t occurs in (Element -> t)`).
+                "Elem" | "Text.Pandoc.XML.Light.Elem" | "Text.Pandoc.XML.Light.Types.Elem" => {
+                    let element_con = TyCon::new(Symbol::intern("Element"), Kind::Star);
+                    let content_con = TyCon::new(Symbol::intern("Content"), Kind::Star);
+                    Scheme::mono(Ty::fun(Ty::Con(element_con), Ty::Con(content_con)))
+                }
+                "CRef" | "Text.Pandoc.XML.Light.CRef" | "Text.Pandoc.XML.Light.Types.CRef" => {
+                    let content_con = TyCon::new(Symbol::intern("Content"), Kind::Star);
+                    Scheme::mono(Ty::fun(self.builtins.text_ty.clone(), Ty::Con(content_con)))
+                }
+
                 // For imported constructors that aren't known builtins,
                 // create a function type based on the constructor's arity.
                 // Mark as non-builtin so we only register by DefId (not by name),

@@ -5199,13 +5199,23 @@ impl TyCtxt {
                         ),
                     ),
                 ),
-                "Data.IntMap.map" => Scheme::poly(
-                    vec![a.clone(), b.clone()],
-                    Ty::fun(
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                    ),
-                ),
+                "Data.IntMap.map" => {
+                    // map :: (a -> b) -> IntMap a -> IntMap b. The container is a
+                    // higher-kinded var `f` (= IntMap), NOT the element type —
+                    // otherwise `IntMap.map (res:) (sRawTokens st)` forced the
+                    // `IntMap [Tok]` field to be a bare `[Tok]` (`expected [],
+                    // found IntMap`, in Readers.LaTeX.Parsing).
+                    let f = TyVar::new(
+                        0xFFFD_0000,
+                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+                    );
+                    let fa = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(a.clone())));
+                    let fb = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(b.clone())));
+                    Scheme::poly(
+                        vec![f.clone(), a.clone(), b.clone()],
+                        Ty::fun(Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())), Ty::fun(fa, fb)),
+                    )
+                }
                 "Data.IntMap.mapWithKey" => Scheme::poly(
                     vec![a.clone(), b.clone()],
                     Ty::fun(
@@ -5216,13 +5226,23 @@ impl TyCtxt {
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
                     ),
                 ),
-                "Data.IntMap.filter" => Scheme::poly(
-                    vec![a.clone()],
-                    Ty::fun(
-                        Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
-                    ),
-                ),
+                "Data.IntMap.filter" => {
+                    // filter :: (a -> Bool) -> IntMap a -> IntMap a. Same as
+                    // `map`: the container is a higher-kinded `f` (= IntMap),
+                    // not the element type.
+                    let f = TyVar::new(
+                        0xFFFD_0000,
+                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+                    );
+                    let fa = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(
+                        vec![f.clone(), a.clone()],
+                        Ty::fun(
+                            Ty::fun(Ty::Var(a.clone()), self.builtins.bool_ty.clone()),
+                            Ty::fun(fa.clone(), fa),
+                        ),
+                    )
+                }
                 "Data.IntMap.foldr" => Scheme::poly(
                     vec![a.clone(), b.clone()],
                     Ty::fun(

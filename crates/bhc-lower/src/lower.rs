@@ -7620,10 +7620,20 @@ fn lower_lit(lit: &ast::Lit) -> hir::Lit {
 fn lower_type_to_scheme(ctx: &mut LowerContext, ty: &ast::Type) -> bhc_types::Scheme {
     match ty {
         ast::Type::Constrained(constraints, inner, _span) => {
-            let inner_ty = lower_type(ctx, inner);
+            // Flatten nested contexts: `C1 a => C2 a => T` (two `=>`, as in
+            // indentWith's `(Stream ..) => HasReaderOptions st => ..`) must
+            // carry BOTH C1 and C2 into the scheme. Walk the `Constrained`
+            // spine, accumulating every context, and take the innermost type.
+            let mut all_constraints: Vec<&ast::Constraint> = constraints.iter().collect();
+            let mut inner_ref = inner.as_ref();
+            while let ast::Type::Constrained(more, deeper, _) = inner_ref {
+                all_constraints.extend(more.iter());
+                inner_ref = deeper.as_ref();
+            }
+            let inner_ty = lower_type(ctx, inner_ref);
 
             // Lower AST constraints to bhc_types::Constraint
-            let type_constraints: Vec<bhc_types::Constraint> = constraints
+            let type_constraints: Vec<bhc_types::Constraint> = all_constraints
                 .iter()
                 .map(|c| {
                     let args: Vec<bhc_types::Ty> =

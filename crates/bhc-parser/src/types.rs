@@ -27,7 +27,12 @@ impl<'src> Parser<'src> {
         // This is tricky because we need lookahead to distinguish
         // `Class a => ...` from `Type -> ...`
         if let Some(constraints) = self.try_parse_context()? {
-            let ty = self.parse_fun_type()?;
+            // Parse the remainder as a guarded type too, so a *second* context
+            // (`C1 a => C2 a => T`, as in indentWith's
+            // `(Stream ..) => HasReaderOptions st => ..`) is recognized rather
+            // than swallowed into the function type — otherwise the later
+            // constraint is silently dropped from the scheme.
+            let ty = self.parse_type_guarded()?;
             let span = start.to(ty.span());
             return Ok(Type::Constrained(constraints, Box::new(ty), span));
         }

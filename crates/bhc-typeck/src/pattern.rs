@@ -49,9 +49,29 @@ pub fn infer_pattern(ctx: &mut TyCtxt, pat: &Pat) -> Ty {
             ty
         }
 
-        Pat::Lit(lit, _span) => {
-            // Literal pattern: return the literal's type
-            infer_lit_type(ctx, lit)
+        Pat::Lit(lit, span) => {
+            // A numeric literal pattern is overloaded exactly like a numeric
+            // literal expression: `Num a => a` (resp. `Fractional a => a`), NOT
+            // a monomorphic `Int`/`Float`. Otherwise `Just 0` matched against
+            // `Maybe Double`, or `case w of (0 :: Double) -> ..`, fails with
+            // `expected Double, found Int`.
+            match lit {
+                Lit::Int(_) => {
+                    let ty = ctx.fresh_ty();
+                    ctx.emit_constraint(bhc_intern::Symbol::intern("Num"), ty.clone(), *span);
+                    ty
+                }
+                Lit::Float(_) => {
+                    let ty = ctx.fresh_ty();
+                    ctx.emit_constraint(
+                        bhc_intern::Symbol::intern("Fractional"),
+                        ty.clone(),
+                        *span,
+                    );
+                    ty
+                }
+                _ => infer_lit_type(ctx, lit),
+            }
         }
 
         Pat::Con(def_ref, sub_pats, span) => {
@@ -319,7 +339,12 @@ mod tests {
 
         let ty = infer_pattern(&mut ctx, &pat);
 
-        assert_eq!(ty, ctx.builtins.int_ty);
+        // A numeric literal pattern is overloaded (`Num a => a`): a fresh type
+        // variable, not a monomorphic `Int`, so it can match e.g. `Double`.
+        assert!(
+            matches!(ty, Ty::Var(_)),
+            "expected an overloaded (fresh-var) numeric literal type, got {ty:?}"
+        );
     }
 
     #[test]
@@ -335,15 +360,16 @@ mod tests {
 
         let ty = infer_pattern(&mut ctx, &pat);
 
-        // Type should be Int
-        assert_eq!(ty, ctx.builtins.int_ty);
+        // Type is the overloaded numeric literal's fresh variable.
+        assert!(
+            matches!(ty, Ty::Var(_)),
+            "expected an overloaded (fresh-var) numeric literal type, got {ty:?}"
+        );
 
-        // x should be bound to Int (by name)
+        // x is bound (by name and by DefId) to that same type.
         let scheme = ctx.env.lookup_local(x).unwrap();
-        assert_eq!(scheme.ty, ctx.builtins.int_ty);
-
-        // Also bound by DefId
+        assert_eq!(scheme.ty, ty);
         let scheme_by_id = ctx.env.lookup_global(def_id).unwrap();
-        assert_eq!(scheme_by_id.ty, ctx.builtins.int_ty);
+        assert_eq!(scheme_by_id.ty, ty);
     }
 }

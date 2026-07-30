@@ -941,6 +941,16 @@ pub fn register_imported_names(
         module_name.clone()
     };
 
+    // Names that are explicitly imported class methods (via `Class(..)` or by
+    // name). A class method is a real definition and MUST shadow a same-named
+    // hardcoded builtin — e.g. `import Text.Pandoc.Class (PandocMonad(..))`
+    // brings `lookupEnv :: PandocMonad m => Text -> m (Maybe Text)`, which must
+    // win over the always-in-scope `System.Environment.lookupEnv` builtin.
+    // Without this, the builtin's `IO`-typed scheme leaks into the class method's
+    // use sites (e.g. `readFileFromTexinputs` in Text.Pandoc.Readers.LaTeX).
+    let imported_methods: rustc_hash::FxHashSet<Symbol> =
+        exports.class_methods.values().flatten().copied().collect();
+
     // Register values
     for (&name, &def_id) in &exports.values {
         // Register qualified name: Module.name -> name
@@ -952,8 +962,12 @@ pub fn register_imported_names(
         // might find a different DefId — e.g., a Prelude builtin).
         ctx.bind_value(qualified, def_id);
 
-        // For non-qualified imports, also bind the unqualified name
-        if !import.qualified && ctx.lookup_value(name).is_none() {
+        // For non-qualified imports, also bind the unqualified name. Bind when
+        // nothing is bound yet, OR when this is an imported class method (which
+        // must shadow a same-named builtin).
+        if !import.qualified
+            && (ctx.lookup_value(name).is_none() || imported_methods.contains(&name))
+        {
             ctx.bind_value(name, def_id);
         }
     }

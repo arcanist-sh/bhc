@@ -5878,6 +5878,33 @@ impl TyCtxt {
                     ))
                 }
 
+                // System.Environment: without a curated scheme these fall to the
+                // `_ => continue` arm, leaving whatever scheme drifted onto their
+                // DefId from the index-based pass — measured as a garbage
+                // `(a -> b) -> a -> a -> c`, which made `lookupEnv "TEXINPUTS"`
+                // type as a function and broke `readFileFromTexinputs` in
+                // Text.Pandoc.Readers.LaTeX (`<$>` expected `f (Maybe _)`).
+                "lookupEnv" | "System.Environment.lookupEnv" => {
+                    // String -> IO (Maybe String)
+                    let maybe_string = Ty::App(
+                        Box::new(Ty::Con(self.builtins.maybe_con.clone())),
+                        Box::new(self.builtins.string_ty.clone()),
+                    );
+                    let io_maybe_string = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(maybe_string),
+                    );
+                    Scheme::mono(Ty::fun(self.builtins.string_ty.clone(), io_maybe_string))
+                }
+                "getEnv" | "System.Environment.getEnv" => {
+                    // String -> IO String
+                    let io_string = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(self.builtins.string_ty.clone()),
+                    );
+                    Scheme::mono(Ty::fun(self.builtins.string_ty.clone(), io_string))
+                }
+
                 // Text.DocLayout operations — permissive stubs (Doc a ≈ a)
                 // Using permissive types because Doc has IsString/Semigroup/Monoid
                 // instances, and BHC doesn't yet fully integrate these with

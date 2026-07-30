@@ -916,16 +916,20 @@ impl Builtins {
                 )
             }),
             ("mapM", {
-                // mapM :: Monad m => (a -> m b) -> [a] -> m [b] (polymorphic)
-                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
-                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                // mapM :: (Traversable t, Monad m) => (a -> m b) -> t a -> m (t b)
+                // The container is polymorphic, not pinned to `[]`: `mapM f m`
+                // over a `Map Text v` must yield `m (Map Text v')`, as in
+                // Writers.Shared's `Context <$> mapM .. metamap`.
+                let star_to_star = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, star_to_star.clone());
+                let t = TyVar::new(BUILTIN_TYVAR_TRAV, star_to_star);
                 let mb = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
-                let m_list_b = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(list_b));
+                let t_a = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
+                let t_b = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(b.clone())));
+                let m_t_b = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(t_b));
                 Scheme::poly(
-                    vec![m.clone(), a.clone(), b.clone()],
-                    Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), Ty::fun(list_a, m_list_b)),
+                    vec![t.clone(), m.clone(), a.clone(), b.clone()],
+                    Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), Ty::fun(t_a, m_t_b)),
                 )
             }),
             ("mapM_", {
@@ -941,16 +945,18 @@ impl Builtins {
                 )
             }),
             ("forM", {
-                // forM :: Monad m => [a] -> (a -> m b) -> m [b] (polymorphic)
-                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
-                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                // forM :: (Traversable t, Monad m) => t a -> (a -> m b) -> m (t b)
+                // Container polymorphic (see `mapM`), not pinned to `[]`.
+                let star_to_star = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, star_to_star.clone());
+                let t = TyVar::new(BUILTIN_TYVAR_TRAV, star_to_star);
                 let mb = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(b.clone())));
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
-                let m_list_b = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(list_b));
+                let t_a = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
+                let t_b = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(b.clone())));
+                let m_t_b = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(t_b));
                 Scheme::poly(
-                    vec![m.clone(), a.clone(), b.clone()],
-                    Ty::fun(list_a, Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), m_list_b)),
+                    vec![t.clone(), m.clone(), a.clone(), b.clone()],
+                    Ty::fun(t_a, Ty::fun(Ty::fun(Ty::Var(a.clone()), mb), m_t_b)),
                 )
             }),
             ("forM_", {
@@ -7577,21 +7583,24 @@ impl Builtins {
             let b = TyVar::new_star(BUILTIN_TYVAR_B);
             let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
             let d = TyVar::new_star(BUILTIN_TYVAR_B + 2);
-            let io_b = Ty::App(
-                Box::new(Ty::Con(self.io_con.clone())),
-                Box::new(Ty::Var(b.clone())),
+            // The applicative/traversal functor is polymorphic, not IO:
+            // `traverse :: Applicative f => (a -> f b) -> t a -> f (t b)`.
+            // Pinning it to IO broke every non-IO use (e.g. Writers.Shared's
+            // `traverse toSubscriptInline :: [Inline] -> Maybe [Inline]`, which
+            // forced `Maybe ~ IO`). `f` has kind `* -> *`.
+            let f = TyVar::new(
+                BUILTIN_TYVAR_M,
+                Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
             );
-            let io_d = Ty::App(
-                Box::new(Ty::Con(self.io_con.clone())),
-                Box::new(Ty::Var(d.clone())),
-            );
-            let io_unit = Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(Ty::unit()));
-            // traverse :: (a -> IO b) -> c -> IO d
+            let io_b = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(b.clone())));
+            let io_d = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(d.clone())));
+            let io_unit = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::unit()));
+            // traverse :: Applicative f => (a -> f b) -> c -> f d
             env.register_value(
                 DefId::new(12000),
                 Symbol::intern("traverse"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone(), c.clone(), d.clone()],
+                    vec![f.clone(), a.clone(), b.clone(), c.clone(), d.clone()],
                     Ty::fun(
                         Ty::fun(Ty::Var(a.clone()), io_b.clone()),
                         Ty::fun(Ty::Var(c.clone()), io_d.clone()),
@@ -7603,7 +7612,7 @@ impl Builtins {
                 DefId::new(12001),
                 Symbol::intern("traverse_"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone(), c.clone()],
+                    vec![f.clone(), a.clone(), b.clone(), c.clone()],
                     Ty::fun(
                         Ty::fun(Ty::Var(a.clone()), io_b.clone()),
                         Ty::fun(Ty::Var(c.clone()), io_unit.clone()),
@@ -7615,7 +7624,7 @@ impl Builtins {
                 DefId::new(12002),
                 Symbol::intern("for"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone(), c.clone(), d.clone()],
+                    vec![f.clone(), a.clone(), b.clone(), c.clone(), d.clone()],
                     Ty::fun(
                         Ty::Var(c.clone()),
                         Ty::fun(Ty::fun(Ty::Var(a.clone()), io_b.clone()), io_d),
@@ -7627,30 +7636,30 @@ impl Builtins {
                 DefId::new(12003),
                 Symbol::intern("for_"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone(), c.clone()],
+                    vec![f.clone(), a.clone(), b.clone(), c.clone()],
                     Ty::fun(
                         Ty::Var(c.clone()),
                         Ty::fun(Ty::fun(Ty::Var(a.clone()), io_b), io_unit.clone()),
                     ),
                 ),
             );
-            // sequenceA :: c -> IO d
+            // sequenceA :: Applicative f => c -> f d
             env.register_value(
                 DefId::new(12004),
                 Symbol::intern("sequenceA"),
                 Scheme::poly(
-                    vec![c.clone(), d.clone()],
+                    vec![f.clone(), c.clone(), d.clone()],
                     Ty::fun(
                         Ty::Var(c.clone()),
-                        Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(Ty::Var(d))),
+                        Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(d))),
                     ),
                 ),
             );
-            // sequenceA_ :: c -> IO ()
+            // sequenceA_ :: Applicative f => c -> f ()
             env.register_value(
                 DefId::new(12005),
                 Symbol::intern("sequenceA_"),
-                Scheme::poly(vec![c.clone()], Ty::fun(Ty::Var(c), io_unit)),
+                Scheme::poly(vec![f.clone(), c.clone()], Ty::fun(Ty::Var(c), io_unit)),
             );
         }
 
@@ -9775,6 +9784,7 @@ const BUILTIN_TYVAR_R: u32 = 0xFFFF_0003;
 const BUILTIN_TYVAR_SHAPE2: u32 = 0xFFFF_0004;
 pub(crate) const BUILTIN_TYVAR_M: u32 = 0xFFFF_0005; // For monad type constructor variable
 pub(crate) const BUILTIN_TYVAR_F: u32 = 0xFFFF_0006; // For functor type constructor variable
+pub(crate) const BUILTIN_TYVAR_TRAV: u32 = 0xFFFF_0007; // For Traversable container variable
 const BUILTIN_TYVAR_S: u32 = 0xFFFF_0007; // For state type variable
 const BUILTIN_TYVAR_T: u32 = 0xFFFF_0008; // For transformer type constructor variable
 const BUILTIN_TYVAR_E: u32 = 0xFFFF_0009; // For error type variable (ExceptT)

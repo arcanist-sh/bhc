@@ -107,10 +107,18 @@ impl<'src> Parser<'src> {
     fn try_parse_constraint(&mut self) -> ParseResult<Option<Constraint>> {
         let start = self.current_span();
 
-        // Constraint class must be a ConId
+        // Constraint class must be a ConId, or a qualified constructor
+        // (`B.ToMetaValue a =>`). For a qualified class the unqualified name
+        // part is what identifies the class — the same `Ident` the unqualified
+        // form produces — so the qualifier is dropped here.
         let class = match self.current_kind() {
             Some(TokenKind::ConId(sym)) => {
                 let ident = Ident::new(*sym);
+                self.advance();
+                ident
+            }
+            Some(TokenKind::QualConId(_qualifier, name)) => {
+                let ident = Ident::new(*name);
                 self.advance();
                 ident
             }

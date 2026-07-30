@@ -5751,7 +5751,6 @@ impl TyCtxt {
                     Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
                 ),
                 "Text.DocLayout.nest"
-                | "Text.DocLayout.hang"
                 | "Text.DocLayout.cblock"
                 | "Text.DocLayout.lblock"
                 | "Text.DocLayout.rblock" => {
@@ -5761,6 +5760,22 @@ impl TyCtxt {
                         Ty::fun(
                             self.builtins.int_ty.clone(),
                             Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                        ),
+                    )
+                }
+                "Text.DocLayout.hang" => {
+                    // hang :: Int -> Doc a -> Doc a -> Doc a  (a prefix AND a body,
+                    // NOT the 2-arg shape of nest/cblock). Bundling it with those
+                    // dropped its third argument, so `hang n prefix` typed as a
+                    // finished Doc instead of `Doc -> Doc`.
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(
+                            self.builtins.int_ty.clone(),
+                            Ty::fun(
+                                Ty::Var(a.clone()),
+                                Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                            ),
                         ),
                     )
                 }
@@ -6059,16 +6074,26 @@ impl TyCtxt {
                 "Text.Pandoc.XML.Light.elContent"
                 | "Text.Pandoc.XML.Light.Types.elContent"
                 | "Text.XML.Light.elContent"
-                | "Text.Pandoc.XML.Light.elChildren"
-                | "Text.Pandoc.XML.Light.Types.elChildren"
-                | "elContent"
-                | "elChildren" => {
+                | "elContent" => {
                     // Element -> [Content]
                     let element_con = TyCon::new(Symbol::intern("Element"), Kind::Star);
                     let content_con = TyCon::new(Symbol::intern("Content"), Kind::Star);
                     Scheme::mono(Ty::fun(
                         Ty::Con(element_con),
                         Ty::List(Box::new(Ty::Con(content_con))),
+                    ))
+                }
+                "Text.Pandoc.XML.Light.elChildren"
+                | "Text.Pandoc.XML.Light.Types.elChildren"
+                | "Text.XML.Light.elChildren"
+                | "Text.XML.Light.Proc.elChildren"
+                | "elChildren" => {
+                    // Element -> [Element]  (elChildren = onlyElems . elContent, so it
+                    // yields only the child *Elements*, not raw [Content]).
+                    let element_con = TyCon::new(Symbol::intern("Element"), Kind::Star);
+                    Scheme::mono(Ty::fun(
+                        Ty::Con(element_con.clone()),
+                        Ty::List(Box::new(Ty::Con(element_con))),
                     ))
                 }
                 "Text.Pandoc.XML.Light.qName"

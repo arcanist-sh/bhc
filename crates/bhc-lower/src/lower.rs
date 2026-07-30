@@ -5518,6 +5518,34 @@ fn register_standard_module_exports(
                     }
                 }
             }
+        } else if module_name == "Djot" || module_name == "Djot.AST" {
+            // The djot stub modules export djot-specific names that must NOT be
+            // conflated with a same-named builtin — e.g. `Djot.AST.div` is a
+            // block constructor (`Blocks -> Blocks`), not integer `div`
+            // (`a -> a -> a`). The generic indirection below would resolve
+            // `D.div` through the unqualified `div` to that builtin (so
+            // `fmap f . D.div` saw a 2-arg function, not a functor). Give each
+            // djot export its own permissive stub instead.
+            let full_qualified = Symbol::intern(&format!("{module_name}.{export}"));
+            if ctx.lookup_value(aliased_qualified).is_none() {
+                let def_id = ctx.fresh_def_id();
+                let kind = if is_constructor {
+                    DefKind::StubConstructor
+                } else {
+                    DefKind::StubValue
+                };
+                ctx.define(def_id, full_qualified, kind, Span::default());
+                ctx.bind_value(aliased_qualified, def_id);
+                if is_constructor {
+                    ctx.bind_constructor(aliased_qualified, def_id);
+                }
+                if qualifier != module_name {
+                    ctx.bind_value(full_qualified, def_id);
+                    if is_constructor {
+                        ctx.bind_constructor(full_qualified, def_id);
+                    }
+                }
+            }
         } else {
             // For modules without typed sigs, prefer an existing binding of the
             // fully-qualified name (e.g. fixed-DefId prelude bindings like

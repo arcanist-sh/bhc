@@ -1878,6 +1878,33 @@ impl TyCtxt {
                     Scheme::mono(Ty::fun(self.builtins.text_ty.clone(), Ty::Con(content_con)))
                 }
 
+                // Djot.AST.Node :: Pos -> Attr -> a -> Node a. The djot AST node
+                // is polymorphic in its content (`Node Block` vs `Node Inline`);
+                // the stub gave it a monomorphic scheme, so `convertBlock`'s
+                // `D.Node _ _ bl :: D.Node D.Block` and `convertInline`'s
+                // `D.Node D.Inline` shared the parameter (`expected D.Block,
+                // found D.Inline`). Pos/Attr fields are left permissive. The
+                // result type con is `D.Node` (how the alias-qualified type is
+                // interned in signatures).
+                "Djot.AST.Node" | "D.Node" => {
+                    let a = TyVar::new_star(0xFFFF_0000);
+                    let p = TyVar::new_star(0xFFFF_0001);
+                    let q = TyVar::new_star(0xFFFF_0002);
+                    let node_con = TyCon::new(
+                        Symbol::intern("D.Node"),
+                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+                    );
+                    let node_a =
+                        Ty::App(Box::new(Ty::Con(node_con)), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(
+                        vec![a.clone(), p.clone(), q.clone()],
+                        Ty::fun(
+                            Ty::Var(p),
+                            Ty::fun(Ty::Var(q), Ty::fun(Ty::Var(a), node_a)),
+                        ),
+                    )
+                }
+
                 // Text.HTML.TagSoup `Tag str` constructors. Same split-registration
                 // hazard as `Elem`/`CRef`: without a DefId-keyed scheme the arity
                 // fallback disagrees with the pattern side, so using e.g. `TagText`

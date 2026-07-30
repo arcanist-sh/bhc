@@ -663,11 +663,20 @@ impl Builtins {
             }),
             // List difference
             ("\\\\", {
-                // (\\) :: Eq a => [a] -> [a] -> [a]
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                // (\\) :: a -> a -> a — the difference operator is shared by
+                // Data.List (`[a] -> [a] -> [a]`) and Data.Set
+                // (`Set a -> Set a -> Set a`). A list-only scheme broke
+                // `Data.Set`-imported uses like JATS's
+                // `S.fromList .. \\ S.fromList ..` (`expected [], found Set`),
+                // which then corrupted `isBlockElement` and cascaded through
+                // `break isBlockElement` into the Content parsers. Kept
+                // permissive; list uses still unify (`a = [x]`).
                 Scheme::poly(
                     vec![a.clone()],
-                    Ty::fun(list_a.clone(), Ty::fun(list_a.clone(), list_a)),
+                    Ty::fun(
+                        Ty::Var(a.clone()),
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                    ),
                 )
             }),
             // Function composition
@@ -972,25 +981,26 @@ impl Builtins {
                 )
             }),
             ("sequence", {
-                // sequence :: [IO a] -> IO [a] (IO-specialized)
-                let io_a = Ty::App(
-                    Box::new(Ty::Con(self.io_con.clone())),
-                    Box::new(Ty::Var(a.clone())),
-                );
-                let list_io_a = Ty::List(Box::new(io_a));
+                // sequence :: Monad m => [m a] -> m [a] (polymorphic in the
+                // monad, NOT IO-specialized — `sequence :: [Maybe a] -> Maybe
+                // [a]`, as in JATS's `case sequence ws of Just ..`, forced
+                // `Maybe ~ IO`).
+                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let m_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())));
+                let list_m_a = Ty::List(Box::new(m_a));
                 let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-                let io_list_a = Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(list_a));
-                Scheme::poly(vec![a.clone()], Ty::fun(list_io_a, io_list_a))
+                let m_list_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(list_a));
+                Scheme::poly(vec![m.clone(), a.clone()], Ty::fun(list_m_a, m_list_a))
             }),
             ("sequence_", {
-                // sequence_ :: [IO a] -> IO () (IO-specialized)
-                let io_a = Ty::App(
-                    Box::new(Ty::Con(self.io_con.clone())),
-                    Box::new(Ty::Var(a.clone())),
-                );
-                let list_io_a = Ty::List(Box::new(io_a));
-                let io_unit = Ty::App(Box::new(Ty::Con(self.io_con.clone())), Box::new(Ty::unit()));
-                Scheme::poly(vec![a.clone()], Ty::fun(list_io_a, io_unit))
+                // sequence_ :: Monad m => [m a] -> m () (polymorphic, not IO).
+                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
+                let m_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())));
+                let list_m_a = Ty::List(Box::new(m_a));
+                let m_unit = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::unit()));
+                Scheme::poly(vec![m.clone(), a.clone()], Ty::fun(list_m_a, m_unit))
             }),
             ("when", {
                 // when :: Monad m => Bool -> m () -> m () (polymorphic)

@@ -1821,6 +1821,44 @@ impl TyCtxt {
                     ))
                 }
 
+                // Text.DocTemplates.Context :: Map Text (Val a) -> Context a
+                // A newtype with a single field, stubbed by name only (the
+                // doctemplates package is not loaded). Without this the arity
+                // fallback below gave it the wrong shape, so `Context m` (as in
+                // Writers.Shared's getField/setField/defField) stayed unapplied:
+                // `expected (Context a), found (Map Text .. -> ..)`.
+                "Context"
+                | "Text.DocTemplates.Context"
+                | "Text.DocTemplates.Internal.Context" => {
+                    let a = TyVar::new_star(0xFFFF_0000);
+                    let star_to_star =
+                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                    let context_con =
+                        TyCon::new(Symbol::intern("Context"), star_to_star.clone());
+                    let val_con = TyCon::new(Symbol::intern("Val"), star_to_star);
+                    let map_con = TyCon::new(
+                        Symbol::intern("Map"),
+                        Kind::Arrow(
+                            Box::new(Kind::Star),
+                            Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+                        ),
+                    );
+                    // Map Text (Val a)
+                    let val_a =
+                        Ty::App(Box::new(Ty::Con(val_con)), Box::new(Ty::Var(a.clone())));
+                    let map_text_val = Ty::App(
+                        Box::new(Ty::App(
+                            Box::new(Ty::Con(map_con)),
+                            Box::new(self.builtins.text_ty.clone()),
+                        )),
+                        Box::new(val_a),
+                    );
+                    // Context a
+                    let context_a =
+                        Ty::App(Box::new(Ty::Con(context_con)), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(vec![a.clone()], Ty::fun(map_text_val, context_a))
+                }
+
                 // For imported constructors that aren't known builtins,
                 // create a function type based on the constructor's arity.
                 // Mark as non-builtin so we only register by DefId (not by name),

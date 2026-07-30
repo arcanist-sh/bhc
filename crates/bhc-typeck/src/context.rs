@@ -1259,8 +1259,9 @@ impl TyCtxt {
                 // ColSpec)]`). Each must be `a1 -> .. -> an -> (a1, .., an)`.
                 "(,,,)" | "(,,,,)" | "(,,,,,)" | "(,,,,,,)" => {
                     let arity = name.matches(',').count() + 1;
-                    let vars: Vec<TyVar> =
-                        (0..arity).map(|i| TyVar::new_star(0xFFFF_0000 + i as u32)).collect();
+                    let vars: Vec<TyVar> = (0..arity)
+                        .map(|i| TyVar::new_star(0xFFFF_0000 + i as u32))
+                        .collect();
                     let tuple_ty = Ty::Tuple(vars.iter().map(|v| Ty::Var(v.clone())).collect());
                     let con_ty = vars
                         .iter()
@@ -1848,14 +1849,10 @@ impl TyCtxt {
                 // fallback below gave it the wrong shape, so `Context m` (as in
                 // Writers.Shared's getField/setField/defField) stayed unapplied:
                 // `expected (Context a), found (Map Text .. -> ..)`.
-                "Context"
-                | "Text.DocTemplates.Context"
-                | "Text.DocTemplates.Internal.Context" => {
+                "Context" | "Text.DocTemplates.Context" | "Text.DocTemplates.Internal.Context" => {
                     let a = TyVar::new_star(0xFFFF_0000);
-                    let star_to_star =
-                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
-                    let context_con =
-                        TyCon::new(Symbol::intern("Context"), star_to_star.clone());
+                    let star_to_star = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                    let context_con = TyCon::new(Symbol::intern("Context"), star_to_star.clone());
                     let val_con = TyCon::new(Symbol::intern("Val"), star_to_star);
                     let map_con = TyCon::new(
                         Symbol::intern("Map"),
@@ -1865,8 +1862,7 @@ impl TyCtxt {
                         ),
                     );
                     // Map Text (Val a)
-                    let val_a =
-                        Ty::App(Box::new(Ty::Con(val_con)), Box::new(Ty::Var(a.clone())));
+                    let val_a = Ty::App(Box::new(Ty::Con(val_con)), Box::new(Ty::Var(a.clone())));
                     let map_text_val = Ty::App(
                         Box::new(Ty::App(
                             Box::new(Ty::Con(map_con)),
@@ -1915,14 +1911,10 @@ impl TyCtxt {
                         Symbol::intern("D.Node"),
                         Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
                     );
-                    let node_a =
-                        Ty::App(Box::new(Ty::Con(node_con)), Box::new(Ty::Var(a.clone())));
+                    let node_a = Ty::App(Box::new(Ty::Con(node_con)), Box::new(Ty::Var(a.clone())));
                     Scheme::poly(
                         vec![a.clone(), p.clone(), q.clone()],
-                        Ty::fun(
-                            Ty::Var(p),
-                            Ty::fun(Ty::Var(q), Ty::fun(Ty::Var(a), node_a)),
-                        ),
+                        Ty::fun(Ty::Var(p), Ty::fun(Ty::Var(q), Ty::fun(Ty::Var(a), node_a))),
                     )
                 }
 
@@ -1947,8 +1939,7 @@ impl TyCtxt {
                         Symbol::intern("Tag"),
                         Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
                     );
-                    let tag_a =
-                        Ty::App(Box::new(Ty::Con(tag_con)), Box::new(Ty::Var(a.clone())));
+                    let tag_a = Ty::App(Box::new(Ty::Con(tag_con)), Box::new(Ty::Var(a.clone())));
                     Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), tag_a))
                 }
                 "TagOpen" | "Text.HTML.TagSoup.TagOpen" => {
@@ -1959,8 +1950,7 @@ impl TyCtxt {
                         Symbol::intern("Tag"),
                         Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
                     );
-                    let tag_a =
-                        Ty::App(Box::new(Ty::Con(tag_con)), Box::new(Ty::Var(a.clone())));
+                    let tag_a = Ty::App(Box::new(Ty::Con(tag_con)), Box::new(Ty::Var(a.clone())));
                     let attrs = Ty::List(Box::new(Ty::Var(b.clone())));
                     Scheme::poly(
                         vec![a.clone(), b.clone()],

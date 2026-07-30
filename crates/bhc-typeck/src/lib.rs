@@ -306,10 +306,14 @@ pub fn type_check_module_full(
                     )),
                 )),
             );
-            let parsect_con =
-                Ty::Con(bhc_types::TyCon::new(Symbol::intern("ParsecT"), parsect_kind));
-            let identity_con =
-                Ty::Con(bhc_types::TyCon::new(Symbol::intern("Identity"), star_to_star));
+            let parsect_con = Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("ParsecT"),
+                parsect_kind,
+            ));
+            let identity_con = Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("Identity"),
+                star_to_star,
+            ));
             // ParsecT s u Identity
             let expansion = Ty::App(
                 Box::new(Ty::App(

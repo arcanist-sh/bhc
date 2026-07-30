@@ -504,11 +504,8 @@ impl TypeEnv {
 
         let mut subst = bhc_types::Subst::new();
         for (pat_ty, arg_ty) in eq.args.iter().zip(args.iter()) {
-            if let Some(s) = self.match_types(pat_ty, arg_ty, &bindable_vars) {
-                subst = subst.compose(&s);
-            } else {
-                return None;
-            }
+            let s = self.match_types(pat_ty, arg_ty, &bindable_vars)?;
+            subst = subst.compose(&s);
         }
 
         Some(subst.apply(&eq.rhs))
@@ -623,11 +620,8 @@ impl TypeEnv {
 
         for (inst_ty, arg_ty) in instance_types.iter().zip(args.iter()) {
             // Try to unify the instance type with the argument
-            if let Some(s) = self.match_types(inst_ty, arg_ty, &bindable_vars) {
-                subst = subst.compose(&s);
-            } else {
-                return None;
-            }
+            let s = self.match_types(inst_ty, arg_ty, &bindable_vars)?;
+            subst = subst.compose(&s);
         }
 
         Some(subst)

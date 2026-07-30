@@ -13,7 +13,10 @@ use bhc_driver::Compiler;
 use std::io::Write;
 
 fn check_ok(source: &str) {
-    let mut file = tempfile::Builder::new().suffix(".hs").tempfile().expect("temp");
+    let mut file = tempfile::Builder::new()
+        .suffix(".hs")
+        .tempfile()
+        .expect("temp");
     file.write_all(source.as_bytes()).expect("write");
     let path = camino::Utf8Path::from_path(file.path()).expect("utf8");
     let compiler = Compiler::with_defaults().expect("compiler");

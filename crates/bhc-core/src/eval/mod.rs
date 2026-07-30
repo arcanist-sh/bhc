@@ -4607,7 +4607,7 @@ impl Evaluator {
                 match &m {
                     Value::Map(map) => {
                         let mut acc = z;
-                        for (_, v) in map.iter() {
+                        for v in map.values() {
                             let tmp = self.apply(f.clone(), acc)?;
                             acc = self.apply(tmp, v.clone())?;
                         }

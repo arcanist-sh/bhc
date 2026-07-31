@@ -1429,6 +1429,41 @@ impl<'src> Lexer<'src> {
                 ));
             }
         }
+
+        // A `,` separates elements of a tuple/list/record, i.e. it belongs to the
+        // nearest ENCLOSING explicit `(`, `[`, or `{` context. If an IMPLICIT
+        // layout block (a `case`-of, `do`, or `let` used as an element) sits
+        // between the `,` and that explicit context, the `,` cannot continue the
+        // implicit block, so it must be closed — the Haskell parse-error(t) rule
+        // (H2010 §10.3). Without this, e.g.
+        //   (case x of A -> a
+        //              _ -> b,      -- trailing `,` stayed INSIDE the `case`
+        //    y)
+        // left the `,` among the case alternatives; the parser then mis-recovered
+        // and silently dropped the enclosing binding (Text.Pandoc.Writers.Shared's
+        // `ensureValidXmlIdentifiers`, breaking Text.Pandoc.Writers.TEI).
+        if token.kind == TokenKind::Comma {
+            // Close the top implicit block ONLY when its IMMEDIATE parent is an
+            // explicit context — i.e. a `case`/`do`/`let` used directly as a
+            // tuple/list/record element. Requiring the *direct* parent to be
+            // explicit (not merely "some explicit context is open below") leaves
+            // a `,` that separates GUARDS inside a case alternative untouched:
+            // there the case sits inside a `do`/`where` (an implicit parent), as
+            // in `(imgdata, Just mime) | m' <- .., m' == .. -> ..`
+            // (Text.Pandoc.Writers.RTF).
+            let n = self.layout_stack.len();
+            if n >= 2 {
+                let top_implicit = !self.layout_stack[n - 1].1;
+                let parent_explicit = self.layout_stack[n - 2].1;
+                if top_implicit && parent_explicit {
+                    self.layout_stack.pop();
+                    self.pending.push(Spanned::new(
+                        Token::new(TokenKind::VirtualRBrace),
+                        Span::from_raw(self.pos as u32, self.pos as u32),
+                    ));
+                }
+            }
+        }
     }
 
     /// Lex the next raw token (without layout processing).

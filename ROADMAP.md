@@ -4,7 +4,7 @@ This document provides a detailed implementation plan to deliver all features pr
 
 ## Current Status
 
-> **Truth pass (2026-07-23).** This document accumulated stale claims from January; corrected against measured reality below. Reality checks that override any older text: **GC is not live for compiled code** (leak-allocator; §5.1 of `spec/BHC-REVIEW-0001`), the **Numeric profile does not fuse on native** (Phase 3), the **Server profile is RTS-complete but not wired to compiled Haskell** (Phase 5), and **WASM runs real programs** (the old "0/6" rows are obsolete). Current headline: **workspace tests 2756/0**; the active focus is the **GHC-compatibility grind — `bhc check` passes 112 of 221 Pandoc library modules** (2026-07-23), up from ~10 at the start of that effort. See `.claude/TODO-pandoc-check.md`.
+> **Truth pass (2026-07-23; Pandoc figures refreshed 2026-07-31).** This document accumulated stale claims from January; corrected against measured reality below. Reality checks that override any older text: **GC is not live for compiled code** (leak-allocator; §5.1 of `spec/BHC-REVIEW-0001`), the **Numeric profile does not fuse on native** (Phase 3), the **Server profile is RTS-complete but not wired to compiled Haskell** (Phase 5), and **WASM runs real programs** (the old "0/6" rows are obsolete). The active focus is the **GHC-compatibility grind — `bhc check` passes 147 of 221 Pandoc library modules** (2026-07-31), up from ~10 at the start of that effort and 112 a week earlier. Recent gains came from general frontend/typeck fixes — import-scoped type aliases, imported class methods shadowing builtins, qualified class names in instance heads, Arrow-operator fixities + arrow/`(->)` unification, polymorphic arity-less stub constructors, and the lexer's layout parse-error rule for a `case`/`do` used as a tuple element. See `.claude/TODO-pandoc-check.md`.
 
 **Beta** — The compiler builds cleanly and compiles real Haskell programs to native executables. E2E tests confirm native compilation works for hello world, arithmetic, fibonacci, IO sequencing, and more. **WASM update (2026-07-02, measured):** the WASM/WASI backend produces valid binaries that run in wasmtime and is at parity with native across the differential suite — **236 of 243 fixtures produce byte-identical output on both backends** (the harness now stages fixture data files and runs `wasmtime --dir=.`). File IO is **host-backed** via WASI `path_open`/`fd_read`/`fd_write` (needs a `--dir` preopen at runtime): `readFile` reads real files, `writeFile` persists to disk, with an in-memory table backing round-trips when no `--dir` is given; `lines`/`words` are synthesized so "read a file, process its lines, write it back" works. Remaining WASM divergences are **general stdlib coverage**, not filesystem plumbing: the `Handle` API (`openFile`/`hGetLine`/`hClose`) and `System.Directory` (`doesFileExist`) unimplemented, plus the long-standing `show_types` native erased-type case and stdin fixtures the harness can't feed. The old "WASM binaries fail wasmtime validation" claim below is stale. GPU backend remains mock-validated only.
 
@@ -33,7 +33,7 @@ This document provides a detailed implementation plan to deliver all features pr
 | E2E Native | 6 | 0 | 1 ignored (numeric-profile fusion — not met, see Phase 3) |
 | Differential native↔WASM (243 fixtures) | 236 agree | 7 diverge | divergences are stdlib-coverage gaps, not WASM failing where native succeeds |
 | E2E GPU | 2 | 0 | mock mode only (no CUDA hardware) |
-| Pandoc `bhc check` (221 lib modules) | 112 | 57 (+52 skipped) | GHC-compatibility grind; see `.claude/TODO-pandoc-check.md` |
+| Pandoc `bhc check` (221 lib modules) | 147 | 28 (+46 skipped) | GHC-compatibility grind (2026-07-31); see `.claude/TODO-pandoc-check.md` |
 
 > The old "Workspace 217/9" and "E2E WASM 0/6" rows are obsolete. The 9 interpreter-IO failures were fixed; WASM binaries are valid and run in wasmtime.
 
@@ -808,7 +808,7 @@ $ bhc-lsp  # Starts LSP server for IDE integration
 | 7 | Advanced Profiles | 🟡 modules built | GC not wired | Incremental/generational GC unit-tested but not on compiled-code path (§5.1); arena + embedded allocator are real |
 | 8 | Ecosystem | 🟡 In Progress | ~60% | Tools compile; REPL evaluation stubbed |
 
-> **"Overall % complete" is intentionally omitted** — it invites the kind of overstatement this pass is correcting. The honest summary: frontend + Core optimizer + native pipeline are solid and compile real programs (Pandoc: 112/221 modules `check`); the two headline differentiators (Numeric fusion, Server concurrency) are ahead of their wiring; there is no live GC. See `spec/BHC-REVIEW-0001` for the full assessment.
+> **"Overall % complete" is intentionally omitted** — it invites the kind of overstatement this pass is correcting. The honest summary: frontend + Core optimizer + native pipeline are solid and compile real programs (Pandoc: 147/221 modules `check` as of 2026-07-31); the two headline differentiators (Numeric fusion, Server concurrency) are ahead of their wiring; there is no live GC. See `spec/BHC-REVIEW-0001` for the full assessment.
 
 ---
 
@@ -838,11 +838,11 @@ The "no Core IR → WASM lowering / placeholder main" gap listed here in January
 
 ---
 
-## Immediate Next Steps (2026-07-23)
+## Immediate Next Steps (2026-07-31)
 
-**Build/test:** clean; `cargo test --all-features` **2756/0** (needs `LIBRARY_PATH=<openblas>/lib` on macOS). The January "Core IR → WASM lowering" priority is **done**.
+**Build/test:** clean; `cargo test --all-features` green (needs `LIBRARY_PATH=<openblas>/lib` on macOS). The January "Core IR → WASM lowering" priority is **done**.
 
-**Current focus — the GHC-compatibility moat.** `bhc check` on Pandoc's library: **112/221** modules pass (up from ~10). The near-term grind is documented in `.claude/TODO-pandoc-check.md`; the remaining tail is deep typeck work (case/tuple pattern-binding inference, the `bhc-lower ↔ bhc-typeck` builtin-list drift, Parsec/Arrow combinator schemes) rather than easy wins.
+**Current focus — the GHC-compatibility moat.** `bhc check` on Pandoc's library: **147/221** modules pass (up from ~10, and from 112 a week earlier). All modules that failed purely at type-checking are now green; the remaining 28 failures are lowering-stage and **multi-layer** — fixing the surface `unbound variable` typically unmasks deeper type errors underneath. The near-term grind is documented in `.claude/TODO-pandoc-check.md`. The remaining tail splits into: **Template Haskell** (`Data.BakedIn`, `Citeproc.Data`/`Locator` — generated bindings, structurally hard) and **multi-layer modules** (Typst, DocBook, HTML, Powerpoint, …), each a targeted reduction rather than an easy win. The deep typeck classes called out in the previous pass — case/tuple pattern-binding, the `bhc-lower ↔ bhc-typeck` builtin drift, and Parsec/Arrow combinator schemes — have largely been resolved.
 
 **Recommended sequencing (from `spec/BHC-REVIEW-0001 §7`):**
 1. **Pandoc grind** — the compatibility moat; each fix compounds. Shift from per-module to per-cause on the deep tail.

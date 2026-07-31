@@ -537,7 +537,7 @@ The compiler builds cleanly (33 crates, 0 errors) and compiles real Haskell prog
 | 9.9 CPP Preprocessing | 🟢 | Built-in Rust preprocessor: `#ifdef`/`#if`/`#elif`/`#else`/`#endif`/`#define`/`#undef`, expression evaluator, macro expansion, predefined platform/version macros |
 | 9.10 Type Families | 🟢 | Standalone open/closed type families, type instances, associated type families with reduction; standalone data families with data instances |
 
-**Exit Criteria:** `bhc check` succeeds on Pandoc source files (excluding Template Haskell). **Status (2026-07-23): 112 of 221 library modules pass** (up from ~10); remaining tail is deep typeck work. See `.claude/TODO-pandoc-check.md`.
+**Exit Criteria:** `bhc check` succeeds on Pandoc source files (excluding Template Haskell). **Status (2026-07-31): 147 of 221 library modules pass** (up from ~10, and 112 a week earlier); every module that failed purely at type-checking is now green, so the remaining 28 are lowering-stage + multi-layer (Template Haskell and modules that unmask deeper type errors once the surface `unbound variable` is resolved). See `.claude/TODO-pandoc-check.md`.
 
 **Notes:** 190 E2E tests passing across 70 milestones (E.1–E.70); workspace `cargo test --all-features` 2756/0. See `.claude/TODO-pandoc-check.md` for the current Pandoc grind.
 
@@ -556,7 +556,7 @@ The compiler builds cleanly (33 crates, 0 errors) and compiles real Haskell prog
 1. **Phase 1** — Without native codegen, nothing else matters ✅
 2. **Phase 2** — Language features needed for real programs ✅
 3. **Phase 3** — Numeric profile is our differentiator 🟡 (IR built; native fusion NOT met — the differentiator is unvalidated)
-4. **Phase 9** — Real-world Haskell compatibility (**current focus**; Pandoc 112/221)
+4. **Phase 9** — Real-world Haskell compatibility (**current focus**; Pandoc 147/221)
 5. **Phase 4** — WASM opens new deployment targets 🟢 (~95%, runs in wasmtime)
 6. **Phase 5** — Server profile for production services 🟡 (RTS done; not wired to compiled code)
 7. **Phase 6** — GPU for competitive numeric performance

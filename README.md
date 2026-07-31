@@ -172,7 +172,7 @@ bhc/
 | Phase 5 | Server Profile | 🟡 RTS done; not yet wired to compiled code |
 | Phase 6 | GPU Backend | 🟡 ~80% (needs hardware) |
 
-See [ROADMAP.md](ROADMAP.md) for detailed, measured status. BHC is under active development: the frontend, Core optimizer, and native + WASM pipelines compile real Haskell (e.g. 112/221 Pandoc library modules `check`), while the two headline differentiators — Numeric fusion and Server concurrency — are ahead of their codegen wiring, and there is no live GC yet (see [`spec/BHC-REVIEW-0001`](spec/BHC-REVIEW-0001-architecture-assessment.md)).
+See [ROADMAP.md](ROADMAP.md) for detailed, measured status. BHC is under active development: the frontend, Core optimizer, and native + WASM pipelines compile real Haskell (e.g. **147 of 221 Pandoc library modules** type-`check`, up from ~10 when that effort began), while the two headline differentiators — Numeric fusion and Server concurrency — are ahead of their codegen wiring, and there is no live GC yet (see [`spec/BHC-REVIEW-0001`](spec/BHC-REVIEW-0001-architecture-assessment.md)).
 
 ## Documentation
 

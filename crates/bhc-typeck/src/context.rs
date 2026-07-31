@@ -1894,7 +1894,6 @@ impl TyCtxt {
                     let content_con = TyCon::new(Symbol::intern("Content"), Kind::Star);
                     Scheme::mono(Ty::fun(self.builtins.text_ty.clone(), Ty::Con(content_con)))
                 }
-
                 // Djot.AST.Node :: Pos -> Attr -> a -> Node a. The djot AST node
                 // is polymorphic in its content (`Node Block` vs `Node Inline`);
                 // the stub gave it a monomorphic scheme, so `convertBlock`'s
@@ -2039,9 +2038,16 @@ impl TyCtxt {
                         }
                         Scheme::mono(con_ty)
                     } else {
-                        // No arity info, fall back to fresh type variable
-                        let fresh = self.fresh_ty();
-                        Scheme::mono(fresh)
+                        // No arity info: a PROPERLY POLYMORPHIC `forall a. a`, so
+                        // each use instantiates its own fresh var. A `mono(fresh)`
+                        // here would share ONE free var across every use of the
+                        // constructor, so using the same arity-less stub con as a
+                        // pattern (e.g. `Text (CData _ s _)`, arity 1) and as an
+                        // expression (`Text $ CData …`) pins that single var two
+                        // ways and conflicts (`expected (t -> t), found Content`
+                        // in Text.Pandoc.Readers.JATS).
+                        let v = TyVar::new_star(0xFFFF_0000);
+                        Scheme::poly(vec![v.clone()], Ty::Var(v))
                     }
                 }
             };
@@ -6232,7 +6238,6 @@ impl TyCtxt {
                     let content_con = TyCon::new(Symbol::intern("Content"), Kind::Star);
                     Scheme::mono(Ty::fun(self.builtins.text_ty.clone(), Ty::Con(content_con)))
                 }
-
                 // Text.Pandoc.XML.Light types and accessors
                 "Text.Pandoc.XML.Light.elName"
                 | "Text.Pandoc.XML.Light.Types.elName"

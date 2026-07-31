@@ -1587,6 +1587,18 @@ impl<'src> Parser<'src> {
                 self.advance();
                 Ok(ident)
             }
+            // A qualified constructor/class/type name, e.g. `Cat.Category` in
+            // `instance Cat.Category (ArrowState s)`. Use the unqualified base
+            // name (bhc resolves classes/types by base name; the qualifier only
+            // disambiguates imports). Without this the instance head parse fails
+            // and error recovery reparses the `where` methods as TOP-LEVEL
+            // bindings, so an infix method like `(.)` shadows the builtin
+            // (Text.Pandoc.Readers.ODT.Arrows.State).
+            TokenKind::QualConId(_, sym) => {
+                let ident = Ident::new(*sym);
+                self.advance();
+                Ok(ident)
+            }
             _ => Err(ParseError::Unexpected {
                 found: tok.node.kind.description().to_string(),
                 expected: "constructor".to_string(),

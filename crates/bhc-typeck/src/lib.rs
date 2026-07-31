@@ -443,6 +443,8 @@ pub fn type_check_module_full(
     }
 
     // Register type aliases from imported modules (cross-module propagation).
+    // The caller scopes `imported_aliases` to this module's actual imports, so a
+    // module-local alias from an unrelated module can't leak in here.
     for (name, params, ty) in imported_aliases {
         ctx.type_aliases.insert(*name, (params.clone(), ty.clone()));
     }

@@ -5934,6 +5934,7 @@ impl TyCtxt {
                 | "Text.DocLayout.doubleQuotes"
                 | "Text.DocLayout.chomp"
                 | "Text.DocLayout.nowrap"
+                | "Text.DocLayout.nestle"
                 | "Text.DocLayout.afterBreak"
                 | "Text.DocLayout.inside"
                 | "Text.DocLayout.flush" => Scheme::poly(

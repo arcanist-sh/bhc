@@ -2529,6 +2529,7 @@ fn register_standard_module_exports(
             "text",
             "char",
             "nest",
+            "nestle",
             "hang",
             "vcat",
             "hcat",

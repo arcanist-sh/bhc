@@ -2132,9 +2132,21 @@ impl Compiler {
         // Phase 2: Lower AST to HIR with registry context
         let (hir, lower_ctx) = self.lower_with_registry(&ast, registry)?;
 
-        // Phase 3: Collect type aliases from imported modules
+        // Phase 3: Collect type aliases from imported modules.
+        //
+        // Only from modules this module actually imports — NOT every module in
+        // the registry. A module-LOCAL alias must not leak everywhere: e.g.
+        // `Text.Pandoc.Readers.Docx.Parse` redefines `type Target = T.Text`,
+        // which, collected globally, clobbered pandoc-types' canonical
+        // `type Target = (Text, Text)` in unrelated modules
+        // (Text.Pandoc.Writers.RST saw `Target` collapse to `Text`).
+        let imported_names: std::collections::HashSet<&str> =
+            hir.imports.iter().map(|i| i.module.as_str()).collect();
         let mut imported_aliases = Vec::new();
-        for info in registry.modules.values() {
+        for (mod_name, info) in &registry.modules {
+            if !imported_names.contains(mod_name.as_str()) {
+                continue;
+            }
             for (name, params, ty) in &info.type_aliases {
                 imported_aliases.push((*name, params.clone(), ty.clone()));
             }

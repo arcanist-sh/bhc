@@ -1149,8 +1149,16 @@ impl<'src> Parser<'src> {
         }
 
         let cond = self.parse_expr()?;
+        // Haskell 2010 allows an optional semicolon before `then`/`else`
+        // (`if e [;] then e [;] else e`, the DoAndIfThenElse rule). When
+        // `then`/`else` land at the enclosing layout column, the lexer inserts
+        // a VirtualSemi before them; accept it (or an explicit `;`) here.
+        self.eat(&TokenKind::Semi);
+        self.eat(&TokenKind::VirtualSemi);
         self.expect(&TokenKind::Then)?;
         let then_branch = self.parse_expr()?;
+        self.eat(&TokenKind::Semi);
+        self.eat(&TokenKind::VirtualSemi);
         self.expect(&TokenKind::Else)?;
         let else_branch = self.parse_expr()?;
 

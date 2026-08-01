@@ -452,8 +452,15 @@ fn desugar_stmts_for_comp(
 
         [ast::Stmt::LetStmt(decls, qual_span), rest @ ..] => {
             // let x = e becomes let x = e in ...
+            // Bind the let names BEFORE lowering the rest — the comprehension
+            // body and head expression can reference them (mirrors how the
+            // do-notation `let` statement scopes its bindings).
+            ctx.enter_scope();
+            pre_bind_let_decls(ctx, decls);
             let body = desugar_stmts_for_comp(ctx, expr, rest, span, lower_expr, lower_pat);
-            desugar_let_decls(ctx, decls, body, *qual_span, lower_expr, lower_pat)
+            let result = desugar_let_decls(ctx, decls, body, *qual_span, lower_expr, lower_pat);
+            ctx.exit_scope();
+            result
         }
     }
 }

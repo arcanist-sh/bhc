@@ -3677,6 +3677,20 @@ impl Builtins {
                     ),
                 )
             }),
+            ("deleteFirstsBy", {
+                // deleteFirstsBy :: (a -> a -> Bool) -> [a] -> [a] -> [a]
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        Ty::fun(
+                            Ty::Var(a.clone()),
+                            Ty::fun(Ty::Var(a.clone()), self.bool_ty.clone()),
+                        ),
+                        Ty::fun(list_a.clone(), Ty::fun(list_a.clone(), list_a)),
+                    ),
+                )
+            }),
             ("unionBy", {
                 // unionBy :: (a -> a -> Bool) -> [a] -> [a] -> [a]
                 let list_a = Ty::List(Box::new(Ty::Var(a.clone())));

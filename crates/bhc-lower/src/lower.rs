@@ -727,6 +727,7 @@ fn register_standard_module_exports(
             "nubBy",
             "delete",
             "deleteBy",
+            "deleteFirstsBy",
             "union",
             "unionBy",
             "intersect",

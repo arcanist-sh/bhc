@@ -6230,8 +6230,10 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                             {
                                                 let pat =
                                                     lower_pat(ctx, &nested_fb.clauses[0].pats[0]);
-                                                let rhs_expr =
-                                                    lower_rhs(ctx, &nested_fb.clauses[0].rhs);
+                                                let rhs_expr = lower_clause_rhs_with_wheres(
+                                                    ctx,
+                                                    &nested_fb.clauses[0],
+                                                );
                                                 return Some(hir::Binding {
                                                     pat,
                                                     sig: None,
@@ -6245,8 +6247,10 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                             if nested_fb.clauses.len() == 1
                                                 && nested_fb.clauses[0].pats.is_empty()
                                             {
-                                                let nested_rhs =
-                                                    lower_rhs(ctx, &nested_fb.clauses[0].rhs);
+                                                let nested_rhs = lower_clause_rhs_with_wheres(
+                                                    ctx,
+                                                    &nested_fb.clauses[0],
+                                                );
                                                 return Some(hir::Binding {
                                                     pat: hir::Pat::Var(
                                                         nested_fb.name.name,
@@ -6327,8 +6331,10 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                             {
                                                 let pat =
                                                     lower_pat(ctx, &nested_fb.clauses[0].pats[0]);
-                                                let rhs_expr =
-                                                    lower_rhs(ctx, &nested_fb.clauses[0].rhs);
+                                                let rhs_expr = lower_clause_rhs_with_wheres(
+                                                    ctx,
+                                                    &nested_fb.clauses[0],
+                                                );
                                                 return Some(hir::Binding {
                                                     pat,
                                                     sig: None,
@@ -6342,8 +6348,10 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                             if nested_fb.clauses.len() == 1
                                                 && nested_fb.clauses[0].pats.is_empty()
                                             {
-                                                let nested_rhs =
-                                                    lower_rhs(ctx, &nested_fb.clauses[0].rhs);
+                                                let nested_rhs = lower_clause_rhs_with_wheres(
+                                                    ctx,
+                                                    &nested_fb.clauses[0],
+                                                );
                                                 return Some(hir::Binding {
                                                     pat: hir::Pat::Var(
                                                         nested_fb.name.name,
@@ -6454,7 +6462,10 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                                 {
                                                     let wpat =
                                                         lower_pat(ctx, &wfb.clauses[0].pats[0]);
-                                                    let wrhs = lower_rhs(ctx, &wfb.clauses[0].rhs);
+                                                    let wrhs = lower_clause_rhs_with_wheres(
+                                                        ctx,
+                                                        &wfb.clauses[0],
+                                                    );
                                                     return Some(hir::Binding {
                                                         pat: wpat,
                                                         sig: None,
@@ -6468,7 +6479,10 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                                 if wfb.clauses.len() == 1
                                                     && wfb.clauses[0].pats.is_empty()
                                                 {
-                                                    let wrhs = lower_rhs(ctx, &wfb.clauses[0].rhs);
+                                                    let wrhs = lower_clause_rhs_with_wheres(
+                                                        ctx,
+                                                        &wfb.clauses[0],
+                                                    );
                                                     return Some(hir::Binding {
                                                         pat: hir::Pat::Var(
                                                             wfb.name.name,
@@ -6492,7 +6506,8 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                                                         .iter()
                                                         .map(|wp| lower_pat(ctx, wp))
                                                         .collect();
-                                                    let wbody = lower_rhs(ctx, &wc.rhs);
+                                                    let wbody =
+                                                        lower_clause_rhs_with_wheres(ctx, wc);
                                                     ctx.exit_scope();
                                                     let wlam = hir::Expr::Lam(
                                                         wpats,
@@ -6622,7 +6637,7 @@ fn lower_body_with_wheres(
                     && nested_fb.clauses[0].pats.len() == 1
                 {
                     let pat = lower_pat(ctx, &nested_fb.clauses[0].pats[0]);
-                    let nested_rhs = lower_rhs(ctx, &nested_fb.clauses[0].rhs);
+                    let nested_rhs = lower_clause_rhs_with_wheres(ctx, &nested_fb.clauses[0]);
                     return Some(hir::Binding {
                         pat,
                         sig: None,
@@ -6634,7 +6649,7 @@ fn lower_body_with_wheres(
                     .lookup_value(nested_fb.name.name)
                     .expect("nested where binding should be bound");
                 if nested_fb.clauses.len() == 1 && nested_fb.clauses[0].pats.is_empty() {
-                    let nested_rhs = lower_rhs(ctx, &nested_fb.clauses[0].rhs);
+                    let nested_rhs = lower_clause_rhs_with_wheres(ctx, &nested_fb.clauses[0]);
                     return Some(hir::Binding {
                         pat: hir::Pat::Var(nested_fb.name.name, nested_def_id, nested_fb.span),
                         sig: None,
@@ -6651,7 +6666,7 @@ fn lower_body_with_wheres(
                     }
                     let pats: Vec<hir::Pat> =
                         clause.pats.iter().map(|p| lower_pat(ctx, p)).collect();
-                    let body = lower_rhs(ctx, &clause.rhs);
+                    let body = lower_clause_rhs_with_wheres(ctx, clause);
                     ctx.exit_scope();
                     let lam = hir::Expr::Lam(pats, Box::new(body), nested_fb.span);
                     return Some(hir::Binding {
@@ -6667,6 +6682,18 @@ fn lower_body_with_wheres(
         .collect();
     ctx.exit_scope();
     hir::Expr::Let(nested_bindings, Box::new(rhs_expr), span)
+}
+
+/// Lower a clause's RHS, threading its own `where` clause (if any). This keeps
+/// nested `where` handling fully recursive: a `where`-binding that itself has a
+/// `where` (`a = b where b = c where c = ...`) is lowered correctly at any
+/// depth, rather than dropping the innermost `where` bindings.
+fn lower_clause_rhs_with_wheres(ctx: &mut LowerContext, clause: &ast::Clause) -> hir::Expr {
+    if clause.wheres.is_empty() {
+        lower_rhs(ctx, &clause.rhs)
+    } else {
+        lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, clause.span)
+    }
 }
 
 fn lower_rhs(ctx: &mut LowerContext, rhs: &ast::Rhs) -> hir::Expr {

@@ -1017,6 +1017,39 @@ impl<'src> Parser<'src> {
             // Function binding - could be prefix or infix
             let mut pats = Vec::new();
 
+            // As-pattern binding: `name@subpat = expr` (e.g. `key@(Key k) = ...`).
+            // The LHS is a pattern binding, not a function head. Without this the
+            // `@` is treated as a bogus argument and the whole binding is dropped
+            // (surfacing as an "unbound variable" wherever it, or a later sibling,
+            // is used).
+            if self.check(&TokenKind::At) {
+                self.advance(); // consume `@`
+                let subpat = self.parse_atom_pattern()?;
+                let pat_span = start.to(subpat.span());
+                let full_pat = Pat::As(name, Box::new(subpat), pat_span);
+
+                let rhs = self.parse_binding_rhs()?;
+                let wheres = if self.eat(&TokenKind::Where) {
+                    self.parse_local_decls()?
+                } else {
+                    vec![]
+                };
+                let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+
+                let clause = Clause {
+                    pats: vec![full_pat],
+                    rhs,
+                    wheres,
+                    span,
+                };
+                return Ok(Decl::FunBind(FunBind {
+                    doc: doc.clone(),
+                    name: Ident::from_str("$patbind"),
+                    clauses: vec![clause],
+                    span,
+                }));
+            }
+
             // Check for infix binding: `x `op` y = ...` or `x --> y = ...`
             // BUT: if the operator is a constructor (starts with :), this is a pattern binding
             // e.g., `cur :| visi = expr` is a pattern binding, not a function definition

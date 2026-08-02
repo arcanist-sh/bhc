@@ -72,7 +72,7 @@ jobs:
       - name: Checkout website repo
         uses: actions/checkout@v4
         with:
-          repository: raskell-io/bhc.raskell.io
+          repository: arcanist-sh/bhc.arcanist.sh
           path: website
           token: ${{ secrets.DOCS_DEPLOY_TOKEN2 }}
 

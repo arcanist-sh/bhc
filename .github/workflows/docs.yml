@@ -40,7 +40,7 @@ jobs:
       - name: Checkout docs repo
         uses: actions/checkout@v4
         with:
-          repository: raskell-io/bhc.raskell.io-docs
+          repository: arcanist-sh/bhc.arcanist.sh-docs
           path: docs-site
           token: ${{ secrets.DOCS_DEPLOY_TOKEN2 }}
 
@@ -51,7 +51,7 @@ jobs:
             -o docs-site/static/api \
             --base-url "/docs/api" \
             --version "${{ github.ref_name }}" \
-            --source-url "https://github.com/raskell-io/bhc/blob/${{ github.sha }}"
+            --source-url "https://github.com/arcanist-sh/bhc/blob/${{ github.sha }}"
 
       - name: Commit and push docs
         run: |

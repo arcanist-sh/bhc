@@ -26,6 +26,7 @@ impl<'src> Parser<'src> {
                     | TokenKind::Underscore
                     | TokenKind::Tilde
                     | TokenKind::Bang
+                    | TokenKind::Minus
             ),
             None => false,
         }
@@ -200,6 +201,39 @@ impl<'src> Parser<'src> {
                 }
 
                 Ok(Pat::QualCon(module_name, ident, vec![], span))
+            }
+
+            TokenKind::Minus => {
+                // Negative literal pattern: `-1`, `-2.5`. The lexer emits a
+                // `Minus` token followed by the numeric literal, so consume
+                // both here. Without this, a `-1 ->` case alternative (or a
+                // negative-literal function-argument pattern) is a parse error,
+                // whose recovery can silently drop the enclosing binding.
+                let start = tok.span;
+                self.advance(); // consume `-`
+                let next = self
+                    .current()
+                    .map(|t| (t.node.kind.clone(), t.span))
+                    .ok_or(ParseError::UnexpectedEof {
+                        expected: "numeric literal after `-` in pattern".to_string(),
+                    })?;
+                match next {
+                    (TokenKind::IntLit(lit), nspan) => {
+                        let value = self.parse_int_literal(&lit.text, nspan)?;
+                        self.advance();
+                        Ok(Pat::Lit(Lit::Int(-value), start.to(nspan)))
+                    }
+                    (TokenKind::FloatLit(lit), nspan) => {
+                        let value = self.parse_float_literal(&lit.text, nspan)?;
+                        self.advance();
+                        Ok(Pat::Lit(Lit::Float(-value), start.to(nspan)))
+                    }
+                    (other, nspan) => Err(ParseError::Unexpected {
+                        found: other.description().to_string(),
+                        expected: "numeric literal after `-` in pattern".to_string(),
+                        span: nspan,
+                    }),
+                }
             }
 
             TokenKind::IntLit(ref lit) => {

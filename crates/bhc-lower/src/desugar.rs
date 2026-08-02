@@ -277,11 +277,25 @@ fn desugar_let_decls(
             {
                 let clause = &fun_bind.clauses[0];
                 let pat = lower_pat(ctx, &clause.pats[0]);
-                let rhs = match &clause.rhs {
-                    ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
-                    ast::Rhs::Guarded(guards, _) => {
-                        desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
+                // Thread the pattern binding's own `where` clause (like the
+                // regular-binding branch below); otherwise a `let (a,b) = e
+                // where f = ...` drops `f`.
+                let rhs = if clause.wheres.is_empty() {
+                    match &clause.rhs {
+                        ast::Rhs::Simple(e, _) => lower_expr(ctx, e),
+                        ast::Rhs::Guarded(guards, _) => {
+                            desugar_guarded_rhs(ctx, guards, span, lower_expr, lower_pat)
+                        }
                     }
+                } else {
+                    desugar_body_with_wheres(
+                        ctx,
+                        &clause.rhs,
+                        &clause.wheres,
+                        fun_bind.span,
+                        lower_expr,
+                        lower_pat,
+                    )
                 };
 
                 bindings.push(hir::Binding {

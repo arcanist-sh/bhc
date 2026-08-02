@@ -6175,7 +6175,7 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                         {
                             // Pattern binding: (x, y) = expr
                             let pat = lower_pat(ctx, &fb.clauses[0].pats[0]);
-                            let rhs_expr = lower_rhs(ctx, &fb.clauses[0].rhs);
+                            let rhs_expr = lower_clause_rhs_with_wheres(ctx, &fb.clauses[0]);
                             return Some(hir::Binding {
                                 pat,
                                 sig: None,
@@ -6950,7 +6950,7 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                         {
                             // Pattern binding: (x, y) = expr
                             let pat = lower_pat(ctx, &fb.clauses[0].pats[0]);
-                            let rhs_expr = lower_rhs(ctx, &fb.clauses[0].rhs);
+                            let rhs_expr = lower_clause_rhs_with_wheres(ctx, &fb.clauses[0]);
                             return Some(hir::Binding {
                                 pat,
                                 sig: None,
@@ -7318,7 +7318,7 @@ fn lower_alt(ctx: &mut LowerContext, alt: &ast::Alt) -> hir::CaseAlt {
                         {
                             // Pattern binding: (x, y) = expr or (x :| xs) = expr
                             let pat = lower_pat(ctx, &fb.clauses[0].pats[0]);
-                            let rhs = lower_rhs(ctx, &fb.clauses[0].rhs);
+                            let rhs = lower_clause_rhs_with_wheres(ctx, &fb.clauses[0]);
                             return Some(hir::Binding {
                                 pat,
                                 sig: None,
@@ -7334,7 +7334,7 @@ fn lower_alt(ctx: &mut LowerContext, alt: &ast::Alt) -> hir::CaseAlt {
 
                         // For simple bindings (no parameters)
                         if fb.clauses.len() == 1 && fb.clauses[0].pats.is_empty() {
-                            let rhs = lower_rhs(ctx, &fb.clauses[0].rhs);
+                            let rhs = lower_clause_rhs_with_wheres(ctx, &fb.clauses[0]);
                             return Some(hir::Binding {
                                 pat: hir::Pat::Var(fb.name.name, def_id, fb.span),
                                 sig: None,

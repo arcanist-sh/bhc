@@ -1937,6 +1937,7 @@ fn register_standard_module_exports(
             "URI",
             "parseURI",
             "parseURIReference",
+            "parseRelativeReference",
             "escapeURIString",
             "unEscapeString",
             "isAllowedInURI",
@@ -3217,6 +3218,9 @@ fn register_standard_module_exports(
             "CDataText",
             "CDataVerbatim",
             "CDataRaw",
+            // xml-light <-> pandoc element conversions
+            "fromXLElement",
+            "toXLElement",
         ],
         // =====================================================================
         // Data.Bifunctor, Data.Tree, Data.Containers.ListUtils
@@ -3416,6 +3420,9 @@ fn register_standard_module_exports(
             "tokenBold",
             "tokenItalic",
             "tokenUnderline",
+            // Color conversions
+            "fromColor",
+            "toColor",
         ],
         "Skylighting.Parser" => &[
             "addSyntaxDefinition",
@@ -3530,6 +3537,7 @@ fn register_standard_module_exports(
             "fromEntry",
             "findEntryByPath",
             "filesInArchive",
+            "zEntries",
             "addEntryToArchive",
             "deleteEntryFromArchive",
             "emptyArchive",

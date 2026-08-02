@@ -3409,6 +3409,13 @@ fn register_standard_module_exports(
             "lineNumberColor",
             "lineNumberBackgroundColor",
             "tokenStyles",
+            // TokenStyle default value and record fields
+            "defStyle",
+            "tokenColor",
+            "tokenBackground",
+            "tokenBold",
+            "tokenItalic",
+            "tokenUnderline",
         ],
         "Skylighting.Parser" => &[
             "addSyntaxDefinition",

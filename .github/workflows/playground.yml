@@ -91,5 +91,7 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "chore: update playground WASM from bhc@${{ github.sha }}"
-            git push
+            # Best-effort deploy: do not fail the workflow if the token lacks
+            # write access to the site repo (surfaces as a warning instead).
+            git push || echo "::warning::playground deploy skipped — DOCS_DEPLOY_TOKEN2 needs write access to arcanist-sh/bhc.arcanist.sh"
           fi

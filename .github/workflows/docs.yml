@@ -63,5 +63,7 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "docs: update API reference from bhc@${{ github.sha }}"
-            git push
+            # Best-effort deploy: do not fail the workflow if the token lacks
+            # write access to the docs repo (surfaces as a warning instead).
+            git push || echo "::warning::docs deploy skipped — DOCS_DEPLOY_TOKEN2 needs write access to arcanist-sh/bhc.arcanist.sh-docs"
           fi

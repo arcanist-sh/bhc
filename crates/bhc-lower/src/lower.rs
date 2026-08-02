@@ -4204,6 +4204,13 @@ fn register_standard_module_exports(
             "showContent",
             "ppElement",
             "ppTopElement",
+            // Text.XML.Light re-exports the config pretty-printer from
+            // Text.XML.Light.Output
+            "ppcElement",
+            "ppcContent",
+            "ppcTopElement",
+            "defaultConfigPP",
+            "useShortEmptyTags",
             "parseXML",
             "onlyElems",
             "Elem",

@@ -2614,8 +2614,65 @@ impl Compiler {
                         is_newtype,
                     };
                     exports.constructors.insert(con_name, con_info);
+
+                    // Record field ACCESSORS are values at use sites
+                    // (`B.unMany blocks`); register each field name as an
+                    // exported value. Placeholder-typed — the permissive
+                    // scheme is instantiated fresh per use, which is the same
+                    // treatment imported values without signatures get.
+                    if let Some(ref names) = con.field_names {
+                        for field in names {
+                            let field_sym = Symbol::intern(field);
+                            if exports.values.contains_key(&field_sym) {
+                                continue;
+                            }
+                            let accessor_id = ctx.fresh_def_id();
+                            ctx.define(
+                                accessor_id,
+                                field_sym,
+                                bhc_lower::DefKind::Value,
+                                bhc_span::Span::default(),
+                            );
+                            exports.values.insert(field_sym, accessor_id);
+                        }
+                    }
                 }
             }
+        }
+
+        // Register class methods as exported VALUES with their schemes, and
+        // record the class → methods mapping (used for `Class(..)` imports and
+        // builtin shadowing). Without this, a module compiled against a
+        // package DB can't resolve imported class methods at all —
+        // Text.Pandoc.Shared failed lowering on Walkable's `walk`/`query`
+        // even though Text.Pandoc.Walk's interface was right there.
+        for class in &iface.classes {
+            let class_name = Symbol::intern(&class.name);
+            let mut method_names = Vec::with_capacity(class.methods.len());
+            for method in &class.methods {
+                let name = Symbol::intern(&method.name);
+                let fresh_id = ctx.fresh_def_id();
+                let scheme = converter.convert_type_signature(&method.signature);
+                ctx.define_with_type(
+                    fresh_id,
+                    name,
+                    bhc_lower::DefKind::Value,
+                    bhc_span::Span::default(),
+                    scheme,
+                );
+                exports.values.insert(name, fresh_id);
+                method_names.push(name);
+            }
+            // The class name itself is importable (`import M (Walkable (..))`).
+            let class_id = ctx.fresh_def_id();
+            ctx.define(
+                class_id,
+                class_name,
+                bhc_lower::DefKind::Type,
+                bhc_span::Span::default(),
+            );
+            exports.types.entry(class_name).or_insert(class_id);
+            exports.class_methods.insert(class_name, method_names);
         }
 
         exports

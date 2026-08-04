@@ -2111,11 +2111,12 @@ fn lower_record_update(
             span,
         ))
     } else {
-        // No field info available - cannot compile record update
-        ctx.error(LowerError::Internal(format!(
-            "cannot compile record update: no information for field '{}'",
-            first_field.name.as_str()
-        )));
+        // No field info available — the record type is an external STUB
+        // (e.g. TagSoup's `renderOptions{ optMinimize = .. }` in
+        // Text.Pandoc.Shared). Failing the whole module here blocks every
+        // dependent; lower to a runtime trap instead. The code path cannot
+        // work until the real library is compiled — at which point its
+        // interface provides the field layout and this branch is not taken.
         Ok(make_pattern_error(span))
     }
 }

@@ -584,7 +584,10 @@ impl TokenKind {
             "of" => Self::Of,
             // "proc" is reserved for Arrows extension - treat as identifier for now
             "qualified" => Self::Qualified,
-            "rec" => Self::Rec,
+            // "rec" is only special inside RecursiveDo/Arrows `rec` blocks
+            // (statement position); in Haskell 2010 it is an ordinary identifier
+            // (e.g. `addId rec = ...` in Text.Pandoc.Readers.RIS). The parser does
+            // not consume a `Rec` token, so lex it as a plain identifier.
             "then" => Self::Then,
             "type" => Self::Type,
             "where" => Self::Where,

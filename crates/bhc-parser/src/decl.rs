@@ -887,9 +887,16 @@ impl<'src> Parser<'src> {
         if self.check(&TokenKind::LParen) {
             // Peek ahead: is this (operator) or (pattern)?
             if let Some(next) = self.peek_nth(1) {
-                let is_pattern_start = matches!(
-                    next.node.kind,
-                    TokenKind::Ident(_)
+                // `(!) a b = ...` defines the operator `!` — the Bang is an
+                // operator NAME here, not a bang pattern.
+                let bang_op_name = matches!(next.node.kind, TokenKind::Bang)
+                    && self
+                        .peek_nth(2)
+                        .is_some_and(|t| matches!(t.node.kind, TokenKind::RParen));
+                let is_pattern_start = !bang_op_name
+                    && matches!(
+                        next.node.kind,
+                        TokenKind::Ident(_)
                         | TokenKind::ConId(_)
                         // A *qualified* constructor also starts a pattern, e.g.
                         // `(Ann.Cell specs colnum cell) = …`. Without this, a
@@ -906,7 +913,7 @@ impl<'src> Parser<'src> {
                         | TokenKind::LBracket
                         | TokenKind::Bang
                         | TokenKind::Tilde
-                );
+                    );
                 if is_pattern_start {
                     // Could be a pattern binding `(a, b) = expr` OR an infix
                     // operator definition whose first operand is parenthesized,
@@ -993,6 +1000,42 @@ impl<'src> Parser<'src> {
             if self.eat(&TokenKind::DoubleColon) {
                 // Type signature
                 let ty = self.parse_type()?;
+
+                // Inline-annotated binding: `let mCss :: Maybe [Text] = e`
+                // (Writers.HTML). The signature and binding share one decl, so
+                // produce a FunBind whose RHS carries the annotation; a plain
+                // TypeSig here would leave the `=` unparsed and drop the whole
+                // enclosing binding.
+                if names.len() == 1 && self.check(&TokenKind::Eq) {
+                    let name = names.into_iter().next().unwrap();
+                    let rhs = self.parse_binding_rhs()?;
+                    let rhs = match rhs {
+                        Rhs::Simple(expr, rspan) => {
+                            let ann_span = expr.span().to(ty.span());
+                            Rhs::Simple(Expr::Ann(Box::new(expr), ty, ann_span), rspan)
+                        }
+                        guarded => guarded,
+                    };
+                    let wheres = if self.eat(&TokenKind::Where) {
+                        self.parse_local_decls()?
+                    } else {
+                        vec![]
+                    };
+                    let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+                    let clause = Clause {
+                        pats: vec![],
+                        rhs,
+                        wheres,
+                        span,
+                    };
+                    return Ok(Decl::FunBind(FunBind {
+                        doc,
+                        name,
+                        clauses: vec![clause],
+                        span,
+                    }));
+                }
+
                 let span = start.to(ty.span());
                 return Ok(Decl::TypeSig(TypeSig {
                     doc,
@@ -1191,11 +1234,11 @@ impl<'src> Parser<'src> {
         // Parse the pattern
         let pat = self.parse_pattern()?;
 
-        // Expect `=`
-        self.expect(&TokenKind::Eq)?;
-
-        // Parse the expression
-        let expr = self.parse_expr()?;
+        // `= expr` or a GUARDED rhs — pattern bindings may carry guards too:
+        // `(sampOrVar, cs') | "sample" \`elem\` cs = ... | otherwise = ...`
+        // (Writers.HTML's inlineToHtml). A hard `expect(Eq)` here dropped the
+        // whole enclosing binding.
+        let rhs = self.parse_binding_rhs()?;
 
         // Parse optional where clause
         let wheres = if self.eat(&TokenKind::Where) {
@@ -1211,7 +1254,7 @@ impl<'src> Parser<'src> {
         // This is a common representation that allows uniform handling.
         let clause = Clause {
             pats: vec![pat],
-            rhs: Rhs::Simple(expr, span),
+            rhs,
             wheres,
             span,
         };
@@ -1426,6 +1469,12 @@ impl<'src> Parser<'src> {
                     self.advance();
                     ident
                 }
+                // `(!) a b = ...` — a bare `!` lexes as Bang, not Operator.
+                TokenKind::Bang => {
+                    let ident = Ident::new(Symbol::intern("!"));
+                    self.advance();
+                    ident
+                }
                 TokenKind::Backslash => {
                     // List difference operator \\
                     let ident = Ident::new(Symbol::intern("\\"));
@@ -1534,10 +1583,11 @@ impl<'src> Parser<'src> {
             let deriving = self.parse_deriving()?;
             (constrs, vec![], deriving)
         } else if self.check(&TokenKind::Where) {
-            // GADT syntax
-            let gadt_constrs = self.parse_gadt_constructors()?;
+            // GADT syntax. Record-syntax GADT constructors come back as
+            // ordinary record ConDecls so field accessors register normally.
+            let (gadt_constrs, record_constrs) = self.parse_gadt_constructors()?;
             let deriving = self.parse_deriving()?;
-            (vec![], gadt_constrs, deriving)
+            (record_constrs, gadt_constrs, deriving)
         } else {
             let deriving = self.parse_deriving()?;
             (vec![], vec![], deriving)
@@ -1559,53 +1609,103 @@ impl<'src> Parser<'src> {
     /// Parse GADT constructors in a `where` block.
     ///
     /// Each entry is `ConName :: Type` separated by layout or semicolons.
-    fn parse_gadt_constructors(&mut self) -> ParseResult<Vec<GadtConDecl>> {
+    fn parse_gadt_constructors(&mut self) -> ParseResult<(Vec<GadtConDecl>, Vec<ConDecl>)> {
         self.expect(&TokenKind::Where)?;
 
         let mut constrs = Vec::new();
+        let mut record_constrs = Vec::new();
 
         if self.eat(&TokenKind::LBrace) {
             // Explicit braces
             if !self.check(&TokenKind::RBrace) {
-                constrs.push(self.parse_gadt_con_decl()?);
+                self.parse_gadt_con_into(&mut constrs, &mut record_constrs)?;
                 while self.eat(&TokenKind::Semi) {
                     if self.check(&TokenKind::RBrace) {
                         break;
                     }
-                    constrs.push(self.parse_gadt_con_decl()?);
+                    self.parse_gadt_con_into(&mut constrs, &mut record_constrs)?;
                 }
             }
             self.expect(&TokenKind::RBrace)?;
         } else if self.eat(&TokenKind::VirtualLBrace) {
             // Layout-based declarations
             if !self.check(&TokenKind::VirtualRBrace) {
-                constrs.push(self.parse_gadt_con_decl()?);
+                self.parse_gadt_con_into(&mut constrs, &mut record_constrs)?;
                 while self.eat(&TokenKind::VirtualSemi) {
                     if self.check(&TokenKind::VirtualRBrace) {
                         break;
                     }
-                    constrs.push(self.parse_gadt_con_decl()?);
+                    self.parse_gadt_con_into(&mut constrs, &mut record_constrs)?;
                 }
             }
             self.eat(&TokenKind::VirtualRBrace);
         }
 
-        Ok(constrs)
+        Ok((constrs, record_constrs))
     }
 
-    /// Parse a single GADT constructor declaration: `ConName :: Type`.
-    fn parse_gadt_con_decl(&mut self) -> ParseResult<GadtConDecl> {
+    /// Parse one GADT constructor into the right bucket: plain
+    /// (`Con :: Type`) or record syntax (`Con :: Ctx => { f :: T, .. } -> R`),
+    /// which becomes an ordinary record `ConDecl` so its field accessors are
+    /// registered like any Haskell-98 record (Readers.ODT.Generic.
+    /// XMLConverter's `XMLConverterState`).
+    fn parse_gadt_con_into(
+        &mut self,
+        plain: &mut Vec<GadtConDecl>,
+        records: &mut Vec<ConDecl>,
+    ) -> ParseResult<()> {
         let start = self.current_span();
         let name = self.parse_conid()?;
         self.expect(&TokenKind::DoubleColon)?;
-        let ty = self.parse_type()?;
+
+        let saved = self.pos;
+        if let Ok(ty) = self.parse_type() {
+            let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
+            plain.push(GadtConDecl {
+                doc: None,
+                name,
+                ty,
+                span,
+            });
+            return Ok(());
+        }
+        self.pos = saved;
+
+        // Record form. An optional context (`NameSpaceID nsID =>`) precedes the
+        // brace; scan for a `=>` before the `{` and discard it (bhc's stub
+        // typeck does not need the constraint).
+        let mut i = self.pos;
+        let mut fat_arrow_at = None;
+        while i < self.tokens.len() {
+            match self.tokens[i].node.kind {
+                TokenKind::FatArrow | TokenKind::UnicodeFatArrow => {
+                    fat_arrow_at = Some(i);
+                    break;
+                }
+                TokenKind::LBrace
+                | TokenKind::VirtualSemi
+                | TokenKind::VirtualRBrace
+                | TokenKind::Semi => break,
+                _ => i += 1,
+            }
+        }
+        if let Some(fa) = fat_arrow_at {
+            self.pos = fa + 1;
+        }
+
+        let fields = self.parse_record_fields()?;
+        self.expect(&TokenKind::Arrow)?;
+        let _result_ty = self.parse_type()?;
         let span = start.to(self.tokens[self.pos.saturating_sub(1)].span);
-        Ok(GadtConDecl {
+        records.push(ConDecl {
             doc: None,
             name,
-            ty,
+            fields,
+            existential_vars: vec![],
+            existential_context: vec![],
             span,
-        })
+        });
+        Ok(())
     }
 
     /// Parse a constructor identifier.
@@ -2299,9 +2399,9 @@ impl<'src> Parser<'src> {
             let deriving = self.parse_deriving()?;
             (constrs, vec![], deriving)
         } else if self.check(&TokenKind::Where) {
-            let gadt_constrs = self.parse_gadt_constructors()?;
+            let (gadt_constrs, record_constrs) = self.parse_gadt_constructors()?;
             let deriving = self.parse_deriving()?;
-            (vec![], gadt_constrs, deriving)
+            (record_constrs, gadt_constrs, deriving)
         } else {
             (vec![], vec![], vec![])
         };
@@ -3084,8 +3184,31 @@ impl<'src> Parser<'src> {
             })?;
 
             match &tok.node.kind {
-                TokenKind::Operator(sym) => {
+                TokenKind::Operator(sym) | TokenKind::ConOperator(sym) => {
                     ops.push(Ident::new(*sym));
+                    self.advance();
+                }
+                // Single-char tokens the lexer reserves for other roles but
+                // that are ordinary operators in a fixity declaration
+                // (`infixl 9 !`, `infixr 9 .`, `infixl 6 -`, `infixl 7 *`).
+                TokenKind::Bang => {
+                    ops.push(Ident::from_str("!"));
+                    self.advance();
+                }
+                TokenKind::Dot => {
+                    ops.push(Ident::from_str("."));
+                    self.advance();
+                }
+                TokenKind::Minus => {
+                    ops.push(Ident::from_str("-"));
+                    self.advance();
+                }
+                TokenKind::Star => {
+                    ops.push(Ident::from_str("*"));
+                    self.advance();
+                }
+                TokenKind::Percent => {
+                    ops.push(Ident::from_str("%"));
                     self.advance();
                 }
                 TokenKind::Backtick => {

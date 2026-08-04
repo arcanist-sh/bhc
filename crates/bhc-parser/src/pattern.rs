@@ -1,6 +1,6 @@
 //! Pattern parsing.
 
-use bhc_ast::{Expr, FieldPat, Lit, ModuleName, Pat};
+use bhc_ast::{Expr, FieldPat, Lit, ModuleName, Pat, TyVar, Type};
 use bhc_intern::{Ident, Symbol};
 use bhc_lexer::TokenKind;
 use bhc_span::Span;
@@ -361,6 +361,56 @@ impl<'src> Parser<'src> {
             return Ok(Pat::View(Box::new(view_expr), Box::new(result_pat), span));
         }
 
+        // Type-applied view expression: `TR.decimal @Integer -> pat`. After a
+        // QUALIFIED var the pattern parser leaves the `@` pending (only the
+        // unqualified Ident arm folds it into an as-pattern), so rebuild the
+        // type application(s) here and require the view arrow.
+        if self.check(&TokenKind::At) && matches!(&first, Pat::Var(..)) {
+            let save_pos = self.pos;
+            let mut view_expr = self.pat_to_expr(&first)?;
+            let mut applied = true;
+            while self.eat(&TokenKind::At) {
+                match self.parse_atype() {
+                    Ok(ty) => {
+                        let sp = view_expr.span().to(ty.span());
+                        view_expr = Expr::TypeApp(Box::new(view_expr), ty, sp);
+                    }
+                    Err(_) => {
+                        applied = false;
+                        break;
+                    }
+                }
+            }
+            if applied && self.eat(&TokenKind::Arrow) {
+                let result_pat = self.parse_pattern()?;
+                let span = start.to(result_pat.span());
+                return Ok(Pat::View(Box::new(view_expr), Box::new(result_pat), span));
+            }
+            self.pos = save_pos;
+        }
+
+        // Operator-continued view expression: `f . g -> pat` — e.g.
+        // `(normalise . unEscapeString -> path)` in Readers.EPUB. In a
+        // delimited pattern context no non-constructor operator can continue a
+        // pattern, so the operator must belong to the view expression: convert
+        // the prefix and let the expression parser take over up to the arrow.
+        if matches!(
+            self.current_kind(),
+            Some(TokenKind::Operator(_) | TokenKind::Dot)
+        ) {
+            let save_pos = self.pos;
+            if let Ok(prefix) = self.pat_to_expr(&first) {
+                if let Ok(view_expr) = self.continue_infix_expr(prefix, 0) {
+                    if self.eat(&TokenKind::Arrow) {
+                        let result_pat = self.parse_pattern()?;
+                        let span = start.to(result_pat.span());
+                        return Ok(Pat::View(Box::new(view_expr), Box::new(result_pat), span));
+                    }
+                }
+            }
+            self.pos = save_pos;
+        }
+
         // Applied view pattern: `f x y -> pat`
         if matches!(&first, Pat::Var(..)) && self.is_apat_start() {
             let save_pos = self.pos;
@@ -381,6 +431,16 @@ impl<'src> Parser<'src> {
             }
             // Not a view pattern — backtrack.
             self.pos = save_pos;
+        }
+
+        // Pattern type annotation in a delimited context: `(n :: Int, fp)`
+        // (Writers.EPUB's comprehension binder). Without this the `::` hits
+        // the closing-delimiter check and the whole binding is dropped.
+        if self.check(&TokenKind::DoubleColon) {
+            self.advance();
+            let ty = self.parse_type()?;
+            let span = first.span().to(ty.span());
+            return Ok(Pat::Ann(Box::new(first), ty, span));
         }
 
         Ok(first)
@@ -459,11 +519,79 @@ impl<'src> Parser<'src> {
                 // Wildcard in view expression context — shouldn't happen, but handle gracefully
                 Ok(Expr::Var(Ident::from_str("_"), *span))
             }
+            Pat::As(name, sub, span) => {
+                // Not a real as-pattern: in a view pattern's EXPRESSION position
+                // an `@` is a visible type application — `(TR.decimal @Integer
+                // -> Right (x, "")) = ...` (Readers.Pod's `entity`). The pattern
+                // parser reads `f @T` as `f @ T` before the `->` is seen, so
+                // rebuild the type application here when the sub-pattern is
+                // shaped like a type. (A genuine as-pattern before `->` is not
+                // an expression, so nothing valid is lost.)
+                let base = self.pat_to_expr(&Pat::Var(*name, *span))?;
+                let ty = Self::pat_to_type(sub).ok_or_else(|| ParseError::Unexpected {
+                    found: "as-pattern".to_string(),
+                    expected: "simple expression for view pattern".to_string(),
+                    span: pat.span(),
+                })?;
+                Ok(Expr::TypeApp(Box::new(base), ty, *span))
+            }
             _ => Err(ParseError::Unexpected {
                 found: "complex pattern".to_string(),
                 expected: "simple expression for view pattern".to_string(),
                 span: pat.span(),
             }),
+        }
+    }
+
+    /// Convert a pattern that syntactically denotes a TYPE back into one.
+    ///
+    /// Used by `pat_to_expr` for view-pattern expressions where `f @T` was
+    /// mis-read as an as-pattern: the "sub-pattern" after the `@` is really a
+    /// type argument. Returns `None` for shapes that can't be a type (literals,
+    /// wildcards, records, ...), which surfaces the original parse error.
+    fn pat_to_type(pat: &Pat) -> Option<Type> {
+        match pat {
+            // Uppercase names parse as (possibly applied) constructor patterns.
+            Pat::Con(name, args, span) => {
+                let mut ty = Type::Con(*name, *span);
+                for arg in args {
+                    let arg_ty = Self::pat_to_type(arg)?;
+                    let sp = ty.span().to(arg_ty.span());
+                    ty = Type::App(Box::new(ty), Box::new(arg_ty), sp);
+                }
+                Some(ty)
+            }
+            Pat::QualCon(module, name, args, span) => {
+                let mut ty = Type::QualCon(module.clone(), *name, *span);
+                for arg in args {
+                    let arg_ty = Self::pat_to_type(arg)?;
+                    let sp = ty.span().to(arg_ty.span());
+                    ty = Type::App(Box::new(ty), Box::new(arg_ty), sp);
+                }
+                Some(ty)
+            }
+            // Lowercase names are type variables (`f @a`).
+            Pat::Var(name, span) => Some(Type::Var(
+                TyVar {
+                    name: *name,
+                    span: *span,
+                },
+                *span,
+            )),
+            Pat::Paren(inner, span) => {
+                Some(Type::Paren(Box::new(Self::pat_to_type(inner)?), *span))
+            }
+            Pat::Tuple(elems, span) => {
+                let tys = elems
+                    .iter()
+                    .map(Self::pat_to_type)
+                    .collect::<Option<Vec<_>>>()?;
+                Some(Type::Tuple(tys, *span))
+            }
+            Pat::List(elems, span) if elems.len() == 1 => {
+                Some(Type::List(Box::new(Self::pat_to_type(&elems[0])?), *span))
+            }
+            _ => None,
         }
     }
 

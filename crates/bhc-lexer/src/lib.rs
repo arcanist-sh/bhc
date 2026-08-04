@@ -73,6 +73,12 @@ pub struct Lexer<'src> {
     /// - `is_let` means the block was opened by the `let` keyword (and is
     ///   therefore closeable by the `in` keyword)
     layout_stack: Vec<(u32, bool, bool)>,
+    /// Whether we are lexically inside a GUARD: a `|` has been seen more
+    /// recently than an `->`/`=`/`;`. Used by the comma-closes-implicit-block
+    /// heuristic below — a `,` between `|` and `->` separates guards
+    /// (`t | not (p t), t /= "x" -> t`) and must NOT close the enclosing
+    /// `case`/`\case` block even when that block sits directly inside parens.
+    guard_active: bool,
     /// Pending tokens to emit (from layout rule).
     pending: Vec<Spanned<Token>>,
     /// Column of the first token on the current line (1-indexed).
@@ -115,6 +121,7 @@ impl<'src> Lexer<'src> {
             pos: 0,
             config,
             layout_stack: vec![(1, false, false)], // Implicit module-level context at column 1
+            guard_active: false,
             pending: Vec::new(),
             line_start_column: 1,
             expect_layout_block: false,
@@ -1442,6 +1449,16 @@ impl<'src> Lexer<'src> {
         // left the `,` among the case alternatives; the parser then mis-recovered
         // and silently dropped the enclosing binding (Text.Pandoc.Writers.Shared's
         // `ensureValidXmlIdentifiers`, breaking Text.Pandoc.Writers.TEI).
+        // Track guard state for the comma heuristic below: `|` opens a guard,
+        // `->`/`=`/`;` end it.
+        match token.kind {
+            TokenKind::Pipe => self.guard_active = true,
+            TokenKind::Arrow | TokenKind::UnicodeArrow | TokenKind::Eq | TokenKind::Semi => {
+                self.guard_active = false;
+            }
+            _ => {}
+        }
+
         if token.kind == TokenKind::Comma {
             // Close the top implicit block ONLY when its IMMEDIATE parent is an
             // explicit context — i.e. a `case`/`do`/`let` used directly as a
@@ -1451,8 +1468,13 @@ impl<'src> Lexer<'src> {
             // there the case sits inside a `do`/`where` (an implicit parent), as
             // in `(imgdata, Just mime) | m' <- .., m' == .. -> ..`
             // (Text.Pandoc.Writers.RTF).
+            //
+            // A guard comma can ALSO occur with the case directly in parens —
+            // `(\case t | not (p t), t /= "x" -> t; ...)` (Readers.Ipynb's
+            // jsonMetaToPairs) — where the immediate parent IS explicit; the
+            // `guard_active` flag (no `->` since the `|`) distinguishes it.
             let n = self.layout_stack.len();
-            if n >= 2 {
+            if n >= 2 && !self.guard_active {
                 let top_implicit = !self.layout_stack[n - 1].1;
                 let parent_explicit = self.layout_stack[n - 2].1;
                 if top_implicit && parent_explicit {

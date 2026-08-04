@@ -3118,13 +3118,18 @@ impl Builtins {
                 Scheme::poly(vec![a.clone()], Ty::fun(list_a, Ty::Var(a.clone())))
             }),
             ("foldMap", {
-                // foldMap :: Monoid m => (a -> m) -> [a] -> m (list-specialized)
-                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                // foldMap :: (Foldable t, Monoid m) => (a -> m) -> t a -> m
+                // The container is polymorphic, not pinned to `[]`: `foldMap f`
+                // over `Inlines` (Many Inline) or a Map/Set/Seq must still yield
+                // the monoid `m` (as in Writers.CslJson's `foldMap fromInline`).
+                let star_to_star = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let t = TyVar::new(BUILTIN_TYVAR_TRAV, star_to_star);
+                let t_a = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![t.clone(), a.clone(), b.clone()],
                     Ty::fun(
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
-                        Ty::fun(list_a, Ty::Var(b.clone())),
+                        Ty::fun(t_a, Ty::Var(b.clone())),
                     ),
                 )
             }),
@@ -6603,7 +6608,6 @@ impl Builtins {
             let a = TyVar::new_star(BUILTIN_TYVAR_A);
             let b = TyVar::new_star(BUILTIN_TYVAR_B);
             let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
-            let list_b = Ty::List(Box::new(Ty::Var(b.clone())));
             let int_ty = self.int_ty.clone();
             let bool_ty = self.bool_ty.clone();
             let ordering_ty = self.ordering_ty.clone();
@@ -6715,18 +6719,24 @@ impl Builtins {
                     ),
                 ),
             );
-            // foldMap :: (a -> [b]) -> [a] -> [b] (simplified for list Foldable)
-            env.register_value(
-                DefId::new(10809),
-                Symbol::intern("foldMap"),
+            // foldMap :: (Foldable t, Monoid m) => (a -> m) -> t a -> m
+            // The Monoid result `m` (= b) must stay free — pinning it to `[b]`
+            // wrongly unifies non-list monoids (e.g. `CslJson Text` in
+            // Writers.CslJson's `foldMap fromInline`) with `[]`. The container is
+            // likewise a polymorphic Foldable `t`, unifying with `[]` for list
+            // uses and with `Inlines`/`Seq`/`Map` otherwise.
+            env.register_value(DefId::new(10809), Symbol::intern("foldMap"), {
+                let star_to_star = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let t = TyVar::new(BUILTIN_TYVAR_TRAV, star_to_star);
+                let t_a = Ty::App(Box::new(Ty::Var(t.clone())), Box::new(Ty::Var(a.clone())));
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![t.clone(), a.clone(), b.clone()],
                     Ty::fun(
-                        Ty::fun(Ty::Var(a.clone()), list_b.clone()),
-                        Ty::fun(list_a.clone(), list_b.clone()),
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                        Ty::fun(t_a, Ty::Var(b.clone())),
                     ),
-                ),
-            );
+                )
+            });
         }
 
         // E.17: Ordering ADT - compare at fixed DefId

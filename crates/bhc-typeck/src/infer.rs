@@ -66,7 +66,13 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             let scheme = ctx
                 .env
                 .lookup_data_con_by_id(def_ref.def_id)
-                .map(|i| i.scheme.clone());
+                .map(|i| i.scheme.clone())
+                // Some builtin newtype constructors are registered only as
+                // VALUES with a constructor-shaped scheme (`Identity ::
+                // a -> Identity a`, DefId 10000). An expression use resolves
+                // to that DefId, which the data-con registry doesn't know —
+                // fall back to the value scheme (constructors are functions).
+                .or_else(|| ctx.env.lookup_def_id(def_ref.def_id).cloned());
             if let Some(s) = scheme {
                 ctx.instantiate(&s)
             } else {
@@ -487,6 +493,17 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                     .map(|i| i.scheme.clone()),
                 _ => None,
             };
+
+            // A permissive placeholder scheme (`forall a. a` — what imported
+            // values without an interface type get) carries no real type
+            // parameters: substituting the explicit type arg into it would pin
+            // the WHOLE base expression to that type (`tshow @Double x` would
+            // make `tshow` itself `Double`, then fail to apply). Ignore the
+            // type application and infer the base normally instead.
+            let scheme = scheme.filter(|s| {
+                !(s.constraints.is_empty()
+                    && matches!(&s.ty, Ty::Var(v) if s.vars.iter().any(|sv| sv.id == v.id)))
+            });
 
             if let Some(scheme) = scheme {
                 // Instantiate the scheme, substituting the provided type args

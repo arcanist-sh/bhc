@@ -1094,6 +1094,13 @@ impl LowerContext {
             "asProxyTypeOf",
             "absurd",
             "vacuous",
+            // Arrow notation: `proc pat -> cmd` desugars to `arr (\pat -> ..)`
+            // and `f -< e` stays an infix use of `-<`. APPEND-ONLY here — the
+            // ops scheme assignment is index-sensitive, inserting mid-list
+            // drifts every later builtin onto a neighbor's scheme.
+            "arr",
+            "-<",
+            "-<<",
         ];
 
         for name in builtin_funcs {

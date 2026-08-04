@@ -272,6 +272,33 @@ pub fn type_check_module_full(
             (vec![], Ty::Tuple(vec![text_ty.clone(), text_ty.clone()])),
         );
 
+        // TagSoup: type Attribute str = (str, str). Left opaque it clashes
+        // with the tuples `lookup` produces over attribute lists (Readers.HTML
+        // `pSelfClosing (== "img") (isJust . lookup "src")`).
+        ctx.type_aliases.insert(
+            Symbol::intern("Attribute"),
+            (
+                vec![a.clone()],
+                Ty::Tuple(vec![Ty::Var(a.clone()), Ty::Var(a.clone())]),
+            ),
+        );
+
+        // blaze-html: type Markup = MarkupM (); type Html = Markup. Left
+        // opaque, `Html` can't unify with the `m a` that do-notation over
+        // markup infers (all 77 unmasked Writers.HTML errors were
+        // `expected Html, found (t t)` pairs).
+        {
+            let markupm_con = Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("MarkupM"),
+                Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+            ));
+            let markup_unit = Ty::App(Box::new(markupm_con), Box::new(Ty::unit()));
+            ctx.type_aliases
+                .insert(Symbol::intern("Markup"), (vec![], markup_unit.clone()));
+            ctx.type_aliases
+                .insert(Symbol::intern("Html"), (vec![], markup_unit));
+        }
+
         // Approximate `NonEmpty a` as `[a]`. BHC already models the `:|`
         // constructor and the `Data.List.NonEmpty` operations as list-valued
         // (see context.rs `":|"`), so the *type* must agree — otherwise a
@@ -281,6 +308,15 @@ pub fn type_check_module_full(
         // need Foldable-generic reductions; this keeps the approximation coherent.
         ctx.type_aliases.insert(
             Symbol::intern("NonEmpty"),
+            (vec![a.clone()], Ty::List(Box::new(Ty::Var(a.clone())))),
+        );
+
+        // Approximate `Seq a` as `[a]`, for the same reason as NonEmpty: the
+        // Data.Sequence operations are permissive stubs, and OverloadedLists
+        // code matches Seq values with LIST patterns (Readers.Typst.Math's
+        // `(base :: Seq Content)` against `[Elt "math.op" _ fs]`).
+        ctx.type_aliases.insert(
+            Symbol::intern("Seq"),
             (vec![a.clone()], Ty::List(Box::new(Ty::Var(a.clone())))),
         );
 

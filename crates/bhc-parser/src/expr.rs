@@ -34,7 +34,7 @@ impl<'src> Parser<'src> {
     }
 
     /// Continue parsing an infix expression from a pre-parsed LHS.
-    fn continue_infix_expr(&mut self, mut lhs: Expr, min_prec: u8) -> ParseResult<Expr> {
+    pub(crate) fn continue_infix_expr(&mut self, mut lhs: Expr, min_prec: u8) -> ParseResult<Expr> {
         while let Some(tok) = self.current() {
             // Track whether the operator was already consumed (for backtick case)
             let mut op_consumed = false;
@@ -213,6 +213,28 @@ impl<'src> Parser<'src> {
                 let expr = self.parse_prefix_expr()?;
                 let span = start.to(expr.span());
                 return Ok(Expr::Neg(Box::new(expr), span));
+            }
+
+            // Arrow notation: `proc pat -> cmd` (Readers.ODT.StyleReader).
+            // `proc` lexes as an ordinary identifier, so probe speculatively:
+            // only a pattern followed by `->` commits. Desugared permissively
+            // to `arr (\pat -> cmd)` — `arr`'s builtin scheme has a free result
+            // var, so it unifies with the declared arrow type, and `-<` inside
+            // the command is an ordinary permissive infix operator.
+            if matches!(&tok.node.kind, TokenKind::Ident(s) if s.as_str() == "proc") {
+                let start = tok.span;
+                let save_pos = self.pos;
+                self.advance();
+                if let Ok(pat) = self.parse_atom_pattern() {
+                    if self.eat(&TokenKind::Arrow) {
+                        let body = self.parse_expr()?;
+                        let span = start.to(body.span());
+                        let lam = Expr::Lam(vec![pat], Box::new(body), span);
+                        let arr = Expr::Var(Ident::from_str("arr"), start);
+                        return Ok(Expr::App(Box::new(arr), Box::new(lam), span));
+                    }
+                }
+                self.pos = save_pos;
             }
         }
 
@@ -465,6 +487,16 @@ impl<'src> Parser<'src> {
             // `(a >>^ f) ^|||^ g` and feeds `^|||^` an arrow where it wants a
             // function (Text.Pandoc.Readers.ODT.Arrows.Utils).
             ">>>" | "<<<" | "^>>" | ">>^" | "<<^" | "^<<" => (1, Assoc::Right),
+            // pandoc's ODT Fallible-arrow operators (Readers.ODT.Arrows.Utils
+            // declares these fixities, but fixity declarations don't propagate
+            // across modules yet): `infixr 2 >>%, ^|||, |||^, ^|||^`,
+            // `infixr 3 ^&&&, &&&^`, `infixr 1 >>? ..`.
+            ">>%" | "^|||" | "|||^" | "^|||^" => (2, Assoc::Right),
+            "^&&&" | "&&&^" => (3, Assoc::Right),
+            ">>?" | ">>?^" | ">>?^?" | "^>>?" | ">>?!" | ">>?%" | ">>?%?" => (1, Assoc::Right),
+            // Arrow notation's feed operators (`f -< e`): bind loosely so the
+            // whole RHS expression is the argument.
+            "-<" | "-<<" => (1, Assoc::Right),
             ">>=" | ">>" => (1, Assoc::Left),
             "=<<" => (1, Assoc::Right),
             "$" | "$!" => (0, Assoc::Right),
@@ -518,6 +550,15 @@ impl<'src> Parser<'src> {
             // Otherwise, fall through to parse as prefix negation
         }
 
+        // Special case for `!`: a bare `!` lexes as Bang (the strictness
+        // marker), but after `(` in EXPRESSION context it can only be the
+        // indexing/attribute operator — either `(!)` as a function
+        // (Writers.HTML's `foldl' (!) h`) or a right section
+        // (`map (! A.class_ "fragment") items`).
+        if matches!(self.current_kind(), Some(TokenKind::Bang)) {
+            return self.parse_operator_section(start);
+        }
+
         // Check for backtick right section: (`op` x) means \y -> y `op` x
         if self.check(&TokenKind::Backtick) {
             self.advance(); // consume opening backtick
@@ -569,6 +610,9 @@ impl<'src> Parser<'src> {
             Some(TokenKind::Minus) => Some(Ident::from_str("-")),
             Some(TokenKind::Percent) => Some(Ident::from_str("%")),
             Some(TokenKind::Dot) => Some(Ident::from_str(".")),
+            // `!` in infix position inside parens — `(H.ol ! A.start x $ ..)`
+            // (Writers.HTML). The lexer emits it as Bang, not Operator.
+            Some(TokenKind::Bang) => Some(Ident::from_str("!")),
             Some(TokenKind::ConOperator(sym)) => Some(Ident::new(sym)),
             Some(TokenKind::QualOperator(qual, sym)) => {
                 let full_name = format!("{}.{}", qual.as_str(), sym.as_str());
@@ -1595,6 +1639,7 @@ impl<'src> Parser<'src> {
             TokenKind::Minus => Ident::from_str("-"),
             TokenKind::Percent => Ident::from_str("%"),
             TokenKind::Dot => Ident::from_str("."),
+            TokenKind::Bang => Ident::from_str("!"),
             TokenKind::ConOperator(sym) => Ident::new(*sym),
             TokenKind::QualOperator(qual, sym) => {
                 let full_name = format!("{}.{}", qual.as_str(), sym.as_str());

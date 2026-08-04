@@ -1812,10 +1812,12 @@ impl TyCtxt {
                     let all_con = TyCon::new(Symbol::intern("All"), Kind::Star);
                     Scheme::mono(Ty::fun(self.builtins.bool_ty.clone(), Ty::Con(all_con)))
                 }
-                "Null" if def_info.kind == DefKind::StubConstructor => {
-                    // Null :: Block (a no-content block)
-                    Scheme::mono(Ty::Con(TyCon::new(Symbol::intern("Block"), Kind::Star)))
-                }
+                // NOTE: `Null` deliberately has NO curated arm. It used to be
+                // pinned to `Block` (pandoc-types <1.23's no-content block), but
+                // Data.Aeson's `Null :: Value` hits the same stub name —
+                // Readers.Metadata's case over a `Value` scrutinee then failed
+                // with `expected Value, found Block`. The generic fallback
+                // (`forall a. a`, instantiated fresh per use) serves both.
 
                 // Text.Pandoc.XML.Light.QName is an external record type stubbed
                 // by name only, so the generic fallback gives it a bare fresh-var
@@ -1914,6 +1916,43 @@ impl TyCtxt {
                     Scheme::poly(
                         vec![a.clone(), p.clone(), q.clone()],
                         Ty::fun(Ty::Var(p), Ty::fun(Ty::Var(q), Ty::fun(Ty::Var(a), node_a))),
+                    )
+                }
+
+                // Citeproc's `Citation a` record constructor (citationId /
+                // citationNoteNumber / citationItems). Distinct from pandoc-types'
+                // nullary-typed `Citation` — the StubConstructor guard keeps the
+                // real one on its data-driven scheme. Readers.EndNote builds it
+                // with record syntax against `m (Citeproc.Citation Text)`; the
+                // arity fallback's bare `Citation` result can't unify with the
+                // applied, alias-qualified type con in that signature.
+                "Citeproc.Citation" | "Citation" if def_info.kind == DefKind::StubConstructor => {
+                    let a = TyVar::new_star(0xFFFF_0000);
+                    let p = TyVar::new_star(0xFFFF_0001);
+                    let q = TyVar::new_star(0xFFFF_0002);
+                    let r = TyVar::new_star(0xFFFF_0003);
+                    let citation_con = TyCon::new(
+                        Symbol::intern("Citeproc.Citation"),
+                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+                    );
+                    let citation_a = Ty::App(
+                        Box::new(Ty::Con(citation_con)),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    self.con_field_defs.insert(
+                        def_info.id,
+                        vec![
+                            (Symbol::intern("citationId"), Ty::Var(p.clone())),
+                            (Symbol::intern("citationNoteNumber"), Ty::Var(q.clone())),
+                            (Symbol::intern("citationItems"), Ty::Var(r.clone())),
+                        ],
+                    );
+                    Scheme::poly(
+                        vec![a.clone(), p.clone(), q.clone(), r.clone()],
+                        Ty::fun(
+                            Ty::Var(p),
+                            Ty::fun(Ty::Var(q), Ty::fun(Ty::Var(r), citation_a)),
+                        ),
                     )
                 }
 
@@ -3703,12 +3742,28 @@ impl TyCtxt {
                     ),
                 ),
                 // Data.Text: (a -> Char -> a) -> a -> Text -> a — foldl
-                "Data.Text.foldl" | "Data.Text.foldr" => Scheme::poly(
+                "Data.Text.foldl" => Scheme::poly(
                     vec![a.clone()],
                     Ty::fun(
                         Ty::fun(
                             Ty::Var(a.clone()),
                             Ty::fun(self.builtins.char_ty.clone(), Ty::Var(a.clone())),
+                        ),
+                        Ty::fun(
+                            Ty::Var(a.clone()),
+                            Ty::fun(self.builtins.text_ty.clone(), Ty::Var(a.clone())),
+                        ),
+                    ),
+                ),
+                // Data.Text: (Char -> a -> a) -> a -> Text -> a — foldr takes the
+                // element FIRST (unlike foldl); sharing foldl's shape matched the
+                // Char pattern against the accumulator.
+                "Data.Text.foldr" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        Ty::fun(
+                            self.builtins.char_ty.clone(),
+                            Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
                         ),
                         Ty::fun(
                             Ty::Var(a.clone()),
@@ -6012,12 +6067,19 @@ impl TyCtxt {
                     vec![a.clone()],
                     Ty::fun(Ty::Var(a.clone()), self.builtins.int_ty.clone()),
                 ),
-                "Text.DocLayout.prefixed" | "Text.DocLayout.beforeNonBlank" => Scheme::poly(
+                "Text.DocLayout.prefixed" => Scheme::poly(
                     vec![a.clone()],
                     Ty::fun(
                         Ty::Var(a.clone()),
                         Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
                     ),
+                ),
+                // beforeNonBlank :: Doc a -> Doc a — UNARY, unlike prefixed;
+                // sharing the 2-arg scheme made `beforeNonBlank ";"` a partial
+                // application (Writers.Typst's `endCode :: Doc Text`).
+                "Text.DocLayout.beforeNonBlank" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
                 ),
 
                 // Text.Emoji operations

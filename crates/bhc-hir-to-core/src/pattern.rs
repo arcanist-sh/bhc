@@ -781,6 +781,20 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
     if matrix.rows.is_empty() {
         return DecisionTree::Fail(span);
     }
+    if std::env::var("BHC_MATCH_DEBUG").is_ok() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CALLS: AtomicU64 = AtomicU64::new(0);
+        let n = CALLS.fetch_add(1, Ordering::Relaxed);
+        if n % 100_000 == 0 {
+            eprintln!(
+                "BHC_MATCH_DEBUG: call #{} rows={} cols={} span={:?}",
+                n,
+                matrix.rows.len(),
+                matrix.scrutinees.len(),
+                span
+            );
+        }
+    }
 
     // Check if first row is all wildcards/vars (match success)
     let all_wild = matrix.rows[0]

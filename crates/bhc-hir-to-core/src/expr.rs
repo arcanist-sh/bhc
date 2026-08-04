@@ -1660,42 +1660,67 @@ fn lower_case(
         lowered_alts.push((alt.pat.clone(), rhs));
     }
 
-    // Build the core alternatives with fallthrough.
-    // For alternative i, the fallthrough is a case on scrut_var with alts [i+1..].
-    // We build from the end backwards so each fallthrough can be computed.
-    let mut core_alts_reversed: Vec<core::Alt> = Vec::with_capacity(lowered_alts.len());
+    // Build the core alternatives with SHARED fallthroughs. Inlining the
+    // remaining alternatives into each alternative's fallthrough is
+    // EXPONENTIAL: alternative 0's fallthrough contains alternative 1's,
+    // which contains alternative 2's, and so on (Text.Pandoc.Builder's
+    // compile hung; Readers.Docx.Symbols overflowed the stack). Instead,
+    // bind a resume point per alternative —
+    //   $fallthru_i = case scrut of { alt_i; _ -> $fallthru_{i+1} }
+    // — and reference it by VARIABLE. Each alternative body appears at most
+    // twice (outer dispatch + its resume point), keeping the total linear.
+    let n = lowered_alts.len();
+    let mut resume_vars: Vec<Option<_>> = (0..=n).map(|_| None).collect();
+    let mut resume_binds: Vec<core::Bind> = Vec::new(); // pushed f_{n-1} first
+    let mut outer_alts_rev: Vec<core::Alt> = Vec::with_capacity(n);
 
-    for i in (0..lowered_alts.len()).rev() {
+    for i in (0..n).rev() {
         let (ref pat, ref rhs) = lowered_alts[i];
+        let fallthrough = resume_vars[i + 1]
+            .as_ref()
+            .map(|v: &core::Var| core::Expr::Var(v.clone(), span));
+        let core_alt = lower_pat_to_alt_with_fallthrough(ctx, pat, rhs.clone(), span, fallthrough)?;
 
-        // Build fallthrough: a case on scrut_var with the remaining (already-built) alternatives
-        let fallthrough = if core_alts_reversed.is_empty() {
-            None // Last alternative: no fallthrough
-        } else {
-            // The remaining alternatives (in correct order)
-            let remaining: Vec<core::Alt> = core_alts_reversed.iter().rev().cloned().collect();
-            Some(core::Expr::Case(
+        // Resume point used by alternatives BEFORE i: try alt i, else resume
+        // at i+1 (or fail the match).
+        if i > 0 {
+            let default_rhs = match &resume_vars[i + 1] {
+                Some(v) => core::Expr::Var(v.clone(), span),
+                None => make_pattern_error(span),
+            };
+            let resume_case = core::Expr::Case(
                 Box::new(core::Expr::Var(scrut_var.clone(), span)),
-                remaining,
+                vec![
+                    core_alt.clone(),
+                    core::Alt {
+                        con: core::AltCon::Default,
+                        binders: vec![],
+                        rhs: default_rhs,
+                    },
+                ],
                 Ty::Error,
                 span,
-            ))
-        };
+            );
+            let f = ctx.fresh_var(&format!("$fallthru{i}"), Ty::Error, span);
+            resume_binds.push(core::Bind::NonRec(f.clone(), Box::new(resume_case)));
+            resume_vars[i] = Some(f);
+        }
 
-        let core_alt = lower_pat_to_alt_with_fallthrough(ctx, pat, rhs.clone(), span, fallthrough)?;
-        core_alts_reversed.push(core_alt);
+        outer_alts_rev.push(core_alt);
     }
+    outer_alts_rev.reverse();
 
-    // Reverse to get correct order
-    core_alts_reversed.reverse();
-
-    // Wrap in let-binding for the scrutinee variable
-    let case_expr = core::Expr::Case(
+    let mut case_expr = core::Expr::Case(
         Box::new(core::Expr::Var(scrut_var.clone(), span)),
-        core_alts_reversed,
+        outer_alts_rev,
         Ty::Error,
         span,
     );
+    // Wrap the resume bindings around the dispatch case: f_1 innermost,
+    // f_{n-1} outermost so each f_i sees f_{i+1} in scope.
+    for bind in resume_binds.into_iter().rev() {
+        case_expr = core::Expr::Let(Box::new(bind), Box::new(case_expr), span);
+    }
 
     let bind = core::Bind::NonRec(scrut_var, Box::new(scrutinee_core));
     Ok(core::Expr::Let(Box::new(bind), Box::new(case_expr), span))

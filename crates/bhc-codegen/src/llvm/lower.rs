@@ -34097,6 +34097,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let map_val = self
             .lower_expr(map_expr)?
             .ok_or_else(|| CodegenError::Internal("map_lookup: no map".to_string()))?;
+        self.lower_builtin_map_lookup_val(key, map_val)
+    }
+
+    /// Value-level core of `Data.Map.lookup`, shared with the direct path.
+    fn lower_builtin_map_lookup_val(
+        &mut self,
+        key: BasicValueEnum<'ctx>,
+        map_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let key_int = self.coerce_to_int(key)?;
         let map_ptr = self.value_to_ptr(map_val)?;
         let rts_fn = self
@@ -34179,6 +34188,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let map_val = self
             .lower_expr(map_expr)?
             .ok_or_else(|| CodegenError::Internal("map_insert: no map".to_string()))?;
+        self.lower_builtin_map_insert_val(key, val, map_val)
+    }
+
+    /// Value-level core of `Data.Map.insert`, shared with the direct path.
+    fn lower_builtin_map_insert_val(
+        &mut self,
+        key: BasicValueEnum<'ctx>,
+        val: BasicValueEnum<'ctx>,
+        map_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let key_int = self.coerce_to_int(key)?;
         let val_ptr = self.value_to_ptr(val)?;
         let map_ptr = self.value_to_ptr(map_val)?;
@@ -39070,6 +39089,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let list_val = self
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("map_fromList: no list".to_string()))?;
+        self.lower_builtin_map_from_list_val(list_val)
+    }
+
+    /// Value-level core of `Data.Map.fromList`, shared with the direct path.
+    fn lower_builtin_map_from_list_val(
+        &mut self,
+        list_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let list_ptr = self.value_to_ptr(list_val)?;
 
         let tm = self.type_mapper();
@@ -39576,6 +39603,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let s2 = self
             .lower_expr(set2_expr)?
             .ok_or_else(|| CodegenError::Internal(format!("{}: no set2", name)))?;
+        self.lower_builtin_set_binary_val(s1, s2, rts_id, name)
+    }
+
+    /// Value-level core of the binary set operations, shared with the direct
+    /// (pre-lowered argument) builtin path.
+    fn lower_builtin_set_binary_val(
+        &mut self,
+        s1: BasicValueEnum<'ctx>,
+        s2: BasicValueEnum<'ctx>,
+        rts_id: usize,
+        name: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let s1_ptr = self.value_to_ptr(s1)?;
         let s2_ptr = self.value_to_ptr(s2)?;
         let rts_fn = self
@@ -39790,6 +39829,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let list_val = self
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("set_fromList: no list".to_string()))?;
+        self.lower_builtin_set_from_list_val(list_val)
+    }
+
+    /// Value-level core of `Data.Set.fromList`, shared with the direct
+    /// (pre-lowered argument) builtin path.
+    fn lower_builtin_set_from_list_val(
+        &mut self,
+        list_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let list_ptr = self.value_to_ptr(list_val)?;
 
         let tm = self.type_mapper();
@@ -45456,9 +45504,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let rts_fn = self.functions.get(&VarId::new(1000201)).ok_or_else(|| {
                     CodegenError::Internal("bhc_text_singleton not declared".to_string())
                 })?;
+                let c = self.coerce_to_int(args[0])?;
                 let result = self
                     .builder()
-                    .build_call(*rts_fn, &[args[0].into()], "text_singleton")
+                    .build_call(*rts_fn, &[c.into()], "text_singleton")
                     .map_err(|e| CodegenError::Internal(format!("text_singleton: {:?}", e)))?
                     .try_as_basic_value()
                     .basic()
@@ -45560,9 +45609,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let rts_fn = self.functions.get(&VarId::new(1000212)).ok_or_else(|| {
                     CodegenError::Internal("bhc_text_take not declared".to_string())
                 })?;
+                let n = self.coerce_to_int(args[0])?;
                 let result = self
                     .builder()
-                    .build_call(*rts_fn, &[args[0].into(), args[1].into()], "text_take")
+                    .build_call(*rts_fn, &[n.into(), args[1].into()], "text_take")
                     .map_err(|e| CodegenError::Internal(format!("text_take: {:?}", e)))?
                     .try_as_basic_value()
                     .basic()
@@ -45573,9 +45623,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let rts_fn = self.functions.get(&VarId::new(1000214)).ok_or_else(|| {
                     CodegenError::Internal("bhc_text_drop not declared".to_string())
                 })?;
+                let n = self.coerce_to_int(args[0])?;
                 let result = self
                     .builder()
-                    .build_call(*rts_fn, &[args[0].into(), args[1].into()], "text_drop")
+                    .build_call(*rts_fn, &[n.into(), args[1].into()], "text_drop")
                     .map_err(|e| CodegenError::Internal(format!("text_drop: {:?}", e)))?
                     .try_as_basic_value()
                     .basic()
@@ -45670,9 +45721,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .functions
                     .get(&VarId::new(var_id))
                     .ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let n = self.coerce_to_int(args[0])?;
                 let result = self
                     .builder()
-                    .build_call(*rts_fn, &[args[0].into(), args[1].into()], "lt_int_ptr")
+                    .build_call(*rts_fn, &[n.into(), args[1].into()], "lt_int_ptr")
                     .map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?
                     .try_as_basic_value()
                     .basic()
@@ -45779,9 +45831,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .functions
                     .get(&VarId::new(var_id))
                     .ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let n = self.coerce_to_int(args[0])?;
                 let result = self
                     .builder()
-                    .build_call(*rts_fn, &[args[0].into(), args[1].into()], "lbs_int_ptr")
+                    .build_call(*rts_fn, &[n.into(), args[1].into()], "lbs_int_ptr")
                     .map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?
                     .try_as_basic_value()
                     .basic()
@@ -45848,9 +45901,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let rts_fn = self.functions.get(&VarId::new(1000473)).ok_or_else(|| {
                     CodegenError::Internal("bhc_lazy_bs_char8_take not declared".to_string())
                 })?;
+                let n = self.coerce_to_int(args[0])?;
                 let result = self
                     .builder()
-                    .build_call(*rts_fn, &[args[0].into(), args[1].into()], "lbs_c8_take")
+                    .build_call(*rts_fn, &[n.into(), args[1].into()], "lbs_c8_take")
                     .map_err(|e| CodegenError::Internal(format!("lbs_c8_take: {:?}", e)))?
                     .try_as_basic_value()
                     .basic()
@@ -45861,9 +45915,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let rts_fn = self.functions.get(&VarId::new(1000475)).ok_or_else(|| {
                     CodegenError::Internal("bhc_lazy_bs_char8_cons not declared".to_string())
                 })?;
+                let c = self.coerce_to_int(args[0])?;
                 let result = self
                     .builder()
-                    .build_call(*rts_fn, &[args[0].into(), args[1].into()], "lbs_c8_cons")
+                    .build_call(*rts_fn, &[c.into(), args[1].into()], "lbs_c8_cons")
                     .map_err(|e| CodegenError::Internal(format!("lbs_c8_cons: {:?}", e)))?
                     .try_as_basic_value()
                     .basic()
@@ -46004,9 +46059,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .functions
                     .get(&VarId::new(var_id))
                     .ok_or_else(|| CodegenError::Internal(format!("{} not declared", name)))?;
+                let n = self.coerce_to_int(args[0])?;
                 let result = self
                     .builder()
-                    .build_call(*rts_fn, &[args[0].into()], "bsb_direct")
+                    .build_call(*rts_fn, &[n.into()], "bsb_direct")
                     .map_err(|e| CodegenError::Internal(format!("{}: {:?}", name, e)))?
                     .try_as_basic_value()
                     .basic()
@@ -46835,6 +46891,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Data.Map, Data.Set, etc. — delegate to existing impls
             "Data.Map.empty" => self.lower_builtin_map_empty(),
             "Data.Set.empty" => self.lower_builtin_set_empty(),
+            "Data.Set.fromList" => self.lower_builtin_set_from_list_val(args[0]),
+            "Data.Map.fromList" => self.lower_builtin_map_from_list_val(args[0]),
+            "Data.Map.lookup" => self.lower_builtin_map_lookup_val(args[0], args[1]),
+            "Data.Sequence.fromList" => self.lower_builtin_seq_from_list_val(args[0]),
+            "Data.Map.insert" => self.lower_builtin_map_insert_val(args[0], args[1], args[2]),
+            "Data.Set.union" => {
+                self.lower_builtin_set_binary_val(args[0], args[1], 1000127, "set_union")
+            }
+            "Data.Set.intersection" => {
+                self.lower_builtin_set_binary_val(args[0], args[1], 1000128, "set_intersection")
+            }
+            "Data.Set.difference" => {
+                self.lower_builtin_set_binary_val(args[0], args[1], 1000129, "set_difference")
+            }
             "Data.IntMap.empty" | "Data.IntSet.empty" => {
                 let rts_fn = self
                     .functions
@@ -46853,10 +46923,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .ok_or_else(|| CodegenError::Internal(format!("{}: void", name)))?;
                 Ok(Some(result))
             }
-            _ => Err(CodegenError::Internal(format!(
-                "lower_builtin_direct: unhandled container builtin '{}'",
-                name
-            ))),
+            _ => {
+                // Generic bridge: the Expr-based `lower_builtin` dispatcher
+                // covers the full container surface, but its helpers lower
+                // their arguments themselves. Register the already-lowered
+                // values as fresh environment variables and re-dispatch with
+                // synthetic Var expressions — one mechanism instead of a
+                // hand-written value-level twin per operation.
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static SYNTH_ID: AtomicU32 = AtomicU32::new(900_000_000);
+                let mut synthetic: Vec<Expr> = Vec::with_capacity(args.len());
+                for v in args {
+                    let id = VarId::new(SYNTH_ID.fetch_add(1, Ordering::Relaxed) as usize);
+                    let var = Var::new(bhc_intern::Symbol::intern("$direct_arg"), id, Ty::Error);
+                    self.env.insert(id, *v);
+                    synthetic.push(Expr::Var(var, bhc_span::Span::default()));
+                }
+                let refs: Vec<&Expr> = synthetic.iter().collect();
+                match self.lower_builtin(name, &refs)? {
+                    Some(result) => Ok(Some(result)),
+                    None => Err(CodegenError::Internal(format!(
+                        "lower_builtin_direct: unhandled container builtin '{}'",
+                        name
+                    ))),
+                }
+            }
         }
     }
 
@@ -51499,6 +51590,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let list = self
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("seq_from_list: no list".to_string()))?;
+        self.lower_builtin_seq_from_list_val(list)
+    }
+
+    /// Value-level core of `Data.Sequence.fromList`, shared with the direct path.
+    fn lower_builtin_seq_from_list_val(
+        &mut self,
+        list: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let list_ptr = self.value_to_ptr(list)?;
         let tm = self.type_mapper();
 

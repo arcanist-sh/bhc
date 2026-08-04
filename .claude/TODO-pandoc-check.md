@@ -2,6 +2,18 @@
 
 **Goal:** `bhc check` succeeds on Pandoc's library modules (excluding Template Haskell).
 
+**🏆 GOAL COMPLETE (2026-08-04): `bhc check` passes ALL 221/221 Pandoc 3.6.4 library
+modules — 0 failed, 0 skipped — INCLUDING the Template Haskell modules (expression
+splices) and `Text.Pandoc.App`.** Invocation:
+`bhc --package-dir <pandoc-types>/src check <pandoc>/src`. The 163→221 endgame
+(2026-08-04, four sessions) is chronicled in the session memory; highlights: declared
+operator fixities (Org.Meta's 84 errors were one ignored `infix 0 ~~>`), TH expression
+splices (`$(embedFile ..)` → permissive `$splice`), Arrow `proc` notation, GADT record
+constructors, view-pattern type applications & compositions, guard-comma layout,
+`!`-operator forms, dedicated-stub routing for collision-heavy external modules
+(Blaze/Jira/Ipynb/Haddock/Citeproc), and a stub-headed permissive unify rule for
+cross-module associated families. Historical per-fix notes below.
+
 **`Num Text` cluster investigated — NO batch cause (2026-07-23).** 13× `No instance Num Text` + 4× `Num [Int]` across 5 parser modules (Creole, Muse, LaTeX/.Parsing/.Table) looked like a batch, but each module also has other/layered errors, and the promising shared-cause hypothesis (`count` = `Data.Text.count :: Text->Text->Int` shadowing `Text.Parsec.count`) is WRONG: a minimal `count n (char 'x')` via `Text.Pandoc.Parsing` type-checks fine. So `Num Text` is emergent/per-module (a numeric literal meeting Text through module-specific inference), not a single fix. Deferred.
 
 **`GridTable` — NOT a clean win (2026-07-23). Occurs-check on `let rows = GT.rows blkTbl; mapM (mapM ..) rows`: the external `Text.GridTable` stub `GT.rows` gets the default StubValue scheme `forall a. a` (context.rs:~7128), which let-generalizes to bottom and occurs-checks in the nested `mapM`. DEAD END: changing the default to `forall a b. a->b` regresses 111->51 (value-stubs like `stderr`/`stdout`/constants NEED `forall a. a`). TARGETED ATTEMPT ALSO FAILED (2026-07-23): gave `rows` (kind=Value, reaches the 2nd-pass `forall a. a` default) an `a->[[b]]` scheme — occurs-check UNCHANGED. `GT.rows` resolves through qualified-name/DefId indirection to a def the by-name fix doesn't reach, and the module likely has layered blockers. GridTable is genuinely resistant; needs deeper work (fix the qualified-stub-value scheme path, or model gridtables). Deferred.**

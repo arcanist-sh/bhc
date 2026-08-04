@@ -537,7 +537,7 @@ The compiler builds cleanly (33 crates, 0 errors) and compiles real Haskell prog
 | 9.9 CPP Preprocessing | 🟢 | Built-in Rust preprocessor: `#ifdef`/`#if`/`#elif`/`#else`/`#endif`/`#define`/`#undef`, expression evaluator, macro expansion, predefined platform/version macros |
 | 9.10 Type Families | 🟢 | Standalone open/closed type families, type instances, associated type families with reduction; standalone data families with data instances |
 
-**Exit Criteria:** `bhc check` succeeds on Pandoc source files (excluding Template Haskell). **Status (2026-07-31): 147 of 221 library modules pass** (up from ~10, and 112 a week earlier); every module that failed purely at type-checking is now green, so the remaining 28 are lowering-stage + multi-layer (Template Haskell and modules that unmask deeper type errors once the surface `unbound variable` is resolved). See `.claude/TODO-pandoc-check.md`.
+**Exit Criteria:** `bhc check` succeeds on Pandoc source files (excluding Template Haskell). **✅ MET AND EXCEEDED (2026-08-04): ALL 221 of 221 library modules pass — 0 failed, 0 skipped — including the Template Haskell modules (expression splices) and `Text.Pandoc.App`.** See `.claude/TODO-pandoc-check.md`.
 
 **Notes:** 190 E2E tests passing across 70 milestones (E.1–E.70); workspace `cargo test --all-features` 2756/0. See `.claude/TODO-pandoc-check.md` for the current Pandoc grind.
 

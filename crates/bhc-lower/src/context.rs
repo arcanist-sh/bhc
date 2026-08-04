@@ -1101,6 +1101,10 @@ impl LowerContext {
             "arr",
             "-<",
             "-<<",
+            // Template Haskell expression splices: `$(embedFile "f")` parses
+            // as `$splice (embedFile "f")` — the placeholder scheme gives the
+            // splice a fresh result type per use.
+            "$splice",
         ];
 
         for name in builtin_funcs {

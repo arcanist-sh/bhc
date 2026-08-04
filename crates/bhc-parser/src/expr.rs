@@ -238,6 +238,27 @@ impl<'src> Parser<'src> {
             }
         }
 
+        // Template Haskell expression splice: `$(embedFile "f")`. A `$` in
+        // PREFIX position (nothing to its left) followed by `(` can only be a
+        // splice — infix `f $ (x)` consumes the `$` in continue_infix_expr
+        // instead. Typed permissively as `$splice inner` (the builtin's
+        // placeholder scheme gives every splice a fresh result type).
+        let is_splice = matches!(
+            self.current_kind(),
+            Some(TokenKind::Operator(s)) if s.as_str() == "$"
+        ) && self.pos + 1 < self.tokens.len()
+            && matches!(self.tokens[self.pos + 1].node.kind, TokenKind::LParen);
+        if is_splice {
+            let start = self.current_span();
+            self.advance(); // `$`
+            self.advance(); // `(`
+            let inner = self.parse_expr()?;
+            let end = self.expect(&TokenKind::RParen)?;
+            let span = start.to(end.span);
+            let splice = Expr::Var(Ident::from_str("$splice"), start);
+            return Ok(Expr::App(Box::new(splice), Box::new(inner), span));
+        }
+
         self.parse_app_expr()
     }
 
@@ -461,7 +482,11 @@ impl<'src> Parser<'src> {
 
     /// Get operator precedence and associativity.
     fn get_operator_info(&self, op: &str) -> (u8, Assoc) {
-        // Default precedences (can be overridden by fixity declarations)
+        // Module-declared fixities win over the default table.
+        if let Some(&(prec, assoc)) = self.declared_fixities.get(op) {
+            return (prec, assoc);
+        }
+        // Default precedences
         match op {
             "." => (9, Assoc::Right),
             "^" | "^^" | "**" => (8, Assoc::Right),
@@ -1690,7 +1715,7 @@ impl<'src> Parser<'src> {
 
 /// Operator associativity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Assoc {
+pub(crate) enum Assoc {
     Left,
     Right,
     None,

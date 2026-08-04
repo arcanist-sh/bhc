@@ -354,6 +354,24 @@ fn try_reduce_type_family(ctx: &TyCtxt, ty: &Ty) -> Ty {
     }
 }
 
+/// A Con-vs-App mismatch where the APP side's head constructor is not
+/// registered in the type environment. Real data types register their type
+/// constructors (`register_data_type`), so an unknown head is a stub-world
+/// type: an imported opaque type or an unregistered associated family
+/// (e.g. `StyleName` whose class lives in another module). A structural
+/// mismatch against such a head is an artifact of stubbing, not a real error.
+fn is_stub_headed_mismatch(ctx: &TyCtxt, a: &Ty, b: &Ty) -> bool {
+    let app_side = match (a, b) {
+        (Ty::Con(_), app @ Ty::App(..)) | (app @ Ty::App(..), Ty::Con(_)) => app,
+        _ => return false,
+    };
+    if let Some((name, _)) = extract_type_family_app(app_side) {
+        ctx.env.lookup_type_con(name).is_none() && !ctx.type_aliases.contains_key(&name)
+    } else {
+        false
+    }
+}
+
 /// Check if a type is an unreducible type family application.
 ///
 /// Returns `Some((name, args, class_name))` if the type looks like a type family
@@ -767,6 +785,13 @@ fn unify_inner(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
                 diagnostics::emit_type_family_reduction_failed(ctx, name, &args, class_name, span);
             } else if let Some((name, args, class_name)) = check_unreduced_type_family(ctx, t2) {
                 diagnostics::emit_type_family_reduction_failed(ctx, name, &args, class_name, span);
+            } else if is_stub_headed_mismatch(ctx, t1, t2) {
+                // Con-vs-App where the APP side's head constructor is not in
+                // the type environment: the head is a stub-world type — an
+                // imported opaque type or an unregistered associated family
+                // (`ParaStyleName` vs `StyleName t`, `Citation` vs
+                // `Citeproc.Citation t` in Readers.Docx). The mismatch is an
+                // artifact of stubbing; treat it permissively.
             } else {
                 diagnostics::emit_type_mismatch(ctx, t1, t2, span);
             }

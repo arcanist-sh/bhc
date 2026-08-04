@@ -3849,12 +3849,25 @@ impl TyCtxt {
                 }
                 // Data.Text.Encoding: ByteString -> Text
                 "Data.Text.Encoding.decodeUtf8"
-                | "Data.Text.Encoding.decodeUtf8With"
                 | "Data.Text.Encoding.decodeLatin1"
                 | "Data.Text.Encoding.decodeUtf16LE" => Scheme::mono(Ty::fun(
                     self.builtins.bytestring_ty.clone(),
                     self.builtins.text_ty.clone(),
                 )),
+                // decodeUtf8With takes the error handler FIRST:
+                // OnDecodeError -> ByteString -> Text (handler left permissive;
+                // Text.Pandoc.App's `TE.decodeUtf8With TE.lenientDecode err`).
+                "Data.Text.Encoding.decodeUtf8With"
+                | "Data.Text.Lazy.Encoding.decodeUtf8With" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(
+                        Ty::Var(a.clone()),
+                        Ty::fun(
+                            self.builtins.bytestring_ty.clone(),
+                            self.builtins.text_ty.clone(),
+                        ),
+                    ),
+                ),
                 // Data.Text.Lazy: pack/unpack
                 "Data.Text.Lazy.pack" => Scheme::mono(Ty::fun(
                     self.builtins.string_ty.clone(),
@@ -3870,8 +3883,7 @@ impl TyCtxt {
                     self.builtins.bytestring_ty.clone(),
                 )),
                 // Data.Text.Lazy.Encoding: BL.ByteString -> TL.Text
-                "Data.Text.Lazy.Encoding.decodeUtf8"
-                | "Data.Text.Lazy.Encoding.decodeUtf8With" => Scheme::mono(Ty::fun(
+                "Data.Text.Lazy.Encoding.decodeUtf8" => Scheme::mono(Ty::fun(
                     self.builtins.bytestring_ty.clone(),
                     self.builtins.text_ty.clone(),
                 )),

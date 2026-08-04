@@ -100,6 +100,10 @@ pub struct Parser<'src> {
     src: &'src str,
     /// Current recursion depth (expressions, types, patterns).
     depth: usize,
+    /// Module-declared operator fixities (`infixl 1 \`op\``, `infix 0 ~~>`),
+    /// collected in a token pre-scan so declarations work regardless of where
+    /// they appear relative to the operator's uses.
+    pub(crate) declared_fixities: std::collections::HashMap<String, (u8, crate::expr::Assoc)>,
 }
 
 /// Maximum nesting depth for expressions, types, and patterns.
@@ -114,6 +118,7 @@ impl<'src> Parser<'src> {
     #[must_use]
     pub fn new(src: &'src str, file_id: FileId) -> Self {
         let tokens: Vec<_> = Lexer::new(src).collect();
+        let declared_fixities = Self::scan_fixities(&tokens);
         Self {
             tokens,
             pos: 0,
@@ -121,7 +126,84 @@ impl<'src> Parser<'src> {
             file_id,
             src,
             depth: 0,
+            declared_fixities,
         }
+    }
+
+    /// Pre-scan the token stream for fixity declarations
+    /// (`infix[l|r] [prec] op, ...`) so declared fixities apply regardless of
+    /// where the declaration sits relative to the operator's uses.
+    fn scan_fixities(
+        tokens: &[Spanned<Token>],
+    ) -> std::collections::HashMap<String, (u8, crate::expr::Assoc)> {
+        use crate::expr::Assoc;
+        let mut map = std::collections::HashMap::new();
+        let mut i = 0;
+        while i < tokens.len() {
+            let assoc = match tokens[i].node.kind {
+                TokenKind::Infix => Assoc::None,
+                TokenKind::Infixl => Assoc::Left,
+                TokenKind::Infixr => Assoc::Right,
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            i += 1;
+            let mut prec = 9u8;
+            if let Some(tok) = tokens.get(i) {
+                if let TokenKind::IntLit(ref lit) = tok.node.kind {
+                    prec = lit.parse().map(|v| v as u8).unwrap_or(9).min(9);
+                    i += 1;
+                }
+            }
+            loop {
+                let name = match tokens.get(i).map(|t| &t.node.kind) {
+                    Some(TokenKind::Operator(sym)) | Some(TokenKind::ConOperator(sym)) => {
+                        i += 1;
+                        sym.as_str().to_string()
+                    }
+                    Some(TokenKind::Bang) => {
+                        i += 1;
+                        "!".to_string()
+                    }
+                    Some(TokenKind::Dot) => {
+                        i += 1;
+                        ".".to_string()
+                    }
+                    Some(TokenKind::Minus) => {
+                        i += 1;
+                        "-".to_string()
+                    }
+                    Some(TokenKind::Star) => {
+                        i += 1;
+                        "*".to_string()
+                    }
+                    Some(TokenKind::Percent) => {
+                        i += 1;
+                        "%".to_string()
+                    }
+                    Some(TokenKind::Backtick) => {
+                        if let Some(TokenKind::Ident(sym)) = tokens.get(i + 1).map(|t| &t.node.kind)
+                        {
+                            let n = sym.as_str().to_string();
+                            i += 3; // ` name `
+                            n
+                        } else {
+                            break;
+                        }
+                    }
+                    _ => break,
+                };
+                map.insert(name, (prec, assoc));
+                if matches!(tokens.get(i).map(|t| &t.node.kind), Some(TokenKind::Comma)) {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        map
     }
 
     /// Enter one level of parse recursion, erroring at the depth limit.

@@ -1296,6 +1296,8 @@ fn register_standard_module_exports(
             "putStr",
             "hPutStr",
             "hGetContents",
+            "getContents",
+            "interact",
         ],
         "Data.ByteString.Lazy.Char8" => &[
             "ByteString",
@@ -1748,6 +1750,9 @@ fn register_standard_module_exports(
             "isExtSeparator",
             "dropTrailingPathSeparator",
             "dropFileName",
+            "splitSearchPath",
+            "getSearchPath",
+            "equalFilePath",
         ],
         "System.IO.Error" => &[
             "isDoesNotExistError",
@@ -1932,6 +1937,11 @@ fn register_standard_module_exports(
             "prependFailure",
             "modifyFailure",
             "formatRelativePath",
+            "genericToJSON",
+            "genericParseJSON",
+            "genericToEncoding",
+            "fieldLabelModifier",
+            "camelTo2",
             // Re-exports from Data.Aeson.TH
             "deriveJSON",
             "deriveToJSON",
@@ -3278,6 +3288,7 @@ fn register_standard_module_exports(
             "parseXML",
             "parseXMLElement",
             "parseXMLContents",
+            "parseXMLContentsWithEntities",
             "onlyElems",
             "elsByTag",
             "Elem",
@@ -3637,6 +3648,12 @@ fn register_standard_module_exports(
             "CompressionMethod",
             "toArchive",
             "toArchiveOrFail",
+            "extractFilesFromArchive",
+            "ZipOption",
+            "OptRecursive",
+            "OptDestination",
+            "OptVerbose",
+            "OptLocation",
             "fromArchive",
             "toEntry",
             "fromEntry",
@@ -4320,6 +4337,57 @@ fn register_standard_module_exports(
             "NormalCite",
             "AuthorOnly",
             "SuppressAuthor",
+            // Citation/CitationItem accessors (Readers.Docx builds citations)
+            "citationId",
+            "citationNoteNumber",
+            "citationItems",
+            "citationItemId",
+            "citationItemLabel",
+            "citationItemLocator",
+            "citationItemType",
+            "citationItemPrefix",
+            "citationItemSuffix",
+            "citationItemData",
+            // Text.Pandoc.Citeproc's `import Citeproc` surface
+            "parseStyle",
+            "mergeLocales",
+            "getLocale",
+            "rawDateEDTF",
+            "styleOptions",
+            "styleIsNoteStyle",
+            "styleLineSpacing",
+            "styleHangingIndent",
+            "styleEntrySpacing",
+            "resultWarnings",
+            "NumVal",
+            "SubstitutedVal",
+            "movePunctuationInsideQuotes",
+            "localePunctuationInQuote",
+            "defaultCiteprocOptions",
+            "dateParts",
+            "dateLiteral",
+            "dateCirca",
+            "CiteprocParseError",
+            "addTextCase",
+            "TextCase",
+            "TitleCase",
+            "SentenceCase",
+            "CapitalizeFirst",
+            "CapitalizeAll",
+            "Lowercase",
+            "Uppercase",
+            // CiteprocOutput class methods
+            "toText",
+            "fromText",
+            "dropTextWhile",
+            "dropTextWhileEnd",
+            "addFontVariant",
+            "addFontStyle",
+            "addFontWeight",
+            "addQuotes",
+            "inNote",
+            "mapText",
+            "localizeQuotes",
         ],
         "Citeproc.Types" => &[
             "Reference",
@@ -4381,6 +4449,25 @@ fn register_standard_module_exports(
             "extractParticles",
             // Locale accessors
             "localeTerms",
+            "localeLanguage",
+            // Lang (Text.Collate.Lang re-exports)
+            "parseLang",
+            "renderLang",
+            "langLanguage",
+            "langRegion",
+            "langScript",
+            "langVariants",
+            // Text-case transforms (Citeproc.CaseTransform re-exports)
+            "addTextCase",
+            "TextCase",
+            "TitleCase",
+            "SentenceCase",
+            "Lowercase",
+            "Uppercase",
+            "CapitalizeFirst",
+            "CapitalizeAll",
+            // Val constructor for substituted variables
+            "SubstitutedVal",
         ],
         "Citeproc.Pandoc" => &["citeproc", "getReferences", "getStyle", "CiteprocOutput"],
         "Citeproc.Locale" => &["Locale", "getLocale", "mergeLocales", "lookupTerm"],
@@ -6013,7 +6100,31 @@ fn register_standard_module_exports(
             // with pandoc-types constructors (`H.Table{ tableHeaderRows = .. }`
             // in Readers.Haddock must not hit pandoc's Table).
             || module_name == "Documentation.Haddock.Types"
-            || (matches!(module_name, "Citeproc" | "Citeproc.Types") && export == "Citation")
+            || (matches!(module_name, "Citeproc" | "Citeproc.Types")
+                && matches!(
+                    export,
+                    // `Citation` collides with pandoc-types' constructor;
+                    // `SuppressAuthor` with its CitationMode constructor;
+                    // `citationId`/`citationNoteNumber` with its accessors.
+                    // The whole citation family stays dedicated so the
+                    // qualified names never leak to the pandoc-types ones
+                    // (Readers.Docx's convertCitationMode/handleCitation).
+                    "Citation"
+                        | "CitationItemType"
+                        | "NormalCite"
+                        | "AuthorOnly"
+                        | "SuppressAuthor"
+                        | "citationId"
+                        | "citationNoteNumber"
+                        | "citationItems"
+                        | "citationItemId"
+                        | "citationItemLabel"
+                        | "citationItemLocator"
+                        | "citationItemType"
+                        | "citationItemPrefix"
+                        | "citationItemSuffix"
+                        | "citationItemData"
+                ))
         {
             // The djot stub modules export djot-specific names that must NOT be
             // conflated with a same-named builtin — e.g. `Djot.AST.div` is a

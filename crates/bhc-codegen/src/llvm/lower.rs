@@ -40386,6 +40386,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .builder()
             .build_int_sub(count_val, one, "init_i")
             .map_err(|e| CodegenError::Internal(format!("text_unpack sub: {:?}", e)))?;
+        // The block emitting this branch is the loop's true preheader; the
+        // header PHIs must name IT as the incoming block. The positionally
+        // previous block (get_previous_basic_block) can be an unrelated case
+        // block that never branches here — MediaBag's derived-Eq thunks put a
+        // `case_unreachable` there, and the PHI failed LLVM verification.
+        let pre_header = self.builder().get_insert_block().ok_or_else(|| {
+            CodegenError::Internal("text_unpack: no pre-header block".to_string())
+        })?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("text_unpack br: {:?}", e)))?;
@@ -40442,9 +40450,6 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("text_unpack loop_br: {:?}", e)))?;
 
         // Wire phi nodes
-        let pre_header = loop_header.get_previous_basic_block().ok_or_else(|| {
-            CodegenError::Internal("text_unpack: no pre-header block".to_string())
-        })?;
         phi_i.add_incoming(&[(&init_i, pre_header), (&next_i, loop_body)]);
         phi_acc.add_incoming(&[(&nil, pre_header), (&cons, loop_body)]);
 
@@ -40922,6 +40927,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .builder()
             .build_int_sub(count_val, one, "init_i")
             .map_err(|e| CodegenError::Internal(format!("bs_unpack sub: {:?}", e)))?;
+        // True preheader for the header PHIs — see lower_builtin_text_unpack.
+        let pre_header = self.builder().get_insert_block().ok_or_else(|| {
+            CodegenError::Internal("bs_unpack: no pre-header block".to_string())
+        })?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("bs_unpack br: {:?}", e)))?;
@@ -40978,9 +40987,6 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("bs_unpack loop_br: {:?}", e)))?;
 
         // Wire phi nodes
-        let pre_header = loop_header
-            .get_previous_basic_block()
-            .ok_or_else(|| CodegenError::Internal("bs_unpack: no pre-header block".to_string()))?;
         phi_i.add_incoming(&[(&init_i, pre_header), (&next_i, loop_body)]);
         phi_acc.add_incoming(&[(&nil, pre_header), (&cons, loop_body)]);
 

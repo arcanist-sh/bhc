@@ -171,6 +171,11 @@ pub struct LowerContext {
     current_scope: ScopeId,
     /// Definition information.
     pub defs: DefMap,
+    /// Type synonyms loaded from `.bhi` interfaces (name, params, body).
+    /// The interface loader fills this; the driver hands it to the type
+    /// checker so synonyms like `type RowHead = [Cell]` expand across
+    /// module boundaries instead of unifying as opaque constructors.
+    pub interface_type_aliases: Vec<(Symbol, Vec<bhc_types::TyVar>, bhc_types::Ty)>,
     /// Errors collected during lowering.
     pub errors: Vec<crate::LowerError>,
     /// Warnings collected during lowering.
@@ -207,6 +212,7 @@ impl LowerContext {
             scopes: vec![root_scope],
             current_scope: ScopeId::new(0),
             defs: IndexMap::default(),
+            interface_type_aliases: Vec::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
             import_aliases: FxHashMap::default(),

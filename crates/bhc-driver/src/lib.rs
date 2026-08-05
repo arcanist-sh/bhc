@@ -1049,8 +1049,15 @@ impl Compiler {
     ) -> CompileResult<TypedModule> {
         debug!("type checking module");
 
-        // Pass lower context's defs directly - bhc_typeck now uses the same DefMap type
-        match bhc_typeck::type_check_module_with_defs(hir, file_id, Some(&lower_ctx.defs)) {
+        // Pass lower context's defs directly - bhc_typeck now uses the same
+        // DefMap type. Interface-loaded type synonyms ride along so aliases
+        // like AnnotatedTable's `type RowHead = [Cell]` expand cross-module.
+        match bhc_typeck::type_check_module_full(
+            hir,
+            file_id,
+            Some(&lower_ctx.defs),
+            &lower_ctx.interface_type_aliases,
+        ) {
             Ok(typed) => Ok(typed),
             Err(diagnostics) => {
                 eprintln!("Type errors:");
@@ -2728,7 +2735,31 @@ impl Compiler {
                 let (constructors, is_newtype) = match definition {
                     TypeDefinition::Data(cons) => (cons.as_slice(), false),
                     TypeDefinition::Newtype(con) => (std::slice::from_ref(con), true),
-                    TypeDefinition::TypeSynonym(_) => continue, // No constructors
+                    TypeDefinition::TypeSynonym(body) => {
+                        // Record the synonym so the type checker can expand it
+                        // (`type RowHead = [Cell]`); registered opaquely, it
+                        // fails unification against its own expansion
+                        // (Writers.HTML/ConTeXt/JATS.Table on AnnotatedTable's
+                        // aliases). Params convert first so the body's Var
+                        // occurrences reuse the same TyVars.
+                        converter.reset_vars();
+                        let param_vars: Vec<bhc_types::TyVar> = exported_type
+                            .params
+                            .iter()
+                            .filter_map(|p| {
+                                match converter
+                                    .convert_type(&bhc_interface::Type::Var(p.clone()))
+                                {
+                                    bhc_types::Ty::Var(v) => Some(v),
+                                    _ => None,
+                                }
+                            })
+                            .collect();
+                        let body_ty = converter.convert_type(body);
+                        ctx.interface_type_aliases
+                            .push((type_name, param_vars, body_ty));
+                        continue; // No constructors
+                    }
                 };
 
                 for (tag, con) in constructors.iter().enumerate() {

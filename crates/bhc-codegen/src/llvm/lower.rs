@@ -47699,6 +47699,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Unbox a value to an integer if it's a pointer (boxed int).
+    #[track_caller]
     fn unbox_to_int(
         &self,
         val: BasicValueEnum<'ctx>,
@@ -47711,9 +47712,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .build_ptr_to_int(p, self.type_mapper().i64_type(), "unbox_int")
                     .map_err(|e| CodegenError::Internal(format!("failed to unbox int: {:?}", e)))
             }
-            _ => Err(CodegenError::TypeError(
-                "expected int or boxed int".to_string(),
-            )),
+            other => Err(CodegenError::TypeError(format!(
+                "expected int or boxed int, got {other} (from {})",
+                std::panic::Location::caller()
+            ))),
         }
     }
 
@@ -47819,6 +47821,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 result.map(|v| Some(v.into())).map_err(|e| {
                     CodegenError::Internal(format!("failed to build float op: {:?}", e))
                 })
+            }
+            // Mixed boxed/unboxed double: one FLOAT side makes it float
+            // arithmetic — unbox the pointer as double bits, never through
+            // unbox_to_int (OOXML hit this adding a boxed Double field to an
+            // unboxed double).
+            (BasicValueEnum::PointerValue(p), BasicValueEnum::FloatValue(r)) => {
+                let l = self.unbox_to_f64(p)?;
+                self.build_float_arith_op(op, l, r)
+            }
+            (BasicValueEnum::FloatValue(l), BasicValueEnum::PointerValue(p)) => {
+                let r = self.unbox_to_f64(p)?;
+                self.build_float_arith_op(op, l, r)
             }
             // Handle boxed integers (pointers) - unbox, compute, rebox
             (BasicValueEnum::PointerValue(_), _) | (_, BasicValueEnum::PointerValue(_)) => {
@@ -48057,35 +48071,52 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Ok(Some(result.into()))
         };
 
+        let do_float_cmp = |this: &Self,
+                            l: inkwell::values::FloatValue<'ctx>,
+                            r: inkwell::values::FloatValue<'ctx>|
+         -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+            use inkwell::FloatPredicate;
+            let pred = match op {
+                PrimOp::Eq => FloatPredicate::OEQ,
+                PrimOp::Ne => FloatPredicate::ONE,
+                PrimOp::Lt => FloatPredicate::OLT,
+                PrimOp::Le => FloatPredicate::OLE,
+                PrimOp::Gt => FloatPredicate::OGT,
+                PrimOp::Ge => FloatPredicate::OGE,
+                _ => return Err(CodegenError::Internal("invalid comparison op".to_string())),
+            };
+            let cmp = this
+                .builder()
+                .build_float_compare(pred, l, r, "fcmp")
+                .map_err(|e| {
+                    CodegenError::Internal(format!("failed to build float cmp: {:?}", e))
+                })?;
+
+            // Convert i1 to i64
+            let result = this
+                .builder()
+                .build_int_z_extend(cmp, this.type_mapper().i64_type(), "fcmp_ext")
+                .map_err(|e| CodegenError::Internal(format!("failed to extend fcmp: {:?}", e)))?;
+
+            Ok(Some(result.into()))
+        };
+
         match (lhs, rhs) {
             (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => do_int_cmp(self, l, r),
             (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => {
-                use inkwell::FloatPredicate;
-                let pred = match op {
-                    PrimOp::Eq => FloatPredicate::OEQ,
-                    PrimOp::Ne => FloatPredicate::ONE,
-                    PrimOp::Lt => FloatPredicate::OLT,
-                    PrimOp::Le => FloatPredicate::OLE,
-                    PrimOp::Gt => FloatPredicate::OGT,
-                    PrimOp::Ge => FloatPredicate::OGE,
-                    _ => return Err(CodegenError::Internal("invalid comparison op".to_string())),
-                };
-                let cmp = self
-                    .builder()
-                    .build_float_compare(pred, l, r, "fcmp")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to build float cmp: {:?}", e))
-                    })?;
-
-                // Convert i1 to i64
-                let result = self
-                    .builder()
-                    .build_int_z_extend(cmp, self.type_mapper().i64_type(), "fcmp_ext")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to extend fcmp: {:?}", e))
-                    })?;
-
-                Ok(Some(result.into()))
+                do_float_cmp(self, l, r)
+            }
+            // Mixed boxed/unboxed double: one FLOAT side makes it a float
+            // comparison — unbox the pointer as double bits, never through
+            // unbox_to_int (OOXML/Writers.RST/Textile hit this comparing a
+            // boxed Double field against an unboxed double).
+            (BasicValueEnum::PointerValue(p), BasicValueEnum::FloatValue(r)) => {
+                let l = self.unbox_to_f64(p)?;
+                do_float_cmp(self, l, r)
+            }
+            (BasicValueEnum::FloatValue(l), BasicValueEnum::PointerValue(p)) => {
+                let r = self.unbox_to_f64(p)?;
+                do_float_cmp(self, l, r)
             }
             // Handle boxed integers (pointers)
             (BasicValueEnum::PointerValue(_), _) | (_, BasicValueEnum::PointerValue(_)) => {
@@ -48097,6 +48128,46 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "comparison operations require matching types".to_string(),
             )),
         }
+    }
+
+    /// Emit one float arithmetic instruction, returning an unboxed
+    /// `FloatValue` like the all-float arm of `lower_binary_arith`.
+    fn build_float_arith_op(
+        &self,
+        op: PrimOp,
+        l: inkwell::values::FloatValue<'ctx>,
+        r: inkwell::values::FloatValue<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let result = match op {
+            PrimOp::Add => self.builder().build_float_add(l, r, "fadd"),
+            PrimOp::Sub => self.builder().build_float_sub(l, r, "fsub"),
+            PrimOp::Mul => self.builder().build_float_mul(l, r, "fmul"),
+            PrimOp::Div | PrimOp::Quot => self.builder().build_float_div(l, r, "fdiv"),
+            PrimOp::Mod | PrimOp::Rem => self.builder().build_float_rem(l, r, "frem"),
+            _ => return Err(CodegenError::Internal("invalid arith op".to_string())),
+        };
+        result
+            .map(|v| Some(v.into()))
+            .map_err(|e| CodegenError::Internal(format!("failed to build float op: {:?}", e)))
+    }
+
+    /// Unbox a pointer-carried Double: the pointer holds the value's bit
+    /// pattern (ptr_to_int, then bitcast to f64) — the same convention the
+    /// coerce paths use when boxing doubles.
+    fn unbox_to_f64(
+        &self,
+        ptr: inkwell::values::PointerValue<'ctx>,
+    ) -> CodegenResult<inkwell::values::FloatValue<'ctx>> {
+        let tm = self.type_mapper();
+        let bits = self
+            .builder()
+            .build_ptr_to_int(ptr, tm.i64_type(), "unbox_double_bits")
+            .map_err(|e| CodegenError::Internal(format!("failed to unbox double: {:?}", e)))?;
+        let double_val = self
+            .builder()
+            .build_bit_cast(bits, tm.f64_type(), "to_double")
+            .map_err(|e| CodegenError::Internal(format!("failed to cast to double: {:?}", e)))?;
+        Ok(double_val.into_float_value())
     }
 
     /// Lower a binary boolean operation.

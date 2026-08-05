@@ -134,8 +134,16 @@ impl LowerContext {
     #[must_use]
     pub fn new() -> Self {
         let mut ctx = Self {
-            // Start after builtin VarIds (builtins use 9-95, so start at 100 to be safe)
-            fresh_counter: 100,
+            // Fresh VarIds share one namespace with DefId-derived VarIds
+            // (`VarId::new(def_id.index())`), the deriving context (50000+),
+            // and RTS builtins (1_000_000+). Starting at 100 collided with
+            // DefIds in any module with >100 defs: two distinct variables got
+            // the same VarId, and codegen's env lookups crossed function
+            // boundaries ("Referring to an argument in another function" —
+            // ImageSize's pWebpSize captured webpSize's argument). 200_000 is
+            // above any realistic DefId count (~11k today) and deriving usage,
+            // and below the builtin range.
+            fresh_counter: 200_000,
             var_map: FxHashMap::default(),
             type_schemes: FxHashMap::default(),
             expr_types: FxHashMap::default(),

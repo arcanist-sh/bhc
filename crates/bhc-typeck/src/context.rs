@@ -5561,19 +5561,24 @@ impl TyCtxt {
                     ))
                 }
                 // docTitle, docAuthors, docDate :: Pandoc -> [Inline]
+                // pandoc-types: these take META, not Pandoc — the old
+                // `Pandoc -> ..` schemes shadowed the interface-imported
+                // accessors (always-in-scope builtins win over imports) and
+                // broke Text.Pandoc.Chunks in --package-db mode with
+                // `expected Meta, found Pandoc` at `docTitle meta`.
                 "docTitle" | "docDate" => {
-                    let pandoc_con = TyCon::new(Symbol::intern("Pandoc"), Kind::Star);
+                    let meta_con = TyCon::new(Symbol::intern("Meta"), Kind::Star);
                     let inline_con = TyCon::new(Symbol::intern("Inline"), Kind::Star);
                     Scheme::mono(Ty::fun(
-                        Ty::Con(pandoc_con),
+                        Ty::Con(meta_con),
                         Ty::List(Box::new(Ty::Con(inline_con))),
                     ))
                 }
                 "docAuthors" => {
-                    let pandoc_con = TyCon::new(Symbol::intern("Pandoc"), Kind::Star);
+                    let meta_con = TyCon::new(Symbol::intern("Meta"), Kind::Star);
                     let inline_con = TyCon::new(Symbol::intern("Inline"), Kind::Star);
                     Scheme::mono(Ty::fun(
-                        Ty::Con(pandoc_con),
+                        Ty::Con(meta_con),
                         Ty::List(Box::new(Ty::List(Box::new(Ty::Con(inline_con))))),
                     ))
                 }

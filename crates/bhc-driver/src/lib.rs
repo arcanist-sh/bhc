@@ -1051,7 +1051,12 @@ impl Compiler {
             Err(diagnostics) => {
                 eprintln!("Type errors:");
                 for (i, diag) in diagnostics.iter().enumerate() {
-                    eprintln!("  {}: {}", i + 1, diag.message);
+                    let span_info = diag
+                        .labels
+                        .first()
+                        .map(|l| format!(" [span {:?}]", l.span))
+                        .unwrap_or_default();
+                    eprintln!("  {}: {}{}", i + 1, diag.message, span_info);
                 }
                 Err(CompileError::TypeError(diagnostics.len()))
             }

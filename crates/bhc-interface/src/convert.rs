@@ -112,12 +112,25 @@ impl TypeConverter {
 
         let ty = self.convert_type(&sig.ty);
 
-        if vars.is_empty() && constraints.is_empty() {
+        // Quantify over EVERY variable the signature mentions, not just the
+        // declared `type_vars` (interface writers currently leave that list
+        // empty). A mono scheme with free variables is shared across all use
+        // sites — the first use pins it, and a second use at a different type
+        // errors (`stringify :: a -> Text` from Shared.bhi produced
+        // `expected Meta, found Pandoc` in Text.Pandoc.Chunks).
+        let mut all_vars = vars;
+        for var in self.var_map.values() {
+            if !all_vars.iter().any(|v| v.id == var.id) {
+                all_vars.push(var.clone());
+            }
+        }
+
+        if all_vars.is_empty() && constraints.is_empty() {
             Scheme::mono(ty)
         } else if constraints.is_empty() {
-            Scheme::poly(vars, ty)
+            Scheme::poly(all_vars, ty)
         } else {
-            Scheme::qualified(vars, constraints, ty)
+            Scheme::qualified(all_vars, constraints, ty)
         }
     }
 

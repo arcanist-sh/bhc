@@ -78,7 +78,7 @@ use bhc_tensor_ir::fusion::{self, FusionContext, KernelReport};
 use bhc_typeck::TypedModule;
 use bhc_wasm::{WasmConfig, WasmModule};
 use camino::{Utf8Path, Utf8PathBuf};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, info, instrument};
@@ -436,13 +436,6 @@ impl Compiler {
         self.callbacks
             .on_phase_complete(CompilePhase::TypeCheck, &unit.module_name);
 
-        // Phase 3: Lower to Core IR
-        self.callbacks
-            .on_phase_start(CompilePhase::CoreLower, &unit.module_name);
-        let core = self.core_lower(&hir, &lower_ctx, &typed)?;
-        self.callbacks
-            .on_phase_complete(CompilePhase::CoreLower, &unit.module_name);
-
         // The module name declared in the source (e.g. `Data.Split`), not the
         // file stem. Object and interface artifacts are laid out by this name's
         // path (`Data/Split.o`, `Data/Split.bhi`) so a package manager (hx) that
@@ -458,6 +451,38 @@ impl Compiler {
             },
         );
         let module_rel_path = module_name.replace('.', "/");
+
+        // Generate interface file if hidir is configured. Emitted immediately
+        // after type checking — NOT gated on codegen — because the interface is
+        // typecheck-level truth (it is generated from the AST and typed HIR
+        // only). Dependents must be able to compile against this module's
+        // declarations even when its own lowering/codegen fails; only the `.o`
+        // depends on codegen. Uses the declared module name so the `.bhi` lands
+        // at the import-resolvable path (`<hidir>/Data/Split.bhi`).
+        if let Some(ref hidir) = self.session.options.output_interface_dir {
+            let iface = bhc_interface::generate::generate_interface(&module_name, &ast, &typed);
+            let iface_path = bhc_interface::interface_path(hidir, &module_name);
+            if let Some(parent) = iface_path.parent() {
+                std::fs::create_dir_all(parent.as_std_path()).map_err(|e| {
+                    CompileError::CodegenError(format!("failed to create hidir: {}", e))
+                })?;
+            }
+            iface.write_to_file(&iface_path).map_err(|e| {
+                CompileError::CodegenError(format!("failed to write interface: {}", e))
+            })?;
+            debug!(
+                module = %unit.module_name,
+                interface = %iface_path,
+                "generated interface file"
+            );
+        }
+
+        // Phase 3: Lower to Core IR
+        self.callbacks
+            .on_phase_start(CompilePhase::CoreLower, &unit.module_name);
+        let core = self.core_lower(&hir, &lower_ctx, &typed)?;
+        self.callbacks
+            .on_phase_complete(CompilePhase::CoreLower, &unit.module_name);
 
         // Phase 4: Code generation (to object file only)
         self.callbacks
@@ -483,27 +508,6 @@ impl Compiler {
         } else {
             Utf8PathBuf::from(object_path.to_str().unwrap_or_default())
         };
-
-        // Generate interface file if hidir is configured. Uses the declared
-        // module name so the `.bhi` lands at the import-resolvable path
-        // (`<hidir>/Data/Split.bhi`).
-        if let Some(ref hidir) = self.session.options.output_interface_dir {
-            let iface = bhc_interface::generate::generate_interface(&module_name, &ast, &typed);
-            let iface_path = bhc_interface::interface_path(hidir, &module_name);
-            if let Some(parent) = iface_path.parent() {
-                std::fs::create_dir_all(parent.as_std_path()).map_err(|e| {
-                    CompileError::CodegenError(format!("failed to create hidir: {}", e))
-                })?;
-            }
-            iface.write_to_file(&iface_path).map_err(|e| {
-                CompileError::CodegenError(format!("failed to write interface: {}", e))
-            })?;
-            debug!(
-                module = %unit.module_name,
-                interface = %iface_path,
-                "generated interface file"
-            );
-        }
 
         info!(module = %unit.module_name, object = %final_object_path, "module compilation complete");
 
@@ -2513,29 +2517,134 @@ impl Compiler {
                 continue;
             }
 
-            // Resolve the module's interface file honoring exposed-modules.
-            let Some(iface_path) = resolve_interface_in(&module_name, &flat_dirs, &packages) else {
+            // Resolve the module's interface (honoring exposed-modules) and
+            // chase any whole-module re-exports it declares.
+            let mut visited = FxHashSet::default();
+            if let Some(exports) =
+                self.load_interface_exports_chasing(&module_name, &flat_dirs, &packages, ctx, &mut visited)
+            {
+                cache.insert(sym, exports);
+            }
+        }
+    }
+
+    /// Load `module_name`'s interface and convert it to `ModuleExports`,
+    /// chasing whole-module re-exports (`reexports` entries with a `"*"`
+    /// value) through the same interface search space. Re-exported names the
+    /// facade doesn't define locally are merged in; local names win. Without
+    /// chasing, a facade module (`module Text.Pandoc.Class (module
+    /// Text.Pandoc.Class.PandocMonad, ...)`) presents an empty surface and
+    /// every dependent fails lowering on its names. `visited` breaks
+    /// re-export cycles.
+    fn load_interface_exports_chasing(
+        &self,
+        module_name: &str,
+        flat_dirs: &[Utf8PathBuf],
+        packages: &[ConfPackage],
+        ctx: &mut LowerContext,
+        visited: &mut FxHashSet<String>,
+    ) -> Option<ModuleExports> {
+        if !visited.insert(module_name.to_string()) {
+            return None;
+        }
+        let iface_path = resolve_interface_in(module_name, flat_dirs, packages)?;
+        let iface = match bhc_interface::ModuleInterface::read_from_file(&iface_path) {
+            Ok(iface) => iface,
+            Err(e) => {
+                debug!(
+                    module = %module_name,
+                    error = %e,
+                    "failed to read interface file"
+                );
+                return None;
+            }
+        };
+        debug!(
+            module = %module_name,
+            interface = %iface_path,
+            "loaded interface file for import"
+        );
+        let mut exports = Self::interface_to_module_exports(&iface, module_name, ctx);
+
+        // Whole-module re-exports: merge the origin module's full surface.
+        for (origin, kind) in &iface.reexports {
+            if kind != "*" {
                 continue;
-            };
-            match bhc_interface::ModuleInterface::read_from_file(&iface_path) {
-                Ok(iface) => {
-                    debug!(
-                        module = %module_name,
-                        interface = %iface_path,
-                        "loaded interface file for import"
-                    );
-                    let exports = Self::interface_to_module_exports(&iface, &module_name, ctx);
-                    cache.insert(sym, exports);
+            }
+            if let Some(sub) =
+                self.load_interface_exports_chasing(origin, flat_dirs, packages, ctx, visited)
+            {
+                for (k, v) in sub.values {
+                    exports.values.entry(k).or_insert(v);
                 }
-                Err(e) => {
-                    debug!(
-                        module = %module_name,
-                        error = %e,
-                        "failed to read interface file"
-                    );
+                for (k, v) in sub.types {
+                    exports.types.entry(k).or_insert(v);
+                }
+                for (k, v) in sub.constructors {
+                    exports.constructors.entry(k).or_insert(v);
+                }
+                for (k, v) in sub.class_methods {
+                    exports.class_methods.entry(k).or_insert(v);
                 }
             }
         }
+
+        // Name-level re-exports: pull the name from its origin's interface
+        // when one resolves; otherwise bind a placeholder DefId, mirroring the
+        // source loader's stub entries for `module Foo (bar) where import Baz
+        // (bar)`. Without the fallback, a facade whose origin is an external
+        // package (Text.Pandoc.Highlighting re-exporting Skylighting's
+        // `pygments`) would drop the name and every dependent fails lowering.
+        let mut chased: FxHashMap<&str, Option<ModuleExports>> = FxHashMap::default();
+        for (key, origin) in &iface.reexports {
+            if origin == "*" {
+                continue;
+            }
+            let (is_type, name) = match key.strip_prefix("type:") {
+                Some(n) => (true, n),
+                None => (false, key.as_str()),
+            };
+            let sym = Symbol::intern(name);
+            let present = if is_type {
+                exports.types.contains_key(&sym)
+            } else {
+                exports.values.contains_key(&sym)
+            };
+            if present {
+                continue;
+            }
+            if !origin.is_empty() && !chased.contains_key(origin.as_str()) {
+                let sub =
+                    self.load_interface_exports_chasing(origin, flat_dirs, packages, ctx, visited);
+                chased.insert(origin.as_str(), sub);
+            }
+            let resolved = chased
+                .get(origin.as_str())
+                .and_then(|sub| sub.as_ref())
+                .and_then(|sub| {
+                    if is_type {
+                        sub.types.get(&sym).copied()
+                    } else {
+                        sub.values.get(&sym).copied()
+                    }
+                });
+            let def_id = resolved.unwrap_or_else(|| {
+                let fresh = ctx.fresh_def_id();
+                let def_kind = if is_type {
+                    bhc_lower::DefKind::Type
+                } else {
+                    bhc_lower::DefKind::Value
+                };
+                ctx.define(fresh, sym, def_kind, bhc_span::Span::default());
+                fresh
+            });
+            if is_type {
+                exports.types.insert(sym, def_id);
+            } else {
+                exports.values.insert(sym, def_id);
+            }
+        }
+        Some(exports)
     }
 
     /// Convert a loaded `ModuleInterface` into `ModuleExports` suitable for

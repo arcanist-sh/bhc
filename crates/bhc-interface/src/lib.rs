@@ -283,7 +283,10 @@ pub struct ModuleInterface {
     pub instances: Vec<ExportedInstance>,
     /// Module dependencies (imported interfaces).
     pub dependencies: Vec<InterfaceDependency>,
-    /// Re-exports from other modules.
+    /// Re-exports from other modules. A `(module, "*")` entry records a
+    /// whole-module re-export (`module X` in the export list): consumers
+    /// resolve `X`'s own interface and merge its exports. Name-level
+    /// re-export entries may map an exported name to its origin module.
     pub reexports: HashMap<String, String>,
 }
 

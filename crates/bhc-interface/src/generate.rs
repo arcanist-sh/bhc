@@ -136,6 +136,107 @@ pub fn generate_interface(
         }
     }
 
+    // Record re-exports so the consumer side can resolve names this module
+    // exports but does not declare. Whole-module re-exports (`module X`)
+    // become `(X, "*")` entries chased into X's interface — a facade like
+    // Text.Pandoc.Class carries none of its submodules' declarations locally,
+    // so without this its interface would be empty. Name-level re-exports
+    // (`module Foo (bar) where import Baz (bar)`) become `(bar, origin)`
+    // entries, with origin `""` when no explicit import list names them (an
+    // open import); consumers chase the origin or fall back to a stub
+    // binding, mirroring the source loader's re-export stubs. `module M`
+    // naming the module itself re-exports the local declarations, already
+    // included above.
+    if let Some(export_list) = &ast.exports {
+        let mut local_values: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut local_types: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for decl in &ast.decls {
+            match decl {
+                bhc_ast::Decl::TypeSig(sig) => {
+                    local_values.extend(sig.names.iter().map(|n| n.name.as_str()));
+                }
+                bhc_ast::Decl::FunBind(fb) => {
+                    local_values.insert(fb.name.name.as_str());
+                }
+                bhc_ast::Decl::DataDecl(d) => {
+                    local_types.insert(d.name.name.as_str());
+                }
+                bhc_ast::Decl::Newtype(nt) => {
+                    local_types.insert(nt.name.name.as_str());
+                }
+                bhc_ast::Decl::TypeAlias(ta) => {
+                    local_types.insert(ta.name.name.as_str());
+                }
+                bhc_ast::Decl::ClassDecl(cls) => {
+                    local_types.insert(cls.name.name.as_str());
+                    for m in &cls.methods {
+                        if let bhc_ast::Decl::TypeSig(sig) = m {
+                            local_values.extend(sig.names.iter().map(|n| n.name.as_str()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Origin module for a name that an explicit import list mentions.
+        let import_origin = |name: &str, want_type: bool| -> String {
+            for import in &ast.imports {
+                let Some(bhc_ast::ImportSpec::Only(items)) = &import.spec else {
+                    continue;
+                };
+                let found = items.iter().any(|item| match item {
+                    bhc_ast::Import::Var(i, _) => !want_type && i.name.as_str() == name,
+                    bhc_ast::Import::Type(i, _, _) => want_type && i.name.as_str() == name,
+                    bhc_ast::Import::Pattern(_, _) => false,
+                });
+                if found {
+                    return import
+                        .module
+                        .parts
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".");
+                }
+            }
+            String::new()
+        };
+
+        for exp in export_list {
+            match exp {
+                bhc_ast::Export::Module(m, _) => {
+                    let name = m
+                        .parts
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    if name != module_name {
+                        iface.reexports.insert(name, "*".to_string());
+                    }
+                }
+                bhc_ast::Export::Var(ident, _) => {
+                    let name = ident.name.as_str();
+                    if !local_values.contains(name) {
+                        iface
+                            .reexports
+                            .insert(name.to_string(), import_origin(name, false));
+                    }
+                }
+                bhc_ast::Export::Type(ident, _, _) => {
+                    let name = ident.name.as_str();
+                    if !local_types.contains(name) {
+                        iface
+                            .reexports
+                            .insert(format!("type:{name}"), import_origin(name, true));
+                    }
+                }
+                bhc_ast::Export::Pattern(_, _) => {}
+            }
+        }
+    }
+
     // Record import dependencies
     for import in &ast.imports {
         let dep_name = import

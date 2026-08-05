@@ -7333,7 +7333,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.lower_builtin_lazy_bs_write_file(args[0], args[1])
             }
             "Data.ByteString.Lazy.putStr" => {
-                self.lower_builtin_text_io_stdout_text(args[0], 1000457, "lbs_put_str")
+                // bhc_lazy_bs_put_str takes ONLY the bytestring (writes to
+                // stdout itself) — routing through the stdout-handle helper
+                // passed two args to a one-arg RTS function.
+                let text_val = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("lbs_put_str: no arg".to_string()))?;
+                let text_ptr = self.value_to_ptr(text_val)?;
+                let rts_fn = self.functions.get(&VarId::new(1000457)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_lazy_bs_put_str not declared".to_string())
+                })?;
+                self.builder()
+                    .build_call(*rts_fn, &[text_ptr.into()], "")
+                    .map_err(|e| CodegenError::Internal(format!("lbs_put_str: {:?}", e)))?;
+                Ok(Some(self.type_mapper().ptr_type().const_null().into()))
             }
             "Data.ByteString.Lazy.hPut" | "Data.ByteString.Lazy.hPutStr" => self
                 .lower_builtin_text_io_handle_text_void(args[0], args[1], 1000458, "lbs_h_put_str"),
@@ -44052,24 +44065,37 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Perform the builtin operation
             let result = self.lower_builtin_direct(name, &args)?;
 
-            // Return the result — convert non-pointer values if needed
-            let result_ptr = match result {
-                Some(v) => {
-                    if v.is_pointer_value() {
-                        v.into_pointer_value()
-                    } else if v.is_int_value() {
-                        self.int_to_ptr(v.into_int_value())?
-                    } else {
-                        // Float or other — box it
-                        let ptr_val = self.value_to_ptr(v)?;
-                        ptr_val
+            // Return the result — convert non-pointer values if needed.
+            // Skip the return entirely when the builtin already terminated the
+            // block: `exitWith` ends in `unreachable`, and appending `ret`
+            // after it is "Terminator found in the middle of a basic block"
+            // (broke Text.Pandoc.Error).
+            let already_terminated = self
+                .builder()
+                .get_insert_block()
+                .and_then(|b| b.get_terminator())
+                .is_some();
+            if !already_terminated {
+                let result_ptr = match result {
+                    Some(v) => {
+                        if v.is_pointer_value() {
+                            v.into_pointer_value()
+                        } else if v.is_int_value() {
+                            self.int_to_ptr(v.into_int_value())?
+                        } else {
+                            // Float or other — box it
+                            let ptr_val = self.value_to_ptr(v)?;
+                            ptr_val
+                        }
                     }
-                }
-                None => ptr_type.const_null(), // Unit/void result
-            };
-            self.builder()
-                .build_return(Some(&result_ptr))
-                .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
+                    None => ptr_type.const_null(), // Unit/void result
+                };
+                self.builder()
+                    .build_return(Some(&result_ptr))
+                    .map_err(|e| {
+                        CodegenError::Internal(format!("failed to build return: {:?}", e))
+                    })?;
+            }
 
             // Restore insertion point
             if let Some(bb) = current_bb {
@@ -45751,8 +45777,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             | "Data.ByteString.Lazy.fromChunks"
             | "Data.ByteString.Lazy.toChunks"
             | "Data.ByteString.Lazy.pack"
-            | "Data.ByteString.Lazy.tail"
-            | "Data.ByteString.Lazy.putStr" => {
+            | "Data.ByteString.Lazy.tail" => {
                 let var_id = match name {
                     "Data.ByteString.Lazy.fromStrict" => 1000441,
                     "Data.ByteString.Lazy.toStrict" => 1000442,
@@ -45760,7 +45785,6 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     "Data.ByteString.Lazy.toChunks" => 1000444,
                     "Data.ByteString.Lazy.pack" => 1000447,
                     "Data.ByteString.Lazy.tail" => 1000450,
-                    "Data.ByteString.Lazy.putStr" => 1000457,
                     _ => unreachable!(),
                 };
                 let rts_fn = self
@@ -45840,6 +45864,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .basic()
                     .ok_or_else(|| CodegenError::Internal(format!("{}: void", name)))?;
                 Ok(Some(result))
+            }
+            "Data.ByteString.Lazy.putStr" => {
+                // bhc_lazy_bs_put_str(text) -> void writes to stdout itself;
+                // the void return materializes as unit (null ptr). This arm
+                // was mis-grouped with the unary ptr -> ptr ops and errored
+                // with "putStr: void" (Text.Pandoc.JSON).
+                let rts_fn = self.functions.get(&VarId::new(1000457)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_lazy_bs_put_str not declared".to_string())
+                })?;
+                self.builder()
+                    .build_call(*rts_fn, &[args[0].into()], "")
+                    .map_err(|e| CodegenError::Internal(format!("lbs_put_str: {:?}", e)))?;
+                Ok(Some(self.type_mapper().ptr_type().const_null().into()))
             }
             "Data.ByteString.Lazy.readFile" | "Data.ByteString.Lazy.hGetContents" => {
                 let var_id = if name == "Data.ByteString.Lazy.readFile" {

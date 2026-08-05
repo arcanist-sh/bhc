@@ -2618,16 +2618,49 @@ impl Compiler {
                     self.load_interface_exports_chasing(origin, flat_dirs, packages, ctx, visited);
                 chased.insert(origin.as_str(), sub);
             }
-            let resolved = chased
-                .get(origin.as_str())
-                .and_then(|sub| sub.as_ref())
-                .and_then(|sub| {
-                    if is_type {
-                        sub.types.get(&sym).copied()
-                    } else {
-                        sub.values.get(&sym).copied()
+            let sub_exports = chased.get(origin.as_str()).and_then(|sub| sub.as_ref());
+            let resolved = sub_exports.and_then(|sub| {
+                if is_type {
+                    sub.types.get(&sym).copied()
+                } else {
+                    sub.values.get(&sym).copied()
+                }
+            });
+            // A re-exported type carries its `(..)` children: class methods
+            // (with their class_methods entry, so Class(..) imports resolve)
+            // and data constructors (with record-field accessor values). The
+            // facade's interface records only `type:Name`, so expand from the
+            // origin here — otherwise `Text.Pandoc.Parsing` re-exporting
+            // `HasMacros (..)` delivers the class but not `extractMacros`,
+            // and `QuoteContext (..)` delivers the type but not `NoQuote`.
+            if is_type && resolved.is_some() {
+                if let Some(sub) = sub_exports {
+                    if let Some(methods) = sub.class_methods.get(&sym) {
+                        for method in methods {
+                            if let Some(v) = sub.values.get(method) {
+                                exports.values.entry(*method).or_insert(*v);
+                            }
+                        }
+                        let methods = methods.clone();
+                        exports.class_methods.entry(sym).or_insert(methods);
                     }
-                });
+                    for (con_name, con_info) in &sub.constructors {
+                        if con_info.type_con_name == sym {
+                            if let Some(fields) = &con_info.field_names {
+                                for field in fields {
+                                    if let Some(v) = sub.values.get(field) {
+                                        exports.values.entry(*field).or_insert(*v);
+                                    }
+                                }
+                            }
+                            exports
+                                .constructors
+                                .entry(*con_name)
+                                .or_insert_with(|| con_info.clone());
+                        }
+                    }
+                }
+            }
             let def_id = resolved.unwrap_or_else(|| {
                 let fresh = ctx.fresh_def_id();
                 let def_kind = if is_type {

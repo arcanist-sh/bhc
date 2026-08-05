@@ -5612,15 +5612,21 @@ impl TyCtxt {
                         Ty::Con(cell_con),
                     ))
                 }
-                // setMeta :: ToMetaValue a => Text -> a -> Meta -> Meta
+                // setMeta :: (HasMeta b, ToMetaValue a) => Text -> a -> b -> b
+                // A HasMeta class method with instances for BOTH Meta and
+                // Pandoc — readers apply it to `B.doc mempty :: Pandoc`.
+                // Pinning b to Meta broke BibTeX/CslJson/EndNote/RIS/RTF
+                // ("expected Meta, found Pandoc").
                 "setMeta" => {
-                    let meta_con = TyCon::new(Symbol::intern("Meta"), Kind::Star);
-                    let meta_ty = Ty::Con(meta_con);
+                    let b = TyVar::new_star(0xFFFF_0101);
                     Scheme::poly(
-                        vec![a.clone()],
+                        vec![a.clone(), b.clone()],
                         Ty::fun(
                             self.builtins.text_ty.clone(),
-                            Ty::fun(Ty::Var(a.clone()), Ty::fun(meta_ty.clone(), meta_ty)),
+                            Ty::fun(
+                                Ty::Var(a.clone()),
+                                Ty::fun(Ty::Var(b.clone()), Ty::Var(b)),
+                            ),
                         ),
                     )
                 }

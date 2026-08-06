@@ -39,7 +39,7 @@ use std::io::{Read, Write};
 use thiserror::Error;
 
 /// Current interface file format version.
-pub const INTERFACE_VERSION: u32 = 2;
+pub const INTERFACE_VERSION: u32 = 3;
 
 /// Magic bytes for interface files.
 pub const INTERFACE_MAGIC: &[u8; 4] = b"BHCI";
@@ -262,6 +262,20 @@ pub struct ExportedInstance {
     pub constraints: Vec<Constraint>,
 }
 
+/// A compiled instance-method implementation: the Core binding name
+/// (`$instance_{method}_{TypeEnc}`) and its definition arity. Consumers
+/// declare `{module}.{name}` externs from these so class-method dispatch
+/// can call imported instances directly (`toSources` on `Text` resolving
+/// to `Text.Pandoc.Sources.$instance_toSources_Text`). Filled by the
+/// driver's post-core-lower interface rewrite, like value arities.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InstanceMethodImpl {
+    /// The Core binding name (starts with `$instance_`).
+    pub name: String,
+    /// Definition arity (Core lambda count).
+    pub arity: u32,
+}
+
 /// Module interface header.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InterfaceHeader {
@@ -295,6 +309,9 @@ pub struct ModuleInterface {
     /// resolve `X`'s own interface and merge its exports. Name-level
     /// re-export entries may map an exported name to its origin module.
     pub reexports: HashMap<String, String>,
+    /// Compiled instance-method implementations (see [`InstanceMethodImpl`]).
+    #[serde(default)]
+    pub instance_methods: Vec<InstanceMethodImpl>,
 }
 
 /// A dependency on another interface.
@@ -323,6 +340,7 @@ impl ModuleInterface {
             instances: Vec::new(),
             dependencies: Vec::new(),
             reexports: HashMap::new(),
+            instance_methods: Vec::new(),
         }
     }
 

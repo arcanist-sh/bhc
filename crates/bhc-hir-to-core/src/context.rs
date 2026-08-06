@@ -1790,6 +1790,67 @@ impl LowerContext {
         self.class_registry.register_instance(instance_info);
     }
 
+    /// Register classes and instances loaded from module interfaces so
+    /// class-method calls on concrete types specialize to
+    /// `$instance_{method}_{TypeEnc}` variables — codegen resolves those
+    /// names against module-qualified externs (e.g. `toSources` on Text in
+    /// a dependent of Text.Pandoc.Sources dispatches to the extern
+    /// `Text.Pandoc.Sources.$instance_toSources_Text` instead of a stub).
+    /// Synthetic DefIds start far above real HIR DefIds.
+    pub fn register_imported_instances(
+        &mut self,
+        classes: &[(Symbol, Vec<Symbol>)],
+        instances: &[(Symbol, Vec<Ty>, Vec<Symbol>)],
+    ) {
+        for (class_name, method_names) in classes {
+            if self.class_registry.lookup_class(*class_name).is_some() {
+                continue; // local declaration wins
+            }
+            self.class_registry
+                .register_class(crate::dictionary::ClassInfo {
+                    name: *class_name,
+                    param_count: 1,
+                    methods: method_names.clone(),
+                    method_types: FxHashMap::default(),
+                    superclasses: Vec::new(),
+                    defaults: FxHashMap::default(),
+                    assoc_types: Vec::new(),
+                });
+        }
+
+        let mut next_id: usize = 900_000;
+        for (class, types, method_names) in instances {
+            let inst_type_name = if types.is_empty() {
+                "Unknown".to_string()
+            } else {
+                types
+                    .iter()
+                    .map(type_name_for_instance)
+                    .collect::<Vec<_>>()
+                    .join("_")
+            };
+            let mut methods = FxHashMap::default();
+            for method in method_names {
+                let def_id = DefId::new(next_id);
+                next_id += 1;
+                let instance_name =
+                    Symbol::intern(&format!("$instance_{}_{}", method, inst_type_name));
+                let var = self.named_var(instance_name, Ty::Error);
+                self.register_var(def_id, var);
+                methods.insert(*method, def_id);
+            }
+            self.class_registry
+                .register_instance(crate::dictionary::InstanceInfo {
+                    class: *class,
+                    instance_types: types.clone(),
+                    methods,
+                    superclass_instances: Vec::new(),
+                    assoc_type_impls: FxHashMap::default(),
+                    instance_constraints: Vec::new(),
+                });
+        }
+    }
+
     /// Lower a HIR module to Core.
     pub fn lower_module(&mut self, module: &HirModule) -> LowerResult<CoreModule> {
         // Propagate extension flags

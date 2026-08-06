@@ -500,6 +500,20 @@ impl Compiler {
                     changed = true;
                 }
             }
+            // Instance-method implementations are Core binds named
+            // `$instance_{method}_{TypeEnc}` — record them (name + arity)
+            // so consumers can declare externs for imported instances.
+            for (name, arity) in &arities {
+                if name.starts_with("$instance_") {
+                    iface
+                        .instance_methods
+                        .push(bhc_interface::InstanceMethodImpl {
+                            name: name.clone(),
+                            arity: *arity,
+                        });
+                    changed = true;
+                }
+            }
             if changed {
                 iface.write_to_file(&iface_path).map_err(|e| {
                     CompileError::CodegenError(format!("failed to write interface: {}", e))
@@ -1169,12 +1183,40 @@ impl Compiler {
             })
             .collect();
 
-        let mut core = bhc_hir_to_core::lower_module_with_defs_and_constructors(
+        // Join each interface-imported instance to its class's method names
+        // so hir-to-core can specialize method calls to the imported
+        // instance implementations ($instance_{method}_{TypeEnc} externs).
+        let class_method_map: FxHashMap<Symbol, &Vec<Symbol>> = lower_ctx
+            .interface_classes
+            .iter()
+            .map(|(class, methods)| (*class, methods))
+            .collect();
+        let imported_instance_data: Vec<(Symbol, Vec<bhc_types::Ty>, Vec<Symbol>)> = lower_ctx
+            .interface_instances
+            .iter()
+            .filter_map(|(class, types)| {
+                class_method_map
+                    .get(class)
+                    .map(|methods| (*class, types.clone(), (*methods).clone()))
+            })
+            .collect();
+        let imports = if lower_ctx.interface_classes.is_empty() && imported_instance_data.is_empty()
+        {
+            None
+        } else {
+            Some((
+                lower_ctx.interface_classes.as_slice(),
+                imported_instance_data.as_slice(),
+            ))
+        };
+
+        let mut core = bhc_hir_to_core::lower_module_with_imports(
             hir,
             Some(&def_map),
             Some(&typed.def_schemes),
             imported_constructors,
             Some(&typed.expr_types),
+            imports,
         )
         .map_err(CompileError::from)?;
 
@@ -2991,7 +3033,32 @@ impl Compiler {
                 bhc_span::Span::default(),
             );
             exports.types.entry(class_name).or_insert(class_id);
-            exports.class_methods.insert(class_name, method_names);
+            exports
+                .class_methods
+                .insert(class_name, method_names.clone());
+            ctx.interface_classes.push((class_name, method_names));
+        }
+
+        // Instance-method implementations become module-qualified externs
+        // via the interface_symbols machinery; the structured (class, types)
+        // pairs let hir-to-core register imported instances for method
+        // specialization.
+        for im in &iface.instance_methods {
+            ctx.interface_symbols.push((
+                Symbol::intern(&im.name),
+                module_name.to_string(),
+                im.arity,
+            ));
+        }
+        for inst in &iface.instances {
+            converter.reset_vars();
+            let types: Vec<bhc_types::Ty> = inst
+                .types
+                .iter()
+                .map(|t| converter.convert_type(t))
+                .collect();
+            ctx.interface_instances
+                .push((Symbol::intern(&inst.class), types));
         }
 
         exports

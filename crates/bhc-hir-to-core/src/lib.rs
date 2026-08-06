@@ -138,7 +138,41 @@ pub fn lower_module_with_defs_and_constructors(
     imported_constructors: Option<&ConstructorInfoMap>,
     expr_types: Option<&ExprTypeMap>,
 ) -> LowerResult<CoreModule> {
+    lower_module_with_imports(
+        module,
+        defs,
+        type_schemes,
+        imported_constructors,
+        expr_types,
+        None,
+    )
+}
+
+/// Like [`lower_module_with_defs_and_constructors`], additionally
+/// registering classes and instances loaded from module interfaces
+/// (`(classes, instances)`: see `LowerContext::register_imported_instances`)
+/// so class-method calls specialize to imported instance implementations.
+#[allow(clippy::type_complexity)]
+pub fn lower_module_with_imports(
+    module: &HirModule,
+    defs: Option<&DefMap>,
+    type_schemes: Option<&TypeSchemeMap>,
+    imported_constructors: Option<&ConstructorInfoMap>,
+    expr_types: Option<&ExprTypeMap>,
+    imported_instances: Option<(
+        &[(bhc_intern::Symbol, Vec<bhc_intern::Symbol>)],
+        &[(
+            bhc_intern::Symbol,
+            Vec<bhc_types::Ty>,
+            Vec<bhc_intern::Symbol>,
+        )],
+    )>,
+) -> LowerResult<CoreModule> {
     let mut ctx = LowerContext::new();
+
+    if let Some((classes, instances)) = imported_instances {
+        ctx.register_imported_instances(classes, instances);
+    }
 
     // If we have definition mappings from the lowering pass, use them
     // to register builtins with the correct DefIds

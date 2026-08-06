@@ -14025,7 +14025,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Create function: fn(env_ptr) -> result_ptr
         let fn_type = ptr_type.fn_type(&[ptr_type.into()], false);
-        let lifted_fn = self.module.add_function(&fn_name, fn_type);
+        let lifted_fn = self.module.add_internal_function(&fn_name, fn_type);
 
         let entry = self.llvm_context().append_basic_block(lifted_fn, "entry");
         self.builder().position_at_end(entry);
@@ -43651,7 +43651,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let fn_type = ptr_type.fn_type(&param_types, false);
 
         // Create the lifted function
-        let lifted_fn = self.module.add_function(&fn_name, fn_type);
+        let lifted_fn = self.module.add_internal_function(&fn_name, fn_type);
 
         // Create entry block for the lifted function
         let entry = self.llvm_context().append_basic_block(lifted_fn, "entry");
@@ -43753,7 +43753,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let fn_type = ptr_type.fn_type(&[ptr_type.into()], false);
 
         // Create the thunk evaluation function
-        let eval_fn = self.module.add_function(&fn_name, fn_type);
+        let eval_fn = self.module.add_internal_function(&fn_name, fn_type);
 
         // Create entry block for the eval function
         let entry = self.llvm_context().append_basic_block(eval_fn, "entry");

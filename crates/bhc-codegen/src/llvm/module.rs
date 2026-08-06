@@ -80,6 +80,20 @@ impl<'ctx> LlvmModule<'ctx> {
         self.module.add_function(name, fn_type, None)
     }
 
+    /// Add a module-private function (internal linkage). Synthetic helpers
+    /// (thunk evaluators, closure bodies, lambda-lifted locals) use
+    /// per-module counters for their names, so external linkage collides
+    /// across objects at link time — the minimal-pandoc link died on 4,476
+    /// duplicate `__thunk_eval_N`/`closure_N` symbols.
+    pub fn add_internal_function(
+        &self,
+        name: &str,
+        fn_type: FunctionType<'ctx>,
+    ) -> FunctionValue<'ctx> {
+        self.module
+            .add_function(name, fn_type, Some(inkwell::module::Linkage::Internal))
+    }
+
     /// Get a function by name.
     #[must_use]
     pub fn get_function(&self, name: &str) -> Option<FunctionValue<'ctx>> {

@@ -179,28 +179,49 @@ pub fn generate_interface(
             }
         }
 
-        // Origin module for a name that an explicit import list mentions.
+        // Origin module(s) for a re-exported name. An explicit import list
+        // naming it gives the definitive origin. Otherwise, every unqualified
+        // open/hiding import (that doesn't hide the name) is a CANDIDATE,
+        // joined with ';' for the consumer to try in order — a facade like
+        // Org.Parsing re-exports `QuoteContext (..)` obtained via `import
+        // Text.Pandoc.Parsing hiding (..)`, and with no candidates the
+        // consumer can only stub the type, losing its (..) children.
         let import_origin = |name: &str, want_type: bool| -> String {
+            let module_of = |import: &bhc_ast::ImportDecl| -> String {
+                import
+                    .module
+                    .parts
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            };
+            let item_matches = |item: &bhc_ast::Import| match item {
+                bhc_ast::Import::Var(i, _) => !want_type && i.name.as_str() == name,
+                bhc_ast::Import::Type(i, _, _) => want_type && i.name.as_str() == name,
+                bhc_ast::Import::Pattern(_, _) => false,
+            };
+            let mut candidates: Vec<String> = Vec::new();
             for import in &ast.imports {
-                let Some(bhc_ast::ImportSpec::Only(items)) = &import.spec else {
-                    continue;
-                };
-                let found = items.iter().any(|item| match item {
-                    bhc_ast::Import::Var(i, _) => !want_type && i.name.as_str() == name,
-                    bhc_ast::Import::Type(i, _, _) => want_type && i.name.as_str() == name,
-                    bhc_ast::Import::Pattern(_, _) => false,
-                });
-                if found {
-                    return import
-                        .module
-                        .parts
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(".");
+                match &import.spec {
+                    Some(bhc_ast::ImportSpec::Only(items)) => {
+                        if items.iter().any(item_matches) {
+                            return module_of(import);
+                        }
+                    }
+                    Some(bhc_ast::ImportSpec::Hiding(items)) => {
+                        if !import.qualified && !items.iter().any(item_matches) {
+                            candidates.push(module_of(import));
+                        }
+                    }
+                    None => {
+                        if !import.qualified {
+                            candidates.push(module_of(import));
+                        }
+                    }
                 }
             }
-            String::new()
+            candidates.join(";")
         };
 
         for exp in export_list {

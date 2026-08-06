@@ -2045,6 +2045,7 @@ fn register_standard_module_exports(
             "<<^",
             "^<<",
             "returnA",
+            "app",
         ],
         "Control.Category" => &["Category", "id", "(.)", "<<<", ">>>"],
         "Control.Concurrent.STM" | "Control.Monad.STM" => &[

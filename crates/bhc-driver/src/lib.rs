@@ -2624,19 +2624,48 @@ impl Compiler {
             if present {
                 continue;
             }
-            if !origin.is_empty() && !chased.contains_key(origin.as_str()) {
-                let sub =
-                    self.load_interface_exports_chasing(origin, flat_dirs, packages, ctx, visited);
-                chased.insert(origin.as_str(), sub);
-            }
-            let sub_exports = chased.get(origin.as_str()).and_then(|sub| sub.as_ref());
-            let resolved = sub_exports.and_then(|sub| {
-                if is_type {
-                    sub.types.get(&sym).copied()
-                } else {
-                    sub.values.get(&sym).copied()
+            // `origin` is a ';'-joined candidate list when the producer
+            // couldn't pin the source (open/hiding imports). Try each until
+            // the name resolves; the resolving candidate also supplies the
+            // (..) children below.
+            let mut sub_exports: Option<&ModuleExports> = None;
+            let mut resolved = None;
+            for candidate in origin.split(';').filter(|c| !c.is_empty()) {
+                if !chased.contains_key(candidate) {
+                    let sub = self.load_interface_exports_chasing(
+                        candidate, flat_dirs, packages, ctx, visited,
+                    );
+                    chased.insert(candidate, sub);
                 }
-            });
+                if let Some(sub) = chased.get(candidate).and_then(|sub| sub.as_ref()) {
+                    let hit = if is_type {
+                        sub.types.get(&sym).copied()
+                    } else {
+                        sub.values.get(&sym).copied()
+                    };
+                    if hit.is_some() {
+                        resolved = hit;
+                        break;
+                    }
+                }
+            }
+            if resolved.is_some() {
+                // Re-borrow the resolving candidate's exports (the loop's
+                // borrow ended at break).
+                for candidate in origin.split(';').filter(|c| !c.is_empty()) {
+                    if let Some(sub) = chased.get(candidate).and_then(|sub| sub.as_ref()) {
+                        let hit = if is_type {
+                            sub.types.contains_key(&sym)
+                        } else {
+                            sub.values.contains_key(&sym)
+                        };
+                        if hit {
+                            sub_exports = Some(sub);
+                            break;
+                        }
+                    }
+                }
+            }
             // A re-exported type carries its `(..)` children: class methods
             // (with their class_methods entry, so Class(..) imports resolve)
             // and data constructors (with record-field accessor values). The

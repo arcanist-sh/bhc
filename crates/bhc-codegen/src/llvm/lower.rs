@@ -1187,11 +1187,74 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// IO bind with pre-evaluated LHS
+    /// Emit the exn-guard at an IO chaining boundary: if a Haskell
+    /// exception is pending (thrown sentinel propagating), skip the rest of
+    /// the chain by returning the sentinel from the enclosing function.
+    /// Completes the RTS-side guard (RTS IO functions already no-op while
+    /// pending) for COMPILED continuation code, which otherwise dereferences
+    /// the null sentinel — minipandoc's Main crashed binding the result of
+    /// runIOorExplode after the HTML writer threw.
+    fn emit_io_exn_guard(&mut self) -> CodegenResult<()> {
+        let check_fn = match self.module.get_function("bhc_exception_check") {
+            Some(f) => f,
+            None => {
+                let i64_type = self.type_mapper().i64_type();
+                let fn_type = i64_type.fn_type(&[], false);
+                self.module.add_function("bhc_exception_check", fn_type)
+            }
+        };
+        let pending = self
+            .builder()
+            .build_call(check_fn, &[], "exn_pending")
+            .map_err(|e| CodegenError::Internal(format!("exn check: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("exn check: void".to_string()))?
+            .into_int_value();
+        let zero = self.type_mapper().i64_type().const_zero();
+        let is_pending = self
+            .builder()
+            .build_int_compare(inkwell::IntPredicate::NE, pending, zero, "exn_is_pending")
+            .map_err(|e| CodegenError::Internal(format!("exn cmp: {:?}", e)))?;
+
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("exn guard: no function".to_string()))?;
+        let returns_ptr = current_fn
+            .get_type()
+            .get_return_type()
+            .is_some_and(|t| matches!(t, inkwell::types::BasicTypeEnum::PointerType(_)));
+        if !returns_ptr {
+            return Ok(());
+        }
+        let skip_block = self
+            .llvm_context()
+            .append_basic_block(current_fn, "exn_skip");
+        let cont_block = self
+            .llvm_context()
+            .append_basic_block(current_fn, "exn_cont");
+        self.builder()
+            .build_conditional_branch(is_pending, skip_block, cont_block)
+            .map_err(|e| CodegenError::Internal(format!("exn br: {:?}", e)))?;
+        self.builder().position_at_end(skip_block);
+        let null = self.type_mapper().ptr_type().const_null();
+        self.builder()
+            .build_return(Some(&null))
+            .map_err(|e| CodegenError::Internal(format!("exn ret: {:?}", e)))?;
+        self.builder().position_at_end(cont_block);
+        Ok(())
+    }
+
     fn lower_io_bind_with_value(
         &mut self,
         lhs_val: BasicValueEnum<'ctx>,
         rhs_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // The LHS just ran — short-circuit before the continuation if it threw.
+        self.emit_io_exn_guard()?;
+
         // For IO, we just run the LHS and pass its result to RHS
         let rhs_val = self
             .lower_expr(rhs_expr)?
@@ -1393,6 +1456,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         _lhs_val: BasicValueEnum<'ctx>,
         rhs_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // The LHS just ran — short-circuit before the continuation if it threw.
+        self.emit_io_exn_guard()?;
+
         // For IO then, LHS is already evaluated (side effect happened)
         // Just evaluate and return RHS
         self.lower_expr(rhs_expr)
@@ -49021,6 +49087,42 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 ))
             }
         };
+
+        // The exception sentinel is null and infectious: applying a null
+        // "closure" (a propagating thrown-exception result — minipandoc's
+        // Main invoked the action returned by a throwing writeHtml5String)
+        // must propagate null upward, not dereference it.
+        if let Some(current_fn) = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+        {
+            let returns_ptr = current_fn
+                .get_type()
+                .get_return_type()
+                .is_some_and(|t| matches!(t, inkwell::types::BasicTypeEnum::PointerType(_)));
+            if returns_ptr {
+                let is_null = self
+                    .builder()
+                    .build_is_null(closure_ptr, "closure_is_null")
+                    .map_err(|e| CodegenError::Internal(format!("null check: {:?}", e)))?;
+                let skip_block = self
+                    .llvm_context()
+                    .append_basic_block(current_fn, "closure_null_skip");
+                let cont_block = self
+                    .llvm_context()
+                    .append_basic_block(current_fn, "closure_call_cont");
+                self.builder()
+                    .build_conditional_branch(is_null, skip_block, cont_block)
+                    .map_err(|e| CodegenError::Internal(format!("null br: {:?}", e)))?;
+                self.builder().position_at_end(skip_block);
+                let null = ptr_type.const_null();
+                self.builder()
+                    .build_return(Some(&null))
+                    .map_err(|e| CodegenError::Internal(format!("null ret: {:?}", e)))?;
+                self.builder().position_at_end(cont_block);
+            }
+        }
 
         // Extract function pointer from closure
         let fn_ptr = self.extract_closure_fn_ptr(closure_ptr)?;

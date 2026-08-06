@@ -2386,6 +2386,15 @@ fn bhc_exception_pending() -> bool {
     BHC_EXCEPTION.with(|cell| cell.get().is_some())
 }
 
+/// C-ABI probe for compiled code: 1 if a Haskell exception is pending
+/// (thrown and not yet caught), else 0. Codegen emits this check at
+/// IO-bind boundaries so a thrown sentinel short-circuits the rest of a
+/// do-chain instead of flowing into value code and being dereferenced.
+#[no_mangle]
+pub extern "C" fn bhc_exception_check() -> i64 {
+    i64::from(bhc_exception_pending())
+}
+
 // ============================================================================
 // SomeException — Tagged Exception Type
 // ============================================================================

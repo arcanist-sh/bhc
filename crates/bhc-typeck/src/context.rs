@@ -2741,12 +2741,22 @@ impl TyCtxt {
                 ),
                 // elem, notElem :: a -> [a] -> Bool
                 "elem" | "notElem" => {
-                    let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                    // Foldable t => a -> t a -> Bool. The container is a
+                    // higher-kinded var, not [a]: Readers.HTML applies `elem`
+                    // to a Set ("expected [], found Set.Set"). The unifier
+                    // decomposes List as App([], elem), so plain list uses
+                    // still unify.
+                    let f = TyVar::new(
+                        0xFFFD_0001,
+                        Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)),
+                    );
+                    let fa =
+                        Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(a.clone())));
                     Scheme::poly(
-                        vec![a.clone()],
+                        vec![f, a.clone()],
                         Ty::fun(
                             Ty::Var(a.clone()),
-                            Ty::fun(list_a, self.builtins.bool_ty.clone()),
+                            Ty::fun(fa, self.builtins.bool_ty.clone()),
                         ),
                     )
                 }

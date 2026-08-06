@@ -18457,7 +18457,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(m_expr)?
             .ok_or_else(|| CodegenError::Internal("runExceptT: m has no value".to_string()))?;
         self.pop_transformer_layer();
+        self.run_except_t_on_value(m_val)
+    }
 
+    /// Run `runExceptT` on an already-lowered ExceptT computation. Shared by
+    /// the applied path (`runExceptT m`) and the value/partial-application
+    /// path (`runExceptT $ m`, which reaches `lower_builtin_direct` via
+    /// `create_builtin_closure`).
+    fn run_except_t_on_value(
+        &mut self,
+        m_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // In nested context (ExceptT over StateT/ReaderT), the m_val IS the transformer
         // closure that expects state/reader-env. Return it as-is — the outer
         // runStateT/runReaderT will call it with the appropriate argument.
@@ -46663,6 +46673,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .map_err(|e| CodegenError::Internal(format!("unreachable failed: {:?}", e)))?;
                 Ok(Some(self.type_mapper().ptr_type().const_null().into()))
             }
+
+            // Transformer runner used as a bare value (`runExceptT $ m` makes
+            // it the operand of `$` → value position → here). Without this arm
+            // it falls through to the `stub: runExceptT not implemented` panic
+            // that aborted minipandoc inside runIOorExplode. args[0] is the
+            // already-lowered ExceptT computation.
+            "runExceptT" => self.run_except_t_on_value(args[0]),
 
             // Async exception masking
             "getMaskingState" => self.lower_builtin_get_masking_state(),

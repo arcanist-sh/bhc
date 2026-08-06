@@ -248,6 +248,14 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 {
                     return Ok(method_expr);
                 }
+                // Result-position method (`def :: Default a => a`): no
+                // argument will ever drive resolution, but typeck recorded
+                // this use's resolved type by span — dispatch directly.
+                if let Some(method_expr) =
+                    ctx.select_method_by_result_type(class_name, name, def_ref.span)
+                {
+                    return Ok(method_expr);
+                }
                 // Still no dict — don't try to resolve here.
                 // The App case in lower_app will handle resolution
                 // when the argument type is known.

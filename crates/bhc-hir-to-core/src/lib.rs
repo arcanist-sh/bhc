@@ -170,14 +170,16 @@ pub fn lower_module_with_imports(
 ) -> LowerResult<CoreModule> {
     let mut ctx = LowerContext::new();
 
-    if let Some((classes, instances)) = imported_instances {
-        ctx.register_imported_instances(classes, instances);
-    }
-
     // If we have definition mappings from the lowering pass, use them
     // to register builtins with the correct DefIds
     if let Some(def_map) = defs {
         ctx.register_lowered_builtins(def_map);
+    }
+
+    // AFTER register_lowered_builtins — it clears var_map, which would wipe
+    // the synthetic $instance_* method vars registered here.
+    if let Some((classes, instances)) = imported_instances {
+        ctx.register_imported_instances(classes, instances);
     }
 
     // If we have type schemes from the type checker, use them

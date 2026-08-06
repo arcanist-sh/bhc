@@ -1790,6 +1790,42 @@ impl LowerContext {
         self.class_registry.register_instance(instance_info);
     }
 
+    /// Resolve a class-method reference by the RESULT type recorded for its
+    /// use site. Nullary/result-position methods (`def :: Default a => a`)
+    /// have no argument to drive specialization and no dictionary in scope;
+    /// the type checker's span-keyed `expr_types` carries the resolved type
+    /// (`WriterOptions` at `writeHtml5String def doc`), which picks the
+    /// instance directly. Only fires when that type is fully concrete —
+    /// a type variable would unify-match an arbitrary instance.
+    pub(crate) fn select_method_by_result_type(
+        &mut self,
+        class_name: Symbol,
+        method: Symbol,
+        span: Span,
+    ) -> Option<bhc_core::Expr> {
+        fn ty_is_concrete(ty: &Ty) -> bool {
+            match ty {
+                Ty::Var(_) | Ty::Error => false,
+                Ty::Con(_) | Ty::Prim(_) => true,
+                Ty::App(f, a) => ty_is_concrete(f) && ty_is_concrete(a),
+                Ty::Fun(a, b) => ty_is_concrete(a) && ty_is_concrete(b),
+                Ty::List(t) => ty_is_concrete(t),
+                Ty::Tuple(ts) => ts.iter().all(ty_is_concrete),
+                _ => false,
+            }
+        }
+        let ty = self.expr_ty_opt(span)?;
+        if !ty_is_concrete(&ty) {
+            return None;
+        }
+        let def_id = {
+            let (instance, _subst) = self.class_registry.resolve_instance(class_name, &ty)?;
+            instance.methods.get(&method).copied()?
+        };
+        let var = self.lookup_var(def_id)?.clone();
+        Some(bhc_core::Expr::Var(var, span))
+    }
+
     /// Register classes and instances loaded from module interfaces so
     /// class-method calls on concrete types specialize to
     /// `$instance_{method}_{TypeEnc}` variables — codegen resolves those

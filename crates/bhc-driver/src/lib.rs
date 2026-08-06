@@ -1194,10 +1194,15 @@ impl Compiler {
         let imported_instance_data: Vec<(Symbol, Vec<bhc_types::Ty>, Vec<Symbol>)> = lower_ctx
             .interface_instances
             .iter()
-            .filter_map(|(class, types)| {
-                class_method_map
+            .map(|(class, types, own_methods)| {
+                // Prefer the class declaration's method list; fall back to
+                // the instance's own methods for externally-defined classes
+                // (Default has no .bhi, but its WriterOptions instance is
+                // compiled in Text.Pandoc.Options).
+                let methods = class_method_map
                     .get(class)
-                    .map(|methods| (*class, types.clone(), (*methods).clone()))
+                    .map_or_else(|| own_methods.clone(), |ms| (*ms).clone());
+                (*class, types.clone(), methods)
             })
             .collect();
         let imports = if lower_ctx.interface_classes.is_empty() && imported_instance_data.is_empty()
@@ -3057,8 +3062,9 @@ impl Compiler {
                 .iter()
                 .map(|t| converter.convert_type(t))
                 .collect();
+            let methods: Vec<Symbol> = inst.methods.iter().map(|m| Symbol::intern(m)).collect();
             ctx.interface_instances
-                .push((Symbol::intern(&inst.class), types));
+                .push((Symbol::intern(&inst.class), types, methods));
         }
 
         exports

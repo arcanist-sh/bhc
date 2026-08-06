@@ -126,10 +126,22 @@ pub fn generate_interface(
                 let constraints: Vec<Constraint> =
                     inst.context.iter().map(convert_ast_constraint).collect();
                 let types = vec![convert_ast_type(&inst.ty)];
+                let methods: Vec<String> = inst
+                    .methods
+                    .iter()
+                    .filter_map(|m| {
+                        if let bhc_ast::Decl::FunBind(fb) = m {
+                            Some(fb.name.name.as_str().to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 iface.add_instance(ExportedInstance {
                     class: inst.class.name.as_str().to_string(),
                     types,
                     constraints,
+                    methods,
                 });
             }
             // Other declarations (FunBind without sig, fixity, foreign, etc.) — skip for MVP

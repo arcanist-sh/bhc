@@ -184,11 +184,14 @@ pub struct LowerContext {
     /// Constructors loaded from `.bhi` interfaces for codegen metadata:
     /// (name, tag, arity, owning type name, is_newtype).
     pub interface_constructors: Vec<(String, u32, u32, Option<String>, bool)>,
-    /// Instances loaded from `.bhi` interfaces: (class name, instance types).
-    /// hir-to-core registers these so class-method calls on concrete types
-    /// specialize to `$instance_{method}_{TypeEnc}` vars, which codegen then
-    /// resolves against the module-qualified externs from `interface_symbols`.
-    pub interface_instances: Vec<(Symbol, Vec<bhc_types::Ty>)>,
+    /// Instances loaded from `.bhi` interfaces: (class name, instance types,
+    /// the instance's own method names). hir-to-core registers these so
+    /// class-method calls on concrete types specialize to
+    /// `$instance_{method}_{TypeEnc}` vars, which codegen then resolves
+    /// against the module-qualified externs from `interface_symbols`. The
+    /// method names let instances of externally-defined classes (Default)
+    /// dispatch without the class's own interface.
+    pub interface_instances: Vec<(Symbol, Vec<bhc_types::Ty>, Vec<Symbol>)>,
     /// Classes loaded from `.bhi` interfaces: (class name, method names).
     /// Needed alongside `interface_instances` so hir-to-core knows which
     /// method names belong to an imported class.

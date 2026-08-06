@@ -1820,6 +1820,22 @@ impl LowerContext {
 
         let mut next_id: usize = 900_000;
         for (class, types, method_names) in instances {
+            // Externally-defined class (Default): no interface declares it,
+            // so synthesize a minimal registration from the instance's own
+            // method list — otherwise `def` isn't recognized as a class
+            // method and never specializes.
+            if self.class_registry.lookup_class(*class).is_none() {
+                self.class_registry
+                    .register_class(crate::dictionary::ClassInfo {
+                        name: *class,
+                        param_count: 1,
+                        methods: method_names.clone(),
+                        method_types: FxHashMap::default(),
+                        superclasses: Vec::new(),
+                        defaults: FxHashMap::default(),
+                        assoc_types: Vec::new(),
+                    });
+            }
             let inst_type_name = if types.is_empty() {
                 "Unknown".to_string()
             } else {

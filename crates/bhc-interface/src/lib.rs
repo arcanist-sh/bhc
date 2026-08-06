@@ -260,6 +260,12 @@ pub struct ExportedInstance {
     pub types: Vec<Type>,
     /// Instance constraints.
     pub constraints: Vec<Constraint>,
+    /// Names of the methods this instance implements. Lets consumers
+    /// dispatch to instances of classes they have no interface for
+    /// (`instance Default WriterOptions` — Default lives in an external
+    /// package, but `$instance_def_WriterOptions` is compiled right here).
+    #[serde(default)]
+    pub methods: Vec<String>,
 }
 
 /// A compiled instance-method implementation: the Core binding name

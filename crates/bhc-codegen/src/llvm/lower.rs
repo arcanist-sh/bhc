@@ -40928,9 +40928,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_sub(count_val, one, "init_i")
             .map_err(|e| CodegenError::Internal(format!("bs_unpack sub: {:?}", e)))?;
         // True preheader for the header PHIs — see lower_builtin_text_unpack.
-        let pre_header = self.builder().get_insert_block().ok_or_else(|| {
-            CodegenError::Internal("bs_unpack: no pre-header block".to_string())
-        })?;
+        let pre_header = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("bs_unpack: no pre-header block".to_string()))?;
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("bs_unpack br: {:?}", e)))?;
@@ -44038,78 +44039,77 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         );
 
         // Check if wrapper already exists
-        let wrapper_fn = if let Some(existing) =
-            self.module.llvm_module().get_function(&wrapper_name)
-        {
-            existing
-        } else {
-            // Create wrapper function: (ptr env, ptr arg1, ptr arg2, ...) -> ptr
-            let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
-            param_types.push(ptr_type.into()); // env/closure pointer
-            for _ in 0..arity {
-                param_types.push(ptr_type.into());
-            }
+        let wrapper_fn =
+            if let Some(existing) = self.module.llvm_module().get_function(&wrapper_name) {
+                existing
+            } else {
+                // Create wrapper function: (ptr env, ptr arg1, ptr arg2, ...) -> ptr
+                let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
+                param_types.push(ptr_type.into()); // env/closure pointer
+                for _ in 0..arity {
+                    param_types.push(ptr_type.into());
+                }
 
-            let wrapper_fn_type = ptr_type.fn_type(&param_types, false);
-            let wrapper_fn = self.module.llvm_module().add_function(
-                &wrapper_name,
-                wrapper_fn_type,
-                Some(inkwell::module::Linkage::Internal),
-            );
+                let wrapper_fn_type = ptr_type.fn_type(&param_types, false);
+                let wrapper_fn = self.module.llvm_module().add_function(
+                    &wrapper_name,
+                    wrapper_fn_type,
+                    Some(inkwell::module::Linkage::Internal),
+                );
 
-            // Build the wrapper function body
-            let entry_bb = self.llvm_ctx.append_basic_block(wrapper_fn, "entry");
-            let current_bb = self.builder().get_insert_block();
+                // Build the wrapper function body
+                let entry_bb = self.llvm_ctx.append_basic_block(wrapper_fn, "entry");
+                let current_bb = self.builder().get_insert_block();
 
-            self.builder().position_at_end(entry_bb);
+                self.builder().position_at_end(entry_bb);
 
-            // Load arguments (skip env at index 0)
-            let args: Vec<BasicValueEnum<'ctx>> = (1..=arity)
-                .map(|i| wrapper_fn.get_nth_param(i).unwrap())
-                .collect();
+                // Load arguments (skip env at index 0)
+                let args: Vec<BasicValueEnum<'ctx>> = (1..=arity)
+                    .map(|i| wrapper_fn.get_nth_param(i).unwrap())
+                    .collect();
 
-            // Perform the builtin operation
-            let result = self.lower_builtin_direct(name, &args)?;
+                // Perform the builtin operation
+                let result = self.lower_builtin_direct(name, &args)?;
 
-            // Return the result — convert non-pointer values if needed.
-            // Skip the return entirely when the builtin already terminated the
-            // block: `exitWith` ends in `unreachable`, and appending `ret`
-            // after it is "Terminator found in the middle of a basic block"
-            // (broke Text.Pandoc.Error).
-            let already_terminated = self
-                .builder()
-                .get_insert_block()
-                .and_then(|b| b.get_terminator())
-                .is_some();
-            if !already_terminated {
-                let result_ptr = match result {
-                    Some(v) => {
-                        if v.is_pointer_value() {
-                            v.into_pointer_value()
-                        } else if v.is_int_value() {
-                            self.int_to_ptr(v.into_int_value())?
-                        } else {
-                            // Float or other — box it
-                            let ptr_val = self.value_to_ptr(v)?;
-                            ptr_val
+                // Return the result — convert non-pointer values if needed.
+                // Skip the return entirely when the builtin already terminated the
+                // block: `exitWith` ends in `unreachable`, and appending `ret`
+                // after it is "Terminator found in the middle of a basic block"
+                // (broke Text.Pandoc.Error).
+                let already_terminated = self
+                    .builder()
+                    .get_insert_block()
+                    .and_then(|b| b.get_terminator())
+                    .is_some();
+                if !already_terminated {
+                    let result_ptr = match result {
+                        Some(v) => {
+                            if v.is_pointer_value() {
+                                v.into_pointer_value()
+                            } else if v.is_int_value() {
+                                self.int_to_ptr(v.into_int_value())?
+                            } else {
+                                // Float or other — box it
+                                let ptr_val = self.value_to_ptr(v)?;
+                                ptr_val
+                            }
                         }
-                    }
-                    None => ptr_type.const_null(), // Unit/void result
-                };
-                self.builder()
-                    .build_return(Some(&result_ptr))
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to build return: {:?}", e))
-                    })?;
-            }
+                        None => ptr_type.const_null(), // Unit/void result
+                    };
+                    self.builder()
+                        .build_return(Some(&result_ptr))
+                        .map_err(|e| {
+                            CodegenError::Internal(format!("failed to build return: {:?}", e))
+                        })?;
+                }
 
-            // Restore insertion point
-            if let Some(bb) = current_bb {
-                self.builder().position_at_end(bb);
-            }
+                // Restore insertion point
+                if let Some(bb) = current_bb {
+                    self.builder().position_at_end(bb);
+                }
 
-            wrapper_fn
-        };
+                wrapper_fn
+            };
 
         // Create a closure wrapping the builtin function
         let fn_ptr = wrapper_fn.as_global_value().as_pointer_value();
@@ -50275,11 +50275,34 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     default_block = Some(block);
                     datacon_info.push(None);
                 }
-                AltCon::Lit(_) => {
-                    return Err(CodegenError::Unsupported(
-                        "mixed literal and constructor patterns".to_string(),
-                    ))
-                }
+                AltCon::Lit(lit) => match lit {
+                    // A string-literal alternative on a LIST scrutinee: the
+                    // empty string IS the nil constructor (String = [Char]),
+                    // so `case s of { "" -> ..; (c:cs) -> .. }` mixes a Lit
+                    // alt into a constructor case (Format's splitExtension
+                    // match; Writers.Muse's `p "" = False`). Dispatch it as
+                    // tag 0, no fields. Non-empty literals would need a deep
+                    // string comparison — still unsupported.
+                    Literal::String(s) if s.as_str().is_empty() => {
+                        let tag_val = self.type_mapper().i64_type().const_zero();
+                        cases.push((tag_val, block));
+                        datacon_info.push(None);
+                    }
+                    _ => {
+                        let alt_summary: Vec<String> = alts
+                            .iter()
+                            .map(|a| match &a.con {
+                                AltCon::DataCon(c) => c.name.as_str().to_string(),
+                                AltCon::Lit(l) => format!("lit {l}"),
+                                AltCon::Default => "_".to_string(),
+                            })
+                            .collect();
+                        return Err(CodegenError::Unsupported(format!(
+                            "mixed literal and constructor patterns (literal {lit}; alts: {})",
+                            alt_summary.join(", ")
+                        )));
+                    }
+                },
             }
         }
 

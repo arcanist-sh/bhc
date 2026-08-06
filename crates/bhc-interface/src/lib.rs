@@ -39,7 +39,7 @@ use std::io::{Read, Write};
 use thiserror::Error;
 
 /// Current interface file format version.
-pub const INTERFACE_VERSION: u32 = 1;
+pub const INTERFACE_VERSION: u32 = 2;
 
 /// Magic bytes for interface files.
 pub const INTERFACE_MAGIC: &[u8; 4] = b"BHCI";
@@ -149,6 +149,13 @@ pub struct ExportedValue {
     /// Inline pragma information.
     #[serde(default)]
     pub inline: InlineInfo,
+    /// Definition arity: the number of leading lambdas in the compiled
+    /// Core binding — NOT the scheme's arrow count (eta differences).
+    /// Dependents need it to declare a correctly-typed extern for direct
+    /// cross-module calls. None until the producer's Core exists (the
+    /// interface is first written right after type checking; the driver
+    /// re-writes it with arities after core-lowering succeeds).
+    pub arity: Option<u32>,
 }
 
 /// Inline pragma information.
@@ -455,6 +462,7 @@ mod tests {
                 ty: Type::fun(Type::var("a"), Type::var("a")),
             },
             inline: InlineInfo::None,
+            arity: None,
         });
 
         assert_eq!(interface.header.module_name, "Test.Module");

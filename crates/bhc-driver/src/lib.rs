@@ -459,6 +459,7 @@ impl Compiler {
         // declarations even when its own lowering/codegen fails; only the `.o`
         // depends on codegen. Uses the declared module name so the `.bhi` lands
         // at the import-resolvable path (`<hidir>/Data/Split.bhi`).
+        let mut written_iface: Option<(bhc_interface::ModuleInterface, Utf8PathBuf)> = None;
         if let Some(ref hidir) = self.session.options.output_interface_dir {
             let iface = bhc_interface::generate::generate_interface(&module_name, &ast, &typed);
             let iface_path = bhc_interface::interface_path(hidir, &module_name);
@@ -475,6 +476,7 @@ impl Compiler {
                 interface = %iface_path,
                 "generated interface file"
             );
+            written_iface = Some((iface, iface_path));
         }
 
         // Phase 3: Lower to Core IR
@@ -484,10 +486,68 @@ impl Compiler {
         self.callbacks
             .on_phase_complete(CompilePhase::CoreLower, &unit.module_name);
 
-        // Phase 4: Code generation (to object file only)
+        // Re-write the interface with definition arities now that Core
+        // exists. Dependents declaring externs for direct cross-module calls
+        // need the Core lambda count (eta can differ from the scheme's arrow
+        // count). The early post-typecheck write above stays authoritative
+        // when lowering fails, preserving the codegen-failure decoupling.
+        if let Some((mut iface, iface_path)) = written_iface {
+            let arities = Self::collect_top_level_arities(&core);
+            let mut changed = false;
+            for value in &mut iface.values {
+                if let Some(arity) = arities.get(value.name.as_str()) {
+                    value.arity = Some(*arity);
+                    changed = true;
+                }
+            }
+            if changed {
+                iface.write_to_file(&iface_path).map_err(|e| {
+                    CompileError::CodegenError(format!("failed to write interface: {}", e))
+                })?;
+            }
+        }
+
+        // Phase 4: Code generation (to object file only) — via the
+        // multimodule path: top-level symbols are mangled "{module}.{name}"
+        // and interface-imported values with a known definition arity become
+        // module-qualified extern declarations, so objects from separate -c
+        // runs link together (bare names collided — 303 duplicate symbols in
+        // the pandoc link probe — and imports lowered to local no-op stubs).
         self.callbacks
             .on_phase_start(CompilePhase::Codegen, &unit.module_name);
-        let object_path = self.codegen(&unit.module_name, &core)?;
+        let mut seen_symbols = FxHashSet::default();
+        let mut imported_symbols: Vec<CompiledSymbol> = Vec::new();
+        for (name, origin, arity) in &lower_ctx.interface_symbols {
+            if seen_symbols.insert(*name) {
+                imported_symbols.push(CompiledSymbol {
+                    name: *name,
+                    llvm_name: format!("{}.{}", origin, name.as_str()),
+                    param_count: *arity as usize,
+                });
+            }
+        }
+        let imported_constructors: Vec<(String, ConstructorMeta)> = lower_ctx
+            .interface_constructors
+            .iter()
+            .map(|(name, tag, arity, type_name, is_newtype)| {
+                (
+                    name.clone(),
+                    ConstructorMeta {
+                        tag: *tag,
+                        arity: *arity,
+                        type_name: type_name.clone(),
+                        is_newtype: *is_newtype,
+                    },
+                )
+            })
+            .collect();
+        let object_path = self.codegen_multimodule(
+            &unit.module_name,
+            &core,
+            &module_name,
+            &imported_symbols,
+            &imported_constructors,
+        )?;
         self.callbacks
             .on_phase_complete(CompilePhase::Codegen, &unit.module_name);
 
@@ -2720,6 +2780,40 @@ impl Compiler {
         Some(exports)
     }
 
+    /// Count each top-level binding's leading Core lambdas — the definition
+    /// arity that dependents' extern declarations must match.
+    fn collect_top_level_arities(core: &CoreModule) -> FxHashMap<String, u32> {
+        fn lambda_count(mut expr: &bhc_core::Expr) -> u32 {
+            let mut n = 0;
+            loop {
+                match expr {
+                    bhc_core::Expr::Lam(_, body, _) => {
+                        n += 1;
+                        expr = body;
+                    }
+                    bhc_core::Expr::TyLam(_, body, _) => {
+                        expr = body;
+                    }
+                    _ => return n,
+                }
+            }
+        }
+        let mut arities = FxHashMap::default();
+        for bind in &core.bindings {
+            match bind {
+                bhc_core::Bind::NonRec(var, expr) => {
+                    arities.insert(var.name.as_str().to_string(), lambda_count(expr));
+                }
+                bhc_core::Bind::Rec(pairs) => {
+                    for (var, expr) in pairs {
+                        arities.insert(var.name.as_str().to_string(), lambda_count(expr));
+                    }
+                }
+            }
+        }
+        arities
+    }
+
     /// Convert a loaded `ModuleInterface` into `ModuleExports` suitable for
     /// the lowering context's module cache.
     ///
@@ -2749,6 +2843,11 @@ impl Compiler {
                 scheme,
             );
             exports.values.insert(name, fresh_id);
+            // Record for module-qualified extern declaration at codegen.
+            if let Some(arity) = value.arity {
+                ctx.interface_symbols
+                    .push((name, module_name.to_string(), arity));
+            }
         }
 
         // Register exported types and their constructors
@@ -2823,6 +2922,17 @@ impl Compiler {
                         is_newtype,
                     };
                     exports.constructors.insert(con_name, con_info);
+
+                    // Record for codegen constructor metadata (tag/arity for
+                    // cross-module constructor applications and matches).
+                    #[allow(clippy::cast_possible_truncation)]
+                    ctx.interface_constructors.push((
+                        con.name.clone(),
+                        tag as u32,
+                        con.fields.len() as u32,
+                        Some(exported_type.name.clone()),
+                        is_newtype,
+                    ));
 
                     // Record field ACCESSORS are values at use sites
                     // (`B.unMany blocks`); register each field name as an
@@ -5573,6 +5683,7 @@ exposed-modules: Data.Text Data.Text.Internal
                 ),
             },
             inline: bhc_interface::InlineInfo::None,
+            arity: None,
         });
         iface.add_value(ExportedValue {
             name: "identity".to_string(),
@@ -5585,6 +5696,7 @@ exposed-modules: Data.Text Data.Text.Internal
                 ),
             },
             inline: bhc_interface::InlineInfo::None,
+            arity: None,
         });
 
         // Convert to module exports
@@ -5654,6 +5766,7 @@ exposed-modules: Data.Text Data.Text.Internal
                 ),
             },
             inline: bhc_interface::InlineInfo::None,
+            arity: None,
         });
         iface.add_type(ExportedType {
             name: "Color".to_string(),

@@ -176,6 +176,14 @@ pub struct LowerContext {
     /// checker so synonyms like `type RowHead = [Cell]` expand across
     /// module boundaries instead of unifying as opaque constructors.
     pub interface_type_aliases: Vec<(Symbol, Vec<bhc_types::TyVar>, bhc_types::Ty)>,
+    /// Values loaded from `.bhi` interfaces with a known definition arity:
+    /// (bare name, defining module, Core lambda count). The driver turns
+    /// these into module-qualified extern declarations so cross-module
+    /// calls link against the real symbol instead of a local stub.
+    pub interface_symbols: Vec<(Symbol, String, u32)>,
+    /// Constructors loaded from `.bhi` interfaces for codegen metadata:
+    /// (name, tag, arity, owning type name, is_newtype).
+    pub interface_constructors: Vec<(String, u32, u32, Option<String>, bool)>,
     /// Errors collected during lowering.
     pub errors: Vec<crate::LowerError>,
     /// Warnings collected during lowering.
@@ -213,6 +221,8 @@ impl LowerContext {
             current_scope: ScopeId::new(0),
             defs: IndexMap::default(),
             interface_type_aliases: Vec::new(),
+            interface_symbols: Vec::new(),
+            interface_constructors: Vec::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
             import_aliases: FxHashMap::default(),

@@ -37,6 +37,7 @@ pub fn generate_interface(
                             ty: exported_ty,
                         },
                         inline: crate::InlineInfo::None,
+                        arity: None,
                     });
                 }
             }

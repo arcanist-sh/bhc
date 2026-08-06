@@ -16,7 +16,7 @@ use bhc_types::{Constraint, Kind, Ty, TyCon};
 
 use crate::context::{has_type_variables, LowerContext};
 use crate::pattern::lower_pat_to_alt;
-use crate::{LowerError, LowerResult};
+use crate::LowerResult;
 
 /// Format a constraint for error messages.
 fn format_constraint(constraint: &Constraint) -> String {

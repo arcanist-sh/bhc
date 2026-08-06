@@ -2527,9 +2527,13 @@ impl Compiler {
             // Resolve the module's interface (honoring exposed-modules) and
             // chase any whole-module re-exports it declares.
             let mut visited = FxHashSet::default();
-            if let Some(exports) =
-                self.load_interface_exports_chasing(&module_name, &flat_dirs, &packages, ctx, &mut visited)
-            {
+            if let Some(exports) = self.load_interface_exports_chasing(
+                &module_name,
+                &flat_dirs,
+                &packages,
+                ctx,
+                &mut visited,
+            ) {
                 cache.insert(sym, exports);
             }
         }
@@ -2747,9 +2751,7 @@ impl Compiler {
                             .params
                             .iter()
                             .filter_map(|p| {
-                                match converter
-                                    .convert_type(&bhc_interface::Type::Var(p.clone()))
-                                {
+                                match converter.convert_type(&bhc_interface::Type::Var(p.clone())) {
                                     bhc_types::Ty::Var(v) => Some(v),
                                     _ => None,
                                 }

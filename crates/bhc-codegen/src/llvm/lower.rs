@@ -15994,7 +15994,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             existing
         } else {
             let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
-            self.module.llvm_module().add_function(name, fn_type, None)
+            // Internal: every module synthesizes its own copy of these
+            // fixed-name helpers; external linkage collided at link time
+            // (80 duplicate bhc_reader_t_*/bhc_except_t_* symbols in the
+            // pandoc link probe).
+            self.module.llvm_module().add_function(
+                name,
+                fn_type,
+                Some(inkwell::module::Linkage::Internal),
+            )
         }
     }
 
@@ -16007,7 +16015,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         } else {
             let fn_type =
                 ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
-            self.module.llvm_module().add_function(name, fn_type, None)
+            self.module.llvm_module().add_function(
+                name,
+                fn_type,
+                Some(inkwell::module::Linkage::Internal),
+            )
         }
     }
 
@@ -47853,6 +47865,24 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let boxed = self.box_int(int_result)?;
                 Ok(Some(boxed.into()))
             }
+            // Mixed int/double: promote the int side (Haskell numeric
+            // defaulting can leave an Int literal against a Double value —
+            // Writers.Docx.OpenXML hit this once imports became real extern
+            // calls with concrete result kinds).
+            (BasicValueEnum::IntValue(l), BasicValueEnum::FloatValue(r)) => {
+                let l = self
+                    .builder()
+                    .build_signed_int_to_float(l, self.type_mapper().f64_type(), "int_to_f64")
+                    .map_err(|e| CodegenError::Internal(format!("int->f64 failed: {:?}", e)))?;
+                self.build_float_arith_op(op, l, r)
+            }
+            (BasicValueEnum::FloatValue(l), BasicValueEnum::IntValue(r)) => {
+                let r = self
+                    .builder()
+                    .build_signed_int_to_float(r, self.type_mapper().f64_type(), "int_to_f64")
+                    .map_err(|e| CodegenError::Internal(format!("int->f64 failed: {:?}", e)))?;
+                self.build_float_arith_op(op, l, r)
+            }
             _ => Err(CodegenError::TypeError(
                 "arithmetic operations require matching numeric types".to_string(),
             )),
@@ -48805,10 +48835,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
 
             let wrapper_fn_type = ptr_type.fn_type(&wrapper_param_types, false);
-            let wrapper_fn =
-                self.module
-                    .llvm_module()
-                    .add_function(&wrapper_name, wrapper_fn_type, None);
+            // Internal: every consuming module synthesizes its own PAP
+            // wrapper for the same imported function (pap_Module.fn_N), so
+            // external linkage collides at link time.
+            let wrapper_fn = self.module.llvm_module().add_function(
+                &wrapper_name,
+                wrapper_fn_type,
+                Some(inkwell::module::Linkage::Internal),
+            );
 
             // Build the wrapper function body
             let entry_bb = self.llvm_ctx.append_basic_block(wrapper_fn, "entry");
@@ -49122,11 +49156,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .filter_map(|vid| self.env.get(vid).map(|val| (*vid, *val)))
                     .collect();
 
-                // First pass: declare all recursive functions
+                // First pass: declare all recursive functions. Internal:
+                // these are lifted LOCAL let-rec bindings named
+                // "{name}${var_id}"; VarIds repeat across modules (the fresh
+                // counter restarts per module), so external linkage collides
+                // at link time (go$200213 in two readers).
                 for (var, _expr) in bindings {
                     let lifted_name = format!("{}${}", var.name.as_str(), var.id.index());
                     let fn_type = self.lower_function_type(&var.ty)?;
-                    let fn_val = self.module.add_function(&lifted_name, fn_type);
+                    let fn_val = self.module.add_internal_function(&lifted_name, fn_type);
                     self.functions.insert(var.id, fn_val);
                 }
 

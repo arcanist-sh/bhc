@@ -2137,7 +2137,10 @@ fn make_pattern_error(span: Span) -> core::Expr {
         ty: Ty::Error,
     };
     let msg = core::Expr::Lit(
-        Literal::String(Symbol::intern("Non-exhaustive patterns")),
+        Literal::String(Symbol::intern(&format!(
+            "Non-exhaustive patterns at bytes {}..{}",
+            span.lo.0, span.hi.0
+        ))),
         Ty::Error,
         span,
     );

@@ -13916,6 +13916,32 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("throw: returned void".to_string()))?;
 
+        // Propagate the sentinel upward IMMEDIATELY. bhc_throw returns a
+        // sentinel (exn-guard model), and letting it flow into normal value
+        // paths dereferences it — writeHtml5String's pattern-failure path
+        // segfaulted exactly this way. Return it from the enclosing function
+        // (uniform ptr convention) and keep emitting any dead continuation
+        // code in a fresh predecessor-less block.
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent());
+        if let Some(current_fn) = current_fn {
+            let returns_ptr = current_fn
+                .get_type()
+                .get_return_type()
+                .is_some_and(|t| matches!(t, inkwell::types::BasicTypeEnum::PointerType(_)));
+            if returns_ptr {
+                self.builder()
+                    .build_return(Some(&result))
+                    .map_err(|e| CodegenError::Internal(format!("throw return: {:?}", e)))?;
+                let cont = self
+                    .llvm_context()
+                    .append_basic_block(current_fn, "after_throw");
+                self.builder().position_at_end(cont);
+            }
+        }
+
         Ok(Some(result))
     }
 

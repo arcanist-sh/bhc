@@ -8933,11 +8933,33 @@ fn lower_newtype_decl_with_accessors(
         })
         .collect();
 
+    // The newtype's applied type `N a1 .. an`, for accessor signatures.
+    let nt_kind = params.iter().fold(bhc_types::Kind::Star, |acc, _| {
+        bhc_types::Kind::Arrow(Box::new(bhc_types::Kind::Star), Box::new(acc))
+    });
+    let nt_con = bhc_types::Ty::Con(bhc_types::TyCon::new(newtype.name.name, nt_kind));
+    let newtype_applied = params.iter().fold(nt_con, |acc, p| {
+        bhc_types::Ty::App(Box::new(acc), Box::new(bhc_types::Ty::Var(p.clone())))
+    });
+
     // Generate field accessor functions for record constructors
     let mut accessors = Vec::new();
     if let hir::ConFields::Named(fields) = &con.fields {
         for (field_idx, field) in fields.iter().enumerate() {
-            let accessor = generate_field_accessor(ctx, &con, fields.len(), field_idx, field);
+            let mut accessor = generate_field_accessor(ctx, &con, fields.len(), field_idx, field);
+            // Give the accessor an explicit signature `N a1..an -> field.ty`.
+            // Its generated body `\(N x) -> x` otherwise infers a type that
+            // over-generalizes the field to a free var (forall a b. N a -> b);
+            // applying the accessor (`unPandocIO ma`) then loses the field's
+            // real type — the ExceptT/StateT transformer stack — so downstream
+            // inference (`flip evalStateT def $ runExceptT $ unPandocIO ma`)
+            // can't pin the state type and `def` never resolves. In eta-form
+            // (`f = unX`) an outer signature masked this; applied use exposed
+            // the bare var.
+            accessor.sig = Some(bhc_types::Scheme::poly(
+                params.clone(),
+                bhc_types::Ty::fun(newtype_applied.clone(), field.ty.clone()),
+            ));
             accessors.push(accessor);
         }
     }

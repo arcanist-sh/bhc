@@ -64,10 +64,33 @@ impl TypeConverter {
                 let kind = Kind::Star; // Default; callers refine if needed
                 Ty::Con(TyCon::new(Symbol::intern(name), kind))
             }
-            IfaceType::App(f, x) => {
-                let f_ty = self.convert_type(f);
-                let x_ty = self.convert_type(x);
-                Ty::App(Box::new(f_ty), Box::new(x_ty))
+            IfaceType::App(..) => {
+                // Collect the application spine so an applied head constructor
+                // gets a kind reflecting its arity (`* -> ... -> *`). A bare
+                // `Con` defaults to kind `*` above, but `PandocIO a` /
+                // `StateT s m a` need a higher-kinded head — otherwise
+                // unifying the head against a same-arity type variable (e.g. a
+                // monad var `m :: * -> *` in `return :: a -> m a`) fails the
+                // kind check and the variable never binds (`return 42 ::
+                // PandocIO Int` left the monad unresolved).
+                let mut args: Vec<&IfaceType> = Vec::new();
+                let mut head = ty;
+                while let IfaceType::App(f, x) = head {
+                    args.push(x);
+                    head = f;
+                }
+                args.reverse();
+                let head_ty = if let IfaceType::Con(name) = head {
+                    let kind = (0..args.len()).fold(Kind::Star, |acc, _| {
+                        Kind::Arrow(Box::new(Kind::Star), Box::new(acc))
+                    });
+                    Ty::Con(TyCon::new(Symbol::intern(name), kind))
+                } else {
+                    self.convert_type(head)
+                };
+                args.into_iter().fold(head_ty, |acc, arg| {
+                    Ty::App(Box::new(acc), Box::new(self.convert_type(arg)))
+                })
             }
             IfaceType::Fun(a, b) => {
                 let a_ty = self.convert_type(a);

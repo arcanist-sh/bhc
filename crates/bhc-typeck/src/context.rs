@@ -7457,6 +7457,106 @@ impl TyCtxt {
                     Scheme::poly(vec![a.clone()], Ty::fun(func_ty, readm_a))
                 }
 
+                // State-monad runners. An explicit `import Control.Monad.State
+                // (evalStateT)` gives the name a FRESH import DefId (the lowerer
+                // rebinds to dodge cross-function DefId sharing), which the
+                // DefId-keyed transformer schemes in register_transformer_ops
+                // never reach — so without these arms the runner got a
+                // permissive `forall t. t`, and the state type never linked to
+                // the `StateT s m a` argument (`flip evalStateT def` left
+                // `def :: Default s => s` unresolved → `stub: def`).
+                "evalStateT" | "execStateT" | "runStateT" => {
+                    let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                    let s = TyVar::new_star(0xFFF0_0001);
+                    let a = TyVar::new_star(0xFFF0_0002);
+                    let m = TyVar::new(0xFFF0_0003, m_kind.clone());
+                    let state_t_con = TyCon::new(
+                        Symbol::intern("StateT"),
+                        Kind::Arrow(
+                            Box::new(Kind::Star),
+                            Box::new(Kind::Arrow(
+                                Box::new(m_kind.clone()),
+                                Box::new(m_kind),
+                            )),
+                        ),
+                    );
+                    // StateT s m a
+                    let state_t = Ty::App(
+                        Box::new(Ty::App(
+                            Box::new(Ty::App(
+                                Box::new(Ty::Con(state_t_con)),
+                                Box::new(Ty::Var(s.clone())),
+                            )),
+                            Box::new(Ty::Var(m.clone())),
+                        )),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    // result inside m: evalStateT -> a, execStateT -> s, runStateT -> (a,s)
+                    let inner = match name {
+                        "execStateT" => Ty::Var(s.clone()),
+                        "runStateT" => {
+                            Ty::Tuple(vec![Ty::Var(a.clone()), Ty::Var(s.clone())])
+                        }
+                        _ => Ty::Var(a.clone()),
+                    };
+                    let m_inner = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(inner));
+                    Scheme::poly(
+                        vec![s.clone(), a.clone(), m.clone()],
+                        Ty::fun(state_t, Ty::fun(Ty::Var(s.clone()), m_inner)),
+                    )
+                }
+
+                // runExceptT :: ExceptT e m a -> m (Either e a). Same
+                // import-rebind permissive-scheme trap as the State runners —
+                // and pandoc's `flip evalStateT def $ runExceptT $ unPandocIO
+                // ma` needs runExceptT's result to be a concrete
+                // `StateT CommonState IO …` so `def`'s state type resolves.
+                "runExceptT" => {
+                    let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                    let e = TyVar::new_star(0xFFF0_0011);
+                    let a = TyVar::new_star(0xFFF0_0012);
+                    let m = TyVar::new(0xFFF0_0013, m_kind.clone());
+                    let except_t_con = TyCon::new(
+                        Symbol::intern("ExceptT"),
+                        Kind::Arrow(
+                            Box::new(Kind::Star),
+                            Box::new(Kind::Arrow(
+                                Box::new(m_kind.clone()),
+                                Box::new(m_kind),
+                            )),
+                        ),
+                    );
+                    let except_t = Ty::App(
+                        Box::new(Ty::App(
+                            Box::new(Ty::App(
+                                Box::new(Ty::Con(except_t_con)),
+                                Box::new(Ty::Var(e.clone())),
+                            )),
+                            Box::new(Ty::Var(m.clone())),
+                        )),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    let either_con = TyCon::new(
+                        Symbol::intern("Either"),
+                        Kind::Arrow(
+                            Box::new(Kind::Star),
+                            Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+                        ),
+                    );
+                    let either_ea = Ty::App(
+                        Box::new(Ty::App(
+                            Box::new(Ty::Con(either_con)),
+                            Box::new(Ty::Var(e.clone())),
+                        )),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    let m_either = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(either_ea));
+                    Scheme::poly(
+                        vec![e.clone(), a.clone(), m.clone()],
+                        Ty::fun(except_t, m_either),
+                    )
+                }
+
                 // Unknown builtins - skip here, will be handled in second pass
                 _ => continue,
             };

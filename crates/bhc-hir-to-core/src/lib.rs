@@ -145,6 +145,7 @@ pub fn lower_module_with_defs_and_constructors(
         imported_constructors,
         expr_types,
         None,
+        None,
     )
 }
 
@@ -159,6 +160,7 @@ pub fn lower_module_with_imports(
     type_schemes: Option<&TypeSchemeMap>,
     imported_constructors: Option<&ConstructorInfoMap>,
     expr_types: Option<&ExprTypeMap>,
+    resolved_expr_types: Option<&ExprTypeMap>,
     imported_instances: Option<(
         &[(bhc_intern::Symbol, Vec<bhc_intern::Symbol>)],
         &[(
@@ -191,6 +193,14 @@ pub fn lower_module_with_imports(
     // real types on Core nodes instead of `Ty::Error`.
     if let Some(ets) = expr_types {
         ctx.set_expr_types(ets.clone());
+    }
+
+    // Fixpoint-resolved types (dispatch-only side channel): used to pick which
+    // `pure`/`return`/method implementation to call at a user-defined monad
+    // whose type a single-pass apply leaves partially unresolved. Never baked
+    // into Core node types (see `TypedModule::resolved_expr_types`).
+    if let Some(rets) = resolved_expr_types {
+        ctx.set_resolved_expr_types(rets.clone());
     }
 
     // If we have imported constructor metadata, register it

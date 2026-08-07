@@ -977,23 +977,41 @@ fn lower_app(
                 let is_return_or_pure =
                     method_name.as_str() == "return" || method_name.as_str() == "pure";
                 if is_return_or_pure {
-                    if let Some(monad_ty) = ctx.current_monad_type().cloned() {
-                        if !LowerContext::is_builtin_monad_type(&monad_ty) {
-                            let pure_sym = Symbol::intern("pure");
-                            let applicative_sym = Symbol::intern("Applicative");
-                            if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
-                                pure_sym,
-                                applicative_sym,
-                                &monad_ty,
+                    // Candidate monad types, in priority order:
+                    //  1. the enclosing do-block monad, if `>>=`/`>>` pushed one;
+                    //  2. the monad constructor read off this `return`/`pure`
+                    //     application's OWN resolved type `M a` (strip the value
+                    //     arg `a`). (2) is what lets a bare `return x :: M a` with
+                    //     no surrounding do-block dispatch — e.g. the argument in
+                    //     `runIOorExplode (return 42)`, whose single-pass expr
+                    //     type leaves the monad a variable (`App(Var, Int)`) but
+                    //     whose fixpoint-resolved type is `App(PandocIO, Int)`.
+                    let mut candidates: Vec<Ty> = Vec::new();
+                    if let Some(m) = ctx.current_monad_type().cloned() {
+                        candidates.push(m);
+                    }
+                    if let Some(Ty::App(head, _arg)) = ctx.resolved_expr_ty_opt(span) {
+                        candidates.push(*head);
+                    }
+                    let pure_sym = Symbol::intern("pure");
+                    let applicative_sym = Symbol::intern("Applicative");
+                    for monad_ty in candidates {
+                        // Builtin monads (IO/StateT/…) take codegen's fast path.
+                        if LowerContext::is_builtin_monad_type(&monad_ty) {
+                            continue;
+                        }
+                        if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
+                            pure_sym,
+                            applicative_sym,
+                            &monad_ty,
+                            span,
+                        ) {
+                            let x_core = lower_expr(ctx, x)?;
+                            return Ok(core::Expr::App(
+                                Box::new(method_expr),
+                                Box::new(x_core),
                                 span,
-                            ) {
-                                let x_core = lower_expr(ctx, x)?;
-                                return Ok(core::Expr::App(
-                                    Box::new(method_expr),
-                                    Box::new(x_core),
-                                    span,
-                                ));
-                            }
+                            ));
                         }
                     }
                 }

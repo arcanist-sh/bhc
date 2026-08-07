@@ -83,6 +83,12 @@ pub struct LowerContext {
     /// Core nodes real types; ~100% coverage measured on real-expression nodes.
     expr_types: crate::ExprTypeMap,
 
+    /// Fixpoint-resolved per-node types, a dispatch-only side channel keyed by
+    /// `Span`. Read via `resolved_expr_ty_opt(span)` to choose which method to
+    /// call at a user-defined monad; never used to type a Core node. Empty
+    /// unless threaded from `TypedModule::resolved_expr_types`.
+    resolved_expr_types: crate::ExprTypeMap,
+
     /// Constructor metadata (`DefId` -> `ConstructorInfo`).
     /// This maps constructor `DefIds` to their metadata including tag and type.
     constructor_map: FxHashMap<DefId, ConstructorInfo>,
@@ -147,6 +153,7 @@ impl LowerContext {
             var_map: FxHashMap::default(),
             type_schemes: FxHashMap::default(),
             expr_types: FxHashMap::default(),
+            resolved_expr_types: FxHashMap::default(),
             constructor_map: FxHashMap::default(),
             constructor_field_types: FxHashMap::default(),
             field_selector_map: FxHashMap::default(),
@@ -176,12 +183,33 @@ impl LowerContext {
         self.expr_types = expr_types;
     }
 
+    /// Set the fixpoint-resolved per-node types (dispatch-only side channel).
+    /// See [`resolved_expr_ty_opt`](Self::resolved_expr_ty_opt).
+    pub fn set_resolved_expr_types(&mut self, resolved: crate::ExprTypeMap) {
+        self.resolved_expr_types = resolved;
+    }
+
     /// Look up a HIR expression's inferred type by its source `Span`, returning
     /// `None` if absent (spec/BHC-BRIEF-0002). Populated by typeck as of Path A;
     /// used to give Core nodes real types instead of `Ty::Error`.
     #[must_use]
     pub(crate) fn expr_ty_opt(&self, span: bhc_span::Span) -> Option<Ty> {
         self.expr_types.get(&span).cloned()
+    }
+
+    /// Like [`expr_ty_opt`](Self::expr_ty_opt), but from the fixpoint-resolved
+    /// map (`TypedModule::resolved_expr_types`). Use this ONLY to decide which
+    /// method/instance to dispatch to (e.g. `return`/`pure` at a user-defined
+    /// monad whose type a single-pass apply leaves partially unresolved) — never
+    /// to type a Core node, since the fuller resolution regresses codegen width
+    /// inference. Falls back to `expr_ty_opt` when the resolved map is empty
+    /// (e.g. lowering paths that don't thread it).
+    #[must_use]
+    pub(crate) fn resolved_expr_ty_opt(&self, span: bhc_span::Span) -> Option<Ty> {
+        self.resolved_expr_types
+            .get(&span)
+            .cloned()
+            .or_else(|| self.expr_ty_opt(span))
     }
 
     /// Look up the type for a definition from the type checker.

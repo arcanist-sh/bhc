@@ -90,6 +90,19 @@ pub struct TypedModule {
     /// inference (spec/BHC-BRIEF-0002); values have the final substitution
     /// applied.
     pub expr_types: FxHashMap<Span, Ty>,
+    /// Like [`expr_types`](Self::expr_types), but with the final substitution
+    /// applied to a *fixpoint* (see [`Subst::apply_resolved`]). The plain
+    /// `expr_types` uses a single-pass apply, which leaves nested variables
+    /// unresolved under a triangular substitution — e.g. `return 42 :: M a`
+    /// records `App(Var m, Int)` with `m` still a variable even though `m` is
+    /// bound. This map resolves those chains.
+    ///
+    /// It exists ONLY as a side channel for lowering's dispatch decisions —
+    /// choosing which `pure`/`return`/method implementation to call at a
+    /// user-defined monad. It MUST NOT be baked into Core node types: codegen
+    /// infers value widths assuming many `expr_types` leaves stay unresolved,
+    /// and the fuller resolution here regresses it.
+    pub resolved_expr_types: FxHashMap<Span, Ty>,
     /// Type schemes for each definition (indexed by `DefId`).
     pub def_schemes: FxHashMap<DefId, Scheme>,
 }

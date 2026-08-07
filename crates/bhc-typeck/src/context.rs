@@ -8344,11 +8344,22 @@ impl TyCtxt {
     /// Convert the context into a `TypedModule`.
     #[must_use]
     pub fn into_typed_module(self, hir: Module) -> TypedModule {
-        // Apply final substitution to all expression types
-        let expr_types = self
+        // Apply final substitution to all expression types. Single-pass apply:
+        // these values are baked into Core by lowering, and codegen's width
+        // inference relies on many leaves staying unresolved.
+        let expr_types: rustc_hash::FxHashMap<Span, Ty> = self
             .expr_types
-            .into_iter()
-            .map(|(id, ty)| (id, self.subst.apply(&ty)))
+            .iter()
+            .map(|(id, ty)| (*id, self.subst.apply(ty)))
+            .collect();
+
+        // A fixpoint-resolved copy for lowering's dispatch decisions only (never
+        // baked into Core). Resolves triangular chains that a single apply leaves
+        // partial, e.g. `return 42 :: M a` recorded as `App(Var m, Int)`.
+        let resolved_expr_types: rustc_hash::FxHashMap<Span, Ty> = self
+            .expr_types
+            .iter()
+            .map(|(id, ty)| (*id, self.subst.apply_resolved(ty)))
             .collect();
 
         // Apply final substitution to all definition schemes
@@ -8435,6 +8446,7 @@ impl TyCtxt {
         TypedModule {
             hir,
             expr_types,
+            resolved_expr_types,
             def_schemes,
         }
     }

@@ -584,6 +584,42 @@ impl Subst {
         self.mapping.contains_key(&var.id)
     }
 
+    /// Applies this substitution to a type, resolving nested variables to a
+    /// fixpoint.
+    ///
+    /// The substitution is *triangular*: [`bind_var`](crate) inserts `v -> t`
+    /// without rewriting `t` against later bindings, so a variable bound early
+    /// may map to a type mentioning a variable bound later. A single
+    /// [`apply`](Self::apply) rewrites only the outermost layer — e.g.
+    /// `603 -> App(Var 600, Int)` stays `App(Var 600, Int)` even when
+    /// `600 -> PandocIO` is present, because the `Var` leaf is looked up once
+    /// and returned verbatim. Applying again rewrites the exposed
+    /// `App(Var 600, _)`, so iterating to a fixpoint fully resolves the chain.
+    ///
+    /// Iteration is bounded to stay safe against transitive cycles the
+    /// immediate-only occurs check cannot rule out; a residual variable is left
+    /// in place rather than looping forever.
+    ///
+    /// This is deliberately NOT used for the `expr_types` that lowering bakes
+    /// into Core — codegen infers value widths assuming many leaves stay
+    /// unresolved, and fully resolving them regresses it. Use it only for a
+    /// side channel consumed by dispatch decisions (which method to call), such
+    /// as [`TypedModule::resolved_expr_types`].
+    #[must_use]
+    pub fn apply_resolved(&self, ty: &Ty) -> Ty {
+        let mut current = self.apply(ty);
+        // A well-formed (acyclic) triangular substitution converges in at most
+        // one pass per level of nesting; 100 is far above any realistic depth.
+        for _ in 0..100 {
+            let next = self.apply(&current);
+            if next == current {
+                break;
+            }
+            current = next;
+        }
+        current
+    }
+
     /// Applies this substitution to a type.
     #[must_use]
     pub fn apply(&self, ty: &Ty) -> Ty {
@@ -985,6 +1021,54 @@ mod tests {
                 assert!(matches!(*to, Ty::Con(_)));
             }
             _ => panic!("expected function type"),
+        }
+    }
+
+    #[test]
+    fn test_subst_apply_resolved_triangular() {
+        // A triangular substitution: a variable bound early maps to a type that
+        // mentions a variable bound later. `bind_var` inserts bindings without
+        // rewriting earlier right-hand sides, so a single `apply` leaves the
+        // nested variable unresolved; `apply_resolved` chases it to a fixpoint.
+        //
+        // Mirrors the real failure: `return 42 :: PandocIO Int` recorded the
+        // application node as `Var(603)`, with both `603 -> App(Var 600, Int)`
+        // and `600 -> PandocIO` present. A single apply produced
+        // `App(Var 600, Int)`, leaving the monad unresolved for dispatch.
+        let m = TyVar::new(600, Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star)));
+        let node = TyVar::new_star(603);
+        // SAFETY: raw symbol indices are valid for these structural tests.
+        let pandoc = TyCon::new(unsafe { Symbol::from_raw(0) }, m.kind.clone());
+        let int = TyCon::new(unsafe { Symbol::from_raw(1) }, Kind::Star);
+
+        let mut subst = Subst::new();
+        // Insert the node binding BEFORE the head-variable binding, so the
+        // node's right-hand side still mentions the not-yet-resolved head var.
+        subst.insert(
+            &node,
+            Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Con(int.clone()))),
+        );
+        subst.insert(&m, Ty::Con(pandoc.clone()));
+
+        // Single-step apply leaves the head variable unresolved (the bug).
+        match subst.apply(&Ty::Var(node.clone())) {
+            Ty::App(head, _) => assert!(
+                matches!(*head, Ty::Var(ref v) if v.id == 600),
+                "single apply should leave the head var unresolved (triangular)"
+            ),
+            other => panic!("expected App, got {other:?}"),
+        }
+
+        // Fixpoint apply resolves the whole chain.
+        match subst.apply_resolved(&Ty::Var(node)) {
+            Ty::App(head, arg) => {
+                assert!(
+                    matches!(*head, Ty::Con(ref c) if c.name == pandoc.name),
+                    "apply_resolved should resolve the head var to the Con"
+                );
+                assert!(matches!(*arg, Ty::Con(_)));
+            }
+            other => panic!("expected App, got {other:?}"),
         }
     }
 

@@ -1221,6 +1221,7 @@ impl Compiler {
             Some(&typed.def_schemes),
             imported_constructors,
             Some(&typed.expr_types),
+            Some(&typed.resolved_expr_types),
             imports,
         )
         .map_err(CompileError::from)?;

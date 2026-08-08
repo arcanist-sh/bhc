@@ -181,6 +181,7 @@ impl DerivingContext {
             "Ord" => self.derive_ord_newtype(newtype_def),
             "Show" => self.derive_show_newtype(newtype_def),
             "Functor" => self.derive_functor_newtype(newtype_def),
+            "Applicative" => self.derive_applicative_newtype(newtype_def),
             "Foldable" => self.derive_foldable_newtype(newtype_def),
             "Traversable" => self.derive_traversable_newtype(newtype_def),
             "Read" => self.derive_read_newtype(newtype_def),
@@ -2304,6 +2305,103 @@ impl DerivingContext {
         Some(DerivedInstance {
             instance,
             bindings: vec![Bind::NonRec(fmap_var, Box::new(fmap_body))],
+        })
+    }
+
+    /// Derive `Applicative` for a newtype that wraps an Applicative (typically a
+    /// monad-transformer stack), à la GeneralizedNewtypeDeriving.
+    ///
+    /// `pure` and `<*>` delegate to the wrapped type's own instances. Because a
+    /// newtype is representationally identity, the underlying `f a` value *is*
+    /// the `N a` value, so the bodies need no wrap/unwrap. The method vars are
+    /// typed with the underlying field type as their result so codegen's
+    /// transformer-stack detection lowers the inner `pure`/`<*>` via the
+    /// transformer builtins instead of re-dispatching to this same instance
+    /// (which would loop).
+    fn derive_applicative_newtype(&mut self, newtype_def: &NewtypeDef) -> Option<DerivedInstance> {
+        // Applicative is `f :: * -> *`, so the newtype needs exactly one param.
+        if newtype_def.params.len() != 1 {
+            return None;
+        }
+        let span = newtype_def.span;
+        let type_param = &newtype_def.params[0];
+        let field_ty = self.get_newtype_field_ty(newtype_def)?;
+        // Only derive when the field actually wraps the type parameter (`T .. a`);
+        // otherwise the field isn't an applicative in `a`.
+        if !self.type_contains_param(&field_ty, type_param) {
+            return None;
+        }
+
+        let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
+
+        // pure x = pure x  (inner `pure` resolved at the underlying field type)
+        let pure_var = self.fresh_var(
+            &format!("$derived_pure_{}", newtype_def.name.as_str()),
+            Ty::Fun(
+                Box::new(Ty::Var(type_param.clone())),
+                Box::new(field_ty.clone()),
+            ),
+        );
+        let x_var = self.fresh_var("x", Ty::Error);
+        let pure_body = core::Expr::Lam(
+            x_var.clone(),
+            Box::new(self.make_pure(core::Expr::Var(x_var, span), span)),
+            span,
+        );
+
+        // f <*> x = f <*> x  (inner `<*>` at the underlying field type)
+        let ap_var = self.fresh_var(
+            &format!("$derived_ap_{}", newtype_def.name.as_str()),
+            Ty::Fun(
+                Box::new(field_ty.clone()),
+                Box::new(Ty::Fun(
+                    Box::new(field_ty.clone()),
+                    Box::new(field_ty.clone()),
+                )),
+            ),
+        );
+        let ap_f = self.fresh_var("f", Ty::Error);
+        let ap_x = self.fresh_var("x", Ty::Error);
+        let ap_apply = self.make_ap(
+            core::Expr::Var(ap_f.clone(), span),
+            core::Expr::Var(ap_x.clone(), span),
+            span,
+        );
+        let ap_body = core::Expr::Lam(
+            ap_f,
+            Box::new(core::Expr::Lam(ap_x, Box::new(ap_apply), span)),
+            span,
+        );
+
+        let mut methods = FxHashMap::default();
+        methods.insert(
+            Symbol::intern("pure"),
+            bhc_hir::DefId::new(pure_var.id.index()),
+        );
+        methods.insert(
+            Symbol::intern("<*>"),
+            bhc_hir::DefId::new(ap_var.id.index()),
+        );
+
+        let instance = InstanceInfo {
+            class: Symbol::intern("Applicative"),
+            instance_types: vec![instance_type.clone()],
+            methods,
+            // Applicative's superclass is Functor, at the same type. Dictionary
+            // construction resolves `Functor N` (the newtype's derived Functor
+            // instance) for the superclass slot; without this the dict can't be
+            // built and `pure`/`<*>` fail to dispatch.
+            superclass_instances: vec![instance_type],
+            assoc_type_impls: FxHashMap::default(),
+            instance_constraints: vec![],
+        };
+
+        Some(DerivedInstance {
+            instance,
+            bindings: vec![
+                Bind::NonRec(pure_var, Box::new(pure_body)),
+                Bind::NonRec(ap_var, Box::new(ap_body)),
+            ],
         })
     }
 

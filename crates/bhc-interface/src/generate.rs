@@ -86,7 +86,9 @@ pub fn generate_interface(
                             "Applicative" => {
                                 vec!["pure".to_string(), "<*>".to_string()]
                             }
-                            "Monad" => vec!["return".to_string(), ">>=".to_string()],
+                            "Monad" => {
+                                vec!["return".to_string(), ">>=".to_string(), ">>".to_string()]
+                            }
                             _ => continue,
                         };
                         iface.add_instance(ExportedInstance {

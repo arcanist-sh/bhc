@@ -2489,6 +2489,31 @@ impl DerivingContext {
             span,
         );
 
+        // (>>) :: N a -> N b -> N b  =  \m k -> m >>= \_ -> k
+        // The class default for `>>` isn't emitted for a derived instance, so
+        // real code using `>>` (statement without binding) otherwise fails to
+        // dispatch. Delegate through the same `>>=` the derived `>>=` uses.
+        let seq_var = self.named_instance_var(
+            &format!("$instance_>>_{}", newtype_def.name.as_str()),
+            Ty::Fun(
+                Box::new(field_ty.clone()),
+                Box::new(Ty::Fun(
+                    Box::new(field_ty.clone()),
+                    Box::new(field_ty.clone()),
+                )),
+            ),
+        );
+        let sm = self.fresh_var("m", Ty::Error);
+        let sk = self.fresh_var("k", Ty::Error);
+        let signore = self.fresh_var("_", Ty::Error);
+        let seq_cont = core::Expr::Lam(signore, Box::new(core::Expr::Var(sk.clone(), span)), span);
+        let seq_apply = self.make_bind(core::Expr::Var(sm.clone(), span), seq_cont, span);
+        let seq_body = core::Expr::Lam(
+            sm,
+            Box::new(core::Expr::Lam(sk, Box::new(seq_apply), span)),
+            span,
+        );
+
         let mut methods = FxHashMap::default();
         methods.insert(
             Symbol::intern("return"),
@@ -2497,6 +2522,10 @@ impl DerivingContext {
         methods.insert(
             Symbol::intern(">>="),
             bhc_hir::DefId::new(bind_var.id.index()),
+        );
+        methods.insert(
+            Symbol::intern(">>"),
+            bhc_hir::DefId::new(seq_var.id.index()),
         );
 
         let instance = InstanceInfo {
@@ -2514,6 +2543,7 @@ impl DerivingContext {
             bindings: vec![
                 Bind::NonRec(return_var, Box::new(return_body)),
                 Bind::NonRec(bind_var, Box::new(bind_body)),
+                Bind::NonRec(seq_var, Box::new(seq_body)),
             ],
         })
     }

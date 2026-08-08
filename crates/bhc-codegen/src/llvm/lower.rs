@@ -18447,6 +18447,25 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     // ExceptT Transformer Operations
     // ========================================================================
 
+    /// Best-effort static type of a Core expression, by walking the
+    /// application spine to the head and stripping one function arrow per
+    /// applied argument. Only the cases needed to recover a transformer stack
+    /// are handled; anything else yields `Ty::Error`. Used to decide
+    /// `runExceptT`'s behavior from its argument's type rather than the ambient
+    /// lowering context.
+    fn core_expr_result_type(&self, expr: &Expr) -> Ty {
+        match expr {
+            Expr::Var(v, _) => v.ty.clone(),
+            Expr::Lit(_, ty, _) => ty.clone(),
+            Expr::App(f, _, _) => match self.core_expr_result_type(f) {
+                Ty::Fun(_, codomain) => *codomain,
+                other => other,
+            },
+            Expr::TyApp(f, _, _) => self.core_expr_result_type(f),
+            _ => Ty::Error,
+        }
+    }
+
     /// runExceptT m = m(_) — runs the computation, returns Either e a
     fn lower_builtin_run_except_t(
         &mut self,
@@ -18457,6 +18476,24 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(m_expr)?
             .ok_or_else(|| CodegenError::Internal("runExceptT: m has no value".to_string()))?;
         self.pop_transformer_layer();
+
+        // `runExceptT` over `ExceptT e (StateT s m)` / `ExceptT e (ReaderT r m)`
+        // is itself a StateT/ReaderT action: return the closure as-is for the
+        // outer runStateT/evalStateT/runReaderT to run. Over `ExceptT e IO` it
+        // runs the computation. `run_except_t_on_value` infers this from the
+        // ambient `current_transformer_layer()`, which is only correct when
+        // runExceptT is lowered inline as a runStateT argument. In value
+        // position (let-bound, or `flip evalStateT _ (runExceptT m)`) the
+        // ambient layer is the enclosing function's, so consult m's static type
+        // directly; fall back to the ambient inference when the type is unknown.
+        let m_ty = self.core_expr_result_type(m_expr);
+        let stack = self.extract_transformer_stack_from_type(&m_ty);
+        if matches!(
+            stack.get(1),
+            Some(TransformerLayer::StateT) | Some(TransformerLayer::ReaderT)
+        ) {
+            return Ok(Some(m_val));
+        }
         self.run_except_t_on_value(m_val)
     }
 
@@ -26128,6 +26165,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         func_expr: &Expr,
         arg_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // `runExceptT $ m` — route to the applied path so runExceptT's
+        // inner-monad decision uses m's static type. Lowering runExceptT here as
+        // a bare value (below) instead reaches lower_builtin_direct, which lacks
+        // the type and mis-lowers `flip evalStateT s $ runExceptT $ m` (the inner
+        // ExceptT-over-StateT action gets run with a null state → null-fn
+        // closure). Narrow to this one runner to avoid the broad `f $ x` reroute
+        // that regressed Text.Pandoc.Error.
+        if let Expr::Var(v, _) = func_expr {
+            if v.name.as_str() == "runExceptT" {
+                return self.lower_builtin_run_except_t(arg_expr);
+            }
+        }
         let func_val = self
             .lower_expr(func_expr)?
             .ok_or_else(|| CodegenError::Internal("$: no function".to_string()))?;

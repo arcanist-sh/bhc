@@ -1919,12 +1919,24 @@ impl LowerContext {
                 self.register_var(def_id, var);
                 methods.insert(*method, def_id);
             }
+            // Superclass instances are at the same type (single-param classes:
+            // `Monad N` needs `Applicative N`, which needs `Functor N`). Without
+            // these, dictionary construction for an imported `Applicative`/`Monad`
+            // instance fails on the superclass slot (construct_dictionary reads
+            // `superclass_instances.get(i)?`) and `pure`/`>>=` never dispatch —
+            // the cross-module analogue of the same-type superclass wiring the
+            // derivers set locally.
+            let superclass_instances: Vec<Ty> =
+                match (types.first(), self.class_registry.lookup_class(*class)) {
+                    (Some(ty), Some(cls)) => vec![ty.clone(); cls.superclasses.len()],
+                    _ => Vec::new(),
+                };
             self.class_registry
                 .register_instance(crate::dictionary::InstanceInfo {
                     class: *class,
                     instance_types: types.clone(),
                     methods,
-                    superclass_instances: Vec::new(),
+                    superclass_instances,
                     assoc_type_impls: FxHashMap::default(),
                     instance_constraints: Vec::new(),
                 });

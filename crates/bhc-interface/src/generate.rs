@@ -71,6 +71,32 @@ pub fn generate_interface(
                     kind,
                     definition: Some(TypeDefinition::Newtype(con)),
                 });
+                // GeneralizedNewtypeDeriving: carry the monad-stack instances
+                // (Functor/Applicative/Monad) so importing modules can dispatch
+                // `fmap`/`pure`/`<*>`/`return`/`>>=` at this newtype. HIR->Core
+                // emits the impls as external `$instance_{method}_{Name}`
+                // symbols (matching the consumer's reconstruction), harvested as
+                // interface instance methods. Only these classes take part in
+                // transformer-newtype deriving, and only with a single type
+                // parameter (the deriver's own precondition).
+                if nt.params.len() == 1 {
+                    for clause in &nt.deriving {
+                        let methods: Vec<String> = match clause.class.name.as_str() {
+                            "Functor" => vec!["fmap".to_string()],
+                            "Applicative" => {
+                                vec!["pure".to_string(), "<*>".to_string()]
+                            }
+                            "Monad" => vec!["return".to_string(), ">>=".to_string()],
+                            _ => continue,
+                        };
+                        iface.add_instance(ExportedInstance {
+                            class: clause.class.name.as_str().to_string(),
+                            types: vec![Type::Con(nt.name.name.as_str().to_string())],
+                            constraints: Vec::new(),
+                            methods,
+                        });
+                    }
+                }
             }
             bhc_ast::Decl::TypeAlias(ta) => {
                 let params: Vec<String> = ta

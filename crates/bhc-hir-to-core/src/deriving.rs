@@ -143,6 +143,24 @@ impl DerivingContext {
         }
     }
 
+    /// Like [`fresh_var`](Self::fresh_var) but keeps `name` verbatim (no
+    /// `_{id}` suffix) while still allocating a unique id. Used for derived
+    /// instance-method bindings whose emitted symbol must be a STABLE
+    /// `$instance_{method}_{Type}` — the cross-module consumer reconstructs
+    /// that exact name (context.rs `register_imported_instances`) and the
+    /// interface harvest externs it (driver `instance_methods`). A suffixed
+    /// name breaks both. The `{method}_{Type}` portion is unique per instance,
+    /// so no collision results from dropping the id.
+    fn named_instance_var(&mut self, name: &str, ty: Ty) -> Var {
+        let n = self.fresh_counter;
+        self.fresh_counter += 1;
+        Var {
+            name: Symbol::intern(name),
+            id: VarId::new(n as usize),
+            ty,
+        }
+    }
+
     /// Derive an instance for a data type.
     pub fn derive_for_data(
         &mut self,
@@ -2251,8 +2269,8 @@ impl DerivingContext {
         let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
 
         // fmap f (Con x) = Con (f x)
-        let fmap_var = self.fresh_var(
-            &format!("$derived_fmap_{}", newtype_def.name.as_str()),
+        let fmap_var = self.named_instance_var(
+            &format!("$instance_fmap_{}", newtype_def.name.as_str()),
             Ty::Error,
         );
 
@@ -2336,8 +2354,8 @@ impl DerivingContext {
         let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
 
         // pure x = pure x  (inner `pure` resolved at the underlying field type)
-        let pure_var = self.fresh_var(
-            &format!("$derived_pure_{}", newtype_def.name.as_str()),
+        let pure_var = self.named_instance_var(
+            &format!("$instance_pure_{}", newtype_def.name.as_str()),
             Ty::Fun(
                 Box::new(Ty::Var(type_param.clone())),
                 Box::new(field_ty.clone()),
@@ -2351,8 +2369,8 @@ impl DerivingContext {
         );
 
         // f <*> x = f <*> x  (inner `<*>` at the underlying field type)
-        let ap_var = self.fresh_var(
-            &format!("$derived_ap_{}", newtype_def.name.as_str()),
+        let ap_var = self.named_instance_var(
+            &format!("$instance_<*>_{}", newtype_def.name.as_str()),
             Ty::Fun(
                 Box::new(field_ty.clone()),
                 Box::new(Ty::Fun(
@@ -2429,8 +2447,8 @@ impl DerivingContext {
         let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
 
         // return x = return x  (inner `return` at the underlying field type)
-        let return_var = self.fresh_var(
-            &format!("$derived_return_{}", newtype_def.name.as_str()),
+        let return_var = self.named_instance_var(
+            &format!("$instance_return_{}", newtype_def.name.as_str()),
             Ty::Fun(
                 Box::new(Ty::Var(type_param.clone())),
                 Box::new(field_ty.clone()),
@@ -2445,8 +2463,8 @@ impl DerivingContext {
 
         // m >>= f = m >>= f  (inner `>>=` at the underlying field type; the
         // continuation's `N b` is representationally the field's `T b`).
-        let bind_var = self.fresh_var(
-            &format!("$derived_bind_{}", newtype_def.name.as_str()),
+        let bind_var = self.named_instance_var(
+            &format!("$instance_>>=_{}", newtype_def.name.as_str()),
             Ty::Fun(
                 Box::new(field_ty.clone()),
                 Box::new(Ty::Fun(

@@ -182,6 +182,7 @@ impl DerivingContext {
             "Show" => self.derive_show_newtype(newtype_def),
             "Functor" => self.derive_functor_newtype(newtype_def),
             "Applicative" => self.derive_applicative_newtype(newtype_def),
+            "Monad" => self.derive_monad_newtype(newtype_def),
             "Foldable" => self.derive_foldable_newtype(newtype_def),
             "Traversable" => self.derive_traversable_newtype(newtype_def),
             "Read" => self.derive_read_newtype(newtype_def),
@@ -2405,6 +2406,100 @@ impl DerivingContext {
         })
     }
 
+    /// Derive `Monad` for a newtype that wraps a monad (typically a
+    /// monad-transformer stack), à la GeneralizedNewtypeDeriving.
+    ///
+    /// `return` and `>>=` delegate to the wrapped type's instances. As with
+    /// [`derive_applicative_newtype`](Self::derive_applicative_newtype) the
+    /// newtype is representationally identity, so `m >>= f` is the underlying
+    /// `m >>= f` (the continuation's `N b` result *is* a `T b`). The method
+    /// vars carry the underlying field type so codegen lowers the inner
+    /// `return`/`>>=` via the transformer builtins.
+    fn derive_monad_newtype(&mut self, newtype_def: &NewtypeDef) -> Option<DerivedInstance> {
+        if newtype_def.params.len() != 1 {
+            return None;
+        }
+        let span = newtype_def.span;
+        let type_param = &newtype_def.params[0];
+        let field_ty = self.get_newtype_field_ty(newtype_def)?;
+        if !self.type_contains_param(&field_ty, type_param) {
+            return None;
+        }
+
+        let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
+
+        // return x = return x  (inner `return` at the underlying field type)
+        let return_var = self.fresh_var(
+            &format!("$derived_return_{}", newtype_def.name.as_str()),
+            Ty::Fun(
+                Box::new(Ty::Var(type_param.clone())),
+                Box::new(field_ty.clone()),
+            ),
+        );
+        let rx = self.fresh_var("x", Ty::Error);
+        let return_body = core::Expr::Lam(
+            rx.clone(),
+            Box::new(self.make_pure(core::Expr::Var(rx, span), span)),
+            span,
+        );
+
+        // m >>= f = m >>= f  (inner `>>=` at the underlying field type; the
+        // continuation's `N b` is representationally the field's `T b`).
+        let bind_var = self.fresh_var(
+            &format!("$derived_bind_{}", newtype_def.name.as_str()),
+            Ty::Fun(
+                Box::new(field_ty.clone()),
+                Box::new(Ty::Fun(
+                    Box::new(Ty::Fun(
+                        Box::new(Ty::Var(type_param.clone())),
+                        Box::new(field_ty.clone()),
+                    )),
+                    Box::new(field_ty.clone()),
+                )),
+            ),
+        );
+        let bm = self.fresh_var("m", Ty::Error);
+        let bf = self.fresh_var("f", Ty::Error);
+        let bind_apply = self.make_bind(
+            core::Expr::Var(bm.clone(), span),
+            core::Expr::Var(bf.clone(), span),
+            span,
+        );
+        let bind_body = core::Expr::Lam(
+            bm,
+            Box::new(core::Expr::Lam(bf, Box::new(bind_apply), span)),
+            span,
+        );
+
+        let mut methods = FxHashMap::default();
+        methods.insert(
+            Symbol::intern("return"),
+            bhc_hir::DefId::new(return_var.id.index()),
+        );
+        methods.insert(
+            Symbol::intern(">>="),
+            bhc_hir::DefId::new(bind_var.id.index()),
+        );
+
+        let instance = InstanceInfo {
+            class: Symbol::intern("Monad"),
+            instance_types: vec![instance_type.clone()],
+            methods,
+            // Monad's superclass is Applicative, at the same type.
+            superclass_instances: vec![instance_type],
+            assoc_type_impls: FxHashMap::default(),
+            instance_constraints: vec![],
+        };
+
+        Some(DerivedInstance {
+            instance,
+            bindings: vec![
+                Bind::NonRec(return_var, Box::new(return_body)),
+                Bind::NonRec(bind_var, Box::new(bind_body)),
+            ],
+        })
+    }
+
     // =========================================================================
     // Foldable derivation
     // =========================================================================
@@ -3038,6 +3133,24 @@ impl DerivingContext {
                 span,
             )),
             Box::new(x),
+            span,
+        )
+    }
+
+    /// Make a `m >>= f` expression.
+    fn make_bind(&self, m: core::Expr, f: core::Expr, span: Span) -> core::Expr {
+        let bind_var = Var {
+            name: Symbol::intern(">>="),
+            id: VarId::new(0),
+            ty: Ty::Error,
+        };
+        core::Expr::App(
+            Box::new(core::Expr::App(
+                Box::new(core::Expr::Var(bind_var, span)),
+                Box::new(m),
+                span,
+            )),
+            Box::new(f),
             span,
         )
     }

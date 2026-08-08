@@ -1152,7 +1152,20 @@ fn lower_app(
                         let inferred = inferred_args.or(inferred_x).or_else(|| {
                             // Fallback: use monad context stack for nested >>=/>>/return
                             if is_monad_family {
-                                ctx.current_monad_type().cloned()
+                                ctx.current_monad_type().cloned().or_else(|| {
+                                    // Last resort: recover the monad constructor from
+                                    // this method application's own fixpoint-resolved
+                                    // type `N b` (strip the value arg). Lets a
+                                    // user/derived monad's `>>=` dispatch when the
+                                    // operands' types are themselves unresolved — e.g.
+                                    // `return 5 >>= \x -> ...` in a top-level do-block
+                                    // over a GND newtype, where both operands are
+                                    // as-yet-undispatched `return`s.
+                                    match ctx.resolved_expr_ty_opt(span) {
+                                        Some(Ty::App(head, _)) => Some(*head),
+                                        _ => None,
+                                    }
+                                })
                             } else {
                                 None
                             }

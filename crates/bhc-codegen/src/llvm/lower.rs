@@ -42302,10 +42302,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Allocate a closure with the given function pointer and captured variables.
+    ///
+    /// The offset-1 word stores the closure's *physical arity* (the number of
+    /// value parameters its lifted function takes, excluding the env pointer),
+    /// not the env size — the env size is always known statically at every use
+    /// site via `closure_type`, so that word was dead. `lower_closure_call`
+    /// reads the arity to split over-application correctly. A stored arity of 0
+    /// means "unknown"; callers that don't know the physical arity use this
+    /// wrapper and `lower_closure_call` falls back to its all-args behavior.
     fn alloc_closure(
         &self,
         fn_ptr: PointerValue<'ctx>,
         captured_vars: &[(VarId, BasicValueEnum<'ctx>)],
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        self.alloc_closure_with_arity(fn_ptr, captured_vars, 0)
+    }
+
+    /// Allocate a closure, recording its physical arity in the header so that
+    /// over-application through `lower_closure_call` can be split correctly.
+    fn alloc_closure_with_arity(
+        &self,
+        fn_ptr: PointerValue<'ctx>,
+        captured_vars: &[(VarId, BasicValueEnum<'ctx>)],
+        arity: u32,
     ) -> CodegenResult<PointerValue<'ctx>> {
         let tm = self.type_mapper();
         let env_size = captured_vars.len() as u32;
@@ -42341,16 +42360,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_store(fn_ptr_slot, fn_ptr)
             .map_err(|e| CodegenError::Internal(format!("failed to store fn_ptr: {:?}", e)))?;
 
-        // Store env_size at offset 1
-        let env_size_slot = self
+        // Store the physical arity at offset 1 (the env size is known statically
+        // at every use site, so this word carries arity instead — see doc above).
+        let arity_slot = self
             .builder()
-            .build_struct_gep(closure_ty, closure_ptr, 1, "env_size_slot")
-            .map_err(|e| CodegenError::Internal(format!("failed to get env_size slot: {:?}", e)))?;
+            .build_struct_gep(closure_ty, closure_ptr, 1, "arity_slot")
+            .map_err(|e| CodegenError::Internal(format!("failed to get arity slot: {:?}", e)))?;
 
-        let env_size_val = tm.i64_type().const_int(env_size as u64, false);
+        let arity_val = tm.i64_type().const_int(arity as u64, false);
         self.builder()
-            .build_store(env_size_slot, env_size_val)
-            .map_err(|e| CodegenError::Internal(format!("failed to store env_size: {:?}", e)))?;
+            .build_store(arity_slot, arity_val)
+            .map_err(|e| CodegenError::Internal(format!("failed to store arity: {:?}", e)))?;
 
         // Store captured variables in environment array
         if env_size > 0 {
@@ -43876,9 +43896,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.builder().position_at_end(block);
         }
 
-        // Allocate closure with function pointer and captured values
+        // Allocate closure with function pointer and captured values. Record the
+        // lambda's physical arity (number of collapsed parameters) so that a
+        // later over-application `f a b …` where `f` has fewer physical params
+        // than applied args (its body returns another closure) is split
+        // correctly by `lower_closure_call` instead of passing all args at once.
         let fn_ptr = lifted_fn.as_global_value().as_pointer_value();
-        let closure_ptr = self.alloc_closure(fn_ptr, &captured)?;
+        let closure_ptr = self.alloc_closure_with_arity(fn_ptr, &captured, params.len() as u32)?;
 
         Ok(Some(closure_ptr.into()))
     }
@@ -49190,54 +49214,195 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
         }
 
-        // Extract function pointer from closure
-        let fn_ptr = self.extract_closure_fn_ptr(closure_ptr)?;
+        // Lower all arguments to pointer values once, in the current block (they
+        // dominate every branch of the arity switch built below). Arguments are
+        // not in tail position.
+        let was_tail = self.in_tail_position;
+        self.in_tail_position = false;
+        let mut arg_vals: Vec<PointerValue<'ctx>> = Vec::new();
+        for arg_expr in args {
+            if let Some(val) = self.lower_expr(arg_expr)? {
+                arg_vals.push(self.value_to_ptr(val)?);
+            }
+        }
+        self.in_tail_position = was_tail;
 
-        // Build function type for the call:
-        // - First param is the closure pointer (environment)
-        // - Remaining params are the arguments
-        let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
-        param_types.push(ptr_type.into()); // closure/env pointer
+        let tail = self.in_tail_position;
+        self.apply_closure_values(closure_ptr, &arg_vals, tail)
+    }
 
+    /// Load a closure's recorded physical arity (offset-1 i64 header word).
+    /// A value of 0 means "unknown" (closure built without an arity).
+    fn load_closure_arity(
+        &self,
+        closure_ptr: PointerValue<'ctx>,
+    ) -> CodegenResult<inkwell::values::IntValue<'ctx>> {
+        // Offset 1 is at the same byte regardless of env size.
+        let closure_ty = self.closure_type(0);
+        let arity_slot = self
+            .builder()
+            .build_struct_gep(closure_ty, closure_ptr, 1, "arity_slot")
+            .map_err(|e| CodegenError::Internal(format!("failed to gep arity: {:?}", e)))?;
+        let arity = self
+            .builder()
+            .build_load(self.type_mapper().i64_type(), arity_slot, "arity")
+            .map_err(|e| CodegenError::Internal(format!("failed to load arity: {:?}", e)))?;
+        Ok(arity.into_int_value())
+    }
+
+    /// Emit a single indirect call `fn_ptr(env, args...)` with `args.len()`
+    /// pointer parameters (plus the env/closure pointer).
+    fn build_indirect_apply(
+        &mut self,
+        fn_ptr: PointerValue<'ctx>,
+        env_ptr: PointerValue<'ctx>,
+        args: &[PointerValue<'ctx>],
+        tail: bool,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> =
+            Vec::with_capacity(args.len() + 1);
+        param_types.push(ptr_type.into());
         for _ in args {
             param_types.push(ptr_type.into());
         }
-
         let fn_type = ptr_type.fn_type(&param_types, false);
 
-        // Arguments are not in tail position
-        let was_tail = self.in_tail_position;
-        self.in_tail_position = false;
-
-        // Lower arguments
-        let mut llvm_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
-        llvm_args.push(closure_ptr.into()); // Pass closure as first argument (environment)
-
-        for arg_expr in args {
-            if let Some(val) = self.lower_expr(arg_expr)? {
-                // Convert to pointer for uniform calling convention
-                let ptr_val = self.value_to_ptr(val)?;
-                llvm_args.push(ptr_val.into());
-            }
+        let mut llvm_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
+            Vec::with_capacity(args.len() + 1);
+        llvm_args.push(env_ptr.into());
+        for a in args {
+            llvm_args.push((*a).into());
         }
 
-        // Restore tail position flag
-        self.in_tail_position = was_tail;
-
-        // Build indirect call through function pointer
         let call = self
             .builder()
             .build_indirect_call(fn_type, fn_ptr, &llvm_args, "closure_call")
             .map_err(|e| {
                 CodegenError::Internal(format!("failed to build closure call: {:?}", e))
             })?;
-
-        // Mark as tail call if in tail position
-        if self.in_tail_position {
+        if tail {
             call.set_tail_call(true);
         }
-
         Ok(call.try_as_basic_value().basic())
+    }
+
+    /// Apply a closure pointer to already-lowered argument values, splitting
+    /// over-application according to the closure's recorded physical arity.
+    ///
+    /// When the closure's physical arity `k` is less than the number of applied
+    /// args `n` (its lifted body returns another closure), calling the lifted
+    /// function with all `n` args silently drops the extra `n-k` and returns a
+    /// mis-typed closure — the root cause of corrupted recursion through
+    /// higher-order combinators like `bind p f = \s -> ... f a r`. Instead we
+    /// call with the first `k`, then apply the remaining `n-k` to the returned
+    /// closure (recursively). A recorded arity of 0 means "unknown" and falls
+    /// back to a single all-args call (prior behavior), so closures built
+    /// without an arity are unaffected.
+    fn apply_closure_values(
+        &mut self,
+        closure_ptr: PointerValue<'ctx>,
+        arg_vals: &[PointerValue<'ctx>],
+        tail: bool,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let n = arg_vals.len();
+        if n == 0 {
+            return Ok(Some(closure_ptr.into()));
+        }
+
+        let fn_ptr = self.extract_closure_fn_ptr(closure_ptr)?;
+
+        // A single argument cannot over-apply at this level; emit directly so
+        // tail-recursive one-arg calls keep their tail-call marking.
+        if n == 1 {
+            return self.build_indirect_apply(fn_ptr, closure_ptr, arg_vals, tail);
+        }
+
+        // n >= 2: branch on the recorded physical arity. Cases 1..n split
+        // (over-application); the default (arity 0 = unknown, or arity >= n)
+        // calls with all n args — exactly the prior behavior.
+        let arity = self.load_closure_arity(closure_ptr)?;
+        let i64t = self.type_mapper().i64_type();
+
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let default_bb = self
+            .llvm_context()
+            .append_basic_block(current_fn, "apply_all");
+        let merge_bb = self
+            .llvm_context()
+            .append_basic_block(current_fn, "apply_merge");
+        let mut case_bbs: Vec<(usize, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+        for k in 1..n {
+            let bb = self
+                .llvm_context()
+                .append_basic_block(current_fn, &format!("apply_split_{}", k));
+            case_bbs.push((k, bb));
+        }
+
+        let cases: Vec<(
+            inkwell::values::IntValue<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        )> = case_bbs
+            .iter()
+            .map(|(k, bb)| (i64t.const_int(*k as u64, false), *bb))
+            .collect();
+        self.builder()
+            .build_switch(arity, default_bb, &cases)
+            .map_err(|e| CodegenError::Internal(format!("apply switch: {:?}", e)))?;
+
+        let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            Vec::new();
+
+        // default: exact or unknown arity — one call with all n args.
+        self.builder().position_at_end(default_bb);
+        let r_all = self.build_indirect_apply(fn_ptr, closure_ptr, arg_vals, false)?;
+        let end_default = self.builder().get_insert_block().unwrap();
+        incoming.push((
+            r_all.unwrap_or_else(|| ptr_type.const_null().into()),
+            end_default,
+        ));
+        self.builder()
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Internal(format!("br merge: {:?}", e)))?;
+
+        // split cases: call the first k args, then apply the remaining n-k to
+        // the returned closure (recursively, which handles its own arity).
+        for (k, bb) in &case_bbs {
+            let k = *k;
+            self.builder().position_at_end(*bb);
+            let inter = self.build_indirect_apply(fn_ptr, closure_ptr, &arg_vals[..k], false)?;
+            let inter_ptr = match inter {
+                Some(BasicValueEnum::PointerValue(p)) => p,
+                _ => ptr_type.const_null(),
+            };
+            let r = self.apply_closure_values(inter_ptr, &arg_vals[k..], false)?;
+            let end_bb = self.builder().get_insert_block().unwrap();
+            incoming.push((r.unwrap_or_else(|| ptr_type.const_null().into()), end_bb));
+            self.builder()
+                .build_unconditional_branch(merge_bb)
+                .map_err(|e| CodegenError::Internal(format!("br merge: {:?}", e)))?;
+        }
+
+        self.builder().position_at_end(merge_bb);
+        let phi = self
+            .builder()
+            .build_phi(ptr_type, "apply_result")
+            .map_err(|e| CodegenError::Internal(format!("phi: {:?}", e)))?;
+        let incoming_refs: Vec<(
+            &dyn inkwell::values::BasicValue<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        )> = incoming
+            .iter()
+            .map(|(v, bb)| (v as &dyn inkwell::values::BasicValue<'ctx>, *bb))
+            .collect();
+        phi.add_incoming(&incoming_refs);
+        Ok(Some(phi.as_basic_value()))
     }
 
     /// Lower a constructor application to an ADT value.
@@ -50940,6 +51105,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         let field_val = self.ptr_to_value(field_ptr, &field_ty)?;
                         self.env.insert(binder.id, field_val);
                     }
+                }
+            } else {
+                // Default/variable alternative (`case e of { ...; r -> r }`).
+                // Its binder names the whole scrutinee, so bind it to the
+                // scrutinee value. Without this the binder is unbound and its
+                // use in the RHS lowers to a runtime stub (`bhc_stub_<name>`),
+                // silently corrupting e.g. the success branch of a hand-written
+                // `orElse p q = \s -> case p s of { Nothing -> q s; r -> r }`.
+                for binder in &alt.binders {
+                    self.env.insert(binder.id, scrut_ptr.into());
                 }
             }
 

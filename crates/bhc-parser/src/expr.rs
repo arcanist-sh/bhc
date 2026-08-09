@@ -1,7 +1,7 @@
 //! Expression parsing.
 
 use bhc_ast::{Alt, ArithSeq, Expr, FieldBind, Guard, GuardedRhs, Lit, ModuleName, Pat, Rhs, Stmt};
-use bhc_intern::Ident;
+use bhc_intern::{Ident, Symbol};
 use bhc_lexer::TokenKind;
 use bhc_span::Span;
 
@@ -1658,6 +1658,9 @@ impl<'src> Parser<'src> {
             expected: "operator".to_string(),
         })?;
 
+        // Track the qualifier/symbol for a qualified operator so a bare
+        // `(M.<>)` section can be emitted as a qualified variable reference.
+        let mut qual_op: Option<(Symbol, Symbol)> = None;
         let op = match &tok.node.kind {
             TokenKind::Operator(sym) => Ident::new(*sym),
             TokenKind::Star => Ident::from_str("*"),
@@ -1667,10 +1670,12 @@ impl<'src> Parser<'src> {
             TokenKind::Bang => Ident::from_str("!"),
             TokenKind::ConOperator(sym) => Ident::new(*sym),
             TokenKind::QualOperator(qual, sym) => {
+                qual_op = Some((*qual, *sym));
                 let full_name = format!("{}.{}", qual.as_str(), sym.as_str());
                 Ident::from_str(&full_name)
             }
             TokenKind::QualConOperator(qual, sym) => {
+                qual_op = Some((*qual, *sym));
                 let full_name = format!("{}.{}", qual.as_str(), sym.as_str());
                 Ident::from_str(&full_name)
             }
@@ -1685,8 +1690,19 @@ impl<'src> Parser<'src> {
         self.advance();
 
         if self.eat(&TokenKind::RParen) {
-            // Just `(+)` - operator as a function
             let span = start.to(self.tokens[self.pos - 1].span);
+            // A bare `(M.<>)` is a qualified variable reference: route it through
+            // QualVar so qualified-name resolution (module alias → member)
+            // applies, exactly like `M.foo`. A flat `Expr::Var("M.<>")` would
+            // instead be looked up verbatim and never resolve.
+            if let Some((qual, sym)) = qual_op {
+                let module_name = ModuleName {
+                    parts: vec![qual],
+                    span,
+                };
+                return Ok(Expr::QualVar(module_name, Ident::new(sym), span));
+            }
+            // Just `(+)` - operator as a function
             return Ok(Expr::Var(op, span));
         }
 

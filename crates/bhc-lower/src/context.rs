@@ -2520,35 +2520,50 @@ impl LowerContext {
     /// Returns the `DefId` if found, or None if not resolvable.
     #[must_use]
     pub fn resolve_qualified_var(&self, qualifier: Symbol, name: Symbol) -> Option<DefId> {
-        // First, try direct lookup of "Qualifier.name" as registered during import processing.
-        // This handles cases where multiple modules share the same qualifier alias
-        // (e.g., `import qualified Data.Text as T` and `import qualified Data.Text.Encoding as T`).
-        let aliased_name = Symbol::intern(&format!("{}.{}", qualifier.as_str(), name.as_str()));
-        if let Some(def_id) = self.lookup_value(aliased_name) {
-            return Some(def_id);
+        // A qualified member is looked up as "Qualifier.member" (registered during
+        // import processing) and, failing that, via the qualifier's alias as
+        // "Module.member". This handles shared qualifier aliases (e.g. both
+        // `Data.Text as T` and `Data.Text.Encoding as T`).
+        //
+        // Operators are sometimes registered in parenthesized form — an export
+        // listed as "(<>)" registers "Qualifier.(<>)" — yet a qualified operator
+        // used as a value, `(M.<>)`, arrives here with the bare member `<>`.
+        // (Infix `a M.<> b` resolves via the operator path.) Try the bare member
+        // first, then the parenthesized form, so both conventions resolve.
+        let member = name.as_str();
+        let is_operator = member
+            .chars()
+            .next()
+            .is_some_and(|c| !(c.is_alphanumeric() || c == '_' || c == '('));
+        let mut variants: Vec<String> = vec![member.to_string()];
+        if is_operator {
+            variants.push(format!("({member})"));
         }
 
-        // Check if we have a qualified name mapping for the aliased name
-        if let Some(unqualified) = self.qualified_names.get(&aliased_name) {
-            if let Some(def_id) = self.lookup_value(*unqualified) {
+        let module = self.import_aliases.get(&qualifier).copied();
+        for m in &variants {
+            // Direct lookup of "Qualifier.member".
+            let aliased_name = Symbol::intern(&format!("{}.{}", qualifier.as_str(), m));
+            if let Some(def_id) = self.lookup_value(aliased_name) {
                 return Some(def_id);
             }
-        }
-
-        // Then, check if the qualifier is an alias and try the full module name
-        if let Some(&module) = self.import_aliases.get(&qualifier) {
-            let qualified_name = Symbol::intern(&format!("{}.{}", module.as_str(), name.as_str()));
-
-            // Check if we have a qualified name mapping
-            if let Some(unqualified) = self.qualified_names.get(&qualified_name) {
+            // Qualified-name mapping for the aliased name.
+            if let Some(unqualified) = self.qualified_names.get(&aliased_name) {
                 if let Some(def_id) = self.lookup_value(*unqualified) {
                     return Some(def_id);
                 }
             }
-
-            // Try direct lookup of the qualified name
-            if let Some(def_id) = self.lookup_value(qualified_name) {
-                return Some(def_id);
+            // Resolve the qualifier alias to its module and retry as "Module.member".
+            if let Some(module) = module {
+                let qualified_name = Symbol::intern(&format!("{}.{}", module.as_str(), m));
+                if let Some(unqualified) = self.qualified_names.get(&qualified_name) {
+                    if let Some(def_id) = self.lookup_value(*unqualified) {
+                        return Some(def_id);
+                    }
+                }
+                if let Some(def_id) = self.lookup_value(qualified_name) {
+                    return Some(def_id);
+                }
             }
         }
 

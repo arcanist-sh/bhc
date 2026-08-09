@@ -482,7 +482,49 @@ impl Compiler {
         // Phase 3: Lower to Core IR
         self.callbacks
             .on_phase_start(CompilePhase::CoreLower, &unit.module_name);
-        let core = self.core_lower(&hir, &lower_ctx, &typed)?;
+        // Imported-constructor metadata WITH record field names, so record
+        // UPDATES on an imported type resolve their field selectors — e.g.
+        // `def{ stateOptions = opts }` on an imported `ParserState` in
+        // readMarkdown. `-c` mode previously passed `None`, so
+        // `lookup_field_selector` returned `None` and the update fell through
+        // to a stub (null value). The full-compile path already does this via
+        // `build_imported_constructor_map`; here the constructors come from the
+        // `.bhi` loader into `lower_ctx`.
+        let imported_ctors: bhc_hir_to_core::ConstructorInfoMap = {
+            let builtins: rustc_hash::FxHashSet<&str> = [
+                "True", "False", "Nothing", "Just", "Left", "Right", "[]", ":", "()", "(,)",
+                "(,,)", "LT", "EQ", "GT", "IO", "Any",
+            ]
+            .into_iter()
+            .collect();
+            lower_ctx
+                .interface_constructors
+                .iter()
+                .filter(|(name, _, _, _, _)| !builtins.contains(name.as_str()))
+                .filter_map(|(name, tag, arity, type_name, is_newtype)| {
+                    let sym = Symbol::intern(name);
+                    let def_id = lower_ctx.lookup_constructor(sym)?;
+                    let field_names = lower_ctx
+                        .get_constructor_field_names(def_id)
+                        .unwrap_or_default();
+                    Some((
+                        def_id,
+                        bhc_hir_to_core::ConstructorInfo {
+                            name: sym,
+                            type_name: type_name.as_ref().map_or(sym, |t| Symbol::intern(t)),
+                            tag: *tag,
+                            arity: *arity,
+                            field_names,
+                            is_newtype: *is_newtype,
+                            existential_dict_count: 0,
+                            existential_classes: vec![],
+                        },
+                    ))
+                })
+                .collect()
+        };
+        let core =
+            self.core_lower_with_constructors(&hir, &lower_ctx, &typed, Some(&imported_ctors))?;
         self.callbacks
             .on_phase_complete(CompilePhase::CoreLower, &unit.module_name);
 

@@ -1527,7 +1527,7 @@ fn register_standard_module_exports(
             "Reader",
         ],
         // === Monad transformers ===
-        "Control.Monad.Except" | "Control.Monad.Trans.Except" => &[
+        "Control.Monad.Except" | "Control.Monad.Trans.Except" | "Control.Monad.Error.Class" => &[
             "ExceptT",
             "Except",
             "runExceptT",
@@ -1538,6 +1538,14 @@ fn register_standard_module_exports(
             "catchError",
             "MonadError",
             "liftEither",
+        ],
+        "Control.Monad.Cont" | "Control.Monad.Cont.Class" | "Control.Monad.Trans.Cont" => &[
+            "ContT",
+            "Cont",
+            "runContT",
+            "runCont",
+            "callCC",
+            "MonadCont",
         ],
         "Control.Monad.State"
         | "Control.Monad.State.Strict"

@@ -1777,6 +1777,32 @@ impl LowerContext {
             }
         }
 
+        // If the class isn't registered — an EXTERNAL class like Data.Default's
+        // `Default`, which has no local `class` decl in this module, only this
+        // instance — synthesize a minimal class registration from the instance's
+        // method names. Without it, `is_class_method`/`is_user_class` don't
+        // recognize `def`, so `def :: T` never dispatches by result type and
+        // falls through to the unimplemented-external stub (a null value), which
+        // then breaks e.g. `def{ field = x }` record updates. Mirrors the
+        // synthesis in `register_imported_instances`.
+        if self
+            .class_registry
+            .lookup_class(instance_def.class)
+            .is_none()
+        {
+            let method_names: Vec<Symbol> = instance_def.methods.iter().map(|m| m.name).collect();
+            self.class_registry
+                .register_class(crate::dictionary::ClassInfo {
+                    name: instance_def.class,
+                    param_count: instance_def.types.len().max(1),
+                    methods: method_names,
+                    method_types: FxHashMap::default(),
+                    superclasses: Vec::new(),
+                    defaults: FxHashMap::default(),
+                    assoc_types: Vec::new(),
+                });
+        }
+
         // Collect associated type implementations
         let mut assoc_type_impls = FxHashMap::default();
         for assoc_impl in &instance_def.assoc_type_impls {

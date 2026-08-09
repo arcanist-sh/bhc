@@ -907,15 +907,32 @@ fn lower_app(
                         }
                         // Fall through to Case 3 if we couldn't resolve
                     } else {
-                        // Single-param class: resolve at concrete type from argument
-                        let inferred = try_infer_arg_type(ctx, x).or_else(|| {
-                            // Fallback: use monad context stack for >>=/>>/return/pure
-                            if is_monad_family {
-                                ctx.current_monad_type().cloned()
-                            } else {
-                                None
-                            }
-                        });
+                        // Single-param class: resolve at concrete type from argument.
+                        //
+                        // `pure`/`return` are the exception: their class parameter is
+                        // the RESULT constructor (`pure :: a -> f a`), never the
+                        // argument `a`. Inferring the instance from the argument type
+                        // resolves the wrong instance — and when no instance exists at
+                        // the argument type, dictionary construction can still fabricate
+                        // a bogus dictionary, yielding an identity-like miscompile (e.g.
+                        // `item >>= \a -> pure a` lowering the lambda to `\a -> a` with a
+                        // dangling closure capture). Leave `inferred` as `None` for them
+                        // so control falls through to the result-type dispatch in Case
+                        // 1.5 below, which is where `return` already resolves correctly.
+                        let is_result_determined =
+                            matches!(method_name.as_str(), "pure" | "return");
+                        let inferred = if is_result_determined {
+                            None
+                        } else {
+                            try_infer_arg_type(ctx, x).or_else(|| {
+                                // Fallback: use monad context stack for >>=/>>/return/pure
+                                if is_monad_family {
+                                    ctx.current_monad_type().cloned()
+                                } else {
+                                    None
+                                }
+                            })
+                        };
                         if let Some(concrete_ty) = inferred {
                             // For monad-family builtin classes, skip if the concrete type
                             // is a builtin monad — let codegen handle the fast path

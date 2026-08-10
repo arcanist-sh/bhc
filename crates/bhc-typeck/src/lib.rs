@@ -74,7 +74,7 @@ use bhc_diagnostics::Diagnostic;
 use bhc_hir::{DefId, Module};
 use bhc_intern::Symbol;
 use bhc_span::{FileId, Span};
-use bhc_types::{Scheme, Ty};
+use bhc_types::{Scheme, Ty, TyVar};
 use rustc_hash::FxHashMap;
 
 /// The result of type checking a module.
@@ -105,6 +105,12 @@ pub struct TypedModule {
     pub resolved_expr_types: FxHashMap<Span, Ty>,
     /// Type schemes for each definition (indexed by `DefId`).
     pub def_schemes: FxHashMap<DefId, Scheme>,
+    /// Type synonyms in scope at this module's compilation (local + imported),
+    /// mapping the synonym name to its `(parameters, right-hand side)`. Exposed
+    /// so interface generation can expand synonyms in exported signatures,
+    /// making the `.bhi` self-contained: a consumer that does NOT import the
+    /// synonym's defining module can still unify against the expanded type.
+    pub type_aliases: FxHashMap<Symbol, (Vec<TyVar>, Ty)>,
 }
 
 // Re-export definition types from bhc-lower

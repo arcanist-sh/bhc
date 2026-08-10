@@ -8448,6 +8448,7 @@ impl TyCtxt {
             expr_types,
             resolved_expr_types,
             def_schemes,
+            type_aliases: self.type_aliases.clone(),
         }
     }
 }

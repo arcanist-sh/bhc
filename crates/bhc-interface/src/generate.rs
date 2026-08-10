@@ -8,6 +8,11 @@ use crate::{
     ExportedValue, Kind, ModuleInterface, Type, TypeDefinition, TypeSignature,
 };
 use bhc_ast::Module as AstModule;
+use bhc_types::Ty as TyckTy;
+use std::collections::HashMap;
+
+/// A resolved type synonym: (parameter placeholders, expanded RHS in interface form).
+type AliasMap = HashMap<String, (Vec<String>, Type)>;
 
 /// Generate a module interface from a parsed AST and type-checked module.
 ///
@@ -16,19 +21,27 @@ use bhc_ast::Module as AstModule;
 pub fn generate_interface(
     module_name: &str,
     ast: &AstModule,
-    _typed: &bhc_typeck::TypedModule,
+    typed: &bhc_typeck::TypedModule,
 ) -> ModuleInterface {
     let mut iface = ModuleInterface::new(module_name);
 
     // Compute a simple hash from the source for consistency checking
     iface.header.module_hash = compute_module_hash(module_name);
 
+    // Build a type-synonym map from the module's typeck aliases (local AND
+    // imported). Exported signatures are expanded against it so the `.bhi` is
+    // self-contained: a consumer that does not import a synonym's defining
+    // module can still unfold it (e.g. `Text.Parsec.String` uses `runP` whose
+    // signature mentions `SourceName` from `Text.Parsec.Pos`, which it does not
+    // import directly).
+    let aliases = build_alias_map(typed);
+
     // Extract exports from AST declarations
     for decl in &ast.decls {
         match decl {
             bhc_ast::Decl::TypeSig(sig) => {
                 for name in &sig.names {
-                    let exported_ty = convert_ast_type(&sig.ty);
+                    let exported_ty = expand_synonyms(convert_ast_type(&sig.ty), &aliases, 0);
                     iface.add_value(ExportedValue {
                         name: name.name.as_str().to_string(),
                         signature: TypeSignature {
@@ -128,12 +141,13 @@ pub fn generate_interface(
                     .iter()
                     .filter_map(|d| {
                         if let bhc_ast::Decl::TypeSig(sig) = d {
+                            let aliases = &aliases;
                             Some(sig.names.iter().map(move |name| ClassMethod {
                                 name: name.name.as_str().to_string(),
                                 signature: TypeSignature {
                                     type_vars: Vec::new(),
                                     constraints: Vec::new(),
-                                    ty: convert_ast_type(&sig.ty),
+                                    ty: expand_synonyms(convert_ast_type(&sig.ty), aliases, 0),
                                 },
                                 has_default: false,
                             }))
@@ -339,6 +353,157 @@ fn convert_con_decl(con: &bhc_ast::ConDecl) -> DataConstructor {
 }
 
 /// Convert an AST type expression to an interface Type.
+/// Type synonyms that bhc's typeck registers UNCONDITIONALLY for every module
+/// (see the "standard Haskell type aliases" block in bhc-typeck). Every consumer
+/// already has these in scope and can unfold them, so we must NOT expand them
+/// into exported signatures — several (`Attr`, `Markup`, `Parsec`, …) also serve
+/// as codegen dispatch keys by name. Only user/imported synonyms a consumer
+/// might lack (e.g. parsec's `SourceName`) get expanded.
+const UNCONDITIONAL_SYNONYMS: &[&str] = &[
+    "String",
+    "ShowS",
+    "ReadS",
+    "FilePath",
+    "Attr",
+    "Target",
+    "Attribute",
+    "Markup",
+    "MarkupM",
+    "Html",
+    "NonEmpty",
+    "Seq",
+    "Parsec",
+    "SyntaxMap",
+    "Token",
+    "SourceLine",
+    "ColSpec",
+    "ListAttributes",
+    "ShortCaption",
+    "Blocks",
+    "Inlines",
+    "Many",
+];
+
+/// Build a synonym map for expansion from the module's typeck aliases, EXCLUDING
+/// the unconditional builtins (which every consumer already has).
+fn build_alias_map(typed: &bhc_typeck::TypedModule) -> AliasMap {
+    let mut map = HashMap::new();
+    for (name, (params, rhs)) in &typed.type_aliases {
+        let n = name.as_str();
+        if UNCONDITIONAL_SYNONYMS.contains(&n) {
+            continue;
+        }
+        if let Some(rhs_iface) = ty_to_iface(rhs) {
+            let param_ids = params.iter().map(|p| format!("v{}", p.id)).collect();
+            map.insert(n.to_string(), (param_ids, rhs_iface));
+        }
+    }
+    map
+}
+
+/// Convert a typeck `Ty` to an interface `Type` (best-effort; returns `None` for
+/// types with no interface representation, e.g. unboxed primitives or `Error`).
+fn ty_to_iface(ty: &TyckTy) -> Option<Type> {
+    Some(match ty {
+        TyckTy::Var(tv) => Type::Var(format!("v{}", tv.id)),
+        TyckTy::Con(tc) => Type::Con(tc.name.as_str().to_string()),
+        TyckTy::App(f, x) => Type::App(Box::new(ty_to_iface(f)?), Box::new(ty_to_iface(x)?)),
+        TyckTy::Fun(a, b) => Type::Fun(Box::new(ty_to_iface(a)?), Box::new(ty_to_iface(b)?)),
+        TyckTy::Tuple(ts) => {
+            let mut v = Vec::with_capacity(ts.len());
+            for t in ts {
+                v.push(ty_to_iface(t)?);
+            }
+            Type::Tuple(v)
+        }
+        TyckTy::List(e) => Type::List(Box::new(ty_to_iface(e)?)),
+        TyckTy::Forall(_, t) => ty_to_iface(t)?,
+        _ => return None,
+    })
+}
+
+/// Recursively expand type synonyms in an interface `Type` so the emitted
+/// signature is self-contained (references no synonym a consumer might lack).
+/// Handles nullary (`type SourceName = String`) and parameterized
+/// (`type Parser = Parsec String ()`) synonyms; bounded to avoid a runaway on a
+/// (malformed) recursive synonym.
+fn expand_synonyms(ty: Type, aliases: &AliasMap, depth: u32) -> Type {
+    if depth > 60 || aliases.is_empty() {
+        return ty;
+    }
+    match ty {
+        Type::App(_, _) => {
+            // Collect the application spine: head applied to args.
+            let mut args: Vec<Type> = Vec::new();
+            let mut head = ty;
+            while let Type::App(f, x) = head {
+                args.push(*x);
+                head = *f;
+            }
+            args.reverse();
+            let args: Vec<Type> = args
+                .into_iter()
+                .map(|a| expand_synonyms(a, aliases, depth + 1))
+                .collect();
+            if let Type::Con(name) = &head {
+                if let Some((params, rhs)) = aliases.get(name) {
+                    if args.len() >= params.len() {
+                        let mut subst: HashMap<String, Type> = HashMap::new();
+                        for (p, a) in params.iter().zip(args.iter()) {
+                            subst.insert(p.clone(), a.clone());
+                        }
+                        let mut result = subst_vars(rhs.clone(), &subst);
+                        for a in &args[params.len()..] {
+                            result = Type::App(Box::new(result), Box::new(a.clone()));
+                        }
+                        return expand_synonyms(result, aliases, depth + 1);
+                    }
+                }
+            }
+            let head = expand_synonyms(head, aliases, depth + 1);
+            args.into_iter()
+                .fold(head, |acc, a| Type::App(Box::new(acc), Box::new(a)))
+        }
+        Type::Con(ref name) => {
+            if let Some((params, rhs)) = aliases.get(name) {
+                if params.is_empty() {
+                    return expand_synonyms(rhs.clone(), aliases, depth + 1);
+                }
+            }
+            ty
+        }
+        Type::Fun(a, b) => Type::Fun(
+            Box::new(expand_synonyms(*a, aliases, depth + 1)),
+            Box::new(expand_synonyms(*b, aliases, depth + 1)),
+        ),
+        Type::Tuple(ts) => Type::Tuple(
+            ts.into_iter()
+                .map(|t| expand_synonyms(t, aliases, depth + 1))
+                .collect(),
+        ),
+        Type::List(e) => Type::List(Box::new(expand_synonyms(*e, aliases, depth + 1))),
+        Type::Var(_) => ty,
+    }
+}
+
+/// Substitute type variables (by placeholder name) in an interface `Type`.
+fn subst_vars(ty: Type, subst: &HashMap<String, Type>) -> Type {
+    match ty {
+        Type::Var(ref name) => subst.get(name).cloned().unwrap_or(ty),
+        Type::Con(_) => ty,
+        Type::App(f, x) => Type::App(
+            Box::new(subst_vars(*f, subst)),
+            Box::new(subst_vars(*x, subst)),
+        ),
+        Type::Fun(a, b) => Type::Fun(
+            Box::new(subst_vars(*a, subst)),
+            Box::new(subst_vars(*b, subst)),
+        ),
+        Type::Tuple(ts) => Type::Tuple(ts.into_iter().map(|t| subst_vars(t, subst)).collect()),
+        Type::List(e) => Type::List(Box::new(subst_vars(*e, subst))),
+    }
+}
+
 fn convert_ast_type(ty: &bhc_ast::Type) -> Type {
     match ty {
         bhc_ast::Type::Var(tv, _) => Type::Var(tv.name.name.as_str().to_string()),

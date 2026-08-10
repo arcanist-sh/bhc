@@ -2810,7 +2810,16 @@ fn type_name_for_instance(ty: &Ty) -> String {
             )
         }
         Ty::List(elem) => format!("List_{}", type_name_for_instance(elem)),
-        Ty::Var(tv) => format!("v{}", tv.id),
+        // A type variable in an instance head is universally quantified — its
+        // fresh VarId is assigned per-compilation and differs between the
+        // producing and consuming modules. Encoding it by id (`v148` vs
+        // `v90174`) made the instance symbol for a multi-parameter head like
+        // `ParsecT s u m` mismatch across modules → the consumer stubbed
+        // `$instance_pure_ParsecT_v9017x` while the producer defined
+        // `$instance_pure_ParsecT_v14x`. Encode all instance-head type
+        // variables canonically so both sides agree. (Single `Con` heads like
+        // `MyIO` are unaffected — they have no variable in the head.)
+        Ty::Var(_) => "v".to_string(),
         Ty::Fun(from, to) => {
             format!(
                 "Fun_{}_{}",

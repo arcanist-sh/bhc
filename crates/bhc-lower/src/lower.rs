@@ -1006,6 +1006,7 @@ fn register_standard_module_exports(
             "isControl",
             "isDigit",
             "isHexDigit",
+            "isOctDigit",
             "isLetter",
             "isLower",
             "isNumber",
@@ -1257,6 +1258,7 @@ fn register_standard_module_exports(
         ],
         "Control.DeepSeq" => &["NFData", "rnf", "deepseq", "force"],
         "Data.Text.Lazy" => &[
+            "uncons",
             "Text",
             "empty",
             "fromStrict",
@@ -1300,6 +1302,7 @@ fn register_standard_module_exports(
             "interact",
         ],
         "Data.ByteString.Lazy.Char8" => &[
+            "uncons",
             "ByteString",
             "empty",
             "pack",
@@ -1680,6 +1683,7 @@ fn register_standard_module_exports(
             "hPutNonBlocking",
         ],
         "Data.ByteString.Char8" => &[
+            "uncons",
             "ByteString",
             "pack",
             "unpack",

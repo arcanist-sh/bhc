@@ -2106,8 +2106,23 @@ impl LowerContext {
                             bhc_hir::ConFields::Named(fields) => {
                                 // Register field selector functions
                                 for field in fields {
-                                    let selector_var = self.named_var(field.name, Ty::Error);
-                                    self.register_var(field.id, selector_var);
+                                    // The accessor is emitted as a separate value
+                                    // binding (id == field.id) and its var is
+                                    // already registered by the pre-pass over all
+                                    // items. Do NOT overwrite it with a fresh var
+                                    // here: a value that forward-references the
+                                    // accessor (a field used above its `data`
+                                    // declaration, e.g. Text.Parsec's
+                                    // `unknownError s = … statePos s` above
+                                    // `data State`) is lowered before this Data
+                                    // item and would then reference the pre-pass
+                                    // var while the accessor binding uses the
+                                    // fresh one — an undeclared, stubbed selector.
+                                    if self.lookup_var(field.id).is_none() {
+                                        let selector_var =
+                                            self.named_var(field.name, Ty::Error);
+                                        self.register_var(field.id, selector_var);
+                                    }
                                     // Also register field metadata for later lookup
                                     self.register_field_selector(
                                         field.name,

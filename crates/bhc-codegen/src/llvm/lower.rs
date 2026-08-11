@@ -43367,12 +43367,24 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             count
         };
 
-        // Use expression-based (pointer) typing when:
-        // 1. Error types (derived/generated bindings)
-        // 2. Expression has more lambdas than the type suggests (dictionary params
-        //    from typeclass constraints are not reflected in the Haskell type)
+        // A function's physical LLVM arity must equal its MANIFEST lambda count
+        // (`param_count`), which is what the body actually binds and what the
+        // over-/under-application machinery in `lower_direct_call` assumes. Use
+        // expression-based (pointer) typing whenever the manifest lambda count
+        // differs from the type-arrow count:
+        // 1. Error types (derived/generated bindings).
+        // 2. MORE lambdas than the type suggests — dictionary params from
+        //    typeclass constraints are not reflected in the Haskell type
+        //    (e.g. a saturated `\$d -> \x -> ...`).
+        // 3. FEWER lambdas than the type suggests — a point-free/partial
+        //    definition that returns a function (e.g. `parse p = runP p ()`,
+        //    lowered as `\$d -> \p -> runP $d p ()`). Declaring it with the
+        //    type-arrow count would bury the leading dictionary param and
+        //    misalign every argument when the PAP is later saturated.
+        // When the counts are EQUAL, both paths yield the same all-pointer
+        // signature, so the `else` branch below is equivalent.
         let fn_type = if param_count > 0
-            && (matches!(&var.ty, Ty::Error) || param_count > type_param_count)
+            && (matches!(&var.ty, Ty::Error) || param_count != type_param_count)
         {
             let tm = self.type_mapper();
 

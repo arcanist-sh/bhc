@@ -597,6 +597,57 @@ fn match_ty(param: &Ty, concrete: &Ty, subst: &mut bhc_types::Subst) {
 /// for the deferred/recursive case). Returns the dictionaries in constraint
 /// order, or `None` if the head is not user-constrained or any dictionary
 /// cannot be resolved (the caller then falls back to plain lowering).
+/// A constrained callee's declared parameter types and a substitution that
+/// instantiates its type variables from the inferable argument types. Shared by
+/// dictionary resolution and by argument lowering, so a constrained *value*
+/// argument can have its OWN dictionary applied at the resulting concrete type.
+fn callee_param_tys_and_subst(
+    ctx: &mut LowerContext,
+    head_ref: &DefRef,
+    args: &[&hir::Expr],
+) -> Option<(Vec<Ty>, bhc_types::Subst)> {
+    let scheme_ty = ctx.lookup_scheme(head_ref.def_id)?.ty.clone();
+    let mut param_tys = Vec::new();
+    let mut cur = &scheme_ty;
+    while let Ty::Fun(a, r) = cur {
+        param_tys.push(a.as_ref().clone());
+        cur = r.as_ref();
+    }
+    let mut subst = bhc_types::Subst::new();
+    for (p, arg) in param_tys.iter().zip(args.iter()) {
+        if let Some(at) = try_infer_arg_type(ctx, arg) {
+            match_ty(p, &at, &mut subst);
+        }
+    }
+    Some((param_tys, subst))
+}
+
+/// Lower a value argument, applying its dictionaries when it is a constrained
+/// function/value used at a known concrete type — e.g. a parser
+/// `digit :: Stream s Identity t => Parsec s u Char` passed to `parse`, whose
+/// `Stream` dictionary must be supplied so it is a usable ParsecT rather than a
+/// `\$d -> ParsecT …` function (whose newtype field, read as a function
+/// pointer, would be garbage). Falls back to plain lowering otherwise.
+fn lower_value_arg(
+    ctx: &mut LowerContext,
+    arg: &hir::Expr,
+    expected_ty: Option<&Ty>,
+) -> LowerResult<core::Expr> {
+    if let Some(exp) = expected_ty {
+        // Even if the expected type still has variables (e.g. a parser's result
+        // type `a`, fixed by context rather than by arguments), attempt dict
+        // application: `lower_constrained_fn_value` only requires the
+        // *constraint's* own type arguments to be concrete, and returns None
+        // otherwise so we fall back to plain lowering.
+        if is_constrained_fn_value(ctx, arg) {
+            if let Some(e) = lower_constrained_fn_value(ctx, arg, exp) {
+                return Ok(e);
+            }
+        }
+    }
+    lower_expr(ctx, arg)
+}
+
 fn resolve_constrained_fn_dicts(
     ctx: &mut LowerContext,
     head_ref: &DefRef,
@@ -737,11 +788,41 @@ fn lower_constrained_fn_value(
     let var = ctx.lookup_var(def_ref.def_id).cloned()?;
     let mut result = core::Expr::Var(var, def_ref.span);
     for c in &user_constraints {
-        let concrete_args: Vec<Ty> = c.args.iter().map(|t| subst.apply(t)).collect();
-        // Require a fully concrete instantiation; otherwise leave it to other
-        // paths rather than emit an unresolved dictionary.
+        let mut concrete_args: Vec<Ty> = c.args.iter().map(|t| subst.apply(t)).collect();
+        // Complete functional-dependency-determined arguments from a matching
+        // instance head (a multi-parameter class such as
+        // `Stream s Identity t | s -> t` leaves `t` a variable after matching
+        // the value's type). Mirrors `resolve_constrained_fn_dicts`.
         if concrete_args.iter().any(has_type_variables) {
-            return None;
+            let completed: Option<Vec<Ty>> =
+                ctx.class_registry().instances.get(&c.class).and_then(|instances| {
+                    instances.iter().find_map(|inst| {
+                        if inst.instance_types.len() != concrete_args.len() {
+                            return None;
+                        }
+                        let mut pat = Vec::new();
+                        let mut tgt = Vec::new();
+                        for (it, a) in inst.instance_types.iter().zip(&concrete_args) {
+                            if !has_type_variables(a) {
+                                pat.push(it.clone());
+                                tgt.push(a.clone());
+                            }
+                        }
+                        if pat.is_empty() {
+                            return None;
+                        }
+                        let sub = bhc_types::types_match_multi(&pat, &tgt)?;
+                        let filled: Vec<Ty> =
+                            inst.instance_types.iter().map(|t| sub.apply(t)).collect();
+                        if filled.iter().any(has_type_variables) {
+                            None
+                        } else {
+                            Some(filled)
+                        }
+                    })
+                });
+            // Leave it to other paths (bare lowering) if still not concrete.
+            concrete_args = completed?;
         }
         let concrete = Constraint::new_multi(c.class, concrete_args, def_ref.span);
         let dict = ctx.resolve_dictionary(&concrete, def_ref.span)?;
@@ -1357,17 +1438,26 @@ fn lower_app(
                         if let Some(dicts) =
                             resolve_constrained_fn_dicts(ctx, head_def_ref, &all_args, span)
                         {
+                            // Instantiated parameter types, so a constrained
+                            // *value* argument (a parser with its own `Stream`
+                            // constraint, passed to `parse`) gets its dictionary
+                            // applied at the concrete type — not just the callee.
+                            let param_info =
+                                callee_param_tys_and_subst(ctx, head_def_ref, &all_args);
                             let mut result = core::Expr::Var(var.clone(), head_def_ref.span);
                             for dict in dicts {
                                 result = core::Expr::App(Box::new(result), Box::new(dict), span);
                             }
-                            for arg in &collected_args {
-                                let arg_core = lower_expr(ctx, arg)?;
+                            for (i, arg) in all_args.iter().enumerate() {
+                                let expected = param_info.as_ref().and_then(|(ptys, sub)| {
+                                    ptys.get(i).map(|p| sub.apply(p))
+                                });
+                                let arg_core =
+                                    lower_value_arg(ctx, arg, expected.as_ref())?;
                                 result =
                                     core::Expr::App(Box::new(result), Box::new(arg_core), span);
                             }
-                            let x_core = lower_expr(ctx, x)?;
-                            return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
+                            return Ok(result);
                         }
                     }
 

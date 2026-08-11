@@ -636,7 +636,54 @@ fn resolve_constrained_fn_dicts(
     // Resolve one dictionary per constraint at the instantiated types.
     let mut dicts = Vec::with_capacity(user_constraints.len());
     for c in &user_constraints {
-        let concrete_args: Vec<Ty> = c.args.iter().map(|t| subst.apply(t)).collect();
+        let mut concrete_args: Vec<Ty> = c.args.iter().map(|t| subst.apply(t)).collect();
+        // Complete functional-dependency-determined arguments. For a
+        // multi-parameter class like `Stream s t | s -> t`, matching the
+        // function's parameter types only fixes `s` (the argument-carried
+        // param); `t` stays a variable. Find the instance whose concrete
+        // positions match and read the remaining types from it, so a
+        // `Stream S t` constraint becomes the resolvable `Stream S Int`.
+        if concrete_args.iter().any(has_type_variables) {
+            // Compute the completed argument list as an owned value so the
+            // immutable borrow of the class registry is released before the
+            // mutable `resolve_dictionary` call below. Match the CONCRETE
+            // positions of the constraint against the instance head to bind the
+            // instance's own type variables, then apply that substitution to the
+            // whole head to fill our undetermined positions. This handles both
+            // concrete instances (`Stream S Int`) and parametric ones
+            // (`Stream [tok] m tok`, where matching `s = [Char]` yields
+            // `tok = Char`, hence the dependent `t = Char`).
+            let completed: Option<Vec<Ty>> =
+                ctx.class_registry().instances.get(&c.class).and_then(|instances| {
+                    instances.iter().find_map(|inst| {
+                        if inst.instance_types.len() != concrete_args.len() {
+                            return None;
+                        }
+                        let mut pat = Vec::new();
+                        let mut tgt = Vec::new();
+                        for (it, a) in inst.instance_types.iter().zip(&concrete_args) {
+                            if !has_type_variables(a) {
+                                pat.push(it.clone());
+                                tgt.push(a.clone());
+                            }
+                        }
+                        if pat.is_empty() {
+                            return None;
+                        }
+                        let subst = bhc_types::types_match_multi(&pat, &tgt)?;
+                        let filled: Vec<Ty> =
+                            inst.instance_types.iter().map(|t| subst.apply(t)).collect();
+                        if filled.iter().any(has_type_variables) {
+                            None
+                        } else {
+                            Some(filled)
+                        }
+                    })
+                });
+            if let Some(completed_args) = completed {
+                concrete_args = completed_args;
+            }
+        }
         let concrete = Constraint::new_multi(c.class, concrete_args, span);
         let dict = ctx.resolve_dictionary(&concrete, span)?;
         dicts.push(dict);
@@ -1286,6 +1333,44 @@ fn lower_app(
                     .iter()
                     .any(|c| ctx.is_user_class(c.class) && c.args.iter().any(has_type_variables));
                 if has_unresolved {
+                    // Clone the constraint list before any mutable ctx call so the
+                    // immutable `scheme` borrow is released (its last use is here).
+                    let constraints = scheme.constraints.clone();
+                    // Preferred path: resolve one dictionary per user constraint
+                    // by matching the callee's parameter types against ALL
+                    // argument types (and completing functional-dependency
+                    // params). This handles multi-parameter classes such as
+                    // `Stream s t | s -> t`, which the single-type fallback
+                    // below builds as a malformed one-arg constraint that never
+                    // resolves — leaving the dictionary silently omitted and
+                    // every subsequent argument shifted by one.
+                    let mut all_args: Vec<&hir::Expr> = collected_args.clone();
+                    all_args.push(x);
+                    // Only for constrained *functions*, not class methods. A
+                    // method whose instance cannot be resolved at a concrete
+                    // type here — e.g. a superclass method applied to polymorphic
+                    // arguments inside another constrained function — must fall
+                    // through to method dispatch, not have its dictionary passed
+                    // as an ordinary argument (`myEqual dict x y`), a form
+                    // codegen does not lower and stubs at runtime.
+                    if ctx.is_class_method(var.name).is_none() {
+                        if let Some(dicts) =
+                            resolve_constrained_fn_dicts(ctx, head_def_ref, &all_args, span)
+                        {
+                            let mut result = core::Expr::Var(var.clone(), head_def_ref.span);
+                            for dict in dicts {
+                                result = core::Expr::App(Box::new(result), Box::new(dict), span);
+                            }
+                            for arg in &collected_args {
+                                let arg_core = lower_expr(ctx, arg)?;
+                                result =
+                                    core::Expr::App(Box::new(result), Box::new(arg_core), span);
+                            }
+                            let x_core = lower_expr(ctx, x)?;
+                            return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
+                        }
+                    }
+
                     // Try to infer concrete type from x or collected args
                     let inferred = try_infer_arg_type(ctx, x).or_else(|| {
                         collected_args
@@ -1293,7 +1378,6 @@ fn lower_app(
                             .find_map(|arg| try_infer_arg_type(ctx, arg))
                     });
                     if let Some(concrete_ty) = inferred {
-                        let constraints = scheme.constraints.clone();
                         // Build from the head var (not lowered f, to avoid double resolution)
                         let mut result = core::Expr::Var(var.clone(), head_def_ref.span);
 

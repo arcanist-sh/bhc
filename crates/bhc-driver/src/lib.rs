@@ -1257,10 +1257,23 @@ impl Compiler {
             ))
         };
 
+        // Merge the type checker's schemes (this module's own definitions) with
+        // the schemes of IMPORTED values recovered from interface files (stored
+        // on the lower context's DefInfo). Without the imported schemes,
+        // hir-to-core's `lookup_scheme` returns nothing for an imported
+        // constrained function, so call-site dictionary resolution silently
+        // omits the dictionary and every subsequent argument shifts by one.
+        let mut merged_schemes = typed.def_schemes.clone();
+        for (def_id, def_info) in &lower_ctx.defs {
+            if let Some(scheme) = &def_info.type_scheme {
+                merged_schemes.entry(*def_id).or_insert_with(|| scheme.clone());
+            }
+        }
+
         let mut core = bhc_hir_to_core::lower_module_with_imports(
             hir,
             Some(&def_map),
-            Some(&typed.def_schemes),
+            Some(&merged_schemes),
             imported_constructors,
             Some(&typed.expr_types),
             Some(&typed.resolved_expr_types),

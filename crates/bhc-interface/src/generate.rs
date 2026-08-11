@@ -36,17 +36,46 @@ pub fn generate_interface(
     // import directly).
     let aliases = build_alias_map(typed);
 
+    // Number of type parameters per class declared in this module, so a
+    // multi-parameter instance head (`instance Stream S Int`, parsed as a single
+    // App spine) can be split into its component types when serialized. Without
+    // this, the interface records only one type and a consumer cannot complete a
+    // functional dependency (`Stream S t | s -> t`), so the dictionary fails to
+    // resolve at the call site.
+    let mut class_param_count: HashMap<String, usize> = HashMap::new();
+    for decl in &ast.decls {
+        if let bhc_ast::Decl::ClassDecl(cls) = decl {
+            class_param_count.insert(cls.name.name.as_str().to_string(), cls.params.len());
+        }
+    }
+
     // Extract exports from AST declarations
     for decl in &ast.decls {
         match decl {
             bhc_ast::Decl::TypeSig(sig) => {
+                // Split off a leading constraint context `C a => t` (under an
+                // optional `forall`) so it is serialized in the signature's
+                // `constraints`. Without this, a consumer importing a
+                // constrained function reconstructs a scheme with NO
+                // constraints, so call-site dictionary resolution omits the
+                // dictionary and every following argument shifts by one.
+                let mut cursor = &sig.ty;
+                if let bhc_ast::Type::Forall(_, inner, _) = cursor {
+                    cursor = inner.as_ref();
+                }
+                let (sig_constraints, bare_ty): (Vec<Constraint>, &bhc_ast::Type) = match cursor {
+                    bhc_ast::Type::Constrained(cs, inner, _) => {
+                        (cs.iter().map(convert_ast_constraint).collect(), inner.as_ref())
+                    }
+                    other => (Vec::new(), other),
+                };
                 for name in &sig.names {
-                    let exported_ty = expand_synonyms(convert_ast_type(&sig.ty), &aliases, 0);
+                    let exported_ty = expand_synonyms(convert_ast_type(bare_ty), &aliases, 0);
                     iface.add_value(ExportedValue {
                         name: name.name.as_str().to_string(),
                         signature: TypeSignature {
                             type_vars: Vec::new(),
-                            constraints: Vec::new(),
+                            constraints: sig_constraints.clone(),
                             ty: exported_ty,
                         },
                         inline: crate::InlineInfo::None,
@@ -167,7 +196,14 @@ pub fn generate_interface(
             bhc_ast::Decl::InstanceDecl(inst) => {
                 let constraints: Vec<Constraint> =
                     inst.context.iter().map(convert_ast_constraint).collect();
-                let types = vec![convert_ast_type(&inst.ty)];
+                let param_count = class_param_count
+                    .get(inst.class.name.as_str())
+                    .copied()
+                    .unwrap_or(1);
+                let types: Vec<Type> = flatten_instance_head(&inst.ty, param_count)
+                    .iter()
+                    .map(|t| convert_ast_type(t))
+                    .collect();
                 let methods: Vec<String> = inst
                     .methods
                     .iter()
@@ -501,6 +537,34 @@ fn subst_vars(ty: Type, subst: &HashMap<String, Type>) -> Type {
         ),
         Type::Tuple(ts) => Type::Tuple(ts.into_iter().map(|t| subst_vars(t, subst)).collect()),
         Type::List(e) => Type::List(Box::new(subst_vars(*e, subst))),
+    }
+}
+
+/// Split a (possibly multi-parameter) instance head into its component types.
+/// The parser represents `instance Stream S Int` as a single App spine
+/// `App(Con(S), Con(Int))`; with `param_count == 2` this yields `[S, Int]`.
+/// Mirrors `flatten_instance_type` in bhc-lower so the serialized instance types
+/// match what the same-module path registers.
+fn flatten_instance_head(ty: &bhc_ast::Type, param_count: usize) -> Vec<&bhc_ast::Type> {
+    if param_count <= 1 {
+        return vec![ty];
+    }
+    let mut spine = Vec::new();
+    let mut current = ty;
+    loop {
+        if let bhc_ast::Type::App(f, x, _) = current {
+            spine.push(x.as_ref());
+            current = f.as_ref();
+        } else {
+            spine.push(current);
+            break;
+        }
+    }
+    spine.reverse();
+    if spine.len() > param_count {
+        spine.split_off(spine.len() - param_count)
+    } else {
+        spine
     }
 }
 

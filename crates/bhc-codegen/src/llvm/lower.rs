@@ -44368,7 +44368,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.builder().position_at_end(entry_bb);
 
                 // For cons (:), use build_cons for correct list layout
-                let result_ptr = if name == ":" && arity == 2 {
+                let result_ptr = if self.is_newtype_constructor(name) && arity == 1 {
+                    // A newtype constructor is a runtime coercion, so its
+                    // function-value form is the identity: return the argument
+                    // unchanged instead of boxing it. Boxing produced a
+                    // {tag=null, field} object whose null head was later read
+                    // as a function pointer (e.g. `parserReturn x = ParsecT $ \…`
+                    // in Text.Parsec, crashing runParsecT with a null `br`).
+                    // This mirrors the direct-application path's newtype handling.
+                    wrapper_fn.get_nth_param(1).unwrap().into_pointer_value()
+                } else if name == ":" && arity == 2 {
                     let head = wrapper_fn.get_nth_param(1).unwrap();
                     let tail = wrapper_fn.get_nth_param(2).unwrap();
                     self.build_cons(head, tail)?

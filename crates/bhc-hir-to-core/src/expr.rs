@@ -705,32 +705,35 @@ fn resolve_constrained_fn_dicts(
             // (`Stream [tok] m tok`, where matching `s = [Char]` yields
             // `tok = Char`, hence the dependent `t = Char`).
             let completed: Option<Vec<Ty>> =
-                ctx.class_registry().instances.get(&c.class).and_then(|instances| {
-                    instances.iter().find_map(|inst| {
-                        if inst.instance_types.len() != concrete_args.len() {
-                            return None;
-                        }
-                        let mut pat = Vec::new();
-                        let mut tgt = Vec::new();
-                        for (it, a) in inst.instance_types.iter().zip(&concrete_args) {
-                            if !has_type_variables(a) {
-                                pat.push(it.clone());
-                                tgt.push(a.clone());
+                ctx.class_registry()
+                    .instances
+                    .get(&c.class)
+                    .and_then(|instances| {
+                        instances.iter().find_map(|inst| {
+                            if inst.instance_types.len() != concrete_args.len() {
+                                return None;
                             }
-                        }
-                        if pat.is_empty() {
-                            return None;
-                        }
-                        let subst = bhc_types::types_match_multi(&pat, &tgt)?;
-                        let filled: Vec<Ty> =
-                            inst.instance_types.iter().map(|t| subst.apply(t)).collect();
-                        if filled.iter().any(has_type_variables) {
-                            None
-                        } else {
-                            Some(filled)
-                        }
-                    })
-                });
+                            let mut pat = Vec::new();
+                            let mut tgt = Vec::new();
+                            for (it, a) in inst.instance_types.iter().zip(&concrete_args) {
+                                if !has_type_variables(a) {
+                                    pat.push(it.clone());
+                                    tgt.push(a.clone());
+                                }
+                            }
+                            if pat.is_empty() {
+                                return None;
+                            }
+                            let subst = bhc_types::types_match_multi(&pat, &tgt)?;
+                            let filled: Vec<Ty> =
+                                inst.instance_types.iter().map(|t| subst.apply(t)).collect();
+                            if filled.iter().any(has_type_variables) {
+                                None
+                            } else {
+                                Some(filled)
+                            }
+                        })
+                    });
             if let Some(completed_args) = completed {
                 concrete_args = completed_args;
             }
@@ -795,32 +798,35 @@ fn lower_constrained_fn_value(
         // the value's type). Mirrors `resolve_constrained_fn_dicts`.
         if concrete_args.iter().any(has_type_variables) {
             let completed: Option<Vec<Ty>> =
-                ctx.class_registry().instances.get(&c.class).and_then(|instances| {
-                    instances.iter().find_map(|inst| {
-                        if inst.instance_types.len() != concrete_args.len() {
-                            return None;
-                        }
-                        let mut pat = Vec::new();
-                        let mut tgt = Vec::new();
-                        for (it, a) in inst.instance_types.iter().zip(&concrete_args) {
-                            if !has_type_variables(a) {
-                                pat.push(it.clone());
-                                tgt.push(a.clone());
+                ctx.class_registry()
+                    .instances
+                    .get(&c.class)
+                    .and_then(|instances| {
+                        instances.iter().find_map(|inst| {
+                            if inst.instance_types.len() != concrete_args.len() {
+                                return None;
                             }
-                        }
-                        if pat.is_empty() {
-                            return None;
-                        }
-                        let sub = bhc_types::types_match_multi(&pat, &tgt)?;
-                        let filled: Vec<Ty> =
-                            inst.instance_types.iter().map(|t| sub.apply(t)).collect();
-                        if filled.iter().any(has_type_variables) {
-                            None
-                        } else {
-                            Some(filled)
-                        }
-                    })
-                });
+                            let mut pat = Vec::new();
+                            let mut tgt = Vec::new();
+                            for (it, a) in inst.instance_types.iter().zip(&concrete_args) {
+                                if !has_type_variables(a) {
+                                    pat.push(it.clone());
+                                    tgt.push(a.clone());
+                                }
+                            }
+                            if pat.is_empty() {
+                                return None;
+                            }
+                            let sub = bhc_types::types_match_multi(&pat, &tgt)?;
+                            let filled: Vec<Ty> =
+                                inst.instance_types.iter().map(|t| sub.apply(t)).collect();
+                            if filled.iter().any(has_type_variables) {
+                                None
+                            } else {
+                                Some(filled)
+                            }
+                        })
+                    });
             // Leave it to other paths (bare lowering) if still not concrete.
             concrete_args = completed?;
         }
@@ -1449,11 +1455,10 @@ fn lower_app(
                                 result = core::Expr::App(Box::new(result), Box::new(dict), span);
                             }
                             for (i, arg) in all_args.iter().enumerate() {
-                                let expected = param_info.as_ref().and_then(|(ptys, sub)| {
-                                    ptys.get(i).map(|p| sub.apply(p))
-                                });
-                                let arg_core =
-                                    lower_value_arg(ctx, arg, expected.as_ref())?;
+                                let expected = param_info
+                                    .as_ref()
+                                    .and_then(|(ptys, sub)| ptys.get(i).map(|p| sub.apply(p)));
+                                let arg_core = lower_value_arg(ctx, arg, expected.as_ref())?;
                                 result =
                                     core::Expr::App(Box::new(result), Box::new(arg_core), span);
                             }

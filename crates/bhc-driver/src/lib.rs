@@ -1231,7 +1231,7 @@ impl Compiler {
         let class_method_map: FxHashMap<Symbol, &Vec<Symbol>> = lower_ctx
             .interface_classes
             .iter()
-            .map(|(class, methods)| (*class, methods))
+            .map(|(class, methods, _supers)| (*class, methods))
             .collect();
         let imported_instance_data: Vec<(Symbol, Vec<bhc_types::Ty>, Vec<Symbol>)> = lower_ctx
             .interface_instances
@@ -1266,7 +1266,9 @@ impl Compiler {
         let mut merged_schemes = typed.def_schemes.clone();
         for (def_id, def_info) in &lower_ctx.defs {
             if let Some(scheme) = &def_info.type_scheme {
-                merged_schemes.entry(*def_id).or_insert_with(|| scheme.clone());
+                merged_schemes
+                    .entry(*def_id)
+                    .or_insert_with(|| scheme.clone());
             }
         }
 
@@ -3097,7 +3099,16 @@ impl Compiler {
             exports
                 .class_methods
                 .insert(class_name, method_names.clone());
-            ctx.interface_classes.push((class_name, method_names));
+            // Carry the superclass names so an importing module lays out this
+            // class's dictionaries with methods after the superclass slots
+            // (matching `select_method`'s `superclass_count + method_index`).
+            let superclass_names: Vec<Symbol> = class
+                .superclasses
+                .iter()
+                .map(|c| Symbol::intern(&c.class))
+                .collect();
+            ctx.interface_classes
+                .push((class_name, method_names, superclass_names));
         }
 
         // Instance-method implementations become module-qualified externs

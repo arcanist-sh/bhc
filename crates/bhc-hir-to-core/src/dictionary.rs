@@ -447,13 +447,29 @@ impl<'a> DictContext<'a> {
         subst: &Subst,
         span: Span,
     ) -> Option<core::Expr> {
-        // Build superclass dictionaries (shared by both paths)
+        // Build superclass dictionaries (shared by both paths).
+        //
+        // One slot per superclass is ALWAYS reserved, so method fields land at
+        // index `superclasses.len() + method_index` — exactly where
+        // `select_method` reads them. When a superclass dictionary can't be
+        // resolved at this call site — e.g. an imported multi-parameter class
+        // whose superclass constrains a type parameter that isn't pinned to a
+        // concrete instance here (`class Monad m => Stream s m t`, superclass
+        // `Monad m`) — the slot is filled with a null placeholder rather than
+        // abandoning the whole dictionary. The placeholder is only dereferenced
+        // if a method actually uses that superclass; for an erased monad such
+        // as Identity the superclass `>>=`/`return` never touch the dict.
         let mut super_fields: Vec<core::Expr> = Vec::new();
         for (i, superclass) in class.superclasses.iter().enumerate() {
-            let super_ty = instance.superclass_instances.get(i)?;
-            let concrete_super_ty = subst.apply(super_ty);
-            let super_constraint = Constraint::new(*superclass, concrete_super_ty, span);
-            let super_dict = self.get_dictionary(&super_constraint, span)?;
+            let super_dict = instance
+                .superclass_instances
+                .get(i)
+                .and_then(|super_ty| {
+                    let concrete_super_ty = subst.apply(super_ty);
+                    let super_constraint = Constraint::new(*superclass, concrete_super_ty, span);
+                    self.get_dictionary(&super_constraint, span)
+                })
+                .unwrap_or(core::Expr::Lit(core::Literal::Int(0), Ty::Error, span));
             super_fields.push(super_dict);
         }
 

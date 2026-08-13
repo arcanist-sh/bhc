@@ -192,10 +192,15 @@ pub struct LowerContext {
     /// method names let instances of externally-defined classes (Default)
     /// dispatch without the class's own interface.
     pub interface_instances: Vec<(Symbol, Vec<bhc_types::Ty>, Vec<Symbol>)>,
-    /// Classes loaded from `.bhi` interfaces: (class name, method names).
-    /// Needed alongside `interface_instances` so hir-to-core knows which
-    /// method names belong to an imported class.
-    pub interface_classes: Vec<(Symbol, Vec<Symbol>)>,
+    /// Classes loaded from `.bhi` interfaces: (class name, method names,
+    /// superclass names). Needed alongside `interface_instances` so hir-to-core
+    /// knows which method names belong to an imported class. The superclass
+    /// names matter for dictionary layout: `select_method` places methods after
+    /// `superclasses.len()` slots, so an importing module must know a class's
+    /// superclass count or it builds dictionaries with methods at the wrong
+    /// offset (e.g. `class Monad m => Stream s m t` — uncons lands at slot 0
+    /// instead of slot 1, and the use site reads the wrong field).
+    pub interface_classes: Vec<(Symbol, Vec<Symbol>, Vec<Symbol>)>,
     /// Errors collected during lowering.
     pub errors: Vec<crate::LowerError>,
     /// Warnings collected during lowering.

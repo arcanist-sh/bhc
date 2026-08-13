@@ -162,7 +162,11 @@ pub fn lower_module_with_imports(
     expr_types: Option<&ExprTypeMap>,
     resolved_expr_types: Option<&ExprTypeMap>,
     imported_instances: Option<(
-        &[(bhc_intern::Symbol, Vec<bhc_intern::Symbol>)],
+        &[(
+            bhc_intern::Symbol,
+            Vec<bhc_intern::Symbol>,
+            Vec<bhc_intern::Symbol>,
+        )],
         &[(
             bhc_intern::Symbol,
             Vec<bhc_types::Ty>,

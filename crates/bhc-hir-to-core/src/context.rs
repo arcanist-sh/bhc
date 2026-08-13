@@ -1889,10 +1889,10 @@ impl LowerContext {
     /// Synthetic DefIds start far above real HIR DefIds.
     pub fn register_imported_instances(
         &mut self,
-        classes: &[(Symbol, Vec<Symbol>)],
+        classes: &[(Symbol, Vec<Symbol>, Vec<Symbol>)],
         instances: &[(Symbol, Vec<Ty>, Vec<Symbol>)],
     ) {
-        for (class_name, method_names) in classes {
+        for (class_name, method_names, superclass_names) in classes {
             if self.class_registry.lookup_class(*class_name).is_some() {
                 continue; // local declaration wins
             }
@@ -1902,7 +1902,11 @@ impl LowerContext {
                     param_count: 1,
                     methods: method_names.clone(),
                     method_types: FxHashMap::default(),
-                    superclasses: Vec::new(),
+                    // Carry the class's superclasses: `select_method` places
+                    // methods after `superclasses.len()` slots, so an importing
+                    // module must agree with the defining module on the count
+                    // or it selects the wrong dictionary field.
+                    superclasses: superclass_names.clone(),
                     defaults: FxHashMap::default(),
                     assoc_types: Vec::new(),
                 });
@@ -2119,8 +2123,7 @@ impl LowerContext {
                                     // var while the accessor binding uses the
                                     // fresh one — an undeclared, stubbed selector.
                                     if self.lookup_var(field.id).is_none() {
-                                        let selector_var =
-                                            self.named_var(field.name, Ty::Error);
+                                        let selector_var = self.named_var(field.name, Ty::Error);
                                         self.register_var(field.id, selector_var);
                                     }
                                     // Also register field metadata for later lookup

@@ -313,6 +313,14 @@ pub struct Lowering<'ctx, 'm> {
     /// Whether we're currently lowering an expression in tail position.
     /// Used for tail call optimization.
     in_tail_position: bool,
+    /// VarIds of lifted local (let/where) functions that capture free variables.
+    /// Unlike a top-level function, such a function needs its captured
+    /// environment threaded on every call, so it must be *capturable* into a
+    /// nested closure — `collect_free_vars` therefore does NOT treat it as a
+    /// global even though it also lives in `functions`. Populated while lowering
+    /// the enclosing recursive `let`, and its `param 0` closure is bound in
+    /// `env` while its body (and any nested continuation) is lowered.
+    captured_local_fns: FxHashSet<VarId>,
     /// Optional module name for symbol mangling in multi-module compilation.
     module_name: Option<String>,
     /// External functions imported from other compiled modules.
@@ -394,6 +402,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             closure_counter: 0,
             constructor_metadata: FxHashMap::default(),
             in_tail_position: false,
+            captured_local_fns: FxHashSet::default(),
             module_name: None,
             external_functions: FxHashMap::default(),
             transformer_stack: TransformerStack::new(),
@@ -445,6 +454,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             closure_counter: 0,
             constructor_metadata: FxHashMap::default(),
             in_tail_position: false,
+            captured_local_fns: FxHashSet::default(),
             module_name: Some(module_name.to_string()),
             external_functions: FxHashMap::default(),
             transformer_stack: TransformerStack::new(),
@@ -42202,9 +42212,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Expr::Lit(_, _, _) => {}
 
             Expr::Var(var, _) => {
-                // A variable is free if it's not bound and not a top-level function/constructor
+                // A variable is free if it's not bound and not a top-level
+                // function/constructor. A *capturing lifted local* function is an
+                // exception: although it lives in `functions`, it needs its
+                // captured environment threaded, so it must be captured into a
+                // nested closure like any other free variable (its `param 0`
+                // closure is what gets captured).
+                let is_capturing_local = self.captured_local_fns.contains(&var.id);
                 if !bound.contains(&var.id)
-                    && !self.functions.contains_key(&var.id)
+                    && (is_capturing_local || !self.functions.contains_key(&var.id))
                     && self.constructor_info(var.name.as_str()).is_none()
                     && self.primitive_op_info(var.name.as_str()).is_none()
                     && self.rts_function_id(var.name.as_str()).is_none()
@@ -48882,6 +48898,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
                 // Check if this is a known top-level function
                 if let Some(fn_val) = self.functions.get(&var.id).copied() {
+                    // A lifted local (let/where) function is in BOTH maps: it has
+                    // an LLVM function AND a closure carrying its captured free
+                    // variables. Prefer the closure so those captures are
+                    // threaded as the env; a direct call passes a null env and
+                    // reads the captures from address 0. A top-level function is
+                    // only in `functions`, so it still takes the direct path.
+                    if let Some(closure_val) = self.env.get(&var.id).copied() {
+                        // When under-applied, `apply_closure_values` cannot form
+                        // a PAP (it does not know the arity statically), so build
+                        // the PAP directly with the closure as the threaded env —
+                        // the same env `fn_val` receives when called through the
+                        // closure — so the captures survive to saturation.
+                        let expected =
+                            (fn_val.get_type().count_param_types() as usize).saturating_sub(1);
+                        if args.len() < expected {
+                            return self.lower_partial_application(
+                                fn_val,
+                                &args,
+                                expected,
+                                closure_val,
+                            );
+                        }
+                        return self.lower_closure_call(closure_val, &args);
+                    }
                     // E.45: Pass callee type for Integer argument promotion
                     return self.lower_direct_call(fn_val, &args, Some(&var.ty));
                 }
@@ -48989,7 +49029,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Check for under-application: fewer args than the function expects
         if args.len() < expected_args {
-            return self.lower_partial_application(fn_val, args, expected_args);
+            // Thread the current function's own env on a self partial-
+            // application (a recursive combinator PAP-ing itself, e.g. parsec's
+            // `walk (acc x xs)`); otherwise a null env (top-level, no captures).
+            let ptr_ty = self.type_mapper().ptr_type();
+            let is_self = self
+                .builder()
+                .get_insert_block()
+                .and_then(|b| b.get_parent())
+                .is_some_and(|cur| cur == fn_val);
+            let callee_env: BasicValueEnum<'ctx> = if is_self {
+                fn_val
+                    .get_nth_param(0)
+                    .unwrap_or_else(|| ptr_ty.const_null().into())
+            } else {
+                ptr_ty.const_null().into()
+            };
+            return self.lower_partial_application(fn_val, args, expected_args, callee_env);
         }
 
         // Exact application
@@ -48999,12 +49055,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Lower a partial application (under-application) to a PAP closure.
     ///
     /// Creates a PAP wrapper function that takes the remaining args and calls
-    /// the original function with all args combined.
+    /// the original function with all args combined. `callee_env` is the
+    /// environment threaded to `fn_val` when the PAP is finally saturated — the
+    /// current function's own env for a self partial-application, the callee's
+    /// closure for a lifted local function used from an enclosing scope, or a
+    /// null pointer for a top-level function that captures nothing. It is stored
+    /// as env slot 0 ahead of the applied arguments.
     fn lower_partial_application(
         &mut self,
         fn_val: FunctionValue<'ctx>,
         applied_args: &[&Expr],
         expected_args: usize,
+        callee_env: BasicValueEnum<'ctx>,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
@@ -49017,7 +49079,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let was_tail = self.in_tail_position;
         self.in_tail_position = false;
 
+        // Slot 0 is the callee env (threaded when the PAP saturates); the
+        // applied args follow.
         let mut applied_vals: Vec<(VarId, BasicValueEnum<'ctx>)> = Vec::new();
+        applied_vals.push((VarId::new(9999), callee_env));
         for (i, arg_expr) in applied_args.iter().enumerate() {
             if let Some(val) = self.lower_expr(arg_expr)? {
                 // Use a dummy VarId for PAP captured args
@@ -49026,6 +49091,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         self.in_tail_position = was_tail;
+
+        // Number of env slots: the callee env plus the applied args.
+        let num_env_slots = num_applied + 1;
 
         // Create the PAP wrapper function
         // Signature: (ptr env, ptr arg1, ptr arg2, ...) -> ptr
@@ -49062,39 +49130,42 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             self.builder().position_at_end(entry_bb);
 
-            // Extract applied args from closure environment
+            // Extract the callee env (slot 0) and applied args (slots 1..) from
+            // the closure environment.
             let closure_ptr = wrapper_fn.get_first_param().unwrap().into_pointer_value();
-            let closure_ty = self.closure_type(num_applied as u32);
+            let closure_ty = self.closure_type(num_env_slots as u32);
 
-            let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
-            // Original function expects null env for direct calls
-            call_args.push(ptr_type.const_null().into());
-
-            // Load applied args from env
-            for i in 0..num_applied {
-                let env_slot = self
-                    .builder()
-                    .build_struct_gep(closure_ty, closure_ptr, 2, "env_slot")
-                    .map_err(|e| CodegenError::Internal(format!("PAP gep failed: {:?}", e)))?;
-
-                let elem_ptr = unsafe {
-                    self.builder()
-                        .build_in_bounds_gep(
-                            ptr_type.array_type(num_applied as u32),
-                            env_slot,
-                            &[i64_type.const_zero(), i64_type.const_int(i as u64, false)],
-                            &format!("pap_arg_{}", i),
-                        )
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("PAP elem gep failed: {:?}", e))
-                        })?
+            let load_env_slot =
+                |this: &Self, idx: usize, name: &str| -> CodegenResult<BasicValueEnum<'ctx>> {
+                    let env_slot = this
+                        .builder()
+                        .build_struct_gep(closure_ty, closure_ptr, 2, "env_slot")
+                        .map_err(|e| CodegenError::Internal(format!("PAP gep failed: {:?}", e)))?;
+                    let elem_ptr = unsafe {
+                        this.builder()
+                            .build_in_bounds_gep(
+                                ptr_type.array_type(num_env_slots as u32),
+                                env_slot,
+                                &[i64_type.const_zero(), i64_type.const_int(idx as u64, false)],
+                                name,
+                            )
+                            .map_err(|e| {
+                                CodegenError::Internal(format!("PAP elem gep failed: {:?}", e))
+                            })?
+                    };
+                    this.builder()
+                        .build_load(ptr_type, elem_ptr, name)
+                        .map_err(|e| CodegenError::Internal(format!("PAP load failed: {:?}", e)))
                 };
 
-                let arg_val = self
-                    .builder()
-                    .build_load(ptr_type, elem_ptr, &format!("pap_load_{}", i))
-                    .map_err(|e| CodegenError::Internal(format!("PAP load failed: {:?}", e)))?;
+            let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = Vec::new();
+            // The callee's own environment (slot 0), not a null env.
+            let env_val = load_env_slot(self, 0, "pap_env")?;
+            call_args.push(env_val.into());
 
+            // Load applied args from env (slots 1..num_applied+1)
+            for i in 0..num_applied {
+                let arg_val = load_env_slot(self, i + 1, &format!("pap_arg_{}", i))?;
                 call_args.push(arg_val.into());
             }
 
@@ -49150,11 +49221,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let was_tail = self.in_tail_position;
         self.in_tail_position = false;
 
-        // All functions take (env_ptr, args...) for uniform calling convention
+        // All functions take (env_ptr, args...) for uniform calling convention.
+        // The env pointer is normally null for a direct call, but a *self*-
+        // recursive call must thread the current function's own environment
+        // (param 0) so a lifted local function that captures free variables does
+        // not lose them across the recursion (a null env there reads captures
+        // from address 0). For a top-level function param 0 is itself null, so
+        // this is a no-op.
         let mut llvm_args = Vec::new();
-        // First arg is env/closure pointer (null for direct calls)
-        let null_env = self.type_mapper().ptr_type().const_null();
-        llvm_args.push(null_env.into());
+        let ptr_ty = self.type_mapper().ptr_type();
+        let is_self_call = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .is_some_and(|cur| cur == fn_val);
+        let env_arg: BasicValueEnum<'ctx> = if is_self_call {
+            fn_val
+                .get_nth_param(0)
+                .unwrap_or_else(|| ptr_ty.const_null().into())
+        } else {
+            ptr_ty.const_null().into()
+        };
+        llvm_args.push(env_arg.into());
 
         // Lower remaining arguments and convert to pointers
         for (i, arg_expr) in args.iter().enumerate() {
@@ -49561,6 +49649,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     self.functions.insert(var.id, fn_val);
                 }
 
+                // When the group captures free variables, mark its functions as
+                // capturing lifted locals so a nested continuation closure (a
+                // combinator passing `walk (acc x xs)` into another parser's CPS)
+                // captures the function's `param 0` closure and threads its env,
+                // rather than calling it directly with a null env.
+                let group_captures = !captured.is_empty();
+                if group_captures {
+                    for (var, _expr) in bindings {
+                        self.captured_local_fns.insert(var.id);
+                    }
+                }
+
                 // Second pass: define all recursive functions, injecting captured
                 // free variables from the closure env into self.env
                 for (var, expr) in bindings {
@@ -49590,6 +49690,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
                 // Lower the body (recursive functions are now available)
                 let result = self.lower_expr(body)?;
+
+                // The lifted functions leave scope with the let; stop treating
+                // them as capturing locals.
+                if group_captures {
+                    for (var, _expr) in bindings {
+                        self.captured_local_fns.remove(&var.id);
+                    }
+                }
 
                 Ok(result)
             }
@@ -49675,6 +49783,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     let val = self.extract_closure_env_elem(env_ptr, env_size, i as u32)?;
                     self.env.insert(*vid, val.into());
                 }
+            }
+
+            // Bind this function to its OWN incoming closure (param 0) while its
+            // body is lowered, so a nested continuation closure that captures it
+            // (marked via `captured_local_fns`) captures this env and threads it,
+            // and a direct self-reference resolves through the closure too. The
+            // enclosing scope rebinds `var` to its real closure afterwards.
+            if let Some(env_ptr) = fn_val.get_nth_param(0) {
+                self.env.insert(var.id, env_ptr);
             }
         }
 

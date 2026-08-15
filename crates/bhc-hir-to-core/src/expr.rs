@@ -958,7 +958,17 @@ fn lower_constrained_fn_app(
             .cloned()
             .collect();
         if uc.is_empty() {
-            return Ok(None);
+            // An unconstrained head (`manyAccum`, `option`, `count`) still needs
+            // this treatment when it carries a constrained parser VALUE argument:
+            // the parser must get its OWN dictionary at the concrete stream type
+            // recovered from `expected_ty`, otherwise it reaches the combinator
+            // as an unforced, dictionary-less value (a `\$d -> ParsecT` / arity-0
+            // CAF) and is mis-run. Proceed only in that case; otherwise leave it
+            // to plain lowering so ordinary applications are unaffected.
+            let has_constrained_arg = value_args.iter().any(|a| is_constrained_fn_value(ctx, a));
+            if !has_constrained_arg {
+                return Ok(None);
+            }
         }
         (uc, scheme.ty.clone())
     };
@@ -1512,17 +1522,25 @@ fn lower_app(
                                     // inside lambda bodies resolve via dictionary dispatch
                                     let is_bind_op = method_name.as_str() == ">>="
                                         || method_name.as_str() == ">>";
+                                    // Operators whose operands are monadic VALUES
+                                    // (`m a <|> m a`, `m a *> m b`, `digit >>= f`)
+                                    // — a constrained parser operand must get its
+                                    // own dictionary applied, else it reaches the
+                                    // instance method (parserPlus/parserBind) as an
+                                    // unforced `\$d -> ParsecT` / thunk and is
+                                    // mis-run. `<$>`/`fmap` is excluded: its first
+                                    // operand is a plain function, not monadic.
+                                    let operands_are_monadic = is_bind_op
+                                        || matches!(
+                                            method_name.as_str(),
+                                            "<|>" | "mplus" | "*>" | "<*" | "<*>"
+                                        );
                                     if is_bind_op {
                                         ctx.push_monad_type(concrete_ty.clone());
                                     }
                                     let mut result = method_expr;
                                     for arg in &collected_args {
-                                        // For a bind op the operands are monadic
-                                        // values (`digit` in `digit >>= f`); lower
-                                        // them dictionary-aware so a constrained
-                                        // parser gets its own dictionary. Other
-                                        // methods keep plain lowering.
-                                        let arg_core = if is_bind_op {
+                                        let arg_core = if operands_are_monadic {
                                             lower_monad_operand(ctx, arg, &concrete_ty, span)?
                                         } else {
                                             lower_expr(ctx, arg)?
@@ -1533,7 +1551,7 @@ fn lower_app(
                                             span,
                                         );
                                     }
-                                    let x_core = if is_bind_op {
+                                    let x_core = if operands_are_monadic {
                                         lower_monad_operand(ctx, x, &concrete_ty, span)?
                                     } else {
                                         lower_expr(ctx, x)?

@@ -989,6 +989,35 @@ impl LowerContext {
         };
         self.class_registry.register_class(monad_class);
 
+        // === Register Alternative class ===
+        // Method: <|> (empty is deliberately omitted so a bare `empty` is not
+        // captured as a class method). Dispatch resolves `<|>` to a named
+        // instance method (`$instance_<|>_ParsecT`), so the method-index layout
+        // does not matter here. Superclass: Applicative.
+        let alternative_class = ClassInfo {
+            name: Symbol::intern("Alternative"),
+            param_count: 1,
+            methods: vec![Symbol::intern("<|>")],
+            method_types: FxHashMap::default(),
+            superclasses: vec![Symbol::intern("Applicative")],
+            defaults: FxHashMap::default(),
+            assoc_types: vec![],
+        };
+        self.class_registry.register_class(alternative_class);
+
+        // === Register MonadPlus class ===
+        // Method: mplus (mzero omitted, like `empty` above). Superclass: Monad.
+        let monad_plus_class = ClassInfo {
+            name: Symbol::intern("MonadPlus"),
+            param_count: 1,
+            methods: vec![Symbol::intern("mplus")],
+            method_types: FxHashMap::default(),
+            superclasses: vec![Symbol::intern("Monad")],
+            defaults: FxHashMap::default(),
+            assoc_types: vec![],
+        };
+        self.class_registry.register_class(monad_plus_class);
+
         // === Register IO instances for Functor/Applicative/Monad ===
         // IO has kind * -> *, so we construct it as a type application
         let io_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
@@ -1588,7 +1617,13 @@ impl LowerContext {
     /// user-defined.
     #[must_use]
     pub fn is_monad_family_class(&self, class_name: Symbol) -> bool {
-        static MONAD_FAMILY: &[&str] = &["Functor", "Applicative", "Monad"];
+        static MONAD_FAMILY: &[&str] = &[
+            "Functor",
+            "Applicative",
+            "Monad",
+            "Alternative",
+            "MonadPlus",
+        ];
         MONAD_FAMILY.contains(&class_name.as_str())
     }
 

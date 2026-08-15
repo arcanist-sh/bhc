@@ -43347,16 +43347,36 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
-    /// Declare a function from a Core variable and expression.
-    /// Uses the expression to infer the function type when var.ty contains unresolved types.
-    fn declare_function_from_expr(
+    /// Physical LLVM function type for a binding whose body is `expr`.
+    ///
+    /// A function's physical LLVM arity must equal its MANIFEST lambda count
+    /// (`count_lambda_params`), which is what the body actually binds and what
+    /// the over-/under-application machinery in `lower_direct_call` assumes.
+    /// The declared `var.ty` is used only when it agrees; expression-based
+    /// (all-pointer) typing is used whenever the manifest lambda count differs
+    /// from the type-arrow count:
+    /// 1. Error types (derived/generated bindings, and every *local* let/where
+    ///    binding — those carry `Ty::Error`). Deriving the arity from the type
+    ///    would declare zero value params, so the lambda parameters bind to
+    ///    non-existent function arguments and lower to `bhc_stub_<name>`, and a
+    ///    recursive self-call is made with no arguments (infinite recursion).
+    /// 2. MORE lambdas than the type suggests — dictionary params from typeclass
+    ///    constraints are not reflected in the Haskell type (`\$d -> \x -> …`).
+    /// 3. FEWER lambdas than the type suggests — a point-free/partial definition
+    ///    that returns a function (`parse p = runP p ()`, lowered as
+    ///    `\$d -> \p -> runP $d p ()`). Declaring it with the type-arrow count
+    ///    would bury the leading dictionary param and misalign every argument
+    ///    when the PAP is later saturated.
+    ///
+    /// When the counts are EQUAL, both paths yield the same all-pointer
+    /// signature, so the type-based path is equivalent.
+    fn lifted_fn_type(
         &self,
         var: &Var,
         expr: &Expr,
-    ) -> CodegenResult<FunctionValue<'ctx>> {
+    ) -> CodegenResult<inkwell::types::FunctionType<'ctx>> {
         let param_count = self.count_lambda_params(expr);
 
-        // Count type-level parameters for comparison
         let type_param_count = {
             let mut count = 0;
             let mut current = &var.ty;
@@ -43367,39 +43387,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             count
         };
 
-        // A function's physical LLVM arity must equal its MANIFEST lambda count
-        // (`param_count`), which is what the body actually binds and what the
-        // over-/under-application machinery in `lower_direct_call` assumes. Use
-        // expression-based (pointer) typing whenever the manifest lambda count
-        // differs from the type-arrow count:
-        // 1. Error types (derived/generated bindings).
-        // 2. MORE lambdas than the type suggests — dictionary params from
-        //    typeclass constraints are not reflected in the Haskell type
-        //    (e.g. a saturated `\$d -> \x -> ...`).
-        // 3. FEWER lambdas than the type suggests — a point-free/partial
-        //    definition that returns a function (e.g. `parse p = runP p ()`,
-        //    lowered as `\$d -> \p -> runP $d p ()`). Declaring it with the
-        //    type-arrow count would bury the leading dictionary param and
-        //    misalign every argument when the PAP is later saturated.
-        // When the counts are EQUAL, both paths yield the same all-pointer
-        // signature, so the `else` branch below is equivalent.
-        let fn_type = if param_count > 0
-            && (matches!(&var.ty, Ty::Error) || param_count != type_param_count)
-        {
+        if param_count > 0 && (matches!(&var.ty, Ty::Error) || param_count != type_param_count) {
             let tm = self.type_mapper();
-
             // All functions take (env_ptr, args...) for uniform closure calling convention
             let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = Vec::new();
             param_types.push(tm.ptr_type().into()); // env/closure pointer
             for _ in 0..param_count {
                 param_types.push(tm.ptr_type().into());
             }
-
-            // Default return type is pointer
-            tm.ptr_type().fn_type(&param_types, false)
+            Ok(tm.ptr_type().fn_type(&param_types, false))
         } else {
-            self.lower_function_type(&var.ty)?
-        };
+            self.lower_function_type(&var.ty)
+        }
+    }
+
+    /// Declare a function from a Core variable and expression.
+    /// Uses the expression to infer the function type when var.ty contains unresolved types.
+    fn declare_function_from_expr(
+        &self,
+        var: &Var,
+        expr: &Expr,
+    ) -> CodegenResult<FunctionValue<'ctx>> {
+        let fn_type = self.lifted_fn_type(var, expr)?;
         let name = self.mangle_name(var.name.as_str());
         Ok(self.module.add_function(&name, fn_type))
     }
@@ -49541,9 +49550,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // "{name}${var_id}"; VarIds repeat across modules (the fresh
                 // counter restarts per module), so external linkage collides
                 // at link time (go$200213 in two readers).
-                for (var, _expr) in bindings {
+                for (var, expr) in bindings {
                     let lifted_name = format!("{}${}", var.name.as_str(), var.id.index());
-                    let fn_type = self.lower_function_type(&var.ty)?;
+                    // Use the manifest lambda count for the arity: a local
+                    // let/where binding's `var.ty` is `Ty::Error`, so the
+                    // type-arrow count would be zero and the lambda parameters
+                    // (and the recursive self-call's arguments) would be lost.
+                    let fn_type = self.lifted_fn_type(var, expr)?;
                     let fn_val = self.module.add_internal_function(&lifted_name, fn_type);
                     self.functions.insert(var.id, fn_val);
                 }

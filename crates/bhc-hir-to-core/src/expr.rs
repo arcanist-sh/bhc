@@ -644,6 +644,13 @@ fn lower_value_arg(
                 return Ok(e);
             }
         }
+        // Application-form constrained value: a parser combinator with its own
+        // constraint, partially applied — `char 'a'`, `many1 digit`. The
+        // dictionaries must precede the value arguments, so this cannot be left
+        // to plain lowering (which would shift every argument by one).
+        if let Some(e) = lower_constrained_fn_app(ctx, arg, exp)? {
+            return Ok(e);
+        }
     }
     lower_expr(ctx, arg)
 }
@@ -784,18 +791,37 @@ fn lower_constrained_fn_value(
         (uc, scheme.ty.clone())
     };
 
-    // Recover the constrained type variables from the expected type.
+    // Recover the constrained type variables from the expected type, then
+    // resolve one dictionary per user constraint at those types.
     let mut subst = bhc_types::Subst::new();
     match_ty(&scheme_ty, expected_ty, &mut subst);
 
+    let dicts = resolve_user_dicts(ctx, &user_constraints, &subst, def_ref.span)?;
     let var = ctx.lookup_var(def_ref.def_id).cloned()?;
     let mut result = core::Expr::Var(var, def_ref.span);
-    for c in &user_constraints {
+    for dict in dicts {
+        result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
+    }
+    Some(result)
+}
+
+/// Resolve one dictionary per user constraint, given a `subst` that binds the
+/// constrained type variables. Any functional-dependency-determined argument
+/// left as a variable after substitution (e.g. `t` in `Stream s m t | s -> t`,
+/// where matching only pins `s`/`m`) is completed from a matching instance
+/// head: the constraint's concrete positions are matched against each instance
+/// head to bind that instance's variables, and the binding is applied to the
+/// whole head to fill the undetermined positions. Returns the dictionaries in
+/// constraint order, or `None` if any cannot be resolved at a concrete type.
+fn resolve_user_dicts(
+    ctx: &mut LowerContext,
+    user_constraints: &[Constraint],
+    subst: &bhc_types::Subst,
+    span: Span,
+) -> Option<Vec<core::Expr>> {
+    let mut dicts = Vec::with_capacity(user_constraints.len());
+    for c in user_constraints {
         let mut concrete_args: Vec<Ty> = c.args.iter().map(|t| subst.apply(t)).collect();
-        // Complete functional-dependency-determined arguments from a matching
-        // instance head (a multi-parameter class such as
-        // `Stream s Identity t | s -> t` leaves `t` a variable after matching
-        // the value's type). Mirrors `resolve_constrained_fn_dicts`.
         if concrete_args.iter().any(has_type_variables) {
             let completed: Option<Vec<Ty>> =
                 ctx.class_registry()
@@ -830,11 +856,116 @@ fn lower_constrained_fn_value(
             // Leave it to other paths (bare lowering) if still not concrete.
             concrete_args = completed?;
         }
-        let concrete = Constraint::new_multi(c.class, concrete_args, def_ref.span);
-        let dict = ctx.resolve_dictionary(&concrete, def_ref.span)?;
+        let concrete = Constraint::new_multi(c.class, concrete_args, span);
+        let dict = ctx.resolve_dictionary(&concrete, span)?;
+        dicts.push(dict);
+    }
+    Some(dicts)
+}
+
+/// If `arg` is a constrained user *function* applied to value arguments — e.g.
+/// `char 'a'` or `many1 digit`, a parser combinator with its own `Stream`
+/// constraint partially applied — return it with its dictionaries inserted
+/// *before* the value arguments (`char $dStream 'a'`). Without this the first
+/// value argument lands in the dictionary parameter's slot and every argument
+/// is shifted by one, so the saturated parser reads a value where it expects a
+/// dictionary (the `runP+…` crash). The constrained type variables are
+/// recovered from the known result type `expected_ty` — authoritative under
+/// `match_ty`'s first-binding-wins rule — and, for anything it leaves open,
+/// from the value arguments' inferred types. Returns `None` when `arg` is not
+/// such an application, its head is a class method, or any dictionary cannot be
+/// resolved at a concrete type; the caller then falls back to plain lowering.
+fn lower_constrained_fn_app(
+    ctx: &mut LowerContext,
+    arg: &hir::Expr,
+    expected_ty: &Ty,
+) -> LowerResult<Option<core::Expr>> {
+    // Peel the application spine: head + value arguments in source order.
+    let mut head = arg;
+    let mut value_args: Vec<&hir::Expr> = Vec::new();
+    while let Expr::App(f, a, _) = head {
+        value_args.push(a.as_ref());
+        head = f.as_ref();
+    }
+    if value_args.is_empty() {
+        // A bare reference — handled by `lower_constrained_fn_value`.
+        return Ok(None);
+    }
+    value_args.reverse();
+    // Peel type applications / annotations to reach the function reference.
+    while let Expr::TypeApp(inner, _, _) | Expr::Ann(inner, _, _) = head {
+        head = inner.as_ref();
+    }
+    let Expr::Var(def_ref) = head else {
+        return Ok(None);
+    };
+    let Some(name) = ctx.lookup_var(def_ref.def_id).map(|v| v.name) else {
+        return Ok(None);
+    };
+    if ctx.is_class_method(name).is_some() {
+        return Ok(None);
+    }
+    let (user_constraints, scheme_ty) = {
+        let Some(scheme) = ctx.lookup_scheme(def_ref.def_id) else {
+            return Ok(None);
+        };
+        let uc: Vec<Constraint> = scheme
+            .constraints
+            .iter()
+            .filter(|c| ctx.is_user_class(c.class))
+            .cloned()
+            .collect();
+        if uc.is_empty() {
+            return Ok(None);
+        }
+        (uc, scheme.ty.clone())
+    };
+
+    // Declared parameter types (the scheme carries no dictionaries).
+    let mut param_tys: Vec<Ty> = Vec::new();
+    let mut cur = &scheme_ty;
+    while let Ty::Fun(a, r) = cur {
+        param_tys.push(a.as_ref().clone());
+        cur = r.as_ref();
+    }
+    // Recover the constrained type variables. Match the result type after the
+    // supplied value arguments against `expected_ty` first (the concrete use
+    // site wins under first-binding-wins), then let the value arguments fill
+    // anything the result type leaves open.
+    let mut subst = bhc_types::Subst::new();
+    let mut result_ty = &scheme_ty;
+    for _ in 0..value_args.len() {
+        if let Ty::Fun(_, r) = result_ty {
+            result_ty = r.as_ref();
+        }
+    }
+    match_ty(result_ty, expected_ty, &mut subst);
+    for (p, a) in param_tys.iter().zip(value_args.iter()) {
+        if let Some(at) = try_infer_arg_type(ctx, a) {
+            match_ty(p, &at, &mut subst);
+        }
+    }
+
+    let Some(dicts) = resolve_user_dicts(ctx, &user_constraints, &subst, def_ref.span) else {
+        return Ok(None);
+    };
+
+    let Some(var) = ctx.lookup_var(def_ref.def_id).cloned() else {
+        return Ok(None);
+    };
+    let mut result = core::Expr::Var(var, def_ref.span);
+    for dict in dicts {
         result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
     }
-    Some(result)
+    // Value arguments follow the dictionaries. Lower each as a value argument in
+    // turn, so a nested constrained parser (the `digit` in `many1 digit`) gets
+    // its own dictionary at the instantiated parameter type.
+    for (i, a) in value_args.iter().enumerate() {
+        let expected = param_tys.get(i).map(|p| subst.apply(p));
+        let arg_core = lower_value_arg(ctx, a, expected.as_ref())?;
+        result = core::Expr::App(Box::new(result), Box::new(arg_core), def_ref.span);
+    }
+    Ok(Some(result))
 }
 
 /// Whether `expr` references a constrained user *function* used as a value

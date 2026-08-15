@@ -655,6 +655,26 @@ fn lower_value_arg(
     lower_expr(ctx, arg)
 }
 
+/// Lower an operand of a monadic bind (`>>=`/`>>`) whose monad `m` is the
+/// concrete type `monad_ty` (kind `* -> *`). A constrained parser used as such
+/// an operand — the `digit` in `digit >>= f` — needs its own dictionary applied
+/// at the concrete stream type, exactly as an ordinary value argument does; the
+/// monad-method dispatch otherwise lowers it bare, so the parser reaches
+/// `parserBind` as a `\$d -> ParsecT` function and is mis-run (the `runP` crash
+/// again). The operand's expected type is `monad_ty` applied to an unknown
+/// result — enough to pin the stream type in the operand's own constraint
+/// without needing its context-determined result type. A continuation lambda or
+/// an already-concrete operand ignores the expected type and lowers normally.
+fn lower_monad_operand(
+    ctx: &mut LowerContext,
+    arg: &hir::Expr,
+    monad_ty: &Ty,
+    _span: Span,
+) -> LowerResult<core::Expr> {
+    let expected = Ty::App(Box::new(monad_ty.clone()), Box::new(Ty::Error));
+    lower_value_arg(ctx, arg, Some(&expected))
+}
+
 fn resolve_constrained_fn_dicts(
     ctx: &mut LowerContext,
     head_ref: &DefRef,
@@ -1475,14 +1495,27 @@ fn lower_app(
                                     }
                                     let mut result = method_expr;
                                     for arg in &collected_args {
-                                        let arg_core = lower_expr(ctx, arg)?;
+                                        // For a bind op the operands are monadic
+                                        // values (`digit` in `digit >>= f`); lower
+                                        // them dictionary-aware so a constrained
+                                        // parser gets its own dictionary. Other
+                                        // methods keep plain lowering.
+                                        let arg_core = if is_bind_op {
+                                            lower_monad_operand(ctx, arg, &concrete_ty, span)?
+                                        } else {
+                                            lower_expr(ctx, arg)?
+                                        };
                                         result = core::Expr::App(
                                             Box::new(result),
                                             Box::new(arg_core),
                                             span,
                                         );
                                     }
-                                    let x_core = lower_expr(ctx, x)?;
+                                    let x_core = if is_bind_op {
+                                        lower_monad_operand(ctx, x, &concrete_ty, span)?
+                                    } else {
+                                        lower_expr(ctx, x)?
+                                    };
                                     if is_bind_op {
                                         ctx.pop_monad_type();
                                     }

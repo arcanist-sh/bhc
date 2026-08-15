@@ -129,6 +129,13 @@ pub struct LowerContext {
     /// Pushed when lowering >>=/>>'s lambda argument for non-builtin monads.
     monad_type_stack: Vec<Ty>,
 
+    /// The type of the instance whose method bodies are currently being lowered
+    /// (e.g. `ParsecT s u m` for `instance Alternative (ParsecT s u m)`). Set
+    /// while lowering instance methods so a bare monad-family method used as a
+    /// value — a point-free `(<|>) = mplus` — resolves to that type's instance
+    /// method instead of stubbing as a builtin.
+    current_instance_type: Option<Ty>,
+
     /// Pre-created existential dict binder variables.
     /// Set before lowering a case alternative RHS so that pattern lowering
     /// can reuse the same vars (instead of creating different fresh ones).
@@ -164,6 +171,7 @@ impl LowerContext {
             generalized_newtype_deriving: false,
             foreign_imports: Vec::new(),
             monad_type_stack: Vec::new(),
+            current_instance_type: None,
             existential_dict_binders: Vec::new(),
         };
         ctx.register_builtins();
@@ -1667,6 +1675,12 @@ impl LowerContext {
         self.monad_type_stack.last()
     }
 
+    /// The type of the instance whose method bodies are currently being lowered,
+    /// used to resolve a bare monad-family method in a point-free method body.
+    pub(crate) fn current_instance_type(&self) -> Option<&Ty> {
+        self.current_instance_type.as_ref()
+    }
+
     /// Check if a class name is a user-defined class (not a builtin like Eq, Ord, Show, etc.).
     ///
     /// This is used to determine whether dictionary-passing should be used for a class.
@@ -1705,6 +1719,12 @@ impl LowerContext {
             "IsString",
             "Generic",
             "NFData",
+            // Registered as builtin monad-family classes so their methods
+            // (`<|>`, `mplus`) dispatch to user instances rather than being
+            // treated as user classes (which would leave a bare reference
+            // undispatched).
+            "Alternative",
+            "MonadPlus",
         ];
         let name_str = class_name.as_str();
         !BUILTIN_CLASSES.contains(&name_str)
@@ -2412,6 +2432,13 @@ impl LowerContext {
                     // Lower instance method bodies to Core bindings.
                     // Each method in the instance provides an implementation that
                     // the evaluator needs to find.
+                    //
+                    // Record the instance type so a bare monad-family method used
+                    // as a value in a point-free method body (parsec's
+                    // `instance Alternative (ParsecT …) where (<|>) = mplus`)
+                    // resolves to this type's instance method.
+                    let prev_instance_type = self.current_instance_type.take();
+                    self.current_instance_type = instance_def.types.first().cloned();
                     for method_def in &instance_def.methods {
                         if inst_constraints.is_empty() {
                             // No instance constraints — lower normally
@@ -2429,6 +2456,7 @@ impl LowerContext {
                             }
                         }
                     }
+                    self.current_instance_type = prev_instance_type;
                 }
                 Item::Fixity(_) => {
                     // Fixity declarations are only used during parsing

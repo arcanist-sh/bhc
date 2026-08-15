@@ -262,6 +262,28 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 let var = ctx.lookup_var(def_ref.def_id).cloned().unwrap();
                 return Ok(core::Expr::Var(var, def_ref.span));
             }
+
+            // A bare monad-family method used as a *value* inside a point-free
+            // instance method body — parsec's `instance Alternative (ParsecT …)
+            // where (<|>) = mplus`, where `mplus` has no argument to drive
+            // resolution. Resolve it to the enclosing instance's type's method
+            // (`$instance_mplus_ParsecT`), instead of leaving it as a builtin
+            // that stubs for a user type. The instance type may carry abstract
+            // parameters (`ParsecT s u m`) — its head constructor is enough.
+            if ctx.is_monad_family_class(class_name) && ctx.lookup_dict(class_name).is_none() {
+                if let Some(inst_ty) = ctx.current_instance_type().cloned() {
+                    if !LowerContext::is_builtin_monad_type(&inst_ty) {
+                        if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
+                            name,
+                            class_name,
+                            &inst_ty,
+                            def_ref.span,
+                        ) {
+                            return Ok(method_expr);
+                        }
+                    }
+                }
+            }
             // Builtin class method with no dict — fall through to regular handling
         }
     }

@@ -834,9 +834,15 @@ fn lower_constrained_fn_value(
     };
 
     // Recover the constrained type variables from the expected type, then
-    // resolve one dictionary per user constraint at those types.
+    // resolve one dictionary per user constraint at those types. Normalize the
+    // `Parsec` synonym on both sides so a `ParsecT` scheme aligns with a
+    // `Parsec` expected type (see `normalize_parsec`).
     let mut subst = bhc_types::Subst::new();
-    match_ty(&scheme_ty, expected_ty, &mut subst);
+    match_ty(
+        &normalize_parsec(&scheme_ty),
+        &normalize_parsec(expected_ty),
+        &mut subst,
+    );
 
     let dicts = resolve_user_dicts(ctx, &user_constraints, &subst, def_ref.span)?;
     let var = ctx.lookup_var(def_ref.def_id).cloned()?;
@@ -917,6 +923,52 @@ fn resolve_user_dicts(
 /// from the value arguments' inferred types. Returns `None` when `arg` is not
 /// such an application, its head is a class method, or any dictionary cannot be
 /// resolved at a concrete type; the caller then falls back to plain lowering.
+/// Normalize the `Parsec s u a` builtin type synonym to its expansion
+/// `ParsecT s u Identity a`, so it aligns with the `ParsecT` form used by parser
+/// combinators when a dictionary's type variables are recovered by matching. The
+/// `parse`/`runParser` family is declared over `Parsec` (a denylisted builtin
+/// synonym that is not expanded in interfaces), while the combinators use
+/// `ParsecT`; without this, matching a `ParsecT s u m a` result against a
+/// `Parsec s u a` expected type aligns the four-argument spine against a
+/// three-argument one, so the monad `m` binds to the user state and `s`/`t` stay
+/// unpinned (the `Stream` fundep then picks an arbitrary — wrong — instance).
+fn normalize_parsec(ty: &Ty) -> Ty {
+    let mut head = ty;
+    let mut args: Vec<&Ty> = Vec::new();
+    while let Ty::App(f, x) = head {
+        args.push(x.as_ref());
+        head = f.as_ref();
+    }
+    args.reverse();
+    if let Ty::Con(tc) = head {
+        if tc.name.as_str() == "Parsec" && args.len() == 3 {
+            let star_to_star = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+            let identity = Ty::Con(TyCon::new(Symbol::intern("Identity"), star_to_star));
+            let parsect_kind = Kind::Arrow(
+                Box::new(Kind::Star),
+                Box::new(Kind::Arrow(
+                    Box::new(Kind::Star),
+                    Box::new(Kind::Arrow(
+                        Box::new(Kind::Star),
+                        Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+                    )),
+                )),
+            );
+            let parsect = Ty::Con(TyCon::new(Symbol::intern("ParsecT"), parsect_kind));
+            // ParsecT s u Identity a
+            let app = |f: Ty, x: Ty| Ty::App(Box::new(f), Box::new(x));
+            return app(
+                app(
+                    app(app(parsect, args[0].clone()), args[1].clone()),
+                    identity,
+                ),
+                args[2].clone(),
+            );
+        }
+    }
+    ty.clone()
+}
+
 fn lower_constrained_fn_app(
     ctx: &mut LowerContext,
     arg: &hir::Expr,
@@ -991,7 +1043,9 @@ fn lower_constrained_fn_app(
             result_ty = r.as_ref();
         }
     }
-    match_ty(result_ty, expected_ty, &mut subst);
+    let normalized_expected = normalize_parsec(expected_ty);
+    let normalized_result = normalize_parsec(result_ty);
+    match_ty(&normalized_result, &normalized_expected, &mut subst);
     for (p, a) in param_tys.iter().zip(value_args.iter()) {
         if let Some(at) = try_infer_arg_type(ctx, a) {
             match_ty(p, &at, &mut subst);

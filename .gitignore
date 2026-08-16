@@ -48,3 +48,7 @@ lcov.info
 *.tmp
 *.temp
 .cache/
+
+# stray Haskell repro artifacts (test binaries)
+/Walk[0-9]*
+/Main.o

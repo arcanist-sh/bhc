@@ -332,13 +332,21 @@ pub fn lower_pat_to_alt_with_fallthrough(
             })
         }
 
-        Pat::As(name, _def_id, inner_pat, inner_span) => {
-            // As-pattern: bind the value and also match the inner pattern
-            let var = Var {
-                name: *name,
-                id: ctx.fresh_id(),
-                ty: Ty::Error,
-            };
+        Pat::As(name, def_id, inner_pat, inner_span) => {
+            // As-pattern: bind the value and also match the inner pattern.
+            // Reuse the var already registered for this binder when present —
+            // `bind_pattern_vars` runs before the RHS is lowered, so the RHS
+            // references THAT var; a fresh var here would orphan the RHS
+            // reference (codegen lowers it to a `bhc_stub_<name>` panic).
+            let var = ctx.lookup_var(*def_id).cloned().unwrap_or_else(|| {
+                let v = Var {
+                    name: *name,
+                    id: ctx.fresh_id(),
+                    ty: Ty::Error,
+                };
+                ctx.register_var(*def_id, v.clone());
+                v
+            });
 
             // Create a nested case for the inner pattern
             let inner_alt =
@@ -877,10 +885,17 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                 // in this constructor group. When a Var pattern at column `col`
                 // is removed by specialization, we must bind it to the scrutinee.
                 for row in group_rows {
-                    if col < row.pats.len()
-                        && matches!(pat_head(ctx, &row.pats[col]), PatHead::Wild)
-                    {
-                        register_wildcard_bindings(ctx, &row.pats[col], &scrutinee);
+                    if col < row.pats.len() {
+                        if matches!(pat_head(ctx, &row.pats[col]), PatHead::Wild) {
+                            register_wildcard_bindings(ctx, &row.pats[col], &scrutinee);
+                        } else {
+                            // A constructor row may still carry as-pattern
+                            // binders around its head (`e1@(ParseError ...)`);
+                            // pat_head is transparent to `@`, so without this
+                            // the binder is silently dropped and the RHS
+                            // reference stubs at runtime.
+                            register_as_outer_bindings(ctx, &row.pats[col], &scrutinee);
+                        }
                     }
                 }
 
@@ -911,10 +926,12 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                 // Register variable bindings for wild/var rows in this
                 // literal group (same logic as constructor groups above).
                 for row in group_rows {
-                    if col < row.pats.len()
-                        && matches!(pat_head(ctx, &row.pats[col]), PatHead::Wild)
-                    {
-                        register_wildcard_bindings(ctx, &row.pats[col], &scrutinee);
+                    if col < row.pats.len() {
+                        if matches!(pat_head(ctx, &row.pats[col]), PatHead::Wild) {
+                            register_wildcard_bindings(ctx, &row.pats[col], &scrutinee);
+                        } else {
+                            register_as_outer_bindings(ctx, &row.pats[col], &scrutinee);
+                        }
                     }
                 }
 
@@ -1052,6 +1069,20 @@ fn default_matrix(
     MatchMatrix {
         scrutinees: new_scrutinees,
         rows: new_rows,
+    }
+}
+
+/// Register the binders of any `v@pat` wrappers at this position to the
+/// column's scrutinee, without descending into constructor sub-patterns
+/// (field binders are handled by specialization).
+fn register_as_outer_bindings(ctx: &mut LowerContext, pat: &hir::Pat, scrutinee: &Var) {
+    match pat {
+        Pat::As(_name, def_id, inner, _) => {
+            ctx.register_var(*def_id, scrutinee.clone());
+            register_as_outer_bindings(ctx, inner, scrutinee);
+        }
+        Pat::Ann(inner, _, _) => register_as_outer_bindings(ctx, inner, scrutinee),
+        _ => {}
     }
 }
 

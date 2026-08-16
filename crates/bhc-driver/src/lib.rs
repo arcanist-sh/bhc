@@ -1264,11 +1264,33 @@ impl Compiler {
         // constrained function, so call-site dictionary resolution silently
         // omits the dictionary and every subsequent argument shifts by one.
         let mut merged_schemes = typed.def_schemes.clone();
+        // Name-keyed fallback: a RE-EXPORTED import (`many` via Text.Parsec →
+        // Text.Parsec.Prim) is bound to a def WITHOUT a signature — the
+        // re-export chasing registers the name, while the defining module's
+        // interface entry carries the scheme under a DIFFERENT DefId. Without
+        // the scheme, call-site dictionary/expected-type recovery bails and a
+        // constrained argument (`char '4'` in `many (char '4')`) is lowered
+        // without its dictionary.
+        let mut scheme_by_name: FxHashMap<Symbol, &bhc_types::Scheme> = FxHashMap::default();
+        for def_info in lower_ctx.defs.values() {
+            if let Some(scheme) = &def_info.type_scheme {
+                scheme_by_name.entry(def_info.name).or_insert(scheme);
+            }
+        }
         for (def_id, def_info) in &lower_ctx.defs {
             if let Some(scheme) = &def_info.type_scheme {
                 merged_schemes
                     .entry(*def_id)
                     .or_insert_with(|| scheme.clone());
+            } else if matches!(def_info.kind, bhc_lower::DefKind::Value) {
+                if let Some(scheme) = scheme_by_name.get(&def_info.name) {
+                    // Only fills defs typeck gave no scheme (locals always
+                    // have one in `typed.def_schemes`, so `or_insert` keeps
+                    // them authoritative).
+                    merged_schemes
+                        .entry(*def_id)
+                        .or_insert_with(|| (*scheme).clone());
+                }
             }
         }
 

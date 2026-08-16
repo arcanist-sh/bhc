@@ -5709,6 +5709,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Monadic / higher-order operations
             "fmap" => Some(2),
             "<$>" => Some(2),
+            // `liftM`/`liftA` are the Monad/Applicative spellings of `fmap`.
+            "liftM" => Some(2),
+            "liftA" => Some(2),
             "<*>" => Some(2),
             "join" => Some(1),
             "=<<" => Some(2),
@@ -6653,7 +6656,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
 
             // Higher-order / Monadic operations
-            "fmap" | "<$>" => self.lower_builtin_fmap(args[0], args[1]),
+            // `liftM`/`liftA` == `fmap` for lawful monads/applicatives; route the
+            // builtin-monad case (list/Maybe/IO) through the same lowering.
+            "fmap" | "<$>" | "liftM" | "liftA" => self.lower_builtin_fmap(args[0], args[1]),
             "<*>" => self.lower_builtin_ap(args[0], args[1]),
             "join" => self.lower_builtin_join(args[0]),
             "=<<" => self.lower_builtin_bind_flipped(args[0], args[1]),

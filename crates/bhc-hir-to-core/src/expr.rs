@@ -677,6 +677,28 @@ fn lower_value_arg(
     lower_expr(ctx, arg)
 }
 
+/// `liftM`/`liftA` are the `Monad`/`Applicative`-constrained spellings of
+/// `fmap` (`liftM f m = fmap f m` for any lawful monad; likewise `liftA`). bhc
+/// has no per-instance `liftM`/`liftA` method, so route them through the
+/// `Functor` `fmap` instance for dispatch. This lets `liftM Just p` on a user
+/// monad like `ParsecT` resolve to `$instance_fmap_ParsecT` (`parsecMap`)
+/// instead of falling through to the `stub: liftM` codegen path. Returns the
+/// unchanged name for everything else.
+fn canonical_functor_method(name: Symbol) -> Symbol {
+    match name.as_str() {
+        "liftM" | "liftA" => Symbol::intern("fmap"),
+        _ => name,
+    }
+}
+
+/// `<$>`/`fmap` and their monad/applicative spellings (`liftM`/`liftA`, already
+/// canonicalized to `fmap`) take a plain function as the first operand and a
+/// monadic value as the *last* operand. Only the last operand needs its
+/// dictionary forced — see `lower_monad_operand`.
+fn is_fmap_like_method(name: Symbol) -> bool {
+    matches!(name.as_str(), "<$>" | "fmap")
+}
+
 /// Lower an operand of a monadic bind (`>>=`/`>>`) whose monad `m` is the
 /// concrete type `monad_ty` (kind `* -> *`). A constrained parser used as such
 /// an operand — the `digit` in `digit >>= f` — needs its own dictionary applied
@@ -1209,7 +1231,7 @@ fn lower_app(
     // Check if f is a Var referencing a class method or constrained function
     if let Expr::Var(def_ref) = f {
         if let Some(var) = ctx.lookup_var(def_ref.def_id).cloned() {
-            let method_name = var.name;
+            let method_name = canonical_functor_method(var.name);
 
             // Case 1: Class method resolution
             if let Some(class_name) = ctx.is_class_method(method_name) {
@@ -1436,7 +1458,7 @@ fn lower_app(
     // We peel the chain to find the head Var, then resolve dictionaries from x's type.
     if let Some((head_def_ref, collected_args)) = peel_app_chain(f) {
         if let Some(var) = ctx.lookup_var(head_def_ref.def_id).cloned() {
-            let method_name = var.name;
+            let method_name = canonical_functor_method(var.name);
 
             // Case 3a: Head is a class method (user-defined or monad-family)
             if let Some(class_name) = ctx.is_class_method(method_name) {
@@ -1582,13 +1604,21 @@ fn lower_app(
                                     // own dictionary applied, else it reaches the
                                     // instance method (parserPlus/parserBind) as an
                                     // unforced `\$d -> ParsecT` / thunk and is
-                                    // mis-run. `<$>`/`fmap` is excluded: its first
-                                    // operand is a plain function, not monadic.
+                                    // mis-run.
                                     let operands_are_monadic = is_bind_op
                                         || matches!(
                                             method_name.as_str(),
                                             "<|>" | "mplus" | "*>" | "<*" | "<*>"
                                         );
+                                    // `<$>`/`fmap` (and `liftM`/`liftA`, already
+                                    // canonicalized to `fmap`) take a plain function
+                                    // first and the monadic value LAST. Only the last
+                                    // operand needs its dictionary forced — the
+                                    // function operand stays plain. Without this,
+                                    // `fmap f digit` reaches `parsecMap` with `digit`
+                                    // an unforced `\$d -> ParsecT` CAF and segfaults,
+                                    // exactly as `<|>` did.
+                                    let is_fmap_like = is_fmap_like_method(method_name);
                                     if is_bind_op {
                                         ctx.push_monad_type(concrete_ty.clone());
                                     }
@@ -1605,7 +1635,7 @@ fn lower_app(
                                             span,
                                         );
                                     }
-                                    let x_core = if operands_are_monadic {
+                                    let x_core = if operands_are_monadic || is_fmap_like {
                                         lower_monad_operand(ctx, x, &concrete_ty, span)?
                                     } else {
                                         lower_expr(ctx, x)?
@@ -1812,7 +1842,7 @@ fn lower_type_app(
     // Check if this is a type application to a class method
     if let Expr::Var(def_ref) = expr {
         if let Some(var) = ctx.lookup_var(def_ref.def_id) {
-            let method_name = var.name;
+            let method_name = canonical_functor_method(var.name);
 
             // Check if this is a class method that needs dictionary resolution.
             // Applies to user-defined classes and monad-family classes at non-builtin types.

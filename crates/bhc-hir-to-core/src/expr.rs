@@ -1039,7 +1039,7 @@ fn lower_constrained_fn_app(
             // as an unforced, dictionary-less value (a `\$d -> ParsecT` / arity-0
             // CAF) and is mis-run. Proceed only in that case; otherwise leave it
             // to plain lowering so ordinary applications are unaffected.
-            let has_constrained_arg = value_args.iter().any(|a| is_constrained_fn_value(ctx, a));
+            let has_constrained_arg = value_args.iter().any(|a| references_constrained_fn(ctx, a));
             if !has_constrained_arg {
                 return Ok(None);
             }
@@ -1103,6 +1103,35 @@ fn is_constrained_fn_value(ctx: &LowerContext, expr: &hir::Expr) -> bool {
     let mut h = expr;
     while let Expr::TypeApp(i, _, _) | Expr::Ann(i, _, _) = h {
         h = i.as_ref();
+    }
+    let Expr::Var(dr) = h else {
+        return false;
+    };
+    if let Some(name) = ctx.lookup_var(dr.def_id).map(|v| v.name) {
+        if ctx.is_class_method(name).is_some() {
+            return false;
+        }
+    }
+    ctx.lookup_scheme(dr.def_id)
+        .is_some_and(|s| s.constraints.iter().any(|c| ctx.is_user_class(c.class)))
+}
+
+/// Whether `expr` is a bare constrained function value OR an *application* of one
+/// whose dictionary is not yet applied — `digit`, `char '4'`, `many1 digit`.
+/// Peels the whole application spine (and any type applications / annotations) to
+/// the head reference. Used to decide whether an unconstrained combinator head
+/// (`manyAccum`, `count`) carries a constrained parser argument that still needs
+/// its own dictionary: `is_constrained_fn_value` only matches a *bare* reference,
+/// so an App-form argument like `char '4'` would otherwise be lowered plainly and
+/// reach the combinator as an unforced, dictionary-less arity-0 value.
+fn references_constrained_fn(ctx: &LowerContext, expr: &hir::Expr) -> bool {
+    let mut h = expr;
+    loop {
+        match h {
+            Expr::App(f, _, _) => h = f.as_ref(),
+            Expr::TypeApp(i, _, _) | Expr::Ann(i, _, _) => h = i.as_ref(),
+            _ => break,
+        }
     }
     let Expr::Var(dr) = h else {
         return false;

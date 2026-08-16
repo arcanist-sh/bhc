@@ -2032,14 +2032,158 @@ fn lower_let_bindings(
     body: core::Expr,
     span: Span,
 ) -> LowerResult<core::Expr> {
-    // Process bindings from right to left, wrapping the body
-    let mut result = body;
+    use crate::binding::collect_free_vars;
 
+    // Haskell `let`/`where` groups are mutually recursive. When the group is
+    // entirely simple variable bindings, a binding may reference a SIBLING
+    // defined later in the group — e.g. parsec's `tokens` has
+    // `walk [] rs = ok rs` with `ok` bound *after* `walk`. The naive
+    // per-binding nesting below binds each on its own, placing an earlier
+    // binding OUTSIDE a later one it references, so the forward reference is
+    // out of scope and codegen emits `stub: ok not implemented`.
+    //
+    // The fix is dependency analysis: split the group into strongly-connected
+    // components and emit each SCC in topological order, with a component's
+    // dependencies bound OUTER (so they are in scope for its RHSes). A
+    // singleton SCC with no self-edge is a `NonRec`; a self-recursive singleton
+    // or a genuine mutual cycle is a `Bind::Rec`. This keeps mutually-recursive
+    // groups to true cycles only (codegen mislowers a multi-binding `Rec` whose
+    // members capture outer variables), so a DAG like `walk -> ok` becomes
+    // `let ok = .. in letrec walk = .. in body` — exactly the working shape.
+    if bindings.len() > 1 && bindings.iter().all(|b| matches!(b.pat, hir::Pat::Var(..))) {
+        let names: Vec<Symbol> = bindings
+            .iter()
+            .filter_map(|b| match &b.pat {
+                hir::Pat::Var(name, ..) => Some(*name),
+                _ => None,
+            })
+            .collect();
+
+        // Lower each RHS once and record which siblings it references.
+        let mut pairs: Vec<(Var, Box<core::Expr>)> = Vec::with_capacity(bindings.len());
+        let mut deps: Vec<Vec<usize>> = Vec::with_capacity(bindings.len());
+        for b in bindings {
+            let (name, def_id) = match &b.pat {
+                hir::Pat::Var(name, def_id, _) => (*name, *def_id),
+                _ => unreachable!("guarded by all(Pat::Var)"),
+            };
+            let rhs = lower_expr(ctx, &b.rhs)?;
+            let fvs = collect_free_vars(&rhs);
+            let d: Vec<usize> = (0..names.len())
+                .filter(|&j| fvs.contains(&names[j]))
+                .collect();
+            deps.push(d);
+            let var = ctx.lookup_var(def_id).cloned().unwrap_or_else(|| Var {
+                name,
+                id: ctx.fresh_id(),
+                ty: Ty::Error,
+            });
+            pairs.push((var, Box::new(rhs)));
+        }
+
+        // Tarjan SCCs of the dependency graph (edge i -> j means binding i
+        // references binding j). Output order is reverse-topological: a
+        // component is emitted after the components it depends on, so we wrap
+        // the body in reverse of that order to bind dependencies outermost.
+        let sccs = strongly_connected_components(&deps);
+
+        let mut pairs_opt: Vec<Option<(Var, Box<core::Expr>)>> =
+            pairs.into_iter().map(Some).collect();
+        let mut result = body;
+        for scc in sccs.iter().rev() {
+            if scc.len() == 1 {
+                let i = scc[0];
+                let (var, rhs) = pairs_opt[i].take().expect("each binding used once");
+                // Self-recursive singleton -> Rec, otherwise NonRec.
+                let bind = if deps[i].contains(&i) {
+                    Bind::Rec(vec![(var, rhs)])
+                } else {
+                    Bind::NonRec(var, rhs)
+                };
+                result = core::Expr::Let(Box::new(bind), Box::new(result), span);
+            } else {
+                // Genuine mutual cycle: one recursive group.
+                let group: Vec<(Var, Box<core::Expr>)> = scc
+                    .iter()
+                    .map(|&i| pairs_opt[i].take().expect("each binding used once"))
+                    .collect();
+                result = core::Expr::Let(Box::new(Bind::Rec(group)), Box::new(result), span);
+            }
+        }
+        return Ok(result);
+    }
+
+    // Fallback: original per-binding reverse nesting (handles complex patterns).
+    let mut result = body;
     for binding in bindings.iter().rev() {
         result = lower_single_let_binding(ctx, binding, result, span)?;
     }
 
     Ok(result)
+}
+
+/// Tarjan's strongly-connected-components on a dependency graph given as
+/// adjacency lists (`adj[i]` lists the nodes `i` points to). Returns the SCCs
+/// in reverse-topological order: if component A depends on component B, B
+/// appears before A. Each returned inner vec lists a component's node indices.
+fn strongly_connected_components(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let n = adj.len();
+    let mut index_of: Vec<Option<usize>> = vec![None; n];
+    let mut lowlink: Vec<usize> = vec![0; n];
+    let mut on_stack: Vec<bool> = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut next_index: usize = 0;
+    let mut sccs: Vec<Vec<usize>> = Vec::new();
+
+    // Iterative DFS to avoid stack overflow on large groups. Each frame tracks
+    // the node and how far through its adjacency list we've progressed.
+    for start in 0..n {
+        if index_of[start].is_some() {
+            continue;
+        }
+        let mut call_stack: Vec<(usize, usize)> = vec![(start, 0)];
+        while let Some(&(v, i)) = call_stack.last() {
+            if i == 0 {
+                index_of[v] = Some(next_index);
+                lowlink[v] = next_index;
+                next_index += 1;
+                stack.push(v);
+                on_stack[v] = true;
+            }
+            if i < adj[v].len() {
+                let w = adj[v][i];
+                call_stack.last_mut().unwrap().1 += 1;
+                match index_of[w] {
+                    None => call_stack.push((w, 0)),
+                    Some(w_idx) => {
+                        if on_stack[w] {
+                            lowlink[v] = lowlink[v].min(w_idx);
+                        }
+                    }
+                }
+            } else {
+                // Done with v's successors; propagate lowlink to parent.
+                if lowlink[v] == index_of[v].unwrap() {
+                    let mut component = Vec::new();
+                    loop {
+                        let w = stack.pop().unwrap();
+                        on_stack[w] = false;
+                        component.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    sccs.push(component);
+                }
+                call_stack.pop();
+                if let Some(&(parent, _)) = call_stack.last() {
+                    lowlink[parent] = lowlink[parent].min(lowlink[v]);
+                }
+            }
+        }
+    }
+
+    sccs
 }
 
 /// Lower a single let binding.

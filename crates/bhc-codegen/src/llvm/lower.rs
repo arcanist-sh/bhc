@@ -49667,9 +49667,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
 
                 // Second pass: define all recursive functions, injecting captured
-                // free variables from the closure env into self.env
+                // free variables from the closure env into self.env. Pass the
+                // whole group's vars so each body can bind its SIBLINGS to
+                // closures built in its own frame (mutual recursion).
+                let group_vars: Vec<Var> = bindings.iter().map(|(v, _)| v.clone()).collect();
                 for (var, expr) in bindings {
-                    self.lower_recursive_function_with_captures(var, expr, &captured)?;
+                    self.lower_recursive_function_with_captures(var, expr, &captured, &group_vars)?;
                 }
 
                 // Restore insertion point
@@ -49767,6 +49770,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         var: &Var,
         expr: &Expr,
         captures: &[(VarId, BasicValueEnum<'ctx>)],
+        group_vars: &[Var],
     ) -> CodegenResult<()> {
         let fn_val = self.functions.get(&var.id).copied().ok_or_else(|| {
             CodegenError::Internal(format!(
@@ -49797,6 +49801,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // enclosing scope rebinds `var` to its real closure afterwards.
             if let Some(env_ptr) = fn_val.get_nth_param(0) {
                 self.env.insert(var.id, env_ptr);
+            }
+
+            // Bind the SIBLING rec functions to closures built in THIS frame, so
+            // a mutual reference (parsec's `chainr1` has `scan` calling `rest`
+            // and `rest` calling `scan`) resolves to a closure carrying this
+            // frame's captured values. Without this, a reference to a sibling is
+            // captured with an SSA value from the enclosing function, which LLVM
+            // rejects ("Referring to an argument in another function"). Every
+            // member of the group shares the same captured union and hence the
+            // same env layout, so a sibling's closure is valid with these values.
+            let current_captures: Vec<(VarId, BasicValueEnum<'ctx>)> = captures
+                .iter()
+                .filter_map(|(vid, _)| self.env.get(vid).map(|v| (*vid, *v)))
+                .collect();
+            for sibling in group_vars {
+                if sibling.id == var.id {
+                    continue;
+                }
+                if let Some(&sib_fn) = self.functions.get(&sibling.id) {
+                    let sib_ptr = sib_fn.as_global_value().as_pointer_value();
+                    let sib_closure = self.alloc_closure(sib_ptr, &current_captures)?;
+                    self.env.insert(sibling.id, sib_closure.into());
+                }
             }
         }
 

@@ -1009,14 +1009,16 @@ impl LowerContext {
         self.class_registry.register_class(monad_class);
 
         // === Register Alternative class ===
-        // Method: <|> (empty is deliberately omitted so a bare `empty` is not
-        // captured as a class method). Dispatch resolves `<|>` to a named
-        // instance method (`$instance_<|>_ParsecT`), so the method-index layout
-        // does not matter here. Superclass: Applicative.
+        // Methods: <|>, empty. Dispatch resolves to a named instance method
+        // (`$instance_<|>_ParsecT`), so the method-index layout does not
+        // matter here. A bare `empty`/`mzero` occurrence dispatches via its
+        // typeck-recorded result type (`monad_head_of_method_occurrence`);
+        // when no named instance exists it falls through to the builtin as
+        // before. Superclass: Applicative.
         let alternative_class = ClassInfo {
             name: Symbol::intern("Alternative"),
             param_count: 1,
-            methods: vec![Symbol::intern("<|>")],
+            methods: vec![Symbol::intern("<|>"), Symbol::intern("empty")],
             method_types: FxHashMap::default(),
             superclasses: vec![Symbol::intern("Applicative")],
             defaults: FxHashMap::default(),
@@ -1025,11 +1027,13 @@ impl LowerContext {
         self.class_registry.register_class(alternative_class);
 
         // === Register MonadPlus class ===
-        // Method: mplus (mzero omitted, like `empty` above). Superclass: Monad.
+        // Methods: mplus, mzero (dispatched like `empty` above; parsec's
+        // `choice ps = foldr (<|>) mzero ps` needs the bare `mzero` resolved
+        // to `$instance_mzero_ParsecT`). Superclass: Monad.
         let monad_plus_class = ClassInfo {
             name: Symbol::intern("MonadPlus"),
             param_count: 1,
-            methods: vec![Symbol::intern("mplus")],
+            methods: vec![Symbol::intern("mplus"), Symbol::intern("mzero")],
             method_types: FxHashMap::default(),
             superclasses: vec![Symbol::intern("Monad")],
             defaults: FxHashMap::default(),

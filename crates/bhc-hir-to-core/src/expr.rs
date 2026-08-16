@@ -210,6 +210,23 @@ fn lower_lit(lit: &Lit, span: Span) -> LowerResult<core::Expr> {
     Ok(core::Expr::Lit(core_lit, Ty::Error, span))
 }
 
+/// From a monad-family method occurrence's instantiated type, recover the
+/// monad/functor constructor `m` it is used at. For `<|> :: P a -> P a -> P a`
+/// the first parameter is `P a` — strip one `App` to get `P`'s head
+/// application; for a nullary/result-only method (`mzero :: P a`) use the
+/// result type itself. Returns None when the shape doesn't match (e.g. the
+/// occurrence type is still a bare variable), letting the caller fall through.
+fn monad_head_of_method_occurrence(ty: &Ty) -> Option<Ty> {
+    let target = match ty {
+        Ty::Fun(a, _) => a.as_ref(),
+        t => t,
+    };
+    match target {
+        Ty::App(m, _) => Some(m.as_ref().clone()),
+        _ => None,
+    }
+}
+
 /// Lower a variable reference to Core.
 ///
 /// This handles several cases:
@@ -280,6 +297,31 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                             def_ref.span,
                         ) {
                             return Ok(method_expr);
+                        }
+                    }
+                }
+
+                // Outside an instance body: a bare monad-family method used as
+                // a VALUE — `foldr (<|>) mzero ps` (parsec's `choice`). Recover
+                // the monad constructor from this occurrence's typeck-recorded
+                // type: the method type's first parameter (or its result, for a
+                // nullary method like `mzero`) is `m a`, and `m`'s head
+                // constructor is concrete for transformer types (`ParsecT s u
+                // m`) even when its arguments are still variables. Dispatch to
+                // the named instance method at that head; builtin monads and
+                // unresolved heads fall through to the codegen fast path as
+                // before.
+                if let Some(occ_ty) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                    if let Some(m_head) = monad_head_of_method_occurrence(&occ_ty) {
+                        if !LowerContext::is_builtin_monad_type(&m_head) {
+                            if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
+                                name,
+                                class_name,
+                                &m_head,
+                                def_ref.span,
+                            ) {
+                                return Ok(method_expr);
+                            }
                         }
                     }
                 }
@@ -672,6 +714,34 @@ fn lower_value_arg(
         // to plain lowering (which would shift every argument by one).
         if let Some(e) = lower_constrained_fn_app(ctx, arg, exp)? {
             return Ok(e);
+        }
+        // A LIST literal of parsers — `choice [char 'a', digit]` expects
+        // `[ParsecT s u m a]`. Each element is itself a value at the list's
+        // element type and may be a constrained parser needing its dictionary;
+        // plain `lower_list` would leave every element an undicted arity-0
+        // value. Rebuild the cons spine with elements lowered as value args.
+        if let (hir::Expr::List(elems, list_span), Ty::List(elem_ty)) = (arg, exp) {
+            let nil_var = Var {
+                name: Symbol::intern("[]"),
+                id: VarId::new(0),
+                ty: Ty::Error,
+            };
+            let cons_var = Var {
+                name: Symbol::intern(":"),
+                id: VarId::new(0),
+                ty: Ty::Error,
+            };
+            let mut result = core::Expr::Var(nil_var, *list_span);
+            for elem in elems.iter().rev() {
+                let elem_core = lower_value_arg(ctx, elem, Some(elem_ty.as_ref()))?;
+                let cons_app = core::Expr::App(
+                    Box::new(core::Expr::Var(cons_var.clone(), *list_span)),
+                    Box::new(elem_core),
+                    *list_span,
+                );
+                result = core::Expr::App(Box::new(cons_app), Box::new(result), *list_span);
+            }
+            return Ok(result);
         }
     }
     lower_expr(ctx, arg)

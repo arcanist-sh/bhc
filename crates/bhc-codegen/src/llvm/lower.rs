@@ -26192,6 +26192,41 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 return self.lower_builtin_run_except_t(arg_expr);
             }
         }
+        // `f $ x` where `f` is a known function with physical arity > 1 is an
+        // UNDER-application: build a proper PAP instead of the raw single-arg
+        // indirect call below, which would invoke an N-param function with one
+        // argument and leave the rest as garbage registers. parsec's
+        // `manyAccum` recursion does exactly this — `seq xs $ walk $ acc x xs`
+        // where `walk` is a 4-param lifted local: the raw call corrupted the
+        // state argument and looped forever. Thread the function's closure
+        // (its captures) as the PAP's callee env when it has one — inside the
+        // function's own body this is its incoming param-0 closure.
+        {
+            let mut head = func_expr;
+            while let Expr::TyApp(i, _, _) | Expr::Cast(i, _, _) | Expr::Tick(_, i, _) = head {
+                head = i.as_ref();
+            }
+            if let Expr::Var(v, _) = head {
+                if let Some(fn_val) = self.functions.get(&v.id).copied() {
+                    let expected =
+                        (fn_val.get_type().count_param_types() as usize).saturating_sub(1);
+                    if expected > 1 {
+                        let ptr_ty = self.type_mapper().ptr_type();
+                        let callee_env: BasicValueEnum<'ctx> = self
+                            .env
+                            .get(&v.id)
+                            .copied()
+                            .unwrap_or_else(|| ptr_ty.const_null().into());
+                        return self.lower_partial_application(
+                            fn_val,
+                            &[arg_expr],
+                            expected,
+                            callee_env,
+                        );
+                    }
+                }
+            }
+        }
         let func_val = self
             .lower_expr(func_expr)?
             .ok_or_else(|| CodegenError::Internal("$: no function".to_string()))?;

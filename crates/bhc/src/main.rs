@@ -36,7 +36,10 @@ struct Cli {
     edition: String,
 
     /// Optimization level (0-3)
-    #[arg(short = 'O', long, default_value = "0")]
+    // Default "2" == OptLevel::Default, matching the session default this flag
+    // previously (silently) never overrode — so behavior is unchanged unless
+    // the user passes an explicit level.
+    #[arg(short = 'O', long, default_value = "2")]
     opt_level: u8,
 
     /// Increase output verbosity (-v info, -vv debug, -vvv trace)
@@ -331,10 +334,21 @@ fn compile_files(files: &[PathBuf], cli: &Cli) -> Result<()> {
         bhc_session::OutputType::Executable
     };
 
+    // Map the numeric -O flag onto the session optimization level. The flag
+    // was previously parsed but never wired, so every compile ran at the
+    // session default; honor it now (0=None, 1=Less, 2=Default, 3+=Aggressive).
+    let opt_level = match cli.opt_level {
+        0 => bhc_session::OptLevel::None,
+        1 => bhc_session::OptLevel::Less,
+        2 => bhc_session::OptLevel::Default,
+        _ => bhc_session::OptLevel::Aggressive,
+    };
+
     // Build compiler with configuration
     let mut builder = CompilerBuilder::new()
         .profile(profile)
         .output_type(output_type)
+        .opt_level(opt_level)
         .emit_kernel_report(cli.kernel_report)
         .tensor_fusion(cli.tensor_fusion);
 

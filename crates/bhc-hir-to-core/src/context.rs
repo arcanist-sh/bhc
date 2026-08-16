@@ -975,7 +975,18 @@ impl LowerContext {
         let applicative_class = ClassInfo {
             name: Symbol::intern("Applicative"),
             param_count: 1,
-            methods: vec![Symbol::intern("pure"), Symbol::intern("<*>")],
+            // `*>`/`<*` appended so a point-free instance alias (parsec's
+            // `(>>) = (Applicative.*>)`) resolves them as class methods and
+            // dispatches to the named instance method
+            // (`$instance_*>_ParsecT`). Appending keeps existing method
+            // indices unchanged; builtin monads still take the codegen fast
+            // path (dispatch falls through when no named instance exists).
+            methods: vec![
+                Symbol::intern("pure"),
+                Symbol::intern("<*>"),
+                Symbol::intern("*>"),
+                Symbol::intern("<*"),
+            ],
             method_types: FxHashMap::default(),
             superclasses: vec![Symbol::intern("Functor")],
             defaults: FxHashMap::default(),

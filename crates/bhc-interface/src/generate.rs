@@ -64,9 +64,10 @@ pub fn generate_interface(
                     cursor = inner.as_ref();
                 }
                 let (sig_constraints, bare_ty): (Vec<Constraint>, &bhc_ast::Type) = match cursor {
-                    bhc_ast::Type::Constrained(cs, inner, _) => {
-                        (cs.iter().map(convert_ast_constraint).collect(), inner.as_ref())
-                    }
+                    bhc_ast::Type::Constrained(cs, inner, _) => (
+                        cs.iter().map(convert_ast_constraint).collect(),
+                        inner.as_ref(),
+                    ),
                     other => (Vec::new(), other),
                 };
                 for name in &sig.names {

@@ -1670,16 +1670,7 @@ impl LowerContext {
     /// user-defined.
     #[must_use]
     pub fn is_monad_family_class(&self, class_name: Symbol) -> bool {
-        static MONAD_FAMILY: &[&str] = &[
-            "Functor",
-            "Applicative",
-            "Monad",
-            "Alternative",
-            "MonadPlus",
-            "Semigroup",
-            "Monoid",
-        ];
-        MONAD_FAMILY.contains(&class_name.as_str())
+        crate::dictionary::MONAD_FAMILY_CLASSES.contains(&class_name.as_str())
     }
 
     /// Check if a type is a builtin monad that uses codegen fast paths.
@@ -1735,46 +1726,8 @@ impl LowerContext {
     /// while user-defined classes use the dictionary-passing transformation.
     #[must_use]
     pub fn is_user_class(&self, class_name: Symbol) -> bool {
-        static BUILTIN_CLASSES: &[&str] = &[
-            "Eq",
-            "Ord",
-            "Show",
-            "Read",
-            "Num",
-            "Integral",
-            "Fractional",
-            "Floating",
-            "Real",
-            "RealFrac",
-            "RealFloat",
-            "Enum",
-            "Bounded",
-            "Functor",
-            "Applicative",
-            "Monad",
-            "MonadFail",
-            "MonadIO",
-            "MonadTrans",
-            "MonadReader",
-            "MonadState",
-            "MonadError",
-            "MonadWriter",
-            "Foldable",
-            "Traversable",
-            "Semigroup",
-            "Monoid",
-            "IsString",
-            "Generic",
-            "NFData",
-            // Registered as builtin monad-family classes so their methods
-            // (`<|>`, `mplus`) dispatch to user instances rather than being
-            // treated as user classes (which would leave a bare reference
-            // undispatched).
-            "Alternative",
-            "MonadPlus",
-        ];
         let name_str = class_name.as_str();
-        !BUILTIN_CLASSES.contains(&name_str)
+        !crate::dictionary::BUILTIN_CLASS_NAMES.contains(&name_str)
             && self.class_registry.lookup_class(class_name).is_some()
     }
 
@@ -2467,12 +2420,20 @@ impl LowerContext {
                 Item::Instance(instance_def) => {
                     // Instance already registered in first pass (register_instance_def)
 
-                    // Check if this instance has user-class constraints that
-                    // need dictionary parameters (e.g., `Describable a => Describable (Box a)`).
+                    // Check if this instance has constraints that need
+                    // dictionary parameters (e.g., `Describable a =>
+                    // Describable (Box a)`). Monad-family/value classes count
+                    // too: `instance Monoid a => Monoid (Future s a)` has
+                    // `mempty = return mempty`, whose inner `mempty` must
+                    // select from the CONSTRAINT dictionary — without the dict
+                    // lambda it mis-dispatched back to the Future instance and
+                    // looped forever. The filter MUST be the shared
+                    // `constraint_needs_dict_param` predicate so the lambda
+                    // arity matches `construct_dictionary`'s `constraint_dicts`.
                     let inst_constraints: Vec<Constraint> = instance_def
                         .constraints
                         .iter()
-                        .filter(|c| self.is_user_class(c.class))
+                        .filter(|c| self.class_registry.constraint_needs_dict_param(c.class))
                         .cloned()
                         .collect();
 

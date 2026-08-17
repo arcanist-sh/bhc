@@ -216,6 +216,18 @@ fn lower_lit(lit: &Lit, span: Span) -> LowerResult<core::Expr> {
 /// application; for a nullary/result-only method (`mzero :: P a`) use the
 /// result type itself. Returns None when the shape doesn't match (e.g. the
 /// occurrence type is still a bare variable), letting the caller fall through.
+/// Whether a type's head is a concrete constructor — dispatching an instance
+/// at a bare type VARIABLE would unify with any instance (the first match),
+/// turning a constraint-dict method like `Future`'s `mempty = return mempty`
+/// into a self-referential loop.
+fn has_concrete_head(ty: &Ty) -> bool {
+    match ty {
+        Ty::Con(_) | Ty::List(_) | Ty::Tuple(_) | Ty::Prim(_) => true,
+        Ty::App(f, _) => has_concrete_head(f),
+        _ => false,
+    }
+}
+
 fn monad_head_of_method_occurrence(ty: &Ty) -> Option<Ty> {
     let target = match ty {
         Ty::Fun(a, _) => a.as_ref(),
@@ -329,7 +341,9 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                         monad_head_of_method_occurrence(&occ_ty)
                     };
                     if let Some(m_head) = m_head {
-                        if !LowerContext::is_builtin_monad_type(&m_head) {
+                        if has_concrete_head(&m_head)
+                            && !LowerContext::is_builtin_monad_type(&m_head)
+                        {
                             if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
                                 name,
                                 class_name,
@@ -1725,7 +1739,7 @@ fn lower_app(
                         let inferred = inferred_args.or(inferred_x).or_else(|| {
                             // Fallback: use monad context stack for nested >>=/>>/return
                             if is_value_class {
-                                ctx.resolved_expr_ty_opt(span)
+                                ctx.resolved_expr_ty_opt(span).filter(has_concrete_head)
                             } else if is_monad_family {
                                 ctx.current_monad_type().cloned().or_else(|| {
                                     // Last resort: recover the monad constructor from

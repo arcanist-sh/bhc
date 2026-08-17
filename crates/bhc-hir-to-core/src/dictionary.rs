@@ -161,11 +161,93 @@ pub struct ClassRegistry {
     pub instances: FxHashMap<Symbol, Vec<InstanceInfo>>,
 }
 
+/// Builtin monad/value-family classes whose methods dispatch through the
+/// resolved-type machinery (see `LowerContext::is_monad_family_class`).
+pub(crate) const MONAD_FAMILY_CLASSES: &[&str] = &[
+    "Functor",
+    "Applicative",
+    "Monad",
+    "Alternative",
+    "MonadPlus",
+    "Semigroup",
+    "Monoid",
+];
+
+/// Builtin classes that are NOT user classes even when a `ClassInfo` is
+/// registered for them (see `LowerContext::is_user_class`). Their methods
+/// resolve through dedicated machinery (Show/Num/... codegen fast paths or
+/// the monad-family dispatch), not user-class dictionary passing.
+pub(crate) const BUILTIN_CLASS_NAMES: &[&str] = &[
+    "Eq",
+    "Ord",
+    "Show",
+    "Read",
+    "Num",
+    "Integral",
+    "Fractional",
+    "Floating",
+    "Real",
+    "RealFrac",
+    "RealFloat",
+    "Enum",
+    "Bounded",
+    "Functor",
+    "Applicative",
+    "Monad",
+    "MonadFail",
+    "MonadIO",
+    "MonadTrans",
+    "MonadReader",
+    "MonadState",
+    "MonadError",
+    "MonadWriter",
+    "Foldable",
+    "Traversable",
+    "Semigroup",
+    "Monoid",
+    "IsString",
+    "Generic",
+    "NFData",
+    // Registered as builtin monad-family classes so their methods
+    // (`<|>`, `mplus`) dispatch to user instances rather than being
+    // treated as user classes (which would leave a bare reference
+    // undispatched).
+    "Alternative",
+    "MonadPlus",
+];
+
 impl ClassRegistry {
     /// Create a new empty registry.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether an instance-declaration constraint of this class becomes a
+    /// runtime dictionary parameter on the instance's methods.
+    ///
+    /// This predicate MUST be used both when wrapping instance-method bodies
+    /// in dictionary lambdas (instance lowering in `LowerContext`) and when
+    /// applying `constraint_dicts` in `construct_dictionary`, so a method's
+    /// dict-lambda arity always matches the dictionaries applied to it.
+    /// User-defined classes count, and so do the builtin VALUE classes
+    /// (Semigroup/Monoid): e.g.
+    /// `instance (Semigroup a, Monoid a) => Monoid (Future s a)` needs the
+    /// `Monoid a` dict so `mempty = return mempty` selects the inner `mempty`
+    /// from the constraint dictionary instead of looping on its own instance.
+    ///
+    /// The MONADIC family (Functor..MonadPlus) deliberately does NOT count:
+    /// wrapping e.g. parsec's `instance Monad m => Stream [tok] m tok` in a
+    /// Monad dict lambda makes `uncons`'s `return` resolve via the dict, but
+    /// at use sites `m` is a builtin fast-path monad (Identity/IO) with no
+    /// registered instance, so the dict is a null placeholder and every token
+    /// read crashes. Monadic ops on constraint tyvars must keep the builtin
+    /// codegen fast path.
+    #[must_use]
+    pub fn constraint_needs_dict_param(&self, class_name: Symbol) -> bool {
+        let name = class_name.as_str();
+        matches!(name, "Semigroup" | "Monoid")
+            || (!BUILTIN_CLASS_NAMES.contains(&name) && self.lookup_class(class_name).is_some())
     }
 
     /// Register a type class.
@@ -477,16 +559,24 @@ impl<'a> DictContext<'a> {
         // For example, `instance Describable a => Describable (Box a)` needs
         // a `Describable a` dictionary. With substitution `{a -> Int}`, we
         // recursively construct the `Describable Int` dictionary.
+        // Arity alignment: the instance's methods were wrapped in exactly one
+        // dict lambda per `constraint_needs_dict_param` constraint, so use the
+        // SAME filter here and NEVER drop a slot — fall back to a null
+        // placeholder when the dictionary cannot be resolved (e.g. when
+        // constructing at a still-polymorphic type). Dropping a slot shifts
+        // every value argument of every method by one.
         let constraint_dicts: Vec<core::Expr> = instance
             .instance_constraints
             .iter()
-            .filter_map(|c| {
+            .filter(|c| self.registry.constraint_needs_dict_param(c.class))
+            .map(|c| {
                 let concrete = Constraint {
                     class: c.class,
                     args: c.args.iter().map(|a| subst.apply(a)).collect(),
                     span,
                 };
                 self.get_dictionary(&concrete, span)
+                    .unwrap_or(core::Expr::Lit(core::Literal::Int(0), Ty::Error, span))
             })
             .collect();
 
@@ -552,7 +642,14 @@ impl<'a> DictContext<'a> {
                             .collect::<Vec<_>>()
                             .join(" ")
                     );
-                    final_fields.push(make_error_expr(&error_msg, span));
+                    final_fields.push(missing_method_field(
+                        self,
+                        &instance.methods,
+                        &constraint_dicts,
+                        *method_name,
+                        &error_msg,
+                        span,
+                    ));
                 }
             }
 
@@ -576,7 +673,14 @@ impl<'a> DictContext<'a> {
                             .collect::<Vec<_>>()
                             .join(" ")
                     );
-                    make_error_expr(&error_msg, span)
+                    missing_method_field(
+                        self,
+                        &instance.methods,
+                        &constraint_dicts,
+                        *method_name,
+                        &error_msg,
+                        span,
+                    )
                 };
                 fields.push(method_expr);
             }
@@ -828,6 +932,48 @@ fn make_error_expr(msg: &str, span: Span) -> core::Expr {
         Box::new(msg_lit),
         span,
     )
+}
+
+/// Synthesize a missing `<$` from the instance's own `fmap`
+/// (`\x p -> fmap (const x) p`), or defer a missing-method error to CALL time
+/// by wrapping it in a lambda — building a dictionary must never throw.
+#[allow(clippy::too_many_arguments)]
+fn missing_method_field(
+    ctx: &mut DictContext,
+    class_methods: &FxHashMap<Symbol, bhc_hir::DefId>,
+    constraint_dicts: &[core::Expr],
+    method_name: Symbol,
+    error_msg: &str,
+    span: Span,
+) -> core::Expr {
+    if method_name.as_str() == "<$" {
+        if let Some(&fmap_id) = class_methods.get(&Symbol::intern("fmap")) {
+            let fmap_ref = ctx.method_reference(fmap_id, span);
+            let fmap_applied = apply_constraint_dicts(fmap_ref, constraint_dicts, span);
+            let xv = ctx.fresh_var("x", Ty::Error, span);
+            let pv = ctx.fresh_var("p", Ty::Error, span);
+            let iv = ctx.fresh_var("_i", Ty::Error, span);
+            let const_l = core::Expr::Lam(iv, Box::new(core::Expr::Var(xv.clone(), span)), span);
+            let body = core::Expr::App(
+                Box::new(core::Expr::App(
+                    Box::new(fmap_applied),
+                    Box::new(const_l),
+                    span,
+                )),
+                Box::new(core::Expr::Var(pv.clone(), span)),
+                span,
+            );
+            return core::Expr::Lam(
+                xv,
+                Box::new(core::Expr::Lam(pv, Box::new(body), span)),
+                span,
+            );
+        }
+    }
+    // Defer the error to call time: a raw error field would throw while the
+    // dictionary itself is being BUILT.
+    let dummy = ctx.fresh_var("_missing", Ty::Error, span);
+    core::Expr::Lam(dummy, Box::new(make_error_expr(error_msg, span)), span)
 }
 
 /// Create a field selector expression for a tuple.

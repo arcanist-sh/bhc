@@ -3487,6 +3487,10 @@ mod tests {
 fn lazify_recursive_parser_calls(bindings: &mut [Bind]) {
     use rustc_hash::{FxHashMap, FxHashSet};
 
+    if std::env::var("BHC_NO_LAZIFY").is_ok() {
+        return;
+    }
+
     fn dict_param_count(mut e: &core::Expr) -> Option<usize> {
         let mut n = 0;
         while let core::Expr::Lam(v, body, _) = e {

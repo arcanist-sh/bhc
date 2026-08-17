@@ -3070,28 +3070,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // ---- String RTS functions (VarId 1176-1179) ----
         // bhc_string_lines(str_ptr) -> ptr
         let string_lines = self.module.llvm_module().add_function(
-            "bhc_string_lines",
+            "bhc_cstr_lines",
             ptr_type.fn_type(&[ptr_type.into()], false),
             None,
         );
         self.functions.insert(VarId::new(1000176), string_lines);
         // bhc_string_unlines(list_ptr) -> ptr
         let string_unlines = self.module.llvm_module().add_function(
-            "bhc_string_unlines",
+            "bhc_cstr_unlines",
             ptr_type.fn_type(&[ptr_type.into()], false),
             None,
         );
         self.functions.insert(VarId::new(1000177), string_unlines);
         // bhc_string_words(str_ptr) -> ptr
         let string_words = self.module.llvm_module().add_function(
-            "bhc_string_words",
+            "bhc_cstr_words",
             ptr_type.fn_type(&[ptr_type.into()], false),
             None,
         );
         self.functions.insert(VarId::new(1000178), string_words);
         // bhc_string_unwords(list_ptr) -> ptr
         let string_unwords = self.module.llvm_module().add_function(
-            "bhc_string_unwords",
+            "bhc_cstr_unwords",
             ptr_type.fn_type(&[ptr_type.into()], false),
             None,
         );
@@ -43204,6 +43204,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// thunk callees), while missing a cycle re-introduces the infinite
     /// eager construction loop.
     fn detect_recursive_cafs(&mut self, bindings: &[Bind]) {
+        if std::env::var("BHC_NO_CAF_THUNK").is_ok() {
+            return;
+        }
         // Collect the candidate nodes: top-level binds with no lambda params.
         let mut node_exprs: FxHashMap<VarId, &Expr> = FxHashMap::default();
         let mut names_by_id: FxHashMap<VarId, bhc_intern::Symbol> = FxHashMap::default();

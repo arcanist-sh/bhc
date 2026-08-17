@@ -6221,6 +6221,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Check if the head is a builtin function
         if let Expr::Var(var, _) = current {
             let name = var.name.as_str();
+            // An IMPORTED definition shadows the builtin of the same name:
+            // parsec's `try` (backtracking) must not be intercepted by the
+            // exception `try`, pandoc's `count`/`many` likewise. A name bound
+            // to a compiled definition (local or interface-imported) takes the
+            // ordinary call path.
+            if self.functions.contains_key(&var.id)
+                || self.external_functions.contains_key(&var.name)
+            {
+                return None;
+            }
             if let Some(arity) = self.builtin_info(name) {
                 args.reverse();
                 if args.len() == arity as usize {
@@ -43671,8 +43681,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 } else if let Some((primop, arity)) = self.primitive_op_info(name) {
                     // Primop used as a value - create a wrapper closure
                     self.create_primop_closure(primop, arity, name)
-                } else if let Some(arity) = self.builtin_info(name) {
-                    // Builtin used as a value - create a wrapper closure
+                } else if self.builtin_info(name).is_some()
+                    && !self.external_functions.contains_key(&var.name)
+                {
+                    // Builtin used as a value - create a wrapper closure.
+                    // An interface-imported definition of the same name
+                    // (parsec's `try`) shadows the builtin — fall through to
+                    // the external branch below instead.
+                    let arity = self.builtin_info(name).unwrap();
                     self.create_builtin_closure(name, arity)
                 } else if let Some(&fn_val) = self.external_functions.get(&var.name) {
                     // Cross-module imported function

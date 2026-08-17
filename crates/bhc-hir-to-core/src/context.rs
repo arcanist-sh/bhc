@@ -956,12 +956,13 @@ impl LowerContext {
         self.register_builtin_instance("Show", &rational_ty, &[(92, "show")]);
 
         // === Register Functor class ===
-        // Methods: fmap
-        // fmap is also known as <$> (DefId 43)
+        // Methods: fmap, <$ (fmap is also known as <$>, DefId 43). `<$` is
+        // dispatched by rewriting to `fmap (const x)` when the instance has no
+        // `$instance_<$` of its own (parsec's ParsecT relies on the default).
         let functor_class = ClassInfo {
             name: Symbol::intern("Functor"),
             param_count: 1,
-            methods: vec![Symbol::intern("fmap")],
+            methods: vec![Symbol::intern("fmap"), Symbol::intern("<$")],
             method_types: FxHashMap::default(),
             superclasses: vec![],
             defaults: FxHashMap::default(),
@@ -1025,6 +1026,35 @@ impl LowerContext {
             assoc_types: vec![],
         };
         self.class_registry.register_class(alternative_class);
+
+        // === Register Semigroup / Monoid classes ===
+        // Dispatch resolves to named instance methods; `mconcat` with no
+        // dedicated instance method is rewritten to `foldr mappend mempty`
+        // at the dispatch site (its class default).
+        let semigroup_class = ClassInfo {
+            name: Symbol::intern("Semigroup"),
+            param_count: 1,
+            methods: vec![Symbol::intern("<>")],
+            method_types: FxHashMap::default(),
+            superclasses: vec![],
+            defaults: FxHashMap::default(),
+            assoc_types: vec![],
+        };
+        self.class_registry.register_class(semigroup_class);
+        let monoid_class = ClassInfo {
+            name: Symbol::intern("Monoid"),
+            param_count: 1,
+            methods: vec![
+                Symbol::intern("mempty"),
+                Symbol::intern("mappend"),
+                Symbol::intern("mconcat"),
+            ],
+            method_types: FxHashMap::default(),
+            superclasses: vec![Symbol::intern("Semigroup")],
+            defaults: FxHashMap::default(),
+            assoc_types: vec![],
+        };
+        self.class_registry.register_class(monoid_class);
 
         // === Register MonadPlus class ===
         // Methods: mplus, mzero (dispatched like `empty` above; parsec's
@@ -1646,6 +1676,8 @@ impl LowerContext {
             "Monad",
             "Alternative",
             "MonadPlus",
+            "Semigroup",
+            "Monoid",
         ];
         MONAD_FAMILY.contains(&class_name.as_str())
     }

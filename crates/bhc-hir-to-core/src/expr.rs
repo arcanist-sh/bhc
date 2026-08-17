@@ -312,7 +312,23 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 // unresolved heads fall through to the codegen fast path as
                 // before.
                 if let Some(occ_ty) = ctx.resolved_expr_ty_opt(def_ref.span) {
-                    if let Some(m_head) = monad_head_of_method_occurrence(&occ_ty) {
+                    // Semigroup/Monoid parameterize over the VALUE type itself:
+                    // take the first parameter (or result) directly, unwrapping
+                    // one list for `mconcat :: [a] -> a`.
+                    let is_value_class = matches!(class_name.as_str(), "Semigroup" | "Monoid");
+                    let m_head = if is_value_class {
+                        let target = match &occ_ty {
+                            Ty::Fun(a, _) => a.as_ref(),
+                            t => t,
+                        };
+                        Some(match target {
+                            Ty::List(t) => t.as_ref().clone(),
+                            t => t.clone(),
+                        })
+                    } else {
+                        monad_head_of_method_occurrence(&occ_ty)
+                    };
+                    if let Some(m_head) = m_head {
                         if !LowerContext::is_builtin_monad_type(&m_head) {
                             if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
                                 name,
@@ -321,6 +337,40 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                                 def_ref.span,
                             ) {
                                 return Ok(method_expr);
+                            }
+                            // `mconcat` used as a VALUE with no dedicated
+                            // instance method (`mconcat <$> manyTill block eof`
+                            // in pandoc's parseBlocks): its class default is
+                            // `foldr mappend mempty`.
+                            if name.as_str() == "mconcat" {
+                                let mappend_e = ctx.resolve_method_at_concrete_type(
+                                    Symbol::intern("mappend"),
+                                    class_name,
+                                    &m_head,
+                                    def_ref.span,
+                                );
+                                let mempty_e = ctx.resolve_method_at_concrete_type(
+                                    Symbol::intern("mempty"),
+                                    class_name,
+                                    &m_head,
+                                    def_ref.span,
+                                );
+                                if let (Some(mappend_e), Some(mempty_e)) = (mappend_e, mempty_e) {
+                                    let foldr_var = Var {
+                                        name: Symbol::intern("foldr"),
+                                        id: VarId::new(0),
+                                        ty: Ty::Error,
+                                    };
+                                    return Ok(core::Expr::App(
+                                        Box::new(core::Expr::App(
+                                            Box::new(core::Expr::Var(foldr_var, def_ref.span)),
+                                            Box::new(mappend_e),
+                                            def_ref.span,
+                                        )),
+                                        Box::new(mempty_e),
+                                        def_ref.span,
+                                    ));
+                                }
                             }
                         }
                     }
@@ -766,7 +816,7 @@ fn canonical_functor_method(name: Symbol) -> Symbol {
 /// monadic value as the *last* operand. Only the last operand needs its
 /// dictionary forced — see `lower_monad_operand`.
 fn is_fmap_like_method(name: Symbol) -> bool {
-    matches!(name.as_str(), "<$>" | "fmap")
+    matches!(name.as_str(), "<$>" | "fmap" | "<$")
 }
 
 /// Lower an operand of a monadic bind (`>>=`/`>>`) whose monad `m` is the
@@ -1250,6 +1300,16 @@ fn try_lower_spine_with_dicts(
     let Expr::Var(callee_ref) = head else {
         return Ok(None);
     };
+    // A class-method callee (`a <> b` chains) is handled by method dispatch,
+    // never by this spine path. Without this, registering Semigroup/Monoid as
+    // builtin classes let every `<>` application through the gate below, and
+    // speculative arg lowering at each level of a long chain re-lowers the
+    // nested spine combinatorially (Muse's block chains hung the compiler).
+    if let Some(name) = ctx.lookup_var(callee_ref.def_id).map(|v| v.name) {
+        if ctx.is_class_method(name).is_some() {
+            return Ok(None);
+        }
+    }
 
     // Only act when some argument is a constrained-function value; otherwise
     // leave the existing cases untouched.
@@ -1658,9 +1718,15 @@ fn lower_app(
                             .iter()
                             .find_map(|arg| try_infer_arg_type(ctx, arg));
                         let inferred_x = try_infer_arg_type(ctx, x);
+                        // Semigroup/Monoid parameterize over the VALUE type
+                        // itself (Inlines), not a type constructor — the
+                        // span-recorded result type IS the class parameter.
+                        let is_value_class = matches!(class_name.as_str(), "Semigroup" | "Monoid");
                         let inferred = inferred_args.or(inferred_x).or_else(|| {
                             // Fallback: use monad context stack for nested >>=/>>/return
-                            if is_monad_family {
+                            if is_value_class {
+                                ctx.resolved_expr_ty_opt(span)
+                            } else if is_monad_family {
                                 ctx.current_monad_type().cloned().or_else(|| {
                                     // Last resort: recover the monad constructor from
                                     // this method application's own fixpoint-resolved
@@ -1680,18 +1746,76 @@ fn lower_app(
                             }
                         });
                         if let Some(concrete_ty) = inferred {
+                            // `mconcat :: [a] -> a` — the class parameter is the
+                            // list's ELEMENT type, but the argument-driven
+                            // inference sees the list. Unwrap it.
+                            let concrete_ty = if method_name.as_str() == "mconcat" {
+                                match &concrete_ty {
+                                    Ty::List(t) => t.as_ref().clone(),
+                                    t => t.clone(),
+                                }
+                            } else {
+                                concrete_ty
+                            };
                             // For monad-family builtin classes, skip if the concrete type
                             // is a builtin monad — let codegen handle the fast path
                             let is_builtin_m = LowerContext::is_builtin_monad_type(&concrete_ty);
                             if is_monad_family && !is_user && is_builtin_m {
                                 // Fall through to codegen fast path
                             } else {
-                                let resolved = ctx.resolve_method_at_concrete_type(
+                                let mut resolved = ctx.resolve_method_at_concrete_type(
                                     method_name,
                                     class_name,
                                     &concrete_ty,
                                     span,
                                 );
+                                // `x <$ p` with no dedicated instance method:
+                                // rewrite through the instance's `fmap` as
+                                // `fmap (const x) p` (the class default).
+                                let mut const_rewrite = false;
+                                if resolved.is_none() && method_name.as_str() == "<$" {
+                                    resolved = ctx.resolve_method_at_concrete_type(
+                                        Symbol::intern("fmap"),
+                                        class_name,
+                                        &concrete_ty,
+                                        span,
+                                    );
+                                    const_rewrite = resolved.is_some();
+                                }
+                                // `mconcat xs` with no dedicated instance
+                                // method: its class default is
+                                // `foldr mappend mempty xs`.
+                                if resolved.is_none() && method_name.as_str() == "mconcat" {
+                                    let mappend_e = ctx.resolve_method_at_concrete_type(
+                                        Symbol::intern("mappend"),
+                                        class_name,
+                                        &concrete_ty,
+                                        span,
+                                    );
+                                    let mempty_e = ctx.resolve_method_at_concrete_type(
+                                        Symbol::intern("mempty"),
+                                        class_name,
+                                        &concrete_ty,
+                                        span,
+                                    );
+                                    if let (Some(mappend_e), Some(mempty_e)) = (mappend_e, mempty_e)
+                                    {
+                                        let foldr_var = Var {
+                                            name: Symbol::intern("foldr"),
+                                            id: VarId::new(0),
+                                            ty: Ty::Error,
+                                        };
+                                        resolved = Some(core::Expr::App(
+                                            Box::new(core::Expr::App(
+                                                Box::new(core::Expr::Var(foldr_var, span)),
+                                                Box::new(mappend_e),
+                                                span,
+                                            )),
+                                            Box::new(mempty_e),
+                                            span,
+                                        ));
+                                    }
+                                }
                                 if let Some(method_expr) = resolved {
                                     // Push monad context for >>=/>>) so return/pure
                                     // inside lambda bodies resolve via dictionary dispatch
@@ -1727,6 +1851,14 @@ fn lower_app(
                                             lower_monad_operand(ctx, arg, &concrete_ty, span)?
                                         } else {
                                             lower_expr(ctx, arg)?
+                                        };
+                                        let arg_core = if const_rewrite {
+                                            // `<$`'s value operand becomes fmap's
+                                            // function operand: \_ -> x
+                                            let ignored = ctx.fresh_var("_const", Ty::Error, span);
+                                            core::Expr::Lam(ignored, Box::new(arg_core), span)
+                                        } else {
+                                            arg_core
                                         };
                                         result = core::Expr::App(
                                             Box::new(result),

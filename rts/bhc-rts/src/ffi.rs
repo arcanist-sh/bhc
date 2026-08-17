@@ -2233,83 +2233,6 @@ unsafe fn alloc_nil() -> *mut u8 {
     }
 }
 
-/// Split a C string by `'\n'`, returning a cons-cell list of C strings.
-#[no_mangle]
-pub extern "C" fn bhc_string_lines(s: *const c_char) -> *mut u8 {
-    if s.is_null() {
-        return unsafe { alloc_nil() };
-    }
-    let rust_str = unsafe { CStr::from_ptr(s) }.to_str().unwrap_or("");
-    // Match Haskell semantics: lines "a\nb\n" == ["a", "b"]
-    // split('\n') would produce ["a", "b", ""], so filter trailing empty.
-    let mut parts: Vec<&str> = rust_str.split('\n').collect();
-    if parts.last() == Some(&"") {
-        parts.pop();
-    }
-    let mut list = unsafe { alloc_nil() };
-    for part in parts.iter().rev() {
-        let cs = CString::new(*part).unwrap_or_default();
-        list = unsafe { alloc_cons(cs.into_raw() as *mut u8, list) };
-    }
-    list
-}
-
-/// Split a C string by whitespace, returning a cons-cell list of C strings.
-#[no_mangle]
-pub extern "C" fn bhc_string_words(s: *const c_char) -> *mut u8 {
-    if s.is_null() {
-        return unsafe { alloc_nil() };
-    }
-    let rust_str = unsafe { CStr::from_ptr(s) }.to_str().unwrap_or("");
-    let parts: Vec<&str> = rust_str.split_whitespace().collect();
-    let mut list = unsafe { alloc_nil() };
-    for part in parts.iter().rev() {
-        let cs = CString::new(*part).unwrap_or_default();
-        list = unsafe { alloc_cons(cs.into_raw() as *mut u8, list) };
-    }
-    list
-}
-
-/// Traverse a cons-cell list, collecting each head as a string.
-fn collect_list_strings(list: *const u8) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut cur = list;
-    while !cur.is_null() {
-        let tag = unsafe { *(cur as *const i64) };
-        if tag == 0 {
-            break;
-        }
-        let head = unsafe { *(cur.add(8) as *const *const c_char) };
-        if !head.is_null() {
-            let s = unsafe { CStr::from_ptr(head) }.to_str().unwrap_or("");
-            parts.push(s.to_string());
-        }
-        cur = unsafe { *(cur.add(16) as *const *const u8) };
-    }
-    parts
-}
-
-/// Join a cons-cell list of C strings, appending `'\n'` after each element.
-/// Matches Haskell semantics: unlines ["a","b","c"] == "a\nb\nc\n"
-#[no_mangle]
-pub extern "C" fn bhc_string_unlines(list: *const u8) -> *mut c_char {
-    let parts = collect_list_strings(list);
-    let mut joined = String::new();
-    for part in &parts {
-        joined.push_str(part);
-        joined.push('\n');
-    }
-    CString::new(joined).map_or(ptr::null_mut(), |cs| cs.into_raw())
-}
-
-/// Join a cons-cell list of C strings with `' '`.
-#[no_mangle]
-pub extern "C" fn bhc_string_unwords(list: *const u8) -> *mut c_char {
-    let parts = collect_list_strings(list);
-    let joined = parts.join(" ");
-    CString::new(joined).map_or(ptr::null_mut(), |cs| cs.into_raw())
-}
-
 /// Print a newline to stdout
 #[no_mangle]
 pub extern "C" fn bhc_print_newline() {
@@ -3611,6 +3534,14 @@ pub extern "C" fn bhc_get_args() -> *mut u8 {
         list = unsafe { alloc_cons(cs.into_raw() as *mut u8, list) };
     }
     list
+}
+
+/// Data.Unique: process-unique monotonically increasing id.
+/// `hashUnique` is the identity on this representation.
+#[no_mangle]
+pub extern "C" fn bhc_new_unique() -> i64 {
+    static UNIQUE_COUNTER: AtomicI64 = AtomicI64::new(1);
+    UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Get the program name. Returns heap-allocated C string.

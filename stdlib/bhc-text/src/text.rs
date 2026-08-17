@@ -1280,3 +1280,380 @@ mod tests {
         }
     }
 }
+
+// ============================================================
+// Extended Text API (pandoc coverage)
+// ============================================================
+
+/// Walk a BHC cons-list of Text pointers, collecting each head.
+unsafe fn collect_text_list(list: *const u8) -> Vec<*const u8> {
+    let mut out = Vec::new();
+    let mut cur = list;
+    while !cur.is_null() {
+        let tag = *(cur as *const i64);
+        if tag == 0 {
+            break;
+        }
+        out.push(*(cur as *const *const u8).add(1));
+        cur = *(cur as *const *const u8).add(2);
+    }
+    out
+}
+
+unsafe fn alloc_adt(tag: i64, fields: &[*mut u8]) -> *mut u8 {
+    let size = 8 + fields.len() * 8;
+    let layout = std::alloc::Layout::from_size_align(size, 8).expect("invalid layout");
+    let ptr = std::alloc::alloc(layout);
+    (ptr as *mut i64).write(tag);
+    for (i, f) in fields.iter().enumerate() {
+        (ptr as *mut *mut u8).add(1 + i).write(*f);
+    }
+    ptr
+}
+
+/// `T.unlines`: join a cons-list of Texts, appending '\n' after each.
+#[no_mangle]
+pub extern "C" fn bhc_text_unlines(list: *const u8) -> *mut u8 {
+    unsafe {
+        let mut joined = String::new();
+        for t in collect_text_list(list) {
+            if !t.is_null() {
+                joined.push_str(text_as_str(t));
+            }
+            joined.push('\n');
+        }
+        alloc_text_from_bytes(joined.as_bytes())
+    }
+}
+
+/// `T.unwords`: join a cons-list of Texts with single spaces.
+#[no_mangle]
+pub extern "C" fn bhc_text_unwords(list: *const u8) -> *mut u8 {
+    unsafe {
+        let parts: Vec<&str> = collect_text_list(list)
+            .into_iter()
+            .filter(|t| !t.is_null())
+            .map(|t| text_as_str(t))
+            .collect();
+        alloc_text_from_bytes(parts.join(" ").as_bytes())
+    }
+}
+
+/// `T.replicate n t`.
+#[no_mangle]
+pub extern "C" fn bhc_text_replicate(n: i64, text: *const u8) -> *mut u8 {
+    unsafe {
+        if text.is_null() || n <= 0 {
+            return bhc_text_empty();
+        }
+        let s = text_as_str(text);
+        alloc_text_from_bytes(s.repeat(n as usize).as_bytes())
+    }
+}
+
+/// `T.cons c t`.
+#[no_mangle]
+pub extern "C" fn bhc_text_cons(c: i64, text: *const u8) -> *mut u8 {
+    unsafe {
+        let ch = char::from_u32(c as u32).unwrap_or('\u{FFFD}');
+        let mut s = String::new();
+        s.push(ch);
+        if !text.is_null() {
+            s.push_str(text_as_str(text));
+        }
+        alloc_text_from_bytes(s.as_bytes())
+    }
+}
+
+/// `T.snoc t c`.
+#[no_mangle]
+pub extern "C" fn bhc_text_snoc(text: *const u8, c: i64) -> *mut u8 {
+    unsafe {
+        let ch = char::from_u32(c as u32).unwrap_or('\u{FFFD}');
+        let mut s = String::new();
+        if !text.is_null() {
+            s.push_str(text_as_str(text));
+        }
+        s.push(ch);
+        alloc_text_from_bytes(s.as_bytes())
+    }
+}
+
+/// `T.uncons`: Maybe (Char, Text). Nothing = {0}; Just (c, rest) = {1, {0, c, rest}}.
+#[no_mangle]
+pub extern "C" fn bhc_text_uncons(text: *const u8) -> *mut u8 {
+    unsafe {
+        if text.is_null() {
+            return alloc_adt(0, &[]);
+        }
+        let s = text_as_str(text);
+        match s.chars().next() {
+            None => alloc_adt(0, &[]),
+            Some(c) => {
+                let rest = alloc_text_from_bytes(&s.as_bytes()[c.len_utf8()..]);
+                let pair = alloc_adt(0, &[c as i64 as *mut u8, rest]);
+                alloc_adt(1, &[pair])
+            }
+        }
+    }
+}
+
+/// `T.unsnoc`: Maybe (Text, Char).
+#[no_mangle]
+pub extern "C" fn bhc_text_unsnoc(text: *const u8) -> *mut u8 {
+    unsafe {
+        if text.is_null() {
+            return alloc_adt(0, &[]);
+        }
+        let s = text_as_str(text);
+        match s.chars().next_back() {
+            None => alloc_adt(0, &[]),
+            Some(c) => {
+                let head = alloc_text_from_bytes(&s.as_bytes()[..s.len() - c.len_utf8()]);
+                let pair = alloc_adt(0, &[head, c as i64 as *mut u8]);
+                alloc_adt(1, &[pair])
+            }
+        }
+    }
+}
+
+/// `T.stripPrefix pre t`: Maybe Text.
+#[no_mangle]
+pub extern "C" fn bhc_text_strip_prefix(pre: *const u8, text: *const u8) -> *mut u8 {
+    unsafe {
+        if pre.is_null() || text.is_null() {
+            return alloc_adt(0, &[]);
+        }
+        match text_as_str(text).strip_prefix(text_as_str(pre)) {
+            None => alloc_adt(0, &[]),
+            Some(rest) => alloc_adt(1, &[alloc_text_from_bytes(rest.as_bytes())]),
+        }
+    }
+}
+
+/// `T.stripSuffix suf t`: Maybe Text.
+#[no_mangle]
+pub extern "C" fn bhc_text_strip_suffix(suf: *const u8, text: *const u8) -> *mut u8 {
+    unsafe {
+        if suf.is_null() || text.is_null() {
+            return alloc_adt(0, &[]);
+        }
+        match text_as_str(text).strip_suffix(text_as_str(suf)) {
+            None => alloc_adt(0, &[]),
+            Some(rest) => alloc_adt(1, &[alloc_text_from_bytes(rest.as_bytes())]),
+        }
+    }
+}
+
+/// `T.stripStart` (leading whitespace).
+#[no_mangle]
+pub extern "C" fn bhc_text_strip_start(text: *const u8) -> *mut u8 {
+    unsafe {
+        if text.is_null() {
+            return bhc_text_empty();
+        }
+        alloc_text_from_bytes(text_as_str(text).trim_start().as_bytes())
+    }
+}
+
+/// `T.stripEnd` (trailing whitespace).
+#[no_mangle]
+pub extern "C" fn bhc_text_strip_end(text: *const u8) -> *mut u8 {
+    unsafe {
+        if text.is_null() {
+            return bhc_text_empty();
+        }
+        alloc_text_from_bytes(text_as_str(text).trim_end().as_bytes())
+    }
+}
+
+/// `T.intersperse c t`.
+#[no_mangle]
+pub extern "C" fn bhc_text_intersperse(c: i64, text: *const u8) -> *mut u8 {
+    unsafe {
+        if text.is_null() {
+            return bhc_text_empty();
+        }
+        let ch = char::from_u32(c as u32).unwrap_or('\u{FFFD}');
+        let s = text_as_str(text);
+        let mut out = String::with_capacity(s.len() * 2);
+        let mut first = true;
+        for cc in s.chars() {
+            if !first {
+                out.push(ch);
+            }
+            first = false;
+            out.push(cc);
+        }
+        alloc_text_from_bytes(out.as_bytes())
+    }
+}
+
+/// `T.any p t`.
+#[no_mangle]
+pub extern "C" fn bhc_text_any(
+    fn_ptr: extern "C" fn(*mut u8, i64) -> i64,
+    env_ptr: *mut u8,
+    text: *const u8,
+) -> i64 {
+    if text.is_null() {
+        return 0;
+    }
+    unsafe {
+        text_as_str(text)
+            .chars()
+            .any(|c| fn_ptr(env_ptr, c as i64) != 0) as i64
+    }
+}
+
+/// `T.all p t`.
+#[no_mangle]
+pub extern "C" fn bhc_text_all(
+    fn_ptr: extern "C" fn(*mut u8, i64) -> i64,
+    env_ptr: *mut u8,
+    text: *const u8,
+) -> i64 {
+    if text.is_null() {
+        return 1;
+    }
+    unsafe {
+        text_as_str(text)
+            .chars()
+            .all(|c| fn_ptr(env_ptr, c as i64) != 0) as i64
+    }
+}
+
+unsafe fn split_at_pred(
+    fn_ptr: extern "C" fn(*mut u8, i64) -> i64,
+    env_ptr: *mut u8,
+    text: *const u8,
+    negate: bool,
+) -> usize {
+    let s = text_as_str(text);
+    let mut idx = s.len();
+    for (i, c) in s.char_indices() {
+        let hit = fn_ptr(env_ptr, c as i64) != 0;
+        if hit == negate {
+            idx = i;
+            break;
+        }
+    }
+    idx
+}
+
+/// `T.break p t` = (before, from-first-match) as a pair {0, a, b}.
+#[no_mangle]
+pub extern "C" fn bhc_text_break(
+    fn_ptr: extern "C" fn(*mut u8, i64) -> i64,
+    env_ptr: *mut u8,
+    text: *const u8,
+) -> *mut u8 {
+    unsafe {
+        if text.is_null() {
+            return alloc_adt(0, &[bhc_text_empty(), bhc_text_empty()]);
+        }
+        // break p = span (not . p): split at the FIRST char satisfying p.
+        let s = text_as_str(text);
+        let mut idx = s.len();
+        for (i, c) in s.char_indices() {
+            if fn_ptr(env_ptr, c as i64) != 0 {
+                idx = i;
+                break;
+            }
+        }
+        let a = alloc_text_from_bytes(&s.as_bytes()[..idx]);
+        let b = alloc_text_from_bytes(&s.as_bytes()[idx..]);
+        alloc_adt(0, &[a, b])
+    }
+}
+
+/// `T.span p t` = (longest-prefix-satisfying, rest).
+#[no_mangle]
+pub extern "C" fn bhc_text_span(
+    fn_ptr: extern "C" fn(*mut u8, i64) -> i64,
+    env_ptr: *mut u8,
+    text: *const u8,
+) -> *mut u8 {
+    unsafe {
+        if text.is_null() {
+            return alloc_adt(0, &[bhc_text_empty(), bhc_text_empty()]);
+        }
+        let s = text_as_str(text);
+        let idx = split_at_pred(fn_ptr, env_ptr, text, true);
+        let a = alloc_text_from_bytes(&s.as_bytes()[..idx]);
+        let b = alloc_text_from_bytes(&s.as_bytes()[idx..]);
+        alloc_adt(0, &[a, b])
+    }
+}
+
+/// `T.takeWhile p t`.
+#[no_mangle]
+pub extern "C" fn bhc_text_take_while(
+    fn_ptr: extern "C" fn(*mut u8, i64) -> i64,
+    env_ptr: *mut u8,
+    text: *const u8,
+) -> *mut u8 {
+    unsafe {
+        if text.is_null() {
+            return bhc_text_empty();
+        }
+        let s = text_as_str(text);
+        let idx = split_at_pred(fn_ptr, env_ptr, text, true);
+        alloc_text_from_bytes(&s.as_bytes()[..idx])
+    }
+}
+
+/// `T.dropWhile p t`.
+#[no_mangle]
+pub extern "C" fn bhc_text_drop_while(
+    fn_ptr: extern "C" fn(*mut u8, i64) -> i64,
+    env_ptr: *mut u8,
+    text: *const u8,
+) -> *mut u8 {
+    unsafe {
+        if text.is_null() {
+            return bhc_text_empty();
+        }
+        let s = text_as_str(text);
+        let idx = split_at_pred(fn_ptr, env_ptr, text, true);
+        alloc_text_from_bytes(&s.as_bytes()[idx..])
+    }
+}
+
+/// `T.dropWhileEnd p t`.
+#[no_mangle]
+pub extern "C" fn bhc_text_drop_while_end(
+    fn_ptr: extern "C" fn(*mut u8, i64) -> i64,
+    env_ptr: *mut u8,
+    text: *const u8,
+) -> *mut u8 {
+    unsafe {
+        if text.is_null() {
+            return bhc_text_empty();
+        }
+        let s = text_as_str(text);
+        let mut idx = 0;
+        for (i, c) in s.char_indices().rev() {
+            if fn_ptr(env_ptr, c as i64) == 0 {
+                idx = i + c.len_utf8();
+                break;
+            }
+        }
+        alloc_text_from_bytes(&s.as_bytes()[..idx])
+    }
+}
+
+/// `T.count needle hay` (non-overlapping).
+#[no_mangle]
+pub extern "C" fn bhc_text_count_sub(needle: *const u8, hay: *const u8) -> i64 {
+    unsafe {
+        if needle.is_null() || hay.is_null() {
+            return 0;
+        }
+        let n = text_as_str(needle);
+        if n.is_empty() {
+            return 0;
+        }
+        text_as_str(hay).matches(n).count() as i64
+    }
+}

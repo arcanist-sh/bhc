@@ -833,6 +833,20 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
 
     // Select best column to match on
     let col = select_column(ctx, &matrix);
+    // Backstop: no scrutinee columns left but a non-wild pattern row remains
+    // (an upstream pats/scrutinees length divergence). Nothing can be
+    // discriminated without a scrutinee — take the first row as the match
+    // rather than ICE on the empty index.
+    if matrix.scrutinees.is_empty() {
+        let first = &matrix.rows[0];
+        return DecisionTree::Leaf {
+            bindings: vec![],
+            guard: first.guard.clone(),
+            rhs: first.rhs.clone(),
+            span: first.span,
+            row_index: first.row_index,
+        };
+    }
     let scrutinee = matrix.scrutinees[col].clone();
     let row_span = matrix.rows[0].span;
 
@@ -1005,13 +1019,21 @@ fn specialize_matrix(
         let sub_pats = pat_sub_patterns(ctx, pat, arity as u32, span);
 
         // Build new pattern row: replace col with sub-patterns
-        let mut new_pats = Vec::with_capacity(row.pats.len() - 1 + arity);
+        let mut new_pats = Vec::with_capacity(row.pats.len().max(col + 1) - 1 + arity);
         for (i, p) in row.pats.iter().enumerate() {
             if i == col {
                 new_pats.extend(sub_pats.iter().cloned());
             } else {
                 new_pats.push(p.clone());
             }
+        }
+        // A row shorter than `col` never reached the splice above — its
+        // padded wildcard's sub-patterns must still be appended, or this
+        // row's pats fall out of step with the scrutinee columns and the
+        // matrix eventually empties its scrutinees while non-wild patterns
+        // remain (ICE at the column-selection index).
+        if row.pats.len() <= col {
+            new_pats.extend(sub_pats.iter().cloned());
         }
 
         new_rows.push(ClauseRow {
@@ -1688,14 +1710,17 @@ fn get_constructor_tag(name: &str, fallback: u32) -> u32 {
         // Unit constructor
         "()" => 0,
 
-        // Tuple constructors (single constructor per type = tag 0)
-        "(,)" => 0,
-        "(,,)" => 0,
-        "(,,,)" => 0,
-        "(,,,,)" => 0,
-        "(,,,,,)" => 0,
-        "(,,,,,,)" => 0,
-        "(,,,,,,,)" => 0,
+        // Tuple constructors (single constructor per type = tag 0) — any
+        // arity: `(,)`, `(,,)`, … Wide-class dictionaries (PandocMonad, 23
+        // methods) exceed any fixed table.
+        t if t.len() >= 3
+            && t.starts_with('(')
+            && t.ends_with(')')
+            && t[1..t.len() - 1].bytes().all(|b| b == b',')
+            && !t[1..t.len() - 1].is_empty() =>
+        {
+            0
+        }
 
         // Ordering constructors
         "LT" => 0,

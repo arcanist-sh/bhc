@@ -556,6 +556,26 @@ impl Compiler {
                     changed = true;
                 }
             }
+            // Class-default implementations are top-level Core binds named
+            // after the method (`getOption` = `\$dClass -> body`). Record
+            // name + arity so importing modules can extern
+            // `{module}.{method}` and apply it to a partial dictionary when
+            // an instance omits the method.
+            for class in &iface.classes {
+                for method in &class.methods {
+                    if method.has_default {
+                        if let Some(arity) = arities.get(method.name.as_str()) {
+                            iface
+                                .class_defaults
+                                .push(bhc_interface::InstanceMethodImpl {
+                                    name: method.name.clone(),
+                                    arity: *arity,
+                                });
+                            changed = true;
+                        }
+                    }
+                }
+            }
             if changed {
                 iface.write_to_file(&iface_path).map_err(|e| {
                     CompileError::CodegenError(format!("failed to write interface: {}", e))
@@ -1225,27 +1245,18 @@ impl Compiler {
             })
             .collect();
 
-        // Join each interface-imported instance to its class's method names
-        // so hir-to-core can specialize method calls to the imported
-        // instance implementations ($instance_{method}_{TypeEnc} externs).
-        let class_method_map: FxHashMap<Symbol, &Vec<Symbol>> = lower_ctx
-            .interface_classes
-            .iter()
-            .map(|(class, methods, _supers)| (*class, methods))
-            .collect();
+        // Pass each interface-imported instance with the methods it ACTUALLY
+        // implements so hir-to-core specializes method calls to real
+        // `$instance_{method}_{TypeEnc}` externs. Fabricating externs for the
+        // full class method list invented symbols no module ever emits when
+        // an instance relies on a class DEFAULT (`instance HasReaderOptions
+        // ParserState` defines only extractReaderOptions; `getOption` comes
+        // from the class default) — those now resolve through the imported
+        // class's `defaults` (partial-dict application) instead.
         let imported_instance_data: Vec<(Symbol, Vec<bhc_types::Ty>, Vec<Symbol>)> = lower_ctx
             .interface_instances
             .iter()
-            .map(|(class, types, own_methods)| {
-                // Prefer the class declaration's method list; fall back to
-                // the instance's own methods for externally-defined classes
-                // (Default has no .bhi, but its WriterOptions instance is
-                // compiled in Text.Pandoc.Options).
-                let methods = class_method_map
-                    .get(class)
-                    .map_or_else(|| own_methods.clone(), |ms| (*ms).clone());
-                (*class, types.clone(), methods)
-            })
+            .map(|(class, types, own_methods)| (*class, types.clone(), own_methods.clone()))
             .collect();
         let imports = if lower_ctx.interface_classes.is_empty() && imported_instance_data.is_empty()
         {
@@ -3080,6 +3091,12 @@ impl Compiler {
                                 bhc_span::Span::default(),
                             );
                             exports.values.insert(field_sym, accessor_id);
+                            // The defining module EMITS the selector as a
+                            // 1-ary function (`FI.RecMod.fx`); extern it so a
+                            // selector used as a VALUE (`getOption
+                            // readerTabStop`) resolves instead of stubbing.
+                            ctx.interface_symbols
+                                .push((field_sym, module_name.to_string(), 1));
                         }
                     }
                 }
@@ -3095,10 +3112,21 @@ impl Compiler {
         for class in &iface.classes {
             let class_name = Symbol::intern(&class.name);
             let mut method_names = Vec::with_capacity(class.methods.len());
+            let mut method_arities: Vec<(Symbol, usize)> = Vec::with_capacity(class.methods.len());
             for method in &class.methods {
                 let name = Symbol::intern(&method.name);
                 let fresh_id = ctx.fresh_def_id();
                 let scheme = converter.convert_type_signature(&method.signature);
+                // Arrow count of the declared method type — the arity an
+                // instance's point-free method binding must be eta-expanded
+                // to (see `eta_expand_point_free_method`).
+                let mut arrows = 0;
+                let mut t = &scheme.ty;
+                while let bhc_types::Ty::Fun(_, r) = t {
+                    arrows += 1;
+                    t = r.as_ref();
+                }
+                method_arities.push((name, arrows));
                 ctx.define_with_type(
                     fresh_id,
                     name,
@@ -3129,8 +3157,23 @@ impl Compiler {
                 .iter()
                 .map(|c| Symbol::intern(&c.class))
                 .collect();
-            ctx.interface_classes
-                .push((class_name, method_names, superclass_names));
+            // Methods with a class-body default implementation: an importing
+            // module applies the exported default fn (externed below from
+            // `iface.class_defaults`) to a partial dictionary when an
+            // instance omits the method.
+            let defaulted_names: Vec<Symbol> = class
+                .methods
+                .iter()
+                .filter(|m| m.has_default)
+                .map(|m| Symbol::intern(&m.name))
+                .collect();
+            ctx.interface_classes.push((
+                class_name,
+                method_names,
+                superclass_names,
+                defaulted_names,
+                method_arities,
+            ));
         }
 
         // Instance-method implementations become module-qualified externs
@@ -3142,6 +3185,18 @@ impl Compiler {
                 Symbol::intern(&im.name),
                 module_name.to_string(),
                 im.arity,
+            ));
+        }
+        // Class-default implementations become module-qualified externs the
+        // same way (`{module}.{method}`, e.g.
+        // `Text.Pandoc.Parsing.Capabilities.getOption`) — dictionary
+        // construction applies them to partial dicts for instances that
+        // omit the method.
+        for cd in &iface.class_defaults {
+            ctx.interface_symbols.push((
+                Symbol::intern(&cd.name),
+                module_name.to_string(),
+                cd.arity,
             ));
         }
         for inst in &iface.instances {

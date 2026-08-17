@@ -165,6 +165,22 @@ pub fn generate_interface(
                     .collect();
                 let supers: Vec<Constraint> =
                     cls.context.iter().map(convert_ast_constraint).collect();
+                // Methods with a default implementation in the class body
+                // (a FunBind alongside the TypeSigs). Consumers use this to
+                // apply the exported default fn when an instance omits the
+                // method, instead of fabricating a nonexistent
+                // `$instance_{method}_{Type}` extern.
+                let default_names: std::collections::HashSet<&str> = cls
+                    .methods
+                    .iter()
+                    .filter_map(|d| {
+                        if let bhc_ast::Decl::FunBind(fb) = d {
+                            Some(fb.name.name.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 // Extract method signatures from class body declarations
                 let methods: Vec<ClassMethod> = cls
                     .methods
@@ -172,14 +188,30 @@ pub fn generate_interface(
                     .filter_map(|d| {
                         if let bhc_ast::Decl::TypeSig(sig) = d {
                             let aliases = &aliases;
+                            let default_names = &default_names;
+                            let class_params = &params;
+                            let class_name = cls.name.name.as_str();
                             Some(sig.names.iter().map(move |name| ClassMethod {
                                 name: name.name.as_str().to_string(),
                                 signature: TypeSignature {
                                     type_vars: Vec::new(),
-                                    constraints: Vec::new(),
+                                    // The method's implicit class constraint
+                                    // (`HasReaderOptions st => ...`), sharing
+                                    // the class param var with the sig type.
+                                    // Consumers use it to extract the class
+                                    // param's instantiation from a recorded
+                                    // occurrence type when the param appears
+                                    // in neither argument nor result head.
+                                    constraints: vec![Constraint {
+                                        class: class_name.to_string(),
+                                        args: class_params
+                                            .iter()
+                                            .map(|p| Type::Var(p.clone()))
+                                            .collect(),
+                                    }],
                                     ty: expand_synonyms(convert_ast_type(&sig.ty), aliases, 0),
                                 },
-                                has_default: false,
+                                has_default: default_names.contains(name.name.as_str()),
                             }))
                         } else {
                             None

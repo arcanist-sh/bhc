@@ -135,6 +135,12 @@ pub struct LowerContext {
     /// value — a point-free `(<|>) = mplus` — resolves to that type's instance
     /// method instead of stubbing as a builtin.
     current_instance_type: Option<Ty>,
+    /// The class of the instance whose method bodies are being lowered
+    /// (paired with `current_instance_type`).
+    current_instance_class: Option<Symbol>,
+    /// Depth of superclass-dispatched bind operand lowering (see
+    /// `select_method_via_superclass` and expr.rs Case 3a').
+    superclass_bind_depth: usize,
 
     /// Pre-created existential dict binder variables.
     /// Set before lowering a case alternative RHS so that pattern lowering
@@ -172,6 +178,8 @@ impl LowerContext {
             foreign_imports: Vec::new(),
             monad_type_stack: Vec::new(),
             current_instance_type: None,
+            current_instance_class: None,
+            superclass_bind_depth: 0,
             existential_dict_binders: Vec::new(),
         };
         ctx.register_builtins();
@@ -1599,39 +1607,107 @@ impl LowerContext {
         method_name: Symbol,
         span: Span,
     ) -> Option<core::Expr> {
-        let (subclass, subclass_dict) = self.lookup_superclass_dict(needed_class)?;
+        // `return` is not a slot in the builtin Monad layout ([>>=, >>]) —
+        // it IS Applicative's `pure`, one more superclass hop away. Left
+        // unmapped, the selection fails and the fallback lowers `return` as
+        // IDENTITY — a do-block continuation then returns a raw value where
+        // an action is expected.
+        let (needed_class, method_name) = match method_name.as_str() {
+            "return" => (Symbol::intern("Applicative"), Symbol::intern("pure")),
+            "liftA" | "liftM" | "<$>" => (Symbol::intern("Functor"), Symbol::intern("fmap")),
+            _ => (needed_class, method_name),
+        };
 
-        // Extract the superclass dictionary from the subclass dictionary
-        let super_dict_expr = crate::dictionary::select_superclass(
-            subclass_dict,
-            subclass,
-            needed_class,
-            &self.class_registry,
-            span,
-        )?;
-
-        // Create a fresh variable to hold the extracted superclass dictionary
-        let temp_var = self.fresh_var(
-            &format!("$super_{}", needed_class.as_str()),
-            Ty::Error,
+        // Find an in-scope dictionary whose class reaches `needed_class`
+        // through the superclass graph (TRANSITIVELY — `MyC ⊃ Monad ⊃
+        // Applicative` needs two hops for `pure`), recording the field-index
+        // path. Compose the selections DIRECTLY (`$sel_j ($sel_i $d)`): a
+        // Let-bound intermediate got lowered as a lazy thunk that failed to
+        // capture the enclosing dict param and forced to null.
+        let mut found: Option<(Var, Vec<usize>)> = None;
+        'outer: for scope in self.dict_scope.iter().rev() {
+            for (class_name, dict_var) in scope {
+                // Only SINGLE-PARAM classes: a multi-param class's monad
+                // superclass slot is a known placeholder (`Stream s m t`'s
+                // `Monad m` is deliberately unconstructed — the builtin
+                // fast-path world), and selecting through it crashed parsec's
+                // `runPT` at runtime.
+                let single_param = self
+                    .class_registry
+                    .lookup_class(*class_name)
+                    .is_some_and(|c| c.param_count == 1);
+                if !single_param {
+                    continue;
+                }
+                if let Some(path) = self.superclass_field_path(*class_name, needed_class, 0) {
+                    found = Some((dict_var.clone(), path));
+                    break 'outer;
+                }
+            }
+        }
+        let (dict_var, path) = found?;
+        if path.is_empty() {
+            // The dict IS the needed class — plain method selection.
+            return self.select_method_from_dict(&dict_var, needed_class, method_name, span);
+        }
+        let info = self.class_registry.lookup_class(needed_class)?;
+        let method_index = info.methods.iter().position(|m| *m == method_name)?;
+        let field_index = info.superclasses.len() + method_index;
+        // Walk the superclass chain. Each hop binds the intermediate
+        // dictionary in a Let (the form parsec's compile is validated
+        // against); the method is selected off the last one.
+        let mut hops: Vec<(Var, core::Expr)> = Vec::new();
+        let mut cur = core::Expr::Var(dict_var, span);
+        for idx in path {
+            let sel = Var {
+                name: Symbol::intern(&format!("$sel_{idx}")),
+                id: VarId::new(idx),
+                ty: Ty::Error,
+            };
+            let super_expr =
+                core::Expr::App(Box::new(core::Expr::Var(sel, span)), Box::new(cur), span);
+            let temp = self.fresh_var("$super", Ty::Error, span);
+            cur = core::Expr::Var(temp.clone(), span);
+            hops.push((temp, super_expr));
+        }
+        let sel_var = Var {
+            name: Symbol::intern(&format!("$sel_{field_index}")),
+            id: VarId::new(field_index),
+            ty: Ty::Error,
+        };
+        let mut result = core::Expr::App(
+            Box::new(core::Expr::Var(sel_var, span)),
+            Box::new(cur),
             span,
         );
+        for (temp, super_expr) in hops.into_iter().rev() {
+            result = core::Expr::Let(
+                Box::new(Bind::NonRec(temp, Box::new(super_expr))),
+                Box::new(result),
+                span,
+            );
+        }
+        Some(result)
+    }
 
-        // Select the method from the superclass dictionary
-        let method_expr = crate::dictionary::select_method(
-            &temp_var,
-            needed_class,
-            method_name,
-            &self.class_registry,
-            span,
-        )?;
-
-        // Wrap in a let binding: let $super_MyEq = $sel_0 $dMyOrd in $sel_N $super_MyEq
-        Some(core::Expr::Let(
-            Box::new(Bind::NonRec(temp_var, Box::new(super_dict_expr))),
-            Box::new(method_expr),
-            span,
-        ))
+    /// Field-index path from `from`'s dictionary to (a dictionary of) `to`
+    /// through superclass slots; empty when `from == to`.
+    fn superclass_field_path(&self, from: Symbol, to: Symbol, depth: usize) -> Option<Vec<usize>> {
+        if from == to {
+            return Some(Vec::new());
+        }
+        if depth > 8 {
+            return None;
+        }
+        let info = self.class_registry.lookup_class(from)?;
+        for (i, sup) in info.superclasses.iter().enumerate() {
+            if let Some(mut rest) = self.superclass_field_path(*sup, to, depth + 1) {
+                let mut path = vec![i];
+                path.append(&mut rest);
+                return Some(path);
+            }
+        }
+        None
     }
 
     /// Select a method from a dictionary.
@@ -1717,6 +1793,22 @@ impl LowerContext {
     /// used to resolve a bare monad-family method in a point-free method body.
     pub(crate) fn current_instance_type(&self) -> Option<&Ty> {
         self.current_instance_type.as_ref()
+    }
+
+    pub(crate) fn current_instance_class(&self) -> Option<Symbol> {
+        self.current_instance_class
+    }
+
+    pub(crate) fn superclass_bind_depth(&self) -> usize {
+        self.superclass_bind_depth
+    }
+
+    pub(crate) fn enter_superclass_bind(&mut self) {
+        self.superclass_bind_depth += 1;
+    }
+
+    pub(crate) fn exit_superclass_bind(&mut self) {
+        self.superclass_bind_depth = self.superclass_bind_depth.saturating_sub(1);
     }
 
     /// Check if a class name is a user-defined class (not a builtin like Eq, Ord, Show, etc.).
@@ -1910,6 +2002,7 @@ impl LowerContext {
         &mut self,
         class_name: Symbol,
         method: Symbol,
+        method_def_id: DefId,
         span: Span,
     ) -> Option<bhc_core::Expr> {
         fn ty_is_concrete(ty: &Ty) -> bool {
@@ -1923,16 +2016,102 @@ impl LowerContext {
                 _ => false,
             }
         }
-        let ty = self.expr_ty_opt(span)?;
-        if !ty_is_concrete(&ty) {
+        let dbg = std::env::var("BHC_DBG_DISPATCH").is_ok();
+        // Prefer the fully-substituted resolved channel: the single-pass
+        // `expr_types` map can leave nested variables unsubstituted
+        // (`getB`'s occurrence read as `(t -> t') -> t''`), and dispatch on
+        // an unresolved type silently fails to the stub path.
+        let ty = match self
+            .resolved_expr_ty_opt(span)
+            .or_else(|| self.expr_ty_opt(span))
+        {
+            Some(t) => t,
+            None => {
+                if dbg {
+                    eprintln!("[dispatch] {method}: no expr type at {span:?}");
+                }
+                return None;
+            }
+        };
+        if dbg {
+            eprintln!("[dispatch] {method}: occ ty = {ty:?}");
+        }
+        // Direct: for nullary/def-like methods the recorded type IS the
+        // class parameter's instantiation.
+        if ty_is_concrete(&ty) {
+            if let Some(expr) = self.method_at_instance_type(class_name, method, &ty, span) {
+                return Some(expr);
+            }
+        }
+        // Scheme-match: for methods whose class parameter appears in neither
+        // an argument nor the result head (`getOption :: (ReaderOptions -> b)
+        // -> ParsecT s st m b`), the recorded type is the full OCCURRENCE
+        // type. Match the method's declared scheme against it and read the
+        // class param's instantiation off the implicit class constraint
+        // (`st := ParserState`), then resolve the instance at that type.
+        let scheme = match self.lookup_scheme(method_def_id) {
+            Some(s) => s.clone(),
+            None => {
+                if dbg {
+                    eprintln!("[dispatch] {method}: no scheme for {method_def_id:?}");
+                }
+                return None;
+            }
+        };
+        if dbg {
+            eprintln!(
+                "[dispatch] {method}: scheme ty = {:?}, constraints = {:?}",
+                scheme.ty, scheme.constraints
+            );
+        }
+        let constraint_arg = scheme
+            .constraints
+            .iter()
+            .find(|c| c.class == class_name)
+            .and_then(|c| c.args.first())
+            .cloned()?;
+        let subst = match bhc_types::types_match(&scheme.ty, &ty) {
+            Some(s) => s,
+            None => {
+                if dbg {
+                    eprintln!("[dispatch] {method}: types_match failed");
+                }
+                return None;
+            }
+        };
+        let inst_ty = subst.apply(&constraint_arg);
+        if dbg {
+            eprintln!("[dispatch] {method}: inst_ty = {inst_ty:?}");
+        }
+        if !ty_is_concrete(&inst_ty) {
             return None;
         }
-        let def_id = {
-            let (instance, _subst) = self.class_registry.resolve_instance(class_name, &ty)?;
-            instance.methods.get(&method).copied()?
+        self.method_at_instance_type(class_name, method, &inst_ty, span)
+    }
+
+    /// Resolve `method` of `class_name` at a concrete instance type: prefer
+    /// the instance's own implementation var; otherwise construct the
+    /// dictionary (which applies class DEFAULTS to a partial dict) and
+    /// select the method from it.
+    fn method_at_instance_type(
+        &mut self,
+        class_name: Symbol,
+        method: Symbol,
+        inst_ty: &Ty,
+        span: Span,
+    ) -> Option<bhc_core::Expr> {
+        let own_method = {
+            let (instance, _subst) = self.class_registry.resolve_instance(class_name, inst_ty)?;
+            instance.methods.get(&method).copied()
         };
-        let var = self.lookup_var(def_id)?.clone();
-        Some(bhc_core::Expr::Var(var, span))
+        if let Some(def_id) = own_method {
+            let var = self.lookup_var(def_id)?.clone();
+            return Some(bhc_core::Expr::Var(var, span));
+        }
+        // Instance omits the method (class default): go through dictionary
+        // construction, which fills the slot by applying the default fn to a
+        // partial dict.
+        self.resolve_method_at_concrete_type(method, class_name, inst_ty, span)
     }
 
     /// Register classes and instances loaded from module interfaces so
@@ -1942,27 +2121,65 @@ impl LowerContext {
     /// a dependent of Text.Pandoc.Sources dispatches to the extern
     /// `Text.Pandoc.Sources.$instance_toSources_Text` instead of a stub).
     /// Synthetic DefIds start far above real HIR DefIds.
+    #[allow(clippy::type_complexity)]
     pub fn register_imported_instances(
         &mut self,
-        classes: &[(Symbol, Vec<Symbol>, Vec<Symbol>)],
+        classes: &[(
+            Symbol,
+            Vec<Symbol>,
+            Vec<Symbol>,
+            Vec<Symbol>,
+            Vec<(Symbol, usize)>,
+        )],
         instances: &[(Symbol, Vec<Ty>, Vec<Symbol>)],
     ) {
-        for (class_name, method_names, superclass_names) in classes {
+        let mut next_default_id: usize = 800_000;
+        for (class_name, method_names, superclass_names, defaulted_names, method_arities) in classes
+        {
             if self.class_registry.lookup_class(*class_name).is_some() {
                 continue; // local declaration wins
+            }
+            // Class-body defaults: the defining module exports the default
+            // as a top-level dict-taking fn named after the method; register
+            // a var with that bare name so codegen resolves it against the
+            // module-qualified extern from `interface_symbols`
+            // (`Text.Pandoc.Parsing.Capabilities.getOption`). Dictionary
+            // construction then applies it to the partial dict when an
+            // instance omits the method — the cross-module analogue of the
+            // same-module `construct_dictionary` defaults path.
+            let mut defaults = FxHashMap::default();
+            for method in defaulted_names {
+                let def_id = DefId::new(next_default_id);
+                next_default_id += 1;
+                let var = self.named_var(*method, Ty::Error);
+                self.register_var(def_id, var);
+                defaults.insert(*method, def_id);
+            }
+            // Arrow-skeleton method types: only the ARROW COUNT of the
+            // declared method type survives the interface (as `(name, n)`
+            // pairs); rebuild `Fun(Error, … Error)` chains so consumers that
+            // need the arity (`eta_expand_point_free_method`) can count
+            // arrows the same way as for locally-declared classes.
+            let mut method_types = FxHashMap::default();
+            for (mname, arrows) in method_arities {
+                let mut t = Ty::Error;
+                for _ in 0..*arrows {
+                    t = Ty::Fun(Box::new(Ty::Error), Box::new(t));
+                }
+                method_types.insert(*mname, bhc_types::Scheme::mono(t));
             }
             self.class_registry
                 .register_class(crate::dictionary::ClassInfo {
                     name: *class_name,
                     param_count: 1,
                     methods: method_names.clone(),
-                    method_types: FxHashMap::default(),
+                    method_types,
                     // Carry the class's superclasses: `select_method` places
                     // methods after `superclasses.len()` slots, so an importing
                     // module must agree with the defining module on the count
                     // or it selects the wrong dictionary field.
                     superclasses: superclass_names.clone(),
-                    defaults: FxHashMap::default(),
+                    defaults,
                     assoc_types: Vec::new(),
                 });
         }
@@ -2447,9 +2664,13 @@ impl LowerContext {
                     // resolves to this type's instance method.
                     let prev_instance_type = self.current_instance_type.take();
                     self.current_instance_type = instance_def.types.first().cloned();
+                    let prev_instance_class = self.current_instance_class.take();
+                    self.current_instance_class = Some(instance_def.class);
                     for method_def in &instance_def.methods {
                         if inst_constraints.is_empty() {
                             // No instance constraints — lower normally
+                            // (`lower_value_def` eta-expands point-free
+                            // bodies to the declared arity).
                             if let Some(bind) = self.lower_value_def(method_def)? {
                                 bindings.push(bind);
                             }
@@ -2465,6 +2686,7 @@ impl LowerContext {
                         }
                     }
                     self.current_instance_type = prev_instance_type;
+                    self.current_instance_class = prev_instance_class;
                 }
                 Item::Fixity(_) => {
                     // Fixity declarations are only used during parsing
@@ -2597,6 +2819,8 @@ impl LowerContext {
 
         let foreign_imports = std::mem::take(&mut self.foreign_imports);
 
+        lazify_recursive_parser_calls(&mut bindings);
+
         Ok(CoreModule {
             name: module.name,
             bindings,
@@ -2609,6 +2833,21 @@ impl LowerContext {
 
     /// Lower a value definition to a Core binding.
     fn lower_value_def(&mut self, value_def: &ValueDef) -> LowerResult<Option<Bind>> {
+        // A composition-valued binding with fewer patterns than its type has
+        // arrows (`many1TillChar p = fmap T.pack . many1Till p`) must be
+        // eta-expanded at the HIR level: once the composition is LOWERED, the
+        // partial `fmap T.pack` inside it is a dead value the method-dispatch
+        // machinery can no longer see (it lowered to a broken builtin
+        // partial). Rewriting `rhs` to `fmap T.pack (many1Till p $eta)`
+        // BEFORE lowering lets the ordinary App-chain dispatch handle it.
+        let rewritten;
+        let value_def = match self.hir_eta_expand_composition(value_def) {
+            Some(v) => {
+                rewritten = v;
+                &rewritten
+            }
+            None => value_def,
+        };
         let var = self
             .lookup_var(value_def.id)
             .cloned()
@@ -2653,6 +2892,14 @@ impl LowerContext {
         if !dict_vars.is_empty() {
             self.pop_dict_scope();
         }
+
+        // Align Core arity with the declared type for point-free bindings
+        // (`lookupEnv = fmap … . liftIO . …`): the interface records the Core
+        // lambda count as the symbol's arity, and importers apply/CAF-call
+        // based on it — a 0-lambda function-typed binding makes every
+        // importer evaluate it with no arguments (see
+        // `eta_expand_point_free_method`).
+        body = self.eta_expand_point_free_method(body, value_def);
 
         // If there are constraints, wrap the body in dictionary lambdas.
         // For example, a function `f :: Num a => a -> a` becomes:
@@ -2709,12 +2956,296 @@ impl LowerContext {
 
         self.pop_dict_scope();
 
+        body = self.eta_expand_point_free_method(body, method_def);
+
         // Wrap body with dict lambdas (outermost first)
         for (_, dict_var) in dict_vars.into_iter().rev() {
             body = core::Expr::Lam(dict_var, Box::new(body), method_def.span);
         }
 
         Ok(Some(Bind::NonRec(var, Box::new(body))))
+    }
+
+    /// HIR-level eta expansion for COMPOSITION-valued bindings whose type
+    /// has more arrows than the equation has patterns (see `lower_value_def`).
+    /// Returns a rewritten ValueDef, or None when not applicable.
+    fn hir_eta_expand_composition(&mut self, value_def: &ValueDef) -> Option<ValueDef> {
+        fn arrows(mut t: &Ty) -> usize {
+            let mut n = 0;
+            while let Ty::Fun(_, r) = t {
+                n += 1;
+                t = r.as_ref();
+            }
+            n
+        }
+        if value_def.equations.len() != 1 {
+            return None;
+        }
+        let eq = value_def.equations.first()?;
+        // The RHS must be a `.`-composition chain (head of the App spine is
+        // the composition operator).
+        fn is_dot_var(ctx: &LowerContext, e: &bhc_hir::Expr) -> bool {
+            if let bhc_hir::Expr::Var(dr) = e {
+                ctx.lookup_var(dr.def_id)
+                    .is_some_and(|v| v.name.as_str() == ".")
+            } else {
+                false
+            }
+        }
+        fn is_composition(ctx: &LowerContext, e: &bhc_hir::Expr) -> bool {
+            if let bhc_hir::Expr::App(f, _, _) = e {
+                if let bhc_hir::Expr::App(g, _, _) = f.as_ref() {
+                    return is_dot_var(ctx, g);
+                }
+            }
+            false
+        }
+        if std::env::var("BHC_DBG_HETA").is_ok() {
+            let head_desc = if let bhc_hir::Expr::App(f, _, _) = &eq.rhs {
+                if let bhc_hir::Expr::App(g, _, _) = f.as_ref() {
+                    if let bhc_hir::Expr::Var(dr) = g.as_ref() {
+                        format!(
+                            "inner-head var {:?} -> {:?}",
+                            dr.def_id,
+                            self.lookup_var(dr.def_id).map(|v| v.name.as_str())
+                        )
+                    } else {
+                        "inner-head not var".to_string()
+                    }
+                } else {
+                    "f not app".to_string()
+                }
+            } else {
+                "rhs not app".to_string()
+            };
+            eprintln!(
+                "[heta] {}: pats={} comp={} {}",
+                value_def.name,
+                eq.pats.len(),
+                is_composition(self, &eq.rhs),
+                head_desc
+            );
+        }
+        if !is_composition(self, &eq.rhs) {
+            return None;
+        }
+        let arrow_count = value_def
+            .sig
+            .as_ref()
+            .map(|s| arrows(&s.ty))
+            .filter(|n| *n > 0)
+            .or_else(|| {
+                self.lookup_scheme(value_def.id)
+                    .map(|s| arrows(&s.ty))
+                    .filter(|n| *n > 0)
+            })
+            .unwrap_or(0);
+        let npats = eq.pats.len();
+        if arrow_count <= npats {
+            return None;
+        }
+        let missing = arrow_count - npats;
+        // Fresh params: synthetic DefIds in a range distinct from real HIR
+        // ids and the other synthetic ranges.
+        let mut new_pats = eq.pats.clone();
+        let mut rhs = eq.rhs.clone();
+        for i in 0..missing {
+            let v = self.fresh_var("$heta", Ty::Error, eq.span);
+            let def_id = DefId::new(1_700_000 + v.id.index());
+            self.register_var(def_id, v.clone());
+            new_pats.push(bhc_hir::Pat::Var(v.name, def_id, eq.span));
+            let arg = bhc_hir::Expr::Var(bhc_hir::DefRef {
+                def_id,
+                span: eq.span,
+            });
+            rhs = if i == 0 {
+                // Unroll the composition chain: `(f . g) x` → `f (g x)`.
+                fn unroll(
+                    ctx: &LowerContext,
+                    e: bhc_hir::Expr,
+                    arg: bhc_hir::Expr,
+                    span: bhc_span::Span,
+                ) -> bhc_hir::Expr {
+                    if let bhc_hir::Expr::App(f, g, _) = &e {
+                        if let bhc_hir::Expr::App(dot, lhs, _) = f.as_ref() {
+                            if is_dot_var(ctx, dot) {
+                                let inner = unroll(ctx, g.as_ref().clone(), arg, span);
+                                return bhc_hir::Expr::App(
+                                    Box::new(lhs.as_ref().clone()),
+                                    Box::new(inner),
+                                    span,
+                                );
+                            }
+                        }
+                    }
+                    bhc_hir::Expr::App(Box::new(e), Box::new(arg), span)
+                }
+                unroll(self, rhs, arg, eq.span)
+            } else {
+                bhc_hir::Expr::App(Box::new(rhs), Box::new(arg), eq.span)
+            };
+        }
+        let mut new_eq = eq.clone();
+        new_eq.pats = new_pats;
+        new_eq.rhs = rhs;
+        let mut out = value_def.clone();
+        out.equations = vec![new_eq];
+        Some(out)
+    }
+
+    /// Eta-expand a point-free instance-method body to its type's arrow count.
+    ///
+    /// A point-free method binding (`lookupEnv = IO.lookupEnv`) compiles to a
+    /// 0-lambda Core bind, so the interface records arity 0 and an importing
+    /// module EVALUATES the dictionary slot as a CAF — calling a function
+    /// that expects its value arguments with none, which reads garbage
+    /// registers (pandoc's PandocMonad PandocIO dict crashed in
+    /// `bhc_text_char_count`). Eta-expanding makes the Core arity match how
+    /// call sites must apply it. Arrow count comes from the explicit
+    /// signature, the typeck scheme, or the RHS occurrence type, in that
+    /// order; a 0-arrow (value-typed) method is left alone — it IS a CAF.
+    fn eta_expand_point_free_method(
+        &mut self,
+        body: core::Expr,
+        method_def: &ValueDef,
+    ) -> core::Expr {
+        // Count existing value lambdas: a PARTIALLY point-free binding
+        // (`many1TillChar p = fmap T.pack . many1Till p` — one lambda, two
+        // arrows) needs the REMAINING arity expanded under them, or its
+        // recorded arity under-counts and callers mis-apply.
+        let existing = {
+            let mut n = 0;
+            let mut e = &body;
+            while let core::Expr::Lam(_, b, _) = e {
+                n += 1;
+                e = b.as_ref();
+            }
+            n
+        };
+        fn arrows(mut t: &Ty) -> usize {
+            let mut n = 0;
+            while let Ty::Fun(_, r) = t {
+                n += 1;
+                t = r.as_ref();
+            }
+            n
+        }
+        let dbg = std::env::var("BHC_DBG_ETA").is_ok();
+        if dbg {
+            let sig_a = method_def.sig.as_ref().map(|s| arrows(&s.ty));
+            let sch_a = self.lookup_scheme(method_def.id).map(|s| arrows(&s.ty));
+            let occ = method_def
+                .equations
+                .first()
+                .map(|e| e.rhs.span())
+                .and_then(|sp| {
+                    self.resolved_expr_ty_opt(sp)
+                        .or_else(|| self.expr_ty_opt(sp))
+                });
+            eprintln!(
+                "[eta] {}: sig={sig_a:?} scheme={sch_a:?} occ={occ:?}",
+                method_def.name
+            );
+        }
+        let arrow_count = method_def
+            .sig
+            .as_ref()
+            .map(|s| arrows(&s.ty))
+            .filter(|n| *n > 0)
+            .or_else(|| {
+                self.lookup_scheme(method_def.id)
+                    .map(|s| arrows(&s.ty))
+                    .filter(|n| *n > 0)
+            })
+            .or_else(|| {
+                let rhs_span = method_def.equations.first()?.rhs.span();
+                self.resolved_expr_ty_opt(rhs_span)
+                    .or_else(|| self.expr_ty_opt(rhs_span))
+                    .map(|t| arrows(&t))
+                    .filter(|n| *n > 0)
+            })
+            .or_else(|| {
+                // The class's declared method signature (local classes carry
+                // real schemes; imported classes carry arrow-skeletons from
+                // the interface's method arities).
+                let class = self.is_class_method(method_def.name)?;
+                let info = self.class_registry.lookup_class(class)?;
+                info.method_types
+                    .get(&method_def.name)
+                    .map(|s| arrows(&s.ty))
+                    .filter(|n| *n > 0)
+            })
+            .unwrap_or(0);
+        if arrow_count <= existing {
+            return body;
+        }
+        let missing = arrow_count - existing;
+        // Applying an argument to a `.`-composition chain unrolls it
+        // (`(f . g . h) x` → `f (g (h x))`): the inner partial applications
+        // (`map (*2)`, `filter pos`, builtin Text partials) become SATURATED
+        // calls that codegen's builtin paths handle — left as a chain, each
+        // builtin-as-value falls to a runtime stub.
+        fn apply_unrolling_composition(
+            body: core::Expr,
+            arg: core::Expr,
+            span: Span,
+        ) -> core::Expr {
+            // A `where`-group wraps the composition in a Let — apply inside.
+            if let core::Expr::Let(bind, inner, lspan) = body {
+                return core::Expr::Let(
+                    bind,
+                    Box::new(apply_unrolling_composition(*inner, arg, span)),
+                    lspan,
+                );
+            }
+            if let core::Expr::App(f, g, _) = &body {
+                if let core::Expr::App(dot, lhs, _) = f.as_ref() {
+                    if let core::Expr::Var(v, _) = dot.as_ref() {
+                        if v.name.as_str() == "." {
+                            let inner = apply_unrolling_composition(g.as_ref().clone(), arg, span);
+                            return core::Expr::App(
+                                Box::new(lhs.as_ref().clone()),
+                                Box::new(inner),
+                                span,
+                            );
+                        }
+                    }
+                }
+            }
+            core::Expr::App(Box::new(body), Box::new(arg), span)
+        }
+        let params: Vec<Var> = (0..missing)
+            .map(|i| self.fresh_var(&format!("$eta{i}"), Ty::Error, method_def.span))
+            .collect();
+        // Descend the EXISTING lambdas; expand the missing arity under them.
+        fn expand_under(
+            body: core::Expr,
+            params: &[Var],
+            span: Span,
+            unroll: &dyn Fn(core::Expr, core::Expr, Span) -> core::Expr,
+        ) -> core::Expr {
+            if let core::Expr::Lam(v, inner, lspan) = body {
+                return core::Expr::Lam(
+                    v,
+                    Box::new(expand_under(*inner, params, span, unroll)),
+                    lspan,
+                );
+            }
+            let mut b = body;
+            for (i, p) in params.iter().enumerate() {
+                let arg = core::Expr::Var(p.clone(), span);
+                b = if i == 0 {
+                    unroll(b, arg, span)
+                } else {
+                    core::Expr::App(Box::new(b), Box::new(arg), span)
+                };
+            }
+            for p in params.iter().rev() {
+                b = core::Expr::Lam(p.clone(), Box::new(b), span);
+            }
+            b
+        }
+        expand_under(body, &params, method_def.span, &apply_unrolling_composition)
     }
 
     /// Lower a default method implementation from a class definition.
@@ -2934,5 +3465,218 @@ mod tests {
         let v1 = ctx.fresh_var("x", Ty::Error, Span::default());
         let v2 = ctx.fresh_var("x", Ty::Error, Span::default());
         assert_ne!(v1.id, v2.id);
+    }
+}
+
+/// Break mutual-recursion cycles among top-level PARSER-SHAPED bindings by
+/// making cycle-internal calls lazy.
+///
+/// pandoc's Markdown reader has `block` → `codeBlockFenced` → … →
+/// `yamlMetaBlock'` → `parseBlocks` → `block`, where every member is a
+/// dictionary-taking function (`\$dPandocMonad -> parser-value`). Building
+/// one member's parser VALUE eagerly calls the next member around the cycle,
+/// which never terminates (stack overflow in `bhc_force`'s blackhole CAS).
+/// The nullary-CAF thunking in codegen cannot see these — they have a
+/// (dict) lambda.
+///
+/// Nodes: top-level bindings whose lambda params are all dictionaries
+/// (`$d…`-named), including nullary ones. For every SCC with a cycle,
+/// wrap each APPLIED reference to a fellow member inside a member's body in
+/// `Expr::Lazy` — codegen thunks it, and the apply/force paths evaluate on
+/// first use, exactly like the nullary-CAF thunks.
+fn lazify_recursive_parser_calls(bindings: &mut [Bind]) {
+    use rustc_hash::{FxHashMap, FxHashSet};
+
+    fn dict_param_count(mut e: &core::Expr) -> Option<usize> {
+        let mut n = 0;
+        while let core::Expr::Lam(v, body, _) = e {
+            if !v.name.as_str().starts_with("$d") {
+                return None;
+            }
+            n += 1;
+            e = body;
+        }
+        Some(n)
+    }
+
+    // Collect candidate nodes.
+    let mut node_names: FxHashSet<Symbol> = FxHashSet::default();
+    let mut arities: FxHashMap<Symbol, usize> = FxHashMap::default();
+    let mut exprs: Vec<(Symbol, &core::Expr)> = Vec::new();
+    for bind in bindings.iter() {
+        let pairs: Vec<(&Var, &core::Expr)> = match bind {
+            Bind::NonRec(v, e) => vec![(v, e.as_ref())],
+            Bind::Rec(ps) => ps.iter().map(|(v, e)| (v, e.as_ref())).collect(),
+        };
+        for (v, e) in pairs {
+            if let Some(n) = dict_param_count(e) {
+                node_names.insert(v.name);
+                arities.insert(v.name, n);
+                exprs.push((v.name, e));
+            }
+        }
+    }
+    if node_names.len() < 2 {
+        return;
+    }
+
+    // Edges among candidates via free-variable names.
+    let names_vec: Vec<Symbol> = exprs.iter().map(|(n, _)| *n).collect();
+    let mut deps: Vec<Vec<usize>> = Vec::with_capacity(exprs.len());
+    for (_, e) in &exprs {
+        let fvs = crate::binding::collect_free_vars(e);
+        let d: Vec<usize> = names_vec
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| fvs.contains(n))
+            .map(|(j, _)| j)
+            .collect();
+        deps.push(d);
+    }
+
+    // Tarjan SCC (iterative).
+    let n = exprs.len();
+    let mut index = vec![usize::MAX; n];
+    let mut low = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut counter = 0usize;
+    let mut cycle_members: FxHashSet<Symbol> = FxHashSet::default();
+    let mut call_stack: Vec<(usize, usize)> = Vec::new();
+    for start in 0..n {
+        if index[start] != usize::MAX {
+            continue;
+        }
+        call_stack.push((start, 0));
+        index[start] = counter;
+        low[start] = counter;
+        counter += 1;
+        stack.push(start);
+        on_stack[start] = true;
+        while let Some(&mut (node, ref mut ei)) = call_stack.last_mut() {
+            if *ei < deps[node].len() {
+                let next = deps[node][*ei];
+                *ei += 1;
+                if index[next] == usize::MAX {
+                    call_stack.push((next, 0));
+                    index[next] = counter;
+                    low[next] = counter;
+                    counter += 1;
+                    stack.push(next);
+                    on_stack[next] = true;
+                } else if on_stack[next] && index[next] < low[node] {
+                    low[node] = index[next];
+                }
+            } else {
+                call_stack.pop();
+                if let Some(&(parent, _)) = call_stack.last() {
+                    if low[node] < low[parent] {
+                        low[parent] = low[node];
+                    }
+                }
+                if low[node] == index[node] {
+                    let mut comp = Vec::new();
+                    while let Some(top) = stack.pop() {
+                        on_stack[top] = false;
+                        comp.push(top);
+                        if top == node {
+                            break;
+                        }
+                    }
+                    let self_loop = comp.len() == 1 && deps[comp[0]].contains(&comp[0]);
+                    if comp.len() > 1 || self_loop {
+                        for m in comp {
+                            cycle_members.insert(names_vec[m]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if cycle_members.is_empty() {
+        return;
+    }
+    if std::env::var("BHC_DBG_CAFS").is_ok() {
+        let mut names: Vec<&str> = cycle_members.iter().map(|s| s.as_str()).collect();
+        names.sort_unstable();
+        eprintln!("[lazify] parser cycle members: {:?}", names);
+    }
+
+    // Rewrite applied references to cycle members inside cycle members.
+    fn spine_head_name(e: &core::Expr) -> Option<(Symbol, usize)> {
+        fn go(e: &core::Expr, len: usize) -> Option<(Symbol, usize)> {
+            match e {
+                core::Expr::App(f, _, _) => go(f, len + 1),
+                core::Expr::Var(v, _) => Some((v.name, len)),
+                _ => None,
+            }
+        }
+        go(e, 0)
+    }
+    fn rewrite(
+        e: &mut core::Expr,
+        members: &FxHashSet<Symbol>,
+        arities: &FxHashMap<Symbol, usize>,
+    ) {
+        // Wrap an EXACT dict-arity cycle-member call — the "construct the
+        // parser value" form. Over-applications (the CPS parser value applied
+        // to state/continuations) must stay eager: wrapping them captures raw
+        // char/int arguments in a thunk env, which the eval path derefs as
+        // pointers (crashed forcing 0xd = '\r').
+        if let core::Expr::App(..) = e {
+            if let Some((h, len)) = spine_head_name(e) {
+                if members.contains(&h) && arities.get(&h) == Some(&len) {
+                    let span = match e {
+                        core::Expr::App(_, _, s) => *s,
+                        _ => unreachable!(),
+                    };
+                    let inner = std::mem::replace(
+                        e,
+                        core::Expr::Lit(core::Literal::Int(0), Ty::Error, span),
+                    );
+                    *e = core::Expr::Lazy(Box::new(inner), span);
+                    return;
+                }
+            }
+        }
+        match e {
+            core::Expr::App(f, a, _) => {
+                rewrite(f, members, arities);
+                rewrite(a, members, arities);
+            }
+            core::Expr::Lam(_, b, _) | core::Expr::TyLam(_, b, _) => rewrite(b, members, arities),
+            core::Expr::Let(bind, body, _) => {
+                match bind.as_mut() {
+                    Bind::NonRec(_, r) => rewrite(r, members, arities),
+                    Bind::Rec(ps) => {
+                        for (_, r) in ps {
+                            rewrite(r, members, arities);
+                        }
+                    }
+                }
+                rewrite(body, members, arities);
+            }
+            core::Expr::Case(scrut, alts, _, _) => {
+                rewrite(scrut, members, arities);
+                for alt in alts {
+                    rewrite(&mut alt.rhs, members, arities);
+                }
+            }
+            core::Expr::Lazy(b, _) | core::Expr::Cast(b, _, _) | core::Expr::Tick(_, b, _) => {
+                rewrite(b, members, arities)
+            }
+            _ => {}
+        }
+    }
+    for bind in bindings.iter_mut() {
+        let pairs: Vec<(&Var, &mut Box<core::Expr>)> = match bind {
+            Bind::NonRec(v, e) => vec![(&*v, e)],
+            Bind::Rec(ps) => ps.iter_mut().map(|(v, e)| (&*v, e)).collect(),
+        };
+        for (v, e) in pairs {
+            if cycle_members.contains(&v.name) {
+                rewrite(e.as_mut(), &cycle_members, &arities);
+            }
+        }
     }
 }

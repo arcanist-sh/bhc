@@ -370,6 +370,14 @@ pub struct Lowering<'ctx, 'm> {
     /// E.44: Set of variable IDs that were thunked (lazy let-bindings).
     /// When these variables are looked up, they must be forced via bhc_force.
     thunked_vars: FxHashSet<VarId>,
+    /// Top-level nullary (0-lambda) bindings that participate in a
+    /// reference cycle among top-level nullary bindings (mutually recursive
+    /// parser CAFs like pandoc's `block`/`yamlMetaBlock'`). Value-position
+    /// references to these become lazy thunks instead of eager calls —
+    /// the eager call turned the construction of one parser value into an
+    /// infinite `block()` -> `yamlMetaBlock'()` -> `block()` call cycle
+    /// (stack overflow). Non-recursive CAF references keep the eager call.
+    recursive_caf_ids: FxHashSet<VarId>,
     /// E.45: Set of variable IDs that hold Integer (arbitrary precision) values.
     /// Used by show dispatch to route to bhc_integer_show instead of show_int.
     integer_vars: FxHashSet<VarId>,
@@ -426,6 +434,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             show_desc_counter: 0,
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
+            recursive_caf_ids: FxHashSet::default(),
             integer_vars: FxHashSet::default(),
             adt_show_vars: FxHashMap::default(),
             con_field_types: FxHashMap::default(),
@@ -478,6 +487,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             show_desc_counter: 0,
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
+            recursive_caf_ids: FxHashSet::default(),
             integer_vars: FxHashSet::default(),
             adt_show_vars: FxHashMap::default(),
             con_field_types: FxHashMap::default(),
@@ -3293,6 +3303,147 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             None,
         );
         self.functions.insert(VarId::new(1000227), text_filter);
+        // ---- Extended Text RTS functions (VarId 1000330-1000349, pandoc coverage) ----
+        // bhc_text_unlines
+        let f1000330 = self.module.llvm_module().add_function(
+            "bhc_text_unlines",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000330), f1000330);
+        // bhc_text_unwords
+        let f1000331 = self.module.llvm_module().add_function(
+            "bhc_text_unwords",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000331), f1000331);
+        // bhc_text_replicate
+        let f1000332 = self.module.llvm_module().add_function(
+            "bhc_text_replicate",
+            ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000332), f1000332);
+        // bhc_text_cons
+        let f1000333 = self.module.llvm_module().add_function(
+            "bhc_text_cons",
+            ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000333), f1000333);
+        // bhc_text_snoc
+        let f1000334 = self.module.llvm_module().add_function(
+            "bhc_text_snoc",
+            ptr_type.fn_type(&[ptr_type.into(), i64_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000334), f1000334);
+        // bhc_text_uncons
+        let f1000335 = self.module.llvm_module().add_function(
+            "bhc_text_uncons",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000335), f1000335);
+        // bhc_text_unsnoc
+        let f1000336 = self.module.llvm_module().add_function(
+            "bhc_text_unsnoc",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000336), f1000336);
+        // bhc_text_strip_prefix
+        let f1000337 = self.module.llvm_module().add_function(
+            "bhc_text_strip_prefix",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000337), f1000337);
+        // bhc_text_strip_suffix
+        let f1000338 = self.module.llvm_module().add_function(
+            "bhc_text_strip_suffix",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000338), f1000338);
+        // bhc_text_strip_start
+        let f1000339 = self.module.llvm_module().add_function(
+            "bhc_text_strip_start",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000339), f1000339);
+        // bhc_text_strip_end
+        let f1000340 = self.module.llvm_module().add_function(
+            "bhc_text_strip_end",
+            ptr_type.fn_type(&[ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000340), f1000340);
+        // bhc_text_intersperse
+        let f1000341 = self.module.llvm_module().add_function(
+            "bhc_text_intersperse",
+            ptr_type.fn_type(&[i64_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000341), f1000341);
+        // bhc_text_any
+        let f1000342 = self.module.llvm_module().add_function(
+            "bhc_text_any",
+            i64_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000342), f1000342);
+        // bhc_text_all
+        let f1000343 = self.module.llvm_module().add_function(
+            "bhc_text_all",
+            i64_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000343), f1000343);
+        // bhc_text_break
+        let f1000344 = self.module.llvm_module().add_function(
+            "bhc_text_break",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000344), f1000344);
+        // bhc_text_span
+        let f1000345 = self.module.llvm_module().add_function(
+            "bhc_text_span",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000345), f1000345);
+        // bhc_text_take_while
+        let f1000346 = self.module.llvm_module().add_function(
+            "bhc_text_take_while",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000346), f1000346);
+        // bhc_text_drop_while
+        let f1000347 = self.module.llvm_module().add_function(
+            "bhc_text_drop_while",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000347), f1000347);
+        // bhc_text_drop_while_end
+        let f1000348 = self.module.llvm_module().add_function(
+            "bhc_text_drop_while_end",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000348), f1000348);
+        // bhc_text_count_sub
+        let f1000349 = self.module.llvm_module().add_function(
+            "bhc_text_count_sub",
+            i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000349), f1000349);
         // bhc_text_foldl(fn_ptr, env_ptr, i64, text_ptr) -> i64
         let text_foldl = self.module.llvm_module().add_function(
             "bhc_text_foldl",
@@ -4394,6 +4545,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .llvm_module()
                 .add_function("bhc_get_current_directory", void_to_ptr, None);
         self.functions.insert(VarId::new(1000317), get_cur_dir);
+        // bhc_new_unique() -> i64 (Data.Unique: process-unique id)
+        let new_unique = self.module.llvm_module().add_function(
+            "bhc_new_unique",
+            i64_type.fn_type(&[], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000318), new_unique);
 
         // E.19: System.FilePath + System.Directory FFI functions
         let ptr_ptr_to_ptr_type =
@@ -5681,6 +5839,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "getProgName" => Some(0),
             "getEnv" => Some(1),
             "lookupEnv" => Some(1),
+            "newUnique" => Some(0),
+            "hashUnique" => Some(1),
             "exitSuccess" => Some(0),
             "exitFailure" => Some(0),
             "exitWith" => Some(1),
@@ -5967,6 +6127,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Data.Text.lines" => Some(1),
             "Data.Text.splitOn" => Some(2),
             "Data.Text.replace" => Some(3),
+            "Data.Text.unlines" => Some(1),
+            "Data.Text.unwords" => Some(1),
+            "Data.Text.replicate" => Some(2),
+            "Data.Text.cons" => Some(2),
+            "Data.Text.snoc" => Some(2),
+            "Data.Text.uncons" => Some(1),
+            "Data.Text.unsnoc" => Some(1),
+            "Data.Text.stripPrefix" => Some(2),
+            "Data.Text.stripSuffix" => Some(2),
+            "Data.Text.stripStart" => Some(1),
+            "Data.Text.stripEnd" => Some(1),
+            "Data.Text.intersperse" => Some(2),
+            "Data.Text.any" => Some(2),
+            "Data.Text.all" => Some(2),
+            "Data.Text.break" => Some(2),
+            "Data.Text.span" => Some(2),
+            "Data.Text.takeWhile" => Some(2),
+            "Data.Text.dropWhile" => Some(2),
+            "Data.Text.dropWhileEnd" => Some(2),
+            "Data.Text.count" => Some(2),
             // Data.Text.Encoding operations
             "Data.Text.Encoding.encodeUtf8" => Some(1),
             "Data.Text.Encoding.decodeUtf8" => Some(1),
@@ -6613,6 +6793,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "getProgName" => self.lower_builtin_get_prog_name(),
             "getEnv" => self.lower_builtin_get_env(args[0]),
             "lookupEnv" => self.lower_builtin_lookup_env(args[0]),
+            "newUnique" => self.lower_builtin_new_unique(),
+            // Uniques are represented as their id — hashUnique is identity.
+            "hashUnique" => self.lower_expr(args[0]),
             "exitSuccess" => self.lower_builtin_exit_success(),
             "exitFailure" => self.lower_builtin_exit_failure(),
             "exitWith" => self.lower_builtin_exit_with(args[0]),
@@ -7188,6 +7371,81 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 args[2],
                 1000235,
                 "text_replace",
+            ),
+            "Data.Text.unlines" => {
+                self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000330, "text_unlines")
+            }
+            "Data.Text.unwords" => {
+                self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000331, "text_unwords")
+            }
+            "Data.Text.replicate" => {
+                self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000332, "text_replicate")
+            }
+            "Data.Text.cons" => {
+                self.lower_builtin_text_int_ptr_to_ptr(args[0], args[1], 1000333, "text_cons")
+            }
+            "Data.Text.snoc" => {
+                self.lower_builtin_text_ptr_int_to_ptr(args[0], args[1], 1000334, "text_snoc")
+            }
+            "Data.Text.uncons" => {
+                self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000335, "text_uncons")
+            }
+            "Data.Text.unsnoc" => {
+                self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000336, "text_unsnoc")
+            }
+            "Data.Text.stripPrefix" => self.lower_builtin_text_binary_ptr_to_ptr(
+                args[0],
+                args[1],
+                1000337,
+                "text_strip_prefix",
+            ),
+            "Data.Text.stripSuffix" => self.lower_builtin_text_binary_ptr_to_ptr(
+                args[0],
+                args[1],
+                1000338,
+                "text_strip_suffix",
+            ),
+            "Data.Text.stripStart" => {
+                self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000339, "text_strip_start")
+            }
+            "Data.Text.stripEnd" => {
+                self.lower_builtin_text_unary_ptr_to_ptr(args[0], 1000340, "text_strip_end")
+            }
+            "Data.Text.intersperse" => self.lower_builtin_text_int_ptr_to_ptr(
+                args[0],
+                args[1],
+                1000341,
+                "text_intersperse",
+            ),
+            "Data.Text.any" => {
+                self.lower_builtin_text_closure_ptr(args[0], args[1], 1000342, "text_any")
+            }
+            "Data.Text.all" => {
+                self.lower_builtin_text_closure_ptr(args[0], args[1], 1000343, "text_all")
+            }
+            "Data.Text.break" => {
+                self.lower_builtin_text_closure_ptr(args[0], args[1], 1000344, "text_break")
+            }
+            "Data.Text.span" => {
+                self.lower_builtin_text_closure_ptr(args[0], args[1], 1000345, "text_span")
+            }
+            "Data.Text.takeWhile" => {
+                self.lower_builtin_text_closure_ptr(args[0], args[1], 1000346, "text_take_while")
+            }
+            "Data.Text.dropWhile" => {
+                self.lower_builtin_text_closure_ptr(args[0], args[1], 1000347, "text_drop_while")
+            }
+            "Data.Text.dropWhileEnd" => self.lower_builtin_text_closure_ptr(
+                args[0],
+                args[1],
+                1000348,
+                "text_drop_while_end",
+            ),
+            "Data.Text.count" => self.lower_builtin_text_binary_ptr_to_int(
+                args[0],
+                args[1],
+                1000349,
+                "text_count_sub",
             ),
             // Data.Text.Encoding (VarIds 1000236-1000237)
             "Data.Text.Encoding.encodeUtf8" => {
@@ -16327,7 +16585,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(r_expr)?
             .ok_or_else(|| CodegenError::Internal("runReaderT: r has no value".to_string()))?;
 
-        let m_ptr = m_val.into_pointer_value();
+        let m_ptr = self.build_force(m_val)?.into_pointer_value();
         let r_ptr = self.value_to_ptr(r_val)?;
         let fn_ptr = self.extract_closure_fn_ptr(m_ptr)?;
 
@@ -17246,7 +17504,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(s_expr)?
             .ok_or_else(|| CodegenError::Internal("runStateT: s has no value".to_string()))?;
 
-        let m_ptr = m_val.into_pointer_value();
+        let m_ptr = self.build_force(m_val)?.into_pointer_value();
         let s_ptr = self.value_to_ptr(s_val)?;
         let fn_ptr = self.extract_closure_fn_ptr(m_ptr)?;
 
@@ -23248,6 +23506,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| CodegenError::Internal("getProgName: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
+    /// Lower `newUnique` — an RTS atomic counter; the Unique value IS its id.
+    fn lower_builtin_new_unique(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let rts_fn = self
+            .functions
+            .get(&VarId::new(1000318))
+            .ok_or_else(|| CodegenError::Internal("bhc_new_unique not declared".to_string()))?;
+        let result = self
+            .builder()
+            .build_call(*rts_fn, &[], "new_unique")
+            .map_err(|e| CodegenError::Internal(format!("newUnique call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("newUnique: returned void".to_string()))?;
         Ok(Some(result))
     }
 
@@ -40273,6 +40547,41 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(result))
     }
 
+    /// Text closure op: (closure, text) -> value via
+    /// `bhc_text_*(fn_ptr, env_ptr, text_ptr)` (same convention as
+    /// `bhc_text_filter`).
+    fn lower_builtin_text_closure_ptr(
+        &mut self,
+        func_expr: &Expr,
+        text_expr: &Expr,
+        rts_id: usize,
+        label: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self
+            .lower_expr(func_expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no func", label)))?;
+        let text = self
+            .lower_expr(text_expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no text", label)))?;
+        let func_ptr = self.value_to_ptr(func)?;
+        let text_ptr = self.value_to_ptr(text)?;
+        let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
+            CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
+        })?;
+        let result = self
+            .builder()
+            .build_call(
+                *rts_fn,
+                &[func_ptr.into(), func_ptr.into(), text_ptr.into()],
+                label,
+            )
+            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+        Ok(Some(result))
+    }
+
     /// Text unary: (ptr) -> i64 (e.g. text_null, text_length, text_head)
     fn lower_builtin_text_unary_ptr_to_int(
         &mut self,
@@ -42195,16 +42504,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "AppendMode" => return Some((2, 0)), // tag=2, arity=0
             "ReadWriteMode" => return Some((3, 0)), // tag=3, arity=0
 
-            // Tuple constructors - used for type class dictionaries
-            "(,)" => return Some((0, 2)),       // 2-tuple
-            "(,,)" => return Some((0, 3)),      // 3-tuple
-            "(,,,)" => return Some((0, 4)),     // 4-tuple
-            "(,,,,)" => return Some((0, 5)),    // 5-tuple
-            "(,,,,,)" => return Some((0, 6)),   // 6-tuple
-            "(,,,,,,)" => return Some((0, 7)),  // 7-tuple
-            "(,,,,,,,)" => return Some((0, 8)), // 8-tuple
-
             _ => {}
+        }
+
+        // Tuple constructors of ANY arity — `(,)`, `(,,)`, …: n commas is the
+        // (n+1)-tuple, tag 0. Used for type class dictionaries; a fixed table
+        // capped at 8 left wide-class dictionaries (PandocMonad has 20+
+        // methods, a 23-tuple) as runtime stubs.
+        if name.len() >= 3 && name.starts_with('(') && name.ends_with(')') {
+            let inner = &name[1..name.len() - 1];
+            if !inner.is_empty() && inner.bytes().all(|b| b == b',') {
+                let arity = inner.len() + 1;
+                return Some((0, arity as u32));
+            }
         }
 
         // Check user-defined constructors registered from case alternatives
@@ -42841,6 +43153,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // and populate dispatch tables + constructor-to-type mappings.
         self.detect_derived_instance_methods(&core_module.bindings);
 
+        // Pre-pass: find mutually-recursive top-level nullary CAFs so their
+        // value-position references lower to lazy thunks (see
+        // `recursive_caf_ids`).
+        self.detect_recursive_cafs(&core_module.bindings);
+
         // Declare foreign imports (creates C declarations and BHC wrappers)
         self.declare_foreign_imports(&core_module.foreign_imports)?;
 
@@ -42850,11 +43167,157 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         // Second pass: define all functions
+        let dbg_verify = std::env::var("BHC_DBG_VERIFY").is_ok();
         for bind in &core_module.bindings {
             self.lower_binding(bind)?;
+            if dbg_verify {
+                let name = match bind {
+                    Bind::NonRec(var, _) => var.name.as_str().to_string(),
+                    Bind::Rec(pairs) => pairs
+                        .first()
+                        .map(|(v, _)| v.name.as_str().to_string())
+                        .unwrap_or_default(),
+                };
+                if let Err(e) = self.module.llvm_module().verify() {
+                    eprintln!("[verify] first failure after binding `{name}`");
+                    eprintln!(
+                        "[verify] {}",
+                        e.to_string()
+                            .lines()
+                            .take(4)
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    );
+                    std::process::exit(3);
+                }
+            }
         }
 
         Ok(())
+    }
+
+    /// Pre-pass: compute the set of top-level nullary bindings that sit in a
+    /// reference cycle among top-level nullary bindings (self-references
+    /// count). Edges over-approximate by using ALL free-variable references
+    /// in a body (including under lambdas) — thunking a reference that
+    /// laziness would not strictly require is safe (the apply path forces
+    /// thunk callees), while missing a cycle re-introduces the infinite
+    /// eager construction loop.
+    fn detect_recursive_cafs(&mut self, bindings: &[Bind]) {
+        // Collect the candidate nodes: top-level binds with no lambda params.
+        let mut node_exprs: FxHashMap<VarId, &Expr> = FxHashMap::default();
+        let mut names_by_id: FxHashMap<VarId, bhc_intern::Symbol> = FxHashMap::default();
+        for bind in bindings {
+            match bind {
+                Bind::NonRec(var, expr) => {
+                    if self.count_lambda_params(expr) == 0 {
+                        node_exprs.insert(var.id, expr);
+                        names_by_id.insert(var.id, var.name);
+                    }
+                }
+                Bind::Rec(pairs) => {
+                    for (var, expr) in pairs {
+                        if self.count_lambda_params(expr) == 0 {
+                            node_exprs.insert(var.id, expr);
+                            names_by_id.insert(var.id, var.name);
+                        }
+                    }
+                }
+            }
+        }
+        if node_exprs.is_empty() {
+            return;
+        }
+        // Edges restricted to candidate nodes.
+        let mut edges: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
+        for (&id, expr) in &node_exprs {
+            let refs = self.free_vars(expr);
+            let outs: Vec<VarId> = refs
+                .into_iter()
+                .filter(|r| *r != id && node_exprs.contains_key(r))
+                .collect();
+            edges.insert(id, outs);
+        }
+        // Self-references: a nullary bind referring to itself is recursive.
+        for (&id, expr) in &node_exprs {
+            if self.free_vars(expr).contains(&id) {
+                self.recursive_caf_ids.insert(id);
+            }
+        }
+        // Iterative Tarjan SCC over the candidate graph; any SCC with more
+        // than one member is a mutual-recursion cycle.
+        let mut index_counter: usize = 0;
+        let mut indices: FxHashMap<VarId, usize> = FxHashMap::default();
+        let mut lowlinks: FxHashMap<VarId, usize> = FxHashMap::default();
+        let mut on_stack: FxHashSet<VarId> = FxHashSet::default();
+        let mut stack: Vec<VarId> = Vec::new();
+        // Explicit DFS frames: (node, next-edge-index)
+        let mut call_stack: Vec<(VarId, usize)> = Vec::new();
+        let node_ids: Vec<VarId> = node_exprs.keys().copied().collect();
+        for &start in &node_ids {
+            if indices.contains_key(&start) {
+                continue;
+            }
+            call_stack.push((start, 0));
+            indices.insert(start, index_counter);
+            lowlinks.insert(start, index_counter);
+            index_counter += 1;
+            stack.push(start);
+            on_stack.insert(start);
+            while let Some(&mut (node, ref mut edge_idx)) = call_stack.last_mut() {
+                let node_edges = &edges[&node];
+                if *edge_idx < node_edges.len() {
+                    let next = node_edges[*edge_idx];
+                    *edge_idx += 1;
+                    if let std::collections::hash_map::Entry::Vacant(e) = indices.entry(next) {
+                        call_stack.push((next, 0));
+                        e.insert(index_counter);
+                        lowlinks.insert(next, index_counter);
+                        index_counter += 1;
+                        stack.push(next);
+                        on_stack.insert(next);
+                    } else if on_stack.contains(&next) {
+                        let next_index = indices[&next];
+                        let ll = lowlinks.get_mut(&node).unwrap();
+                        if next_index < *ll {
+                            *ll = next_index;
+                        }
+                    }
+                } else {
+                    call_stack.pop();
+                    if let Some(&(parent, _)) = call_stack.last() {
+                        let node_ll = lowlinks[&node];
+                        let parent_ll = lowlinks.get_mut(&parent).unwrap();
+                        if node_ll < *parent_ll {
+                            *parent_ll = node_ll;
+                        }
+                    }
+                    if lowlinks[&node] == indices[&node] {
+                        // Root of an SCC — pop it off.
+                        let mut component = Vec::new();
+                        while let Some(top) = stack.pop() {
+                            on_stack.remove(&top);
+                            component.push(top);
+                            if top == node {
+                                break;
+                            }
+                        }
+                        if component.len() > 1 {
+                            if std::env::var("BHC_DBG_CAFS").is_ok() {
+                                let names: Vec<&str> = component
+                                    .iter()
+                                    .filter_map(|id| names_by_id.get(id).map(|s| s.as_str()))
+                                    .collect();
+                                eprintln!("[cafs] cycle of {}: {:?}", component.len(), names);
+                            }
+                            for member in component {
+                                self.recursive_caf_ids.insert(member);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Pre-pass: scan all bindings to detect which functions use StateT/ReaderT/ExceptT/WriterT.
@@ -43657,6 +44120,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // All functions have at least 1 param (env pointer) due to uniform calling convention
                     let fn_type = fn_val.get_type();
                     if fn_type.count_param_types() <= 1 {
+                        // A CAF in a mutual-recursion cycle must NOT be
+                        // evaluated at reference time: pandoc's `block`
+                        // references `yamlMetaBlock'` whose body references
+                        // `block` — the eager call chain never terminates.
+                        // Wrap the CAF fn as a lazy thunk instead; the apply
+                        // path and bhc_force evaluate it on first USE.
+                        if self.recursive_caf_ids.contains(&var.id) {
+                            let fn_ptr = fn_val.as_global_value().as_pointer_value();
+                            let thunk_ptr = self.alloc_thunk(fn_ptr, &[])?;
+                            return Ok(Some(thunk_ptr.into()));
+                        }
                         // CAF - call the function with null env to get its value
                         let null_env = self.type_mapper().ptr_type().const_null();
                         let call_result = self
@@ -44580,7 +45054,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let result = self.lower_builtin_direct(name, &all_args)?;
 
             let result_ptr = match result {
-                Some(v) => v.into_pointer_value(),
+                Some(v) => {
+                    if v.is_pointer_value() {
+                        v.into_pointer_value()
+                    } else if v.is_int_value() {
+                        // Int-returning builtins (`Data.Text.any`/`all`/
+                        // `count`) — `into_pointer_value` on them is a panic.
+                        self.int_to_ptr(v.into_int_value())?
+                    } else {
+                        self.value_to_ptr(v)?
+                    }
+                }
                 None => ptr_type.const_null(),
             };
             self.builder()
@@ -45412,7 +45896,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // evalStateT m s = fst (runStateT m s)
                 let m_val = args[0];
                 let s_val = args[1];
-                let closure = m_val.into_pointer_value();
+                // The monadic action may arrive as a LAZY thunk (a
+                // lazified recursive-parser call): force before reading the
+                // closure fn ptr — passthrough for real closures.
+                let closure = self.build_force(m_val)?.into_pointer_value();
                 let fn_ptr_val = self.extract_closure_fn_ptr(closure)?;
                 let s_ptr = self.value_to_ptr(s_val)?;
                 let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
@@ -45435,7 +45922,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // execStateT m s = snd (runStateT m s)
                 let m_val = args[0];
                 let s_val = args[1];
-                let closure = m_val.into_pointer_value();
+                // The monadic action may arrive as a LAZY thunk (a
+                // lazified recursive-parser call): force before reading the
+                // closure fn ptr — passthrough for real closures.
+                let closure = self.build_force(m_val)?.into_pointer_value();
                 let fn_ptr_val = self.extract_closure_fn_ptr(closure)?;
                 let s_ptr = self.value_to_ptr(s_val)?;
                 let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
@@ -45924,6 +46414,314 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or_else(|| CodegenError::Internal("text_to_lower: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.unlines" => {
+                let rts_fn = self.functions.get(&VarId::new(1000330)).ok_or_else(|| {
+                    CodegenError::Internal("text_unlines not declared".to_string())
+                })?;
+                let result = self
+                    .builder()
+                    .build_call(*rts_fn, &[args[0].into()], "text_unlines")
+                    .map_err(|e| CodegenError::Internal(format!("text_unlines: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_unlines: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.unwords" => {
+                let rts_fn = self.functions.get(&VarId::new(1000331)).ok_or_else(|| {
+                    CodegenError::Internal("text_unwords not declared".to_string())
+                })?;
+                let result = self
+                    .builder()
+                    .build_call(*rts_fn, &[args[0].into()], "text_unwords")
+                    .map_err(|e| CodegenError::Internal(format!("text_unwords: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_unwords: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.replicate" => {
+                let rts_fn = self.functions.get(&VarId::new(1000332)).ok_or_else(|| {
+                    CodegenError::Internal("text_replicate not declared".to_string())
+                })?;
+                let n = self.coerce_to_int(args[0])?;
+                let result = self
+                    .builder()
+                    .build_call(*rts_fn, &[n.into(), args[1].into()], "text_replicate")
+                    .map_err(|e| CodegenError::Internal(format!("text_replicate: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_replicate: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.cons" => {
+                let rts_fn = self
+                    .functions
+                    .get(&VarId::new(1000333))
+                    .ok_or_else(|| CodegenError::Internal("text_cons not declared".to_string()))?;
+                let n = self.coerce_to_int(args[0])?;
+                let result = self
+                    .builder()
+                    .build_call(*rts_fn, &[n.into(), args[1].into()], "text_cons")
+                    .map_err(|e| CodegenError::Internal(format!("text_cons: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_cons: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.snoc" => {
+                let rts_fn = self
+                    .functions
+                    .get(&VarId::new(1000334))
+                    .ok_or_else(|| CodegenError::Internal("text_snoc not declared".to_string()))?;
+                let n = self.coerce_to_int(args[1])?;
+                let result = self
+                    .builder()
+                    .build_call(*rts_fn, &[args[0].into(), n.into()], "text_snoc")
+                    .map_err(|e| CodegenError::Internal(format!("text_snoc: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_snoc: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.uncons" => {
+                let rts_fn = self.functions.get(&VarId::new(1000335)).ok_or_else(|| {
+                    CodegenError::Internal("text_uncons not declared".to_string())
+                })?;
+                let result = self
+                    .builder()
+                    .build_call(*rts_fn, &[args[0].into()], "text_uncons")
+                    .map_err(|e| CodegenError::Internal(format!("text_uncons: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_uncons: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.unsnoc" => {
+                let rts_fn = self.functions.get(&VarId::new(1000336)).ok_or_else(|| {
+                    CodegenError::Internal("text_unsnoc not declared".to_string())
+                })?;
+                let result = self
+                    .builder()
+                    .build_call(*rts_fn, &[args[0].into()], "text_unsnoc")
+                    .map_err(|e| CodegenError::Internal(format!("text_unsnoc: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_unsnoc: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.stripPrefix" => {
+                let rts_fn = self.functions.get(&VarId::new(1000337)).ok_or_else(|| {
+                    CodegenError::Internal("text_strip_prefix not declared".to_string())
+                })?;
+                let result = self
+                    .builder()
+                    .build_call(
+                        *rts_fn,
+                        &[args[0].into(), args[1].into()],
+                        "text_strip_prefix",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("text_strip_prefix: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_strip_prefix: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.stripSuffix" => {
+                let rts_fn = self.functions.get(&VarId::new(1000338)).ok_or_else(|| {
+                    CodegenError::Internal("text_strip_suffix not declared".to_string())
+                })?;
+                let result = self
+                    .builder()
+                    .build_call(
+                        *rts_fn,
+                        &[args[0].into(), args[1].into()],
+                        "text_strip_suffix",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("text_strip_suffix: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_strip_suffix: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.stripStart" => {
+                let rts_fn = self.functions.get(&VarId::new(1000339)).ok_or_else(|| {
+                    CodegenError::Internal("text_strip_start not declared".to_string())
+                })?;
+                let result = self
+                    .builder()
+                    .build_call(*rts_fn, &[args[0].into()], "text_strip_start")
+                    .map_err(|e| CodegenError::Internal(format!("text_strip_start: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_strip_start: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.stripEnd" => {
+                let rts_fn = self.functions.get(&VarId::new(1000340)).ok_or_else(|| {
+                    CodegenError::Internal("text_strip_end not declared".to_string())
+                })?;
+                let result = self
+                    .builder()
+                    .build_call(*rts_fn, &[args[0].into()], "text_strip_end")
+                    .map_err(|e| CodegenError::Internal(format!("text_strip_end: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_strip_end: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.intersperse" => {
+                let rts_fn = self.functions.get(&VarId::new(1000341)).ok_or_else(|| {
+                    CodegenError::Internal("text_intersperse not declared".to_string())
+                })?;
+                let n = self.coerce_to_int(args[0])?;
+                let result = self
+                    .builder()
+                    .build_call(*rts_fn, &[n.into(), args[1].into()], "text_intersperse")
+                    .map_err(|e| CodegenError::Internal(format!("text_intersperse: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_intersperse: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.any" => {
+                let rts_fn = self
+                    .functions
+                    .get(&VarId::new(1000342))
+                    .ok_or_else(|| CodegenError::Internal("text_any not declared".to_string()))?;
+                let result = self
+                    .builder()
+                    .build_call(
+                        *rts_fn,
+                        &[args[0].into(), args[0].into(), args[1].into()],
+                        "text_any",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("text_any: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_any: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.all" => {
+                let rts_fn = self
+                    .functions
+                    .get(&VarId::new(1000343))
+                    .ok_or_else(|| CodegenError::Internal("text_all not declared".to_string()))?;
+                let result = self
+                    .builder()
+                    .build_call(
+                        *rts_fn,
+                        &[args[0].into(), args[0].into(), args[1].into()],
+                        "text_all",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("text_all: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_all: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.break" => {
+                let rts_fn = self
+                    .functions
+                    .get(&VarId::new(1000344))
+                    .ok_or_else(|| CodegenError::Internal("text_break not declared".to_string()))?;
+                let result = self
+                    .builder()
+                    .build_call(
+                        *rts_fn,
+                        &[args[0].into(), args[0].into(), args[1].into()],
+                        "text_break",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("text_break: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_break: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.span" => {
+                let rts_fn = self
+                    .functions
+                    .get(&VarId::new(1000345))
+                    .ok_or_else(|| CodegenError::Internal("text_span not declared".to_string()))?;
+                let result = self
+                    .builder()
+                    .build_call(
+                        *rts_fn,
+                        &[args[0].into(), args[0].into(), args[1].into()],
+                        "text_span",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("text_span: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_span: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.takeWhile" => {
+                let rts_fn = self.functions.get(&VarId::new(1000346)).ok_or_else(|| {
+                    CodegenError::Internal("text_take_while not declared".to_string())
+                })?;
+                let result = self
+                    .builder()
+                    .build_call(
+                        *rts_fn,
+                        &[args[0].into(), args[0].into(), args[1].into()],
+                        "text_take_while",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("text_take_while: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_take_while: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.dropWhile" => {
+                let rts_fn = self.functions.get(&VarId::new(1000347)).ok_or_else(|| {
+                    CodegenError::Internal("text_drop_while not declared".to_string())
+                })?;
+                let result = self
+                    .builder()
+                    .build_call(
+                        *rts_fn,
+                        &[args[0].into(), args[0].into(), args[1].into()],
+                        "text_drop_while",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("text_drop_while: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_drop_while: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.dropWhileEnd" => {
+                let rts_fn = self.functions.get(&VarId::new(1000348)).ok_or_else(|| {
+                    CodegenError::Internal("text_drop_while_end not declared".to_string())
+                })?;
+                let result = self
+                    .builder()
+                    .build_call(
+                        *rts_fn,
+                        &[args[0].into(), args[0].into(), args[1].into()],
+                        "text_drop_while_end",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("text_drop_while_end: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| {
+                        CodegenError::Internal("text_drop_while_end: void".to_string())
+                    })?;
+                Ok(Some(result))
+            }
+            "Data.Text.count" => {
+                let rts_fn = self.functions.get(&VarId::new(1000349)).ok_or_else(|| {
+                    CodegenError::Internal("text_count_sub not declared".to_string())
+                })?;
+                let result = self
+                    .builder()
+                    .build_call(*rts_fn, &[args[0].into(), args[1].into()], "text_count_sub")
+                    .map_err(|e| CodegenError::Internal(format!("text_count_sub: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_count_sub: void".to_string()))?;
                 Ok(Some(result))
             }
             "Data.Text.take" => {
@@ -49484,6 +50282,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if n == 0 {
             return Ok(Some(closure_ptr.into()));
         }
+
+        // The callee may be a lazy thunk (a recursive-CAF reference — see
+        // `recursive_caf_ids`): force it before reading the fn ptr.
+        // `bhc_force` is a cheap passthrough for real closures (their first
+        // word is a function ADDRESS, which reads as a non-negative tag).
+        let closure_ptr = self.build_force(closure_ptr.into())?.into_pointer_value();
 
         let fn_ptr = self.extract_closure_fn_ptr(closure_ptr)?;
 

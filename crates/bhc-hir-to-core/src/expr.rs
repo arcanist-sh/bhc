@@ -8,7 +8,7 @@
 //! - `Tuple` and `List` become constructor applications
 
 use bhc_core::{self as core, Alt, AltCon, Bind, DataCon, Literal, Var, VarId};
-use bhc_hir::{self as hir, DefRef, Expr, Lit};
+use bhc_hir::{self as hir, DefId, DefRef, Expr, Lit};
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
@@ -281,9 +281,26 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 // argument will ever drive resolution, but typeck recorded
                 // this use's resolved type by span — dispatch directly.
                 if let Some(method_expr) =
-                    ctx.select_method_by_result_type(class_name, name, def_ref.span)
+                    ctx.select_method_by_result_type(class_name, name, def_ref.def_id, def_ref.span)
                 {
                     return Ok(method_expr);
+                }
+                // Inside an instance-method body, a method of the SAME class
+                // refers to the enclosing instance (`getB f = Box mkSt (f 1)`
+                // within `instance Mk S`: `mkSt` is `mkSt @S`). The recorded
+                // occurrence type may keep the class param generic there, so
+                // resolve at the enclosing instance type directly.
+                if let Some(inst_ty) = ctx.current_instance_type().cloned() {
+                    if ctx.current_instance_class() == Some(class_name) {
+                        if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
+                            name,
+                            class_name,
+                            &inst_ty,
+                            def_ref.span,
+                        ) {
+                            return Ok(method_expr);
+                        }
+                    }
                 }
                 // Still no dict — don't try to resolve here.
                 // The App case in lower_app will handle resolution
@@ -747,6 +764,18 @@ fn callee_param_tys_and_subst(
             match_ty(p, &at, &mut subst);
         }
     }
+    // Arguments alone may not pin every scheme variable — inside a top-level
+    // CAF (`p1 = choice [char 'y', char 'x'] :: Parser Char`) no sibling
+    // argument carries the stream type `s`. Typeck recorded this occurrence's
+    // instantiated type (concrete via the binding's annotation); match the
+    // scheme against it to fill the remaining variables (argument-driven
+    // bindings win — `match_ty` never overrides).
+    if let Some(occ_ty) = ctx
+        .resolved_expr_ty_opt(head_ref.span)
+        .or_else(|| ctx.expr_ty_opt(head_ref.span))
+    {
+        match_ty(&scheme_ty, &occ_ty, &mut subst);
+    }
     Some((param_tys, subst))
 }
 
@@ -820,7 +849,11 @@ fn lower_value_arg(
 /// unchanged name for everything else.
 fn canonical_functor_method(name: Symbol) -> Symbol {
     match name.as_str() {
-        "liftM" | "liftA" => Symbol::intern("fmap"),
+        // `<$>` IS `fmap` — without this it is not recognized as a class
+        // method here, and `g <$> getState` in a class-default body compiled
+        // to DIRECT application of `g` to the parser value (pandoc's
+        // `getOption` crash).
+        "liftM" | "liftA" | "<$>" => Symbol::intern("fmap"),
         _ => name,
     }
 }
@@ -887,6 +920,19 @@ fn resolve_constrained_fn_dicts(
         if let Some(at) = try_infer_arg_type(ctx, arg) {
             match_ty(p, &at, &mut subst);
         }
+    }
+    // Arguments alone may not pin the constrained variables — inside a
+    // top-level CAF (`p1 = choice [char 'y', char 'x'] :: Parser Char`) no
+    // sibling argument carries the stream type `s`, so the `Stream s m t`
+    // dictionary silently failed to resolve and every argument shifted by
+    // one at saturation. Typeck recorded this occurrence's instantiated
+    // type; match the scheme against it to fill the remaining variables
+    // (argument-driven bindings win — `match_ty` never overrides).
+    if let Some(occ_ty) = ctx
+        .resolved_expr_ty_opt(head_ref.span)
+        .or_else(|| ctx.expr_ty_opt(head_ref.span))
+    {
+        match_ty(&scheme_ty, &occ_ty, &mut subst);
     }
 
     // Resolve one dictionary per constraint at the instantiated types.
@@ -1493,7 +1539,20 @@ fn lower_app(
                             try_infer_arg_type(ctx, x).or_else(|| {
                                 // Fallback: use monad context stack for >>=/>>/return/pure
                                 if is_monad_family {
-                                    ctx.current_monad_type().cloned()
+                                    ctx.current_monad_type().cloned().or_else(|| {
+                                        // Last resort: recover the monad constructor from
+                                        // this method application's own fixpoint-resolved
+                                        // type `N b` (strip the value arg). Lets a
+                                        // user/derived monad's `>>=` dispatch when the
+                                        // operands' types are themselves unresolved — e.g.
+                                        // `return 5 >>= \x -> ...` in a top-level do-block
+                                        // over a GND newtype, where both operands are
+                                        // as-yet-undispatched `return`s.
+                                        match ctx.resolved_expr_ty_opt(span) {
+                                            Some(Ty::App(head, _)) => Some(*head),
+                                            _ => None,
+                                        }
+                                    })
                                 } else {
                                     None
                                 }
@@ -1632,6 +1691,16 @@ fn lower_app(
     if let Some((head_def_ref, collected_args)) = peel_app_chain(f) {
         if let Some(var) = ctx.lookup_var(head_def_ref.def_id).cloned() {
             let method_name = canonical_functor_method(var.name);
+            if std::env::var("BHC_DBG_FMAP").is_ok() && is_fmap_like_method(method_name) {
+                eprintln!(
+                    "[fmap] head={} is_method={:?} args={} occ={:?}",
+                    method_name,
+                    ctx.is_class_method(method_name),
+                    collected_args.len(),
+                    ctx.resolved_expr_ty_opt(x.span())
+                        .or_else(|| ctx.expr_ty_opt(x.span()))
+                );
+            }
 
             // Case 3a: Head is a class method (user-defined or monad-family)
             if let Some(class_name) = ctx.is_class_method(method_name) {
@@ -1941,6 +2010,75 @@ fn lower_app(
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // Case 3a': a monad-family method at a still-POLYMORPHIC monad,
+            // with a user-class dictionary IN SCOPE whose class lists the
+            // method's class as a SUPERCLASS — pandoc's readMarkdown do-block
+            // binds at generic `m` with only `$dPandocMonad` available, and
+            // `Monad` is a direct superclass of `PandocMonad`. Select the
+            // method from the dictionary's superclass slot; operands lower
+            // plainly (no concrete type to dict them at). Without this the
+            // bind fails to lower and the enclosing case collapses into an
+            // unconditional non-exhaustive throw. Guard on the occurrence
+            // type staying unresolved so concrete binds (IO inside the same
+            // constrained function) keep their fast paths.
+            // Inside the operands of a superclass-dispatched bind (flag set
+            // below), `return`/`pure` must come from the SAME dictionary —
+            // otherwise they lower as identity and the continuation yields a
+            // raw value where an action is expected. Scoped to that dynamic
+            // extent only: a global mapping mis-selected from parsec's
+            // `Stream` dicts (whose superclasses also carry Monad) and broke
+            // every combinator probe.
+            if ctx.superclass_bind_depth() > 0 && matches!(method_name.as_str(), "return" | "pure")
+            {
+                if let Some(method_expr) = ctx.select_method_via_superclass(
+                    Symbol::intern("Applicative"),
+                    Symbol::intern("pure"),
+                    span,
+                ) {
+                    let mut result = method_expr;
+                    for arg in &collected_args {
+                        let arg_core = lower_expr(ctx, arg)?;
+                        result = core::Expr::App(Box::new(result), Box::new(arg_core), span);
+                    }
+                    let x_core = lower_expr(ctx, x)?;
+                    return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
+                }
+            }
+            if let Some(class_name) = ctx.is_class_method(method_name) {
+                if ctx.is_monad_family_class(class_name) && ctx.lookup_dict(class_name).is_none() {
+                    let occ_unresolved = ctx.resolved_expr_ty_opt(span).is_none_or(|t| {
+                        let mut h = &t;
+                        while let Ty::App(f, _) = h {
+                            h = f;
+                        }
+                        !matches!(h, Ty::Con(_))
+                    });
+                    if occ_unresolved {
+                        if let Some(method_expr) =
+                            ctx.select_method_via_superclass(class_name, method_name, span)
+                        {
+                            // While lowering this bind's operands, nested
+                            // `return`/`pure` at the same generic monad must
+                            // select from the same dictionary (see the
+                            // return/pure hook above).
+                            ctx.enter_superclass_bind();
+                            let mut lowered = Vec::with_capacity(collected_args.len() + 1);
+                            for arg in &collected_args {
+                                lowered.push(lower_expr(ctx, arg));
+                            }
+                            let x_res = lower_expr(ctx, x);
+                            ctx.exit_superclass_bind();
+                            let mut result = method_expr;
+                            for arg_core in lowered {
+                                result =
+                                    core::Expr::App(Box::new(result), Box::new(arg_core?), span);
+                            }
+                            return Ok(core::Expr::App(Box::new(result), Box::new(x_res?), span));
                         }
                     }
                 }
@@ -2271,6 +2409,87 @@ fn lower_let(
 }
 
 /// Lower let bindings, handling pattern bindings with case expressions.
+/// Collect `(name, def_id, span)` for every binder in a pattern.
+fn pattern_binders(pat: &hir::Pat, out: &mut Vec<(Symbol, DefId, Span)>) {
+    match pat {
+        hir::Pat::Wild(_) | hir::Pat::Lit(_, _) | hir::Pat::Error(_) => {}
+        hir::Pat::Var(name, def_id, span) => out.push((*name, *def_id, *span)),
+        hir::Pat::Con(_, pats, _) => {
+            for p in pats {
+                pattern_binders(p, out);
+            }
+        }
+        hir::Pat::RecordCon(_, field_pats, _) => {
+            for fp in field_pats {
+                pattern_binders(&fp.pat, out);
+            }
+        }
+        hir::Pat::As(name, def_id, inner, span) => {
+            out.push((*name, *def_id, *span));
+            pattern_binders(inner, out);
+        }
+        hir::Pat::Or(l, r, _) => {
+            pattern_binders(l, out);
+            pattern_binders(r, out);
+        }
+        hir::Pat::Ann(inner, _, _) | hir::Pat::View(_, inner, _) => pattern_binders(inner, out),
+    }
+}
+
+/// Desugar a mixed let/where group: every non-Var pattern binding becomes a
+/// fresh whole-value Var binding plus one Var binding per pattern binder that
+/// cases on the whole value (see `lower_let_bindings`).
+fn desugar_pattern_bindings(
+    ctx: &mut LowerContext,
+    bindings: &[hir::Binding],
+) -> Vec<hir::Binding> {
+    let mut out = Vec::with_capacity(bindings.len() * 2);
+    for b in bindings {
+        if matches!(b.pat, hir::Pat::Var(..)) {
+            out.push(b.clone());
+            continue;
+        }
+        let pb = ctx.fresh_var("$pb", Ty::Error, b.span);
+        // Synthetic DefId range distinct from HIR ids and the 800k/900k
+        // interface-synthesis ranges.
+        let pb_def = DefId::new(1_600_000 + pb.id.index());
+        ctx.register_var(pb_def, pb.clone());
+        out.push(hir::Binding {
+            pat: hir::Pat::Var(pb.name, pb_def, b.span),
+            sig: b.sig.clone(),
+            rhs: b.rhs.clone(),
+            span: b.span,
+        });
+        let mut binders = Vec::new();
+        pattern_binders(&b.pat, &mut binders);
+        for (name, def_id, bspan) in binders {
+            let selector = hir::Expr::Case(
+                Box::new(hir::Expr::Var(hir::DefRef {
+                    def_id: pb_def,
+                    span: b.span,
+                })),
+                vec![hir::CaseAlt {
+                    pat: b.pat.clone(),
+                    guards: Vec::new(),
+                    rhs: hir::Expr::Var(hir::DefRef {
+                        def_id,
+                        span: bspan,
+                    }),
+                    span: b.span,
+                }],
+                b.span,
+            );
+            out.push(hir::Binding {
+                pat: hir::Pat::Var(name, def_id, bspan),
+                sig: None,
+                rhs: selector,
+                span: b.span,
+            });
+        }
+    }
+    out
+}
+
 fn lower_let_bindings(
     ctx: &mut LowerContext,
     bindings: &[hir::Binding],
@@ -2295,6 +2514,26 @@ fn lower_let_bindings(
     // groups to true cycles only (codegen mislowers a multi-binding `Rec` whose
     // members capture outer variables), so a DAG like `walk -> ok` becomes
     // `let ok = .. in letrec walk = .. in body` — exactly the working shape.
+    //
+    // PATTERN bindings in the group (`(th', tb') = case … of …` alongside
+    // recursive local functions — pandoc's `toLegacyTable`) previously forced
+    // the whole group onto the naive nesting fallback, where forward
+    // references to later siblings stub. Desugar each pattern binding into a
+    // fresh whole-value binding (`$pb = rhs`) plus one Var binding per binder
+    // (`th' = case $pb of (a, _) -> a`), turning the group all-Var so the
+    // same SCC machinery applies.
+    let desugared_storage: Vec<hir::Binding>;
+    let bindings: &[hir::Binding] = if bindings.len() > 1
+        && bindings.iter().any(|b| !matches!(b.pat, hir::Pat::Var(..)))
+        && bindings
+            .iter()
+            .all(|b| matches!(b.pat, hir::Pat::Var(..)) || !b.pat.bound_vars().is_empty())
+    {
+        desugared_storage = desugar_pattern_bindings(ctx, bindings);
+        &desugared_storage
+    } else {
+        bindings
+    };
     if bindings.len() > 1 && bindings.iter().all(|b| matches!(b.pat, hir::Pat::Var(..))) {
         let names: Vec<Symbol> = bindings
             .iter()

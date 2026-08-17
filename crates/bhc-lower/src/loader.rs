@@ -859,6 +859,28 @@ pub fn apply_import_spec(exports: &ModuleExports, spec: &Option<ast::ImportSpec>
                                     if let Some(&def_id) = exports.values.get(&con.name) {
                                         filtered.values.insert(con.name, def_id);
                                     }
+                                    // A member may be a record FIELD
+                                    // (`ReaderOptions(readerTabStop, …)`).
+                                    // Field selectors are not exported as
+                                    // values — importers synthesize them from
+                                    // constructor info (`register_field_selector`)
+                                    // — so carry every constructor of this
+                                    // type that declares the field, or the
+                                    // selector is unbound and stubs at
+                                    // runtime.
+                                    for (&cname, info) in &exports.constructors {
+                                        if info.type_con_name == ident.name
+                                            && info
+                                                .field_names
+                                                .as_ref()
+                                                .is_some_and(|fs| fs.contains(&con.name))
+                                        {
+                                            filtered
+                                                .constructors
+                                                .entry(cname)
+                                                .or_insert_with(|| info.clone());
+                                        }
+                                    }
                                 }
                             }
                         } else {

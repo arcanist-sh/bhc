@@ -157,6 +157,17 @@ impl Scope {
 /// Map from `DefId` to definition information.
 pub type DefMap = IndexMap<DefId, DefInfo>;
 
+/// An imported class as threaded from module interfaces:
+/// (class name, method names, superclass names, defaulted-method names,
+/// per-method declared-type arrow counts).
+pub type InterfaceClassEntry = (
+    Symbol,
+    Vec<Symbol>,
+    Vec<Symbol>,
+    Vec<Symbol>,
+    Vec<(Symbol, usize)>,
+);
+
 /// The lowering context, holding all state needed during lowering.
 pub struct LowerContext {
     /// Next `DefId` to allocate.
@@ -200,7 +211,12 @@ pub struct LowerContext {
     /// superclass count or it builds dictionaries with methods at the wrong
     /// offset (e.g. `class Monad m => Stream s m t` — uncons lands at slot 0
     /// instead of slot 1, and the use site reads the wrong field).
-    pub interface_classes: Vec<(Symbol, Vec<Symbol>, Vec<Symbol>)>,
+    /// The fourth element lists methods with a class-body DEFAULT
+    /// implementation (externed as `{module}.{method}` via
+    /// `interface_symbols`), applied to partial dictionaries for instances
+    /// that omit the method. The fifth carries each method's declared-type
+    /// arrow count, used to eta-expand point-free instance-method bindings.
+    pub interface_classes: Vec<InterfaceClassEntry>,
     /// Errors collected during lowering.
     pub errors: Vec<crate::LowerError>,
     /// Warnings collected during lowering.

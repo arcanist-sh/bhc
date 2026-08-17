@@ -39,7 +39,7 @@ use std::io::{Read, Write};
 use thiserror::Error;
 
 /// Current interface file format version.
-pub const INTERFACE_VERSION: u32 = 3;
+pub const INTERFACE_VERSION: u32 = 4;
 
 /// Magic bytes for interface files.
 pub const INTERFACE_MAGIC: &[u8; 4] = b"BHCI";
@@ -318,6 +318,14 @@ pub struct ModuleInterface {
     /// Compiled instance-method implementations (see [`InstanceMethodImpl`]).
     #[serde(default)]
     pub instance_methods: Vec<InstanceMethodImpl>,
+    /// Compiled CLASS-DEFAULT method implementations. A class default
+    /// lowers as a top-level dict-taking function named after the method
+    /// (`getOption` = `\$dClass -> body`); importing modules extern it as
+    /// `{module}.{method}` and apply it to a partial dictionary when an
+    /// instance omits the method (mirrors same-module
+    /// `construct_dictionary` defaults).
+    #[serde(default)]
+    pub class_defaults: Vec<InstanceMethodImpl>,
 }
 
 /// A dependency on another interface.
@@ -347,6 +355,7 @@ impl ModuleInterface {
             dependencies: Vec::new(),
             reexports: HashMap::new(),
             instance_methods: Vec::new(),
+            class_defaults: Vec::new(),
         }
     }
 

@@ -3437,6 +3437,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             None,
         );
         self.functions.insert(VarId::new(1000348), f1000348);
+        // bhc_text_take_while_end
+        let f1000350 = self.module.llvm_module().add_function(
+            "bhc_text_take_while_end",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000350), f1000350);
         // bhc_text_count_sub
         let f1000349 = self.module.llvm_module().add_function(
             "bhc_text_count_sub",
@@ -5628,6 +5635,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "fromMaybe" => Some(2),
             "maybe" => Some(3),
             "listToMaybe" => Some(1),
+            "nonEmpty" => Some(1),
+            "first" => Some(2),
             "maybeToList" => Some(1),
             "catMaybes" => Some(1),
             "mapMaybe" => Some(2),
@@ -6146,6 +6155,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Data.Text.takeWhile" => Some(2),
             "Data.Text.dropWhile" => Some(2),
             "Data.Text.dropWhileEnd" => Some(2),
+            "Data.Text.takeWhileEnd" => Some(2),
             "Data.Text.count" => Some(2),
             // Data.Text.Encoding operations
             "Data.Text.Encoding.encodeUtf8" => Some(1),
@@ -6467,6 +6477,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "fromMaybe" => self.lower_builtin_from_maybe(args[0], args[1]),
             "maybe" => self.lower_builtin_maybe(args[0], args[1], args[2]),
             "listToMaybe" => self.lower_builtin_list_to_maybe(args[0]),
+            "nonEmpty" => self.lower_builtin_non_empty(args[0]),
+            "first" => self.lower_builtin_either_first(args[0], args[1]),
             "maybeToList" => self.lower_builtin_maybe_to_list(args[0]),
             "catMaybes" => self.lower_builtin_cat_maybes(args[0]),
             "mapMaybe" => self.lower_builtin_map_maybe(args[0], args[1]),
@@ -7440,6 +7452,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 args[1],
                 1000348,
                 "text_drop_while_end",
+            ),
+            "Data.Text.takeWhileEnd" => self.lower_builtin_text_closure_ptr(
+                args[0],
+                args[1],
+                1000350,
+                "text_take_while_end",
             ),
             "Data.Text.count" => self.lower_builtin_text_binary_ptr_to_int(
                 args[0],
@@ -13023,6 +13041,177 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower `listToMaybe list` — head of list as Maybe.
+    /// Data.Bifunctor.first at Either: `first f (Left a) = Left (f a)`,
+    /// `first f (Right b) = Right b`.
+    ///
+    /// Only the Either shape is implemented (tag 0 = Left, one field): the
+    /// tuple Bifunctor instance is indistinguishable at runtime (tuples are
+    /// also tag 0) and remains unsupported — pandoc's readWithM needs the
+    /// Either form (`Bifunctor.first (fromParsecError sources) <$>
+    /// runParserT …`).
+    fn lower_builtin_either_first(
+        &mut self,
+        f_expr: &Expr,
+        e_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let f = self
+            .lower_expr(f_expr)?
+            .ok_or_else(|| CodegenError::Internal("first: no fn".to_string()))?;
+        let e = self
+            .lower_expr(e_expr)?
+            .ok_or_else(|| CodegenError::Internal("first: no either".to_string()))?;
+        self.build_either_first(f, e)
+    }
+
+    /// Value-level core of `lower_builtin_either_first`, shared with the
+    /// builtin-wrapper (partial application) path.
+    fn build_either_first(
+        &mut self,
+        f: BasicValueEnum<'ctx>,
+        e: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let f_ptr = self.value_to_ptr(f)?;
+        let e_ptr = self.value_to_ptr(e)?;
+        let forced = self.value_to_ptr(self.build_force(e_ptr.into())?)?;
+
+        let tag = self.extract_adt_tag(forced)?;
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+        let left_block = self.llvm_ctx.append_basic_block(current_fn, "bf_left");
+        let right_block = self.llvm_ctx.append_basic_block(current_fn, "bf_right");
+        let merge_block = self.llvm_ctx.append_basic_block(current_fn, "bf_merge");
+
+        let is_left = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                tm.i64_type().const_zero(),
+                "bf_is_left",
+            )
+            .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(is_left, left_block, right_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Left a → Left (f a)
+        self.builder().position_at_end(left_block);
+        let a = self.extract_adt_field(forced, 1, 0)?;
+        let mapped = self
+            .apply_closure_values(f_ptr, &[a], false)?
+            .ok_or_else(|| CodegenError::Internal("first: apply returned void".to_string()))?;
+        let mapped_ptr = self.value_to_ptr(mapped)?;
+        let new_left = self.alloc_adt(0, 1)?;
+        self.store_adt_field(new_left, 1, 0, mapped_ptr.into())?;
+        self.builder()
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+        let left_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?;
+
+        // Right b → unchanged
+        self.builder().position_at_end(right_block);
+        self.builder()
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+        let right_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?;
+
+        self.builder().position_at_end(merge_block);
+        let phi = self
+            .builder()
+            .build_phi(ptr_type, "bf_result")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        phi.add_incoming(&[(&new_left, left_end), (&forced, right_end)]);
+        Ok(Some(phi.as_basic_value()))
+    }
+
+    /// Data.List.NonEmpty.nonEmpty: [a] -> Maybe (NonEmpty a)
+    ///
+    /// BHC represents `NonEmpty a` as a plain cons list known to be
+    /// non-empty (its `last`/`init`/`head`/`tail`/`toList` all resolve to
+    /// the ordinary list builtins by name), so this is a nil check that
+    /// wraps the WHOLE list: `[] -> Nothing; xs -> Just xs`.
+    fn lower_builtin_non_empty(
+        &mut self,
+        list_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let list_val = self
+            .lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal("nonEmpty: list has no value".to_string()))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+        let forced = self.value_to_ptr(self.build_force(list_ptr.into())?)?;
+
+        let tag = self.extract_adt_tag(forced)?;
+        let tm = self.type_mapper();
+        let ptr_type = tm.ptr_type();
+
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+
+        let nil_block = self.llvm_ctx.append_basic_block(current_fn, "ne_nil");
+        let cons_block = self.llvm_ctx.append_basic_block(current_fn, "ne_cons");
+        let merge_block = self.llvm_ctx.append_basic_block(current_fn, "ne_merge");
+
+        let is_nil = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                tm.i64_type().const_zero(),
+                "ne_is_nil",
+            )
+            .map_err(|e| CodegenError::Internal(format!("failed to compare: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(is_nil, nil_block, cons_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+
+        // Nil → Nothing (tag=0, arity=0)
+        self.builder().position_at_end(nil_block);
+        let nothing = self.alloc_adt(0, 0)?;
+        self.builder()
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+        let nil_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?;
+
+        // Cons → Just the whole list (tag=1, arity=1)
+        self.builder().position_at_end(cons_block);
+        let just = self.alloc_adt(1, 1)?;
+        self.store_adt_field(just, 1, 0, forced.into())?;
+        self.builder()
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
+        let cons_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no insert block".to_string()))?;
+
+        // Merge
+        self.builder().position_at_end(merge_block);
+        let phi = self
+            .builder()
+            .build_phi(ptr_type, "ne_result")
+            .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
+        phi.add_incoming(&[(&nothing, nil_end), (&just, cons_end)]);
+        Ok(Some(phi.as_basic_value()))
+    }
+
     fn lower_builtin_list_to_maybe(
         &mut self,
         list_expr: &Expr,
@@ -40564,6 +40753,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(text_expr)?
             .ok_or_else(|| CodegenError::Internal(format!("{}: no text", label)))?;
         let func_ptr = self.value_to_ptr(func)?;
+        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
         let text_ptr = self.value_to_ptr(text)?;
         let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
             CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
@@ -40572,7 +40762,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .builder()
             .build_call(
                 *rts_fn,
-                &[func_ptr.into(), func_ptr.into(), text_ptr.into()],
+                &[fn_ptr.into(), func_ptr.into(), text_ptr.into()],
                 label,
             )
             .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
@@ -40689,6 +40879,35 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Text: (i64, ptr) -> ptr (e.g. text_take, text_drop)
+    /// Lower an operand that a Text RTS builtin consumes as a `*const u8`
+    /// Text value. String LITERALS lower to cons-lists (`OverloadedStrings`
+    /// keeps the char-list representation), so wrap them with
+    /// `bhc_text_pack` before handing them to the RTS — otherwise the RTS
+    /// reads a cons cell as a `{len, bytes}` Text header and walks garbage
+    /// (`T.replicate n "\n"` in ensureFinalNewlines crashed exactly there).
+    fn lower_text_operand(&mut self, expr: &Expr) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let val = self
+            .lower_expr(expr)?
+            .ok_or_else(|| CodegenError::Internal("text operand has no value".to_string()))?;
+        let is_string_lit = matches!(expr, Expr::Lit(Literal::String(_), _, _));
+        if !is_string_lit {
+            return Ok(val);
+        }
+        let list_ptr = self.value_to_ptr(val)?;
+        let pack = self
+            .functions
+            .get(&VarId::new(1000223))
+            .ok_or_else(|| CodegenError::Internal("bhc_text_pack not declared".to_string()))?;
+        let packed = self
+            .builder()
+            .build_call(*pack, &[list_ptr.into()], "lit_text_pack")
+            .map_err(|e| CodegenError::Internal(format!("lit_text_pack failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("lit_text_pack: void".to_string()))?;
+        Ok(packed)
+    }
+
     fn lower_builtin_text_int_ptr_to_ptr(
         &mut self,
         int_expr: &Expr,
@@ -40699,9 +40918,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let n = self
             .lower_expr(int_expr)?
             .ok_or_else(|| CodegenError::Internal(format!("{}: no int", label)))?;
-        let t = self
-            .lower_expr(ptr_expr)?
-            .ok_or_else(|| CodegenError::Internal(format!("{}: no ptr", label)))?;
+        let t = self.lower_text_operand(ptr_expr)?;
         let n_int = self.coerce_to_int(n)?;
         let t_ptr = self.value_to_ptr(t)?;
         let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
@@ -41006,10 +41223,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(text_expr)?
             .ok_or_else(|| CodegenError::Internal("text_map: no text".to_string()))?;
         let func_ptr = self.value_to_ptr(func)?;
+        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
         let text_ptr = self.value_to_ptr(text)?;
 
-        // For closure dispatch, pass the closure pointer as both fn_ptr and env_ptr.
-        // The RTS function will interpret the closure accordingly.
+        // Closure dispatch: the RTS calls `fn_ptr(env_ptr, ...)` directly, so
+        // pass the entry point loaded from the closure header and the closure
+        // itself as the environment.
         let rts_fn = self
             .functions
             .get(&VarId::new(1000226))
@@ -41018,7 +41237,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .builder()
             .build_call(
                 *rts_fn,
-                &[func_ptr.into(), func_ptr.into(), text_ptr.into()],
+                &[fn_ptr.into(), func_ptr.into(), text_ptr.into()],
                 "text_map",
             )
             .map_err(|e| CodegenError::Internal(format!("text_map call failed: {:?}", e)))?
@@ -41043,6 +41262,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(text_expr)?
             .ok_or_else(|| CodegenError::Internal("text_filter: no text".to_string()))?;
         let func_ptr = self.value_to_ptr(func)?;
+        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
         let text_ptr = self.value_to_ptr(text)?;
         let rts_fn = self
             .functions
@@ -41052,7 +41272,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .builder()
             .build_call(
                 *rts_fn,
-                &[func_ptr.into(), func_ptr.into(), text_ptr.into()],
+                &[fn_ptr.into(), func_ptr.into(), text_ptr.into()],
                 "text_filter",
             )
             .map_err(|e| CodegenError::Internal(format!("text_filter call failed: {:?}", e)))?
@@ -41081,6 +41301,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(text_expr)?
             .ok_or_else(|| CodegenError::Internal("text_foldl: no text".to_string()))?;
         let func_ptr = self.value_to_ptr(func)?;
+        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
         let init_int = self.coerce_to_int(init)?;
         let text_ptr = self.value_to_ptr(text)?;
         let rts_fn = self
@@ -41092,7 +41313,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_call(
                 *rts_fn,
                 &[
-                    func_ptr.into(),
+                    fn_ptr.into(),
                     func_ptr.into(),
                     init_int.into(),
                     text_ptr.into(),
@@ -41567,6 +41788,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(bs_expr)?
             .ok_or_else(|| CodegenError::Internal("lazy_bs_filter: no bs".to_string()))?;
         let func_ptr = self.value_to_ptr(func)?;
+        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
         let bs_ptr = self.value_to_ptr(bs)?;
         let rts_fn = self
             .functions
@@ -41576,7 +41798,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .builder()
             .build_call(
                 *rts_fn,
-                &[func_ptr.into(), func_ptr.into(), bs_ptr.into()],
+                &[fn_ptr.into(), func_ptr.into(), bs_ptr.into()],
                 "lazy_bs_filter",
             )
             .map_err(|e| CodegenError::Internal(format!("lazy_bs_filter call failed: {:?}", e)))?
@@ -41599,6 +41821,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(bs_expr)?
             .ok_or_else(|| CodegenError::Internal("lazy_bs_drop_while: no bs".to_string()))?;
         let func_ptr = self.value_to_ptr(func)?;
+        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
         let bs_ptr = self.value_to_ptr(bs)?;
         let rts_fn = self.functions.get(&VarId::new(1000474)).ok_or_else(|| {
             CodegenError::Internal("bhc_lazy_bs_char8_drop_while not declared".to_string())
@@ -41607,7 +41830,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .builder()
             .build_call(
                 *rts_fn,
-                &[func_ptr.into(), func_ptr.into(), bs_ptr.into()],
+                &[fn_ptr.into(), func_ptr.into(), bs_ptr.into()],
                 "lazy_bs_drop_while",
             )
             .map_err(|e| {
@@ -46328,6 +46551,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .ok_or_else(|| CodegenError::Internal("text_singleton: void".to_string()))?;
                 Ok(Some(result))
             }
+            "first" => self.build_either_first(args[0], args[1]),
             "Data.Text.pack" => {
                 let rts_fn = self.functions.get(&VarId::new(1000223)).ok_or_else(|| {
                     CodegenError::Internal("bhc_text_pack not declared".to_string())
@@ -46594,11 +46818,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .functions
                     .get(&VarId::new(1000342))
                     .ok_or_else(|| CodegenError::Internal("text_any not declared".to_string()))?;
+                let cl = self.value_to_ptr(args[0])?;
+                let fnp = self.extract_closure_fn_ptr(cl)?;
                 let result = self
                     .builder()
                     .build_call(
                         *rts_fn,
-                        &[args[0].into(), args[0].into(), args[1].into()],
+                        &[fnp.into(), cl.into(), args[1].into()],
                         "text_any",
                     )
                     .map_err(|e| CodegenError::Internal(format!("text_any: {:?}", e)))?
@@ -46612,11 +46838,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .functions
                     .get(&VarId::new(1000343))
                     .ok_or_else(|| CodegenError::Internal("text_all not declared".to_string()))?;
+                let cl = self.value_to_ptr(args[0])?;
+                let fnp = self.extract_closure_fn_ptr(cl)?;
                 let result = self
                     .builder()
                     .build_call(
                         *rts_fn,
-                        &[args[0].into(), args[0].into(), args[1].into()],
+                        &[fnp.into(), cl.into(), args[1].into()],
                         "text_all",
                     )
                     .map_err(|e| CodegenError::Internal(format!("text_all: {:?}", e)))?
@@ -46630,11 +46858,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .functions
                     .get(&VarId::new(1000344))
                     .ok_or_else(|| CodegenError::Internal("text_break not declared".to_string()))?;
+                let cl = self.value_to_ptr(args[0])?;
+                let fnp = self.extract_closure_fn_ptr(cl)?;
                 let result = self
                     .builder()
                     .build_call(
                         *rts_fn,
-                        &[args[0].into(), args[0].into(), args[1].into()],
+                        &[fnp.into(), cl.into(), args[1].into()],
                         "text_break",
                     )
                     .map_err(|e| CodegenError::Internal(format!("text_break: {:?}", e)))?
@@ -46648,11 +46878,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .functions
                     .get(&VarId::new(1000345))
                     .ok_or_else(|| CodegenError::Internal("text_span not declared".to_string()))?;
+                let cl = self.value_to_ptr(args[0])?;
+                let fnp = self.extract_closure_fn_ptr(cl)?;
                 let result = self
                     .builder()
                     .build_call(
                         *rts_fn,
-                        &[args[0].into(), args[0].into(), args[1].into()],
+                        &[fnp.into(), cl.into(), args[1].into()],
                         "text_span",
                     )
                     .map_err(|e| CodegenError::Internal(format!("text_span: {:?}", e)))?
@@ -46665,11 +46897,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let rts_fn = self.functions.get(&VarId::new(1000346)).ok_or_else(|| {
                     CodegenError::Internal("text_take_while not declared".to_string())
                 })?;
+                let cl = self.value_to_ptr(args[0])?;
+                let fnp = self.extract_closure_fn_ptr(cl)?;
                 let result = self
                     .builder()
                     .build_call(
                         *rts_fn,
-                        &[args[0].into(), args[0].into(), args[1].into()],
+                        &[fnp.into(), cl.into(), args[1].into()],
                         "text_take_while",
                     )
                     .map_err(|e| CodegenError::Internal(format!("text_take_while: {:?}", e)))?
@@ -46682,11 +46916,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let rts_fn = self.functions.get(&VarId::new(1000347)).ok_or_else(|| {
                     CodegenError::Internal("text_drop_while not declared".to_string())
                 })?;
+                let cl = self.value_to_ptr(args[0])?;
+                let fnp = self.extract_closure_fn_ptr(cl)?;
                 let result = self
                     .builder()
                     .build_call(
                         *rts_fn,
-                        &[args[0].into(), args[0].into(), args[1].into()],
+                        &[fnp.into(), cl.into(), args[1].into()],
                         "text_drop_while",
                     )
                     .map_err(|e| CodegenError::Internal(format!("text_drop_while: {:?}", e)))?
@@ -46699,11 +46935,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let rts_fn = self.functions.get(&VarId::new(1000348)).ok_or_else(|| {
                     CodegenError::Internal("text_drop_while_end not declared".to_string())
                 })?;
+                let cl = self.value_to_ptr(args[0])?;
+                let fnp = self.extract_closure_fn_ptr(cl)?;
                 let result = self
                     .builder()
                     .build_call(
                         *rts_fn,
-                        &[args[0].into(), args[0].into(), args[1].into()],
+                        &[fnp.into(), cl.into(), args[1].into()],
                         "text_drop_while_end",
                     )
                     .map_err(|e| CodegenError::Internal(format!("text_drop_while_end: {:?}", e)))?
@@ -46711,6 +46949,27 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .basic()
                     .ok_or_else(|| {
                         CodegenError::Internal("text_drop_while_end: void".to_string())
+                    })?;
+                Ok(Some(result))
+            }
+            "Data.Text.takeWhileEnd" => {
+                let rts_fn = self.functions.get(&VarId::new(1000350)).ok_or_else(|| {
+                    CodegenError::Internal("text_take_while_end not declared".to_string())
+                })?;
+                let cl = self.value_to_ptr(args[0])?;
+                let fnp = self.extract_closure_fn_ptr(cl)?;
+                let result = self
+                    .builder()
+                    .build_call(
+                        *rts_fn,
+                        &[fnp.into(), cl.into(), args[1].into()],
+                        "text_take_while_end",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("text_take_while_end: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| {
+                        CodegenError::Internal("text_take_while_end: void".to_string())
                     })?;
                 Ok(Some(result))
             }

@@ -264,16 +264,9 @@ impl<'src> Parser<'src> {
 
     /// Parse an application expression.
     fn parse_app_expr(&mut self) -> ParseResult<Expr> {
-        let mut expr = self.parse_atom_expr()?;
+        let mut expr = self.parse_postfix_atom_expr()?;
 
         loop {
-            // Check for record update: `expr { field = value }`
-            if self.check(&TokenKind::LBrace) && !matches!(expr, Expr::Con(_, _)) {
-                let start = expr.span();
-                expr = self.parse_record_update(expr, start)?;
-                continue;
-            }
-
             // Check for type application: `expr @Type`
             if self.check(&TokenKind::At) {
                 self.advance(); // consume @
@@ -286,7 +279,7 @@ impl<'src> Parser<'src> {
             // Check if this looks like an argument
             if let Some(tok) = self.current() {
                 if self.is_atom_start(&tok.node.kind) {
-                    let arg = self.parse_atom_expr()?;
+                    let arg = self.parse_postfix_atom_expr()?;
                     let span = expr.span().to(arg.span());
                     expr = Expr::App(Box::new(expr), Box::new(arg), span);
                     continue;
@@ -296,6 +289,21 @@ impl<'src> Parser<'src> {
             break;
         }
 
+        Ok(expr)
+    }
+
+    /// Parse an atom followed by any postfix record updates.
+    ///
+    /// Record update binds tighter than application (H2010 grammar:
+    /// `aexp -> aexp { fbind ... }`), so `f x r{ a = v }` must parse as
+    /// `f x (r{ a = v })` — the braces attach to the argument atom, never
+    /// to the accumulated application.
+    fn parse_postfix_atom_expr(&mut self) -> ParseResult<Expr> {
+        let mut expr = self.parse_atom_expr()?;
+        while self.check(&TokenKind::LBrace) && !matches!(expr, Expr::Con(_, _)) {
+            let start = expr.span();
+            expr = self.parse_record_update(expr, start)?;
+        }
         Ok(expr)
     }
 

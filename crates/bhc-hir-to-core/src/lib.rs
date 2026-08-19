@@ -233,7 +233,21 @@ pub fn lower_module_with_imports(
         }
     }
 
-    ctx.lower_module(module)
+    let result = ctx.lower_module(module);
+    if let (Ok(module), Ok(filter)) = (&result, std::env::var("BHC_DUMP_BIND")) {
+        for bind in &module.bindings {
+            let pairs: Vec<(&bhc_core::Var, &bhc_core::Expr)> = match bind {
+                bhc_core::Bind::NonRec(v, e) => vec![(v, e)],
+                bhc_core::Bind::Rec(bs) => bs.iter().map(|(v, e)| (v, e.as_ref())).collect(),
+            };
+            for (v, e) in pairs {
+                if v.name.as_str().contains(&filter) {
+                    eprintln!("=== CORE BIND {} ===\n{:#?}", v.name.as_str(), e);
+                }
+            }
+        }
+    }
+    result
 }
 
 #[cfg(test)]

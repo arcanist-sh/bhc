@@ -985,303 +985,6 @@ pub extern "C" fn bhc_text_replace(
 }
 
 // ============================================================
-// Tests
-// ============================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_text(s: &str) -> *mut u8 {
-        alloc_text_from_bytes(s.as_bytes())
-    }
-
-    #[test]
-    fn test_empty() {
-        let t = bhc_text_empty();
-        assert_eq!(bhc_text_null(t), 1);
-        assert_eq!(bhc_text_length(t), 0);
-    }
-
-    #[test]
-    fn test_singleton() {
-        let t = bhc_text_singleton('A' as i64);
-        assert_eq!(bhc_text_null(t), 0);
-        assert_eq!(bhc_text_length(t), 1);
-        assert_eq!(bhc_text_head(t), 'A' as i64);
-    }
-
-    #[test]
-    fn test_singleton_multibyte() {
-        let t = bhc_text_singleton('ü' as i64);
-        assert_eq!(bhc_text_length(t), 1);
-        assert_eq!(bhc_text_head(t), 'ü' as i64);
-    }
-
-    #[test]
-    fn test_length_ascii() {
-        let t = make_text("Hello");
-        assert_eq!(bhc_text_length(t), 5);
-    }
-
-    #[test]
-    fn test_length_multibyte() {
-        let t = make_text("café");
-        assert_eq!(bhc_text_length(t), 4);
-    }
-
-    #[test]
-    fn test_eq() {
-        let a = make_text("hello");
-        let b = make_text("hello");
-        let c = make_text("world");
-        assert_eq!(bhc_text_eq(a, b), 1);
-        assert_eq!(bhc_text_eq(a, c), 0);
-    }
-
-    #[test]
-    fn test_compare() {
-        let a = make_text("abc");
-        let b = make_text("abd");
-        let c = make_text("abc");
-        assert_eq!(bhc_text_compare(a, b), 0); // LT
-        assert_eq!(bhc_text_compare(a, c), 1); // EQ
-        assert_eq!(bhc_text_compare(b, a), 2); // GT
-    }
-
-    #[test]
-    fn test_head_last() {
-        let t = make_text("Hello");
-        assert_eq!(bhc_text_head(t), 'H' as i64);
-        assert_eq!(bhc_text_last(t), 'o' as i64);
-    }
-
-    #[test]
-    fn test_tail() {
-        let t = make_text("Hello");
-        let tail = bhc_text_tail(t);
-        assert_eq!(bhc_text_length(tail), 4);
-        assert_eq!(bhc_text_head(tail), 'e' as i64);
-    }
-
-    #[test]
-    fn test_init() {
-        let t = make_text("Hello");
-        let init = bhc_text_init(t);
-        assert_eq!(bhc_text_length(init), 4);
-        assert_eq!(bhc_text_last(init), 'l' as i64);
-    }
-
-    #[test]
-    fn test_append() {
-        let a = make_text("Hello");
-        let b = make_text(" World");
-        let c = bhc_text_append(a, b);
-        assert_eq!(bhc_text_length(c), 11);
-        assert_eq!(bhc_text_head(c), 'H' as i64);
-        assert_eq!(bhc_text_last(c), 'd' as i64);
-    }
-
-    #[test]
-    fn test_reverse() {
-        let t = make_text("Hello");
-        let r = bhc_text_reverse(t);
-        assert_eq!(bhc_text_head(r), 'o' as i64);
-        assert_eq!(bhc_text_last(r), 'H' as i64);
-    }
-
-    #[test]
-    fn test_take() {
-        let t = make_text("Hello World");
-        let taken = bhc_text_take(5, t);
-        assert_eq!(bhc_text_length(taken), 5);
-        assert_eq!(bhc_text_head(taken), 'H' as i64);
-        assert_eq!(bhc_text_last(taken), 'o' as i64);
-    }
-
-    #[test]
-    fn test_drop() {
-        let t = make_text("Hello World");
-        let dropped = bhc_text_drop(6, t);
-        assert_eq!(bhc_text_length(dropped), 5);
-        assert_eq!(bhc_text_head(dropped), 'W' as i64);
-    }
-
-    #[test]
-    fn test_take_end() {
-        let t = make_text("Hello World");
-        let taken = bhc_text_take_end(5, t);
-        assert_eq!(bhc_text_length(taken), 5);
-        assert_eq!(bhc_text_head(taken), 'W' as i64);
-    }
-
-    #[test]
-    fn test_drop_end() {
-        let t = make_text("Hello World");
-        let dropped = bhc_text_drop_end(6, t);
-        assert_eq!(bhc_text_length(dropped), 5);
-        assert_eq!(bhc_text_last(dropped), 'o' as i64);
-    }
-
-    #[test]
-    fn test_is_prefix_of() {
-        let prefix = make_text("Hello");
-        let text = make_text("Hello World");
-        let other = make_text("World");
-        assert_eq!(bhc_text_is_prefix_of(prefix, text), 1);
-        assert_eq!(bhc_text_is_prefix_of(other, text), 0);
-    }
-
-    #[test]
-    fn test_is_suffix_of() {
-        let suffix = make_text("World");
-        let text = make_text("Hello World");
-        let other = make_text("Hello");
-        assert_eq!(bhc_text_is_suffix_of(suffix, text), 1);
-        assert_eq!(bhc_text_is_suffix_of(other, text), 0);
-    }
-
-    #[test]
-    fn test_is_infix_of() {
-        let needle = make_text("lo Wo");
-        let haystack = make_text("Hello World");
-        let missing = make_text("xyz");
-        assert_eq!(bhc_text_is_infix_of(needle, haystack), 1);
-        assert_eq!(bhc_text_is_infix_of(missing, haystack), 0);
-    }
-
-    #[test]
-    fn test_to_lower() {
-        let t = make_text("Hello WORLD");
-        let lower = bhc_text_to_lower(t);
-        unsafe {
-            assert_eq!(text_as_str(lower), "hello world");
-        }
-    }
-
-    #[test]
-    fn test_to_upper() {
-        let t = make_text("Hello World");
-        let upper = bhc_text_to_upper(t);
-        unsafe {
-            assert_eq!(text_as_str(upper), "HELLO WORLD");
-        }
-    }
-
-    #[test]
-    fn test_to_title() {
-        let t = make_text("hello world");
-        let title = bhc_text_to_title(t);
-        unsafe {
-            assert_eq!(text_as_str(title), "Hello World");
-        }
-    }
-
-    #[test]
-    fn test_to_case_fold() {
-        let t = make_text("Hello WORLD");
-        let folded = bhc_text_to_case_fold(t);
-        unsafe {
-            assert_eq!(text_as_str(folded), "hello world");
-        }
-    }
-
-    #[test]
-    fn test_char_count_and_at() {
-        let t = make_text("café");
-        assert_eq!(bhc_text_char_count(t), 4);
-        assert_eq!(bhc_text_char_at(t, 0), 'c' as i64);
-        assert_eq!(bhc_text_char_at(t, 3), 'é' as i64);
-    }
-
-    #[test]
-    fn test_null_safety() {
-        assert_eq!(bhc_text_null(ptr::null()), 1);
-        assert_eq!(bhc_text_length(ptr::null()), 0);
-        assert_eq!(bhc_text_head(ptr::null()), 0);
-        assert_eq!(bhc_text_last(ptr::null()), 0);
-        assert_eq!(bhc_text_eq(ptr::null(), ptr::null()), 1);
-        let _ = bhc_text_tail(ptr::null());
-        let _ = bhc_text_init(ptr::null());
-        let _ = bhc_text_append(ptr::null(), ptr::null());
-        let _ = bhc_text_reverse(ptr::null());
-    }
-
-    #[test]
-    fn test_multibyte_operations() {
-        // Test with emoji (4-byte UTF-8)
-        let t = make_text("Hi 🌍!");
-        assert_eq!(bhc_text_length(t), 5);
-        assert_eq!(bhc_text_head(t), 'H' as i64);
-        assert_eq!(bhc_text_char_at(t, 3), '🌍' as i64);
-
-        let taken = bhc_text_take(3, t);
-        assert_eq!(bhc_text_length(taken), 3);
-
-        let dropped = bhc_text_drop(3, t);
-        assert_eq!(bhc_text_length(dropped), 2);
-        assert_eq!(bhc_text_head(dropped), '🌍' as i64);
-    }
-
-    #[test]
-    fn test_encode_decode_utf8() {
-        let t = make_text("Hello");
-        let bs = bhc_text_encode_utf8(t);
-        assert_eq!(bhc_text_length(bs), 5); // same layout, same length fn works
-        let t2 = bhc_text_decode_utf8(bs);
-        unsafe {
-            assert_eq!(text_as_str(t2), "Hello");
-        }
-    }
-
-    #[test]
-    fn test_strip() {
-        let t = make_text("  Hello World  ");
-        let stripped = bhc_text_strip(t);
-        unsafe {
-            assert_eq!(text_as_str(stripped), "Hello World");
-        }
-    }
-
-    #[test]
-    fn test_replace() {
-        let t = make_text("Hello World");
-        let needle = make_text("World");
-        let replacement = make_text("Rust");
-        let result = bhc_text_replace(needle, replacement, t);
-        unsafe {
-            assert_eq!(text_as_str(result), "Hello Rust");
-        }
-    }
-
-    #[test]
-    fn test_concat() {
-        // Build a cons-list of Text values manually for testing
-        // We'll test via the public encode/decode roundtrip instead
-        let t = make_text("Hello World");
-        let stripped = bhc_text_strip(t);
-        unsafe {
-            assert_eq!(text_as_str(stripped), "Hello World");
-        }
-    }
-
-    #[test]
-    fn test_encode_utf8_multibyte() {
-        let t = make_text("café");
-        let bs = bhc_text_encode_utf8(t);
-        // "café" is 5 bytes in UTF-8 (c=1, a=1, f=1, é=2)
-        unsafe {
-            let bytes = text_bytes(bs);
-            assert_eq!(bytes.len(), 5);
-        }
-        let t2 = bhc_text_decode_utf8(bs);
-        unsafe {
-            assert_eq!(text_as_str(t2), "café");
-        }
-    }
-}
-
-// ============================================================
 // Extended Text API (pandoc coverage)
 // ============================================================
 
@@ -1643,6 +1346,29 @@ pub extern "C" fn bhc_text_drop_while_end(
     }
 }
 
+/// `T.takeWhileEnd p t` — longest suffix whose characters all satisfy `p`.
+#[no_mangle]
+pub extern "C" fn bhc_text_take_while_end(
+    fn_ptr: extern "C" fn(*mut u8, i64) -> i64,
+    env_ptr: *mut u8,
+    text: *const u8,
+) -> *mut u8 {
+    unsafe {
+        if text.is_null() {
+            return bhc_text_empty();
+        }
+        let s = text_as_str(text);
+        let mut idx = 0;
+        for (i, c) in s.char_indices().rev() {
+            if fn_ptr(env_ptr, c as i64) == 0 {
+                idx = i + c.len_utf8();
+                break;
+            }
+        }
+        alloc_text_from_bytes(&s.as_bytes()[idx..])
+    }
+}
+
 /// `T.count needle hay` (non-overlapping).
 #[no_mangle]
 pub extern "C" fn bhc_text_count_sub(needle: *const u8, hay: *const u8) -> i64 {
@@ -1655,5 +1381,302 @@ pub extern "C" fn bhc_text_count_sub(needle: *const u8, hay: *const u8) -> i64 {
             return 0;
         }
         text_as_str(hay).matches(n).count() as i64
+    }
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_text(s: &str) -> *mut u8 {
+        alloc_text_from_bytes(s.as_bytes())
+    }
+
+    #[test]
+    fn test_empty() {
+        let t = bhc_text_empty();
+        assert_eq!(bhc_text_null(t), 1);
+        assert_eq!(bhc_text_length(t), 0);
+    }
+
+    #[test]
+    fn test_singleton() {
+        let t = bhc_text_singleton('A' as i64);
+        assert_eq!(bhc_text_null(t), 0);
+        assert_eq!(bhc_text_length(t), 1);
+        assert_eq!(bhc_text_head(t), 'A' as i64);
+    }
+
+    #[test]
+    fn test_singleton_multibyte() {
+        let t = bhc_text_singleton('ü' as i64);
+        assert_eq!(bhc_text_length(t), 1);
+        assert_eq!(bhc_text_head(t), 'ü' as i64);
+    }
+
+    #[test]
+    fn test_length_ascii() {
+        let t = make_text("Hello");
+        assert_eq!(bhc_text_length(t), 5);
+    }
+
+    #[test]
+    fn test_length_multibyte() {
+        let t = make_text("café");
+        assert_eq!(bhc_text_length(t), 4);
+    }
+
+    #[test]
+    fn test_eq() {
+        let a = make_text("hello");
+        let b = make_text("hello");
+        let c = make_text("world");
+        assert_eq!(bhc_text_eq(a, b), 1);
+        assert_eq!(bhc_text_eq(a, c), 0);
+    }
+
+    #[test]
+    fn test_compare() {
+        let a = make_text("abc");
+        let b = make_text("abd");
+        let c = make_text("abc");
+        assert_eq!(bhc_text_compare(a, b), 0); // LT
+        assert_eq!(bhc_text_compare(a, c), 1); // EQ
+        assert_eq!(bhc_text_compare(b, a), 2); // GT
+    }
+
+    #[test]
+    fn test_head_last() {
+        let t = make_text("Hello");
+        assert_eq!(bhc_text_head(t), 'H' as i64);
+        assert_eq!(bhc_text_last(t), 'o' as i64);
+    }
+
+    #[test]
+    fn test_tail() {
+        let t = make_text("Hello");
+        let tail = bhc_text_tail(t);
+        assert_eq!(bhc_text_length(tail), 4);
+        assert_eq!(bhc_text_head(tail), 'e' as i64);
+    }
+
+    #[test]
+    fn test_init() {
+        let t = make_text("Hello");
+        let init = bhc_text_init(t);
+        assert_eq!(bhc_text_length(init), 4);
+        assert_eq!(bhc_text_last(init), 'l' as i64);
+    }
+
+    #[test]
+    fn test_append() {
+        let a = make_text("Hello");
+        let b = make_text(" World");
+        let c = bhc_text_append(a, b);
+        assert_eq!(bhc_text_length(c), 11);
+        assert_eq!(bhc_text_head(c), 'H' as i64);
+        assert_eq!(bhc_text_last(c), 'd' as i64);
+    }
+
+    #[test]
+    fn test_reverse() {
+        let t = make_text("Hello");
+        let r = bhc_text_reverse(t);
+        assert_eq!(bhc_text_head(r), 'o' as i64);
+        assert_eq!(bhc_text_last(r), 'H' as i64);
+    }
+
+    #[test]
+    fn test_take() {
+        let t = make_text("Hello World");
+        let taken = bhc_text_take(5, t);
+        assert_eq!(bhc_text_length(taken), 5);
+        assert_eq!(bhc_text_head(taken), 'H' as i64);
+        assert_eq!(bhc_text_last(taken), 'o' as i64);
+    }
+
+    #[test]
+    fn test_drop() {
+        let t = make_text("Hello World");
+        let dropped = bhc_text_drop(6, t);
+        assert_eq!(bhc_text_length(dropped), 5);
+        assert_eq!(bhc_text_head(dropped), 'W' as i64);
+    }
+
+    #[test]
+    fn test_take_end() {
+        let t = make_text("Hello World");
+        let taken = bhc_text_take_end(5, t);
+        assert_eq!(bhc_text_length(taken), 5);
+        assert_eq!(bhc_text_head(taken), 'W' as i64);
+    }
+
+    #[test]
+    fn test_drop_end() {
+        let t = make_text("Hello World");
+        let dropped = bhc_text_drop_end(6, t);
+        assert_eq!(bhc_text_length(dropped), 5);
+        assert_eq!(bhc_text_last(dropped), 'o' as i64);
+    }
+
+    #[test]
+    fn test_is_prefix_of() {
+        let prefix = make_text("Hello");
+        let text = make_text("Hello World");
+        let other = make_text("World");
+        assert_eq!(bhc_text_is_prefix_of(prefix, text), 1);
+        assert_eq!(bhc_text_is_prefix_of(other, text), 0);
+    }
+
+    #[test]
+    fn test_is_suffix_of() {
+        let suffix = make_text("World");
+        let text = make_text("Hello World");
+        let other = make_text("Hello");
+        assert_eq!(bhc_text_is_suffix_of(suffix, text), 1);
+        assert_eq!(bhc_text_is_suffix_of(other, text), 0);
+    }
+
+    #[test]
+    fn test_is_infix_of() {
+        let needle = make_text("lo Wo");
+        let haystack = make_text("Hello World");
+        let missing = make_text("xyz");
+        assert_eq!(bhc_text_is_infix_of(needle, haystack), 1);
+        assert_eq!(bhc_text_is_infix_of(missing, haystack), 0);
+    }
+
+    #[test]
+    fn test_to_lower() {
+        let t = make_text("Hello WORLD");
+        let lower = bhc_text_to_lower(t);
+        unsafe {
+            assert_eq!(text_as_str(lower), "hello world");
+        }
+    }
+
+    #[test]
+    fn test_to_upper() {
+        let t = make_text("Hello World");
+        let upper = bhc_text_to_upper(t);
+        unsafe {
+            assert_eq!(text_as_str(upper), "HELLO WORLD");
+        }
+    }
+
+    #[test]
+    fn test_to_title() {
+        let t = make_text("hello world");
+        let title = bhc_text_to_title(t);
+        unsafe {
+            assert_eq!(text_as_str(title), "Hello World");
+        }
+    }
+
+    #[test]
+    fn test_to_case_fold() {
+        let t = make_text("Hello WORLD");
+        let folded = bhc_text_to_case_fold(t);
+        unsafe {
+            assert_eq!(text_as_str(folded), "hello world");
+        }
+    }
+
+    #[test]
+    fn test_char_count_and_at() {
+        let t = make_text("café");
+        assert_eq!(bhc_text_char_count(t), 4);
+        assert_eq!(bhc_text_char_at(t, 0), 'c' as i64);
+        assert_eq!(bhc_text_char_at(t, 3), 'é' as i64);
+    }
+
+    #[test]
+    fn test_null_safety() {
+        assert_eq!(bhc_text_null(ptr::null()), 1);
+        assert_eq!(bhc_text_length(ptr::null()), 0);
+        assert_eq!(bhc_text_head(ptr::null()), 0);
+        assert_eq!(bhc_text_last(ptr::null()), 0);
+        assert_eq!(bhc_text_eq(ptr::null(), ptr::null()), 1);
+        let _ = bhc_text_tail(ptr::null());
+        let _ = bhc_text_init(ptr::null());
+        let _ = bhc_text_append(ptr::null(), ptr::null());
+        let _ = bhc_text_reverse(ptr::null());
+    }
+
+    #[test]
+    fn test_multibyte_operations() {
+        // Test with emoji (4-byte UTF-8)
+        let t = make_text("Hi 🌍!");
+        assert_eq!(bhc_text_length(t), 5);
+        assert_eq!(bhc_text_head(t), 'H' as i64);
+        assert_eq!(bhc_text_char_at(t, 3), '🌍' as i64);
+
+        let taken = bhc_text_take(3, t);
+        assert_eq!(bhc_text_length(taken), 3);
+
+        let dropped = bhc_text_drop(3, t);
+        assert_eq!(bhc_text_length(dropped), 2);
+        assert_eq!(bhc_text_head(dropped), '🌍' as i64);
+    }
+
+    #[test]
+    fn test_encode_decode_utf8() {
+        let t = make_text("Hello");
+        let bs = bhc_text_encode_utf8(t);
+        assert_eq!(bhc_text_length(bs), 5); // same layout, same length fn works
+        let t2 = bhc_text_decode_utf8(bs);
+        unsafe {
+            assert_eq!(text_as_str(t2), "Hello");
+        }
+    }
+
+    #[test]
+    fn test_strip() {
+        let t = make_text("  Hello World  ");
+        let stripped = bhc_text_strip(t);
+        unsafe {
+            assert_eq!(text_as_str(stripped), "Hello World");
+        }
+    }
+
+    #[test]
+    fn test_replace() {
+        let t = make_text("Hello World");
+        let needle = make_text("World");
+        let replacement = make_text("Rust");
+        let result = bhc_text_replace(needle, replacement, t);
+        unsafe {
+            assert_eq!(text_as_str(result), "Hello Rust");
+        }
+    }
+
+    #[test]
+    fn test_concat() {
+        // Build a cons-list of Text values manually for testing
+        // We'll test via the public encode/decode roundtrip instead
+        let t = make_text("Hello World");
+        let stripped = bhc_text_strip(t);
+        unsafe {
+            assert_eq!(text_as_str(stripped), "Hello World");
+        }
+    }
+
+    #[test]
+    fn test_encode_utf8_multibyte() {
+        let t = make_text("café");
+        let bs = bhc_text_encode_utf8(t);
+        // "café" is 5 bytes in UTF-8 (c=1, a=1, f=1, é=2)
+        unsafe {
+            let bytes = text_bytes(bs);
+            assert_eq!(bytes.len(), 5);
+        }
+        let t2 = bhc_text_decode_utf8(bs);
+        unsafe {
+            assert_eq!(text_as_str(t2), "café");
+        }
     }
 }

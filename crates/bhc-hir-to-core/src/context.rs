@@ -1064,6 +1064,50 @@ impl LowerContext {
         };
         self.class_registry.register_class(monoid_class);
 
+        // Builtin `Semigroup Text` / `Monoid Text` instances: Text is a
+        // builtin type with no Haskell instance declaration anywhere, so
+        // dispatch at the concrete type would otherwise find nothing and
+        // lower `t <> u` to an unresolved-method error closure (pandoc's
+        // ensureFinalNewlines hit exactly that at runtime). Route the
+        // methods at vars named for the codegen Text builtins.
+        {
+            let text_ty = Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("Text"),
+                bhc_types::Kind::Star,
+            ));
+            self.register_builtin_text_instance_vars();
+            let append_id = DefId::new(790_000);
+            let empty_id = DefId::new(790_001);
+            let concat_id = DefId::new(790_002);
+            let mut sg_methods = FxHashMap::default();
+            sg_methods.insert(Symbol::intern("<>"), append_id);
+            self.class_registry
+                .register_instance(crate::dictionary::InstanceInfo {
+                    class: Symbol::intern("Semigroup"),
+                    instance_types: vec![text_ty.clone()],
+                    methods: sg_methods,
+                    superclass_instances: Vec::new(),
+                    assoc_type_impls: FxHashMap::default(),
+                    instance_constraints: Vec::new(),
+                });
+            let mut mo_methods = FxHashMap::default();
+            mo_methods.insert(Symbol::intern("mempty"), empty_id);
+            mo_methods.insert(Symbol::intern("mappend"), append_id);
+            mo_methods.insert(Symbol::intern("mconcat"), concat_id);
+            self.class_registry
+                .register_instance(crate::dictionary::InstanceInfo {
+                    class: Symbol::intern("Monoid"),
+                    instance_types: vec![text_ty],
+                    methods: mo_methods,
+                    superclass_instances: vec![Ty::Con(bhc_types::TyCon::new(
+                        Symbol::intern("Text"),
+                        bhc_types::Kind::Star,
+                    ))],
+                    assoc_type_impls: FxHashMap::default(),
+                    instance_constraints: Vec::new(),
+                });
+        }
+
         // === Register MonadPlus class ===
         // Methods: mplus, mzero (dispatched like `empty` above; parsec's
         // `choice ps = foldr (<|>) mzero ps` needs the bare `mzero` resolved
@@ -1231,6 +1275,26 @@ impl LowerContext {
                 ty: Ty::Error, // Types resolved during evaluation
             };
             self.var_map.insert(def_info.id, var);
+        }
+
+        // The clear above wiped the synthetic method vars behind the builtin
+        // `Semigroup Text` / `Monoid Text` instances (DefIds 790_000–790_002,
+        // registered at context construction); restore them so dictionary
+        // construction still finds `Data.Text.append`/`empty`/`concat`
+        // instead of falling back to a bare `<>` stub.
+        self.register_builtin_text_instance_vars();
+    }
+
+    /// (Re-)register the vars backing the builtin Text Semigroup/Monoid
+    /// instance methods under their fixed DefIds.
+    fn register_builtin_text_instance_vars(&mut self) {
+        for (offset, builtin) in ["Data.Text.append", "Data.Text.empty", "Data.Text.concat"]
+            .iter()
+            .enumerate()
+        {
+            let def_id = DefId::new(790_000 + offset);
+            let var = self.named_var(Symbol::intern(builtin), Ty::Error);
+            self.register_var(def_id, var);
         }
     }
 
@@ -1452,7 +1516,28 @@ impl LowerContext {
         constraint: &Constraint,
         span: Span,
     ) -> Option<core::Expr> {
-        // 1. First, try to find an in-scope dictionary variable directly
+        // 0. A fully concrete constraint names its instance directly. The
+        // in-scope lookup below matches by CLASS alone and can hand back a
+        // dictionary for a DIFFERENT type: readMarkdown's `ToSources a`
+        // context dict is the Text instance, but its readWithM call site
+        // instantiates `ToSources Sources` — passing the Text dict made
+        // `toSources` walk a Sources ADT as UTF-8 bytes. When every
+        // constraint argument is pinned and the instance is constructible,
+        // build the instance dictionary; fall through on failure.
+        if !constraint.args.is_empty() && constraint.args.iter().all(|ty| !has_type_variables(ty)) {
+            let mut dict_ctx =
+                DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
+            if let Some(dict_expr) = dict_ctx.get_dictionary(constraint, span) {
+                let bindings = dict_ctx.take_bindings();
+                let mut result = dict_expr;
+                for bind in bindings.into_iter().rev() {
+                    result = core::Expr::Let(Box::new(bind), Box::new(result), span);
+                }
+                return Some(result);
+            }
+        }
+
+        // 1. Next, try to find an in-scope dictionary variable directly
         if let Some(dict_var) = self.lookup_dict(constraint.class) {
             return Some(core::Expr::Var(dict_var.clone(), span));
         }

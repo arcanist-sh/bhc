@@ -2728,6 +2728,17 @@ fn lower_case(
     use crate::pattern::{bind_pattern_vars, lower_pat_to_alt_with_fallthrough};
 
     let scrutinee_core = lower_expr(ctx, scrutinee)?;
+    if std::env::var("BHC_DBG_CASE").is_ok() {
+        let pats: Vec<String> = alts.iter().map(|a| format!("{:?}", a.pat)).collect();
+        let joined = pats.join(" | ");
+        eprintln!(
+            "[case] span={}..{} alts={} pats={}",
+            span.lo.0,
+            span.hi.0,
+            alts.len(),
+            &joined[..joined.len().min(200)]
+        );
+    }
 
     // Check if any alternative has a nested/complex sub-pattern that needs
     // fallthrough support (e.g., `Lit 0` where the literal match may fail).
@@ -3169,6 +3180,15 @@ fn lower_record_update(
     // Try to find the field selector information for the first field (clone to avoid borrow issues)
     let first_field = &fields[0];
     let field_info = ctx.lookup_field_selector(first_field.name).cloned();
+    if std::env::var("BHC_DBG_RECUPD").is_ok() {
+        eprintln!(
+            "[recupd] span={}..{} field={} info={}",
+            span.lo.0,
+            span.hi.0,
+            first_field.name.as_str(),
+            field_info.is_some()
+        );
+    }
 
     if let Some(info) = field_info {
         // Build a map of field name -> new value expression

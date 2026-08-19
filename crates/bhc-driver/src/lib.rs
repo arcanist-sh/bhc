@@ -2735,6 +2735,177 @@ impl Compiler {
                 cache.insert(sym, exports);
             }
         }
+
+        // Instances are GLOBAL in Haskell: an instance defined anywhere in the
+        // transitive dependency closure is usable at any call site, even when
+        // the defining module is never imported (Main calls `readMarkdown`,
+        // whose `ToSources Text` instance lives in Text.Pandoc.Sources — a
+        // module Main has no import for). Without this pass the call site
+        // silently drops the unresolvable dictionary argument and every later
+        // argument shifts one slot. Sweep every `.bhi` reachable through the
+        // package DBs and register class layouts + instance metadata +
+        // instance-method externs (values/constructors/synonyms stay
+        // import-scoped — only instance visibility is global).
+        let current_module: String = ast
+            .name
+            .as_ref()
+            .map(|n| {
+                n.parts
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            })
+            .unwrap_or_default();
+        self.register_db_instances_globally(&flat_dirs, &packages, &current_module, ctx);
+    }
+
+    /// Register class dictionary layouts, instance metadata, and
+    /// instance-method extern symbols from every interface in the package DBs.
+    ///
+    /// Everything is deduplicated against what interface loading already
+    /// registered, so imported modules are unaffected; this only ADDS
+    /// visibility for instances whose defining module is not imported.
+    fn register_db_instances_globally(
+        &self,
+        flat_dirs: &[Utf8PathBuf],
+        packages: &[ConfPackage],
+        current_module: &str,
+        ctx: &mut LowerContext,
+    ) {
+        // Collect candidate .bhi paths: recursive walk of the flat dirs plus
+        // each package's exposed modules resolved through the normal search.
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        fn walk_bhi(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk_bhi(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("bhi") {
+                    out.push(path);
+                }
+            }
+        }
+        for dir in flat_dirs {
+            walk_bhi(dir.as_std_path(), &mut paths);
+        }
+        for pkg in packages {
+            for module in &pkg.exposed_modules {
+                if let Some(p) = resolve_interface_in(module, &[], std::slice::from_ref(pkg)) {
+                    paths.push(p.as_std_path().to_path_buf());
+                }
+            }
+        }
+        paths.sort();
+        paths.dedup();
+
+        let known_classes: FxHashSet<Symbol> = ctx
+            .interface_classes
+            .iter()
+            .map(|(name, _, _, _, _)| *name)
+            .collect();
+        let known_symbols: FxHashSet<(Symbol, String)> = ctx
+            .interface_symbols
+            .iter()
+            .map(|(name, module, _)| (*name, module.clone()))
+            .collect();
+        let known_instances: FxHashSet<String> = ctx
+            .interface_instances
+            .iter()
+            .map(|(class, types, _)| format!("{class:?}|{types:?}"))
+            .collect();
+
+        for path in &paths {
+            let Some(utf8_path) = Utf8PathBuf::from_path_buf(path.clone()).ok() else {
+                continue;
+            };
+            let Ok(iface) = bhc_interface::ModuleInterface::read_from_file(&utf8_path) else {
+                continue;
+            };
+            let module_name = iface.header.module_name.clone();
+            // Never ingest the interface of the module being compiled: its
+            // instance methods are LOCAL bindings here, and registering them
+            // as imported symbols makes codegen rename the local definitions
+            // (`$instance_x_T` would be emitted as `$instance_x_T.3`).
+            if module_name == current_module {
+                continue;
+            }
+            let mut converter = bhc_interface::convert::TypeConverter::new(95000);
+
+            for class in &iface.classes {
+                let class_name = Symbol::intern(&class.name);
+                if known_classes.contains(&class_name) {
+                    continue;
+                }
+                let mut method_names = Vec::with_capacity(class.methods.len());
+                let mut method_arities: Vec<(Symbol, usize)> =
+                    Vec::with_capacity(class.methods.len());
+                let mut defaulted_names = Vec::new();
+                for method in &class.methods {
+                    let name = Symbol::intern(&method.name);
+                    let scheme = converter.convert_type_signature(&method.signature);
+                    let mut arrows = 0;
+                    let mut t = &scheme.ty;
+                    while let bhc_types::Ty::Fun(_, r) = t {
+                        arrows += 1;
+                        t = r.as_ref();
+                    }
+                    method_arities.push((name, arrows));
+                    method_names.push(name);
+                    if method.has_default {
+                        defaulted_names.push(name);
+                    }
+                }
+                let superclass_names: Vec<Symbol> = class
+                    .superclasses
+                    .iter()
+                    .map(|c| Symbol::intern(&c.class))
+                    .collect();
+                ctx.interface_classes.push((
+                    class_name,
+                    method_names,
+                    superclass_names,
+                    defaulted_names,
+                    method_arities,
+                ));
+            }
+
+            for im in &iface.instance_methods {
+                let name = Symbol::intern(&im.name);
+                if known_symbols.contains(&(name, module_name.clone())) {
+                    continue;
+                }
+                ctx.interface_symbols
+                    .push((name, module_name.clone(), im.arity));
+            }
+            for cd in &iface.class_defaults {
+                let name = Symbol::intern(&cd.name);
+                if known_symbols.contains(&(name, module_name.clone())) {
+                    continue;
+                }
+                ctx.interface_symbols
+                    .push((name, module_name.clone(), cd.arity));
+            }
+
+            for inst in &iface.instances {
+                converter.reset_vars();
+                let types: Vec<bhc_types::Ty> = inst
+                    .types
+                    .iter()
+                    .map(|t| converter.convert_type(t))
+                    .collect();
+                let class_sym = Symbol::intern(&inst.class);
+                let key = format!("{class_sym:?}|{types:?}");
+                if known_instances.contains(&key) {
+                    continue;
+                }
+                let methods: Vec<Symbol> = inst.methods.iter().map(|m| Symbol::intern(m)).collect();
+                ctx.interface_instances.push((class_sym, types, methods));
+            }
+        }
     }
 
     /// Load `module_name`'s interface and convert it to `ModuleExports`,

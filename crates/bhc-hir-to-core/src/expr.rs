@@ -487,6 +487,20 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
     Ok(base_expr)
 }
 
+/// Every leaf of the type is a concrete constructor/primitive — no type
+/// variables, no `Ty::Error`. Downstream dictionary resolution can act on
+/// such a type without guessing.
+fn is_fully_concrete_ty(ty: &Ty) -> bool {
+    match ty {
+        Ty::Con(_) | Ty::Prim(_) => true,
+        Ty::App(f, a) => is_fully_concrete_ty(f) && is_fully_concrete_ty(a),
+        Ty::Fun(a, b) => is_fully_concrete_ty(a) && is_fully_concrete_ty(b),
+        Ty::List(t) => is_fully_concrete_ty(t),
+        Ty::Tuple(ts) => ts.iter().all(is_fully_concrete_ty),
+        _ => false,
+    }
+}
+
 /// Try to infer the concrete type of an HIR expression.
 ///
 /// Returns `Some(Ty)` for expressions with obvious types:
@@ -502,10 +516,16 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
         }
         Expr::Var(def_ref) => {
             // Look up the type of this variable from the type checker.
-            // Only return concrete (non-polymorphic) types.
+            // Only return concrete (non-polymorphic) types. FULLY-concrete
+            // applied types count (`p :: ParsecT [Char] () Identity Char`
+            // from an enclosing signature) — they carry everything downstream
+            // dictionary resolution needs; bare heads or var-carrying types
+            // do not and must stay None.
             let ty = ctx.lookup_type(def_ref.def_id);
+            let allow_concrete = std::env::var("BHC_NO_CONCVAR").is_err();
             match &ty {
                 Ty::Con(_) => Some(ty),
+                t if allow_concrete && is_fully_concrete_ty(t) => Some(ty),
                 Ty::Error => {
                     // Core IR params often have ty: Error in type_schemes.
                     // Check the Core Var's type as a fallback (populated from
@@ -513,6 +533,7 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
                     if let Some(var) = ctx.lookup_var(def_ref.def_id) {
                         match &var.ty {
                             Ty::Con(_) => Some(var.ty.clone()),
+                            t if allow_concrete && is_fully_concrete_ty(t) => Some(var.ty.clone()),
                             _ => None,
                         }
                     } else {
@@ -746,6 +767,94 @@ fn match_ty(param: &Ty, concrete: &Ty, subst: &mut bhc_types::Subst) {
 /// instantiates its type variables from the inferable argument types. Shared by
 /// dictionary resolution and by argument lowering, so a constrained *value*
 /// argument can have its OWN dictionary applied at the resulting concrete type.
+/// The FULLY-CONCRETE result type of an applied expression, computed from
+/// the head's scheme with its parameters pinned by the (inferable) argument
+/// types. `manyTill p $eta` inside a signed binding pins `s`, `u`, `m` from
+/// the params' types and yields `ParsecT [Char] () Identity [Char]` — enough
+/// for method dispatch AND operand dictionary resolution. A bare `digit`
+/// operand pins nothing (its scheme keeps variables) and stays None, so the
+/// validated codegen fast paths keep those cases.
+fn concrete_applied_result_ty(ctx: &LowerContext, e: &hir::Expr) -> Option<Ty> {
+    let mut head = e;
+    let mut args: Vec<&hir::Expr> = Vec::new();
+    while let hir::Expr::App(f, a, _) = head {
+        args.push(a.as_ref());
+        head = f.as_ref();
+    }
+    if args.is_empty() {
+        return None;
+    }
+    args.reverse();
+    let hir::Expr::Var(head_ref) = head else {
+        return None;
+    };
+    let dbg = std::env::var("BHC_DBG_CART").is_ok();
+    let Some(sch) = ctx.lookup_scheme(head_ref.def_id) else {
+        if dbg {
+            eprintln!(
+                "[cart] head {:?} ({:?}): NO scheme",
+                ctx.lookup_var(head_ref.def_id).map(|v| v.name),
+                head_ref.def_id
+            );
+        }
+        return None;
+    };
+    let scheme_ty = sch.ty.clone();
+    if dbg {
+        eprintln!(
+            "[cart] head {:?}: scheme {:?}",
+            ctx.lookup_var(head_ref.def_id).map(|v| v.name),
+            scheme_ty
+        );
+    }
+    let mut param_tys = Vec::new();
+    let mut cur = &scheme_ty;
+    while let Ty::Fun(a, r) = cur {
+        param_tys.push(a.as_ref().clone());
+        cur = r.as_ref();
+    }
+    if args.len() > param_tys.len() {
+        return None;
+    }
+    let mut subst = bhc_types::Subst::new();
+    for (p, a) in param_tys.iter().zip(args.iter()) {
+        if let Some(at) = try_infer_arg_type(ctx, a) {
+            match_ty(p, &at, &mut subst);
+        }
+    }
+    let mut result = scheme_ty.clone();
+    for _ in 0..args.len() {
+        let Ty::Fun(_, r) = result else { return None };
+        result = *r;
+    }
+    let result = subst.apply(&result);
+    // The MONAD portion must be concrete — the head constructor and every
+    // applied argument except the LAST (the value type: `ParsecT [Char] ()
+    // Identity [a]`'s `a` is irrelevant to instance resolution and operand
+    // dictionaries).
+    fn monad_applied_concrete(t: &Ty) -> bool {
+        let Ty::App(f, _last) = t else { return false };
+        let mut cur = f.as_ref();
+        loop {
+            match cur {
+                Ty::App(g, a) => {
+                    if !is_fully_concrete_ty(a) {
+                        return false;
+                    }
+                    cur = g.as_ref();
+                }
+                Ty::Con(_) => return true,
+                _ => return false,
+            }
+        }
+    }
+    let ok = monad_applied_concrete(&result);
+    if dbg {
+        eprintln!("[cart] result {:?} monad_concrete={}", result, ok);
+    }
+    ok.then_some(result)
+}
+
 fn callee_param_tys_and_subst(
     ctx: &mut LowerContext,
     head_ref: &DefRef,
@@ -1810,20 +1919,102 @@ fn lower_app(
                             if is_value_class {
                                 ctx.resolved_expr_ty_opt(span).filter(has_concrete_head)
                             } else if is_monad_family {
-                                ctx.current_monad_type().cloned().or_else(|| {
-                                    // Last resort: recover the monad constructor from
-                                    // this method application's own fixpoint-resolved
-                                    // type `N b` (strip the value arg). Lets a
-                                    // user/derived monad's `>>=` dispatch when the
-                                    // operands' types are themselves unresolved — e.g.
-                                    // `return 5 >>= \x -> ...` in a top-level do-block
-                                    // over a GND newtype, where both operands are
-                                    // as-yet-undispatched `return`s.
-                                    match ctx.resolved_expr_ty_opt(span) {
-                                        Some(Ty::App(head, _)) => Some(*head),
-                                        _ => None,
-                                    }
-                                })
+                                ctx.current_monad_type()
+                                    .cloned()
+                                    .or_else(|| {
+                                        if std::env::var("BHC_NO_CART").is_ok() {
+                                            return None;
+                                        }
+                                        // A FULLY-CONCRETE applied operand type
+                                        // (`manyTill p $eta` with sig-typed
+                                        // params) carries the complete monad
+                                        // instantiation — dispatch AND operand
+                                        // dicting both work from it. Bare
+                                        // operands (`digit` in `digit <|>
+                                        // letter`) pin nothing and stay on the
+                                        // codegen fast paths.
+                                        collected_args
+                                            .iter()
+                                            .copied()
+                                            .chain(std::iter::once(x))
+                                            .find_map(|arg| {
+                                                let full = concrete_applied_result_ty(ctx, arg)?;
+                                                (!LowerContext::is_builtin_monad_type(&full))
+                                                    .then_some(full)
+                                            })
+                                    })
+                                    .or_else(|| {
+                                        if std::env::var("BHC_NO_PRONGB").is_ok() {
+                                            return None;
+                                        }
+                                        // Inside a CONSTRAINED function whose own
+                                        // dict params satisfy an operand's
+                                        // constraints (`many1TillChar p = fmap
+                                        // T.pack . many1Till p` — `many1Till`
+                                        // needs the same `Stream` dict the
+                                        // enclosing fn received), dispatch by the
+                                        // operand's scheme-result HEAD; operand
+                                        // dicting then resolves from those
+                                        // in-scope dicts. Unconstrained contexts
+                                        // (Main-level `digit <|> letter`) have no
+                                        // dicts in scope and keep the codegen
+                                        // fast paths; a VAR result head (runPT's
+                                        // bind at generic m) also skips.
+                                        collected_args
+                                            .iter()
+                                            .copied()
+                                            .chain(std::iter::once(x))
+                                            .find_map(|arg| {
+                                                let mut head = arg;
+                                                let mut nargs = 0usize;
+                                                while let hir::Expr::App(f2, _, _) = head {
+                                                    nargs += 1;
+                                                    head = f2.as_ref();
+                                                }
+                                                if nargs == 0 {
+                                                    return None;
+                                                }
+                                                let hir::Expr::Var(dr) = head else {
+                                                    return None;
+                                                };
+                                                let scheme = ctx.lookup_scheme(dr.def_id)?;
+                                                let dict_scoped = scheme
+                                                    .constraints
+                                                    .iter()
+                                                    .any(|c| ctx.lookup_dict(c.class).is_some());
+                                                if !dict_scoped {
+                                                    return None;
+                                                }
+                                                let mut t = scheme.ty.clone();
+                                                for _ in 0..nargs {
+                                                    let Ty::Fun(_, r) = t else {
+                                                        return None;
+                                                    };
+                                                    t = *r;
+                                                }
+                                                let mut h = &t;
+                                                while let Ty::App(f2, _) = h {
+                                                    h = f2.as_ref();
+                                                }
+                                                (matches!(h, Ty::Con(_))
+                                                    && !LowerContext::is_builtin_monad_type(h))
+                                                .then(|| h.clone())
+                                            })
+                                    })
+                                    .or_else(|| {
+                                        // Last resort: recover the monad constructor from
+                                        // this method application's own fixpoint-resolved
+                                        // type `N b` (strip the value arg). Lets a
+                                        // user/derived monad's `>>=` dispatch when the
+                                        // operands' types are themselves unresolved — e.g.
+                                        // `return 5 >>= \x -> ...` in a top-level do-block
+                                        // over a GND newtype, where both operands are
+                                        // as-yet-undispatched `return`s.
+                                        match ctx.resolved_expr_ty_opt(span) {
+                                            Some(Ty::App(head, _)) => Some(*head),
+                                            _ => None,
+                                        }
+                                    })
                             } else {
                                 None
                             }

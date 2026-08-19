@@ -1738,9 +1738,12 @@ impl LowerContext {
         let info = self.class_registry.lookup_class(needed_class)?;
         let method_index = info.methods.iter().position(|m| *m == method_name)?;
         let field_index = info.superclasses.len() + method_index;
-        // Walk the superclass chain. Each hop binds the intermediate
-        // dictionary in a Let (the form parsec's compile is validated
-        // against); the method is selected off the last one.
+        // Walk the superclass chain, binding each intermediate dictionary
+        // in a Let — the codegen thunk for the Let CAPTURES the enclosing
+        // dict param and the method application is emitted correctly (the
+        // pushed baseline reaching pandoc's titleBlock uses this form).
+        // Direct `$sel_j ($sel_i $d)` composition makes codegen DROP the
+        // method application entirely.
         let mut hops: Vec<(Var, core::Expr)> = Vec::new();
         let mut cur = core::Expr::Var(dict_var, span);
         for idx in path {
@@ -3130,12 +3133,32 @@ impl LowerContext {
             return None;
         }
         let missing = arrow_count - npats;
+        // The scheme's arrow types, so the fresh params carry their CONCRETE
+        // types (`$heta :: ParsecT [Char] () Identity Char`) — downstream
+        // argument-type inference pins dictionary resolution from them.
+        let param_tys: Vec<Ty> = {
+            let mut tys = Vec::new();
+            let mut t = self
+                .lookup_scheme(value_def.id)
+                .map(|s| s.ty.clone())
+                .or_else(|| value_def.sig.as_ref().map(|s| s.ty.clone()))
+                .unwrap_or(Ty::Error);
+            while let Ty::Fun(a, r) = t {
+                tys.push(*a);
+                t = *r;
+            }
+            tys
+        };
         // Fresh params: synthetic DefIds in a range distinct from real HIR
         // ids and the other synthetic ranges.
         let mut new_pats = eq.pats.clone();
         let mut rhs = eq.rhs.clone();
         for i in 0..missing {
-            let v = self.fresh_var("$heta", Ty::Error, eq.span);
+            let pty = param_tys.get(npats + i).cloned().unwrap_or(Ty::Error);
+            if std::env::var("BHC_DBG_HETA").is_ok() {
+                eprintln!("[heta] {} param {}: {:?}", value_def.name, npats + i, pty);
+            }
+            let v = self.fresh_var("$heta", pty, eq.span);
             let def_id = DefId::new(1_700_000 + v.id.index());
             self.register_var(def_id, v.clone());
             new_pats.push(bhc_hir::Pat::Var(v.name, def_id, eq.span));
@@ -3540,19 +3563,6 @@ fn type_name_for_instance(ty: &Ty) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_fresh_var() {
-        let mut ctx = LowerContext::new();
-        let v1 = ctx.fresh_var("x", Ty::Error, Span::default());
-        let v2 = ctx.fresh_var("x", Ty::Error, Span::default());
-        assert_ne!(v1.id, v2.id);
-    }
-}
-
 /// Break mutual-recursion cycles among top-level PARSER-SHAPED bindings by
 /// making cycle-internal calls lazy.
 ///
@@ -3767,5 +3777,18 @@ fn lazify_recursive_parser_calls(bindings: &mut [Bind]) {
                 rewrite(e.as_mut(), &cycle_members, &arities);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fresh_var() {
+        let mut ctx = LowerContext::new();
+        let v1 = ctx.fresh_var("x", Ty::Error, Span::default());
+        let v2 = ctx.fresh_var("x", Ty::Error, Span::default());
+        assert_ne!(v1.id, v2.id);
     }
 }

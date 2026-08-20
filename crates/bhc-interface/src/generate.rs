@@ -22,6 +22,7 @@ pub fn generate_interface(
     module_name: &str,
     ast: &AstModule,
     typed: &bhc_typeck::TypedModule,
+    imported_class_params: &HashMap<String, usize>,
 ) -> ModuleInterface {
     let mut iface = ModuleInterface::new(module_name);
 
@@ -42,7 +43,12 @@ pub fn generate_interface(
     // this, the interface records only one type and a consumer cannot complete a
     // functional dependency (`Stream S t | s -> t`), so the dictionary fails to
     // resolve at the call site.
-    let mut class_param_count: HashMap<String, usize> = HashMap::new();
+    // Seed with IMPORTED classes' parameter counts (from the loaded
+    // interfaces), then let local declarations override. Without the seed, a
+    // module defining an instance of an imported multi-parameter class
+    // (`instance Monad m => Stream Sources m Char` — Stream lives in parsec)
+    // serialized a flattened one-element head that no consumer could match.
+    let mut class_param_count: HashMap<String, usize> = imported_class_params.clone();
     for decl in &ast.decls {
         if let bhc_ast::Decl::ClassDecl(cls) = decl {
             class_param_count.insert(cls.name.name.as_str().to_string(), cls.params.len());

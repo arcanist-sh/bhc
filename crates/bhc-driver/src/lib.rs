@@ -461,7 +461,17 @@ impl Compiler {
         // at the import-resolvable path (`<hidir>/Data/Split.bhi`).
         let mut written_iface: Option<(bhc_interface::ModuleInterface, Utf8PathBuf)> = None;
         if let Some(ref hidir) = self.session.options.output_interface_dir {
-            let iface = bhc_interface::generate::generate_interface(&module_name, &ast, &typed);
+            let class_params: std::collections::HashMap<String, usize> = lower_ctx
+                .all_class_param_counts()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), *v))
+                .collect();
+            let iface = bhc_interface::generate::generate_interface(
+                &module_name,
+                &ast,
+                &typed,
+                &class_params,
+            );
             let iface_path = bhc_interface::interface_path(hidir, &module_name);
             if let Some(parent) = iface_path.parent() {
                 std::fs::create_dir_all(parent.as_std_path()).map_err(|e| {
@@ -2864,6 +2874,13 @@ impl Compiler {
                     .iter()
                     .map(|c| Symbol::intern(&c.class))
                     .collect();
+                // Multi-parameter classes: `lower_instance_decl` splits the
+                // parsed single-type instance head by the class's parameter
+                // count (defaulting to 1). Without this an importing module's
+                // `instance Stream Sources m Char` records a FLATTENED
+                // one-element head `(Sources m) Char` into its own interface,
+                // and no downstream consumer can ever match the instance.
+                ctx.register_class_param_count(class_name, class.params.len().max(1));
                 ctx.interface_classes.push((
                     class_name,
                     method_names,
@@ -3338,6 +3355,8 @@ impl Compiler {
                 .filter(|m| m.has_default)
                 .map(|m| Symbol::intern(&m.name))
                 .collect();
+            // See the flat-dir loader: instance heads split by this count.
+            ctx.register_class_param_count(class_name, class.params.len().max(1));
             ctx.interface_classes.push((
                 class_name,
                 method_names,
@@ -4105,8 +4124,17 @@ impl Compiler {
                     if let Ok(ast) = self.parse(&unit2, file_id) {
                         let (hir, lower_ctx) = self.lower_with_registry(&ast, &registry)?;
                         let typed = self.type_check(&hir, file_id, &lower_ctx)?;
-                        let iface =
-                            bhc_interface::generate::generate_interface(mod_name, &ast, &typed);
+                        let class_params: std::collections::HashMap<String, usize> = lower_ctx
+                            .all_class_param_counts()
+                            .iter()
+                            .map(|(k, v)| (k.as_str().to_string(), *v))
+                            .collect();
+                        let iface = bhc_interface::generate::generate_interface(
+                            mod_name,
+                            &ast,
+                            &typed,
+                            &class_params,
+                        );
                         let iface_path = bhc_interface::interface_path(hidir, mod_name);
                         if let Some(parent) = iface_path.parent() {
                             std::fs::create_dir_all(parent.as_std_path()).ok();

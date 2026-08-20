@@ -257,6 +257,93 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
     let var_name = ctx.lookup_var(def_ref.def_id).map(|v| v.name);
 
     if let Some(name) = var_name {
+        // `guard :: Alternative f => Bool -> f ()` — an external constrained
+        // FUNCTION (not a class method), unimplemented as a builtin, so it
+        // stubs at runtime (pandoc's `guardEnabled` = `getOption
+        // readerExtensions >>= guard . extensionEnabled ext`). When the
+        // occurrence type pins `f` to a user monad, synthesize its body
+        // `\b -> if b then pure () else empty` with both methods resolved at
+        // that instance.
+        if name.as_str() == "guard" {
+            if let Some(Ty::Fun(_, r)) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                if let Ty::App(f_ty, _) = r.as_ref() {
+                    if has_concrete_head(f_ty) && !LowerContext::is_builtin_monad_type(f_ty) {
+                        let pure_e = ctx.resolve_method_at_concrete_type(
+                            Symbol::intern("pure"),
+                            Symbol::intern("Applicative"),
+                            f_ty,
+                            def_ref.span,
+                        );
+                        let empty_e = ctx.resolve_method_at_concrete_type(
+                            Symbol::intern("empty"),
+                            Symbol::intern("Alternative"),
+                            f_ty,
+                            def_ref.span,
+                        );
+                        if let (Some(pure_e), Some(empty_e)) = (pure_e, empty_e) {
+                            let b = ctx.fresh_var("$guard_b", Ty::Error, def_ref.span);
+                            let unit = core::Expr::Var(
+                                Var {
+                                    name: Symbol::intern("()"),
+                                    id: VarId::new(0),
+                                    ty: Ty::Error,
+                                },
+                                def_ref.span,
+                            );
+                            let body = make_if_expr(
+                                core::Expr::Var(b.clone(), def_ref.span),
+                                core::Expr::App(Box::new(pure_e), Box::new(unit), def_ref.span),
+                                empty_e,
+                                def_ref.span,
+                            );
+                            return Ok(core::Expr::Lam(b, Box::new(body), def_ref.span));
+                        }
+                    }
+                }
+            }
+        }
+        // `mappend`/`<>` at Ordering (parsec's `compareErrorPos x y =
+        // Mon.mappend (compare …) (compare …)`): Ordering has no Semigroup
+        // instance registered anywhere, so the occurrence stubbed at runtime.
+        // Synthesize the Ordering semigroup: `\x y -> case x of EQ -> y;
+        // _ -> x`.
+        if matches!(name.as_str(), "mappend" | "<>") {
+            let is_ordering = |t: &Ty| matches!(t, Ty::Con(tc) if tc.name.as_str() == "Ordering");
+            if let Some(Ty::Fun(a, r)) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                if let Ty::Fun(b, res) = r.as_ref() {
+                    if is_ordering(&a) && is_ordering(b) && is_ordering(res) {
+                        let span = def_ref.span;
+                        let x = ctx.fresh_var("$ord_x", Ty::Error, span);
+                        let y = ctx.fresh_var("$ord_y", Ty::Error, span);
+                        let eq_con = DataCon {
+                            name: Symbol::intern("EQ"),
+                            ty_con: TyCon::new(Symbol::intern("Ordering"), Kind::Star),
+                            tag: 1,
+                            arity: 0,
+                        };
+                        let case = core::Expr::Case(
+                            Box::new(core::Expr::Var(x.clone(), span)),
+                            vec![
+                                Alt {
+                                    con: AltCon::DataCon(eq_con),
+                                    binders: vec![],
+                                    rhs: core::Expr::Var(y.clone(), span),
+                                },
+                                Alt {
+                                    con: AltCon::Default,
+                                    binders: vec![],
+                                    rhs: core::Expr::Var(x.clone(), span),
+                                },
+                            ],
+                            Ty::Error,
+                            span,
+                        );
+                        let inner = core::Expr::Lam(y, Box::new(case), span);
+                        return Ok(core::Expr::Lam(x, Box::new(inner), span));
+                    }
+                }
+            }
+        }
         // Check if this is a class method
         let is_method = ctx.is_class_method(name);
         if let Some(class_name) = is_method {
@@ -352,7 +439,11 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                         };
                         Some(match target {
                             Ty::List(t) => t.as_ref().clone(),
-                            t => t.clone(),
+                            // Alias-qualified container cons (`Set.Set
+                            // Extension` under `import qualified Data.Set as
+                            // Set`) must match the builtin instance heads,
+                            // which are registered under the bare names.
+                            t => strip_container_qualifier(t),
                         })
                     } else {
                         monad_head_of_method_occurrence(&occ_ty)
@@ -956,6 +1047,31 @@ fn lower_value_arg(
 /// monad like `ParsecT` resolve to `$instance_fmap_ParsecT` (`parsecMap`)
 /// instead of falling through to the `stub: liftM` codegen path. Returns the
 /// unchanged name for everything else.
+/// Strip a module-alias qualifier from a builtin container's head
+/// constructor: `Set.Set Extension` (under `import qualified Data.Set as
+/// Set`) becomes `Set Extension`, matching the builtin Semigroup/Monoid
+/// instance heads registered under the bare names. Only the head con of a
+/// `Set`/`Map` spelling is rewritten; every other type is returned as-is.
+fn strip_container_qualifier(ty: &Ty) -> Ty {
+    fn canon_con(tc: &bhc_types::TyCon) -> Option<bhc_types::TyCon> {
+        let name = tc.name.as_str();
+        let last = name.rsplit('.').next()?;
+        if last != name && matches!(last, "Set" | "Map") {
+            Some(bhc_types::TyCon::new(Symbol::intern(last), tc.kind.clone()))
+        } else {
+            None
+        }
+    }
+    match ty {
+        Ty::Con(tc) => canon_con(tc).map_or_else(|| ty.clone(), Ty::Con),
+        Ty::App(f, a) => match strip_container_qualifier(f) {
+            new_f if &new_f != f.as_ref() => Ty::App(Box::new(new_f), a.clone()),
+            _ => ty.clone(),
+        },
+        _ => ty.clone(),
+    }
+}
+
 fn canonical_functor_method(name: Symbol) -> Symbol {
     match name.as_str() {
         // `<$>` IS `fmap` — without this it is not recognized as a class
@@ -1087,10 +1203,29 @@ fn resolve_constrained_fn_dicts(
                             let subst = bhc_types::types_match_multi(&pat, &tgt)?;
                             let filled: Vec<Ty> =
                                 inst.instance_types.iter().map(|t| subst.apply(t)).collect();
-                            if filled.iter().any(has_type_variables) {
+                            // Merge per position: take the instance's type where it
+                            // became concrete, keep ours where the instance stays
+                            // parametric. `Monad m => Stream Sources m Char` fills
+                            // the dependent `t = Char` while `m` — parametric in
+                            // BOTH the call site and the instance — stays our
+                            // variable (readWithM is polymorphic in it). The old
+                            // all-or-nothing check rejected exactly that shape and
+                            // the Stream dictionary was silently omitted.
+                            let merged: Vec<Ty> = filled
+                                .iter()
+                                .zip(&concrete_args)
+                                .map(|(f, ours)| {
+                                    if has_type_variables(ours) && !has_type_variables(f) {
+                                        f.clone()
+                                    } else {
+                                        ours.clone()
+                                    }
+                                })
+                                .collect();
+                            if merged.iter().zip(&concrete_args).all(|(m, ours)| m == ours) {
                                 None
                             } else {
-                                Some(filled)
+                                Some(merged)
                             }
                         })
                     });
@@ -1098,9 +1233,22 @@ fn resolve_constrained_fn_dicts(
                 concrete_args = completed_args;
             }
         }
+        if std::env::var("BHC_DBG_DICT4").is_ok() {
+            eprintln!("DICT4: class={} args={concrete_args:?}", c.class.as_str());
+        }
         let concrete = Constraint::new_multi(c.class, concrete_args, span);
-        let dict = ctx.resolve_dictionary(&concrete, span)?;
-        dicts.push(dict);
+        let dict = ctx.resolve_dictionary(&concrete, span);
+        if std::env::var("BHC_DBG_DICT4").is_ok() {
+            eprintln!("DICT4: resolved={}", dict.is_some());
+            if dict.is_none() {
+                if let Some(insts) = ctx.class_registry().instances.get(&c.class) {
+                    for inst in insts {
+                        eprintln!("DICT4:   candidate head={:?}", inst.instance_types);
+                    }
+                }
+            }
+        }
+        dicts.push(dict?);
     }
     Some(dicts)
 }
@@ -2354,6 +2502,14 @@ fn lower_app(
                                         Box::new(result),
                                         Box::new(dict_expr),
                                         span,
+                                    );
+                                } else {
+                                    // The callee's lambda has a dict parameter for
+                                    // this constraint; omitting the argument shifts
+                                    // every later argument one slot at runtime.
+                                    eprintln!(
+                                        "warning: dictionary for `{}` could not be resolved at call site; argument slots may shift",
+                                        constraint.class.as_str()
                                     );
                                 }
                             }

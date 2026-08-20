@@ -2672,6 +2672,14 @@ impl LowerContext {
         self.class_param_counts.get(&class_name).copied()
     }
 
+    /// All known class parameter counts (local declarations and imported
+    /// interface classes). Interface generation splits multi-parameter
+    /// instance heads with these.
+    #[must_use]
+    pub fn all_class_param_counts(&self) -> &FxHashMap<Symbol, usize> {
+        &self.class_param_counts
+    }
+
     /// Register a pattern synonym definition.
     pub fn register_pattern_synonym(&mut self, name: Symbol, args: Vec<Symbol>, pattern: ast::Pat) {
         self.pattern_synonyms.insert(name, (args, pattern));

@@ -1108,6 +1108,64 @@ impl LowerContext {
                 });
         }
 
+        // Builtin `Semigroup`/`Monoid` instances for the container builtins
+        // Set and Map (same reasoning as Text above): `mempty :: Set a` has
+        // no Haskell instance anywhere, so pandoc's
+        // `emptyExtensions = Extensions mempty` lowered to a garbage-valued
+        // stub and `Set.member` walked it (Rust BTreeSet panic). Route the
+        // methods at the codegen container builtins; left-biased
+        // `Data.Map.union` matches the Monoid (Map k v) contract.
+        {
+            let star_to_star =
+                bhc_types::Kind::Arrow(Box::new(bhc_types::Kind::Star), Box::new(Kind::Star));
+            let set_head = Ty::App(
+                Box::new(Ty::Con(bhc_types::TyCon::new(
+                    Symbol::intern("Set"),
+                    star_to_star.clone(),
+                ))),
+                Box::new(Ty::Var(bhc_types::TyVar::new_star(0xFFF7_0001))),
+            );
+            let map_head = Ty::App(
+                Box::new(Ty::App(
+                    Box::new(Ty::Con(bhc_types::TyCon::new(
+                        Symbol::intern("Map"),
+                        bhc_types::Kind::Arrow(Box::new(Kind::Star), Box::new(star_to_star)),
+                    ))),
+                    Box::new(Ty::Var(bhc_types::TyVar::new_star(0xFFF7_0002))),
+                )),
+                Box::new(Ty::Var(bhc_types::TyVar::new_star(0xFFF7_0003))),
+            );
+            for (head, union_id, empty_id, unions_id) in [
+                (set_head, 790_003, 790_004, 790_005),
+                (map_head, 790_006, 790_007, 790_008),
+            ] {
+                let mut sg_methods = FxHashMap::default();
+                sg_methods.insert(Symbol::intern("<>"), DefId::new(union_id));
+                self.class_registry
+                    .register_instance(crate::dictionary::InstanceInfo {
+                        class: Symbol::intern("Semigroup"),
+                        instance_types: vec![head.clone()],
+                        methods: sg_methods,
+                        superclass_instances: Vec::new(),
+                        assoc_type_impls: FxHashMap::default(),
+                        instance_constraints: Vec::new(),
+                    });
+                let mut mo_methods = FxHashMap::default();
+                mo_methods.insert(Symbol::intern("mempty"), DefId::new(empty_id));
+                mo_methods.insert(Symbol::intern("mappend"), DefId::new(union_id));
+                mo_methods.insert(Symbol::intern("mconcat"), DefId::new(unions_id));
+                self.class_registry
+                    .register_instance(crate::dictionary::InstanceInfo {
+                        class: Symbol::intern("Monoid"),
+                        instance_types: vec![head.clone()],
+                        methods: mo_methods,
+                        superclass_instances: vec![head],
+                        assoc_type_impls: FxHashMap::default(),
+                        instance_constraints: Vec::new(),
+                    });
+            }
+        }
+
         // === Register MonadPlus class ===
         // Methods: mplus, mzero (dispatched like `empty` above; parsec's
         // `choice ps = foldr (<|>) mzero ps` needs the bare `mzero` resolved
@@ -1285,12 +1343,22 @@ impl LowerContext {
         self.register_builtin_text_instance_vars();
     }
 
-    /// (Re-)register the vars backing the builtin Text Semigroup/Monoid
-    /// instance methods under their fixed DefIds.
+    /// (Re-)register the vars backing the builtin Text/Set/Map
+    /// Semigroup/Monoid instance methods under their fixed DefIds.
     fn register_builtin_text_instance_vars(&mut self) {
-        for (offset, builtin) in ["Data.Text.append", "Data.Text.empty", "Data.Text.concat"]
-            .iter()
-            .enumerate()
+        for (offset, builtin) in [
+            "Data.Text.append",
+            "Data.Text.empty",
+            "Data.Text.concat",
+            "Data.Set.union",
+            "Data.Set.empty",
+            "Data.Set.unions",
+            "Data.Map.union",
+            "Data.Map.empty",
+            "Data.Map.unions",
+        ]
+        .iter()
+        .enumerate()
         {
             let def_id = DefId::new(790_000 + offset);
             let var = self.named_var(Symbol::intern(builtin), Ty::Error);
@@ -1578,6 +1646,30 @@ impl LowerContext {
                 result = core::Expr::Let(Box::new(bind), Box::new(result), span);
             }
             return Some(result);
+        }
+
+        // 4. Partially-concrete multi-parameter constraint with NO in-scope
+        // dictionary: construct from a structurally matching instance. The
+        // canonical case is `Stream Sources m Char` at readWithM's runParserT
+        // call — `s`/`t` are pinned but `m` is the caller's own type variable,
+        // so steps 0 and 3 (all-concrete guards) never fire, and there is no
+        // in-scope `Stream` dict for step 1. Instance matching binds the
+        // instance's `m` to our variable; `construct_dictionary` already
+        // null-placeholders superclass/context slots it cannot resolve at a
+        // polymorphic type. Ordering matters: this runs AFTER the in-scope
+        // lookup, so constrained functions that carry their own dictionary
+        // keep passing it along (the validated fast path).
+        if constraint.args.len() > 1 && constraint.args.iter().any(|ty| !has_type_variables(ty)) {
+            let mut dict_ctx =
+                DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
+            if let Some(dict_expr) = dict_ctx.get_dictionary(constraint, span) {
+                let bindings = dict_ctx.take_bindings();
+                let mut result = dict_expr;
+                for bind in bindings.into_iter().rev() {
+                    result = core::Expr::Let(Box::new(bind), Box::new(result), span);
+                }
+                return Some(result);
+            }
         }
 
         None

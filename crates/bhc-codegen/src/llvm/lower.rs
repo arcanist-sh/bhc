@@ -12879,20 +12879,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_conditional_branch(is_nothing, nothing_block, just_block)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
-        // Nothing → return default
+        // Nothing → return default (value_to_ptr also boxes Double defaults:
+        // MediaWiki's `fromMaybe 1.0 $ parseWidth w`)
         self.builder().position_at_end(nothing_block);
-        let def_as_ptr = match def_val {
-            BasicValueEnum::PointerValue(p) => p,
-            BasicValueEnum::IntValue(i) => self
-                .builder()
-                .build_int_to_ptr(i, ptr_type, "def_as_ptr")
-                .map_err(|e| CodegenError::Internal(format!("failed to cast: {:?}", e)))?,
-            _ => {
-                return Err(CodegenError::TypeError(
-                    "fromMaybe: unexpected default type".to_string(),
-                ))
-            }
-        };
+        let def_as_ptr = self.value_to_ptr(def_val)?;
         self.builder()
             .build_unconditional_branch(merge_block)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -12978,20 +12968,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_conditional_branch(is_nothing, nothing_block, just_block)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
-        // Nothing → return default
+        // Nothing → return default (value_to_ptr also boxes Double defaults)
         self.builder().position_at_end(nothing_block);
-        let def_as_ptr = match def_val {
-            BasicValueEnum::PointerValue(p) => p,
-            BasicValueEnum::IntValue(i) => self
-                .builder()
-                .build_int_to_ptr(i, ptr_type, "def_as_ptr")
-                .map_err(|e| CodegenError::Internal(format!("failed to cast: {:?}", e)))?,
-            _ => {
-                return Err(CodegenError::TypeError(
-                    "maybe: unexpected default type".to_string(),
-                ))
-            }
-        };
+        let def_as_ptr = self.value_to_ptr(def_val)?;
         self.builder()
             .build_unconditional_branch(merge_block)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -13492,20 +13471,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_unconditional_branch(merge_block)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
-        // Right → return default
+        // Right → return default (value_to_ptr also boxes Double defaults)
         self.builder().position_at_end(right_block);
-        let def_as_ptr = match def_val {
-            BasicValueEnum::PointerValue(p) => p,
-            BasicValueEnum::IntValue(i) => self
-                .builder()
-                .build_int_to_ptr(i, ptr_type, "def_as_ptr")
-                .map_err(|e| CodegenError::Internal(format!("failed to cast: {:?}", e)))?,
-            _ => {
-                return Err(CodegenError::TypeError(
-                    "fromLeft: unexpected default type".to_string(),
-                ))
-            }
-        };
+        let def_as_ptr = self.value_to_ptr(def_val)?;
         self.builder()
             .build_unconditional_branch(merge_block)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -13586,20 +13554,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_unconditional_branch(merge_block)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
 
-        // Left → return default
+        // Left → return default (value_to_ptr also boxes Double defaults)
         self.builder().position_at_end(left_block);
-        let def_as_ptr = match def_val {
-            BasicValueEnum::PointerValue(p) => p,
-            BasicValueEnum::IntValue(i) => self
-                .builder()
-                .build_int_to_ptr(i, ptr_type, "def_as_ptr")
-                .map_err(|e| CodegenError::Internal(format!("failed to cast: {:?}", e)))?,
-            _ => {
-                return Err(CodegenError::TypeError(
-                    "fromRight: unexpected default type".to_string(),
-                ))
-            }
-        };
+        let def_as_ptr = self.value_to_ptr(def_val)?;
         self.builder()
             .build_unconditional_branch(merge_block)
             .map_err(|e| CodegenError::Internal(format!("failed to build branch: {:?}", e)))?;
@@ -26663,6 +26620,25 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         if let Expr::Var(v, _) = func_expr {
             if v.name.as_str() == "runExceptT" {
                 return self.lower_builtin_run_except_t(arg_expr);
+            }
+        }
+        // `g a b $ x` — the left operand is itself an application: fold `x`
+        // into the spine and lower as ONE saturated application. Lowering the
+        // left side as a value first 2-arg-calls the underlying closure, and
+        // when its physical arity is larger (parsec's `eok s' s' $
+        // unknownError s'` — `eok` is a 3-param continuation) the missing
+        // registers are garbage: parserReturn/updateParserState handed a raw
+        // `3` to `errorIsUnknown` as the ParseError. `lower_application`'s
+        // spine collector walks through the reconstructed App, so the call is
+        // emitted with all arguments (and saturated builtin/constructor heads
+        // dispatch correctly). Var-headed `f $ x` keeps the paths below.
+        {
+            let mut head = func_expr;
+            while let Expr::TyApp(i, _, _) | Expr::Cast(i, _, _) | Expr::Tick(_, i, _) = head {
+                head = i.as_ref();
+            }
+            if matches!(head, Expr::App(..)) {
+                return self.lower_application(func_expr, arg_expr);
             }
         }
         // `f $ x` where `f` is a known function with physical arity > 1 is an
@@ -44389,7 +44365,24 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // (parsec's `try`) shadows the builtin — fall through to
                     // the external branch below instead.
                     let arity = self.builtin_info(name).unwrap();
-                    self.create_builtin_closure(name, arity)
+                    if matches!(
+                        name,
+                        "Data.Set.empty" | "Data.Map.empty" | "Data.Text.empty"
+                    ) {
+                        // A nullary container builtin in value position IS its
+                        // result: `mempty` dispatched to `Data.Set.empty` must
+                        // produce the empty set, not an arity-0 closure —
+                        // bhc_force passes closures through (their first word
+                        // reads as a non-negative tag), so no consumer ever
+                        // evaluates the wrapper and strict RTS ops
+                        // (`bhc_set_member`) walk it as container data.
+                        // Restricted to the Monoid-dispatch targets: other
+                        // nullary builtins (`stderr`) have no value-position
+                        // lowering and must keep the wrapper.
+                        self.lower_builtin(name, &[])
+                    } else {
+                        self.create_builtin_closure(name, arity)
+                    }
                 } else if let Some(&fn_val) = self.external_functions.get(&var.name) {
                     // Cross-module imported function
                     // Check if it's a CAF (only env pointer, no real arguments)

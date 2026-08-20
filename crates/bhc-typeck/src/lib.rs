@@ -91,7 +91,7 @@ pub struct TypedModule {
     /// applied.
     pub expr_types: FxHashMap<Span, Ty>,
     /// Like [`expr_types`](Self::expr_types), but with the final substitution
-    /// applied to a *fixpoint* (see [`Subst::apply_resolved`]). The plain
+    /// applied to a *fixpoint* (see [`bhc_types::Subst::apply_resolved`]). The plain
     /// `expr_types` uses a single-pass apply, which leaves nested variables
     /// unresolved under a triangular substitution — e.g. `return 42 :: M a`
     /// records `App(Var m, Int)` with `m` still a variable even though `m` is

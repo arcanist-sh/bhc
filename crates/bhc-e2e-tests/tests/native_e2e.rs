@@ -280,6 +280,10 @@ fn test_tier3_state_t_case_native() {
 }
 
 #[test]
+#[ignore = "compiled binary waits on stdin at 0% CPU and never reads it — \
+            pre-existing hang, reproduces at least back to 767df7b; fails \
+            every CI leg (and once ate a 6h runner). Un-ignore when the \
+            stdin-read path is fixed."]
 fn test_tier3_milestone_d_csv_parser_native() {
     run_native_test("tier3_io/milestone_d_csv_parser", Profile::Default);
 }

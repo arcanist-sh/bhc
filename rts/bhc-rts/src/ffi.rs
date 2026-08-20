@@ -520,6 +520,33 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
         return obj;
     }
 
+    // Debug aid (BHC_TRAP_CODE_OBJ): deliberately SIGSEGV — while the
+    // caller's registers are still intact for a crash-probe dump — when the
+    // forced object is misaligned, or is a raw CODE address (a function
+    // pointer flowing as a value; TEXT-only heuristic: the RTS links near
+    // the end of __TEXT, __DATA with its legitimate static CAF cells is
+    // above). The Rust panic path would destroy the callee-saved register
+    // chain before aborting, which is why this is a raw null read. The env
+    // check is cached: reading it per call churns the very registers the
+    // trap exists to preserve.
+    {
+        static TRAP_CODE_OBJ: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let trap = *TRAP_CODE_OBJ.get_or_init(|| std::env::var_os("BHC_TRAP_CODE_OBJ").is_some());
+        if trap {
+            let here = bhc_force as *const () as usize;
+            let o = obj as usize;
+            if o & 7 != 0 {
+                unsafe { std::ptr::null::<u64>().read_volatile() };
+            }
+            if o > here.saturating_sub(0x200_0000) && o < here + 0x40_0000 {
+                eprintln!(
+                    "BHC_TRAP_CODE_OBJ: forcing code address {o:#x} (bhc_force at {here:#x})"
+                );
+                unsafe { std::ptr::null::<u64>().read_volatile() };
+            }
+        }
+    }
+
     // Tag and result-slot accesses are atomic: if a thunk is ever shared
     // across tasks, plain loads/stores on these words would be a data race
     // (UB), and a torn update could dispatch on a garbage tag.
@@ -583,6 +610,23 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
         result_slot.store(result, Ordering::Release);
         tag_atomic.store(BHC_TAG_INDIRECTION, Ordering::Release);
 
+        // TEMP DEBUG (BHC_TRAP_CODE_OBJ): a thunk that EVALUATES to a code
+        // address — the eval fn identifies which expression yields a raw
+        // function pointer as a value.
+        {
+            static TRAP2: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *TRAP2.get_or_init(|| std::env::var_os("BHC_TRAP_CODE_OBJ").is_some()) {
+                let here = bhc_force as *const () as usize;
+                let r = result as usize;
+                if r > here.saturating_sub(0x200_0000) && r < here + 0x40_0000 {
+                    eprintln!(
+                        "BHC_TRAP_CODE_OBJ: thunk {obj:?} eval_fn {eval_fn_ptr:?} -> code addr {r:#x} (bhc_force at {here:#x})"
+                    );
+                    unsafe { std::ptr::null::<u64>().read_volatile() };
+                }
+            }
+        }
+
         return result;
     }
 
@@ -616,6 +660,169 @@ pub unsafe extern "C" fn bhc_is_thunk(obj: *const u8) -> c_int {
         0
     }
 }
+
+// ============================================================================
+// Runtime partial application (PAP)
+// ============================================================================
+//
+// Codegen's `apply_closure_values` calls `bhc_pap_create_<k>` when a closure
+// receives `k` arguments but its recorded physical arity `A` is larger.
+// Calling the lifted function anyway would leave the missing argument
+// registers as whatever garbage they held — pandoc's parsec error
+// continuations captured a code address as a ParseError this way. The PAP is
+// itself an ordinary closure:
+//
+//   [0]  fn ptr = RESUME[A - k]     (physical arity A - k)
+//   [8]  arity  = A - k
+//   [16] env[0] = the original closure
+//   [24] env[1] = k
+//   [32] env[2..] = the k captured argument words
+//
+// A later application of exactly `A - k` args (the apply switch's default
+// branch) calls the resume, which reassembles one saturated call of the
+// original closure. Fewer args pap the PAP again (env[0] chains); more args
+// take the split path — resume with `A - k`, then apply the rest to the
+// result.
+
+/// Issue one call of `closure`'s function pointer with `args` value
+/// arguments (plus the closure itself as the leading env parameter).
+///
+/// # Safety
+///
+/// `closure` must be a valid closure whose first word is a function taking
+/// `args.len()` pointer arguments after the env pointer.
+unsafe fn pap_call_closure(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
+    let fn_ptr = unsafe { *(closure as *const *const u8) };
+    let c = closure;
+    let a = args;
+    macro_rules! arg_ty {
+        ($idx:expr) => { *mut u8 };
+    }
+    macro_rules! call {
+        ($($idx:expr),*) => {{
+            let f: unsafe extern "C" fn(*mut u8 $(, arg_ty!($idx))*) -> *mut u8 =
+                unsafe { std::mem::transmute(fn_ptr) };
+            #[allow(unused_unsafe)]
+            unsafe { f(c $(, a[$idx])*) }
+        }};
+    }
+    match args.len() {
+        0 => call!(),
+        1 => call!(0),
+        2 => call!(0, 1),
+        3 => call!(0, 1, 2),
+        4 => call!(0, 1, 2, 3),
+        5 => call!(0, 1, 2, 3, 4),
+        6 => call!(0, 1, 2, 3, 4, 5),
+        7 => call!(0, 1, 2, 3, 4, 5, 6),
+        8 => call!(0, 1, 2, 3, 4, 5, 6, 7),
+        9 => call!(0, 1, 2, 3, 4, 5, 6, 7, 8),
+        10 => call!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+        11 => call!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+        12 => call!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+        n => rts_abort(&format!("PAP: saturated call of {n} args unsupported")),
+    }
+}
+
+/// Shared body of the resume functions: read the captured callee + args from
+/// the PAP env and issue the saturated call with the new args appended.
+///
+/// # Safety
+///
+/// `pap` must be a PAP built by `pap_create`.
+unsafe fn pap_resume(pap: *mut u8, new_args: &[*mut u8]) -> *mut u8 {
+    let callee = unsafe { *(pap.add(16) as *const *mut u8) };
+    let k = unsafe { *(pap.add(24) as *const i64) } as usize;
+    let mut args: Vec<*mut u8> = Vec::with_capacity(k + new_args.len());
+    for i in 0..k {
+        args.push(unsafe { *(pap.add(32 + 8 * i) as *const *mut u8) });
+    }
+    args.extend_from_slice(new_args);
+    unsafe { pap_call_closure(callee, &args) }
+}
+
+macro_rules! pap_resume_fns {
+    ($(($name:ident, $($arg:ident),*)),* $(,)?) => {
+        $(
+            unsafe extern "C" fn $name(pap: *mut u8 $(, $arg: *mut u8)*) -> *mut u8 {
+                unsafe { pap_resume(pap, &[$($arg),*]) }
+            }
+        )*
+    };
+}
+
+pap_resume_fns!(
+    (pap_resume_1, b1),
+    (pap_resume_2, b1, b2),
+    (pap_resume_3, b1, b2, b3),
+    (pap_resume_4, b1, b2, b3, b4),
+    (pap_resume_5, b1, b2, b3, b4, b5),
+    (pap_resume_6, b1, b2, b3, b4, b5, b6),
+    (pap_resume_7, b1, b2, b3, b4, b5, b6, b7),
+);
+
+/// Resume function for a PAP with `m` remaining arguments (1-indexed).
+fn pap_resume_table(m: usize) -> *const u8 {
+    match m {
+        1 => pap_resume_1 as *const u8,
+        2 => pap_resume_2 as *const u8,
+        3 => pap_resume_3 as *const u8,
+        4 => pap_resume_4 as *const u8,
+        5 => pap_resume_5 as *const u8,
+        6 => pap_resume_6 as *const u8,
+        7 => pap_resume_7 as *const u8,
+        _ => rts_abort(&format!("PAP: {m} remaining args unsupported")),
+    }
+}
+
+/// Shared body of the create entry points.
+///
+/// # Safety
+///
+/// `closure` must be a valid closure with its physical arity in word 1,
+/// strictly greater than `args.len()`.
+unsafe fn pap_create(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
+    let arity = unsafe { *(closure.add(8) as *const i64) } as usize;
+    let k = args.len();
+    let m = arity - k;
+    let pap = bhc_alloc(32 + 8 * k);
+    unsafe {
+        *(pap as *mut *const u8) = pap_resume_table(m);
+        *(pap.add(8) as *mut i64) = m as i64;
+        *(pap.add(16) as *mut *mut u8) = closure;
+        *(pap.add(24) as *mut i64) = k as i64;
+        for (i, a) in args.iter().enumerate() {
+            *(pap.add(32 + 8 * i) as *mut *mut u8) = *a;
+        }
+    }
+    pap
+}
+
+macro_rules! pap_create_fns {
+    ($(($name:ident, $($arg:ident),*)),* $(,)?) => {
+        $(
+            /// Build a PAP for an under-applied closure (see module comment).
+            ///
+            /// # Safety
+            ///
+            /// `closure` must be a valid closure whose recorded arity exceeds
+            /// the number of arguments passed here.
+            #[no_mangle]
+            pub unsafe extern "C" fn $name(closure: *mut u8 $(, $arg: *mut u8)*) -> *mut u8 {
+                unsafe { pap_create(closure, &[$($arg),*]) }
+            }
+        )*
+    };
+}
+
+pap_create_fns!(
+    (bhc_pap_create_1, a1),
+    (bhc_pap_create_2, a1, a2),
+    (bhc_pap_create_3, a1, a2, a3),
+    (bhc_pap_create_4, a1, a2, a3, a4),
+    (bhc_pap_create_5, a1, a2, a3, a4, a5),
+    (bhc_pap_create_6, a1, a2, a3, a4, a5, a6),
+);
 
 // ============================================================================
 // Primitive Operations for Haskell Type Classes

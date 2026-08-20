@@ -26690,23 +26690,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 ))
             }
         };
-        let ptr_type = self.type_mapper().ptr_type();
+        // Route through the arity-aware apply machinery: the raw single-arg
+        // indirect call this used to emit under-applied multi-parameter
+        // closures (`eerr $ mergeError err err'` with a 2-param lifted
+        // continuation read its second parameter from a garbage register).
         let arg_ptr = self.value_to_ptr(arg_val)?;
-        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
-        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
-        let result = self
-            .builder()
-            .build_indirect_call(
-                fn_type,
-                fn_ptr,
-                &[func_ptr.into(), arg_ptr.into()],
-                "apply_result",
-            )
-            .map_err(|e| CodegenError::Internal(format!("$ call failed: {:?}", e)))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal("$: returned void".to_string()))?;
-        Ok(Some(result))
+        self.apply_closure_values(func_ptr, &[arg_ptr], false)
     }
 
     /// Lower `.` - function composition: (f . g) x = f (g x).
@@ -50546,9 +50535,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         let fn_ptr = self.extract_closure_fn_ptr(closure_ptr)?;
 
-        // A single argument cannot over-apply at this level; emit directly so
-        // tail-recursive one-arg calls keep their tail-call marking.
-        if n == 1 {
+        // A single argument cannot over-apply, but it CAN under-apply (a CPS
+        // continuation invoked `eerr err` one argument at a time onto a
+        // 2-param lifted lambda reads its second parameter from a garbage
+        // register). Keep the direct emission only for tail position, where
+        // the tail-call marking matters for recursive parser loops; a
+        // non-tail single-arg apply falls through to the switch below, whose
+        // default block carries the under-application PAP check (the 1..n
+        // split-case loop is empty for n == 1).
+        if n == 1 && tail {
             return self.build_indirect_apply(fn_ptr, closure_ptr, arg_vals, tail);
         }
 
@@ -50592,8 +50587,82 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
             Vec::new();
 
-        // default: exact or unknown arity — one call with all n args.
+        // default: arity == n, arity == 0 (unknown), or arity > n. The first
+        // two get one call with all n args. UNDER-application (known arity
+        // strictly greater than n) must NOT call — the lifted function would
+        // read its missing parameters from whatever the argument registers
+        // held (parsec's error continuations captured a code address as a
+        // ParseError this way). Build a runtime PAP via the RTS instead;
+        // applying the remaining args later resumes with one saturated call.
         self.builder().position_at_end(default_bb);
+        if n <= 6 {
+            let underapp_bb = self
+                .llvm_context()
+                .append_basic_block(current_fn, "apply_underapp");
+            let allsat_bb = self
+                .llvm_context()
+                .append_basic_block(current_fn, "apply_allsat");
+            let known = self
+                .builder()
+                .build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    arity,
+                    i64t.const_zero(),
+                    "arity_known",
+                )
+                .map_err(|e| CodegenError::Internal(format!("arity known: {:?}", e)))?;
+            let over = self
+                .builder()
+                .build_int_compare(
+                    inkwell::IntPredicate::SGT,
+                    arity,
+                    i64t.const_int(n as u64, false),
+                    "arity_over",
+                )
+                .map_err(|e| CodegenError::Internal(format!("arity over: {:?}", e)))?;
+            let underapp = self
+                .builder()
+                .build_and(known, over, "is_underapp")
+                .map_err(|e| CodegenError::Internal(format!("underapp and: {:?}", e)))?;
+            self.builder()
+                .build_conditional_branch(underapp, underapp_bb, allsat_bb)
+                .map_err(|e| CodegenError::Internal(format!("br underapp: {:?}", e)))?;
+
+            self.builder().position_at_end(underapp_bb);
+            let pap_name = format!("bhc_pap_create_{}", n);
+            let pap_fn = if let Some(f) = self.module.get_function(&pap_name) {
+                f
+            } else {
+                let mut params: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> =
+                    vec![ptr_type.into()];
+                for _ in 0..n {
+                    params.push(ptr_type.into());
+                }
+                self.module
+                    .add_function(&pap_name, ptr_type.fn_type(&params, false))
+            };
+            let mut pap_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
+                vec![closure_ptr.into()];
+            for a in arg_vals {
+                pap_args.push((*a).into());
+            }
+            let r_pap = self
+                .builder()
+                .build_call(pap_fn, &pap_args, "pap")
+                .map_err(|e| CodegenError::Internal(format!("pap call: {:?}", e)))?
+                .try_as_basic_value()
+                .basic();
+            let end_pap = self.builder().get_insert_block().unwrap();
+            incoming.push((
+                r_pap.unwrap_or_else(|| ptr_type.const_null().into()),
+                end_pap,
+            ));
+            self.builder()
+                .build_unconditional_branch(merge_bb)
+                .map_err(|e| CodegenError::Internal(format!("br merge: {:?}", e)))?;
+
+            self.builder().position_at_end(allsat_bb);
+        }
         let r_all = self.build_indirect_apply(fn_ptr, closure_ptr, arg_vals, false)?;
         let end_default = self.builder().get_insert_block().unwrap();
         incoming.push((
@@ -51921,6 +51990,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 ))
             }
         };
+
+        // The scrutinee may be an unforced thunk: mergeError's equation-head
+        // match read a lazy ParseError's eval-fn pointer as its position
+        // field and parsec crashed comparing "positions" that were code
+        // addresses. bhc_force is a cheap passthrough for evaluated values
+        // and resolves indirections, so tag and field reads below see the
+        // real constructor.
+        let scrut_ptr = self.build_force(scrut_ptr.into())?.into_pointer_value();
 
         // Extract the tag from the ADT value
         let tag = self.extract_adt_tag(scrut_ptr)?;

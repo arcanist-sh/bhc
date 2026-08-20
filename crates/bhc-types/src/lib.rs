@@ -604,7 +604,8 @@ impl Subst {
     /// into Core — codegen infers value widths assuming many leaves stay
     /// unresolved, and fully resolving them regresses it. Use it only for a
     /// side channel consumed by dispatch decisions (which method to call), such
-    /// as [`TypedModule::resolved_expr_types`].
+    /// as `TypedModule::resolved_expr_types` in `bhc-typeck` (a downstream
+    /// crate, so not an intra-doc link from here).
     #[must_use]
     pub fn apply_resolved(&self, ty: &Ty) -> Ty {
         let mut current = self.apply(ty);

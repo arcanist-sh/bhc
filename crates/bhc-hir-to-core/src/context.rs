@@ -200,7 +200,7 @@ impl LowerContext {
     }
 
     /// Set the fixpoint-resolved per-node types (dispatch-only side channel).
-    /// See [`resolved_expr_ty_opt`](Self::resolved_expr_ty_opt).
+    /// See `resolved_expr_ty_opt` (the private reader this map feeds).
     pub fn set_resolved_expr_types(&mut self, resolved: crate::ExprTypeMap) {
         self.resolved_expr_types = resolved;
     }

@@ -3102,6 +3102,14 @@ impl LowerContext {
             }
             None => value_def,
         };
+        let join_rewritten;
+        let value_def = match self.hir_rewrite_join(value_def) {
+            Some(v) => {
+                join_rewritten = v;
+                &join_rewritten
+            }
+            None => value_def,
+        };
         let var = self
             .lookup_var(value_def.id)
             .cloned()
@@ -3233,6 +3241,131 @@ impl LowerContext {
     /// HIR-level eta expansion for COMPOSITION-valued bindings whose type
     /// has more arrows than the equation has patterns (see `lower_value_def`).
     /// Returns a rewritten ValueDef, or None when not applicable.
+    /// Rewrite `join m` to `m >>= \x -> x` at the HIR level.
+    ///
+    /// `join` is an external constrained function with no implementation; as
+    /// a bare occurrence it stubs at runtime (parsec's `notFollowedBy' p =
+    /// try $ join $ do … <|> …` — the stub's garbage return propagated as a
+    /// null through pandoc's many1TillChar). Rewriting to an ordinary bind
+    /// application BEFORE lowering rides the whole existing `>>=` dispatch
+    /// machinery (concrete fast paths, generic-m superclass selection,
+    /// operand-type dispatch) — a Core-level synthesis via manual dictionary
+    /// selection was tried and mis-selected.
+    fn hir_rewrite_join(&mut self, value_def: &ValueDef) -> Option<ValueDef> {
+        // Cheap pre-scan: does any equation reference a var named `join`?
+        fn mentions_join(ctx: &LowerContext, e: &bhc_hir::Expr) -> bool {
+            use bhc_hir::Expr as E;
+            match e {
+                E::Var(r) => ctx
+                    .lookup_var(r.def_id)
+                    .is_some_and(|v| v.name.as_str() == "join"),
+                E::App(f, a, _) => mentions_join(ctx, f) || mentions_join(ctx, a),
+                E::Lam(_, b, _) => mentions_join(ctx, b),
+                E::Let(_, b, _) => mentions_join(ctx, b),
+                E::Case(s, alts, _) => {
+                    mentions_join(ctx, s) || alts.iter().any(|a| mentions_join(ctx, &a.rhs))
+                }
+                E::If(c, t, f, _) => {
+                    mentions_join(ctx, c) || mentions_join(ctx, t) || mentions_join(ctx, f)
+                }
+                E::Tuple(es, _) | E::List(es, _) => es.iter().any(|e| mentions_join(ctx, e)),
+                _ => false,
+            }
+        }
+        if !value_def
+            .equations
+            .iter()
+            .any(|eq| mentions_join(self, &eq.rhs))
+        {
+            return None;
+        }
+        let bind_id = self.find_var_id_by_name(">>=")?;
+
+        fn rewrite(ctx: &mut LowerContext, e: &mut bhc_hir::Expr, bind_id: DefId) {
+            use bhc_hir::Expr as E;
+            // Recurse first so nested joins rewrite too.
+            match e {
+                E::App(f, a, _) => {
+                    rewrite(ctx, f, bind_id);
+                    rewrite(ctx, a, bind_id);
+                }
+                E::Lam(_, b, _) => rewrite(ctx, b, bind_id),
+                E::Let(_, b, _) => rewrite(ctx, b, bind_id),
+                E::Case(s, alts, _) => {
+                    rewrite(ctx, s, bind_id);
+                    for alt in alts {
+                        rewrite(ctx, &mut alt.rhs, bind_id);
+                    }
+                }
+                E::If(c, t, f, _) => {
+                    rewrite(ctx, c, bind_id);
+                    rewrite(ctx, t, bind_id);
+                    rewrite(ctx, f, bind_id);
+                }
+                E::Tuple(es, _) | E::List(es, _) => {
+                    for x in es {
+                        rewrite(ctx, x, bind_id);
+                    }
+                }
+                _ => {}
+            }
+            // Then rewrite `join m` heads — both the direct application and
+            // the `$`-applied form `join $ m` (join as `$`'s left argument),
+            // which is parsec's actual shape (`try $ join $ do ... <|> ...`).
+            if let E::App(f, m, span) = e {
+                let is_join = matches!(f.as_ref(), E::Var(r) if ctx
+                    .lookup_var(r.def_id)
+                    .is_some_and(|v| v.name.as_str() == "join"));
+                let is_dollar_join = matches!(f.as_ref(), E::App(g, h, _)
+                    if matches!(g.as_ref(), E::Var(r) if ctx
+                        .lookup_var(r.def_id)
+                        .is_some_and(|v| v.name.as_str() == "$"))
+                    && matches!(h.as_ref(), E::Var(r) if ctx
+                        .lookup_var(r.def_id)
+                        .is_some_and(|v| v.name.as_str() == "join")));
+                if is_join || is_dollar_join {
+                    let span = *span;
+                    let n = ctx.fresh_counter;
+                    ctx.fresh_counter += 1;
+                    let x_id = DefId::new(1_700_000 + n as usize);
+                    let x_name = Symbol::intern("$join_x");
+                    let ident = E::Lam(
+                        vec![bhc_hir::Pat::Var(x_name, x_id, span)],
+                        Box::new(E::Var(bhc_hir::DefRef { def_id: x_id, span })),
+                        span,
+                    );
+                    let bind_var = E::Var(bhc_hir::DefRef {
+                        def_id: bind_id,
+                        span,
+                    });
+                    let inner = std::mem::replace(m.as_mut(), E::Tuple(vec![], span));
+                    *e = E::App(
+                        Box::new(E::App(Box::new(bind_var), Box::new(inner), span)),
+                        Box::new(ident),
+                        span,
+                    );
+                }
+            }
+        }
+
+        let mut vd = value_def.clone();
+        for eq in &mut vd.equations {
+            let mut rhs = eq.rhs.clone();
+            rewrite(self, &mut rhs, bind_id);
+            eq.rhs = rhs;
+        }
+        Some(vd)
+    }
+
+    /// Find a registered variable's `DefId` by name (linear scan; used for
+    /// low-frequency rewrites only).
+    fn find_var_id_by_name(&self, name: &str) -> Option<DefId> {
+        self.var_map
+            .iter()
+            .find(|(_, v)| v.name.as_str() == name)
+            .map(|(id, _)| *id)
+    }
+
     fn hir_eta_expand_composition(&mut self, value_def: &ValueDef) -> Option<ValueDef> {
         fn arrows(mut t: &Ty) -> usize {
             let mut n = 0;

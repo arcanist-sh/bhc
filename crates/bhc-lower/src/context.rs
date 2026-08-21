@@ -159,13 +159,18 @@ pub type DefMap = IndexMap<DefId, DefInfo>;
 
 /// An imported class as threaded from module interfaces:
 /// (class name, method names, superclass names, defaulted-method names,
-/// per-method declared-type arrow counts).
+/// per-method declared-type arrow counts, class type-parameter count).
+/// The parameter count matters downstream: dictionary machinery guards
+/// (e.g. superclass method selection) must know a multi-parameter class
+/// (`Stream s m t`) from a single-parameter one — hardcoding 1 let
+/// selection walk through Stream's deliberately-null Monad slot.
 pub type InterfaceClassEntry = (
     Symbol,
     Vec<Symbol>,
     Vec<Symbol>,
     Vec<Symbol>,
     Vec<(Symbol, usize)>,
+    usize,
 );
 
 /// The lowering context, holding all state needed during lowering.

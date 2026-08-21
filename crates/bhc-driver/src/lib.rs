@@ -2816,7 +2816,7 @@ impl Compiler {
         let known_classes: FxHashSet<Symbol> = ctx
             .interface_classes
             .iter()
-            .map(|(name, _, _, _, _)| *name)
+            .map(|(name, _, _, _, _, _)| *name)
             .collect();
         let known_symbols: FxHashSet<(Symbol, String)> = ctx
             .interface_symbols
@@ -2888,6 +2888,7 @@ impl Compiler {
                     superclass_names,
                     defaulted_names,
                     method_arities,
+                    class.params.len().max(1),
                 ));
             }
 
@@ -3364,6 +3365,7 @@ impl Compiler {
                 superclass_names,
                 defaulted_names,
                 method_arities,
+                class.params.len().max(1),
             ));
         }
 

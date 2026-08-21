@@ -2384,11 +2384,19 @@ impl LowerContext {
             Vec<Symbol>,
             Vec<Symbol>,
             Vec<(Symbol, usize)>,
+            usize,
         )],
         instances: &[(Symbol, Vec<Ty>, Vec<Symbol>)],
     ) {
         let mut next_default_id: usize = 800_000;
-        for (class_name, method_names, superclass_names, defaulted_names, method_arities) in classes
+        for (
+            class_name,
+            method_names,
+            superclass_names,
+            defaulted_names,
+            method_arities,
+            param_count,
+        ) in classes
         {
             if self.class_registry.lookup_class(*class_name).is_some() {
                 continue; // local declaration wins
@@ -2425,7 +2433,11 @@ impl LowerContext {
             self.class_registry
                 .register_class(crate::dictionary::ClassInfo {
                     name: *class_name,
-                    param_count: 1,
+                    // The REAL parameter count from the interface: the
+                    // superclass-selection guard keys on it, and hardcoding 1
+                    // let dispatch walk through a multi-param class's
+                    // deliberately-null superclass slot (Stream's Monad).
+                    param_count: (*param_count).max(1),
                     methods: method_names.clone(),
                     method_types,
                     // Carry the class's superclasses: `select_method` places

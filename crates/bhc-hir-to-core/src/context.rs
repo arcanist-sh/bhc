@@ -1996,6 +1996,23 @@ impl LowerContext {
         self.current_binding_sig.as_ref()
     }
 
+    /// Narrow the binding signature to a local (`let`/`where`) binding while
+    /// its right-hand side is lowered, returning the previous value to hand
+    /// back to [`Self::restore_current_binding_sig`]. A `None` argument leaves
+    /// the enclosing definition's signature in place, which is still better
+    /// context than nothing.
+    pub(crate) fn set_current_binding_sig(&mut self, ty: Option<Ty>) -> Option<Ty> {
+        match ty {
+            Some(ty) => self.current_binding_sig.replace(ty),
+            None => self.current_binding_sig.clone(),
+        }
+    }
+
+    /// Restore the signature saved by [`Self::set_current_binding_sig`].
+    pub(crate) fn restore_current_binding_sig(&mut self, saved: Option<Ty>) {
+        self.current_binding_sig = saved;
+    }
+
     /// Install the type-synonym definitions threaded from typeck.
     pub fn set_type_aliases(&mut self, aliases: FxHashMap<Symbol, (Vec<bhc_types::TyVar>, Ty)>) {
         self.type_aliases = aliases;

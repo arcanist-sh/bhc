@@ -1120,7 +1120,29 @@ fn lower_monad_operand(
     monad_ty: &Ty,
     _span: Span,
 ) -> LowerResult<core::Expr> {
-    let expected = Ty::App(Box::new(monad_ty.clone()), Box::new(Ty::Error));
+    // The dispatched monad type can still carry variables — inside a local
+    // (`let`/`where`) binding the operands are bare (`anyChar`) and pin
+    // nothing, so it arrives as `ParsecT ?s ?u ?m`. Typing the operand against
+    // that pins none of `s`/`u`/`m`, leaving the operand's own constraint
+    // (`Stream ?s ?m Char`) unresolvable and the value emitted still awaiting
+    // its dictionary. The enclosing binding's signature does determine them:
+    // match against its result monad and substitute. Dispatch itself is left
+    // alone — only the operand's expected type improves.
+    let mut monad = monad_ty.clone();
+    if has_type_variables(&monad) {
+        if let Some(sig) = ctx.current_binding_sig().cloned() {
+            let mut result = &sig;
+            while let Ty::Fun(_, ret) = result {
+                result = ret.as_ref();
+            }
+            if let Ty::App(sig_monad, _) = result {
+                let mut subst = bhc_types::Subst::new();
+                match_ty(&monad, sig_monad, &mut subst);
+                monad = subst.apply(&monad);
+            }
+        }
+    }
+    let expected = Ty::App(Box::new(monad), Box::new(Ty::Error));
     lower_value_arg(ctx, arg, Some(&expected))
 }
 
@@ -2969,7 +2991,7 @@ fn lower_let_bindings(
                 hir::Pat::Var(name, def_id, _) => (*name, *def_id),
                 _ => unreachable!("guarded by all(Pat::Var)"),
             };
-            let rhs = lower_expr(ctx, &b.rhs)?;
+            let rhs = lower_local_binding_rhs(ctx, b, def_id)?;
             let fvs = collect_free_vars(&rhs);
             let d: Vec<usize> = (0..names.len())
                 .filter(|&j| fvs.contains(&names[j]))
@@ -3091,6 +3113,73 @@ fn strongly_connected_components(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
 /// Lower a single let binding.
 /// For simple variable patterns, creates a let binding.
 /// For complex patterns, creates a case expression.
+/// Lower a local (`let`/`where`) binding's right-hand side as a VALUE at the
+/// binding's own type.
+///
+/// Plain `lower_expr` skips dictionary application, so a constrained value
+/// bound locally — `let s = anyChar in …`, or parsec's
+/// `manyTill p end = scan where scan = …` — stays an undicted closure still
+/// awaiting its `Stream` dictionary. Consumers then read that closure's header
+/// as the value's own, and every later argument shifts by one. Top-level
+/// bindings already get this treatment via `lower_value_def`; local ones did
+/// not.
+///
+/// The type comes from the binding's signature when it has one, otherwise from
+/// its recorded scheme or the RHS's resolved occurrence type. With no type
+/// available `lower_value_arg` falls back to plain lowering, so this is a
+/// superset of the previous behaviour.
+fn lower_local_binding_rhs(
+    ctx: &mut LowerContext,
+    binding: &hir::Binding,
+    def_id: DefId,
+) -> LowerResult<core::Expr> {
+    let mut expected: Option<Ty> = binding
+        .sig
+        .as_ref()
+        .map(|s| s.ty.clone())
+        .or_else(|| ctx.lookup_scheme(def_id).map(|s| s.ty.clone()))
+        .or_else(|| ctx.resolved_expr_ty_opt(binding.rhs.span()));
+
+    // A local binding's recorded occurrence type usually keeps the monad
+    // parameters open — `let s = anyChar` records `ParsecT ?s ?u ?m Char`,
+    // because nothing in the binding itself pins them. The ENCLOSING
+    // binding's signature does, so match the occurrence against that
+    // signature's result and parameter types and substitute what they pin.
+    // Without this the constraint stays `Stream ?s ?m Char`, resolves to
+    // nothing, and the value is emitted still awaiting its dictionary.
+    if let Some(ty) = expected.as_mut() {
+        if has_type_variables(ty) {
+            if let Some(sig) = ctx.current_binding_sig().cloned() {
+                let mut candidates = Vec::new();
+                let mut cur = &sig;
+                while let Ty::Fun(param, ret) = cur {
+                    candidates.push(param.as_ref().clone());
+                    cur = ret.as_ref();
+                }
+                candidates.push(cur.clone());
+                for cand in candidates {
+                    if !has_type_variables(ty) {
+                        break;
+                    }
+                    let mut subst = bhc_types::Subst::new();
+                    match_ty(ty, &cand, &mut subst);
+                    *ty = subst.apply(ty);
+                }
+            }
+        }
+    }
+
+    // Lower the RHS under the binding's own type, the way `lower_value_def`
+    // does for a top-level binding. Occurrences *inside* the RHS (the
+    // `anyChar` in `scan = do { x <- anyChar; … }`) repair their own
+    // unresolved types against this signature; without it only the enclosing
+    // definition's signature is visible and the inner constraint stays open.
+    let saved_sig = ctx.set_current_binding_sig(expected.clone());
+    let lowered = lower_value_arg(ctx, &binding.rhs, expected.as_ref());
+    ctx.restore_current_binding_sig(saved_sig);
+    lowered
+}
+
 fn lower_single_let_binding(
     ctx: &mut LowerContext,
     binding: &hir::Binding,
@@ -3102,7 +3191,7 @@ fn lower_single_let_binding(
     match &binding.pat {
         // Simple variable pattern: let x = e in body
         hir::Pat::Var(name, def_id, _) => {
-            let rhs = lower_expr(ctx, &binding.rhs)?;
+            let rhs = lower_local_binding_rhs(ctx, binding, *def_id)?;
             let var = ctx.lookup_var(*def_id).cloned().unwrap_or_else(|| Var {
                 name: *name,
                 id: ctx.fresh_id(),

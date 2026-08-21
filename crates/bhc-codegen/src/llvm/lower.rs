@@ -51999,6 +51999,44 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // real constructor.
         let scrut_ptr = self.build_force(scrut_ptr.into())?.into_pointer_value();
 
+        // Null is the infectious exception sentinel (bhc_force passes it
+        // through): a null scrutinee must PROPAGATE null upward, not have its
+        // tag/fields dereferenced — a lazy projection thunk in pandoc's
+        // Parsing.General forced a null capture and segfaulted on the field
+        // read. Mirrors lower_closure_call's closure_null_skip.
+        if let Some(current_fn) = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+        {
+            let returns_ptr = current_fn
+                .get_type()
+                .get_return_type()
+                .is_some_and(|t| matches!(t, inkwell::types::BasicTypeEnum::PointerType(_)));
+            if returns_ptr {
+                let ptr_type = self.type_mapper().ptr_type();
+                let is_null = self
+                    .builder()
+                    .build_is_null(scrut_ptr, "scrut_is_null")
+                    .map_err(|e| CodegenError::Internal(format!("null check: {:?}", e)))?;
+                let skip_block = self
+                    .llvm_context()
+                    .append_basic_block(current_fn, "scrut_null_skip");
+                let cont_block = self
+                    .llvm_context()
+                    .append_basic_block(current_fn, "scrut_case_cont");
+                self.builder()
+                    .build_conditional_branch(is_null, skip_block, cont_block)
+                    .map_err(|e| CodegenError::Internal(format!("null br: {:?}", e)))?;
+                self.builder().position_at_end(skip_block);
+                let null = ptr_type.const_null();
+                self.builder()
+                    .build_return(Some(&null))
+                    .map_err(|e| CodegenError::Internal(format!("null ret: {:?}", e)))?;
+                self.builder().position_at_end(cont_block);
+            }
+        }
+
         // Extract the tag from the ADT value
         let tag = self.extract_adt_tag(scrut_ptr)?;
 

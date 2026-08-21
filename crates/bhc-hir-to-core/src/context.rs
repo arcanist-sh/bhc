@@ -138,6 +138,19 @@ pub struct LowerContext {
     /// The class of the instance whose method bodies are being lowered
     /// (paired with `current_instance_type`).
     current_instance_class: Option<Symbol>,
+    /// The declared scheme TYPE of the top-level binding currently being
+    /// lowered. An occurrence's typeck-recorded type inside a signed binding
+    /// can keep the signature's instantiation VARIABLES (`optional (char 'z')`
+    /// inside `poly :: Monad m => ParsecT String () m SourcePos` records
+    /// `ParsecT s u m (Maybe Char)`); matching the occurrence's result against
+    /// this signature's result pins them (`s := [Char]`, `u := ()`), so the
+    /// Stream dictionary resolves instead of being silently omitted.
+    current_binding_sig: Option<Ty>,
+    /// Type-synonym definitions (name -> (params, rhs)), local + imported,
+    /// threaded from typeck. Declared signatures keep synonyms unexpanded
+    /// (`MarkdownParser m a`); dictionary resolution expands them before
+    /// matching against constructor-shaped occurrence types.
+    type_aliases: FxHashMap<Symbol, (Vec<bhc_types::TyVar>, Ty)>,
     /// Depth of superclass-dispatched bind operand lowering (see
     /// `select_method_via_superclass` and expr.rs Case 3a').
     superclass_bind_depth: usize,
@@ -178,6 +191,8 @@ impl LowerContext {
             foreign_imports: Vec::new(),
             monad_type_stack: Vec::new(),
             current_instance_type: None,
+            current_binding_sig: None,
+            type_aliases: FxHashMap::default(),
             current_instance_class: None,
             superclass_bind_depth: 0,
             existential_dict_binders: Vec::new(),
@@ -1975,6 +1990,65 @@ impl LowerContext {
         self.current_instance_type.as_ref()
     }
 
+    /// The declared type of the top-level binding currently being lowered
+    /// (see the field doc).
+    pub(crate) fn current_binding_sig(&self) -> Option<&Ty> {
+        self.current_binding_sig.as_ref()
+    }
+
+    /// Install the type-synonym definitions threaded from typeck.
+    pub fn set_type_aliases(&mut self, aliases: FxHashMap<Symbol, (Vec<bhc_types::TyVar>, Ty)>) {
+        self.type_aliases = aliases;
+    }
+
+    /// Expand type synonyms in `ty` (recursively, depth-capped): the head of
+    /// an application spine naming a registered alias with enough arguments
+    /// is replaced by the alias body with its parameters substituted.
+    pub(crate) fn expand_type_aliases(&self, ty: &Ty) -> Ty {
+        fn go(aliases: &FxHashMap<Symbol, (Vec<bhc_types::TyVar>, Ty)>, ty: &Ty, depth: u32) -> Ty {
+            if depth > 16 {
+                return ty.clone();
+            }
+            // Collect the application spine.
+            let mut head = ty;
+            let mut args: Vec<&Ty> = Vec::new();
+            while let Ty::App(f, a) = head {
+                args.push(a.as_ref());
+                head = f.as_ref();
+            }
+            args.reverse();
+            if let Ty::Con(tc) = head {
+                if let Some((params, rhs)) = aliases.get(&tc.name) {
+                    if params.len() <= args.len() {
+                        let mut s = bhc_types::Subst::new();
+                        for (p, a) in params.iter().zip(&args) {
+                            s.insert(p, (*a).clone());
+                        }
+                        let expanded = s.apply(rhs);
+                        let rebuilt = args[params.len()..].iter().fold(expanded, |acc, a| {
+                            Ty::App(Box::new(acc), Box::new((*a).clone()))
+                        });
+                        return go(aliases, &rebuilt, depth + 1);
+                    }
+                }
+            }
+            match ty {
+                Ty::App(f, a) => Ty::App(
+                    Box::new(go(aliases, f, depth + 1)),
+                    Box::new(go(aliases, a, depth + 1)),
+                ),
+                Ty::Fun(a, b) => Ty::Fun(
+                    Box::new(go(aliases, a, depth + 1)),
+                    Box::new(go(aliases, b, depth + 1)),
+                ),
+                Ty::List(t) => Ty::List(Box::new(go(aliases, t, depth + 1))),
+                Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| go(aliases, t, depth + 1)).collect()),
+                other => other.clone(),
+            }
+        }
+        go(&self.type_aliases, ty, 0)
+    }
+
     pub(crate) fn current_instance_class(&self) -> Option<Symbol> {
         self.current_instance_class
     }
@@ -3033,6 +3107,15 @@ impl LowerContext {
             .cloned()
             .ok_or_else(|| LowerError::Internal("missing variable for value def".into()))?;
 
+        // Record the binding's declared type so occurrence-type gaps inside
+        // the body can be repaired against the signature (see
+        // `current_binding_sig`). Saved/restored because value defs nest.
+        let saved_binding_sig = self.current_binding_sig.take();
+        // Expand type synonyms ONCE here, not per occurrence: the fallback in
+        // dictionary resolution reads this on a hot path.
+        let declared = self.lookup_scheme(value_def.id).map(|s| s.ty.clone());
+        self.current_binding_sig = declared.map(|t| self.expand_type_aliases(&t));
+
         // Check if the definition has user-defined class constraints.
         // Only user-defined classes use dictionary-passing; builtin classes
         // (Eq, Ord, Num, Show, etc.) are dispatched via hardcoded codegen.
@@ -3092,6 +3175,7 @@ impl LowerContext {
             }
         }
 
+        self.current_binding_sig = saved_binding_sig;
         Ok(Some(Bind::NonRec(var, Box::new(body))))
     }
 

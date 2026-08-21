@@ -1323,6 +1323,7 @@ impl Compiler {
             Some(&typed.expr_types),
             Some(&typed.resolved_expr_types),
             imports,
+            Some(&typed.type_aliases),
         )
         .map_err(CompileError::from)?;
 

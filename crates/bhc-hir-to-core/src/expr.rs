@@ -824,7 +824,20 @@ fn peel_app_chain(expr: &hir::Expr) -> Option<(&DefRef, Vec<&hir::Expr>)> {
 fn match_ty(param: &Ty, concrete: &Ty, subst: &mut bhc_types::Subst) {
     match (param, concrete) {
         (Ty::Var(tv), c) => {
-            if subst.get(tv).is_none() {
+            // Concrete wins over an earlier var-to-var binding: typeck can
+            // record an occurrence whose PARAMETER portion keeps signature
+            // variables while its RESULT portion is substituted
+            // (`optional`'s occ = `ParsecT s u m Char -> ParsecT [Char] ()
+            // m' a'`); first-wins bound `s := s-var` from the parameter side
+            // and the concrete `[Char]` from the result side was discarded —
+            // the Stream dictionary then failed to resolve. No cloning in the
+            // check: this is a hot path (a stray `prev.clone()` here made
+            // citeproc-heavy modules ~50x slower to compile).
+            let upgrade = match subst.get(tv) {
+                None => true,
+                Some(prev) => has_type_variables(prev) && !has_type_variables(c),
+            };
+            if upgrade {
                 subst.insert(tv, c.clone());
             }
         }
@@ -1157,13 +1170,71 @@ fn resolve_constrained_fn_dicts(
         .resolved_expr_ty_opt(head_ref.span)
         .or_else(|| ctx.expr_ty_opt(head_ref.span))
     {
+        if std::env::var("BHC_DBG_DICT4").is_ok() {
+            eprintln!("DICT4: occ_ty at head span = {occ_ty:?}");
+        }
         match_ty(&scheme_ty, &occ_ty, &mut subst);
+
+        // The occurrence's recorded type can keep the ENCLOSING SIGNATURE'S
+        // instantiation variables unresolved (`optional (char 'z')` inside
+        // `poly :: Monad m => ParsecT String () m SourcePos` records
+        // `ParsecT s u m (Maybe Char)` — s/u never substituted). Those same
+        // variables appear in the signature's result position with their
+        // concrete instantiations, so matching the occurrence's RESULT
+        // against the signature's RESULT pins them (`s := [Char]`,
+        // `u := ()`); `match_ty` binds pattern variables and tolerates the
+        // differing final type argument. Without this the Stream dictionary
+        // silently failed to resolve and every argument shifted at runtime.
+        if let Some(sig_ty) = ctx.current_binding_sig().cloned() {
+            fn result_of(t: &Ty) -> &Ty {
+                match t {
+                    Ty::Fun(_, r) => result_of(r),
+                    other => other,
+                }
+            }
+            // The stored signature is already synonym-expanded (pandoc's
+            // `MarkdownParser m a` = `ParsecT Sources ParserState m a`) —
+            // see `lower_value_def`, which expands once per binding.
+            let occ_result = result_of(&occ_ty).clone();
+            let sig_result = result_of(&sig_ty).clone();
+            match_ty(&occ_result, &sig_result, &mut subst);
+        }
+    } else if std::env::var("BHC_DBG_DICT4").is_ok() {
+        eprintln!("DICT4: NO occ ty at head span {:?}", head_ref.span);
     }
 
     // Resolve one dictionary per constraint at the instantiated types.
+    // Fixpoint apply: the signature-result fallback above binds the
+    // occurrence's variables (scheme var -> occ var -> concrete is a
+    // two-step chain a single-pass apply would leave at the occ var).
     let mut dicts = Vec::with_capacity(user_constraints.len());
     for c in &user_constraints {
-        let mut concrete_args: Vec<Ty> = c.args.iter().map(|t| subst.apply(t)).collect();
+        // `String` from a declared signature stays an unexpanded synonym and
+        // never matches an instance head shaped `[tok]`; expand it.
+        fn expand_string(t: &Ty) -> Ty {
+            match t {
+                Ty::Con(tc) if tc.name.as_str() == "String" => Ty::List(Box::new(Ty::Con(
+                    bhc_types::TyCon::new(Symbol::intern("Char"), bhc_types::Kind::Star),
+                ))),
+                Ty::App(f, a) => Ty::App(Box::new(expand_string(f)), Box::new(expand_string(a))),
+                Ty::List(inner) => Ty::List(Box::new(expand_string(inner))),
+                Ty::Fun(a, b) => Ty::Fun(Box::new(expand_string(a)), Box::new(expand_string(b))),
+                other => other.clone(),
+            }
+        }
+        // Exactly two applies, not the fixpoint: the chain here is
+        // structurally scheme-var -> occurrence-var -> concrete (the
+        // signature fallback binds the second hop). `apply_resolved`'s
+        // fixpoint re-walked the (sometimes enormous — citeproc) substituted
+        // types until stable and made those modules ~50x slower to compile.
+        let mut concrete_args: Vec<Ty> = c
+            .args
+            .iter()
+            .map(|t| {
+                let once = subst.apply(t);
+                expand_string(&subst.apply(&once))
+            })
+            .collect();
         // Complete functional-dependency-determined arguments. For a
         // multi-parameter class like `Stream s t | s -> t`, matching the
         // function's parameter types only fixes `s` (the argument-carried

@@ -8954,11 +8954,35 @@ fn lower_newtype_decl_with_accessors(
         bhc_types::Ty::App(Box::new(acc), Box::new(bhc_types::Ty::Var(p.clone())))
     });
 
-    // Generate field accessor functions for record constructors
+    // Generate field accessor functions for record constructors.
+    //
+    // A NEWTYPE accessor must be IDENTITY, not a constructor match: the
+    // constructor is erased at runtime (constructor_wrapper is `mov x0,x1`),
+    // so the runtime value of `ParsecT f` IS `f` — often a raw closure.
+    // The generic `\(Con x) -> x` form compiles through the decision-tree
+    // pattern path, which reads an ADT field at offset +8; applied to the
+    // erased value that returned the CLOSURE'S ARITY WORD (parsec's
+    // `unParser` handed `5` to the CPS machinery, which forced it —
+    // the readMarkdown runtime crash).
     let mut accessors = Vec::new();
     if let hir::ConFields::Named(fields) = &con.fields {
-        for (field_idx, field) in fields.iter().enumerate() {
-            let mut accessor = generate_field_accessor(ctx, &con, fields.len(), field_idx, field);
+        for field in fields.iter() {
+            let arg_id = ctx.fresh_def_id();
+            let arg_name = Symbol::intern("_nt_val");
+            ctx.define(arg_id, arg_name, DefKind::Value, field.span);
+            let equation = hir::Equation {
+                pats: vec![hir::Pat::Var(arg_name, arg_id, field.span)],
+                guards: vec![],
+                rhs: hir::Expr::Var(ctx.def_ref(arg_id, field.span)),
+                span: field.span,
+            };
+            let mut accessor = hir::ValueDef {
+                id: field.id,
+                name: field.name,
+                sig: None,
+                equations: vec![equation],
+                span: field.span,
+            };
             // Give the accessor an explicit signature `N a1..an -> field.ty`.
             // Its generated body `\(N x) -> x` otherwise infers a type that
             // over-generalizes the field to a free var (forall a b. N a -> b);

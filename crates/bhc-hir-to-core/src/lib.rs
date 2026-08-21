@@ -146,6 +146,7 @@ pub fn lower_module_with_defs_and_constructors(
         expr_types,
         None,
         None,
+        None,
     )
 }
 
@@ -153,7 +154,7 @@ pub fn lower_module_with_defs_and_constructors(
 /// registering classes and instances loaded from module interfaces
 /// (`(classes, instances)`: see `LowerContext::register_imported_instances`)
 /// so class-method calls specialize to imported instance implementations.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn lower_module_with_imports(
     module: &HirModule,
     defs: Option<&DefMap>,
@@ -175,8 +176,19 @@ pub fn lower_module_with_imports(
             Vec<bhc_intern::Symbol>,
         )],
     )>,
+    type_aliases: Option<
+        &rustc_hash::FxHashMap<bhc_intern::Symbol, (Vec<bhc_types::TyVar>, bhc_types::Ty)>,
+    >,
 ) -> LowerResult<CoreModule> {
     let mut ctx = LowerContext::new();
+
+    // Type-synonym definitions (local + imported, from typeck): the
+    // signature-fallback in dictionary resolution must see through synonyms
+    // (`MarkdownParser m a` = `ParsecT Sources ParserState m a`) to match a
+    // signature's result against a ParsecT-shaped occurrence.
+    if let Some(aliases) = type_aliases {
+        ctx.set_type_aliases(aliases.clone());
+    }
 
     // If we have definition mappings from the lowering pass, use them
     // to register builtins with the correct DefIds

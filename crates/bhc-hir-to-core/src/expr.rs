@@ -2260,6 +2260,40 @@ fn lower_app(
                                 None
                             }
                         });
+
+                        // A dispatch type recovered from an operand's scheme is the
+                        // bare head constructor (`ParsecT`), which names the monad but
+                        // leaves it unapplied — and instance resolution matches on the
+                        // applied form, so it found nothing and the method stayed an
+                        // undispatched builtin `>>=`. At runtime that generic bind ran
+                        // its continuation even after the parser had failed, so inside
+                        // a constrained binding `char '!'` appeared to succeed on 'a'.
+                        // The enclosing signature supplies the applied form —
+                        // `ParsecT s u m`, arguments still variables, which is exactly
+                        // what the parametric instance matches.
+                        let inferred = inferred.map(|ty| {
+                            let Ty::Con(ref con) = ty else {
+                                return ty;
+                            };
+                            let Some(sig) = ctx.current_binding_sig() else {
+                                return ty;
+                            };
+                            let mut result = sig;
+                            while let Ty::Fun(_, ret) = result {
+                                result = ret.as_ref();
+                            }
+                            let Ty::App(monad, _) = result else {
+                                return ty;
+                            };
+                            let mut head = monad.as_ref();
+                            while let Ty::App(f2, _) = head {
+                                head = f2.as_ref();
+                            }
+                            match head {
+                                Ty::Con(h) if h.name == con.name => monad.as_ref().clone(),
+                                _ => ty,
+                            }
+                        });
                         if let Some(concrete_ty) = inferred {
                             // `mconcat :: [a] -> a` — the class parameter is the
                             // list's ELEMENT type, but the argument-driven

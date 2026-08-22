@@ -50792,6 +50792,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
 
             Bind::Rec(bindings) => {
+                // A self-recursive binding whose right-hand side is a VALUE (no
+                // lambda parameters) is not a function to lift: `ones = 1 : ones`
+                // denotes a self-referential structure, and `scan` in parsec's
+                // `manyTill p end = scan where scan = …` denotes a parser. Lifting
+                // produced a closure over a zero-argument *producer* of the value
+                // and handed that out as if it were the value; since its recorded
+                // arity is 0 ("unknown"), callers applied their arguments straight
+                // to the producer. `take 3 ones` then read garbage, and
+                // `runParsecT` got the producer back instead of a parse result.
+                // Build the knot instead — see `lower_rec_value_binding`.
+                // Restricted to a value that is COMPUTED. A constructor-headed
+                // right-hand side (`ones = 1 : ones`) builds a cyclic data
+                // structure, and consuming one needs list walks to force the
+                // tail they read — which they do not yet do — so that shape is
+                // left on the old path rather than traded for a crash.
+                if bindings.len() == 1
+                    && self.count_lambda_params(bindings[0].1.as_ref()) == 0
+                    && !self.rec_rhs_builds_data(bindings[0].1.as_ref())
+                {
+                    let (var, rhs) = &bindings[0];
+                    return self.lower_rec_value_binding(var, rhs.as_ref(), body);
+                }
+
                 // For recursive let bindings, we lift them to top-level functions.
                 // Free variables from the enclosing scope are captured via the
                 // closure environment (param 0).
@@ -50889,6 +50912,166 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 Ok(result)
             }
         }
+    }
+
+    /// Whether a recursive value binding constructs a cyclic data structure
+    /// (`ones = 1 : ones`) rather than computing a value (`scan = p <|> q`).
+    /// Decided by the head of the application spine being a data constructor.
+    fn rec_rhs_builds_data(&self, expr: &Expr) -> bool {
+        let mut head = expr;
+        loop {
+            match head {
+                Expr::App(f, _, _) => head = f.as_ref(),
+                Expr::Let(_, b, _) => head = b.as_ref(),
+                _ => break,
+            }
+        }
+        match head {
+            Expr::Var(var, _) => {
+                let name = var.name.as_str();
+                self.constructor_metadata.contains_key(name)
+                    || name == ":"
+                    || name == "[]"
+                    || name.starts_with('(')
+                    || name.starts_with(|c: char| c.is_uppercase())
+            }
+            _ => false,
+        }
+    }
+
+    /// Lower a self-recursive `let`/`where` binding whose right-hand side is a
+    /// value rather than a function (a parser combinator's `scan`).
+    ///
+    /// Such a binding is a thunk that refers to itself, so the recursive
+    /// occurrence must be *the same object* the binding produces: forcing it
+    /// once memoises the result, and an occurrence reached before that (only
+    /// possible under a lambda, as in `p >>= \x -> scan >>= …`) sees the
+    /// finished value. Allocating the thunk before generating its own body is
+    /// what ties the knot — the body reads the binding back out of a slot in
+    /// the thunk's own environment.
+    fn lower_rec_value_binding(
+        &mut self,
+        var: &Var,
+        rhs: &Expr,
+        body: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_type = self.type_mapper().i64_type();
+
+        // Capture the right-hand side's free variables except the binding
+        // itself; its occurrences are served by the self slot appended below.
+        let free = self.free_vars(rhs);
+        let mut captured: Vec<(VarId, BasicValueEnum<'ctx>)> = Vec::new();
+        for var_id in &free {
+            if *var_id == var.id {
+                continue;
+            }
+            if let Some(val) = self.env.get(var_id) {
+                captured.push((*var_id, *val));
+            }
+        }
+        let self_index = captured.len();
+        let env_size = (self_index + 1) as u32;
+
+        let fn_name = self.next_thunk_name();
+        let fn_type = ptr_type.fn_type(&[ptr_type.into()], false);
+        let eval_fn = self.module.add_internal_function(&fn_name, fn_type);
+
+        // Allocate in the enclosing frame, with the self slot left null until
+        // the address exists to store into it.
+        let mut env_init = captured.clone();
+        env_init.push((var.id, ptr_type.const_null().into()));
+        let thunk_ptr =
+            self.alloc_thunk(eval_fn.as_global_value().as_pointer_value(), &env_init)?;
+
+        let thunk_ty = self.thunk_type(env_size);
+        let env_slot = self
+            .builder()
+            .build_struct_gep(thunk_ty, thunk_ptr, 3, "rec_env_slot")
+            .map_err(|e| CodegenError::Internal(format!("failed to get rec env slot: {:?}", e)))?;
+        let self_slot = unsafe {
+            self.builder()
+                .build_in_bounds_gep(
+                    ptr_type.array_type(env_size),
+                    env_slot,
+                    &[
+                        i64_type.const_zero(),
+                        i64_type.const_int(self_index as u64, false),
+                    ],
+                    "rec_self_slot",
+                )
+                .map_err(|e| {
+                    CodegenError::Internal(format!("failed to get rec self slot: {:?}", e))
+                })?
+        };
+        self.builder()
+            .build_store(self_slot, thunk_ptr)
+            .map_err(|e| CodegenError::Internal(format!("failed to store rec self: {:?}", e)))?;
+
+        // Generate the body, reading every binding — including the recursive
+        // one — out of the environment parameter.
+        let current_block = self.builder().get_insert_block();
+        let entry = self.llvm_context().append_basic_block(eval_fn, "entry");
+        self.builder().position_at_end(entry);
+        let old_env = std::mem::take(&mut self.env);
+
+        let env_ptr = eval_fn
+            .get_first_param()
+            .ok_or_else(|| CodegenError::Internal("missing env param".to_string()))?
+            .into_pointer_value();
+        let env_array_type = ptr_type.array_type(env_size);
+        let env_ids: Vec<VarId> = captured
+            .iter()
+            .map(|(v, _)| *v)
+            .chain(std::iter::once(var.id))
+            .collect();
+        for (i, var_id) in env_ids.iter().enumerate() {
+            let elem_ptr = unsafe {
+                self.builder()
+                    .build_in_bounds_gep(
+                        env_array_type,
+                        env_ptr,
+                        &[i64_type.const_zero(), i64_type.const_int(i as u64, false)],
+                        &format!("rec_env_load_{}", i),
+                    )
+                    .map_err(|e| {
+                        CodegenError::Internal(format!("failed to get env elem ptr: {:?}", e))
+                    })?
+            };
+            let elem_val = self
+                .builder()
+                .build_load(ptr_type, elem_ptr, &format!("rec_env_val_{}", i))
+                .map_err(|e| CodegenError::Internal(format!("failed to load env elem: {:?}", e)))?;
+            self.env.insert(*var_id, elem_val);
+        }
+
+        let result = self.lower_expr(rhs)?;
+        let has_terminator = self
+            .builder()
+            .get_insert_block()
+            .map(|bb| bb.get_terminator().is_some())
+            .unwrap_or(false);
+        if !has_terminator {
+            let ret: BasicValueEnum<'ctx> = match result {
+                Some(val) => self.value_to_ptr(val)?.into(),
+                None => ptr_type.const_null().into(),
+            };
+            self.builder()
+                .build_return(Some(&ret))
+                .map_err(|e| CodegenError::Internal(format!("failed to build return: {:?}", e)))?;
+        }
+
+        self.env = old_env;
+        if let Some(block) = current_block {
+            self.builder().position_at_end(block);
+        }
+
+        self.env.insert(var.id, thunk_ptr.into());
+        self.thunked_vars.insert(var.id);
+        let result = self.lower_expr(body)?;
+        self.env.remove(&var.id);
+        self.thunked_vars.remove(&var.id);
+        Ok(result)
     }
 
     /// Lower a recursive function that was lifted from a let binding.

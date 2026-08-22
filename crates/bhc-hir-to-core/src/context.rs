@@ -12,7 +12,7 @@ use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
 use bhc_types::{Constraint, Kind, Scheme, Ty, TyCon, TyVar};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::deriving::{DerivedInstance, DerivingContext};
 use crate::dictionary::{ClassInfo, ClassRegistry, DictContext, InstanceInfo};
@@ -146,6 +146,17 @@ pub struct LowerContext {
     /// this signature's result pins them (`s := [Char]`, `u := ()`), so the
     /// Stream dictionary resolves instead of being silently omitted.
     current_binding_sig: Option<Ty>,
+
+    /// Head type constructors of instances that arrived through a module
+    /// interface, keyed by class — `(Monad, ParsecT)` when compiling a module
+    /// that *imports* parsec.
+    ///
+    /// This distinguishes a use site from the instance's own implementation.
+    /// Dispatching a method inside the module that defines the instance would
+    /// rewrite the generic implementation into a call to itself; only a
+    /// consumer may dispatch. See the signature fallback in
+    /// `lower_app`'s monad-family case.
+    imported_instance_heads: FxHashSet<(Symbol, Symbol)>,
     /// Type-synonym definitions (name -> (params, rhs)), local + imported,
     /// threaded from typeck. Declared signatures keep synonyms unexpanded
     /// (`MarkdownParser m a`); dictionary resolution expands them before
@@ -192,6 +203,7 @@ impl LowerContext {
             monad_type_stack: Vec::new(),
             current_instance_type: None,
             current_binding_sig: None,
+            imported_instance_heads: FxHashSet::default(),
             type_aliases: FxHashMap::default(),
             current_instance_class: None,
             superclass_bind_depth: 0,
@@ -1996,6 +2008,13 @@ impl LowerContext {
         self.current_binding_sig.as_ref()
     }
 
+    /// Whether `class` has an instance at `head` that arrived through a module
+    /// interface — i.e. this module is a CONSUMER of the instance rather than
+    /// the module implementing it (see `imported_instance_heads`).
+    pub(crate) fn has_imported_instance(&self, class: Symbol, head: Symbol) -> bool {
+        self.imported_instance_heads.contains(&(class, head))
+    }
+
     /// Narrow the binding signature to a local (`let`/`where`) binding while
     /// its right-hand side is lowered, returning the previous value to hand
     /// back to [`Self::restore_current_binding_sig`]. A `None` argument leaves
@@ -2469,6 +2488,11 @@ impl LowerContext {
 
         let mut next_id: usize = 900_000;
         for (class, types, method_names) in instances {
+            // Remember that this instance came from an interface, so a method
+            // use site can tell itself apart from the instance's own module.
+            if let Some(head) = types.first().and_then(head_type_con_name) {
+                self.imported_instance_heads.insert((*class, head));
+            }
             // Externally-defined class (Default): no interface declares it,
             // so synthesize a minimal registration from the instance's own
             // method list — otherwise `def` isn't recognized as a class
@@ -3865,6 +3889,19 @@ pub(crate) fn has_type_variables(ty: &Ty) -> bool {
 ///
 /// Handles flexible instance heads like `Ty::App(Box, a)` → `"Box_a"`,
 /// `Ty::List(a)` → `"List_a"`, `Ty::Con(Int)` → `"Int"`, etc.
+/// The name of a type's head constructor, walking through applications:
+/// `ParsecT s u m` yields `ParsecT`. A variable-headed type has none.
+fn head_type_con_name(ty: &Ty) -> Option<Symbol> {
+    let mut head = ty;
+    while let Ty::App(f, _) = head {
+        head = f.as_ref();
+    }
+    match head {
+        Ty::Con(con) => Some(con.name),
+        _ => None,
+    }
+}
+
 fn type_name_for_instance(ty: &Ty) -> String {
     match ty {
         Ty::Con(con) => con.name.as_str().to_string(),

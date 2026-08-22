@@ -1987,6 +1987,32 @@ fn lower_app(
                     }
                     let pure_sym = Symbol::intern("pure");
                     let applicative_sym = Symbol::intern("Applicative");
+                    //  3. the enclosing binding's signature. Inside a constrained
+                    //     binding neither of the above pins the monad — the
+                    //     do-block's own type stays a variable and the surrounding
+                    //     `>>=` may itself be lowered before its monad context is
+                    //     pushed — so `return` stayed a builtin returning its
+                    //     argument raw. The result then travelled on as though it
+                    //     were a parser. Gated like the bind's own fallback: only a
+                    //     CONSUMER of the instance may dispatch, never the module
+                    //     implementing it.
+                    if let Some(sig) = ctx.current_binding_sig() {
+                        let mut result = sig;
+                        while let Ty::Fun(_, ret) = result {
+                            result = ret.as_ref();
+                        }
+                        if let Ty::App(monad, _) = result {
+                            let mut head = monad.as_ref();
+                            while let Ty::App(f2, _) = head {
+                                head = f2.as_ref();
+                            }
+                            if let Ty::Con(con) = head {
+                                if ctx.has_imported_instance(applicative_sym, con.name) {
+                                    candidates.push(monad.as_ref().clone());
+                                }
+                            }
+                        }
+                    }
                     for monad_ty in candidates {
                         // Builtin monads (IO/StateT/…) take codegen's fast path.
                         if LowerContext::is_builtin_monad_type(&monad_ty) {
@@ -2255,6 +2281,46 @@ fn lower_app(
                                             Some(Ty::App(head, _)) => Some(*head),
                                             _ => None,
                                         }
+                                    })
+                                    .or_else(|| {
+                                        // Nothing above pinned the monad: inside a
+                                        // constrained binding the operands can be bare
+                                        // parameters (`manyTill p end = scan where scan
+                                        // = do { x <- p; … }`), which carry no
+                                        // instantiated type of their own. Left
+                                        // undispatched, `>>=` stays a builtin whose
+                                        // generic bind ignores parser failure.
+                                        //
+                                        // The binding's signature names the monad
+                                        // applied to its (still variable) arguments,
+                                        // which is what the parametric instance
+                                        // matches. Only a CONSUMER of the instance may
+                                        // use it: inside the module implementing the
+                                        // instance, this would rewrite the generic
+                                        // implementation — parsec's own `parserBind` —
+                                        // into a call to itself, miscompiling the
+                                        // library. An imported instance means we are a
+                                        // consumer. A variable result head, as in
+                                        // `runPT`'s bind at a generic `m`, has no head
+                                        // constructor and skips.
+                                        let sig = ctx.current_binding_sig()?;
+                                        let mut result = sig;
+                                        while let Ty::Fun(_, ret) = result {
+                                            result = ret.as_ref();
+                                        }
+                                        let Ty::App(monad, _) = result else {
+                                            return None;
+                                        };
+                                        let mut head = monad.as_ref();
+                                        while let Ty::App(f2, _) = head {
+                                            head = f2.as_ref();
+                                        }
+                                        let Ty::Con(con) = head else {
+                                            return None;
+                                        };
+                                        (!LowerContext::is_builtin_monad_type(head)
+                                            && ctx.has_imported_instance(class_name, con.name))
+                                        .then(|| monad.as_ref().clone())
                                     })
                             } else {
                                 None

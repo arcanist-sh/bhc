@@ -2032,6 +2032,40 @@ fn lower_app(
                             ));
                         }
                     }
+
+                    //  4. The monad is the enclosing binding's own constrained
+                    //     type VARIABLE — `readMarkdown :: PandocMonad m => …
+                    //     -> m Pandoc` whose body is `return doc`. Every
+                    //     candidate above is concrete, so all of them miss, and
+                    //     the builtin fast path has nothing to dispatch ON:
+                    //     `return`'s monad appears only in its RESULT, so no
+                    //     argument carries it at runtime. The builtin then
+                    //     returns its argument raw and the caller unwraps a
+                    //     plain value as though it were an action — `evalStateT
+                    //     f 0` forces the literal 7 as a pointer.
+                    //
+                    //     There is a dictionary in scope for exactly this
+                    //     variable: the binding's own. Select `pure` out of it,
+                    //     hopping superclasses (PandocMonad ⊃ Monad ⊃
+                    //     Applicative) to reach it. Last, so a concrete monad is
+                    //     always preferred and previously-dispatching call sites
+                    //     are untouched.
+                    let monad_is_type_var = match ctx.resolved_expr_ty_opt(span) {
+                        Some(Ty::App(head, _)) => matches!(head.as_ref(), Ty::Var(_)),
+                        _ => false,
+                    };
+                    if monad_is_type_var {
+                        if let Some(method_expr) =
+                            ctx.select_method_via_superclass(applicative_sym, pure_sym, span)
+                        {
+                            let x_core = lower_expr(ctx, x)?;
+                            return Ok(core::Expr::App(
+                                Box::new(method_expr),
+                                Box::new(x_core),
+                                span,
+                            ));
+                        }
+                    }
                 }
             }
 

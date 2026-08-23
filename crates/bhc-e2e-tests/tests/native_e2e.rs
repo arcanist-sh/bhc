@@ -836,6 +836,15 @@ fn test_tier3_superclass_native() {
     run_native_test("tier3_io/superclass", Profile::Default);
 }
 
+// `return`/`pure` inside a binding constrained by a user class: the monad is
+// the class's own type variable, so it appears only in the RESULT type and no
+// argument carries it at runtime. The enclosing dictionary is the only route to
+// the right `pure`, reached by hopping Tagged -> Monad -> Applicative.
+#[test]
+fn test_tier3_pure_via_superclass_native() {
+    run_native_test("tier3_io/pure_via_superclass", Profile::Default);
+}
+
 // Dictionary passing: a recursive function polymorphic over a user class. The
 // dictionary cannot be inlined/specialized away, so it is passed at runtime and
 // each call site resolves the right instance.

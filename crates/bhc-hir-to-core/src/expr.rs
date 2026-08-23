@@ -2679,18 +2679,54 @@ fn lower_app(
                         // Build from the head var (not lowered f, to avoid double resolution)
                         let mut result = core::Expr::Var(var.clone(), head_def_ref.span);
 
+                        // Instantiate the callee's DECLARED constraints through its
+                        // own parameter types. The guess below — "whichever argument
+                        // first yields a type" — is only right when the class
+                        // parameter happens to be that argument: `setMeta :: (HasMeta
+                        // a, ToMetaValue b) => Text -> b -> a -> a` guessed `[Char]`
+                        // from the Text, and `withQuoteContext :: HasQuoteContext st m
+                        // => QuoteContext -> …` guessed `QuoteContext`, neither of
+                        // which is the class parameter. It also flattened every
+                        // multi-parameter class to one argument, which no instance
+                        // head can match.
+                        let declared_subst =
+                            callee_param_tys_and_subst(ctx, head_def_ref, &all_args)
+                                .map(|(_, sub)| sub);
+
                         for constraint in &constraints {
                             if ctx.is_user_class(constraint.class)
                                 && constraint.args.iter().any(has_type_variables)
                             {
-                                let concrete_constraint = Constraint::new(
+                                // Try the substituted form first, then the guess. This
+                                // is strictly additive: a call site the guess already
+                                // resolved keeps resolving, so no argument list that
+                                // used to be well-formed can start shifting. (The
+                                // guess is still wrong wherever the class parameter is
+                                // genuinely polymorphic — `addMeta field val = modify
+                                // (setMeta field val)` resolves `ToMetaValue` at the
+                                // caller's `Text` — but replacing a wrong dictionary
+                                // with a missing one trades a wrong answer for a
+                                // crash, which is not an improvement.)
+                                let instantiated = declared_subst.as_ref().and_then(|sub| {
+                                    let args: Vec<Ty> =
+                                        constraint.args.iter().map(|a| sub.apply(a)).collect();
+                                    args.iter().any(|a| !has_type_variables(a)).then(|| {
+                                        Constraint::new_multi(
+                                            constraint.class,
+                                            args,
+                                            constraint.span,
+                                        )
+                                    })
+                                });
+                                let guessed = Constraint::new(
                                     constraint.class,
                                     concrete_ty.clone(),
                                     constraint.span,
                                 );
-                                if let Some(dict_expr) =
-                                    ctx.resolve_dictionary(&concrete_constraint, span)
-                                {
+                                let resolved = instantiated
+                                    .and_then(|c| ctx.resolve_dictionary(&c, span))
+                                    .or_else(|| ctx.resolve_dictionary(&guessed, span));
+                                if let Some(dict_expr) = resolved {
                                     result = core::Expr::App(
                                         Box::new(result),
                                         Box::new(dict_expr),

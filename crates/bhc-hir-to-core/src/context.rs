@@ -2360,15 +2360,23 @@ impl LowerContext {
             .find(|c| c.class == class_name)
             .and_then(|c| c.args.first())
             .cloned()?;
-        let subst = match bhc_types::types_match(&scheme.ty, &ty) {
-            Some(s) => s,
-            None => {
-                if dbg {
-                    eprintln!("[dispatch] {method}: types_match failed");
-                }
-                return None;
+        // `types_match` is all-or-nothing, and typeck routinely records an
+        // occurrence only partially resolved: the nullary `tag :: m Int` used
+        // at `MyM` comes back as `MyM ?594`, whose element position defeats the
+        // match even though the class parameter — the only part that selects an
+        // instance — is pinned to `MyM`. Rejecting that dropped the method to
+        // the stub path and aborted at runtime. Fall back to the lenient
+        // one-way matcher, which records what it can and ignores positions it
+        // cannot align; the concreteness check on `inst_ty` just below is what
+        // actually gates dispatch.
+        let subst = bhc_types::types_match(&scheme.ty, &ty).unwrap_or_else(|| {
+            if dbg {
+                eprintln!("[dispatch] {method}: types_match failed, trying lenient match");
             }
-        };
+            let mut s = bhc_types::Subst::new();
+            crate::expr::match_ty(&scheme.ty, &ty, &mut s);
+            s
+        });
         let inst_ty = subst.apply(&constraint_arg);
         if dbg {
             eprintln!("[dispatch] {method}: inst_ty = {inst_ty:?}");

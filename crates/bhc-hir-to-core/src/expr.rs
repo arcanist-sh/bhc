@@ -524,6 +524,7 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
     // because the builtin class registry uses DefIds that don't match the
     // lowering context's actual DefId assignments.
     if let Some(scheme) = ctx.lookup_scheme(def_ref.def_id) {
+        let scheme_ty = scheme.ty.clone();
         // Filter to only user-defined class constraints
         let user_constraints: Vec<_> = scheme
             .constraints
@@ -544,6 +545,28 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 .iter()
                 .any(|c| ctx.lookup_dict(c.class).is_some());
             if all_deferred && !any_in_scope {
+                // "Defer to App-level" assumes this reference is the head of an
+                // application, so an argument type will pin the constraint. A
+                // constrained *value* has no arguments and is never that head:
+                // `f2 :: Mk a => a` in `print (f2 :: Int)` is an argument to
+                // `print`, so nothing downstream ever resolves it and the bare
+                // `\$dMk -> …` closure travels on AS the value — printing a
+                // pointer, silently, with no warning.
+                //
+                // Typeck did record this occurrence's instantiated type. Match
+                // the scheme against it to pin the constraint. Restricted to
+                // non-function instantiations so genuine constrained functions
+                // still defer: `lower_app` builds its own head var precisely to
+                // avoid resolving a dictionary twice, and applying one here as
+                // well would shift every later argument.
+                if let Some(dicted) = lower_constrained_value_at_occurrence(
+                    ctx,
+                    def_ref,
+                    &scheme_ty,
+                    &user_constraints,
+                ) {
+                    return Ok(dicted);
+                }
                 return Ok(base_expr);
             }
 
@@ -821,7 +844,7 @@ fn peel_app_chain(expr: &hir::Expr) -> Option<(&DefRef, Vec<&hir::Expr>)> {
 /// Structurally match a (possibly polymorphic) parameter type against an
 /// inferred concrete type, recording type-variable bindings in `subst`.
 /// Only the first binding for each variable is kept.
-fn match_ty(param: &Ty, concrete: &Ty, subst: &mut bhc_types::Subst) {
+pub(crate) fn match_ty(param: &Ty, concrete: &Ty, subst: &mut bhc_types::Subst) {
     match (param, concrete) {
         (Ty::Var(tv), c) => {
             // Concrete wins over an earlier var-to-var binding: typeck can
@@ -957,6 +980,57 @@ fn concrete_applied_result_ty(ctx: &LowerContext, e: &hir::Expr) -> Option<Ty> {
         eprintln!("[cart] result {:?} monad_concrete={}", result, ok);
     }
     ok.then_some(result)
+}
+
+/// Apply dictionaries to a reference to a constrained *value* — a binding whose
+/// scheme carries constraints but whose instantiated type is not a function, so
+/// it is never the head of an application and no argument will ever drive
+/// resolution (`f2 :: Mk a => a`, `mkVal :: Tagged m => m Int`).
+///
+/// Returns `None` — leaving the caller to emit the bare variable, as before —
+/// unless the occurrence's recorded type pins every constraint to a fully
+/// concrete one *and* every dictionary resolves. Half-applying dictionaries
+/// would shift argument slots, which is worse than not applying them.
+fn lower_constrained_value_at_occurrence(
+    ctx: &mut LowerContext,
+    def_ref: &DefRef,
+    scheme_ty: &Ty,
+    constraints: &[Constraint],
+) -> Option<core::Expr> {
+    let occ_ty = ctx.resolved_expr_ty_opt(def_ref.span)?;
+    let mut subst = bhc_types::Subst::new();
+    match_ty(scheme_ty, &occ_ty, &mut subst);
+    // A function instantiation means this is a constrained *function*; those
+    // resolve at the application site, which builds its own head var.
+    if matches!(subst.apply(scheme_ty), Ty::Fun(..)) {
+        return None;
+    }
+    let instantiated: Vec<Constraint> = constraints
+        .iter()
+        .map(|c| {
+            Constraint::new_multi(
+                c.class,
+                c.args.iter().map(|a| subst.apply(a)).collect(),
+                c.span,
+            )
+        })
+        .collect();
+    if instantiated
+        .iter()
+        .any(|c| c.args.iter().any(has_type_variables))
+    {
+        return None;
+    }
+    let mut dicts = Vec::with_capacity(instantiated.len());
+    for c in &instantiated {
+        dicts.push(ctx.resolve_dictionary(c, def_ref.span)?);
+    }
+    let var = ctx.lookup_var(def_ref.def_id).cloned()?;
+    let mut result = core::Expr::Var(var, def_ref.span);
+    for dict in dicts {
+        result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
+    }
+    Some(result)
 }
 
 fn callee_param_tys_and_subst(

@@ -845,6 +845,14 @@ fn test_tier3_pure_via_superclass_native() {
     run_native_test("tier3_io/pure_via_superclass", Profile::Default);
 }
 
+// Dispatch driven by the RESULT type: a constrained value that is never the
+// head of an application, and a nullary class method whose recorded occurrence
+// pins the class parameter but leaves the element type a variable.
+#[test]
+fn test_tier3_result_type_dispatch_native() {
+    run_native_test("tier3_io/result_type_dispatch", Profile::Default);
+}
+
 // Dictionary passing: a recursive function polymorphic over a user class. The
 // dictionary cannot be inlined/specialized away, so it is passed at runtime and
 // each call site resolves the right instance.

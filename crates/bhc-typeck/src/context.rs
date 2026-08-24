@@ -7557,6 +7557,42 @@ impl TyCtxt {
                     )
                 }
 
+                // runReaderT :: ReaderT r m a -> r -> m a. Same import-rebind
+                // permissive-scheme trap as the State runners and runExceptT:
+                // without an arm here `runReaderT (f ()) 0` typed its argument
+                // as a bare variable, so a constrained `f :: Monad m => …`
+                // never learned its monad was `ReaderT r IO` and no dictionary
+                // could be resolved for it.
+                "runReaderT" => {
+                    let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                    let r = TyVar::new_star(0xFFF0_0021);
+                    let a = TyVar::new_star(0xFFF0_0022);
+                    let m = TyVar::new(0xFFF0_0023, m_kind.clone());
+                    let reader_t_con = TyCon::new(
+                        Symbol::intern("ReaderT"),
+                        Kind::Arrow(
+                            Box::new(Kind::Star),
+                            Box::new(Kind::Arrow(Box::new(m_kind.clone()), Box::new(m_kind))),
+                        ),
+                    );
+                    // ReaderT r m a
+                    let reader_t = Ty::App(
+                        Box::new(Ty::App(
+                            Box::new(Ty::App(
+                                Box::new(Ty::Con(reader_t_con)),
+                                Box::new(Ty::Var(r.clone())),
+                            )),
+                            Box::new(Ty::Var(m.clone())),
+                        )),
+                        Box::new(Ty::Var(a.clone())),
+                    );
+                    let m_a = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())));
+                    Scheme::poly(
+                        vec![r.clone(), a.clone(), m.clone()],
+                        Ty::fun(reader_t, Ty::fun(Ty::Var(r.clone()), m_a)),
+                    )
+                }
+
                 // Unknown builtins - skip here, will be handled in second pass
                 _ => continue,
             };

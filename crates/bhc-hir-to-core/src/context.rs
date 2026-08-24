@@ -1213,16 +1213,15 @@ impl LowerContext {
         let io_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
         let io_ty = Ty::Con(TyCon::new(Symbol::intern("IO"), io_kind));
 
-        // Functor IO: fmap = DefId(150)
-        self.register_builtin_instance("Functor", &io_ty, &[(150, "fmap")]);
-
-        // Applicative IO: pure = DefId(151), <*> = DefId(152)
-        // Superclass: Functor IO
-        self.register_builtin_instance("Applicative", &io_ty, &[(151, "pure"), (152, "<*>")]);
-
-        // Monad IO: >>= = DefId(153), >> = DefId(154)
-        // Superclass: Applicative IO
-        self.register_builtin_instance("Monad", &io_ty, &[(153, ">>="), (154, ">>")]);
+        // IO's Functor/Applicative/Monad methods live in the same reserved
+        // range as the other builtin monads (10000+), NOT at 150-154.
+        // `DictContext::method_reference` consults the module's var_map before
+        // its own name table, and DefIds that low are real module exports —
+        // 150-154 land on `Control.Exception`'s `throwIO`/`bracket`/`bracket_`,
+        // so an IO dictionary built from them had those in its method slots.
+        self.register_builtin_instance("Functor", &io_ty, &[(10060, "fmap")]);
+        self.register_builtin_instance("Applicative", &io_ty, &[(10061, "pure"), (10062, "<*>")]);
+        self.register_builtin_instance("Monad", &io_ty, &[(10063, ">>="), (10064, ">>")]);
 
         // === Register MonadTrans class ===
         // Methods: lift
@@ -1629,6 +1628,43 @@ impl LowerContext {
                     result = core::Expr::Let(Box::new(bind), Box::new(result), span);
                 }
                 return Some(result);
+            }
+        }
+
+        // 0b. EXPERIMENT (BHC_MONAD_WITNESS): the builtin monad instances are
+        // registered under the BARE type constructor (`Con StateT`), because
+        // codegen matches them by name rather than by shape. A use site's type
+        // is applied — `StateT Int IO` — and `types_match` never matches a
+        // bare `Con` pattern against an `App`, so step 0 above always misses.
+        // Retry at the head constructor.
+        if crate::dictionary::monad_witness_enabled()
+            && matches!(
+                constraint.class.as_str(),
+                "Monad" | "Applicative" | "Functor"
+            )
+        {
+            fn head_con(ty: &Ty) -> Option<&TyCon> {
+                match ty {
+                    Ty::Con(tc) => Some(tc),
+                    Ty::App(f, _) => head_con(f),
+                    _ => None,
+                }
+            }
+            if let Some(tc) = constraint.args.first().and_then(head_con) {
+                let head_constraint =
+                    Constraint::new(constraint.class, Ty::Con(tc.clone()), constraint.span);
+                if head_constraint.args != constraint.args {
+                    let mut dict_ctx =
+                        DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
+                    if let Some(dict_expr) = dict_ctx.get_dictionary(&head_constraint, span) {
+                        let bindings = dict_ctx.take_bindings();
+                        let mut result = dict_expr;
+                        for bind in bindings.into_iter().rev() {
+                            result = core::Expr::Let(Box::new(bind), Box::new(result), span);
+                        }
+                        return Some(result);
+                    }
+                }
             }
         }
 
@@ -2111,6 +2147,27 @@ impl LowerContext {
         let name_str = class_name.as_str();
         !crate::dictionary::BUILTIN_CLASS_NAMES.contains(&name_str)
             && self.class_registry.lookup_class(class_name).is_some()
+    }
+
+    /// Whether this constraint becomes a runtime dictionary parameter on the
+    /// binding that declares it — and therefore must be supplied at every call
+    /// site.
+    ///
+    /// Callee and caller MUST agree here. A binding that takes a dictionary its
+    /// callers do not pass has every later argument shifted one slot; a caller
+    /// that passes one the binding never bound has the same problem in reverse.
+    /// Both sides go through this predicate for exactly that reason.
+    ///
+    /// Under `BHC_MONAD_WITNESS`, a binding polymorphic in its MONAD needs a
+    /// witness too: codegen otherwise picks `return` from the ambient
+    /// transformer layer, which for such a binding is `IO`, whose `return` is
+    /// identity. Only when the class parameter really is a variable — a
+    /// concrete `Monad IO` constraint has nothing to dispatch.
+    pub(crate) fn constraint_is_dict_passed(&self, c: &Constraint) -> bool {
+        self.is_user_class(c.class)
+            || (crate::dictionary::monad_witness_enabled()
+                && matches!(c.class.as_str(), "Monad" | "Applicative")
+                && matches!(c.args.first(), Some(Ty::Var(_))))
     }
 
     /// Try to derive an instance for a user-defined typeclass (`DeriveAnyClass`).
@@ -3193,7 +3250,7 @@ impl LowerContext {
             .map(|s| {
                 s.constraints
                     .iter()
-                    .filter(|c| self.is_user_class(c.class))
+                    .filter(|c| self.constraint_is_dict_passed(c))
                     .cloned()
                     .collect()
             })

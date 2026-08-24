@@ -161,6 +161,23 @@ pub struct ClassRegistry {
     pub instances: FxHashMap<Symbol, Vec<InstanceInfo>>,
 }
 
+/// EXPERIMENT (`BHC_MONAD_WITNESS=1`): give `Monad`/`Applicative` constraints a
+/// runtime witness, so a monad-polymorphic binding can dispatch `return`/`pure`.
+///
+/// Without one, codegen picks `return` from an AMBIENT transformer layer; a
+/// binding polymorphic in its monad has no layer, falls back to
+/// `TransformerLayer::IO`, and `lower_builtin_return` there is IDENTITY. So
+/// `runParserT :: Monad m => ... -> m (Either ParseError a)` hands back a bare
+/// `Right x`, and the caller's transformer bind reads that ADT's tag as a
+/// function pointer (`blr 0x1`). See `VQ.hs`/`VR.hs` in the pandoc harness.
+///
+/// Off by default: see the note on `constraint_needs_dict_param` for the
+/// earlier attempt that regressed.
+pub(crate) fn monad_witness_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BHC_MONAD_WITNESS").is_some())
+}
+
 /// Builtin monad/value-family classes whose methods dispatch through the
 /// resolved-type machinery (see `LowerContext::is_monad_family_class`).
 pub(crate) const MONAD_FAMILY_CLASSES: &[&str] = &[
@@ -246,6 +263,9 @@ impl ClassRegistry {
     #[must_use]
     pub fn constraint_needs_dict_param(&self, class_name: Symbol) -> bool {
         let name = class_name.as_str();
+        if monad_witness_enabled() && matches!(name, "Monad" | "Applicative") {
+            return true;
+        }
         matches!(name, "Semigroup" | "Monoid")
             || (!BUILTIN_CLASS_NAMES.contains(&name) && self.lookup_class(class_name).is_some())
     }
@@ -690,19 +710,37 @@ impl<'a> DictContext<'a> {
 
     /// Create a reference to a method implementation.
     fn method_reference(&self, def_id: DefId, span: Span) -> core::Expr {
-        // First, check the var_map for the registered variable name.
-        // This handles instance methods that have been renamed (e.g., $instance_describe_Color).
+        // Builtin monad instance methods are SYNTHETIC: their DefIds are
+        // hardcoded at registration and name nothing the program declared. They
+        // must be resolved by name, not through the var_map, because that map
+        // is keyed by the program's own DefIds and these numbers collide with
+        // whatever happens to land on them — 150-154 hit `Control.Exception`'s
+        // `throwIO`/`bracket`, and 10060-10064 hit `ExceptT`/`runExceptT`, each
+        // silently filling an IO dictionary with unrelated functions. There is
+        // no DefId range that is safe to assume free, so check the name table
+        // first instead of hunting for one.
+        if let Some(name) = self.transformer_method_name(def_id) {
+            return core::Expr::Var(
+                Var {
+                    name,
+                    id: VarId::new(def_id.index()),
+                    ty: Ty::Error,
+                },
+                span,
+            );
+        }
+
+        // Otherwise the var_map holds the registered variable name. This
+        // handles real instance methods that have been renamed (e.g.
+        // $instance_describe_Color).
         if let Some(var_map) = &self.var_map {
             if let Some(var) = var_map.get(&def_id) {
                 return core::Expr::Var(var.clone(), span);
             }
         }
 
-        // For transformer instance methods (DefIds 10000-10055), use qualified names
-        // so codegen can distinguish ReaderT.>>= from IO's >>= etc.
         let name = self
-            .transformer_method_name(def_id)
-            .or_else(|| self.find_method_name(def_id))
+            .find_method_name(def_id)
             .unwrap_or_else(|| Symbol::intern(&format!("$method_{}", def_id.index())));
         let var = Var {
             name,
@@ -715,6 +753,18 @@ impl<'a> DictContext<'a> {
     /// Map transformer instance method `DefIds` to qualified names for codegen.
     fn transformer_method_name(&self, def_id: DefId) -> Option<Symbol> {
         let name = match def_id.index() {
+            // IO instances. These MUST be qualified even though IO is the
+            // default layer: `create_builtin_closure` caches one wrapper per
+            // NAME per module, so an unqualified `pure` in the IO dictionary
+            // and an unqualified `pure` reached from a StateT context would
+            // share a single wrapper baked with whichever layer was lowered
+            // first. The other layers are already qualified for the same
+            // reason; IO fell through to `find_method_name`'s bare names.
+            10060 => "IO.fmap",
+            10061 => "IO.pure",
+            10062 => "IO.<*>",
+            10063 => "IO.>>=",
+            10064 => "IO.>>",
             // Identity instances
             10000 => "Identity",
             10001 => "runIdentity",

@@ -6318,6 +6318,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Identity.>>=" => Some(2),
             "Identity.>>" => Some(2),
 
+            // IO instance methods, reached as dictionary slots (see
+            // `transformer_method_name`). Same semantics as the unqualified
+            // forms below — bhc's IO model makes a value its own action — but
+            // under distinct names so each layer gets its own wrapper.
+            "IO.fmap" => Some(2),
+            "IO.pure" => Some(1),
+            "IO.<*>" => Some(2),
+            "IO.>>=" => Some(2),
+            "IO.>>" => Some(2),
+
             // ReaderT operations
             "ReaderT" => Some(1),
             "runReaderT" => Some(2),
@@ -7866,6 +7876,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Identity.<*>" => self.lower_builtin_ap(args[0], args[1]),
             "Identity.>>=" => self.lower_builtin_bind(args[0], args[1]),
             "Identity.>>" => self.lower_builtin_then(args[0], args[1]),
+
+            // IO instance methods, reached through an IO dictionary. Dictionary
+            // construction eta-expands each slot into a wrapper that APPLIES
+            // the method, so these need an applied form here as well as the
+            // pre-lowered form in `lower_builtin_direct`. All of them are the
+            // unqualified IO semantics: a value is its own action.
+            "IO.pure" => self.lower_builtin_return(args[0]),
+            "IO.>>=" => self.lower_builtin_bind(args[0], args[1]),
+            "IO.>>" => self.lower_builtin_then(args[0], args[1]),
+            "IO.fmap" | "IO.<*>" => self.lower_builtin_ap(args[0], args[1]),
 
             // ReaderT operations
             "ReaderT" => self.lower_expr(args[0]), // newtype wrap = identity
@@ -44994,10 +45014,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
 
-        // Create a unique name for the wrapper function
+        // Create a unique name for the wrapper function. The encoding must be
+        // INJECTIVE: wrappers are cached by this name, so two builtins that
+        // collapse to the same string share one body and one of them silently
+        // gets the other's semantics. Mapping every non-alphanumeric character
+        // to `_` is not injective — `IO.>>` and `IO.<*>` both become `IO___`,
+        // as do `StateT.>>=` and `StateT.<*>`. Escape by code point instead.
         let wrapper_name = format!(
             "builtin_wrapper_{}",
-            name.replace(|c: char| !c.is_alphanumeric(), "_")
+            name.chars()
+                .map(|c| if c.is_alphanumeric() {
+                    c.to_string()
+                } else {
+                    format!("_{:x}", c as u32)
+                })
+                .collect::<String>()
         );
 
         // Check if wrapper already exists
@@ -45318,7 +45349,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let ptr_type = self.type_mapper().ptr_type();
 
         match name {
-            ">>" => {
+            ">>" | "IO.>>" => {
                 // (>>) :: m a -> m b -> m b
                 // Execute first action (arg1), ignore result, return second (arg2)
                 // For our simple model, arg1 and arg2 are thunks/values
@@ -45327,7 +45358,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // Note: If these were actual IO thunks, we'd need to force them
                 Ok(Some(args[1]))
             }
-            ">>=" => {
+            ">>=" | "IO.>>=" => {
                 // (>>=) :: m a -> (a -> m b) -> m b
                 // Execute first action, pass result to function, return result of function
                 let action_result = args[0]; // Result of first action
@@ -45379,7 +45410,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     })?;
                 Ok(Some(result))
             }
-            "return" | "pure" => {
+            // `IO.pure` is the same identity, under the qualified name an IO
+            // dictionary slot carries (see `transformer_method_name`).
+            "return" | "pure" | "IO.pure" => {
                 // return :: a -> m a
                 // For our simple IO model, just return the value
                 Ok(Some(args[0]))
@@ -45495,7 +45528,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .ok_or_else(|| CodegenError::Internal("fmap: returned void".to_string()))?;
                 Ok(Some(result))
             }
-            "<*>" => {
+            // `fmap` and `<*>` coincide at IO: both apply the closure in the
+            // first argument to the value in the second.
+            "<*>" | "IO.<*>" | "IO.fmap" => {
                 // (<*>) :: f (a -> b) -> f a -> f b
                 // For IO: extract function from first action, apply to second
                 let func_closure = args[0].into_pointer_value();

@@ -529,7 +529,7 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         let user_constraints: Vec<_> = scheme
             .constraints
             .iter()
-            .filter(|c| ctx.is_user_class(c.class))
+            .filter(|c| ctx.constraint_is_dict_passed(c))
             .cloned()
             .collect();
 
@@ -1231,7 +1231,7 @@ fn resolve_constrained_fn_dicts(
         let uc: Vec<Constraint> = scheme
             .constraints
             .iter()
-            .filter(|c| ctx.is_user_class(c.class))
+            .filter(|c| ctx.constraint_is_dict_passed(c))
             .cloned()
             .collect();
         if uc.is_empty() {
@@ -1450,7 +1450,7 @@ fn lower_constrained_fn_value(
         let uc: Vec<Constraint> = scheme
             .constraints
             .iter()
-            .filter(|c| ctx.is_user_class(c.class))
+            .filter(|c| ctx.constraint_is_dict_passed(c))
             .cloned()
             .collect();
         if uc.is_empty() {
@@ -1632,7 +1632,7 @@ fn lower_constrained_fn_app(
         let uc: Vec<Constraint> = scheme
             .constraints
             .iter()
-            .filter(|c| ctx.is_user_class(c.class))
+            .filter(|c| ctx.constraint_is_dict_passed(c))
             .cloned()
             .collect();
         if uc.is_empty() {

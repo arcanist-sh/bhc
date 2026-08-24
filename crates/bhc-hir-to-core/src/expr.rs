@@ -1281,7 +1281,21 @@ fn resolve_constrained_fn_dicts(
         // `u := ()`); `match_ty` binds pattern variables and tolerates the
         // differing final type argument. Without this the Stream dictionary
         // silently failed to resolve and every argument shifted at runtime.
-        if let Some(sig_ty) = ctx.current_binding_sig().cloned() {
+        // Only when the enclosing signature is POLYMORPHIC. This fallback
+        // exists to recover the SIGNATURE'S OWN instantiation variables, so a
+        // monomorphic signature has nothing for it to recover — the only
+        // variables it can bind are call-site-fresh ones, and it binds them to
+        // whatever the enclosing binding happens to return. `runReaderT (f ())
+        // 0` inside `main :: IO ()` records `f`'s occurrence as `() -> ?573
+        // Int`, and matching that result against `IO ()` pinned `?573 := IO`,
+        // resolving `Monad m` to the IO dictionary for a ReaderT computation.
+        // `return` then compiled to IO's identity and `runReaderT` was handed a
+        // bare value to call.
+        if let Some(sig_ty) = ctx
+            .current_binding_sig()
+            .cloned()
+            .filter(has_type_variables)
+        {
             fn result_of(t: &Ty) -> &Ty {
                 match t {
                     Ty::Fun(_, r) => result_of(r),

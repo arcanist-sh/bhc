@@ -539,7 +539,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     _ => {
                         // Check if this is a user-defined function that was detected
                         // as using StateT/ReaderT/ExceptT/WriterT operations in its body.
-                        if self.state_t_functions.contains(name) {
+                        let decided = if self.state_t_functions.contains(name) {
                             TransformerLayer::StateT
                         } else if self.reader_t_functions.contains(name) {
                             TransformerLayer::ReaderT
@@ -549,7 +549,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             TransformerLayer::WriterT
                         } else {
                             self.current_transformer_layer()
+                        };
+                        if std::env::var_os("BHC_DBG_LAYER").is_some() {
+                            eprintln!(
+                                "LAYER head={name} state_t={} reader_t={} except_t={} writer_t={} current={:?} -> {decided:?}",
+                                self.state_t_functions.contains(name),
+                                self.reader_t_functions.contains(name),
+                                self.except_t_functions.contains(name),
+                                self.writer_t_functions.contains(name),
+                                self.current_transformer_layer(),
+                            );
                         }
+                        decided
                     }
                 }
             }
@@ -671,11 +682,32 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .or_else(|| self.detect_transformer_for_body(arg)),
             Expr::Lam(_, body, _) => self.detect_transformer_for_body(body),
             Expr::Let(bind, body, _) => {
+                // A DICTIONARY's contents are the methods that are AVAILABLE,
+                // not operations this binding performs. `main :: IO ()` whose
+                // body constructs a `Monad (StateT s m)` dictionary has
+                // `StateT.pure`/`StateT.>>=` sitting in that dictionary's
+                // fields; letting them vote made body detection classify main
+                // as a StateT computation, so its IO binds were lowered as
+                // StateT binds and main returned a suspended `\s -> …` closure
+                // that nothing ever ran.
+                fn is_dict_binder(v: &Var) -> bool {
+                    v.name.as_str().starts_with("$dict")
+                }
                 let in_bind = match bind.as_ref() {
-                    Bind::NonRec(_, e) => self.detect_transformer_for_body(e),
-                    Bind::Rec(bindings) => bindings
-                        .iter()
-                        .find_map(|(_, e)| self.detect_transformer_for_body(e)),
+                    Bind::NonRec(v, e) => {
+                        if is_dict_binder(v) {
+                            None
+                        } else {
+                            self.detect_transformer_for_body(e)
+                        }
+                    }
+                    Bind::Rec(bindings) => bindings.iter().find_map(|(v, e)| {
+                        if is_dict_binder(v) {
+                            None
+                        } else {
+                            self.detect_transformer_for_body(e)
+                        }
+                    }),
                 };
                 in_bind.or_else(|| self.detect_transformer_for_body(body))
             }
@@ -6594,6 +6626,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let needs_lift = op_layer != current
                     && self.transformer_stack.contains(op_layer)
                     && self.transformer_stack.lifts_to_reach(op_layer).unwrap_or(0) > 0;
+                if std::env::var_os("BHC_DBG_LAYER").is_some() {
+                    eprintln!(
+                        "BIND {name} op_layer={op_layer:?} current={current:?} needs_lift={needs_lift}"
+                    );
+                }
 
                 if needs_lift {
                     // Lift the inner operation to the current stack layer
@@ -6646,6 +6683,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let needs_lift = op_layer != current
                     && self.transformer_stack.contains(op_layer)
                     && self.transformer_stack.lifts_to_reach(op_layer).unwrap_or(0) > 0;
+                if std::env::var_os("BHC_DBG_LAYER").is_some() {
+                    eprintln!(
+                        "BIND {name} op_layer={op_layer:?} current={current:?} needs_lift={needs_lift}"
+                    );
+                }
 
                 if needs_lift {
                     // Lift the inner operation to the current stack layer

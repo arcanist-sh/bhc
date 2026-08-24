@@ -1297,6 +1297,24 @@ impl LowerContext {
         );
         let state_t_ty = Ty::Con(TyCon::new(Symbol::intern("StateT"), state_t_kind));
 
+        // === Register ExceptT instances ===
+        // Only fmap/pure/>>= — the methods with a value form in codegen's
+        // `lower_builtin_direct`. `<*>` and `>>` are deliberately left out so
+        // `missing_method_field` fills them with a deferred-error lambda; a
+        // registered method with no value form aborts with `unknown builtin`
+        // the moment the dictionary is BUILT, which is worse.
+        let except_t_kind = Kind::Arrow(
+            Box::new(Kind::Star),
+            Box::new(Kind::Arrow(
+                Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+                Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+            )),
+        );
+        let except_t_ty = Ty::Con(TyCon::new(Symbol::intern("ExceptT"), except_t_kind));
+        self.register_builtin_instance("Functor", &except_t_ty, &[(10080, "fmap")]);
+        self.register_builtin_instance("Applicative", &except_t_ty, &[(10081, "pure")]);
+        self.register_builtin_instance("Monad", &except_t_ty, &[(10083, ">>=")]);
+
         self.register_builtin_instance("Functor", &state_t_ty, &[(10042, "fmap")]);
         self.register_builtin_instance(
             "Applicative",
@@ -1650,12 +1668,40 @@ impl LowerContext {
                     _ => None,
                 }
             }
+            /// The layer directly beneath a transformer, as a method-name
+            /// suffix. `ExceptT e (StateT s m)` -> `_st`; anything else has no
+            /// distinct representation to select.
+            fn inner_layer_suffix(ty: &Ty) -> Option<&'static str> {
+                // `T a m` is App(App(Con T, a), m): the inner monad is the
+                // outer argument of the two-argument application.
+                let Ty::App(f, inner) = ty else {
+                    return None;
+                };
+                let is_except_t = matches!(f.as_ref(), Ty::App(g, _)
+                    if matches!(head_con(g), Some(tc) if tc.name.as_str() == "ExceptT"));
+                if !is_except_t {
+                    return None;
+                }
+                match head_con(inner)?.name.as_str() {
+                    "StateT" => Some("_st"),
+                    _ => None,
+                }
+            }
             if let Some(tc) = constraint.args.first().and_then(head_con) {
                 let head_constraint =
                     Constraint::new(constraint.class, Ty::Con(tc.clone()), constraint.span);
                 if head_constraint.args != constraint.args {
                     let mut dict_ctx =
                         DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
+                    // Resolution matches on the bare head, which throws away
+                    // the layer beneath a transformer — but ExceptT's methods
+                    // differ between `ExceptT e (StateT s m)` and plain
+                    // `ExceptT e m`. Recover it from the full type here, where
+                    // it is still available, and let it pick the method
+                    // representation (`ExceptT_st.pure` vs `ExceptT.pure`).
+                    dict_ctx.set_transformer_variant(
+                        constraint.args.first().and_then(inner_layer_suffix),
+                    );
                     if let Some(dict_expr) = dict_ctx.get_dictionary(&head_constraint, span) {
                         let bindings = dict_ctx.take_bindings();
                         let mut result = dict_expr;

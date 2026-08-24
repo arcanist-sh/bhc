@@ -420,6 +420,16 @@ pub struct DictContext<'a> {
     /// instance method name, which is important for instance methods that
     /// have been renamed (e.g., `$instance_describe_Color`).
     var_map: Option<FxHashMap<DefId, Var>>,
+    /// Which representation a builtin transformer's methods should use, chosen
+    /// from the FULL instance type before construction starts.
+    ///
+    /// ExceptT's runtime representation depends on the layer beneath it — over
+    /// StateT a computation threads the state, plain it does not — and a
+    /// dictionary slot cannot read that from codegen's ambient transformer
+    /// stack, because the wrapper for a given method NAME is generated once per
+    /// module under whatever layer happened to be current. So the variant
+    /// travels in the name: `ExceptT.pure` vs `ExceptT_st.pure`.
+    transformer_variant: Option<&'static str>,
 }
 
 impl<'a> DictContext<'a> {
@@ -432,6 +442,7 @@ impl<'a> DictContext<'a> {
             dict_bindings: Vec::new(),
             dict_cache: FxHashMap::default(),
             var_map: None,
+            transformer_variant: None,
         }
     }
 
@@ -444,7 +455,14 @@ impl<'a> DictContext<'a> {
             dict_bindings: Vec::new(),
             dict_cache: FxHashMap::default(),
             var_map: Some(var_map),
+            transformer_variant: None,
         }
+    }
+
+    /// Select the representation for builtin transformer methods in the
+    /// dictionaries this context builds. See `transformer_variant`.
+    pub fn set_transformer_variant(&mut self, variant: Option<&'static str>) {
+        self.transformer_variant = variant;
     }
 
     /// Take ownership of the generated dictionary bindings.
@@ -720,6 +738,15 @@ impl<'a> DictContext<'a> {
         // no DefId range that is safe to assume free, so check the name table
         // first instead of hunting for one.
         if let Some(name) = self.transformer_method_name(def_id) {
+            // Apply the representation chosen for this instance, if any:
+            // `ExceptT.pure` becomes `ExceptT_st.pure` when the layer beneath
+            // is StateT. See `transformer_variant`.
+            let name = match (self.transformer_variant, name.as_str().split_once('.')) {
+                (Some(suffix), Some((con, method))) => {
+                    Symbol::intern(&format!("{con}{suffix}.{method}"))
+                }
+                _ => name,
+            };
             return core::Expr::Var(
                 Var {
                     name,
@@ -765,6 +792,13 @@ impl<'a> DictContext<'a> {
             10062 => "IO.<*>",
             10063 => "IO.>>=",
             10064 => "IO.>>",
+            // ExceptT instances. Only the methods with a value form in
+            // `lower_builtin_direct` are registered; `<*>`/`>>` deliberately
+            // are NOT, so `missing_method_field` gives them a deferred-error
+            // lambda rather than a slot that aborts with `unknown builtin`.
+            10080 => "ExceptT.fmap",
+            10081 => "ExceptT.pure",
+            10083 => "ExceptT.>>=",
             // Identity instances
             10000 => "Identity",
             10001 => "runIdentity",

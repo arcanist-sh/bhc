@@ -6399,6 +6399,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "ExceptT.<*>" => Some(2),
             "ExceptT.>>=" => Some(2),
             "ExceptT.>>" => Some(2),
+            // ExceptT-over-StateT dictionary slots. ExceptT's representation
+            // depends on the layer beneath it, and a dictionary slot cannot
+            // consult the ambient stack, so the variant is part of the name.
+            "ExceptT_st.pure" => Some(1),
+            "ExceptT_st.>>=" => Some(2),
+            "ExceptT_st.fmap" => Some(2),
             "ExceptT.lift" => Some(1),
             "ExceptT.liftIO" => Some(1),
             "throwE" => Some(1),
@@ -7966,6 +7972,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "ExceptT.>>" => self.lower_builtin_except_t_then(args[0], args[1]),
             "ExceptT.fmap" => self.lower_builtin_except_t_fmap(args[0], args[1]),
             "ExceptT.<*>" => self.lower_builtin_except_t_ap(args[0], args[1]),
+            // The `_st` names carry the ExceptT-over-StateT representation
+            // explicitly, for dictionary slots that cannot consult the ambient
+            // transformer stack. Reached applied as well as in value position:
+            // a Functor dictionary's synthesised `<$` field APPLIES its `fmap`.
+            "ExceptT_st.pure" => self.lower_builtin_except_t_pure_over_st(args[0]),
+            "ExceptT_st.>>=" => self.lower_builtin_except_t_bind_over_st(args[0], args[1]),
+            "ExceptT_st.fmap" => self.lower_builtin_except_t_fmap(args[0], args[1]),
             "ExceptT.lift" | "ExceptT.liftIO" => self.lower_builtin_except_t_lift(args[0]),
             "throwE" => self.lower_builtin_throw_e(args[0]),
             "catchE" => self.lower_builtin_catch_e(args[0], args[1]),
@@ -19047,32 +19060,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(x_expr)?
             .ok_or_else(|| CodegenError::Internal("ExceptT.pure: x has no value".to_string()))?;
 
-        let _ptr_type = self.type_mapper().ptr_type();
-        let fn_name = "bhc_except_t_pure";
-
-        let func = self.get_or_create_transformer_fn(fn_name);
-        if func.count_basic_blocks() == 0 {
-            let entry = self.llvm_ctx.append_basic_block(func, "entry");
-            let saved_bb = self.builder().get_insert_block();
-            self.builder().position_at_end(entry);
-            // \(env, _) -> Right(x) where x = env[0]
-            let env = func.get_nth_param(0).unwrap().into_pointer_value();
-            let x = self.extract_closure_env_elem(env, 1, 0)?;
-            // Allocate Right ADT: tag=1, arity=1
-            let right_adt = self.alloc_adt(1, 1)?;
-            self.store_adt_field(right_adt, 1, 0, x.into())?;
-            self.builder()
-                .build_return(Some(&right_adt))
-                .map_err(|e| CodegenError::Internal(format!("except_t_pure return: {:?}", e)))?;
-            if let Some(bb) = saved_bb {
-                self.builder().position_at_end(bb);
-            }
-        }
-
-        let fn_ptr = func.as_global_value().as_pointer_value();
-        let x_ptr = self.value_to_ptr(x_val)?;
-        let closure_ptr = self.alloc_closure(fn_ptr, &[(VarId::new(900000), x_ptr.into())])?;
-        Ok(Some(closure_ptr.into()))
+        self.except_t_pure_from_value(x_val, false)
     }
 
     /// throwE e = closure \_ -> Left e
@@ -19141,7 +19129,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let k_val = self
             .lower_expr(k_expr)?
             .ok_or_else(|| CodegenError::Internal("ExceptT.>>=: k has no value".to_string()))?;
+        self.except_t_bind_from_values(m_val, k_val)
+    }
 
+    /// Plain `>>=` for ExceptT from already-lowered values (no state or reader
+    /// beneath). See `except_t_pure_from_value`.
+    fn except_t_bind_from_values(
+        &mut self,
+        m_val: BasicValueEnum<'ctx>,
+        k_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_except_t_bind";
 
@@ -19544,7 +19541,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let m_val = self
             .lower_expr(m_expr)?
             .ok_or_else(|| CodegenError::Internal("ExceptT.fmap: m has no value".to_string()))?;
+        self.except_t_fmap_from_values(f_val, m_val)
+    }
 
+    /// `fmap` for ExceptT from already-lowered values, for the Functor slot of
+    /// an ExceptT dictionary. See `except_t_pure_from_value`.
+    fn except_t_fmap_from_values(
+        &mut self,
+        f_val: BasicValueEnum<'ctx>,
+        m_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_except_t_fmap";
 
@@ -19774,22 +19780,50 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(x_expr)?
             .ok_or_else(|| CodegenError::Internal("ExceptT.pure/st: x has no value".to_string()))?;
 
-        let fn_name = "bhc_except_t_pure_over_st";
+        self.except_t_pure_from_value(x_val, true)
+    }
+
+    /// `pure` for ExceptT from an already-lowered value, at an EXPLICITLY
+    /// chosen variant.
+    ///
+    /// ExceptT's representation depends on what sits beneath it — over StateT a
+    /// computation threads the state (`\(env,s) -> (Right x, s)`), plain it
+    /// does not (`\(env,_) -> Right x`). The Expr-based entry points pick the
+    /// variant from the ambient transformer stack, which a DICTIONARY SLOT
+    /// cannot do: `create_builtin_closure` generates one wrapper per NAME per
+    /// module, under whatever layer happened to be current when the slot was
+    /// first reached. So dictionary construction passes the variant explicitly
+    /// and it travels in the builtin's name (`ExceptT_st.pure`).
+    fn except_t_pure_from_value(
+        &mut self,
+        x_val: BasicValueEnum<'ctx>,
+        over_state_t: bool,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let fn_name = if over_state_t {
+            "bhc_except_t_pure_over_st"
+        } else {
+            "bhc_except_t_pure"
+        };
         let func = self.get_or_create_transformer_fn(fn_name);
         if func.count_basic_blocks() == 0 {
             let entry = self.llvm_ctx.append_basic_block(func, "entry");
             let saved_bb = self.builder().get_insert_block();
             self.builder().position_at_end(entry);
-            // \(env, s) -> (Right(x), s) where x = env[0]
             let env = func.get_nth_param(0).unwrap().into_pointer_value();
-            let s = func.get_nth_param(1).unwrap().into_pointer_value();
             let x = self.extract_closure_env_elem(env, 1, 0)?;
             let right_adt = self.alloc_adt(1, 1)?;
             self.store_adt_field(right_adt, 1, 0, x.into())?;
-            let pair = self.alloc_pair(right_adt.into(), s.into())?;
-            self.builder().build_return(Some(&pair)).map_err(|e| {
-                CodegenError::Internal(format!("except_t_pure_over_st return: {:?}", e))
-            })?;
+            if over_state_t {
+                let s = func.get_nth_param(1).unwrap().into_pointer_value();
+                let pair = self.alloc_pair(right_adt.into(), s.into())?;
+                self.builder().build_return(Some(&pair)).map_err(|e| {
+                    CodegenError::Internal(format!("except_t_pure_over_st return: {:?}", e))
+                })?;
+            } else {
+                self.builder().build_return(Some(&right_adt)).map_err(|e| {
+                    CodegenError::Internal(format!("except_t_pure return: {:?}", e))
+                })?;
+            }
             if let Some(bb) = saved_bb {
                 self.builder().position_at_end(bb);
             }
@@ -19853,7 +19887,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let k_val = self
             .lower_expr(k_expr)?
             .ok_or_else(|| CodegenError::Internal("ExceptT.>>=/st: k has no value".to_string()))?;
+        self.except_t_bind_over_st_from_values(m_val, k_val)
+    }
 
+    /// `>>=` for ExceptT-over-StateT from already-lowered values. See
+    /// `except_t_pure_from_value` for why a dictionary slot needs a
+    /// value-based entry point with the variant chosen explicitly.
+    fn except_t_bind_over_st_from_values(
+        &mut self,
+        m_val: BasicValueEnum<'ctx>,
+        k_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_except_t_bind_over_st";
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -45642,6 +45686,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 Ok(Some(result))
             }
             "Identity.>>" => Ok(Some(args[1])),
+
+            // ExceptT dictionary slots, reached as VALUES through
+            // `create_builtin_closure`. The `_st` names carry the
+            // ExceptT-over-StateT representation; see
+            // `except_t_pure_from_value` for why the variant is in the name
+            // rather than read from the ambient transformer stack. `fmap` has
+            // no over-StateT implementation, so both names share the plain one.
+            "ExceptT.pure" => self.except_t_pure_from_value(args[0], false),
+            "ExceptT_st.pure" => self.except_t_pure_from_value(args[0], true),
+            "ExceptT.>>=" => self.except_t_bind_from_values(args[0], args[1]),
+            "ExceptT_st.>>=" => self.except_t_bind_over_st_from_values(args[0], args[1]),
+            "ExceptT.fmap" | "ExceptT_st.fmap" => self.except_t_fmap_from_values(args[0], args[1]),
 
             // ReaderT/StateT constructors (newtype = pass through)
             "ReaderT" | "StateT" => Ok(Some(args[0])),

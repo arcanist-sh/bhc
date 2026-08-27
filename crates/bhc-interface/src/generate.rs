@@ -611,19 +611,7 @@ fn convert_ast_type(ty: &bhc_ast::Type) -> Type {
     match ty {
         bhc_ast::Type::Var(tv, _) => Type::Var(tv.name.name.as_str().to_string()),
         bhc_ast::Type::Con(ident, _) => Type::Con(ident.name.as_str().to_string()),
-        bhc_ast::Type::QualCon(module, ident, _) => {
-            let qual_name = format!(
-                "{}.{}",
-                module
-                    .parts
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join("."),
-                ident.name.as_str()
-            );
-            Type::Con(qual_name)
-        }
+        bhc_ast::Type::QualCon(_module, ident, _) => Type::Con(ident.name.as_str().to_string()),
         bhc_ast::Type::App(f, x, _) => {
             Type::App(Box::new(convert_ast_type(f)), Box::new(convert_ast_type(x)))
         }

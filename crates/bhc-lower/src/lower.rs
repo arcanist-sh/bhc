@@ -8420,10 +8420,14 @@ pub(crate) fn lower_type(ctx: &mut LowerContext, ty: &ast::Type) -> bhc_types::T
         }
 
         ast::Type::QualCon(module_name, ident, _) => {
-            // Qualified type constructor like M.Map
-            // Create a qualified name symbol by combining module and name
-            let qual_name = format!("{}.{}", module_name, ident.name.as_str());
-            let symbol = Symbol::intern(&qual_name);
+            // Qualified type constructor like `M.Map`. The qualifier is the
+            // IMPORTING module's alias, not part of the type's identity, so
+            // keeping it made the same type have different names depending on
+            // how each module imported it: parsec's `import qualified Data.Text
+            // as Text` recorded `instance Stream Text.Text m Char`, which no
+            // use site spelling `Text` could ever match.
+            let _ = module_name;
+            let symbol = ident.name;
             bhc_types::Ty::Con(bhc_types::TyCon::new(symbol, bhc_types::Kind::Star))
         }
 

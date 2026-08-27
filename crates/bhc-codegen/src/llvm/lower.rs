@@ -24520,6 +24520,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     ) {
                         return self.infer_show_from_expr(_arg);
                     }
+                    // `concat xs` has the type of xs's ELEMENTS, not of xs:
+                    // `concat ["x","y"]` is a String. Inferring from the whole
+                    // argument gave a list-of-lists and printed the result as
+                    // character codes. Only override when the head element
+                    // actually tells us something, so `concat [[1],[2]]` keeps
+                    // falling through to the list handling below.
+                    //
+                    // `mconcat` is NOT covered: it resolves to a runtime
+                    // dictionary selection (`$sel_3 $dMonoid`), so the spine
+                    // head is not a name this can match.
+                    if matches!(fv.name.as_str(), "concat" | "Data.List.concat") {
+                        if let Some(head) = self.get_list_head_expr_cloned(_arg) {
+                            if let Some(inferred) = self.infer_show_from_expr(&head) {
+                                return Some(inferred);
+                            }
+                        }
+                    }
                 }
                 // E.51: fmap/(<$>) preserves the functor type — infer from the second arg
                 if let Expr::App(ff, _, _) = f.as_ref() {

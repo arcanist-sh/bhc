@@ -295,6 +295,11 @@ fn test_tier3_list_monoid_native() {
 }
 
 #[test]
+fn test_tier3_concat_string_show_native() {
+    run_native_test("tier3_io/concat_string_show", Profile::Default);
+}
+
+#[test]
 fn test_tier3_state_t_string_native() {
     run_native_test("tier3_io/state_t_string", Profile::Default);
 }

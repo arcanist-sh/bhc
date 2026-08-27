@@ -228,6 +228,53 @@ fn has_concrete_head(ty: &Ty) -> bool {
     }
 }
 
+/// Whether an in-scope dictionary for `class_name` is one this occurrence
+/// should actually be selecting a method from.
+///
+/// `lookup_dict` matches by CLASS ALONE, so it returns a dictionary for any
+/// type. That is fine for a user class, where at most one is in scope. It is
+/// wrong for the monad family once a binding constrained over its OWN monad
+/// puts a `Monad m` dictionary in scope: parsec's `getPosition :: Monad m =>
+/// ParsecT s u m SourcePos` selected its do-block's `>>=` out of the dictionary
+/// for ParsecT's INNER monad, so every parser ran from a garbage state and
+/// `getPosition` reported column 0.
+///
+/// The default when the occurrence's monad cannot be determined is to REFUSE.
+/// Before monad-family constraints became dictionary-passed, no such dictionary
+/// was ever in scope and these methods went to the concrete-instance dispatch
+/// below; refusing restores exactly that behaviour instead of guessing.
+fn in_scope_dict_matches(ctx: &LowerContext, class_name: Symbol, span: Span) -> bool {
+    if !ctx.is_monad_family_class(class_name) {
+        return true;
+    }
+    let Some(dict_ty) = ctx.lookup_dict_ty(class_name).cloned() else {
+        // No recorded type: this dictionary predates the witness (an
+        // existential pattern match, say), so keep the old behaviour.
+        return true;
+    };
+    ctx.resolved_expr_ty_opt(span)
+        .as_ref()
+        .and_then(monad_head_of_method_occurrence)
+        .is_some_and(|occ_head| same_type_head(&dict_ty, &occ_head))
+}
+
+/// Whether two types name the same monad, comparing only head constructors —
+/// `ParsecT s u m` and `ParsecT [Char] () IO` are the same monad, and a type
+/// variable matches only another variable.
+fn same_type_head(a: &Ty, b: &Ty) -> bool {
+    fn head(ty: &Ty) -> &Ty {
+        match ty {
+            Ty::App(f, _) => head(f),
+            other => other,
+        }
+    }
+    match (head(a), head(b)) {
+        (Ty::Con(x), Ty::Con(y)) => x.name == y.name,
+        (Ty::Var(_), Ty::Var(_)) => true,
+        _ => false,
+    }
+}
+
 fn monad_head_of_method_occurrence(ty: &Ty) -> Option<Ty> {
     let target = match ty {
         Ty::Fun(a, _) => a.as_ref(),
@@ -349,7 +396,8 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         if let Some(class_name) = is_method {
             // This is a class method - we need to select it from a dictionary
             // Look for an in-scope dictionary for this class
-            if let Some(dict_var) = ctx.lookup_dict(class_name) {
+            let dict_matches = in_scope_dict_matches(ctx, class_name, def_ref.span);
+            if let Some(dict_var) = ctx.lookup_dict(class_name).filter(|_| dict_matches) {
                 // Select the method from the dictionary
                 if let Some(method_expr) =
                     ctx.select_method_from_dict(dict_var, class_name, name, def_ref.span)
@@ -403,7 +451,12 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
             // (`$instance_mplus_ParsecT`), instead of leaving it as a builtin
             // that stubs for a user type. The instance type may carry abstract
             // parameters (`ParsecT s u m`) — its head constructor is enough.
-            if ctx.is_monad_family_class(class_name) && ctx.lookup_dict(class_name).is_none() {
+            // A monad-family dictionary that is not for THIS monad must not
+            // suppress the concrete-instance dispatch; see `in_scope_dict_matches`.
+            if ctx.is_monad_family_class(class_name)
+                && (ctx.lookup_dict(class_name).is_none()
+                    || !in_scope_dict_matches(ctx, class_name, def_ref.span))
+            {
                 if let Some(inst_ty) = ctx.current_instance_type().cloned() {
                     if !LowerContext::is_builtin_monad_type(&inst_ty) {
                         if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
@@ -1897,7 +1950,8 @@ fn lower_app(
 
                 // Case 1a: Dictionary in scope (from existential pattern match).
                 // Select the method from the dictionary and apply the argument.
-                if is_user {
+                let dict_matches = in_scope_dict_matches(ctx, class_name, span);
+                if is_user && dict_matches {
                     if let Some(dict_var) = ctx.lookup_dict(class_name).cloned() {
                         if let Some(method_expr) =
                             ctx.select_method_from_dict(&dict_var, class_name, method_name, span)
@@ -1913,7 +1967,9 @@ fn lower_app(
                 }
 
                 // Case 1b: No dict in scope — resolve via instance lookup
-                if (is_user || is_monad_family) && ctx.lookup_dict(class_name).is_none() {
+                if (is_user || is_monad_family)
+                    && (ctx.lookup_dict(class_name).is_none() || !dict_matches)
+                {
                     let param_count = ctx.class_param_count(class_name);
 
                     if param_count > 1 && is_user {
@@ -2224,7 +2280,10 @@ fn lower_app(
                     }
                 }
 
-                if (is_user || is_monad_family) && ctx.lookup_dict(class_name).is_none() {
+                if (is_user || is_monad_family)
+                    && (ctx.lookup_dict(class_name).is_none()
+                        || !in_scope_dict_matches(ctx, class_name, span))
+                {
                     let param_count = ctx.class_param_count(class_name);
 
                     if param_count > 1 && is_user {
@@ -2704,7 +2763,10 @@ fn lower_app(
                 }
             }
             if let Some(class_name) = ctx.is_class_method(method_name) {
-                if ctx.is_monad_family_class(class_name) && ctx.lookup_dict(class_name).is_none() {
+                if ctx.is_monad_family_class(class_name)
+                    && (ctx.lookup_dict(class_name).is_none()
+                        || !in_scope_dict_matches(ctx, class_name, span))
+                {
                     let occ_unresolved = ctx.resolved_expr_ty_opt(span).is_none_or(|t| {
                         let mut h = &t;
                         while let Ty::App(f, _) = h {

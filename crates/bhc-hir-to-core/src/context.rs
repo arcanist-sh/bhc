@@ -109,6 +109,16 @@ pub struct LowerContext {
     ///
     /// Each entry maps constraint class names to their dictionary variables.
     dict_scope: Vec<FxHashMap<Symbol, Var>>,
+    /// The constrained TYPE each in-scope dictionary is for, where known.
+    ///
+    /// `dict_scope` is keyed by CLASS ALONE, so a lookup happily returns a
+    /// dictionary for a DIFFERENT type. Harmless while at most one dictionary
+    /// per class is ever in scope, but a binding constrained over its own monad
+    /// puts a `Monad m` dictionary in scope for someone else's INNER monad —
+    /// parsec's `getPosition :: Monad m => ParsecT s u m SourcePos` then ran its
+    /// do-block's `>>=` out of that dictionary instead of ParsecT's, and every
+    /// parser started from a garbage state. Kept in lockstep with `dict_scope`.
+    dict_scope_ty: Vec<FxHashMap<Symbol, Ty>>,
 
     /// Registry of type classes and instances for dictionary construction.
     class_registry: ClassRegistry,
@@ -195,6 +205,7 @@ impl LowerContext {
             constructor_field_types: FxHashMap::default(),
             field_selector_map: FxHashMap::default(),
             dict_scope: vec![FxHashMap::default()], // Start with empty root scope
+            dict_scope_ty: vec![FxHashMap::default()],
             class_registry: ClassRegistry::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
@@ -1542,12 +1553,14 @@ impl LowerContext {
     /// Push a new dictionary scope.
     pub fn push_dict_scope(&mut self) {
         self.dict_scope.push(FxHashMap::default());
+        self.dict_scope_ty.push(FxHashMap::default());
     }
 
     /// Pop the current dictionary scope.
     pub fn pop_dict_scope(&mut self) {
         if self.dict_scope.len() > 1 {
             self.dict_scope.pop();
+            self.dict_scope_ty.pop();
         }
     }
 
@@ -1556,6 +1569,27 @@ impl LowerContext {
         if let Some(scope) = self.dict_scope.last_mut() {
             scope.insert(class_name, dict_var);
         }
+    }
+
+    /// Register a dictionary along with the TYPE it is for, so a later lookup
+    /// can tell whether it is the right dictionary and not merely the right
+    /// class. See `dict_scope_ty`.
+    pub fn register_dict_at(&mut self, class_name: Symbol, ty: Ty, dict_var: Var) {
+        self.register_dict(class_name, dict_var);
+        if let Some(scope) = self.dict_scope_ty.last_mut() {
+            scope.insert(class_name, ty);
+        }
+    }
+
+    /// The type an in-scope dictionary for `class_name` is for, if recorded.
+    #[must_use]
+    pub fn lookup_dict_ty(&self, class_name: Symbol) -> Option<&Ty> {
+        for scope in self.dict_scope_ty.iter().rev() {
+            if let Some(ty) = scope.get(&class_name) {
+                return Some(ty);
+            }
+        }
+        None
     }
 
     /// Look up a dictionary variable for a constraint class.
@@ -3323,8 +3357,13 @@ impl LowerContext {
         // Push a new dictionary scope and register all dictionaries
         if !dict_vars.is_empty() {
             self.push_dict_scope();
-            for (class_name, dict_var) in &dict_vars {
-                self.register_dict(*class_name, dict_var.clone());
+            for ((class_name, dict_var), constraint) in dict_vars.iter().zip(&user_constraints) {
+                match constraint.args.first() {
+                    Some(ty) => {
+                        self.register_dict_at(*class_name, ty.clone(), dict_var.clone());
+                    }
+                    None => self.register_dict(*class_name, dict_var.clone()),
+                }
             }
         }
 

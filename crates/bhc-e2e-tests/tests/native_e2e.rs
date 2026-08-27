@@ -280,6 +280,11 @@ fn test_tier3_state_alias_native() {
 }
 
 #[test]
+fn test_tier3_writer_alias_native() {
+    run_native_test("tier3_io/writer_alias", Profile::Default);
+}
+
+#[test]
 fn test_tier3_state_t_string_native() {
     run_native_test("tier3_io/state_t_string", Profile::Default);
 }

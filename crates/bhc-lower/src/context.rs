@@ -1226,6 +1226,8 @@ impl LowerContext {
             (10081, "runWriterT"),
             (10082, "tell"),
             (10083, "execWriterT"),
+            (10091, "runWriter"),
+            (10092, "execWriter"),
         ];
 
         for &(id, name) in transformer_builtins {

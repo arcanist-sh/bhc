@@ -8897,6 +8897,47 @@ impl Builtins {
             ),
         );
 
+        // `Writer w = WriterT w Identity`, and Identity is erased, so the
+        // alias runners have the transformer shapes with the monad dropped.
+        // These need the REAL `Writer` constructor rather than a simplified
+        // function shape: without it the log's type is not derivable at the
+        // use site and `runWriter`'s pair prints its second component as a
+        // pointer.
+        let writer_con = TyCon::new(
+            Symbol::intern("Writer"),
+            Kind::Arrow(
+                Box::new(Kind::Star),
+                Box::new(Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star))),
+            ),
+        );
+        let writer_w_a = Ty::App(
+            Box::new(Ty::App(
+                Box::new(Ty::Con(writer_con.clone())),
+                Box::new(Ty::Var(w_var.clone())),
+            )),
+            Box::new(Ty::Var(a.clone())),
+        );
+
+        // runWriter :: Writer w a -> (a, w)
+        env.register_value(
+            DefId::new(10091),
+            Symbol::intern("runWriter"),
+            Scheme::poly(
+                vec![w_var.clone(), a.clone()],
+                Ty::fun(writer_w_a.clone(), pair_a_w.clone()),
+            ),
+        );
+
+        // execWriter :: Writer w a -> w
+        env.register_value(
+            DefId::new(10092),
+            Symbol::intern("execWriter"),
+            Scheme::poly(
+                vec![w_var.clone(), a.clone()],
+                Ty::fun(writer_w_a, Ty::Var(w_var.clone())),
+            ),
+        );
+
         // WriterT.pure :: a -> WriterT w m a
         env.register_value(
             DefId::new(10084),

@@ -6422,6 +6422,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // WriterT operations
             "WriterT" => Some(1),
             "runWriterT" => Some(1),
+            "runWriter" => Some(1),
             "WriterT.fmap" => Some(2),
             "WriterT.pure" => Some(1),
             "WriterT.<*>" => Some(2),
@@ -6431,6 +6432,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "WriterT.liftIO" => Some(1),
             "tell" => Some(1),
             "execWriterT" => Some(1),
+            "execWriter" => Some(1),
 
             // Generic lift/liftIO (dispatched based on transformer context)
             "lift" => Some(1),
@@ -8011,7 +8013,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // WriterT operations
             "WriterT" => self.lower_expr(args[0]), // newtype wrap = identity
-            "runWriterT" => self.lower_builtin_run_writer_t(args[0]),
+            "runWriterT" | "runWriter" => self.lower_builtin_run_writer_t(args[0]),
             "WriterT.pure" => self.lower_builtin_writer_t_pure(args[0]),
             "WriterT.>>=" => self.lower_builtin_writer_t_bind(args[0], args[1]),
             "WriterT.>>" => self.lower_builtin_writer_t_then(args[0], args[1]),
@@ -8019,7 +8021,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "WriterT.<*>" => self.lower_builtin_writer_t_ap(args[0], args[1]),
             "WriterT.lift" | "WriterT.liftIO" => self.lower_builtin_writer_t_lift(args[0]),
             "tell" => self.lower_builtin_tell(args[0]),
-            "execWriterT" => self.lower_builtin_exec_writer_t(args[0]),
+            "execWriterT" | "execWriter" => self.lower_builtin_exec_writer_t(args[0]),
 
             _ => {
                 // Check for field selector pattern: $sel_N

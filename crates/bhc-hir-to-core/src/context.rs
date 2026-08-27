@@ -1146,7 +1146,7 @@ impl LowerContext {
                 });
         }
 
-        // Lists get a builtin `Semigroup` — and deliberately NOT a `Monoid`.
+        // Lists get builtin `Semigroup` and `Monoid` instances.
         // Without this, `"ab" <> "cd"` and `[1,2] <> [3]` lowered to an
         // unresolved-method stub. `mappend` and `mconcat` would work too, but
         // registering the Monoid instance also exposes `mempty`, and `mempty`
@@ -1160,9 +1160,22 @@ impl LowerContext {
             self.class_registry
                 .register_instance(crate::dictionary::InstanceInfo {
                     class: Symbol::intern("Semigroup"),
-                    instance_types: vec![list_head],
+                    instance_types: vec![list_head.clone()],
                     methods: sg_methods,
                     superclass_instances: Vec::new(),
+                    assoc_type_impls: FxHashMap::default(),
+                    instance_constraints: Vec::new(),
+                });
+            let mut mo_methods = FxHashMap::default();
+            mo_methods.insert(Symbol::intern("mempty"), DefId::new(790_010));
+            mo_methods.insert(Symbol::intern("mappend"), DefId::new(790_009));
+            mo_methods.insert(Symbol::intern("mconcat"), DefId::new(790_011));
+            self.class_registry
+                .register_instance(crate::dictionary::InstanceInfo {
+                    class: Symbol::intern("Monoid"),
+                    instance_types: vec![list_head.clone()],
+                    methods: mo_methods,
+                    superclass_instances: vec![list_head],
                     assoc_type_impls: FxHashMap::default(),
                     instance_constraints: Vec::new(),
                 });

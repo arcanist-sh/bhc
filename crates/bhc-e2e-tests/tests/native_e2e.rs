@@ -290,6 +290,11 @@ fn test_tier3_list_semigroup_native() {
 }
 
 #[test]
+fn test_tier3_list_monoid_native() {
+    run_native_test("tier3_io/list_monoid", Profile::Default);
+}
+
+#[test]
 fn test_tier3_state_t_string_native() {
     run_native_test("tier3_io/state_t_string", Profile::Default);
 }

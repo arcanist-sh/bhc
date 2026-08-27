@@ -404,6 +404,21 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 {
                     return Ok(method_expr);
                 }
+            } else if !ctx.is_user_class(class_name)
+                && matches!(class_name.as_str(), "Semigroup" | "Monoid")
+            {
+                // The builtin VALUE classes. `mempty` has no argument to
+                // dispatch on and no dictionary in scope at a top-level use,
+                // and this arm previously required a USER class — so
+                // `mempty :: [Int]` never reached instance resolution at all
+                // and stayed a bare `mempty` Var in Core, which `length` then
+                // walked as garbage. Only the result-type channel is opened
+                // here; superclass extraction stays user-classes-only.
+                if let Some(method_expr) =
+                    ctx.select_method_by_result_type(class_name, name, def_ref.def_id, def_ref.span)
+                {
+                    return Ok(method_expr);
+                }
             } else if ctx.is_user_class(class_name) {
                 // No direct dict in scope — try superclass extraction.
                 // If we have MyOrd in scope and need MyEq, extract MyEq from MyOrd.

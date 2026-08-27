@@ -170,6 +170,7 @@ pub fn lower_module_with_imports(
             Vec<bhc_intern::Symbol>,
             Vec<(bhc_intern::Symbol, usize)>,
             usize,
+            Vec<Vec<usize>>,
         )],
         &[(
             bhc_intern::Symbol,
@@ -347,6 +348,7 @@ mod tests {
             params: vec![a_var.clone()],
             fundeps: vec![],
             supers: vec![],
+            super_params: vec![],
             methods: vec![bhc_hir::MethodSig {
                 name: Symbol::intern("myAdd"),
                 id: DefId::new(0),
@@ -451,7 +453,8 @@ mod tests {
             name: Symbol::intern("MyEq"),
             params: vec![a_var.clone()],
             fundeps: vec![],
-            supers: vec![], // No superclasses
+            supers: vec![],
+            super_params: vec![], // No superclasses
             methods: vec![
                 bhc_hir::MethodSig {
                     name: Symbol::intern("myEq"),
@@ -686,6 +689,7 @@ mod tests {
             params: vec![a_var],
             fundeps: vec![],
             supers: vec![],
+            super_params: vec![],
             methods: vec![bhc_hir::MethodSig {
                 name: Symbol::intern("myAdd"),
                 id: DefId::new(0),
@@ -824,6 +828,7 @@ mod tests {
             params: vec![a_var.clone()],
             fundeps: vec![],
             supers: vec![],
+            super_params: vec![],
             methods: vec![bhc_hir::MethodSig {
                 name: Symbol::intern("myEq"),
                 id: DefId::new(0),
@@ -1135,6 +1140,7 @@ mod tests {
             params: vec![a_var.clone()],
             fundeps: vec![],
             supers: vec![],
+            super_params: vec![],
             methods: vec![
                 bhc_hir::MethodSig {
                     name: Symbol::intern("myEq"),

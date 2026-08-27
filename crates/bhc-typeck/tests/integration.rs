@@ -997,6 +997,7 @@ fn test_class_declaration() {
         params: vec![a_var],
         fundeps: vec![],
         supers: vec![],
+        super_params: vec![],
         methods: vec![MethodSig {
             name: Symbol::intern("=="),
             id: DefId::new(0),
@@ -1048,6 +1049,7 @@ fn test_class_with_multiple_methods() {
         params: vec![a_var],
         fundeps: vec![],
         supers: vec![],
+        super_params: vec![],
         methods: vec![
             MethodSig {
                 name: Symbol::intern("compare"),
@@ -1099,6 +1101,7 @@ fn test_instance_declaration() {
         params: vec![a_var],
         fundeps: vec![],
         supers: vec![],
+        super_params: vec![],
         methods: vec![MethodSig {
             name: Symbol::intern("myEq"),
             id: DefId::new(0),
@@ -1176,6 +1179,7 @@ fn test_instance_with_multiple_methods() {
         params: vec![a_var],
         fundeps: vec![],
         supers: vec![],
+        super_params: vec![],
         methods: vec![
             MethodSig {
                 name: Symbol::intern("isZero"),
@@ -1273,6 +1277,7 @@ fn test_functional_dependency_type_inference() {
             span: Span::DUMMY,
         }],
         supers: vec![],
+        super_params: vec![],
         methods: vec![MethodSig {
             name: Symbol::intern("convert"),
             id: DefId::new(0),
@@ -1357,6 +1362,7 @@ fn test_fundep_bidirectional() {
             },
         ],
         supers: vec![],
+        super_params: vec![],
         methods: vec![
             MethodSig {
                 name: Symbol::intern("to"),

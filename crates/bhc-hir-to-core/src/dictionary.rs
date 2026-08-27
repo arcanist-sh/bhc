@@ -64,6 +64,14 @@ pub struct ClassInfo {
     pub method_types: FxHashMap<Symbol, Scheme>,
     /// Superclass names.
     pub superclasses: Vec<Symbol>,
+    /// For each entry in `superclasses`, which of this class's parameters it
+    /// constrains, by index. `class Monad m => Stream s m t` records `[[1]]`.
+    ///
+    /// Empty means unknown, which keeps the historical behaviour of assuming
+    /// the instance's FIRST type — right for a single-parameter class, and
+    /// the reason a multi-parameter one looked its monad superclass up at the
+    /// stream type and found nothing.
+    pub superclass_params: Vec<Vec<usize>>,
     /// Default method implementations (method name -> `DefId`).
     pub defaults: FxHashMap<Symbol, DefId>,
     /// Associated type declarations.
@@ -1120,6 +1128,7 @@ mod tests {
             methods: vec![Symbol::intern("=="), Symbol::intern("/=")],
             method_types: FxHashMap::default(),
             superclasses: vec![],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -1165,6 +1174,7 @@ mod tests {
             methods: vec![Symbol::intern("convert")],
             method_types: FxHashMap::default(),
             superclasses: vec![],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -1295,6 +1305,7 @@ mod tests {
             methods: vec![Symbol::intern("empty"), Symbol::intern("insert")],
             method_types: FxHashMap::default(),
             superclasses: vec![],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![AssocTypeInfo {
                 name: Symbol::intern("Element"),
@@ -1361,6 +1372,7 @@ mod tests {
             methods: vec![Symbol::intern("==")],
             method_types: FxHashMap::default(),
             superclasses: vec![],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -1431,6 +1443,7 @@ mod tests {
             methods: vec![Symbol::intern("convert")],
             method_types: FxHashMap::default(),
             superclasses: vec![],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };

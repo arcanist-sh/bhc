@@ -666,6 +666,16 @@ pub struct ClassDef {
     pub assoc_types: Vec<AssocTypeSig>,
     /// Superclass constraints.
     pub supers: Vec<Symbol>,
+    /// For each entry in `supers`, which of this class's `params` that
+    /// superclass constrains, by index.
+    ///
+    /// `class Monad m => Stream s m t` records `[[1]]`: the superclass is
+    /// about `m`, the SECOND parameter. Without this, an instance's
+    /// superclass dictionary was looked up at the instance's FIRST type —
+    /// `Monad Sources` for `instance Stream Sources m Char` — which matches
+    /// nothing. Empty when the mapping is unknown, which preserves the old
+    /// first-type behaviour.
+    pub super_params: Vec<Vec<usize>>,
     /// Method signatures.
     pub methods: Vec<MethodSig>,
     /// Default method implementations.
@@ -982,6 +992,7 @@ mod tests {
                 span: Span::default(),
             }],
             supers: vec![],
+            super_params: vec![],
             methods: vec![],
             defaults: vec![],
             assoc_types: vec![],
@@ -1021,6 +1032,7 @@ mod tests {
                 },
             ],
             supers: vec![],
+            super_params: vec![],
             methods: vec![],
             defaults: vec![],
             assoc_types: vec![],

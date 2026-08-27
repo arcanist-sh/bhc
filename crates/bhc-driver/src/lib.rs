@@ -311,6 +311,27 @@ pub struct Compiler {
     callbacks: Arc<dyn CompileCallbacks>,
 }
 
+/// Which of a class's parameters each superclass constrains, by index.
+///
+/// The interface already carries each superclass as a full constraint, so
+/// the mapping is recoverable by matching its type arguments against the
+/// class's parameter names.
+fn superclass_param_indices(class: &bhc_interface::ExportedClass) -> Vec<Vec<usize>> {
+    class
+        .superclasses
+        .iter()
+        .map(|c| {
+            c.args
+                .iter()
+                .filter_map(|t| match t {
+                    bhc_interface::Type::Var(name) => class.params.iter().position(|p| p == name),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
 impl Compiler {
     /// Create a new compiler with the given options.
     ///
@@ -2813,7 +2834,7 @@ impl Compiler {
         let known_classes: FxHashSet<Symbol> = ctx
             .interface_classes
             .iter()
-            .map(|(name, _, _, _, _, _)| *name)
+            .map(|(name, _, _, _, _, _, _)| *name)
             .collect();
         let known_symbols: FxHashSet<(Symbol, String)> = ctx
             .interface_symbols
@@ -2886,6 +2907,7 @@ impl Compiler {
                     defaulted_names,
                     method_arities,
                     class.params.len().max(1),
+                    superclass_param_indices(class),
                 ));
             }
 
@@ -3371,6 +3393,7 @@ impl Compiler {
                 defaulted_names,
                 method_arities,
                 class.params.len().max(1),
+                superclass_param_indices(class),
             ));
         }
 

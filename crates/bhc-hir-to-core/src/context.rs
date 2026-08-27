@@ -785,6 +785,7 @@ impl LowerContext {
             methods: vec![Symbol::intern("=="), Symbol::intern("/=")],
             method_types: FxHashMap::default(),
             superclasses: vec![],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -807,6 +808,7 @@ impl LowerContext {
             ],
             method_types: FxHashMap::default(),
             superclasses: vec![Symbol::intern("Eq")],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -829,6 +831,7 @@ impl LowerContext {
             ],
             method_types: FxHashMap::default(),
             superclasses: vec![],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -847,6 +850,7 @@ impl LowerContext {
             ],
             method_types: FxHashMap::default(),
             superclasses: vec![Symbol::intern("Num")],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -861,6 +865,7 @@ impl LowerContext {
             methods: vec![Symbol::intern("show")],
             method_types: FxHashMap::default(),
             superclasses: vec![],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -1011,6 +1016,7 @@ impl LowerContext {
             methods: vec![Symbol::intern("fmap"), Symbol::intern("<$")],
             method_types: FxHashMap::default(),
             superclasses: vec![],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -1036,6 +1042,7 @@ impl LowerContext {
             ],
             method_types: FxHashMap::default(),
             superclasses: vec![Symbol::intern("Functor")],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -1050,6 +1057,7 @@ impl LowerContext {
             methods: vec![Symbol::intern(">>="), Symbol::intern(">>")],
             method_types: FxHashMap::default(),
             superclasses: vec![Symbol::intern("Applicative")],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -1068,6 +1076,7 @@ impl LowerContext {
             methods: vec![Symbol::intern("<|>"), Symbol::intern("empty")],
             method_types: FxHashMap::default(),
             superclasses: vec![Symbol::intern("Applicative")],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -1083,6 +1092,7 @@ impl LowerContext {
             methods: vec![Symbol::intern("<>")],
             method_types: FxHashMap::default(),
             superclasses: vec![],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -1097,6 +1107,7 @@ impl LowerContext {
             ],
             method_types: FxHashMap::default(),
             superclasses: vec![Symbol::intern("Semigroup")],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -1249,6 +1260,7 @@ impl LowerContext {
             methods: vec![Symbol::intern("mplus"), Symbol::intern("mzero")],
             method_types: FxHashMap::default(),
             superclasses: vec![Symbol::intern("Monad")],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -1277,6 +1289,7 @@ impl LowerContext {
             methods: vec![Symbol::intern("lift")],
             method_types: FxHashMap::default(),
             superclasses: vec![],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -1291,6 +1304,7 @@ impl LowerContext {
             methods: vec![Symbol::intern("liftIO")],
             method_types: FxHashMap::default(),
             superclasses: vec![Symbol::intern("Monad")],
+            superclass_params: vec![],
             defaults: FxHashMap::default(),
             assoc_types: vec![],
         };
@@ -2366,6 +2380,7 @@ impl LowerContext {
             methods: method_names,
             method_types,
             superclasses: class_def.supers.clone(),
+            superclass_params: class_def.super_params.clone(),
             defaults,
             assoc_types,
         };
@@ -2410,6 +2425,7 @@ impl LowerContext {
                     methods: method_names,
                     method_types: FxHashMap::default(),
                     superclasses: Vec::new(),
+                    superclass_params: vec![],
                     defaults: FxHashMap::default(),
                     assoc_types: Vec::new(),
                 });
@@ -2426,14 +2442,29 @@ impl LowerContext {
         let first_type = instance_types.first().cloned().unwrap_or(Ty::Error);
 
         // For superclass instances, use the CLASS's superclass list (not the
-        // instance's constraints, which may be empty). For each superclass,
-        // we assume the first instance type satisfies it.
+        // instance's constraints, which may be empty).
+        //
+        // Which instance type satisfies a given superclass comes from the
+        // class's recorded parameter mapping: `class Monad m => Stream s m t`
+        // says its superclass is about parameter 1, so `instance Stream
+        // Sources m Char` must offer `m` — not `Sources`. Falling back to the
+        // first type when the mapping is unknown keeps single-parameter
+        // classes working exactly as before.
         let superclass_instances =
             if let Some(class_info) = self.class_registry.lookup_class(instance_def.class) {
                 class_info
                     .superclasses
                     .iter()
-                    .map(|_| first_type.clone())
+                    .enumerate()
+                    .map(|(i, _)| {
+                        class_info
+                            .superclass_params
+                            .get(i)
+                            .and_then(|params| params.first())
+                            .and_then(|&p| instance_types.get(p))
+                            .cloned()
+                            .unwrap_or_else(|| first_type.clone())
+                    })
                     .collect()
             } else {
                 // Builtin class not in registry — fall back to instance constraints
@@ -2604,6 +2635,7 @@ impl LowerContext {
             Vec<Symbol>,
             Vec<(Symbol, usize)>,
             usize,
+            Vec<Vec<usize>>,
         )],
         instances: &[(Symbol, Vec<Ty>, Vec<Symbol>, Vec<Constraint>)],
     ) {
@@ -2615,6 +2647,7 @@ impl LowerContext {
             defaulted_names,
             method_arities,
             param_count,
+            superclass_param_indices,
         ) in classes
         {
             if self.class_registry.lookup_class(*class_name).is_some() {
@@ -2664,6 +2697,7 @@ impl LowerContext {
                     // module must agree with the defining module on the count
                     // or it selects the wrong dictionary field.
                     superclasses: superclass_names.clone(),
+                    superclass_params: superclass_param_indices.clone(),
                     defaults,
                     assoc_types: Vec::new(),
                 });
@@ -2688,6 +2722,7 @@ impl LowerContext {
                         methods: method_names.clone(),
                         method_types: FxHashMap::default(),
                         superclasses: Vec::new(),
+                        superclass_params: vec![],
                         defaults: FxHashMap::default(),
                         assoc_types: Vec::new(),
                     });

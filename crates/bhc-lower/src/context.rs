@@ -164,6 +164,12 @@ pub type DefMap = IndexMap<DefId, DefInfo>;
 /// (e.g. superclass method selection) must know a multi-parameter class
 /// (`Stream s m t`) from a single-parameter one — hardcoding 1 let
 /// selection walk through Stream's deliberately-null Monad slot.
+///
+/// The final element records, per superclass, WHICH of the class's
+/// parameters it constrains: `class Monad m => Stream s m t` gives `[[1]]`.
+/// An instance's superclass dictionary is otherwise looked up at the
+/// instance's FIRST type, which for a multi-parameter class is the wrong
+/// one and matches no instance.
 pub type InterfaceClassEntry = (
     Symbol,
     Vec<Symbol>,
@@ -171,6 +177,7 @@ pub type InterfaceClassEntry = (
     Vec<Symbol>,
     Vec<(Symbol, usize)>,
     usize,
+    Vec<Vec<usize>>,
 );
 
 /// An imported instance as threaded from module interfaces:

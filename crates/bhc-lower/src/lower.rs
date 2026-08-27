@@ -9259,6 +9259,23 @@ fn lower_class_decl(ctx: &mut LowerContext, class: &ast::ClassDecl) -> LowerResu
         .collect();
 
     let supers: Vec<Symbol> = class.context.iter().map(|c| c.class.name).collect();
+    // Which of this class's parameters each superclass constrains. For
+    // `class Monad m => Stream s m t` this is `[[1]]` — the superclass is
+    // about `m`, not about the first parameter. Reuses the same name->index
+    // map the fundeps above are built from.
+    let super_params: Vec<Vec<usize>> = class
+        .context
+        .iter()
+        .map(|c| {
+            c.args
+                .iter()
+                .filter_map(|t| match t {
+                    ast::Type::Var(tv, _) => param_indices.get(&tv.name.name).copied(),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
 
     // Extract method signatures
     let methods: Vec<hir::MethodSig> = class
@@ -9326,6 +9343,7 @@ fn lower_class_decl(ctx: &mut LowerContext, class: &ast::ClassDecl) -> LowerResu
         params,
         fundeps,
         supers,
+        super_params,
         methods,
         defaults,
         assoc_types,

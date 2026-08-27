@@ -6363,6 +6363,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // ReaderT operations
             "ReaderT" => Some(1),
             "runReaderT" => Some(2),
+            // mtl aliases: `Reader r = ReaderT r Identity`, and Identity is
+            // erased here, so each alias runner IS its transformer runner.
+            "runReader" => Some(2),
             "ReaderT.fmap" => Some(2),
             "ReaderT.pure" => Some(1),
             "ReaderT.<*>" => Some(2),
@@ -6390,6 +6393,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "gets" => Some(1),
             "evalStateT" => Some(2),
             "execStateT" => Some(2),
+            "runState" => Some(2),
+            "evalState" => Some(2),
+            "execState" => Some(2),
 
             // ExceptT operations
             "ExceptT" => Some(1),
@@ -7937,7 +7943,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // ReaderT operations
             "ReaderT" => self.lower_expr(args[0]), // newtype wrap = identity
-            "runReaderT" => self.lower_builtin_run_reader_t(args[0], args[1]),
+            "runReaderT" | "runReader" => self.lower_builtin_run_reader_t(args[0], args[1]),
             "ReaderT.pure" => self.lower_builtin_reader_t_pure(args[0]),
             "ReaderT.>>=" => self.lower_builtin_reader_t_bind(args[0], args[1]),
             "ReaderT.>>" => self.lower_builtin_reader_t_then(args[0], args[1]),
@@ -7950,7 +7956,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // StateT operations
             "StateT" => self.lower_expr(args[0]), // newtype wrap = identity
-            "runStateT" => self.lower_builtin_run_state_t(args[0], args[1]),
+            "runStateT" | "runState" => self.lower_builtin_run_state_t(args[0], args[1]),
             "StateT.pure" => self.lower_builtin_state_t_pure(args[0]),
             "StateT.>>=" => self.lower_builtin_state_t_bind(args[0], args[1]),
             "StateT.>>" => self.lower_builtin_state_t_then(args[0], args[1]),
@@ -7961,8 +7967,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "put" => self.lower_builtin_put(args[0]),
             "modify" => self.lower_builtin_modify(args[0]),
             "gets" => self.lower_builtin_gets(args[0]),
-            "evalStateT" => self.lower_builtin_eval_state_t(args[0], args[1]),
-            "execStateT" => self.lower_builtin_exec_state_t(args[0], args[1]),
+            "evalStateT" | "evalState" => self.lower_builtin_eval_state_t(args[0], args[1]),
+            "execStateT" | "execState" => self.lower_builtin_exec_state_t(args[0], args[1]),
 
             // ExceptT operations
             "ExceptT" => self.lower_expr(args[0]), // newtype wrap = identity

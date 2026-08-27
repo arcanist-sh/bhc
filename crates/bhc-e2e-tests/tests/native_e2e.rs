@@ -270,6 +270,16 @@ fn test_tier3_state_t_native() {
 }
 
 #[test]
+fn test_tier3_reader_alias_native() {
+    run_native_test("tier3_io/reader_alias", Profile::Default);
+}
+
+#[test]
+fn test_tier3_state_alias_native() {
+    run_native_test("tier3_io/state_alias", Profile::Default);
+}
+
+#[test]
 fn test_tier3_state_t_string_native() {
     run_native_test("tier3_io/state_t_string", Profile::Default);
 }

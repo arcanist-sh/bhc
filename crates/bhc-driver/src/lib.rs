@@ -69,7 +69,7 @@ use bhc_loop_ir::{
     vectorize::{VectorizeConfig, VectorizePass, VectorizeReport},
     LoopId, TargetArch,
 };
-use bhc_lower::{LowerContext, ModuleCache, ModuleExports};
+use bhc_lower::{InterfaceInstanceEntry, LowerContext, ModuleCache, ModuleExports};
 use bhc_package::hackage::{Hackage, HackageError};
 use bhc_session::{Options, OutputType, Profile, Session, SessionRef};
 use bhc_span::FileId;
@@ -1263,11 +1263,8 @@ impl Compiler {
         // ParserState` defines only extractReaderOptions; `getOption` comes
         // from the class default) — those now resolve through the imported
         // class's `defaults` (partial-dict application) instead.
-        let imported_instance_data: Vec<(Symbol, Vec<bhc_types::Ty>, Vec<Symbol>)> = lower_ctx
-            .interface_instances
-            .iter()
-            .map(|(class, types, own_methods)| (*class, types.clone(), own_methods.clone()))
-            .collect();
+        let imported_instance_data: Vec<InterfaceInstanceEntry> =
+            lower_ctx.interface_instances.clone();
         let imports = if lower_ctx.interface_classes.is_empty() && imported_instance_data.is_empty()
         {
             None
@@ -2826,7 +2823,7 @@ impl Compiler {
         let known_instances: FxHashSet<String> = ctx
             .interface_instances
             .iter()
-            .map(|(class, types, _)| format!("{class:?}|{types:?}"))
+            .map(|(class, types, _, _)| format!("{class:?}|{types:?}"))
             .collect();
 
         for path in &paths {
@@ -2922,7 +2919,15 @@ impl Compiler {
                     continue;
                 }
                 let methods: Vec<Symbol> = inst.methods.iter().map(|m| Symbol::intern(m)).collect();
-                ctx.interface_instances.push((class_sym, types, methods));
+                // Converted after the types and without resetting the variable
+                // map, so the instance head and its constraints share one `m`.
+                let constraints: Vec<bhc_types::Constraint> = inst
+                    .constraints
+                    .iter()
+                    .map(|c| converter.convert_constraint(c))
+                    .collect();
+                ctx.interface_instances
+                    .push((class_sym, types, methods, constraints));
             }
         }
     }
@@ -3400,8 +3405,17 @@ impl Compiler {
                 .map(|t| converter.convert_type(t))
                 .collect();
             let methods: Vec<Symbol> = inst.methods.iter().map(|m| Symbol::intern(m)).collect();
-            ctx.interface_instances
-                .push((Symbol::intern(&inst.class), types, methods));
+            let constraints: Vec<bhc_types::Constraint> = inst
+                .constraints
+                .iter()
+                .map(|c| converter.convert_constraint(c))
+                .collect();
+            ctx.interface_instances.push((
+                Symbol::intern(&inst.class),
+                types,
+                methods,
+                constraints,
+            ));
         }
 
         exports

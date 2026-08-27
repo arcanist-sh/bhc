@@ -173,6 +173,23 @@ pub type InterfaceClassEntry = (
     usize,
 );
 
+/// An imported instance as threaded from module interfaces:
+/// (class name, instance types, own method names, the instance's OWN
+/// constraints).
+///
+/// The constraints matter because a constrained instance's methods each take a
+/// dictionary parameter. Dropping them made consumers build the dictionary with
+/// the method BARE while the defining module had compiled it expecting the
+/// dictionary — parsec's `instance Monad m => Stream [tok] m tok` then had
+/// `tokenPrimEx` apply the stream into `uncons`'s dictionary slot and every
+/// token read failed.
+pub type InterfaceInstanceEntry = (
+    Symbol,
+    Vec<bhc_types::Ty>,
+    Vec<Symbol>,
+    Vec<bhc_types::Constraint>,
+);
+
 /// The lowering context, holding all state needed during lowering.
 pub struct LowerContext {
     /// Next `DefId` to allocate.
@@ -207,7 +224,7 @@ pub struct LowerContext {
     /// against the module-qualified externs from `interface_symbols`. The
     /// method names let instances of externally-defined classes (Default)
     /// dispatch without the class's own interface.
-    pub interface_instances: Vec<(Symbol, Vec<bhc_types::Ty>, Vec<Symbol>)>,
+    pub interface_instances: Vec<InterfaceInstanceEntry>,
     /// Classes loaded from `.bhi` interfaces: (class name, method names,
     /// superclass names). Needed alongside `interface_instances` so hir-to-core
     /// knows which method names belong to an imported class. The superclass

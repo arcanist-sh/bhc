@@ -175,6 +175,7 @@ pub fn lower_module_with_imports(
             bhc_intern::Symbol,
             Vec<bhc_types::Ty>,
             Vec<bhc_intern::Symbol>,
+            Vec<bhc_types::Constraint>,
         )],
     )>,
     type_aliases: Option<

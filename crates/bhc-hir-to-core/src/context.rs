@@ -2533,7 +2533,7 @@ impl LowerContext {
             Vec<(Symbol, usize)>,
             usize,
         )],
-        instances: &[(Symbol, Vec<Ty>, Vec<Symbol>)],
+        instances: &[(Symbol, Vec<Ty>, Vec<Symbol>, Vec<Constraint>)],
     ) {
         let mut next_default_id: usize = 800_000;
         for (
@@ -2598,7 +2598,7 @@ impl LowerContext {
         }
 
         let mut next_id: usize = 900_000;
-        for (class, types, method_names) in instances {
+        for (class, types, method_names, constraints) in instances {
             // Remember that this instance came from an interface, so a method
             // use site can tell itself apart from the instance's own module.
             if let Some(head) = types.first().and_then(head_type_con_name) {
@@ -2658,7 +2658,15 @@ impl LowerContext {
                     methods,
                     superclass_instances,
                     assoc_type_impls: FxHashMap::default(),
-                    instance_constraints: Vec::new(),
+                    // An instance's OWN constraints give its methods a
+                    // dictionary parameter each. Dropping them here (as this
+                    // did, unconditionally) left consumers building the
+                    // dictionary with a BARE method while the defining module
+                    // had compiled it expecting the dictionary — parsec's
+                    // `instance Monad m => Stream [tok] m tok` then had
+                    // `tokenPrimEx` apply the stream into `uncons`'s dictionary
+                    // slot and every token read failed.
+                    instance_constraints: constraints.clone(),
                 });
         }
     }

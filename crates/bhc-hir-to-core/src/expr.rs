@@ -2920,9 +2920,17 @@ fn lower_app(
                                     // The callee's lambda has a dict parameter for
                                     // this constraint; omitting the argument shifts
                                     // every later argument one slot at runtime.
+                                    // Name the callee and its byte range: the
+                                    // bare class name gives no way to find which
+                                    // of a module's call sites is at fault, and
+                                    // these warnings are the main signal for
+                                    // argument-shift miscompiles.
                                     eprintln!(
-                                        "warning: dictionary for `{}` could not be resolved at call site; argument slots may shift",
-                                        constraint.class.as_str()
+                                        "warning: dictionary for `{}` could not be resolved at call site of `{}` ({}..{}); argument slots may shift",
+                                        constraint.class.as_str(),
+                                        var.name.as_str(),
+                                        span.lo.as_u32(),
+                                        span.hi.as_u32()
                                     );
                                 }
                             }

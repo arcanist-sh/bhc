@@ -17649,7 +17649,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         action_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let action_val = self.lower_expr(action_expr)?.ok_or_else(|| {
+        let action_val = self.lower_lifted_arg(action_expr)?.ok_or_else(|| {
             CodegenError::Internal("ReaderT.lift: action has no value".to_string())
         })?;
 
@@ -18581,11 +18581,65 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// StateT.lift action = closure \s -> (action, s)
+    /// Lower the argument of `lift`/`liftIO` at the INNER monad's layer.
+    ///
+    /// `lift`'s argument belongs to the monad *underneath* the current
+    /// transformer — crossing that boundary is the whole point of `lift`.
+    /// Lowering it at the outer layer made `lift (return 5)` compile its
+    /// `return` as `StateT.pure`, so what got paired with the state was a
+    /// StateT closure rather than the Int, and `evalStateT` handed back a
+    /// pointer. `state_t_pure` and `state_t_lift` build the identical
+    /// `\(env, s) -> (env[0], s)` shape, so the argument's lowering was the
+    /// only thing telling them apart.
+    ///
+    /// Only the argument is lowered with the layer popped: the nested-variant
+    /// checks in the ExceptT and WriterT lifts (`is_except_t_over_state_t` and
+    /// friends) must still see the unpopped stack. `pop` is a no-op at the IO
+    /// base, so a non-transformer context is unaffected.
+    fn lower_lifted_arg(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Cross exactly one LOGICAL layer. The stack can hold the same layer
+        // several times over: entering a `StateT s IO` binding pushes StateT
+        // for the signature, and lowering a StateT `>>=` pushes it again for
+        // the operands, so a lifted action inside a do-block sits under
+        // [StateT, StateT, IO]. Popping a single entry would leave StateT
+        // current and the argument would still be lowered at the outer monad —
+        // which is why `go = lift (return 5)` was fixed by one pop but
+        // `do { s <- lift (return 5); .. }` was not.
+        //
+        // Caveat: a genuinely nested same-kind stack (`StateT s1 (StateT s2
+        // IO)`) would be over-popped by this. bhc's transformer support is
+        // keyed on the layer KIND rather than the state type, so it cannot
+        // tell that case from the duplication artifact anyway — see the note
+        // on `is_reader_t_over_state_t`, which calls out the same artifact.
+        let outer = self.current_transformer_layer();
+        let mut popped = Vec::new();
+        while self.current_transformer_layer() == outer {
+            match self.transformer_stack.pop() {
+                Some(layer) => popped.push(layer),
+                // Only IO remains; `pop` refuses to empty the stack.
+                None => break,
+            }
+        }
+        if std::env::var_os("BHC_DBG_LAYER").is_some() {
+            eprintln!(
+                "LIFTARG outer={:?} popped={} inner={:?}",
+                outer,
+                popped.len(),
+                self.current_transformer_layer()
+            );
+        }
+        let result = self.lower_expr(expr);
+        while let Some(layer) = popped.pop() {
+            self.transformer_stack.push(layer);
+        }
+        result
+    }
+
     fn lower_builtin_state_t_lift(
         &mut self,
         action_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let action_val = self.lower_expr(action_expr)?.ok_or_else(|| {
+        let action_val = self.lower_lifted_arg(action_expr)?.ok_or_else(|| {
             CodegenError::Internal("StateT.lift: action has no value".to_string())
         })?;
 
@@ -19482,20 +19536,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // In nested contexts, the inner action is a closure that needs
         // state/reader-env threaded through. Route to nested lift functions.
         if self.transformer_stack.is_except_t_over_state_t() {
-            let io_val = self.lower_expr(io_expr)?.ok_or_else(|| {
+            let io_val = self.lower_lifted_arg(io_expr)?.ok_or_else(|| {
                 CodegenError::Internal("ExceptT.lift/st: io has no value".to_string())
             })?;
             return Ok(Some(self.apply_except_t_lift_to_value_over_st(io_val)?));
         }
         if self.transformer_stack.is_except_t_over_reader_t() {
-            let io_val = self.lower_expr(io_expr)?.ok_or_else(|| {
+            let io_val = self.lower_lifted_arg(io_expr)?.ok_or_else(|| {
                 CodegenError::Internal("ExceptT.lift/rt: io has no value".to_string())
             })?;
             return Ok(Some(self.apply_except_t_lift_to_value_over_rt(io_val)?));
         }
 
         let io_val = self
-            .lower_expr(io_expr)?
+            .lower_lifted_arg(io_expr)?
             .ok_or_else(|| CodegenError::Internal("ExceptT.lift: io has no value".to_string()))?;
 
         let _ptr_type = self.type_mapper().ptr_type();
@@ -21113,20 +21167,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // In nested contexts, the inner action is a closure that needs
         // state/reader-env threaded through. Route to nested lift functions.
         if self.transformer_stack.is_writer_t_over_state_t() {
-            let io_val = self.lower_expr(io_expr)?.ok_or_else(|| {
+            let io_val = self.lower_lifted_arg(io_expr)?.ok_or_else(|| {
                 CodegenError::Internal("WriterT.lift/st: io has no value".to_string())
             })?;
             return Ok(Some(self.apply_writer_t_lift_to_value_over_st(io_val)?));
         }
         if self.transformer_stack.is_writer_t_over_reader_t() {
-            let io_val = self.lower_expr(io_expr)?.ok_or_else(|| {
+            let io_val = self.lower_lifted_arg(io_expr)?.ok_or_else(|| {
                 CodegenError::Internal("WriterT.lift/rt: io has no value".to_string())
             })?;
             return Ok(Some(self.apply_writer_t_lift_to_value_over_rt(io_val)?));
         }
 
         let io_val = self
-            .lower_expr(io_expr)?
+            .lower_lifted_arg(io_expr)?
             .ok_or_else(|| CodegenError::Internal("WriterT.lift: io has no value".to_string()))?;
 
         let _ptr_type = self.type_mapper().ptr_type();

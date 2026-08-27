@@ -575,7 +575,7 @@ impl LowerContext {
             "||",
             // List operators (35-37)
             ":",
-            "++",
+            "append",
             "!!",
             // Function composition (38-39)
             ".",
@@ -1146,6 +1146,28 @@ impl LowerContext {
                 });
         }
 
+        // Lists get a builtin `Semigroup` — and deliberately NOT a `Monoid`.
+        // Without this, `"ab" <> "cd"` and `[1,2] <> [3]` lowered to an
+        // unresolved-method stub. `mappend` and `mconcat` would work too, but
+        // registering the Monoid instance also exposes `mempty`, and `mempty`
+        // at a list type does not currently produce an empty list —
+        // `length (mempty :: [Int])` answers 5. A loud stub for the Monoid
+        // methods beats a silent wrong answer for `mempty`.
+        {
+            let list_head = Ty::List(Box::new(Ty::Var(bhc_types::TyVar::new_star(0xFFF7_0004))));
+            let mut sg_methods = FxHashMap::default();
+            sg_methods.insert(Symbol::intern("<>"), DefId::new(790_009));
+            self.class_registry
+                .register_instance(crate::dictionary::InstanceInfo {
+                    class: Symbol::intern("Semigroup"),
+                    instance_types: vec![list_head],
+                    methods: sg_methods,
+                    superclass_instances: Vec::new(),
+                    assoc_type_impls: FxHashMap::default(),
+                    instance_constraints: Vec::new(),
+                });
+        }
+
         // Builtin `Semigroup`/`Monoid` instances for the container builtins
         // Set and Map (same reasoning as Text above): `mempty :: Set a` has
         // no Haskell instance anywhere, so pandoc's
@@ -1411,6 +1433,9 @@ impl LowerContext {
             "Data.Map.union",
             "Data.Map.empty",
             "Data.Map.unions",
+            "Data.List.append",
+            "Data.List.empty",
+            "Data.List.concat",
         ]
         .iter()
         .enumerate()

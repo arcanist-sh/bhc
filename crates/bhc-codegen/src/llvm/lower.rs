@@ -6133,6 +6133,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Data.Sequence.filter" => Some(2),
             // Data.Text operations
             "Data.Text.empty" => Some(0),
+            "Data.List.empty" => Some(0),
+            "Data.List.append" => Some(2),
+            "Data.List.concat" => Some(1),
             "Data.Text.singleton" => Some(1),
             "Data.Text.pack" => Some(1),
             "Data.Text.unpack" => Some(1),
@@ -7336,6 +7339,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // Data.Text operations (VarIds 1000200-1000226)
             "Data.Text.empty" => self.lower_builtin_text_nullary(1000200, "text_empty"),
+            // `mempty` at a list type. Not a Prelude name — it exists so the
+            // builtin `Monoid [a]` instance has something to dispatch to.
+            "Data.List.empty" => Ok(Some(self.build_nil()?.into())),
+            "Data.List.append" => self.lower_builtin_append(args[0], args[1]),
+            "Data.List.concat" => self.lower_builtin_concat(args[0]),
             "Data.Text.singleton" => {
                 self.lower_builtin_text_unary_int_to_ptr(args[0], 1000201, "text_singleton")
             }
@@ -9104,7 +9112,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let list2_val = self
             .lower_expr(list2_expr)?
             .ok_or_else(|| CodegenError::Internal("append: list2 has no value".to_string()))?;
+        self.append_values(list1_val, list2_val)
+    }
 
+    /// Append two already-lowered lists.
+    ///
+    /// Split out of `lower_builtin_append` so the value-position builtin path
+    /// can reach it too: the builtin `Semigroup [a]` instance dispatches `<>`
+    /// through `lower_builtin_direct`, which has values rather than
+    /// expressions in hand.
+    fn append_values(
+        &mut self,
+        list1_val: BasicValueEnum<'ctx>,
+        list2_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let list1_ptr = match list1_val {
             BasicValueEnum::PointerValue(p) => p,
             _ => return Err(CodegenError::TypeError("append expects a list".to_string())),
@@ -12123,7 +12144,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let list_val = self
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("concat: list has no value".to_string()))?;
+        self.concat_values(list_val)
+    }
 
+    /// Concatenate an already-lowered list of lists.
+    ///
+    /// Split out of `lower_builtin_concat` for the same reason as
+    /// `append_values`: the builtin `Monoid [a]` instance dispatches `mconcat`
+    /// through the value-position builtin path.
+    fn concat_values(
+        &mut self,
+        list_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let list_ptr = match list_val {
             BasicValueEnum::PointerValue(p) => p,
             _ => {
@@ -16304,6 +16336,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Expr::TyApp(e, _, _) => self.expr_looks_like_list(e),
             // Let binding - check the body
             Expr::Let(_, body, _) => self.expr_looks_like_list(body),
+            // Annotations and ticks are transparent here: `mempty :: [Int]`
+            // reaches this as a Cast around the instance method, and stopping
+            // at the wrapper printed the empty list as an address.
+            Expr::Cast(e, _, _) | Expr::Tick(_, e, _) => self.expr_looks_like_list(e),
             // Variable that's a list constructor or function returning a list
             Expr::Var(var, _) => {
                 let name = var.name.as_str();
@@ -16324,6 +16360,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         | "enumFromThenTo"
                         | "replicate"
                         | "append"
+                        // `++` is the name a source-level append actually
+                        // carries; without it `print (xs ++ ys)` fell through
+                        // to the pointer branch and printed an address, even
+                        // though `append` (the same builtin under its other
+                        // name) was listed. The Semigroup/Monoid spellings
+                        // reach the same list builtins.
+                        | "++"
+                        | "<>"
+                        | "mappend"
+                        | "mconcat"
+                        | "Data.List.append"
+                        | "Data.List.concat"
+                        | "Data.List.empty"
                         | "tail"
                         | "maybeToList"
                         | "catMaybes"
@@ -44524,7 +44573,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     let arity = self.builtin_info(name).unwrap();
                     if matches!(
                         name,
-                        "Data.Set.empty" | "Data.Map.empty" | "Data.Text.empty"
+                        "Data.Set.empty" | "Data.Map.empty" | "Data.Text.empty" | "Data.List.empty"
                     ) {
                         // A nullary container builtin in value position IS its
                         // result: `mempty` dispatched to `Data.Set.empty` must
@@ -46781,6 +46830,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .ok_or_else(|| CodegenError::Internal("text_length: void".to_string()))?;
                 Ok(Some(result))
             }
+            // The builtin `Semigroup [a]` / `Monoid [a]` instances dispatch
+            // here, with their arguments already lowered.
+            "Data.List.append" => self.append_values(args[0], args[1]),
+            "Data.List.empty" => Ok(Some(self.build_nil()?.into())),
+            "Data.List.concat" => self.concat_values(args[0]),
             "Data.Text.append" | "Data.Text.<>" => {
                 let rts_fn = self.functions.get(&VarId::new(1000210)).ok_or_else(|| {
                     CodegenError::Internal("bhc_text_append not declared".to_string())

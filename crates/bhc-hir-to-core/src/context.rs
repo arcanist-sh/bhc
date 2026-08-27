@@ -118,7 +118,7 @@ pub struct LowerContext {
     /// parsec's `getPosition :: Monad m => ParsecT s u m SourcePos` then ran its
     /// do-block's `>>=` out of that dictionary instead of ParsecT's, and every
     /// parser started from a garbage state. Kept in lockstep with `dict_scope`.
-    dict_scope_ty: Vec<FxHashMap<Symbol, Ty>>,
+    dict_scope_ty: Vec<FxHashMap<Symbol, Vec<Ty>>>,
 
     /// Registry of type classes and instances for dictionary construction.
     class_registry: ClassRegistry,
@@ -1626,22 +1626,118 @@ impl LowerContext {
     /// Register a dictionary along with the TYPE it is for, so a later lookup
     /// can tell whether it is the right dictionary and not merely the right
     /// class. See `dict_scope_ty`.
-    pub fn register_dict_at(&mut self, class_name: Symbol, ty: Ty, dict_var: Var) {
+    ///
+    /// Whether hopping to `needed`'s dictionary through an in-scope `holder`
+    /// dictionary is the RIGHT hop for the binding being lowered.
+    ///
+    /// A multi-parameter class's superclass constrains one specific
+    /// parameter — `class Monad m => Stream s m t` is about `m` — so the hop
+    /// only makes sense in a binding that works in that parameter.
+    /// parsec's `runPT` is such a place: its do-block genuinely runs in `m`,
+    /// which is why selecting its `>>=` through `Stream`'s superclass is
+    /// correct there. Any ParsecT-level binding under the same constraint is
+    /// not, and taking the hop there ran the parser in the wrong monad —
+    /// silently, as wrong answers rather than crashes.
+    ///
+    /// Refuses whenever anything is unknown, which leaves the historical
+    /// "skip multi-parameter classes entirely" behaviour in place.
+    fn superclass_hop_matches(&self, holder: Symbol, needed: Symbol) -> bool {
+        let Some(info) = self.class_registry.lookup_class(holder) else {
+            return false;
+        };
+        // `needed` may be reached TRANSITIVELY — `return` is Applicative's
+        // `pure`, two hops from a `Stream` dictionary — so find the DIRECT
+        // superclass that leads to it and use that one's parameter.
+        let Some(idx) = info
+            .superclasses
+            .iter()
+            .position(|s| *s == needed || self.superclass_field_path(*s, needed, 0).is_some())
+        else {
+            return false;
+        };
+        let Some(param) = info
+            .superclass_params
+            .get(idx)
+            .and_then(|p| p.first())
+            .copied()
+        else {
+            return false;
+        };
+        let Some(constrained) = self
+            .lookup_dict_args(holder)
+            .and_then(|a| a.get(param))
+            .cloned()
+        else {
+            return false;
+        };
+        // Decide from the ENCLOSING BINDING's signature, not from the
+        // occurrence's recorded type.
+        //
+        // The occurrence route cannot work: comparing type-variable HEADS
+        // treats any two variables as equal, so every occurrence whose monad
+        // typeck left unresolved matches — and a parser library is full of
+        // those. Comparing variable IDENTITY fails the other way, because an
+        // occurrence's inference variables are not the signature's.
+        //
+        // The signature route has neither problem. `runPT :: Stream s m t =>
+        // … -> m (Either ParseError a)` returns in `m`, the very parameter
+        // the superclass constrains, so its do-block wants the hop. A
+        // ParsecT-level binding under the same constraint returns in
+        // `ParsecT s u m`, so it does not. Both the signature and the
+        // constraint come from one declaration, so their variables ARE the
+        // same objects and identity is meaningful here.
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        fn head(ty: &Ty) -> &Ty {
+            match ty {
+                Ty::App(f, _) => head(f),
+                other => other,
+            }
+        }
+        let Some(sig) = self.current_binding_sig() else {
+            return false;
+        };
+        let sig_monad = head(result_of(sig));
+        matches!(
+            (head(&constrained), sig_monad),
+            (Ty::Var(a), Ty::Var(b)) if a.id == b.id
+        )
+    }
+
+    /// Register a dictionary along with the constraint arguments it is for.
+    ///
+    /// Records the FULL argument list, not just the first type: a superclass
+    /// of a multi-parameter class is about a specific parameter (`class Monad
+    /// m => Stream s m t` is about `m`, index 1), so deciding whether that
+    /// superclass hop applies needs the argument at that index.
+    pub fn register_dict_at(&mut self, class_name: Symbol, args: Vec<Ty>, dict_var: Var) {
         self.register_dict(class_name, dict_var);
         if let Some(scope) = self.dict_scope_ty.last_mut() {
-            scope.insert(class_name, ty);
+            scope.insert(class_name, args);
         }
     }
 
-    /// The type an in-scope dictionary for `class_name` is for, if recorded.
+    /// The constraint arguments an in-scope dictionary for `class_name` is
+    /// for, if recorded.
     #[must_use]
-    pub fn lookup_dict_ty(&self, class_name: Symbol) -> Option<&Ty> {
+    pub fn lookup_dict_args(&self, class_name: Symbol) -> Option<&[Ty]> {
         for scope in self.dict_scope_ty.iter().rev() {
-            if let Some(ty) = scope.get(&class_name) {
-                return Some(ty);
+            if let Some(args) = scope.get(&class_name) {
+                return Some(args.as_slice());
             }
         }
         None
+    }
+
+    /// The first constraint argument, i.e. the type a single-parameter class's
+    /// dictionary is for.
+    #[must_use]
+    pub fn lookup_dict_ty(&self, class_name: Symbol) -> Option<&Ty> {
+        self.lookup_dict_args(class_name).and_then(|a| a.first())
     }
 
     /// Look up a dictionary variable for a constraint class.
@@ -2008,7 +2104,7 @@ impl LowerContext {
                     .class_registry
                     .lookup_class(*class_name)
                     .is_some_and(|c| c.param_count == 1);
-                if !single_param {
+                if !single_param && !self.superclass_hop_matches(*class_name, needed_class) {
                     continue;
                 }
                 if let Some(path) = self.superclass_field_path(*class_name, needed_class, 0) {
@@ -3431,11 +3527,10 @@ impl LowerContext {
         if !dict_vars.is_empty() {
             self.push_dict_scope();
             for ((class_name, dict_var), constraint) in dict_vars.iter().zip(&user_constraints) {
-                match constraint.args.first() {
-                    Some(ty) => {
-                        self.register_dict_at(*class_name, ty.clone(), dict_var.clone());
-                    }
-                    None => self.register_dict(*class_name, dict_var.clone()),
+                if constraint.args.is_empty() {
+                    self.register_dict(*class_name, dict_var.clone());
+                } else {
+                    self.register_dict_at(*class_name, constraint.args.clone(), dict_var.clone());
                 }
             }
         }

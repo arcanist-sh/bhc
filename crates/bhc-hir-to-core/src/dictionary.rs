@@ -597,6 +597,62 @@ impl<'a> DictContext<'a> {
                     let super_constraint = Constraint::new(*superclass, concrete_super_ty, span);
                     self.get_dictionary(&super_constraint, span)
                 })
+                .or_else(|| {
+                    // The instance's OWN constraints name the right type when
+                    // the head above does not resolve: `instance Monad m =>
+                    // Stream Sources m Char` carries `Monad m` in its context,
+                    // and with the parameter mapping recorded that is the same
+                    // `m` the superclass is about. Without this the slot stays
+                    // a null placeholder and selecting through it segfaults.
+                    if std::env::var_os("BHC_DBG_SUPER").is_some() {
+                        eprintln!(
+                            "SUPER fill class={} super={} inst_cs={:?}",
+                            class.name.as_str(),
+                            superclass.as_str(),
+                            instance
+                                .instance_constraints
+                                .iter()
+                                .map(|c| c.class.as_str())
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                    let matching = instance
+                        .instance_constraints
+                        .iter()
+                        .find(|c| c.class == *superclass)?;
+                    let args: Vec<Ty> = matching.args.iter().map(|a| subst.apply(a)).collect();
+                    self.get_dictionary(
+                        &Constraint::new_multi(*superclass, args.clone(), span),
+                        span,
+                    )
+                    .or_else(|| {
+                        // Builtin monad instances are registered under the
+                        // BARE constructor (`Con StateT`) because codegen
+                        // matches them by name, so an applied type such as
+                        // `StateT Int IO` never matches. Retry at the head,
+                        // as `resolve_dictionary` does for the same reason.
+                        fn head_con(ty: &Ty) -> Option<&bhc_types::TyCon> {
+                            match ty {
+                                Ty::Con(tc) => Some(tc),
+                                Ty::App(f, _) => head_con(f),
+                                _ => None,
+                            }
+                        }
+                        let head = args.first().and_then(head_con)?;
+                        let bare = vec![Ty::Con(head.clone())];
+                        if bare == args {
+                            return None;
+                        }
+                        let r = self.get_dictionary(
+                            &Constraint::new_multi(*superclass, bare.clone(), span),
+                            span,
+                        );
+                        if std::env::var_os("BHC_DBG_SUPER").is_some() {
+                            eprintln!("SUPER  bare={:?} resolved={}", bare, r.is_some());
+                        }
+                        r
+                    })
+                })
                 .unwrap_or(core::Expr::Lit(core::Literal::Int(0), Ty::Error, span));
             super_fields.push(super_dict);
         }

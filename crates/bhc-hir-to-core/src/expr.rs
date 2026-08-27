@@ -261,7 +261,7 @@ fn in_scope_dict_matches(ctx: &LowerContext, class_name: Symbol, span: Span) -> 
 /// Whether two types name the same monad, comparing only head constructors —
 /// `ParsecT s u m` and `ParsecT [Char] () IO` are the same monad, and a type
 /// variable matches only another variable.
-fn same_type_head(a: &Ty, b: &Ty) -> bool {
+pub(crate) fn same_type_head(a: &Ty, b: &Ty) -> bool {
     fn head(ty: &Ty) -> &Ty {
         match ty {
             Ty::App(f, _) => head(f),
@@ -275,7 +275,7 @@ fn same_type_head(a: &Ty, b: &Ty) -> bool {
     }
 }
 
-fn monad_head_of_method_occurrence(ty: &Ty) -> Option<Ty> {
+pub(crate) fn monad_head_of_method_occurrence(ty: &Ty) -> Option<Ty> {
     let target = match ty {
         Ty::Fun(a, _) => a.as_ref(),
         t => t,
@@ -1981,6 +1981,26 @@ fn lower_app(
                     }
                 }
 
+                // Case 1a': the monad family supplied as a SUPERCLASS, single
+                // argument. `return x` arrives here while `a >>= k` arrives at
+                // the multi-argument site below; patching only one leaves the
+                // other bare for codegen to guess an ambient layer for.
+                if is_monad_family
+                    && crate::dictionary::monad_witness_enabled()
+                    && ctx.lookup_dict(class_name).is_none()
+                {
+                    if let Some(method_expr) =
+                        ctx.select_method_via_superclass(class_name, method_name, span)
+                    {
+                        let x_core = lower_expr(ctx, x)?;
+                        return Ok(core::Expr::App(
+                            Box::new(method_expr),
+                            Box::new(x_core),
+                            span,
+                        ));
+                    }
+                }
+
                 // Case 1b: No dict in scope — resolve via instance lookup
                 if (is_user || is_monad_family)
                     && (ctx.lookup_dict(class_name).is_none() || !dict_matches)
@@ -2292,6 +2312,32 @@ fn lower_app(
                             let x_core = lower_expr(ctx, x)?;
                             return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
                         }
+                    }
+                }
+
+                // The monad family supplied as a SUPERCLASS. parsec's
+                // `runPT :: Stream s m t => …` has no `Monad m` constraint of
+                // its own — `class Monad m => Stream s m t` supplies it — so
+                // `lookup_dict(Monad)` misses and the do-block's `>>=` was
+                // emitted bare for codegen to guess an ambient layer for.
+                // `select_method_via_superclass` now checks that the hop is
+                // about the occurrence's own monad before taking it, so a
+                // ParsecT-level binding under the same constraint is left
+                // alone. `a >>= k` arrives here, at the MULTI-argument site.
+                if is_monad_family
+                    && crate::dictionary::monad_witness_enabled()
+                    && ctx.lookup_dict(class_name).is_none()
+                {
+                    if let Some(method_expr) =
+                        ctx.select_method_via_superclass(class_name, method_name, span)
+                    {
+                        let mut result = method_expr;
+                        for arg in &collected_args {
+                            let arg_core = lower_expr(ctx, arg)?;
+                            result = core::Expr::App(Box::new(result), Box::new(arg_core), span);
+                        }
+                        let x_core = lower_expr(ctx, x)?;
+                        return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
                     }
                 }
 

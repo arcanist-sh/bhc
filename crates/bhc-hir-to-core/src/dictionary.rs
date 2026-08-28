@@ -241,6 +241,32 @@ pub(crate) const BUILTIN_CLASS_NAMES: &[&str] = &[
     "MonadPlus",
 ];
 
+/// The representation suffix for a transformer whose methods depend on the
+/// layer beneath it. Mirrors the copy in `resolve_dictionary`: `ExceptT e
+/// (StateT s m)` needs `_st`, because its methods thread the state.
+fn inner_layer_suffix(ty: &Ty) -> Option<&'static str> {
+    fn head_con(ty: &Ty) -> Option<&bhc_types::TyCon> {
+        match ty {
+            Ty::Con(tc) => Some(tc),
+            Ty::App(f, _) => head_con(f),
+            _ => None,
+        }
+    }
+    // `T a m` is App(App(Con T, a), m): the inner monad is the outer argument.
+    let Ty::App(f, inner) = ty else {
+        return None;
+    };
+    let is_except_t = matches!(f.as_ref(), Ty::App(g, _)
+        if matches!(head_con(g), Some(tc) if tc.name.as_str() == "ExceptT"));
+    if !is_except_t {
+        return None;
+    }
+    match head_con(inner)?.name.as_str() {
+        "StateT" => Some("_st"),
+        _ => None,
+    }
+}
+
 impl ClassRegistry {
     /// Create a new empty registry.
     #[must_use]
@@ -604,18 +630,6 @@ impl<'a> DictContext<'a> {
                     // and with the parameter mapping recorded that is the same
                     // `m` the superclass is about. Without this the slot stays
                     // a null placeholder and selecting through it segfaults.
-                    if std::env::var_os("BHC_DBG_SUPER").is_some() {
-                        eprintln!(
-                            "SUPER fill class={} super={} inst_cs={:?}",
-                            class.name.as_str(),
-                            superclass.as_str(),
-                            instance
-                                .instance_constraints
-                                .iter()
-                                .map(|c| c.class.as_str())
-                                .collect::<Vec<_>>()
-                        );
-                    }
                     let matching = instance
                         .instance_constraints
                         .iter()
@@ -643,14 +657,21 @@ impl<'a> DictContext<'a> {
                         if bare == args {
                             return None;
                         }
-                        let r = self.get_dictionary(
-                            &Constraint::new_multi(*superclass, bare.clone(), span),
-                            span,
-                        );
-                        if std::env::var_os("BHC_DBG_SUPER").is_some() {
-                            eprintln!("SUPER  bare={:?} resolved={}", bare, r.is_some());
-                        }
-                        r
+                        // Matching on the bare head throws away the layer
+                        // BENEATH a transformer, and ExceptT's runtime
+                        // representation depends on it: over StateT its methods
+                        // thread the state, so the plain variant yields a value
+                        // the `_st` bind then unwraps one level too far. A
+                        // parser under `ExceptT e (StateT s IO)` had its own
+                        // `Either ParseError a` result taken for ExceptT's error
+                        // layer, and the character inside was forced as a
+                        // pointer.
+                        let saved = self.transformer_variant;
+                        self.set_transformer_variant(args.first().and_then(inner_layer_suffix));
+                        let built = self
+                            .get_dictionary(&Constraint::new_multi(*superclass, bare, span), span);
+                        self.set_transformer_variant(saved);
+                        built
                     })
                 })
                 .unwrap_or(core::Expr::Lit(core::Literal::Int(0), Ty::Error, span));

@@ -40971,6 +40971,76 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(result))
     }
 
+    /// Call a `Data.Text` RTS entry point whose arguments are all text
+    /// pointers, from the *value* position where the arguments have already
+    /// been lowered.
+    ///
+    /// The `lower_builtin_text_*` helpers above take unlowered `Expr`s and so
+    /// only serve the expression position. A builtin used point-free — passed
+    /// as a value, or reached through a closure wrapper — arrives here instead,
+    /// and without an arm it degrades to a `stub: ... not implemented` at
+    /// runtime.
+    fn lower_builtin_text_ptrs_direct(
+        &mut self,
+        args: &[BasicValueEnum<'ctx>],
+        arity: usize,
+        rts_id: usize,
+        label: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if args.len() < arity {
+            return Err(CodegenError::Internal(format!(
+                "{}: expected {} argument(s), got {}",
+                label,
+                arity,
+                args.len()
+            )));
+        }
+        let mut call_args = Vec::with_capacity(arity);
+        for arg in &args[..arity] {
+            call_args.push(self.value_to_ptr(*arg)?.into());
+        }
+        let rts_fn = *self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
+            CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
+        })?;
+        let result = self
+            .builder()
+            .build_call(rts_fn, &call_args, label)
+            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+        Ok(Some(result))
+    }
+
+    /// Value-position sibling of 'lower_builtin_text_int_ptr_to_ptr'.
+    fn lower_builtin_text_int_ptr_direct(
+        &mut self,
+        args: &[BasicValueEnum<'ctx>],
+        rts_id: usize,
+        label: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if args.len() < 2 {
+            return Err(CodegenError::Internal(format!(
+                "{}: expected 2 arguments, got {}",
+                label,
+                args.len()
+            )));
+        }
+        let n_int = self.coerce_to_int(args[0])?;
+        let t_ptr = self.value_to_ptr(args[1])?;
+        let rts_fn = *self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
+            CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
+        })?;
+        let result = self
+            .builder()
+            .build_call(rts_fn, &[n_int.into(), t_ptr.into()], label)
+            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", label, e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", label)))?;
+        Ok(Some(result))
+    }
+
     /// Text unary: (ptr) -> i64 (e.g. text_null, text_length, text_head)
     fn lower_builtin_text_unary_ptr_to_int(
         &mut self,
@@ -46864,6 +46934,63 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .basic()
                     .ok_or_else(|| CodegenError::Internal("text_append: void".to_string()))?;
                 Ok(Some(result))
+            }
+            // `Data.Text` builtins reached in the value position (point-free
+            // use, or via a closure wrapper). These mirror the expression-
+            // position arms; without them the call falls through to a runtime
+            // "not implemented" stub even though the builtin exists.
+            "Data.Text.tail" => self.lower_builtin_text_ptrs_direct(args, 1, 1000208, "text_tail"),
+            "Data.Text.init" => self.lower_builtin_text_ptrs_direct(args, 1, 1000209, "text_init"),
+            "Data.Text.reverse" => {
+                self.lower_builtin_text_ptrs_direct(args, 1, 1000211, "text_reverse")
+            }
+            "Data.Text.toCaseFold" => {
+                self.lower_builtin_text_ptrs_direct(args, 1, 1000221, "text_to_case_fold")
+            }
+            "Data.Text.toTitle" => {
+                self.lower_builtin_text_ptrs_direct(args, 1, 1000222, "text_to_title")
+            }
+            "Data.Text.concat" => {
+                self.lower_builtin_text_ptrs_direct(args, 1, 1000229, "text_concat")
+            }
+            "Data.Text.strip" => {
+                self.lower_builtin_text_ptrs_direct(args, 1, 1000231, "text_strip")
+            }
+            "Data.Text.words" => {
+                self.lower_builtin_text_ptrs_direct(args, 1, 1000232, "text_words")
+            }
+            "Data.Text.lines" => {
+                self.lower_builtin_text_ptrs_direct(args, 1, 1000233, "text_lines")
+            }
+            "Data.Text.head" => self.lower_builtin_text_ptrs_direct(args, 1, 1000206, "text_head"),
+            "Data.Text.last" => self.lower_builtin_text_ptrs_direct(args, 1, 1000207, "text_last"),
+            "Data.Text.eq" => self.lower_builtin_text_ptrs_direct(args, 2, 1000204, "text_eq"),
+            "Data.Text.compare" => {
+                self.lower_builtin_text_ptrs_direct(args, 2, 1000205, "text_compare")
+            }
+            "Data.Text.isPrefixOf" => {
+                self.lower_builtin_text_ptrs_direct(args, 2, 1000216, "text_is_prefix_of")
+            }
+            "Data.Text.isSuffixOf" => {
+                self.lower_builtin_text_ptrs_direct(args, 2, 1000217, "text_is_suffix_of")
+            }
+            "Data.Text.isInfixOf" => {
+                self.lower_builtin_text_ptrs_direct(args, 2, 1000218, "text_is_infix_of")
+            }
+            "Data.Text.intercalate" => {
+                self.lower_builtin_text_ptrs_direct(args, 2, 1000230, "text_intercalate")
+            }
+            "Data.Text.splitOn" => {
+                self.lower_builtin_text_ptrs_direct(args, 2, 1000234, "text_split_on")
+            }
+            "Data.Text.replace" => {
+                self.lower_builtin_text_ptrs_direct(args, 3, 1000235, "text_replace")
+            }
+            "Data.Text.takeEnd" => {
+                self.lower_builtin_text_int_ptr_direct(args, 1000213, "text_take_end")
+            }
+            "Data.Text.dropEnd" => {
+                self.lower_builtin_text_int_ptr_direct(args, 1000215, "text_drop_end")
             }
             "Data.Text.toUpper" => {
                 let rts_fn = self.functions.get(&VarId::new(1000220)).ok_or_else(|| {

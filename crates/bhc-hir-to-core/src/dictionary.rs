@@ -169,8 +169,8 @@ pub struct ClassRegistry {
     pub instances: FxHashMap<Symbol, Vec<InstanceInfo>>,
 }
 
-/// EXPERIMENT (`BHC_MONAD_WITNESS=1`): give `Monad`/`Applicative` constraints a
-/// runtime witness, so a monad-polymorphic binding can dispatch `return`/`pure`.
+/// Give `Monad`/`Applicative` constraints a runtime witness, so a
+/// monad-polymorphic binding can dispatch `return`/`pure`.
 ///
 /// Without one, codegen picks `return` from an AMBIENT transformer layer; a
 /// binding polymorphic in its monad has no layer, falls back to
@@ -179,11 +179,23 @@ pub struct ClassRegistry {
 /// `Right x`, and the caller's transformer bind reads that ADT's tag as a
 /// function pointer (`blr 0x1`). See `VQ.hs`/`VR.hs` in the pandoc harness.
 ///
-/// Off by default: see the note on `constraint_needs_dict_param` for the
-/// earlier attempt that regressed.
+/// **On by default since 2026-08-28.** It was an opt-in experiment while two
+/// defects made it worse than useless on real code: instance constraints were
+/// dropped crossing a `.bhi` boundary, and a constrained occurrence could
+/// select a dictionary for the wrong monad. With both fixed, a measurement on
+/// DBs built from scratch under each setting showed it strictly better and
+/// nowhere worse — pandoc sweep 197/221 with a byte-identical fail list under
+/// both, e2e 211/0 under both, parsec probe battery 10/10 under both, and the
+/// 24-probe parser ladder going 6 passing to 18. `readWithM`, the call
+/// `readMarkdown` makes, runs correctly for the first time.
+///
+/// Set `BHC_MONAD_WITNESS=0` to opt back out.
 pub(crate) fn monad_witness_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("BHC_MONAD_WITNESS").is_some())
+    *ON.get_or_init(|| match std::env::var("BHC_MONAD_WITNESS") {
+        Ok(v) => !matches!(v.as_str(), "0" | "off" | "false"),
+        Err(_) => true,
+    })
 }
 
 /// Builtin monad/value-family classes whose methods dispatch through the
@@ -303,13 +315,19 @@ impl ClassRegistry {
     /// `Monoid a` dict so `mempty = return mempty` selects the inner `mempty`
     /// from the constraint dictionary instead of looping on its own instance.
     ///
-    /// The MONADIC family (Functor..MonadPlus) deliberately does NOT count:
-    /// wrapping e.g. parsec's `instance Monad m => Stream [tok] m tok` in a
-    /// Monad dict lambda makes `uncons`'s `return` resolve via the dict, but
-    /// at use sites `m` is a builtin fast-path monad (Identity/IO) with no
-    /// registered instance, so the dict is a null placeholder and every token
-    /// read crashes. Monadic ops on constraint tyvars must keep the builtin
-    /// codegen fast path.
+    /// `Monad` and `Applicative` count when the monad witness is on, which it
+    /// is by default — see `monad_witness_enabled`. The rest of the monadic
+    /// family (Functor, Alternative, MonadPlus, ...) still does not: monadic
+    /// ops on those constraint tyvars keep the builtin codegen fast path.
+    ///
+    /// Counting `Monad` used to be actively harmful, which is why it was long
+    /// gated off. Wrapping e.g. parsec's `instance Monad m => Stream [tok] m
+    /// tok` in a Monad dict lambda makes `uncons`'s `return` resolve via the
+    /// dict — but the dict was a null placeholder, so every token read
+    /// crashed. That had two causes, both since fixed: instance constraints
+    /// were not serialized into `.bhi`, so a consumer rebuilt the dict with
+    /// the wrong arity, and a constrained occurrence could select a dictionary
+    /// for the wrong monad.
     #[must_use]
     pub fn constraint_needs_dict_param(&self, class_name: Symbol) -> bool {
         let name = class_name.as_str();

@@ -3485,10 +3485,18 @@ impl LowerContext {
             }
             None => value_def,
         };
-        let var = self
+        let mut var = self
             .lookup_var(value_def.id)
             .cloned()
             .ok_or_else(|| LowerError::Internal("missing variable for value def".into()))?;
+        // Codegen derives this binding's transformer layer from its TYPE, and
+        // a monad written through a synonym hides the transformer behind the
+        // synonym's own constructor: `type S = StateT Int IO; go :: S Int`
+        // arrives as `App(Con S, Int)`, no layer is detected, and `return`
+        // compiles at the ambient IO layer — where it is IDENTITY — so
+        // `evalStateT` is handed a raw value instead of a state function.
+        // `current_binding_sig` is expanded just below for the same reason.
+        var.ty = self.expand_type_aliases(&var.ty);
 
         // Record the binding's declared type so occurrence-type gaps inside
         // the body can be repaired against the signature (see

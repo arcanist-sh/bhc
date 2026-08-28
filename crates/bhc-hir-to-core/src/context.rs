@@ -1708,6 +1708,22 @@ impl LowerContext {
         )
     }
 
+    /// The dictionaries currently in scope, with the constraint arguments each
+    /// is for, in the shape `DictContext` wants for filling superclass slots.
+    fn scope_dicts_for_construction(&self) -> Vec<(Symbol, Vec<Ty>, Var)> {
+        let mut out = Vec::new();
+        for scope in self.dict_scope.iter().rev() {
+            for (class, var) in scope {
+                if out.iter().any(|(c, _, _)| c == class) {
+                    continue; // innermost wins
+                }
+                let args = self.lookup_dict_args(*class).unwrap_or(&[]).to_vec();
+                out.push((*class, args, var.clone()));
+            }
+        }
+        out
+    }
+
     /// Register a dictionary along with the constraint arguments it is for.
     ///
     /// Records the FULL argument list, not just the first type: a superclass
@@ -1821,6 +1837,7 @@ impl LowerContext {
         if !constraint.args.is_empty() && constraint.args.iter().all(|ty| !has_type_variables(ty)) {
             let mut dict_ctx =
                 DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
+            dict_ctx.set_scope_dicts(self.scope_dicts_for_construction());
             if let Some(dict_expr) = dict_ctx.get_dictionary(constraint, span) {
                 let bindings = dict_ctx.take_bindings();
                 let mut result = dict_expr;
@@ -1875,6 +1892,7 @@ impl LowerContext {
                 if head_constraint.args != constraint.args {
                     let mut dict_ctx =
                         DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
+                    dict_ctx.set_scope_dicts(self.scope_dicts_for_construction());
                     // Resolution matches on the bare head, which throws away
                     // the layer beneath a transformer — but ExceptT's methods
                     // differ between `ExceptT e (StateT s m)` and plain
@@ -1922,6 +1940,7 @@ impl LowerContext {
             // Create a DictContext with var_map so method_reference uses correct names
             let mut dict_ctx =
                 DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
+            dict_ctx.set_scope_dicts(self.scope_dicts_for_construction());
             let dict_expr = dict_ctx.get_dictionary(constraint, span)?;
 
             // If the dictionary construction generated bindings, wrap the
@@ -1953,6 +1972,7 @@ impl LowerContext {
         if constraint.args.len() > 1 && constraint.args.iter().any(|ty| !has_type_variables(ty)) {
             let mut dict_ctx =
                 DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
+            dict_ctx.set_scope_dicts(self.scope_dicts_for_construction());
             if let Some(dict_expr) = dict_ctx.get_dictionary(constraint, span) {
                 let bindings = dict_ctx.take_bindings();
                 let mut result = dict_expr;
@@ -1987,6 +2007,7 @@ impl LowerContext {
         // Construct the dictionary with var_map for correct method names
         let mut dict_ctx =
             DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
+        dict_ctx.set_scope_dicts(self.scope_dicts_for_construction());
         let dict_expr = dict_ctx.get_dictionary(&constraint, span)?;
         let bindings = dict_ctx.take_bindings();
 
@@ -2031,6 +2052,7 @@ impl LowerContext {
 
         let mut dict_ctx =
             DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
+        dict_ctx.set_scope_dicts(self.scope_dicts_for_construction());
         let dict_expr = dict_ctx.get_dictionary(&constraint, span)?;
         let bindings = dict_ctx.take_bindings();
 

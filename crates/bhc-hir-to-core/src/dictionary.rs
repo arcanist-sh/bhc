@@ -267,6 +267,22 @@ fn inner_layer_suffix(ty: &Ty) -> Option<&'static str> {
     }
 }
 
+/// Whether two types share a head constructor, with a type variable matching
+/// only another type variable.
+fn same_head(a: &Ty, b: &Ty) -> bool {
+    fn head(ty: &Ty) -> &Ty {
+        match ty {
+            Ty::App(f, _) => head(f),
+            other => other,
+        }
+    }
+    match (head(a), head(b)) {
+        (Ty::Con(x), Ty::Con(y)) => x.name == y.name,
+        (Ty::Var(_), Ty::Var(_)) => true,
+        _ => false,
+    }
+}
+
 impl ClassRegistry {
     /// Create a new empty registry.
     #[must_use]
@@ -464,6 +480,17 @@ pub struct DictContext<'a> {
     /// module under whatever layer happened to be current. So the variant
     /// travels in the name: `ExceptT.pure` vs `ExceptT_st.pure`.
     transformer_variant: Option<&'static str>,
+    /// Dictionaries in scope at the construction site, with the constraint
+    /// arguments each is for.
+    ///
+    /// A superclass slot can only be built from an instance when the type is
+    /// concrete. `readWithM :: Monad m => …` constructs `Stream Sources m
+    /// Char` while `m` is still ITS OWN variable, so the `Monad m` superclass
+    /// resolved to nothing and the slot became a null placeholder — and
+    /// `runPT`, which now selects its methods from that dictionary, read a
+    /// field off null. But `readWithM` HAS a `Monad m` dictionary in scope, for
+    /// exactly that `m`. This is how it reaches the slot.
+    scope_dicts: Vec<(Symbol, Vec<Ty>, Var)>,
 }
 
 impl<'a> DictContext<'a> {
@@ -477,6 +504,7 @@ impl<'a> DictContext<'a> {
             dict_cache: FxHashMap::default(),
             var_map: None,
             transformer_variant: None,
+            scope_dicts: Vec::new(),
         }
     }
 
@@ -490,7 +518,15 @@ impl<'a> DictContext<'a> {
             dict_cache: FxHashMap::default(),
             var_map: Some(var_map),
             transformer_variant: None,
+            scope_dicts: Vec::new(),
         }
+    }
+
+    /// Offer the dictionaries in scope at the construction site, so a
+    /// superclass slot that cannot be built from an instance can still be
+    /// filled. See `scope_dicts`.
+    pub fn set_scope_dicts(&mut self, dicts: Vec<(Symbol, Vec<Ty>, Var)>) {
+        self.scope_dicts = dicts;
     }
 
     /// Select the representation for builtin transformer methods in the
@@ -673,6 +709,33 @@ impl<'a> DictContext<'a> {
                         self.set_transformer_variant(saved);
                         built
                     })
+                })
+                .or_else(|| {
+                    // Last resort: a dictionary in scope AT THE CONSTRUCTION
+                    // SITE for this very superclass. `readWithM :: Monad m =>`
+                    // builds `Stream Sources m Char` while `m` is still its own
+                    // variable, so no instance can supply the `Monad m` slot —
+                    // but its own `Monad m` dictionary is right there. Without
+                    // this the slot stayed null, and `runPT`, which now selects
+                    // its methods from that dictionary, read a field off null.
+                    //
+                    // Matched by head, so `m` lines up with `m` and never with
+                    // a different monad.
+                    let want: Option<Vec<Ty>> = instance
+                        .instance_constraints
+                        .iter()
+                        .find(|c| c.class == *superclass)
+                        .map(|c| c.args.iter().map(|a| subst.apply(a)).collect());
+                    self.scope_dicts
+                        .iter()
+                        .find(|(class, args, _)| {
+                            *class == *superclass
+                                && want.as_ref().is_none_or(|w| {
+                                    w.len() == args.len()
+                                        && w.iter().zip(args).all(|(a, b)| same_head(a, b))
+                                })
+                        })
+                        .map(|(_, _, var)| core::Expr::Var(var.clone(), span))
                 })
                 .unwrap_or(core::Expr::Lit(core::Literal::Int(0), Ty::Error, span));
             super_fields.push(super_dict);

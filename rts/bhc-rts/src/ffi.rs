@@ -20,6 +20,13 @@ use crate::{global, init_default, Profile, RuntimeConfig};
 /// continuing with corrupted state would be undefined behavior.
 fn rts_abort(msg: &str) -> ! {
     eprintln!("BHC Runtime Error: {msg}");
+    // A fatal runtime error names a symptom; the caller chain is what names
+    // the cause. `capture()` honours RUST_BACKTRACE, so this costs nothing
+    // unless someone asks for it.
+    let bt = std::backtrace::Backtrace::capture();
+    if bt.status() == std::backtrace::BacktraceStatus::Captured {
+        eprintln!("stack backtrace:\n{bt}");
+    }
     std::process::exit(1);
 }
 
@@ -766,6 +773,10 @@ pap_resume_fns!(
     (pap_resume_7, b1, b2, b3, b4, b5, b6, b7),
 );
 
+/// Largest number of still-missing arguments a PAP can represent, i.e. the
+/// highest arity in `pap_resume_fns!` below.
+const MAX_PAP_REMAINING: usize = 7;
+
 /// Resume function for a PAP with `m` remaining arguments (1-indexed).
 fn pap_resume_table(m: usize) -> *const u8 {
     match m {
@@ -789,6 +800,17 @@ fn pap_resume_table(m: usize) -> *const u8 {
 unsafe fn pap_create(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
     let arity = unsafe { *(closure.add(8) as *const i64) } as usize;
     let k = args.len();
+    // A wild `arity` means `closure` is not a closure: codegen under-applied
+    // something that has no arity word, and word 1 is whatever that object
+    // happens to store. Reporting only the derived `m` (as this used to) sends
+    // you looking for a 50-billion-argument function. Report the object.
+    if arity < k || arity - k > MAX_PAP_REMAINING {
+        let code = unsafe { *(closure as *const usize) };
+        rts_abort(&format!(
+            "PAP: applied {k} arg(s) to an object at {closure:p} whose arity word reads {arity} \
+             (word0={code:#x}); it is most likely not a closure"
+        ));
+    }
     let m = arity - k;
     let pap = bhc_alloc(32 + 8 * k);
     unsafe {

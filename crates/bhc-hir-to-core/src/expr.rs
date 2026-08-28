@@ -754,7 +754,23 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
             // from an enclosing signature) — they carry everything downstream
             // dictionary resolution needs; bare heads or var-carrying types
             // do not and must stay None.
-            let ty = ctx.lookup_type(def_ref.def_id);
+            //
+            // Expand type synonyms on the way out. The type recorded for a
+            // parameter is whatever its signature said, so a parameter
+            // written `String` stays `Con "String"` and cannot match the
+            // instance head `Stream [tok] m tok`. A constrained value in that
+            // scope — parsec's `anyChar`, nullary and needing only a `Stream`
+            // dictionary — then resolves to no instance and is emitted with
+            // its dictionary MISSING, silently and with no unresolved-dictionary
+            // warning; consumers read that undicted closure's header as the
+            // parser's own. Spelling the same signature `[Char]` was the
+            // difference between a working parser and a crash.
+            //
+            // The expansion happens HERE, on the type handed to instance
+            // resolution, rather than on the parameter's recorded type: giving
+            // codegen the expanded form makes it infer a different width for
+            // Char and emit `icmp eq i32 %to_char, i64 32`.
+            let ty = ctx.expand_type_aliases(&ctx.lookup_type(def_ref.def_id));
             let allow_concrete = std::env::var("BHC_NO_CONCVAR").is_err();
             match &ty {
                 Ty::Con(_) => Some(ty),
@@ -764,9 +780,10 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
                     // Check the Core Var's type as a fallback (populated from
                     // the function's type signature in compile_equations).
                     if let Some(var) = ctx.lookup_var(def_ref.def_id) {
-                        match &var.ty {
-                            Ty::Con(_) => Some(var.ty.clone()),
-                            t if allow_concrete && is_fully_concrete_ty(t) => Some(var.ty.clone()),
+                        let vty = ctx.expand_type_aliases(&var.ty);
+                        match &vty {
+                            Ty::Con(_) => Some(vty),
+                            t if allow_concrete && is_fully_concrete_ty(t) => Some(vty),
                             _ => None,
                         }
                     } else {

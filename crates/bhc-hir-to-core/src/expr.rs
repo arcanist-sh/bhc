@@ -228,6 +228,31 @@ fn has_concrete_head(ty: &Ty) -> bool {
     }
 }
 
+/// Whether the binding being lowered RETURNS in the monad an in-scope
+/// dictionary for `class_name` is for.
+///
+/// This is the discriminator for a value-position monad method, where the
+/// occurrence itself carries no usable type. `runParsecT :: Monad m => … -> m
+/// (Consumed …)` returns in `m`, the dictionary's own monad, so a bare
+/// `return` there means that monad's `pure`. `poly :: Monad m => ParsecT
+/// String () m SourcePos` returns in ParsecT, so its `return` is ParsecT's —
+/// routing that one to the INNER monad's dictionary is the same wrong-monad
+/// selection `in_scope_dict_matches` exists to prevent, and it segfaults the
+/// parser probes.
+fn binding_returns_in_dict_monad(ctx: &LowerContext, class_name: Symbol) -> bool {
+    fn result_of(t: &Ty) -> &Ty {
+        match t {
+            Ty::Fun(_, r) => result_of(r),
+            other => other,
+        }
+    }
+    let Some(dict_ty) = ctx.lookup_dict_ty(class_name).cloned() else {
+        return false;
+    };
+    ctx.current_binding_sig()
+        .is_some_and(|sig| same_type_head(&dict_ty, result_of(sig)))
+}
+
 /// Whether an in-scope dictionary for `class_name` is one this occurrence
 /// should actually be selecting a method from.
 ///
@@ -393,6 +418,32 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         }
         // Check if this is a class method
         let is_method = ctx.is_class_method(name);
+        // `return` is in NO class's method list: the builtin Monad layout is
+        // [`>>=`, `>>`] and `return` is Applicative's `pure` under another
+        // name, so `is_class_method` does not recognise it and the whole
+        // dictionary-selection path below is skipped. An APPLIED `return` is
+        // fine — `lower_app` dispatches it — but a VALUE occurrence fell
+        // through to a builtin and codegen guessed an ambient transformer
+        // layer for it. parsec's `runParsecT` writes `return . Consumed .
+        // return`, so its `return`s went bare and StateT's bind was handed a
+        // non-closure to call.
+        //
+        // Route a value-position `return` through the superclass hop, which
+        // already remaps it to Applicative's `pure`. Adding `return` to
+        // Monad's method list instead would shift every Monad dictionary's
+        // field indices, since methods are laid out after the superclass
+        // slots.
+        if is_method.is_none()
+            && name.as_str() == "return"
+            && crate::dictionary::monad_witness_enabled()
+            && binding_returns_in_dict_monad(ctx, Symbol::intern("Monad"))
+        {
+            if let Some(method_expr) =
+                ctx.select_method_via_superclass(Symbol::intern("Monad"), name, def_ref.span)
+            {
+                return Ok(method_expr);
+            }
+        }
         if let Some(class_name) = is_method {
             // This is a class method - we need to select it from a dictionary
             // Look for an in-scope dictionary for this class

@@ -95,11 +95,52 @@ pub fn lower_expr(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<core:
 ///
 /// Conservative: only fills a slot that is currently `Ty::Error`, so anything
 /// lowering already typed correctly (e.g. constructor schemes) is preserved.
+/// Whether a variable of this type may carry it into Core.
+///
+/// Function types have always been annotated. ADTs are added because `show` on
+/// a variable had no way to find its type at all: `build_show_descriptor` falls
+/// back to `expr.ty()`, a Core variable carries `Ty::Error`, and the default
+/// coercion is Int — so `let n = R 97 in show n` printed the POINTER as a
+/// number while `show (R 97)` printed `R 97`. Any variable was affected, not
+/// just a monadically bound one.
+///
+/// Scalars stay out. Codegen infers value widths assuming `Ty::Error`, and
+/// handing it a `Char` makes it emit `icmp eq i32 %c, i64 32`, which fails LLVM
+/// verification — the `milestone_e_json` fixture catches exactly that. An ADT
+/// is a pointer either way, so it carries no width to disagree about.
+fn ty_is_annotatable(ty: &Ty) -> bool {
+    fn head(t: &Ty) -> &Ty {
+        match t {
+            Ty::App(f, _) => head(f),
+            other => other,
+        }
+    }
+    if matches!(ty, Ty::Fun(_, _)) {
+        return true;
+    }
+    match head(ty) {
+        Ty::Con(tc) => !matches!(
+            tc.name.as_str(),
+            "Int"
+                | "Integer"
+                | "Char"
+                | "Double"
+                | "Float"
+                | "Word"
+                | "Bool"
+                | "String"
+                | "Ordering"
+                | "IO"
+        ),
+        _ => false,
+    }
+}
+
 fn annotate_ty(ctx: &LowerContext, span: bhc_span::Span, core: core::Expr) -> core::Expr {
     let Some(ty) = ctx.expr_ty_opt(span) else {
         return core;
     };
-    if !matches!(ty, Ty::Fun(_, _)) {
+    if !ty_is_annotatable(&ty) {
         return core;
     }
     match core {

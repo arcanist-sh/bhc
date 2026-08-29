@@ -24295,6 +24295,48 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower `show` — type-aware dispatch to the correct show function.
     /// First tries expr.ty(), falls back to expression structure analysis.
+    /// `show` for a user-defined type with a derived Show, dispatched on the
+    /// expression's TYPE. Returns `Ok(None)` when the type names no such type,
+    /// so the caller falls through to its existing handling.
+    fn lower_builtin_show_user_adt(
+        &mut self,
+        expr: &Expr,
+        ty: &Ty,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        fn head_name(t: &Ty) -> Option<String> {
+            match t {
+                Ty::Con(tc) => Some(tc.name.as_str().to_string()),
+                Ty::App(f, _) => head_name(f),
+                _ => None,
+            }
+        }
+        let Some(name) = head_name(ty) else {
+            return Ok(None);
+        };
+        let Some(show_var_id) = self.derived_show_fns.get(&name).copied() else {
+            return Ok(None);
+        };
+        let Some(show_fn) = self.functions.get(&show_var_id).copied() else {
+            return Ok(None);
+        };
+        let val = self
+            .lower_expr(expr)?
+            .ok_or_else(|| CodegenError::Internal("show adt: no value".to_string()))?;
+        let val_ptr = self.value_to_ptr(val)?;
+        // A derived show is emitted in the closure convention: slot 0 is the
+        // environment, slot 1 the value. A top-level derived function ignores
+        // the environment, but the arity has to match or LLVM rejects the call.
+        let env = show_fn.as_global_value().as_pointer_value();
+        let result = self
+            .builder()
+            .build_call(show_fn, &[env.into(), val_ptr.into()], "show_user_adt")
+            .map_err(|e| CodegenError::Internal(format!("show_user_adt call: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("show_user_adt: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
     fn lower_builtin_show(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let ty = expr.ty();
 
@@ -24392,6 +24434,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             if self.is_int_type(&ty) {
                 return self.lower_builtin_show_typed(expr, 1000072, "show_int", ShowCoerce::Int);
+            }
+            // A user-defined type with a derived Show. `print` already reached
+            // it, through the descriptor that `try_build_adt_show_desc` builds,
+            // but `show` had no arm for it and fell through to the Int default
+            // below — so `show n` on a variable printed its POINTER as a number
+            // while `show (R 97)` printed `R 97`.
+            if let Some(result) = self.lower_builtin_show_user_adt(expr, &ty)? {
+                return Ok(Some(result));
             }
         }
 

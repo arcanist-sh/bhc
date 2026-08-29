@@ -290,6 +290,11 @@ fn test_tier3_list_semigroup_native() {
 }
 
 #[test]
+fn test_tier3_show_bound_adt_native() {
+    run_native_test("tier3_io/show_bound_adt", Profile::Default);
+}
+
+#[test]
 fn test_tier3_list_monoid_native() {
     run_native_test("tier3_io/list_monoid", Profile::Default);
 }

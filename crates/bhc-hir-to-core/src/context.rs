@@ -1724,6 +1724,83 @@ impl LowerContext {
         out
     }
 
+    /// The dictionaries reachable from one in scope by SUPERCLASS selection,
+    /// as (superclass, arguments, base dictionary, field-index path).
+    ///
+    /// `scope_dicts_for_construction` above only reports the classes a binding
+    /// is constrained by directly. That is not enough to fill an instance's own
+    /// constraint slot when the constraint sits ABOVE the one in scope:
+    /// `myRead :: PandocMonad m => …` builds `Stream Sources m Char`, whose
+    /// `Monad m` slot has no instance to come from while `m` is a variable, and
+    /// no `Monad` dictionary is in scope either — only `PandocMonad`, which has
+    /// Monad among its superclasses.
+    ///
+    /// Only single-parameter hops are offered. Which class parameter a
+    /// superclass of a multi-parameter class constrains is recorded separately
+    /// (`superclass_params`), and guessing it here would hand the slot a
+    /// dictionary for the wrong type — worse than leaving it null.
+    fn scope_super_dicts_for_construction(&self) -> Vec<(Symbol, Vec<Ty>, Var, Vec<usize>)> {
+        let mut out: Vec<(Symbol, Vec<Ty>, Var, Vec<usize>)> = Vec::new();
+        for scope in self.dict_scope.iter().rev() {
+            for (class, var) in scope {
+                let Some(args) = self.lookup_dict_args(*class) else {
+                    continue;
+                };
+                if args.len() != 1 {
+                    continue;
+                }
+                let args = args.to_vec();
+                for (sup, path) in self.superclass_reachable(*class, 0) {
+                    if sup == *class {
+                        continue;
+                    }
+                    let single_param = self
+                        .class_registry
+                        .lookup_class(sup)
+                        .is_some_and(|c| c.param_count == 1);
+                    if !single_param {
+                        continue;
+                    }
+                    if out.iter().any(|(c, _, _, _)| *c == sup) {
+                        continue; // innermost, shallowest wins
+                    }
+                    out.push((sup, args.clone(), var.clone(), path));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every class reachable from `from` by superclass edges, with the
+    /// field-index path taken to get there. Breadth-first, so the shallowest
+    /// path to a class is the one reported.
+    fn superclass_reachable(&self, from: Symbol, depth: usize) -> Vec<(Symbol, Vec<usize>)> {
+        let mut out = Vec::new();
+        if depth > 8 {
+            return out;
+        }
+        let Some(info) = self.class_registry.lookup_class(from) else {
+            return out;
+        };
+        let sups: Vec<Symbol> = info.superclasses.clone();
+        for (i, sup) in sups.iter().enumerate() {
+            if !out.iter().any(|(c, _): &(Symbol, Vec<usize>)| c == sup) {
+                out.push((*sup, vec![i]));
+            }
+        }
+        for (i, sup) in sups.iter().enumerate() {
+            for (deeper, mut rest) in self.superclass_reachable(*sup, depth + 1) {
+                if out.iter().any(|(c, _): &(Symbol, Vec<usize>)| *c == deeper) {
+                    continue;
+                }
+                let mut path = vec![i];
+                path.append(&mut rest);
+                out.push((deeper, path));
+            }
+        }
+        out
+    }
+
     /// Register a dictionary along with the constraint arguments it is for.
     ///
     /// Records the FULL argument list, not just the first type: a superclass
@@ -1838,6 +1915,7 @@ impl LowerContext {
             let mut dict_ctx =
                 DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
             dict_ctx.set_scope_dicts(self.scope_dicts_for_construction());
+            dict_ctx.set_scope_super_dicts(self.scope_super_dicts_for_construction());
             if let Some(dict_expr) = dict_ctx.get_dictionary(constraint, span) {
                 let bindings = dict_ctx.take_bindings();
                 let mut result = dict_expr;
@@ -1893,6 +1971,7 @@ impl LowerContext {
                     let mut dict_ctx =
                         DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
                     dict_ctx.set_scope_dicts(self.scope_dicts_for_construction());
+                    dict_ctx.set_scope_super_dicts(self.scope_super_dicts_for_construction());
                     // Resolution matches on the bare head, which throws away
                     // the layer beneath a transformer — but ExceptT's methods
                     // differ between `ExceptT e (StateT s m)` and plain
@@ -1941,6 +2020,7 @@ impl LowerContext {
             let mut dict_ctx =
                 DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
             dict_ctx.set_scope_dicts(self.scope_dicts_for_construction());
+            dict_ctx.set_scope_super_dicts(self.scope_super_dicts_for_construction());
             let dict_expr = dict_ctx.get_dictionary(constraint, span)?;
 
             // If the dictionary construction generated bindings, wrap the
@@ -1973,6 +2053,7 @@ impl LowerContext {
             let mut dict_ctx =
                 DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
             dict_ctx.set_scope_dicts(self.scope_dicts_for_construction());
+            dict_ctx.set_scope_super_dicts(self.scope_super_dicts_for_construction());
             if let Some(dict_expr) = dict_ctx.get_dictionary(constraint, span) {
                 let bindings = dict_ctx.take_bindings();
                 let mut result = dict_expr;
@@ -2008,6 +2089,7 @@ impl LowerContext {
         let mut dict_ctx =
             DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
         dict_ctx.set_scope_dicts(self.scope_dicts_for_construction());
+        dict_ctx.set_scope_super_dicts(self.scope_super_dicts_for_construction());
         let dict_expr = dict_ctx.get_dictionary(&constraint, span)?;
         let bindings = dict_ctx.take_bindings();
 
@@ -2053,6 +2135,7 @@ impl LowerContext {
         let mut dict_ctx =
             DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
         dict_ctx.set_scope_dicts(self.scope_dicts_for_construction());
+        dict_ctx.set_scope_super_dicts(self.scope_super_dicts_for_construction());
         let dict_expr = dict_ctx.get_dictionary(&constraint, span)?;
         let bindings = dict_ctx.take_bindings();
 

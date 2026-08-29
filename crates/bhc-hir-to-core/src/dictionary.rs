@@ -509,6 +509,16 @@ pub struct DictContext<'a> {
     /// field off null. But `readWithM` HAS a `Monad m` dictionary in scope, for
     /// exactly that `m`. This is how it reaches the slot.
     scope_dicts: Vec<(Symbol, Vec<Ty>, Var)>,
+    /// Dictionaries reachable from one in scope by SUPERCLASS selection, as
+    /// (superclass, arguments, base dictionary, field-index path).
+    ///
+    /// `scope_dicts` above only covers the classes a binding is constrained by
+    /// directly. `myRead :: PandocMonad m => …` builds `Stream Sources m Char`,
+    /// whose `Monad m` slot has no instance to come from because `m` is still a
+    /// variable — and no `Monad` dictionary is in scope either, only
+    /// `PandocMonad`, which HAS Monad as a superclass. Without this the slot
+    /// stayed a null placeholder and `runPT` read a field off it.
+    scope_super_dicts: Vec<(Symbol, Vec<Ty>, Var, Vec<usize>)>,
 }
 
 impl<'a> DictContext<'a> {
@@ -523,6 +533,7 @@ impl<'a> DictContext<'a> {
             var_map: None,
             transformer_variant: None,
             scope_dicts: Vec::new(),
+            scope_super_dicts: Vec::new(),
         }
     }
 
@@ -537,6 +548,7 @@ impl<'a> DictContext<'a> {
             var_map: Some(var_map),
             transformer_variant: None,
             scope_dicts: Vec::new(),
+            scope_super_dicts: Vec::new(),
         }
     }
 
@@ -545,6 +557,12 @@ impl<'a> DictContext<'a> {
     /// filled. See `scope_dicts`.
     pub fn set_scope_dicts(&mut self, dicts: Vec<(Symbol, Vec<Ty>, Var)>) {
         self.scope_dicts = dicts;
+    }
+
+    /// Offer the dictionaries reachable from one in scope by superclass
+    /// selection. See `scope_super_dicts`.
+    pub fn set_scope_super_dicts(&mut self, dicts: Vec<(Symbol, Vec<Ty>, Var, Vec<usize>)>) {
+        self.scope_super_dicts = dicts;
     }
 
     /// Select the representation for builtin transformer methods in the
@@ -744,16 +762,44 @@ impl<'a> DictContext<'a> {
                         .iter()
                         .find(|c| c.class == *superclass)
                         .map(|c| c.args.iter().map(|a| subst.apply(a)).collect());
+                    let matches = |class: &Symbol, args: &Vec<Ty>| {
+                        *class == *superclass
+                            && want.as_ref().is_none_or(|w| {
+                                w.len() == args.len()
+                                    && w.iter().zip(args).all(|(a, b)| same_head(a, b))
+                            })
+                    };
                     self.scope_dicts
                         .iter()
-                        .find(|(class, args, _)| {
-                            *class == *superclass
-                                && want.as_ref().is_none_or(|w| {
-                                    w.len() == args.len()
-                                        && w.iter().zip(args).all(|(a, b)| same_head(a, b))
-                                })
-                        })
+                        .find(|(class, args, _)| matches(class, args))
                         .map(|(_, _, var)| core::Expr::Var(var.clone(), span))
+                        .or_else(|| {
+                            // Nothing in scope IS this class, but something in
+                            // scope may HAVE it as a superclass: `myRead ::
+                            // PandocMonad m => …` has only a `PandocMonad`
+                            // dictionary, and Monad sits above it. Compose the
+                            // selections directly rather than binding the
+                            // intermediate — a Let-bound hop gets lowered as a
+                            // thunk that captures the enclosing frame.
+                            let (_, _, base, path) = self
+                                .scope_super_dicts
+                                .iter()
+                                .find(|(class, args, _, _)| matches(class, args))?;
+                            let mut cur = core::Expr::Var(base.clone(), span);
+                            for idx in path {
+                                let sel = Var {
+                                    name: Symbol::intern(&format!("$sel_{idx}")),
+                                    id: VarId::new(0),
+                                    ty: Ty::Error,
+                                };
+                                cur = core::Expr::App(
+                                    Box::new(core::Expr::Var(sel, span)),
+                                    Box::new(cur),
+                                    span,
+                                );
+                            }
+                            Some(cur)
+                        })
                 })
                 .unwrap_or(core::Expr::Lit(core::Literal::Int(0), Ty::Error, span));
             super_fields.push(super_dict);

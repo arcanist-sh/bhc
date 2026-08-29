@@ -310,6 +310,11 @@ fn test_tier3_bool_not_native() {
 }
 
 #[test]
+fn test_tier3_applicative_seq_native() {
+    run_native_test("tier3_io/applicative_seq", Profile::Default);
+}
+
+#[test]
 fn test_tier3_list_monoid_native() {
     run_native_test("tier3_io/list_monoid", Profile::Default);
 }

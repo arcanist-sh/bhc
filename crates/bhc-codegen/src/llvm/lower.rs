@@ -5732,6 +5732,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Monadic operations
             ">>=" => Some(2),
             ">>" => Some(2),
+            // `a *> b` IS `a >> b`, and `a <* b` runs both and keeps the first.
+            "*>" | "<*" => Some(2),
             "return" => Some(1),
             "pure" => Some(1),
 
@@ -6680,7 +6682,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     result
                 }
             }
-            ">>" => {
+            // `a <* b` runs both and keeps the FIRST result. At the IO layer
+            // an action is its own value, so that is just "lower both, return
+            // the first". Under a transformer it is not — the second action's
+            // state has to be threaded on while its value is dropped — so
+            // anything else falls through to the stub rather than quietly
+            // sequencing wrongly.
+            "<*" if matches!(self.current_transformer_layer(), TransformerLayer::IO) => {
+                let a = self.lower_expr(args[0])?;
+                let _b = self.lower_expr(args[1])?;
+                Ok(a)
+            }
+            // `*>` is `>>`: same sequencing, same layer handling. Routing it
+            // here rather than giving it an arm of its own is what keeps the
+            // transformer cases in step — `>>` below already knows how to lift
+            // and how each stack threads its state.
+            ">>" | "*>" => {
                 // For ReaderT-over-StateT, bypass auto-lift and route directly
                 // to nested ReaderT then which threads state through 3-arg closures
                 if self.transformer_stack.is_reader_t_over_state_t() {

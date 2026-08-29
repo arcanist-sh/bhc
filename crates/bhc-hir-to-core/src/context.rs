@@ -1801,6 +1801,71 @@ impl LowerContext {
         out
     }
 
+    /// A dictionary expression for `class_name` from the dictionaries in scope:
+    /// the dictionary itself when one is in scope for exactly these arguments,
+    /// else a superclass selection from one that is.
+    ///
+    /// `anyChar`'s leading `Monad m` is wholly a type variable, so no instance
+    /// can be selected for it at all — but inside a `Monad m =>` binding the
+    /// binding's own dictionary is precisely it. `want` must match what the
+    /// in-scope dictionary is recorded for: parsec's internals have several
+    /// distinct type variables live at once, and matching on the class alone
+    /// hands back a dictionary for a different one.
+    #[must_use]
+    pub fn dict_expr_for_class(
+        &self,
+        class_name: Symbol,
+        want: &[Ty],
+        span: Span,
+    ) -> Option<core::Expr> {
+        let args_match = |have: Option<&[Ty]>| {
+            have.is_some_and(|h| {
+                h.len() == want.len()
+                    && h.iter().zip(want).all(|(a, b)| match (a, b) {
+                        // Two variables line up: the dictionary the binding
+                        // received IS the one for its own type variable, even
+                        // though the occurrence carries a freshly instantiated
+                        // id rather than the signature's.
+                        (Ty::Var(_), Ty::Var(_)) => true,
+                        _ => a == b,
+                    })
+            })
+        };
+        if let Some(var) = self.lookup_dict(class_name) {
+            if args_match(self.lookup_dict_args(class_name)) {
+                return Some(core::Expr::Var(var.clone(), span));
+            }
+            return None;
+        }
+        let mut best: Option<(Var, Vec<usize>)> = None;
+        for scope in self.dict_scope.iter().rev() {
+            for (have, var) in scope {
+                if !args_match(self.lookup_dict_args(*have)) {
+                    continue;
+                }
+                if let Some(path) = self.superclass_field_path(*have, class_name, 0) {
+                    if path.is_empty() {
+                        continue;
+                    }
+                    if best.as_ref().is_none_or(|(_, b)| path.len() < b.len()) {
+                        best = Some((var.clone(), path));
+                    }
+                }
+            }
+        }
+        let (var, path) = best?;
+        let mut cur = core::Expr::Var(var, span);
+        for idx in path {
+            let sel = Var {
+                name: Symbol::intern(&format!("$sel_{idx}")),
+                id: VarId::new(0),
+                ty: Ty::Error,
+            };
+            cur = core::Expr::App(Box::new(core::Expr::Var(sel, span)), Box::new(cur), span);
+        }
+        Some(cur)
+    }
+
     /// Register a dictionary along with the constraint arguments it is for.
     ///
     /// Records the FULL argument list, not just the first type: a superclass

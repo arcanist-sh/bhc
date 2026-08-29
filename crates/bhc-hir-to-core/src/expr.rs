@@ -1646,6 +1646,20 @@ fn resolve_user_dicts(
     let mut dicts = Vec::with_capacity(user_constraints.len());
     for c in user_constraints {
         let mut concrete_args: Vec<Ty> = c.args.iter().map(|t| subst.apply(t)).collect();
+        // A constraint with NOTHING pinned can still be satisfied by a
+        // dictionary in scope for that very variable. pandoc's `anyChar ::
+        // (Monad m, Stream s m Char, UpdateSourcePos s Char) => …` used inside
+        // a `Monad m =>` binding has `Monad m` FIRST, wholly a variable;
+        // instance completion below cannot help, because nothing is pinned to
+        // select an instance with. Bailing there abandoned all THREE of
+        // `anyChar`'s dictionaries, and the fallback then applied a PREFIX of
+        // them, so every later argument landed one slot off.
+        if concrete_args.iter().all(has_type_variables) {
+            if let Some(dict) = ctx.dict_expr_for_class(c.class, &concrete_args, span) {
+                dicts.push(dict);
+                continue;
+            }
+        }
         if concrete_args.iter().any(has_type_variables) {
             let completed: Option<Vec<Ty>> =
                 ctx.class_registry()
@@ -1670,11 +1684,32 @@ fn resolve_user_dicts(
                             let sub = bhc_types::types_match_multi(&pat, &tgt)?;
                             let filled: Vec<Ty> =
                                 inst.instance_types.iter().map(|t| sub.apply(t)).collect();
-                            if filled.iter().any(has_type_variables) {
-                                None
-                            } else {
-                                Some(filled)
+                            if !filled.iter().any(has_type_variables) {
+                                return Some(filled);
                             }
+                            // The instance matched every pinned argument but
+                            // left one of its OWN variables standing: `instance
+                            // Monad m => Stream Sources m Char` matched against
+                            // `Stream Sources ? Char` still has `m`. Keep OUR
+                            // argument in the open positions so the constraint
+                            // names the caller's `m`, and let construction fill
+                            // the instance's context from the dictionaries in
+                            // scope — the same route the enclosing call already
+                            // takes for `runParserT`'s own `Stream` dictionary.
+                            let kept: Vec<Ty> = inst
+                                .instance_types
+                                .iter()
+                                .zip(&concrete_args)
+                                .map(|(it, ours)| {
+                                    let f = sub.apply(it);
+                                    if has_type_variables(&f) {
+                                        ours.clone()
+                                    } else {
+                                        f
+                                    }
+                                })
+                                .collect();
+                            Some(kept)
                         })
                     });
             // Leave it to other paths (bare lowering) if still not concrete.

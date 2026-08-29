@@ -45887,27 +45887,27 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .ok_or_else(|| CodegenError::Internal("<*>: returned void".to_string()))?;
                 Ok(Some(result))
             }
+            // A Haskell `String` is a cons list, not a C string. These arms
+            // used to hand the list pointer straight to `bhc_print_string_ln`,
+            // which read it as NUL-terminated bytes — so `act >>= putStrLn`
+            // printed an empty line instead of the string, silently. The
+            // expression-position arms walk the list; so do these now.
             "putStrLn" => {
-                // putStrLn :: String -> IO ()
-                let str_ptr = args[0].into_pointer_value();
-                let rts_fn = self.functions.get(&VarId::new(1000002)).ok_or_else(|| {
-                    CodegenError::Internal("bhc_print_string_ln not declared".to_string())
+                let str_ptr = self.value_to_ptr(args[0])?;
+                self.lower_print_char_list_ptr(str_ptr)?;
+                let newline_fn = *self.functions.get(&VarId::new(1000010)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_print_newline not declared".to_string())
                 })?;
                 self.builder()
-                    .build_call(*rts_fn, &[str_ptr.into()], "")
+                    .build_call(newline_fn, &[], "")
                     .map_err(|e| {
-                        CodegenError::Internal(format!("putStrLn call failed: {:?}", e))
+                        CodegenError::Internal(format!("putStrLn newline failed: {:?}", e))
                     })?;
                 Ok(Some(ptr_type.const_null().into()))
             }
             "putStr" => {
-                let str_ptr = args[0].into_pointer_value();
-                let rts_fn = self.functions.get(&VarId::new(1000004)).ok_or_else(|| {
-                    CodegenError::Internal("bhc_print_string not declared".to_string())
-                })?;
-                self.builder()
-                    .build_call(*rts_fn, &[str_ptr.into()], "")
-                    .map_err(|e| CodegenError::Internal(format!("putStr call failed: {:?}", e)))?;
+                let str_ptr = self.value_to_ptr(args[0])?;
+                self.lower_print_char_list_ptr(str_ptr)?;
                 Ok(Some(ptr_type.const_null().into()))
             }
             // Identity operations (newtype = pass through)

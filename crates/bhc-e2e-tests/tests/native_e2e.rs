@@ -295,6 +295,11 @@ fn test_tier3_show_bound_adt_native() {
 }
 
 #[test]
+fn test_tier3_io_builtin_as_value_native() {
+    run_native_test("tier3_io/io_builtin_as_value", Profile::Default);
+}
+
+#[test]
 fn test_tier3_list_monoid_native() {
     run_native_test("tier3_io/list_monoid", Profile::Default);
 }

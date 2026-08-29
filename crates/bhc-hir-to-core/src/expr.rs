@@ -1608,6 +1608,22 @@ fn lower_constrained_fn_value(
         }
         (uc, scheme.ty.clone())
     };
+    // A scheme keeps whatever the signature was written with. A parser
+    // declared `ParsecT String () m Char` never structurally matches the
+    // occurrence type `ParsecT [Char] () IO Char`, and its `Stream String m
+    // Char` constraint never matches the `Stream [tok] m tok` instance head —
+    // so every constraint fails to resolve and the value is passed with NO
+    // dictionaries at all. `runParserT` then runs the undicted lambda as a
+    // parser and reads its closure header as a tag. Expand on both the type
+    // and the constraint arguments.
+    let scheme_ty = ctx.expand_type_aliases(&scheme_ty);
+    let user_constraints: Vec<Constraint> = user_constraints
+        .into_iter()
+        .map(|c| {
+            let args = c.args.iter().map(|a| ctx.expand_type_aliases(a)).collect();
+            Constraint::new_multi(c.class, args, c.span)
+        })
+        .collect();
 
     // Recover the constrained type variables from the expected type, then
     // resolve one dictionary per user constraint at those types. Normalize the

@@ -2488,6 +2488,20 @@ impl LowerContext {
             }
             args.reverse();
             if let Ty::Con(tc) = head {
+                // `String` is a synonym of the language itself, declared in no
+                // module, so it never reaches the alias map. Left unexpanded it
+                // matches neither `[Char]` in an occurrence type nor the
+                // `Stream [tok] m tok` instance head, and a parser declared
+                // `ParsecT String () m Char` ends up passed with NO dictionaries.
+                if tc.name.as_str() == "String"
+                    && args.is_empty()
+                    && !aliases.contains_key(&tc.name)
+                {
+                    return Ty::List(Box::new(Ty::Con(bhc_types::TyCon::new(
+                        Symbol::intern("Char"),
+                        bhc_types::Kind::Star,
+                    ))));
+                }
                 if let Some((params, rhs)) = aliases.get(&tc.name) {
                     if params.len() <= args.len() {
                         let mut s = bhc_types::Subst::new();

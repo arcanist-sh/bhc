@@ -365,6 +365,10 @@ pub struct Lowering<'ctx, 'm> {
     derived_to_fns: FxHashMap<String, VarId>,
     /// Counter for generating unique show descriptor global names.
     show_desc_counter: usize,
+    /// Counter for the synthetic variables that let a value-position builtin
+    /// reach the expression-position implementation. See the fallback at the
+    /// end of `lower_builtin_direct`.
+    builtin_arg_counter: usize,
     /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
     overloaded_strings: bool,
     /// E.44: Set of variable IDs that were thunked (lazy let-bindings).
@@ -432,6 +436,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             derived_from_fns: FxHashMap::default(),
             derived_to_fns: FxHashMap::default(),
             show_desc_counter: 0,
+            builtin_arg_counter: 0,
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
             recursive_caf_ids: FxHashSet::default(),
@@ -485,6 +490,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             derived_from_fns: FxHashMap::default(),
             derived_to_fns: FxHashMap::default(),
             show_desc_counter: 0,
+            builtin_arg_counter: 0,
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
             recursive_caf_ids: FxHashSet::default(),
@@ -45675,6 +45681,56 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Execute a builtin operation directly on LLVM values (already lowered).
     /// This is for when builtins are used as values and receive runtime arguments.
+    /// Run a builtin's EXPRESSION-position implementation over
+    /// already-lowered values.
+    ///
+    /// `lower_builtin` takes `Expr`s and is where nearly every builtin actually
+    /// lives; `lower_builtin_direct` takes values and covers only a few dozen.
+    /// A builtin used as a value — `map length xs`, `act >>= putStrLn` — lands
+    /// in the second and, missing there, aborted at runtime with
+    /// `stub: <name> not implemented`.
+    ///
+    /// Binding each value into the environment under a fresh id and passing
+    /// variables that refer to them lets the expression implementation run
+    /// unchanged. The bindings are removed afterwards so nothing leaks into the
+    /// enclosing scope, and the ids are far above anything the frontend
+    /// allocates. Returns `Ok(None)` when the name has no expression
+    /// implementation either, so the caller still falls back to its stub.
+    fn lower_builtin_via_expr_path(
+        &mut self,
+        name: &str,
+        args: &[BasicValueEnum<'ctx>],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        const SYNTHETIC_ARG_BASE: usize = 900_000_000;
+        let mut ids = Vec::with_capacity(args.len());
+        let mut exprs = Vec::with_capacity(args.len());
+        for arg in args {
+            let id = VarId::new(SYNTHETIC_ARG_BASE + self.builtin_arg_counter);
+            self.builtin_arg_counter += 1;
+            self.env.insert(id, *arg);
+            ids.push(id);
+            exprs.push(Expr::Var(
+                Var {
+                    name: Symbol::intern("$builtin_arg"),
+                    id,
+                    ty: Ty::Error,
+                },
+                bhc_span::Span::default(),
+            ));
+        }
+        let refs: Vec<&Expr> = exprs.iter().collect();
+        // An expression implementation may need an RTS entry point this module
+        // never declared (`bhc_stderr`, for one). That is a compile error where
+        // the stub was only a runtime one, so a failure here has to fall back
+        // rather than propagate — three pandoc modules stopped compiling
+        // before this was a fallback instead of a replacement.
+        let result = self.lower_builtin(name, &refs).unwrap_or(None);
+        for id in ids {
+            self.env.remove(&id);
+        }
+        Ok(result)
+    }
+
     fn lower_builtin_direct(
         &mut self,
         name: &str,
@@ -48479,10 +48535,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     || name.starts_with("Data.IntSet.")
                 {
                     self.lower_builtin_container_direct(name, args)
+                } else if let Some(result) = self.lower_builtin_via_expr_path(name, args)? {
+                    // Most builtins are implemented only in `lower_builtin`,
+                    // which wants `Expr`s. Reaching one as a VALUE — passed to
+                    // a higher-order function, `map length xs` — used to fall
+                    // straight through to the stub below and abort at runtime.
+                    // Binding the already-lowered arguments into the
+                    // environment and handing the expression path variables
+                    // that refer to them reaches every one of those
+                    // implementations without duplicating any of them.
+                    Ok(Some(result))
                 } else {
-                    // For builtins that are handled in lower_builtin but not
-                    // lower_builtin_direct, generate a stub that calls bhc_error
-                    // at runtime rather than failing compilation.
+                    // Still nothing: generate a stub that calls bhc_error at
+                    // runtime rather than failing compilation.
                     let stub_fn = self.get_or_create_stub_function(name)?;
                     let null_env = self.type_mapper().ptr_type().const_null();
                     let call_result = self

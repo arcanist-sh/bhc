@@ -5,6 +5,10 @@ module Main where
 
 data Shape = Circle Int | Square Int deriving Show
 
+-- Fields of every shape a derived Show has to render. A field binder used to
+-- carry no type, so a String field printed as its pointer.
+data Fields = Fields String Bool Char Double Int deriving Show
+
 mkShape :: IO Shape
 mkShape = return (Circle 97)
 
@@ -33,3 +37,6 @@ main = do
   putStrLn (viaParam (Circle 1))
   putStrLn (show topLevel)
   print a
+  putStrLn (show (Fields "s" True 'c' 1.5 7))
+  let f = Fields "held" False 'z' 2.5 8
+  putStrLn (show f)

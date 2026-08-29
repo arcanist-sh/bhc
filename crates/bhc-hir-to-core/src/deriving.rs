@@ -1580,8 +1580,20 @@ impl DerivingContext {
                 arity: field_count as u32,
             };
 
+            // Give each field binder its DECLARED type. `show` dispatches on
+            // the type of its argument, and a binder typed `Ty::Error` falls
+            // through to the Int default — which is why `show (L "p")` printed
+            // the string's POINTER (`L 4356276064`) while `show (R 97)` was
+            // fine.
+            let field_tys: Vec<Ty> = match &con.fields {
+                ConFields::Positional(tys) => tys.clone(),
+                ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
+            };
             let fields: Vec<Var> = (0..field_count)
-                .map(|i| self.fresh_var(&format!("f{i}"), Ty::Error))
+                .map(|i| {
+                    let ty = field_tys.get(i).cloned().unwrap_or(Ty::Error);
+                    self.fresh_var(&format!("f{i}"), ty)
+                })
                 .collect();
 
             let show_expr = if field_count == 0 {

@@ -15263,24 +15263,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .into()
             }
             BasicValueEnum::PointerValue(p) => {
-                // Convert pointer to int, XOR with 1, convert back
-                let int_val = self
-                    .builder()
-                    .build_ptr_to_int(p, tm.i64_type(), "bool_to_int")
-                    .map_err(|e| {
-                        CodegenError::Internal(format!("failed to convert bool: {:?}", e))
-                    })?;
+                // A boxed Bool is a nullary ADT — a heap pointer whose first
+                // word is the tag, 0 for False and 1 for True. This used to
+                // `ptr_to_int`, XOR 1, and `int_to_ptr`, which flips a bit of
+                // the ADDRESS: `not False` came back as a garbage pointer that
+                // tested as false, so `if not False` took the wrong branch.
+                // Flip the TAG and hand back a fresh Bool.
+                let tag = self.extract_adt_tag(p)?;
                 let one = tm.i64_type().const_int(1, false);
-                let xored = self
+                let flipped = self
                     .builder()
-                    .build_xor(int_val, one, "not_result")
+                    .build_xor(tag, one, "not_tag")
                     .map_err(|e| CodegenError::Internal(format!("failed to build not: {:?}", e)))?;
-                self.builder()
-                    .build_int_to_ptr(xored, tm.ptr_type(), "not_to_ptr")
+                let out = self.alloc_adt(0, 0)?;
+                let adt_ty = self.adt_type(0);
+                let tag_ptr = self
+                    .builder()
+                    .build_struct_gep(adt_ty, out, 0, "not_tag_ptr")
                     .map_err(|e| {
-                        CodegenError::Internal(format!("failed to convert not result: {:?}", e))
-                    })?
-                    .into()
+                        CodegenError::Internal(format!("failed to get not tag ptr: {:?}", e))
+                    })?;
+                self.builder().build_store(tag_ptr, flipped).map_err(|e| {
+                    CodegenError::Internal(format!("failed to store not tag: {:?}", e))
+                })?;
+                out.into()
             }
             _ => return Err(CodegenError::TypeError("not expects a boolean".to_string())),
         };

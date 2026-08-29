@@ -1,0 +1,6 @@
+not False is True
+not True is False
+double negation holds
+False
+True
+True

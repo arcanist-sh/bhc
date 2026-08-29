@@ -305,6 +305,11 @@ fn test_tier3_builtin_point_free_native() {
 }
 
 #[test]
+fn test_tier3_bool_not_native() {
+    run_native_test("tier3_io/bool_not", Profile::Default);
+}
+
+#[test]
 fn test_tier3_list_monoid_native() {
     run_native_test("tier3_io/list_monoid", Profile::Default);
 }

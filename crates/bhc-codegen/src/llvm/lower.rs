@@ -55,6 +55,13 @@ enum PrimOp {
 }
 use bhc_index::Idx;
 use bhc_types::Ty;
+
+/// Base for `VarId`s codegen invents for values and expressions it synthesizes.
+///
+/// Above every id the front end can produce, so a synthetic variable never
+/// collides with a real one — and above the builtin range, so
+/// `is_saturated_builtin` does not mistake one for a compiled function.
+const SYNTHETIC_BUILTIN_BASE: usize = 900_000_000;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::types::{BasicType, BasicTypeEnum};
@@ -2321,6 +2328,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Container RTS functions (Map, Set, IntMap, IntSet)
         let ptr_type = i8_ptr_type;
 
+        // bhc_map_canon(ptr, i64) -> void
+        let map_canon = self.module.llvm_module().add_function(
+            "bhc_map_canon",
+            self.llvm_ctx
+                .void_type()
+                .fn_type(&[ptr_type.into(), i64_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000197), map_canon);
+        // bhc_set_canon(ptr, i64) -> void
+        let set_canon = self.module.llvm_module().add_function(
+            "bhc_set_canon",
+            self.llvm_ctx
+                .void_type()
+                .fn_type(&[ptr_type.into(), i64_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000198), set_canon);
+        // bhc_container_key(i64, i64) -> i64
+        let container_key = self.module.llvm_module().add_function(
+            "bhc_container_key",
+            i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000199), container_key);
         // Map operations
         let map_empty = self.module.llvm_module().add_function(
             "bhc_map_empty",
@@ -6720,10 +6752,57 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // state has to be threaded on while its value is dropped — so
             // anything else falls through to the stub rather than quietly
             // sequencing wrongly.
-            "<*" if matches!(self.current_transformer_layer(), TransformerLayer::IO) => {
-                let a = self.lower_expr(args[0])?;
-                let _b = self.lower_expr(args[1])?;
-                Ok(a)
+            "<*" => {
+                if matches!(self.current_transformer_layer(), TransformerLayer::IO) {
+                    // An IO action IS its value, so this is "lower both,
+                    // return the first".
+                    let a = self.lower_expr(args[0])?;
+                    let _b = self.lower_expr(args[1])?;
+                    return Ok(a);
+                }
+                // Under a transformer the second action's state must be
+                // threaded on while its value is dropped, which is exactly
+                // `a >>= \x -> b >> return x`. Building it here lets the binds
+                // that already know each layer do the work; a per-layer arm
+                // would have to relearn all of it.
+                let span = args[0].span();
+                let mut synth = |n: &str| {
+                    let id = VarId::new(SYNTHETIC_BUILTIN_BASE + self.builtin_arg_counter);
+                    self.builtin_arg_counter += 1;
+                    Var {
+                        name: Symbol::intern(n),
+                        id,
+                        ty: Ty::Error,
+                    }
+                };
+                let bind = synth(">>=");
+                let then = synth(">>");
+                let ret = synth("return");
+                let kept = synth("$kept");
+                let body = Expr::App(
+                    Box::new(Expr::App(
+                        Box::new(Expr::Var(then, span)),
+                        Box::new(args[1].clone()),
+                        span,
+                    )),
+                    Box::new(Expr::App(
+                        Box::new(Expr::Var(ret, span)),
+                        Box::new(Expr::Var(kept.clone(), span)),
+                        span,
+                    )),
+                    span,
+                );
+                let lam = Expr::Lam(kept, Box::new(body), span);
+                let rewritten = Expr::App(
+                    Box::new(Expr::App(
+                        Box::new(Expr::Var(bind, span)),
+                        Box::new(args[0].clone()),
+                        span,
+                    )),
+                    Box::new(lam),
+                    span,
+                );
+                self.lower_expr(&rewritten)
             }
             // `*>` is `>>`: same sequencing, same layer handling. Routing it
             // here rather than giving it an arm of its own is what keeps the
@@ -16070,6 +16149,145 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             _ => false,
         }
+    }
+
+    /// How a container key must be read for equality: 0 = machine word (the
+    /// default, and what a `Map Int v` wants), 1 = `Text` handle, 2 = `[Char]`
+    /// cons list.
+    ///
+    /// A Map orders its keys as machine words, so a boxed key compares by
+    /// ADDRESS and two equal `Text`s never match. `bhc_container_key` fixes
+    /// that, but only when it is told how to read the key — a large `Int`
+    /// dereferenced as a pointer would crash — so this answers 0 whenever the
+    /// type is not visible, leaving such a key exactly as it was.
+    fn key_kind_of_ty(&self, ty: &Ty) -> u64 {
+        if self.is_text_type(ty) {
+            1
+        } else if self.is_string_type(ty) {
+            2
+        } else {
+            0
+        }
+    }
+
+    /// The key type of a `Map k v` or `Set k`, if the type says.
+    fn container_key_ty<'t>(&self, ty: &'t Ty) -> Option<&'t Ty> {
+        fn con_name(t: &Ty) -> Option<&str> {
+            match t {
+                Ty::Con(c) => Some(c.name.as_str()),
+                _ => None,
+            }
+        }
+        match ty {
+            // Map k v
+            Ty::App(f, _) => match f.as_ref() {
+                Ty::App(g, k) => {
+                    let n = con_name(g)?;
+                    (n.ends_with("Map") || n.ends_with("map")).then_some(k.as_ref())
+                }
+                // Set k
+                g => {
+                    let n = con_name(g)?;
+                    (n.ends_with("Set") || n.ends_with("set")).then_some(match ty {
+                        Ty::App(_, k) => k.as_ref(),
+                        _ => return None,
+                    })
+                }
+            },
+            _ => None,
+        }
+    }
+
+    /// The key kind for a container operation, read from the key expression
+    /// where it says anything and otherwise from the container's own type.
+    fn container_key_kind(&self, key: Option<&Expr>, container: Option<&Expr>) -> u64 {
+        if let Some(k) = key {
+            if self.is_text_expr(k) {
+                return 1;
+            }
+            if matches!(k, Expr::Lit(Literal::String(_), _, _)) {
+                return 2;
+            }
+            let kind = self.key_kind_of_ty(&k.ty());
+            if kind != 0 {
+                return kind;
+            }
+        }
+        if let Some(c) = container {
+            if let Some(kt) = self.container_key_ty(&c.ty()) {
+                return self.key_kind_of_ty(kt);
+            }
+        }
+        0
+    }
+
+    /// The key kind for a list of key/value pairs (`Data.Map.fromList`) or of
+    /// keys (`Data.Set.fromList`), read from the list's element type.
+    fn assoc_list_key_kind(&self, list: &Expr, pair: bool) -> u64 {
+        let elem = match list.ty() {
+            Ty::List(e) => *e,
+            Ty::App(f, a) if matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "[]") => *a,
+            _ => return 0,
+        };
+        if !pair {
+            return self.key_kind_of_ty(&elem);
+        }
+        match elem {
+            Ty::Tuple(ts) if !ts.is_empty() => self.key_kind_of_ty(&ts[0]),
+            _ => 0,
+        }
+    }
+
+    /// Re-key a container in place so its boxed keys compare by content.
+    ///
+    /// `fromList` often cannot see the key type — the list's element type is
+    /// erased by the time Core reaches codegen — while the operation that
+    /// looks a key up usually can, from the container's own type. Emitting
+    /// this before a key operation makes the two agree.
+    fn emit_container_canon(
+        &mut self,
+        container: PointerValue<'ctx>,
+        kind: u64,
+        is_set: bool,
+    ) -> CodegenResult<()> {
+        if kind == 0 {
+            return Ok(());
+        }
+        let id = if is_set { 1000198 } else { 1000197 };
+        let rts_fn = *self
+            .functions
+            .get(&VarId::new(id))
+            .ok_or_else(|| CodegenError::Internal("container canon not declared".to_string()))?;
+        let kind_val = self.type_mapper().i64_type().const_int(kind, false);
+        self.builder()
+            .build_call(rts_fn, &[container.into(), kind_val.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("container canon call: {:?}", e)))?;
+        Ok(())
+    }
+
+    /// Emit `bhc_container_key(kind, key)` when the kind says the key is
+    /// boxed; otherwise hand the key back unchanged.
+    fn canonical_container_key(
+        &mut self,
+        key: IntValue<'ctx>,
+        kind: u64,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        if kind == 0 {
+            return Ok(key);
+        }
+        let rts_fn = *self
+            .functions
+            .get(&VarId::new(1000199))
+            .ok_or_else(|| CodegenError::Internal("bhc_container_key not declared".to_string()))?;
+        let kind_val = self.type_mapper().i64_type().const_int(kind, false);
+        let result = self
+            .builder()
+            .build_call(rts_fn, &[kind_val.into(), key.into()], "container_key")
+            .map_err(|e| CodegenError::Internal(format!("container_key call: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("container_key: returned void".to_string()))?;
+        Ok(result.into_int_value())
     }
 
     /// Check if a type is the Rational type.
@@ -35081,6 +35299,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(val_expr)?
             .ok_or_else(|| CodegenError::Internal("map_singleton: no value".to_string()))?;
         let key_int = self.coerce_to_int(key)?;
+        let kind = self.container_key_kind(Some(key_expr), None);
+        let key_int = self.canonical_container_key(key_int, kind)?;
         let val_ptr = self.value_to_ptr(val)?;
         let rts_fn = self
             .functions
@@ -35155,7 +35375,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(map_expr)?
             .ok_or_else(|| CodegenError::Internal("map_member: no map".to_string()))?;
         let key_int = self.coerce_to_int(key)?;
+        let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
+        let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = self.value_to_ptr(map_val)?;
+        self.emit_container_canon(map_ptr, kind, false)?;
         let rts_fn = self
             .functions
             .get(&VarId::new(1000104))
@@ -35182,7 +35405,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let map_val = self
             .lower_expr(map_expr)?
             .ok_or_else(|| CodegenError::Internal("map_lookup: no map".to_string()))?;
-        self.lower_builtin_map_lookup_val(key, map_val)
+        let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
+        self.lower_builtin_map_lookup_val(key, map_val, kind)
     }
 
     /// Value-level core of `Data.Map.lookup`, shared with the direct path.
@@ -35190,9 +35414,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         key: BasicValueEnum<'ctx>,
         map_val: BasicValueEnum<'ctx>,
+        kind: u64,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let key_int = self.coerce_to_int(key)?;
+        let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = self.value_to_ptr(map_val)?;
+        self.emit_container_canon(map_ptr, kind, false)?;
         let rts_fn = self
             .functions
             .get(&VarId::new(1000105))
@@ -35239,7 +35466,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("map_fwd: no map".to_string()))?;
         let default_ptr = self.value_to_ptr(default)?;
         let key_int = self.coerce_to_int(key)?;
+        let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
+        let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = self.value_to_ptr(map_val)?;
+        self.emit_container_canon(map_ptr, kind, false)?;
         let rts_fn = self.functions.get(&VarId::new(1000106)).ok_or_else(|| {
             CodegenError::Internal("bhc_map_find_with_default not declared".to_string())
         })?;
@@ -35273,7 +35503,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let map_val = self
             .lower_expr(map_expr)?
             .ok_or_else(|| CodegenError::Internal("map_insert: no map".to_string()))?;
-        self.lower_builtin_map_insert_val(key, val, map_val)
+        let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
+        self.lower_builtin_map_insert_val(key, val, map_val, kind)
     }
 
     /// Value-level core of `Data.Map.insert`, shared with the direct path.
@@ -35282,10 +35513,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         key: BasicValueEnum<'ctx>,
         val: BasicValueEnum<'ctx>,
         map_val: BasicValueEnum<'ctx>,
+        kind: u64,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let key_int = self.coerce_to_int(key)?;
+        let key_int = self.canonical_container_key(key_int, kind)?;
         let val_ptr = self.value_to_ptr(val)?;
         let map_ptr = self.value_to_ptr(map_val)?;
+        self.emit_container_canon(map_ptr, kind, false)?;
         let rts_fn = self
             .functions
             .get(&VarId::new(1000107))
@@ -35317,7 +35551,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(map_expr)?
             .ok_or_else(|| CodegenError::Internal("map_delete: no map".to_string()))?;
         let key_int = self.coerce_to_int(key)?;
+        let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
+        let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = self.value_to_ptr(map_val)?;
+        self.emit_container_canon(map_ptr, kind, false)?;
         let rts_fn = self
             .functions
             .get(&VarId::new(1000108))
@@ -40174,13 +40411,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let list_val = self
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("map_fromList: no list".to_string()))?;
-        self.lower_builtin_map_from_list_val(list_val)
+        let kind = self.assoc_list_key_kind(list_expr, true);
+        self.lower_builtin_map_from_list_val(list_val, kind)
     }
 
     /// Value-level core of `Data.Map.fromList`, shared with the direct path.
     fn lower_builtin_map_from_list_val(
         &mut self,
         list_val: BasicValueEnum<'ctx>,
+        kind: u64,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let list_ptr = self.value_to_ptr(list_val)?;
 
@@ -40267,6 +40506,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let val_ptr = self.extract_adt_field(head_ptr, 2, 1)?;
 
         let key_int = self.coerce_to_int(key_ptr.into())?;
+        let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = map_phi.as_basic_value().into_pointer_value();
 
         let new_map = self
@@ -40530,6 +40770,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(val_expr)?
             .ok_or_else(|| CodegenError::Internal("set_singleton: no value".to_string()))?;
         let val_int = self.coerce_to_int(val)?;
+        let kind = self.container_key_kind(Some(val_expr), None);
+        let val_int = self.canonical_container_key(val_int, kind)?;
         let rts_fn = self
             .functions
             .get(&VarId::new(1000121))
@@ -40603,7 +40845,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(set_expr)?
             .ok_or_else(|| CodegenError::Internal("set_member: no set".to_string()))?;
         let val_int = self.coerce_to_int(val)?;
+        let kind = self.container_key_kind(Some(val_expr), Some(set_expr));
+        let val_int = self.canonical_container_key(val_int, kind)?;
         let set_ptr = self.value_to_ptr(set_val)?;
+        self.emit_container_canon(set_ptr, kind, true)?;
         let rts_fn = self
             .functions
             .get(&VarId::new(1000124))
@@ -40631,7 +40876,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(set_expr)?
             .ok_or_else(|| CodegenError::Internal("set_insert: no set".to_string()))?;
         let val_int = self.coerce_to_int(val)?;
+        let kind = self.container_key_kind(Some(val_expr), Some(set_expr));
+        let val_int = self.canonical_container_key(val_int, kind)?;
         let set_ptr = self.value_to_ptr(set_val)?;
+        self.emit_container_canon(set_ptr, kind, true)?;
         let rts_fn = self
             .functions
             .get(&VarId::new(1000125))
@@ -40659,7 +40907,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(set_expr)?
             .ok_or_else(|| CodegenError::Internal("set_delete: no set".to_string()))?;
         let val_int = self.coerce_to_int(val)?;
+        let kind = self.container_key_kind(Some(val_expr), Some(set_expr));
+        let val_int = self.canonical_container_key(val_int, kind)?;
         let set_ptr = self.value_to_ptr(set_val)?;
+        self.emit_container_canon(set_ptr, kind, true)?;
         let rts_fn = self
             .functions
             .get(&VarId::new(1000126))
@@ -40914,7 +41165,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let list_val = self
             .lower_expr(list_expr)?
             .ok_or_else(|| CodegenError::Internal("set_fromList: no list".to_string()))?;
-        self.lower_builtin_set_from_list_val(list_val)
+        let kind = self.assoc_list_key_kind(list_expr, false);
+        self.lower_builtin_set_from_list_val(list_val, kind)
     }
 
     /// Value-level core of `Data.Set.fromList`, shared with the direct
@@ -40922,6 +41174,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     fn lower_builtin_set_from_list_val(
         &mut self,
         list_val: BasicValueEnum<'ctx>,
+        kind: u64,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let list_ptr = self.value_to_ptr(list_val)?;
 
@@ -41001,6 +41254,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let tail_ptr = self.extract_adt_field(cur_ptr, 2, 1)?;
 
         let elem_int = self.coerce_to_int(head_ptr.into())?;
+        let elem_int = self.canonical_container_key(elem_int, kind)?;
         let set_ptr = set_phi.as_basic_value().into_pointer_value();
 
         let new_set = self
@@ -45853,7 +46107,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         name: &str,
         args: &[BasicValueEnum<'ctx>],
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        const SYNTHETIC_ARG_BASE: usize = 900_000_000;
+        const SYNTHETIC_ARG_BASE: usize = SYNTHETIC_BUILTIN_BASE;
         let mut ids = Vec::with_capacity(args.len());
         let mut exprs = Vec::with_capacity(args.len());
         for arg in args {
@@ -47136,19 +47390,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .ok_or_else(|| CodegenError::Internal("text_pack: void".to_string()))?;
                 Ok(Some(result))
             }
-            "Data.Text.unpack" => {
-                let rts_fn = self.functions.get(&VarId::new(1000224)).ok_or_else(|| {
-                    CodegenError::Internal("bhc_text_unpack not declared".to_string())
-                })?;
-                let result = self
-                    .builder()
-                    .build_call(*rts_fn, &[args[0].into()], "text_unpack")
-                    .map_err(|e| CodegenError::Internal(format!("text_unpack: {:?}", e)))?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or_else(|| CodegenError::Internal("text_unpack: void".to_string()))?;
-                Ok(Some(result))
-            }
+            // `Data.Text.unpack` is deliberately absent: there is no
+            // `bhc_text_unpack` entry point (this arm called
+            // `bhc_text_char_count` — VarId 1000224 — and handed its COUNT
+            // back as a `[Char]`, so `map T.unpack` produced integers that
+            // `putStrLn` then dereferenced). The expression path builds the
+            // cons list char by char, and the fallback reaches it.
             "Data.Text.null" => {
                 let rts_fn = self.functions.get(&VarId::new(1000202)).ok_or_else(|| {
                     CodegenError::Internal("bhc_text_null not declared".to_string())
@@ -48932,11 +49179,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Data.Map, Data.Set, etc. — delegate to existing impls
             "Data.Map.empty" => self.lower_builtin_map_empty(),
             "Data.Set.empty" => self.lower_builtin_set_empty(),
-            "Data.Set.fromList" => self.lower_builtin_set_from_list_val(args[0]),
-            "Data.Map.fromList" => self.lower_builtin_map_from_list_val(args[0]),
-            "Data.Map.lookup" => self.lower_builtin_map_lookup_val(args[0], args[1]),
+            "Data.Set.fromList" => self.lower_builtin_set_from_list_val(args[0], 0),
+            "Data.Map.fromList" => self.lower_builtin_map_from_list_val(args[0], 0),
+            "Data.Map.lookup" => self.lower_builtin_map_lookup_val(args[0], args[1], 0),
             "Data.Sequence.fromList" => self.lower_builtin_seq_from_list_val(args[0]),
-            "Data.Map.insert" => self.lower_builtin_map_insert_val(args[0], args[1], args[2]),
+            "Data.Map.insert" => self.lower_builtin_map_insert_val(args[0], args[1], args[2], 0),
             "Data.Set.union" => {
                 self.lower_builtin_set_binary_val(args[0], args[1], 1000127, "set_union")
             }

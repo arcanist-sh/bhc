@@ -305,6 +305,11 @@ fn test_tier3_builtin_point_free_native() {
 }
 
 #[test]
+fn test_tier3_map_text_keys_native() {
+    run_native_test("tier3_io/map_text_keys", Profile::Default);
+}
+
+#[test]
 fn test_tier3_string_equality_native() {
     run_native_test("tier3_io/string_equality", Profile::Default);
 }
@@ -327,6 +332,11 @@ fn test_tier3_bool_immediate_native() {
 #[test]
 fn test_tier3_bool_not_native() {
     run_native_test("tier3_io/bool_not", Profile::Default);
+}
+
+#[test]
+fn test_tier3_applicative_seq_transformer_native() {
+    run_native_test("tier3_io/applicative_seq_transformer", Profile::Default);
 }
 
 #[test]

@@ -1,0 +1,9 @@
+Just 7
+8
+False
+7
+True
+0
+Just 20
+True
+False

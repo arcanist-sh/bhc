@@ -2235,10 +2235,12 @@ impl LowerContext {
             "setLocale",
             // System.IO (stubs) - hSetBuffering and hFlush moved to builtin_funcs
             "flush",
-            // Data.Map/Set qualified functions (stubs)
-            "M.fromListWith",
-            "M.member",
-            "M.notMember",
+            // Data.Map/Set functions with no qualifier. The `M.`-prefixed
+            // spellings used to be here too, and they SHADOWED the real
+            // builtins: `Data.Map.member` is implemented, but a stub bound
+            // under the exact alias `M` won the lookup, so `M.member` aborted
+            // at runtime — in every pandoc module, which all write
+            // `import qualified Data.Map as M`.
             "member",
             "notMember",
             "fromListWith",

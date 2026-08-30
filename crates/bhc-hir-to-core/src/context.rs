@@ -1708,6 +1708,89 @@ impl LowerContext {
         )
     }
 
+    /// The type a `holder` dictionary's superclass path to `needed` is ABOUT.
+    ///
+    /// `class Monad m => Stream s m t`'s `Monad` superclass constrains `m`, so
+    /// the answer is whatever `m` is bound to in the holder's own constraint
+    /// arguments. A single-parameter holder has only one thing it can be
+    /// about, which matters because `superclass_params` is recorded where a
+    /// class is DECLARED — an imported class like `PandocMonad` arrives
+    /// without it.
+    fn superclass_constrained_ty(&self, holder: Symbol, needed: Symbol) -> Option<Ty> {
+        let info = self.class_registry.lookup_class(holder)?;
+        let idx = info
+            .superclasses
+            .iter()
+            .position(|s| *s == needed || self.superclass_field_path(*s, needed, 0).is_some())?;
+        let param = info
+            .superclass_params
+            .get(idx)
+            .and_then(|p| p.first())
+            .copied()
+            .or(if info.param_count == 1 { Some(0) } else { None })?;
+        self.lookup_dict_args(holder)
+            .and_then(|a| a.get(param))
+            .cloned()
+    }
+
+    /// Whether the OCCURRENCE being lowered rules out taking `holder`'s
+    /// superclass hop to `needed`.
+    ///
+    /// The enclosing binding's signature is the wrong thing to ask (see
+    /// `superclass_hop_matches`): a `ParsecT`-level binding can still contain
+    /// sub-expressions that work in `m`, and a binding in `m` can contain an
+    /// inline parser that works in `ParsecT`. What settles it is the monad
+    /// THIS occurrence works in, which typeck records span-keyed.
+    ///
+    /// Used only to REFUSE, and only when the occurrence's monad is a concrete
+    /// constructor while the hop's dictionary is about something else. A type
+    /// variable never refuses anything — typeck leaves plenty of them
+    /// unresolved in a parser library, and reading those as agreement is the
+    /// mistake that kept every earlier scoping of this guard wrong in one
+    /// direction or the other.
+    fn occurrence_refutes_hop(&self, holder: Symbol, needed: Symbol, span: Span) -> bool {
+        if !self.is_monad_family_class(needed) {
+            return false;
+        }
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        fn head(ty: &Ty) -> &Ty {
+            match ty {
+                Ty::App(f, _) => head(f),
+                other => other,
+            }
+        }
+        let dbg = std::env::var("BHC_DBG_HOP").is_ok();
+        let Some(occ) = self
+            .resolved_expr_ty_opt(span)
+            .or_else(|| self.expr_ty_opt(span))
+        else {
+            if dbg {
+                eprintln!("[hop] {holder} -> {needed} @ {span:?}: no occurrence type");
+            }
+            return false;
+        };
+        let occ_head = head(result_of(&occ)).clone();
+        let constrained = self.superclass_constrained_ty(holder, needed);
+        if dbg {
+            eprintln!(
+                "[hop] {holder} -> {needed} @ {span:?}: occ_head={occ_head:?} constrained={constrained:?}"
+            );
+        }
+        let Ty::Con(occ_con) = &occ_head else {
+            return false;
+        };
+        match constrained.as_ref().map(head) {
+            Some(Ty::Var(_)) => true,
+            Some(Ty::Con(c)) => c.name != occ_con.name,
+            _ => false,
+        }
+    }
+
     /// The dictionaries currently in scope, with the constraint arguments each
     /// is for, in the shape `DictContext` wants for filling superclass slots.
     fn scope_dicts_for_construction(&self) -> Vec<(Symbol, Vec<Ty>, Var)> {
@@ -2275,6 +2358,9 @@ impl LowerContext {
                     .lookup_class(*class_name)
                     .is_some_and(|c| c.param_count == 1);
                 if !single_param && !self.superclass_hop_matches(*class_name, needed_class) {
+                    continue;
+                }
+                if self.occurrence_refutes_hop(*class_name, needed_class, span) {
                     continue;
                 }
                 if let Some(path) = self.superclass_field_path(*class_name, needed_class, 0) {

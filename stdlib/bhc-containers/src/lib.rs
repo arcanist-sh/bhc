@@ -9,8 +9,9 @@
 #![warn(missing_docs)]
 #![allow(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ptr;
+use std::sync::Mutex;
 
 // ========================================================================
 // Opaque container types
@@ -21,6 +22,146 @@ type RtsMap = BTreeMap<i64, *mut u8>;
 
 /// Opaque Set type: BTreeSet<i64> behind a Box.
 type RtsSet = BTreeSet<i64>;
+
+// ========================================================================
+// Key canonicalization
+// ========================================================================
+
+/// Interned canonical keys: content -> the first pointer seen for it.
+static INTERNED_KEYS: Mutex<Option<HashMap<Vec<u8>, i64>>> = Mutex::new(None);
+
+/// A `BhcText`'s header is `[data_ptr][offset][byte_len]`, 24 bytes.
+/// Canonical definition: `bhc-text`'s `text.rs`.
+const TEXT_HEADER_SIZE: usize = 24;
+
+/// Read the active bytes of a `BhcText`.
+unsafe fn text_key_bytes(text: *const u8) -> Vec<u8> {
+    let data = unsafe { *(text as *const *const u8) };
+    let off = unsafe { *((text as *const u64).add(1)) } as usize;
+    let len = unsafe { *((text as *const u64).add(2)) } as usize;
+    if data.is_null() || len > (1 << 30) {
+        return Vec::new();
+    }
+    let _ = TEXT_HEADER_SIZE;
+    unsafe { std::slice::from_raw_parts(data.add(off), len) }.to_vec()
+}
+
+/// Read the bytes of a `[Char]` cons list. Layout: nil = `[0]`,
+/// cons = `[1][head][tail]`.
+unsafe fn char_list_key_bytes(mut p: *const u8) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut guard = 0usize;
+    while !p.is_null() {
+        let tag = unsafe { *(p as *const i64) };
+        if tag != 1 {
+            break;
+        }
+        let head = unsafe { *(p.add(8) as *const u64) } as u32;
+        if let Some(ch) = char::from_u32(head) {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+        }
+        p = unsafe { *(p.add(16) as *const *const u8) };
+        guard += 1;
+        if guard > (1 << 24) {
+            break;
+        }
+    }
+    out
+}
+
+/// Canonicalize a container key so that equal CONTENTS become the same key.
+///
+/// A Map or Set orders its keys as machine words, which is right for an `Int`
+/// and wrong for anything boxed: two equal `Text`s are two different handles,
+/// so `M.lookup k (M.fromList [(k, v)])` answered `Nothing` for every `Map
+/// Text v` in pandoc. Interning gives every equal content the first pointer
+/// ever seen for it, which restores lookup, membership and deletion.
+///
+/// `kind` says how to read the key, and codegen only passes a non-zero one
+/// where it knows the key's type — an unknown key keeps today's behaviour
+/// rather than risking a dereference of a large integer.
+///
+/// Ordering among interned keys is by that first pointer, not by content, so
+/// `toList` on a boxed-key map is not in key order.
+///
+/// # Safety
+/// For `kind` 1 the key must be a live `BhcText`; for `kind` 2 a `[Char]`
+/// cons list. Kind 0 does not dereference.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_container_key(kind: i64, raw: i64) -> i64 {
+    if kind == 0 || raw == 0 {
+        return raw;
+    }
+    let ptr = raw as *const u8;
+    let bytes = match kind {
+        1 => unsafe { text_key_bytes(ptr) },
+        2 => unsafe { char_list_key_bytes(ptr) },
+        _ => return raw,
+    };
+    let mut guard = match INTERNED_KEYS.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let table = guard.get_or_insert_with(HashMap::new);
+    *table.entry(bytes).or_insert(raw)
+}
+
+/// Container objects already re-keyed, so the walk happens once each.
+static CANONICALIZED: Mutex<Option<HashSet<usize>>> = Mutex::new(None);
+
+/// Whether `ptr` still needs re-keying, marking it done.
+fn claim_for_canon(ptr: *const u8) -> bool {
+    let mut guard = match CANONICALIZED.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.get_or_insert_with(HashSet::new).insert(ptr as usize)
+}
+
+/// Re-key a map so its boxed keys compare by content.
+///
+/// `fromList` cannot always see what kind of key it is building with — the
+/// list's element type is often erased by the time Core reaches codegen —
+/// while the operation that later looks a key up usually can, from the map's
+/// own type. So the map is re-keyed on first use by a caller that knows,
+/// in place: replacing each key with its canonical form preserves the map's
+/// contents, and doing it to a shared map is what makes every alias agree.
+///
+/// # Safety
+/// `map_ptr` must be null or a live `RtsMap` whose keys match `kind`.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_map_canon(map_ptr: *mut u8, kind: i64) {
+    if map_ptr.is_null() || kind == 0 || !claim_for_canon(map_ptr) {
+        return;
+    }
+    let m = unsafe { &mut *(map_ptr as *mut RtsMap) };
+    let entries: Vec<(i64, *mut u8)> = m.iter().map(|(k, v)| (*k, *v)).collect();
+    let mut rekeyed = BTreeMap::new();
+    for (k, v) in entries {
+        rekeyed.insert(unsafe { bhc_container_key(kind, k) }, v);
+    }
+    *m = rekeyed;
+}
+
+/// Re-key a set so its boxed elements compare by content. See
+/// [`bhc_map_canon`].
+///
+/// # Safety
+/// `set_ptr` must be null or a live `RtsSet` whose elements match `kind`.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_set_canon(set_ptr: *mut u8, kind: i64) {
+    if set_ptr.is_null() || kind == 0 || !claim_for_canon(set_ptr) {
+        return;
+    }
+    let s = unsafe { &mut *(set_ptr as *mut RtsSet) };
+    let elems: Vec<i64> = s.iter().copied().collect();
+    let mut rekeyed = BTreeSet::new();
+    for e in elems {
+        rekeyed.insert(unsafe { bhc_container_key(kind, e) });
+    }
+    *s = rekeyed;
+}
 
 // ========================================================================
 // Data.Map operations

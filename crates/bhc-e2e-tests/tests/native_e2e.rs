@@ -305,6 +305,11 @@ fn test_tier3_builtin_point_free_native() {
 }
 
 #[test]
+fn test_tier3_constrained_value_superclass_native() {
+    run_native_test("tier3_io/constrained_value_superclass", Profile::Default);
+}
+
+#[test]
 fn test_tier3_foldable_to_list_native() {
     run_native_test("tier3_io/foldable_to_list", Profile::Default);
 }

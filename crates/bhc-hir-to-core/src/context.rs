@@ -1854,6 +1854,39 @@ impl LowerContext {
         out
     }
 
+    /// A dictionary for `class` from one in scope — the dictionary itself, or
+    /// one of its superclasses selected out of it.
+    ///
+    /// A constrained VALUE gets its dictionaries at its use site, and only
+    /// from `lookup_dict`, which sees a binding's OWN constraints. parsec's
+    /// `getState :: Monad m => ParsecT s u m u` used inside a `PandocMonad m
+    /// =>` function found no `Monad` there — `PandocMonad` has it as a
+    /// superclass — so `getState` was emitted with its dictionary missing and
+    /// its first value argument landed in the dictionary's slot.
+    pub(crate) fn dict_in_scope_or_via_superclass(
+        &self,
+        class: Symbol,
+        span: Span,
+    ) -> Option<core::Expr> {
+        if let Some(v) = self.lookup_dict(class) {
+            return Some(core::Expr::Var(v.clone(), span));
+        }
+        let (_, _, base, path) = self
+            .scope_super_dicts_for_construction()
+            .into_iter()
+            .find(|(c, _, _, _)| *c == class)?;
+        let mut expr = core::Expr::Var(base, span);
+        for idx in path {
+            let sel = Var {
+                name: Symbol::intern(&format!("$sel_{idx}")),
+                id: VarId::new(idx),
+                ty: Ty::Error,
+            };
+            expr = core::Expr::App(Box::new(core::Expr::Var(sel, span)), Box::new(expr), span);
+        }
+        Some(expr)
+    }
+
     /// Every class reachable from `from` by superclass edges, with the
     /// field-index path taken to get there. Breadth-first, so the shallowest
     /// path to a class is the one reported.

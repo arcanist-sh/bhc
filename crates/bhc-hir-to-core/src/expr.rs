@@ -724,9 +724,10 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
             let all_deferred = user_constraints
                 .iter()
                 .all(|c| c.args.iter().any(has_type_variables));
-            let any_in_scope = user_constraints
-                .iter()
-                .any(|c| ctx.lookup_dict(c.class).is_some());
+            let any_in_scope = user_constraints.iter().any(|c| {
+                ctx.dict_in_scope_or_via_superclass(c.class, def_ref.span)
+                    .is_some()
+            });
             if all_deferred && !any_in_scope {
                 // "Defer to App-level" assumes this reference is the head of an
                 // application, so an argument type will pin the constraint. A
@@ -756,15 +757,19 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
             // Apply dictionaries for each user-defined class constraint
             let mut result = base_expr;
             for constraint in &user_constraints {
-                // Skip constraints with type variables UNLESS a dict is in scope
-                if constraint.args.iter().any(has_type_variables)
-                    && ctx.lookup_dict(constraint.class).is_none()
-                {
+                // Skip constraints with type variables UNLESS a dict is in
+                // scope — directly, or as a superclass of one that is.
+                let from_scope =
+                    ctx.dict_in_scope_or_via_superclass(constraint.class, def_ref.span);
+                if constraint.args.iter().any(has_type_variables) && from_scope.is_none() {
                     continue;
                 }
 
                 // Try to resolve the dictionary
-                if let Some(dict_expr) = ctx.resolve_dictionary(constraint, def_ref.span) {
+                if let Some(dict_expr) = ctx
+                    .resolve_dictionary(constraint, def_ref.span)
+                    .or(from_scope)
+                {
                     result = core::Expr::App(Box::new(result), Box::new(dict_expr), def_ref.span);
                 } else {
                     // Dictionary not available - generate an error expression

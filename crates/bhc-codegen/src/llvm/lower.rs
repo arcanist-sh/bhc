@@ -16302,17 +16302,45 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// keys (`Data.Set.fromList`), read from the list's element type.
     fn assoc_list_key_kind(&self, list: &Expr, pair: bool) -> u64 {
         let elem = match list.ty() {
-            Ty::List(e) => *e,
-            Ty::App(f, a) if matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "[]") => *a,
-            _ => return 0,
+            Ty::List(e) => Some(*e),
+            Ty::App(f, a) if matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "[]") => {
+                Some(*a)
+            }
+            _ => None,
+        };
+        if let Some(elem) = elem {
+            let kind = if pair {
+                match elem {
+                    Ty::Tuple(ref ts) if !ts.is_empty() => self.key_kind_of_ty(&ts[0]),
+                    _ => 0,
+                }
+            } else {
+                self.key_kind_of_ty(&elem)
+            };
+            if kind != 0 {
+                return kind;
+            }
+        }
+        // A list literal's own type is usually erased by the time Core reaches
+        // codegen, but its first element is right there: `M.fromList [("a",1)]`
+        // says what its keys are even when `[(String, Int)]` does not survive.
+        let Some(head) = self.get_list_head_expr_cloned(list) else {
+            return 0;
         };
         if !pair {
-            return self.key_kind_of_ty(&elem);
+            return self.container_key_kind(Some(&head), None);
         }
-        match elem {
-            Ty::Tuple(ts) if !ts.is_empty() => self.key_kind_of_ty(&ts[0]),
-            _ => 0,
+        // `(,) k v` — the key is the FIRST argument, two applications down.
+        let mut cur = &head;
+        while let Expr::TyApp(inner, _, _) = cur {
+            cur = inner;
         }
+        if let Expr::App(f, _v, _) = cur {
+            if let Expr::App(_, k, _) = f.as_ref() {
+                return self.container_key_kind(Some(k), None);
+            }
+        }
+        0
     }
 
     /// Re-key a container in place so its boxed keys compare by content.
@@ -20645,7 +20673,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Right: a = field0(either); kr = k(k, a); result = kr(kr, s')
             self.builder().position_at_end(right_bb);
             let a = self.extract_adt_field(either, 1, 0)?;
-            let k_fn = self.extract_closure_fn_ptr(k)?;
+            let k_fn = self.checked_closure_fn_ptr(k, "ExceptT-over-StateT bind: continuation")?;
             let kr = self
                 .builder()
                 .build_indirect_call(fn_type2, k_fn, &[k.into(), a.into()], "bind_st_kr")
@@ -20654,7 +20682,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .basic()
                 .ok_or_else(|| CodegenError::Internal("ExceptT bind/st k: void".to_string()))?
                 .into_pointer_value();
-            let kr_fn = self.extract_closure_fn_ptr(kr)?;
+            let kr_fn =
+                self.checked_closure_fn_ptr(kr, "ExceptT-over-StateT bind: continuation result")?;
             let result = self
                 .builder()
                 .build_indirect_call(
@@ -39044,8 +39073,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("map_insertWith: no map".to_string()))?;
 
         let key_int = self.coerce_to_int(key_val)?;
+        let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
+        let key_int = self.canonical_container_key(key_int, kind)?;
         let new_ptr = self.value_to_ptr(new_val)?;
         let map_ptr = self.value_to_ptr(map_val)?;
+        self.emit_container_canon(map_ptr, kind, false)?;
 
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
@@ -39177,7 +39209,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("map_adjust: no map".to_string()))?;
 
         let key_int = self.coerce_to_int(key_val)?;
+        let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
+        let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = self.value_to_ptr(map_val)?;
+        self.emit_container_canon(map_ptr, kind, false)?;
 
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
@@ -39454,6 +39489,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         fn_expr: &Expr,
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let kind = self.assoc_list_key_kind(list_expr, true);
         let fn_val = self
             .lower_expr(fn_expr)?
             .ok_or_else(|| CodegenError::Internal("map_fromListWith: no function".to_string()))?;
@@ -39561,6 +39597,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let key_ptr = self.extract_adt_field(head_ptr, 2, 0)?;
         let val_ptr = self.extract_adt_field(head_ptr, 2, 1)?;
         let key_int = self.coerce_to_int(key_ptr.into())?;
+        let key_int = self.canonical_container_key(key_int, kind)?;
 
         // Lookup key in current map
         let map_acc_ptr = map_phi.as_basic_value().into_pointer_value();
@@ -40265,7 +40302,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("map_update: no map".to_string()))?;
 
         let key_int = self.coerce_to_int(key_val)?;
+        let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
+        let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = self.value_to_ptr(map_val)?;
+        self.emit_container_canon(map_ptr, kind, false)?;
 
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
@@ -40428,7 +40468,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("map_alter: no map".to_string()))?;
 
         let key_int = self.coerce_to_int(key_val)?;
+        let kind = self.container_key_kind(Some(key_expr), Some(map_expr));
+        let key_int = self.canonical_container_key(key_int, kind)?;
         let map_ptr = self.value_to_ptr(map_val)?;
+        self.emit_container_canon(map_ptr, kind, false)?;
 
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();

@@ -18,6 +18,9 @@ main = do
   print (M.findWithDefault (0 :: Int) (T.pack "z") mt)
   let mi = M.fromList [(1 :: Int, 10 :: Int), (2, 20)]
   print (M.lookup (2 :: Int) mi)
+  print (M.size (M.insertWith (+) ("a" :: String) (1 :: Int) ms))
+  print (M.lookup ("a" :: String) (M.insertWith (+) ("a" :: String) (1 :: Int) ms))
+  print (M.size (M.fromListWith (+) [("a" :: String, 1 :: Int), ("a", 2)]))
   let st = S.fromList [T.pack "a", T.pack "b"]
   print (S.member (T.pack "a") st)
   print (S.member (T.pack "c") st)

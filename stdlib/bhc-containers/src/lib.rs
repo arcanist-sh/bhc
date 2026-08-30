@@ -27,8 +27,14 @@ type RtsSet = BTreeSet<i64>;
 // Key canonicalization
 // ========================================================================
 
-/// Interned canonical keys: content -> the first pointer seen for it.
-static INTERNED_KEYS: Mutex<Option<HashMap<Vec<u8>, i64>>> = Mutex::new(None);
+/// Interned canonical keys: (kind, content) -> the first pointer seen for it.
+///
+/// The KIND is part of the key because the canonical pointer is read back
+/// under it: a `Text` "a" and a `[Char]` "a" have the same content but
+/// different representations, and canonicalizing a container twice — which
+/// `bhc_map_canon` does — has to be idempotent.
+type InternTable = HashMap<(i64, Vec<u8>), i64>;
+static INTERNED_KEYS: Mutex<Option<InternTable>> = Mutex::new(None);
 
 /// A `BhcText`'s header is `[data_ptr][offset][byte_len]`, 24 bytes.
 /// Canonical definition: `bhc-text`'s `text.rs`.
@@ -103,8 +109,8 @@ pub unsafe extern "C" fn bhc_container_key(kind: i64, raw: i64) -> i64 {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let table = guard.get_or_insert_with(HashMap::new);
-    *table.entry(bytes).or_insert(raw)
+    let table = guard.get_or_insert_with(InternTable::new);
+    *table.entry((kind, bytes)).or_insert(raw)
 }
 
 /// Container objects already re-keyed, so the walk happens once each.

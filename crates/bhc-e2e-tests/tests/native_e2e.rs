@@ -315,6 +315,11 @@ fn test_tier3_applicative_seq_native() {
 }
 
 #[test]
+fn test_tier3_show_bound_list_native() {
+    run_native_test("tier3_io/show_bound_list", Profile::Default);
+}
+
+#[test]
 fn test_tier3_list_monoid_native() {
     run_native_test("tier3_io/list_monoid", Profile::Default);
 }

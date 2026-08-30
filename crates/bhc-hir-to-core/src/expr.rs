@@ -118,6 +118,20 @@ fn ty_is_annotatable(ty: &Ty) -> bool {
     if matches!(ty, Ty::Fun(_, _)) {
         return true;
     }
+    // Lists and tuples are pointers too, and a bound list had the same problem
+    // an ADT did: `let xs = ["ab"] in print xs` printed the LIST's address.
+    //
+    // A String is `[Char]`, and annotating one puts a Char back in front of
+    // codegen's width inference — `icmp eq i32 %to_char, i64 44`, which fails
+    // LLVM verification. The `milestone_e_json` fixture catches it. A list OF
+    // strings is fine: only the outer type is annotated, and its elements are
+    // described by the show descriptor rather than by a binder type.
+    if let Ty::List(elem) = ty {
+        return !matches!(elem.as_ref(), Ty::Con(tc) if tc.name.as_str() == "Char");
+    }
+    if matches!(ty, Ty::Tuple(_)) {
+        return true;
+    }
     match head(ty) {
         Ty::Con(tc) => !matches!(
             tc.name.as_str(),

@@ -1,0 +1,10 @@
+[1,2]
+"hi"
+"ab"
+Just [1,2]
+[Just 1,Nothing]
+Right 5
+[(1,'x')]
+["ab","cd"]
+[1,2]
+[C 1,D "s"]

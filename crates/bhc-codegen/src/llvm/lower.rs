@@ -24975,10 +24975,35 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Build a descriptor for the element type of a list expression.
+    /// A stand-in expression carrying just a type, for descriptor building.
+    ///
+    /// `build_show_descriptor` inspects an expression's SYNTAX first and its
+    /// type second. When only the type is known — a list's element type, say —
+    /// this hands it something whose syntax says nothing and whose type says
+    /// everything. Nothing lowers it; descriptor construction only reads types
+    /// and emits globals.
+    fn ty_only_expr(ty: Ty) -> Expr {
+        Expr::Var(
+            Var {
+                name: Symbol::intern("$elem"),
+                id: VarId::new(0),
+                ty,
+            },
+            bhc_span::Span::default(),
+        )
+    }
+
     fn build_list_elem_descriptor(&mut self, list_expr: &Expr) -> PointerValue<'ctx> {
         // Try to get the head element and build its descriptor recursively
         if let Some(head) = self.get_list_head_expr_cloned(list_expr) {
             return self.build_show_descriptor(&head);
+        }
+        // No cons cell to read — the list came from a variable or a call, as in
+        // `print (map reverse xs)`. Its TYPE still names the element, and
+        // defaulting to Int here is what printed element ADDRESSES.
+        if let Ty::List(elem) = list_expr.ty() {
+            let stand_in = Self::ty_only_expr(elem.as_ref().clone());
+            return self.build_show_descriptor(&stand_in);
         }
         self.get_primitive_show_desc(0) // default to Int
     }
@@ -44244,6 +44269,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Infer the user ADT type name from an expression, for derived method dispatch.
     fn infer_adt_type_from_expr(&self, expr: &Expr) -> Option<String> {
+        // The syntactic cases below name the type from a CONSTRUCTOR. When
+        // there is no constructor to read — a variable, or the stand-in used
+        // for a list's element type — the expression's own type still names it.
+        // Without this, `let cons = [C 1, D "s"] in print cons` printed the
+        // elements' addresses.
+        fn head_con_name(t: &Ty) -> Option<String> {
+            match t {
+                Ty::Con(tc) => Some(tc.name.as_str().to_string()),
+                Ty::App(f, _) => head_con_name(f),
+                _ => None,
+            }
+        }
+        if let Some(name) = head_con_name(&expr.ty()) {
+            if self.derived_show_fns.contains_key(&name) {
+                return Some(name);
+            }
+        }
         match expr {
             // A bare constructor: e.g., `Red`
             Expr::Var(var, _) => {

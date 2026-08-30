@@ -128,6 +128,17 @@ enum TransformerLayer {
     WriterT,
 }
 
+/// A monad that is an ordinary data type rather than a transformer layer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ValueMonad {
+    /// `Nothing` short-circuits; `Just x` continues with `x`.
+    Maybe,
+    /// `Left e` short-circuits; `Right x` continues with `x`.
+    Either,
+    /// `m >>= k` is `concatMap k m`.
+    List,
+}
+
 /// Coercion mode for type-specialized show functions.
 #[derive(Clone, Copy, Debug)]
 enum ShowCoerce {
@@ -151,6 +162,8 @@ enum ShowCoerce {
     EitherOf,
     /// Pass pointer + fst/snd type tags for show_tuple2
     Tuple2Of,
+    /// Pass pointer directly for `show_text` (a `Data.Text.Text` handle)
+    Text,
     /// Pass pointer directly for show_unit
     Unit,
     /// Extract ADT tag (i64) for show_ordering
@@ -376,6 +389,13 @@ pub struct Lowering<'ctx, 'm> {
     /// reach the expression-position implementation. See the fallback at the
     /// end of `lower_builtin_direct`.
     builtin_arg_counter: usize,
+    /// The type of the builtin currently being lowered, at its occurrence.
+    ///
+    /// `Maybe`, `Either` and `[]` are monads but not transformer layers, so
+    /// nothing in the layer machinery can tell a do-block in one from a do
+    /// block in `IO`. The operator's own type can: `>>=` is a `Ty::Fun`, and
+    /// those reach Core.
+    current_builtin_ty: Ty,
     /// Whether {-# LANGUAGE OverloadedStrings #-} is enabled.
     overloaded_strings: bool,
     /// E.44: Set of variable IDs that were thunked (lazy let-bindings).
@@ -444,6 +464,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             derived_to_fns: FxHashMap::default(),
             show_desc_counter: 0,
             builtin_arg_counter: 0,
+            current_builtin_ty: Ty::Error,
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
             recursive_caf_ids: FxHashSet::default(),
@@ -498,6 +519,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             derived_to_fns: FxHashMap::default(),
             show_desc_counter: 0,
             builtin_arg_counter: 0,
+            current_builtin_ty: Ty::Error,
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
             recursive_caf_ids: FxHashSet::default(),
@@ -2239,6 +2261,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .llvm_module()
             .add_function("bhc_show_unit", ptr_to_ptr, None);
         self.functions.insert(VarId::new(1000097), show_unit);
+
+        // bhc_show_text(ptr) -> *i8
+        let show_text = self
+            .module
+            .llvm_module()
+            .add_function("bhc_show_text", ptr_to_ptr, None);
+        self.functions.insert(VarId::new(1000196), show_text);
 
         // bhc_show_with_desc(ptr, ptr) -> *i8
         let ptr_ptr_to_ptr = i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false);
@@ -6524,7 +6553,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Check if an expression is a saturated builtin function application.
-    fn is_saturated_builtin<'a>(&self, expr: &'a Expr) -> Option<(&'a str, Vec<&'a Expr>)> {
+    /// The third component is the builtin's own type at this occurrence. An
+    /// operator occurrence is a `Ty::Fun`, and those the type checker's
+    /// span-keyed types do reach (`annotate_ty`), so `>>=`'s type is how the
+    /// monad a do-block runs in can be told when it is `Maybe`, `Either` or a
+    /// list — none of which is a transformer layer.
+    fn is_saturated_builtin<'a>(&self, expr: &'a Expr) -> Option<(&'a str, Vec<&'a Expr>, Ty)> {
         // Collect arguments while unwrapping applications
         let mut args = Vec::new();
         let mut current = expr;
@@ -6555,7 +6589,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             if let Some(arity) = self.builtin_info(name) {
                 args.reverse();
                 if args.len() == arity as usize {
-                    return Some((name, args));
+                    return Some((name, args, var.ty.clone()));
                 }
             }
         }
@@ -6688,6 +6722,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Monadic operations — dispatch based on transformer stack.
             // Detects the operation's native layer and inserts lifts if needed.
             ">>=" => {
+                // `Maybe`, `Either` and `[]` are monads but not transformer
+                // layers, so the layer machinery below would run a do-block in
+                // one of them as if it were IO: `x <- half n` bound `x` to the
+                // whole `Just` and nothing short-circuited on `Nothing`.
+                match self.current_value_monad(args[0]) {
+                    Some(ValueMonad::List) => {
+                        return self.lower_builtin_concat_map(args[1], args[0])
+                    }
+                    Some(_) => return self.lower_value_monad_bind(args[0], args[1], true),
+                    None => {}
+                }
                 // For ReaderT-over-StateT, bypass auto-lift and route directly
                 // to nested ReaderT bind which threads state through 3-arg closures
                 if self.transformer_stack.is_reader_t_over_state_t() {
@@ -6809,6 +6854,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // transformer cases in step — `>>` below already knows how to lift
             // and how each stack threads its state.
             ">>" | "*>" => {
+                // See `>>=` above: a value monad is not a transformer layer.
+                // The list case stays with the layer path — `m >> k` there is
+                // `concatMap (const k) m`, and do-notation over lists rarely
+                // discards a binding.
+                if matches!(
+                    self.current_value_monad(args[0]),
+                    Some(ValueMonad::Maybe | ValueMonad::Either)
+                ) {
+                    return self.lower_value_monad_bind(args[0], args[1], false);
+                }
                 // For ReaderT-over-StateT, bypass auto-lift and route directly
                 // to nested ReaderT then which threads state through 3-arg closures
                 if self.transformer_stack.is_reader_t_over_state_t() {
@@ -6866,6 +6921,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
             }
             "return" | "pure" => {
+                // In a value monad `return x` builds the wrapper — `Just x`,
+                // `Right x`, `[x]` — not the identity the IO layer wants.
+                if let Some(m) = self.value_monad_of_ty(&self.current_builtin_ty) {
+                    return self.lower_value_monad_pure(m, args[0]);
+                }
                 // For ReaderT-over-StateT, route to nested ReaderT pure
                 if self.transformer_stack.is_reader_t_over_state_t() {
                     return self.lower_builtin_reader_t_pure(args[0]);
@@ -8542,7 +8602,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         list_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // Take-fusion: detect iterate/repeat/cycle and fuse into bounded loop
-        if let Some((inner_name, inner_args)) = self.is_saturated_builtin(list_expr) {
+        if let Some((inner_name, inner_args, _)) = self.is_saturated_builtin(list_expr) {
             match inner_name {
                 "iterate" => return self.lower_take_iterate(n_expr, inner_args[0], inner_args[1]),
                 "repeat" => return self.lower_take_repeat(n_expr, inner_args[0]),
@@ -15736,6 +15796,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             | ShowCoerce::EitherOf
                             | ShowCoerce::Tuple2Of
                             | ShowCoerce::StringList
+                            | ShowCoerce::Text
                             // `Ordering` (LT/EQ/GT) is a heap-allocated ADT whose
                             // type is erased to `Error` by codegen — without this
                             // it falls through to the boxed-int branch and prints
@@ -16137,13 +16198,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         match expr {
             Expr::TyApp(inner, _, _) => self.is_text_expr(inner),
             Expr::Var(v, _) => self.is_text_type(&v.ty),
-            Expr::App(f, _, _) => {
+            Expr::App(f, arg, _) => {
                 let mut cur = f.as_ref();
-                while let Expr::App(inner, _, _) = cur {
+                let mut first_arg = arg.as_ref();
+                while let Expr::App(inner, a, _) = cur {
+                    first_arg = a.as_ref();
                     cur = inner.as_ref();
                 }
                 match cur {
-                    Expr::Var(v, _) => self.is_text_type(result_of(&v.ty)),
+                    Expr::Var(v, _) => {
+                        // `<>` keeps its operands' type, and its own is erased,
+                        // so ask an operand: `show (a <> b)` on two Texts
+                        // printed an address.
+                        if matches!(v.name.as_str(), "<>" | "mappend") {
+                            return self.is_text_expr(first_arg) || self.is_text_expr(arg);
+                        }
+                        self.is_text_type(result_of(&v.ty))
+                    }
                     _ => false,
                 }
             }
@@ -16288,6 +16359,179 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("container_key: returned void".to_string()))?;
         Ok(result.into_int_value())
+    }
+
+    /// The monad a `>>=`, `>>`, `return` or `pure` occurrence works in, when
+    /// it is one of the three that are ordinary DATA types rather than
+    /// transformer layers.
+    ///
+    /// Do-notation in `Maybe`, `Either` and `[]` used to be lowered as if it
+    /// were `IO`, where an action IS its value: `x <- half n` bound `x` to the
+    /// whole `Just`, nothing short-circuited on `Nothing`, and the answer was
+    /// arithmetic on a heap address.
+    fn value_monad_of_ty(&self, ty: &Ty) -> Option<ValueMonad> {
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        fn head(t: &Ty) -> &Ty {
+            match t {
+                Ty::App(f, _) => head(f),
+                other => other,
+            }
+        }
+        let r = result_of(ty);
+        if matches!(r, Ty::List(_)) {
+            return Some(ValueMonad::List);
+        }
+        match head(r) {
+            Ty::Con(c) => match c.name.as_str() {
+                "Maybe" => Some(ValueMonad::Maybe),
+                "Either" => Some(ValueMonad::Either),
+                "[]" | "List" => Some(ValueMonad::List),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The value monad of the builtin being lowered, from its own type and
+    /// otherwise from the action it is applied to.
+    fn current_value_monad(&self, action: &Expr) -> Option<ValueMonad> {
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        if let Some(m) = self.value_monad_of_ty(&self.current_builtin_ty) {
+            return Some(m);
+        }
+        if let Some(m) = self.value_monad_of_ty(&action.ty()) {
+            return Some(m);
+        }
+        // The action is usually a CALL, whose own Core type is erased; the
+        // function it calls carries its signature.
+        let mut cur = action;
+        while let Expr::TyApp(inner, _, _) = cur {
+            cur = inner;
+        }
+        let mut spine = cur;
+        while let Expr::App(f, _, _) = spine {
+            spine = f;
+        }
+        if let Expr::Var(v, _) = spine {
+            return self.value_monad_of_ty(result_of(&v.ty));
+        }
+        None
+    }
+
+    /// `m >>= k` for `Maybe` or `Either`: tag 0 (`Nothing`/`Left`) is the
+    /// answer as it stands, tag 1 continues with the wrapped value.
+    fn lower_value_monad_bind(
+        &mut self,
+        m_expr: &Expr,
+        k_expr: &Expr,
+        keep_value: bool,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let was_tail = self.in_tail_position;
+        self.in_tail_position = false;
+        let m_val = self
+            .lower_expr(m_expr)?
+            .ok_or_else(|| CodegenError::Internal("value-monad bind: no action".to_string()))?;
+        let m_ptr = self.value_to_ptr(m_val)?;
+        let m_ptr = self.build_force(m_ptr.into())?.into_pointer_value();
+        let tag = self.extract_adt_tag(m_ptr)?;
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("value-monad bind: no fn".to_string()))?;
+        let cont_bb = self.llvm_ctx.append_basic_block(current_fn, "vm_bind_cont");
+        let stop_bb = self.llvm_ctx.append_basic_block(current_fn, "vm_bind_stop");
+        let merge_bb = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "vm_bind_merge");
+        let is_stop = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                self.type_mapper().i64_type().const_zero(),
+                "vm_is_stop",
+            )
+            .map_err(|e| CodegenError::Internal(format!("vm bind cmp: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(is_stop, stop_bb, cont_bb)
+            .map_err(|e| CodegenError::Internal(format!("vm bind br: {:?}", e)))?;
+
+        // Short-circuit: the action IS the answer.
+        self.builder().position_at_end(stop_bb);
+        self.builder()
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Internal(format!("vm bind stop br: {:?}", e)))?;
+        let stop_end = self.builder().get_insert_block().unwrap();
+
+        // Continue: `>>=` hands the wrapped value on, `>>` drops it.
+        self.builder().position_at_end(cont_bb);
+        self.in_tail_position = false;
+        let cont_val = if keep_value {
+            let a = self.extract_adt_field(m_ptr, 1, 0)?;
+            let k_val = self.lower_expr(k_expr)?.ok_or_else(|| {
+                CodegenError::Internal("value-monad bind: no continuation".to_string())
+            })?;
+            let k_ptr = self.value_to_ptr(k_val)?;
+            let fn_ptr = self.extract_closure_fn_ptr(k_ptr)?;
+            let ptr_type = self.type_mapper().ptr_type();
+            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            self.builder()
+                .build_indirect_call(fn_type, fn_ptr, &[k_ptr.into(), a.into()], "vm_bind_k")
+                .map_err(|e| CodegenError::Internal(format!("vm bind call: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("vm bind: k returned void".to_string()))?
+        } else {
+            self.lower_expr(k_expr)?.ok_or_else(|| {
+                CodegenError::Internal("value-monad then: no second action".to_string())
+            })?
+        };
+        let cont_ptr = self.value_to_ptr(cont_val)?;
+        self.builder()
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Internal(format!("vm bind cont br: {:?}", e)))?;
+        let cont_end = self.builder().get_insert_block().unwrap();
+
+        self.builder().position_at_end(merge_bb);
+        let phi = self
+            .builder()
+            .build_phi(self.type_mapper().ptr_type(), "vm_bind_result")
+            .map_err(|e| CodegenError::Internal(format!("vm bind phi: {:?}", e)))?;
+        phi.add_incoming(&[(&m_ptr, stop_end), (&cont_ptr, cont_end)]);
+        self.in_tail_position = was_tail;
+        Ok(Some(phi.as_basic_value()))
+    }
+
+    /// `return`/`pure` for `Maybe` or `Either`: both wrap in tag 1 with one
+    /// field (`Just`, `Right`). For a list it is the one-element list.
+    fn lower_value_monad_pure(
+        &mut self,
+        monad: ValueMonad,
+        x_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let val = self
+            .lower_expr(x_expr)?
+            .ok_or_else(|| CodegenError::Internal("value-monad pure: no value".to_string()))?;
+        let val_ptr = self.value_to_ptr(val)?;
+        if matches!(monad, ValueMonad::List) {
+            let nil = self.build_nil()?;
+            let cell = self.build_cons(val_ptr.into(), nil.into())?;
+            return Ok(Some(cell.into()));
+        }
+        let out = self.alloc_adt(1, 1)?;
+        self.store_adt_field(out, 1, 0, val_ptr.into())?;
+        Ok(Some(out.into()))
     }
 
     /// Check if a type is the Rational type.
@@ -24694,6 +24938,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     ShowCoerce::Float,
                 );
             }
+            if self.is_text_type(&ty) {
+                return self.lower_builtin_show_typed(expr, 1000196, "show_text", ShowCoerce::Text);
+            }
             if self.is_string_type(&ty) {
                 return self.lower_builtin_show_typed(
                     expr,
@@ -24886,6 +25133,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // Could be [a] for any a - use List with Int default
                 Some((ShowCoerce::List, 1000093, "show_list"))
             }
+            // A `Text` is an opaque RTS handle, so `show` on one printed its
+            // ADDRESS. Recognised from the Core type where there is one, and
+            // otherwise from the result type of the function applied.
+            e if self.is_text_expr(e) => Some((ShowCoerce::Text, 1000196, "show_text")),
             // Function applications returning known types
             Expr::App(f, _arg, _) => {
                 // E.63: force/id are identity functions — infer from argument.
@@ -25204,6 +25455,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     ShowCoerce::Double
                 } else if self.is_float_type(&ty) {
                     ShowCoerce::Float
+                } else if self.is_text_type(&ty) {
+                    ShowCoerce::Text
                 } else if self.is_string_type(&ty) {
                     ShowCoerce::StringList
                 } else if self.is_list_type(&ty) {
@@ -25242,6 +25495,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             ShowCoerce::Bool => self.get_primitive_show_desc(3),
             ShowCoerce::Char => self.get_primitive_show_desc(4),
             ShowCoerce::StringList => self.get_primitive_show_desc(5),
+            ShowCoerce::Text => self.get_primitive_show_desc(8),
             ShowCoerce::Unit => self.get_primitive_show_desc(6),
             ShowCoerce::Ordering => self.get_primitive_show_desc(7),
             ShowCoerce::Integer => self.get_primitive_show_desc(0), // Use Int tag (0) — Integer show is handled separately
@@ -25339,7 +25593,40 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
             }
         }
+        // No constructor to read the element off — `T.stripPrefix a b` is a
+        // call, not a `Just` — so take it from the type when there is one.
+        if let Some(inner) = self.is_maybe_type(&maybe_expr.ty()) {
+            let inner = inner.clone();
+            if let Some(desc) = self.descriptor_for_ty(&inner) {
+                return desc;
+            }
+        }
         self.get_primitive_show_desc(0) // Nothing defaults to Int
+    }
+
+    /// A show descriptor built from a type alone, for the leaf shapes whose
+    /// tag needs nothing else. `None` when the type says nothing useful.
+    fn descriptor_for_ty(&mut self, ty: &Ty) -> Option<PointerValue<'ctx>> {
+        let tag = if self.is_bool_type(ty) {
+            3
+        } else if self.is_char_type(ty) {
+            4
+        } else if self.is_double_type(ty) {
+            1
+        } else if self.is_float_type(ty) {
+            2
+        } else if self.is_text_type(ty) {
+            8
+        } else if self.is_string_type(ty) {
+            5
+        } else if self.is_unit_type(ty) {
+            6
+        } else if self.is_int_type(ty) {
+            0
+        } else {
+            return None;
+        };
+        Some(self.get_primitive_show_desc(tag))
     }
 
     /// Build descriptors for the fst/snd types of a tuple expression.
@@ -25421,7 +25708,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // For compound types, use bhc_show_with_desc with recursive descriptors
         match coerce {
-            ShowCoerce::StringList | ShowCoerce::Unit | ShowCoerce::Integer => {
+            ShowCoerce::StringList | ShowCoerce::Text | ShowCoerce::Unit | ShowCoerce::Integer => {
                 // Pass pointer directly: fn(ptr) -> ptr (simple, no nesting)
                 let rts_fn = *self
                     .functions
@@ -50949,8 +51236,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let full_app = Expr::App(Box::new(func.clone()), Box::new(arg.clone()), func.span());
 
         // Check if this is a saturated builtin function
-        if let Some((name, builtin_args)) = self.is_saturated_builtin(&full_app) {
-            return self.lower_builtin(name, &builtin_args);
+        if let Some((name, builtin_args, head_ty)) = self.is_saturated_builtin(&full_app) {
+            let saved = std::mem::replace(&mut self.current_builtin_ty, head_ty);
+            let result = self.lower_builtin(name, &builtin_args);
+            self.current_builtin_ty = saved;
+            return result;
         }
 
         // Check if this is a saturated primitive operation

@@ -404,7 +404,15 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
 
             // Resolve the record type to find its type constructor name
             let resolved = ctx.apply_subst(&record_ty);
-            let type_name = extract_type_con_name(&resolved);
+            // A base whose type inference has not pinned — `def{ stateOptions =
+            // opts }` — names no type of its own, but its FIELDS do. Unifying
+            // through them is what lets the nullary `def` resolve to an
+            // instance; without it pandoc's `readMarkdown` built its parser
+            // state from whichever `Default` the fallback happened to pick.
+            let type_name = extract_type_con_name(&resolved).or_else(|| {
+                let names: Vec<Symbol> = fields.iter().map(|f| f.name).collect();
+                ctx.type_owning_fields(&names)
+            });
 
             if let Some(name) = type_name {
                 if let Some(con_ids) = ctx.type_to_data_cons.get(&name).cloned() {

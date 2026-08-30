@@ -7733,6 +7733,37 @@ impl TyCtxt {
             .map(|v: &Vec<(Symbol, Ty)>| v.as_slice())
     }
 
+    /// The type whose record constructors carry every one of `fields`.
+    ///
+    /// A record update names its fields but need not say what it is updating:
+    /// `def{ stateOptions = opts }` leaves the base's type to inference, and
+    /// with nothing else to go on it stays a variable — so the nullary `def`
+    /// had no instance to resolve to and pandoc's `readMarkdown` handed the
+    /// parser a state that was not one. The fields identify the type, as long
+    /// as exactly one type has all of them.
+    #[must_use]
+    pub fn type_owning_fields(&self, fields: &[Symbol]) -> Option<Symbol> {
+        if fields.is_empty() {
+            return None;
+        }
+        let mut found: Option<Symbol> = None;
+        for (type_name, con_ids) in &self.type_to_data_cons {
+            let has_all = fields.iter().all(|f| {
+                con_ids.iter().any(|c| {
+                    self.get_con_fields(*c)
+                        .is_some_and(|defs| defs.iter().any(|(n, _)| n == f))
+                })
+            });
+            if has_all {
+                if found.is_some() {
+                    return None; // ambiguous
+                }
+                found = Some(*type_name);
+            }
+        }
+        found
+    }
+
     /// Register a type class definition.
     pub fn register_class(&mut self, class: &ClassDef) {
         // Build method signatures map

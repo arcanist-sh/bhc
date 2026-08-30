@@ -1922,6 +1922,42 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
     }
 }
 
+/// Read the characters of a `Data.Text.Text`.
+///
+/// A `BhcText`'s header is `[data_ptr][offset][byte_len]`; the canonical
+/// definition is `bhc-text`'s `text.rs`. It is repeated here so `show` can
+/// render a Text without the runtime depending on the text library.
+unsafe fn bhc_text_show_str(text: *const u8) -> String {
+    if text.is_null() {
+        return String::new();
+    }
+    let data = unsafe { *(text as *const *const u8) };
+    let off = unsafe { *((text as *const u64).add(1)) } as usize;
+    let len = unsafe { *((text as *const u64).add(2)) } as usize;
+    if data.is_null() || len > (1 << 30) {
+        return String::new();
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data.add(off), len) };
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Show a `Data.Text.Text` — the string it holds, in quotes.
+///
+/// A Text is an opaque handle, so `show` on one used to print its ADDRESS.
+///
+/// # Safety
+/// `text` must be null or a live `BhcText`.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_show_text(text: *const u8) -> *mut c_char {
+    let shown = format!(
+        "\"{}\"",
+        unsafe { bhc_text_show_str(text) }.escape_default()
+    );
+    CString::new(shown)
+        .unwrap_or_else(|_| CString::new("\"\"").expect("static"))
+        .into_raw()
+}
+
 /// Read the constructor tag of a nullary-constructor value.
 ///
 /// `max_tag` is the largest tag the type has: at or below it the value cannot
@@ -2159,6 +2195,11 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 format!("\"{}\"", s.escape_default())
             }
             6 => "()".to_string(),
+            8 => {
+                // Text: an opaque handle, shown like the String it holds.
+                let s = bhc_text_show_str(ptr);
+                format!("\"{}\"", s.escape_default())
+            }
             7 => {
                 // Ordering: 0=LT, 1=EQ, 2=GT (see Bool above for why this is
                 // not a plain dereference).

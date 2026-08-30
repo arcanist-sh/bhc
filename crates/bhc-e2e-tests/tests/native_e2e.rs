@@ -305,6 +305,26 @@ fn test_tier3_builtin_point_free_native() {
 }
 
 #[test]
+fn test_tier3_value_monad_do_native() {
+    run_native_test("tier3_io/value_monad_do", Profile::Default);
+}
+
+#[test]
+fn test_tier3_sort_by_comparator_native() {
+    run_native_test("tier3_io/sort_by_comparator", Profile::Default);
+}
+
+#[test]
+fn test_tier3_record_update_default_native() {
+    run_native_test("tier3_io/record_update_default", Profile::Default);
+}
+
+#[test]
+fn test_tier3_show_text_native() {
+    run_native_test("tier3_io/show_text", Profile::Default);
+}
+
+#[test]
 fn test_tier3_map_text_keys_native() {
     run_native_test("tier3_io/map_text_keys", Profile::Default);
 }

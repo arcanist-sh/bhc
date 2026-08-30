@@ -57,6 +57,25 @@ unsafe fn extract_bool(val: *mut u8) -> bool {
 
 /// Call a 2-arg equality closure and extract the Bool result.
 /// BHC closures are flat: fn(env, arg1, arg2) -> result.
+unsafe fn extract_ordering(val: *mut u8) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let raw = val as i64;
+    // `compare` answers with an `Ordering` — LT=0, EQ=1, GT=2 — either boxed
+    // or as a tagged immediate. Reading the ADDRESS of a boxed one as a signed
+    // ordering made every comparison "greater", so `sortBy compare` left its
+    // list exactly as it found it.
+    let tag = if (0..=2).contains(&raw) {
+        raw
+    } else {
+        get_tag(val)
+    };
+    match tag {
+        0 => Ordering::Less,
+        1 => Ordering::Equal,
+        _ => Ordering::Greater,
+    }
+}
+
 unsafe fn call_eq_closure(eq_fn: *mut u8, a: *mut u8, b: *mut u8) -> bool {
     let fn_ptr: extern "C" fn(*mut u8, *mut u8, *mut u8) -> *mut u8 =
         std::mem::transmute(*(eq_fn as *const *mut u8));
@@ -156,14 +175,7 @@ pub unsafe extern "C" fn bhc_list_sort_by(cmp_fn: *mut u8, list: *mut u8) -> *mu
         std::mem::transmute(*(cmp_fn as *const *mut u8));
 
     let mut vec = list_to_vec(list);
-    vec.sort_by(|&a, &b| {
-        let result = fn_ptr(cmp_fn, a, b) as i64;
-        match result {
-            r if r < 0 => std::cmp::Ordering::Less,
-            0 => std::cmp::Ordering::Equal,
-            _ => std::cmp::Ordering::Greater,
-        }
-    });
+    vec.sort_by(|&a, &b| extract_ordering(fn_ptr(cmp_fn, a, b)));
     vec_to_list(&vec)
 }
 

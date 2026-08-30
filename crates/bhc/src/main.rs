@@ -225,7 +225,29 @@ fn install_ice_hook() {
     }));
 }
 
+/// Stack for the thread the compiler actually runs on.
+///
+/// Lowering is recursive over the program's shape, and a module with a very
+/// large literal match (pandoc's `Readers.Docx.Symbols`) drives the decision
+/// tree deep enough to overflow the 8 MiB a main thread gets by default.
+const COMPILER_STACK_SIZE: usize = 1024 * 1024 * 1024;
+
 fn main() -> Result<()> {
+    // Run on a thread with room for deep recursion; the main thread's stack
+    // cannot be grown after the process starts.
+    let child = std::thread::Builder::new()
+        .name("bhc-main".to_string())
+        .stack_size(COMPILER_STACK_SIZE)
+        .spawn(real_main)
+        .expect("failed to spawn compiler thread");
+    match child.join() {
+        Ok(r) => r,
+        // The thread already reported the panic through the ICE hook.
+        Err(_) => std::process::exit(101),
+    }
+}
+
+fn real_main() -> Result<()> {
     install_ice_hook();
     let cli = Cli::parse();
 

@@ -305,6 +305,26 @@ fn test_tier3_builtin_point_free_native() {
 }
 
 #[test]
+fn test_tier3_string_equality_native() {
+    run_native_test("tier3_io/string_equality", Profile::Default);
+}
+
+#[test]
+fn test_tier3_text_equality_native() {
+    run_native_test("tier3_io/text_equality", Profile::Default);
+}
+
+#[test]
+fn test_tier3_string_literal_case_native() {
+    run_native_test("tier3_io/string_literal_case", Profile::Default);
+}
+
+#[test]
+fn test_tier3_bool_immediate_native() {
+    run_native_test("tier3_io/bool_immediate", Profile::Default);
+}
+
+#[test]
 fn test_tier3_bool_not_native() {
     run_native_test("tier3_io/bool_not", Profile::Default);
 }

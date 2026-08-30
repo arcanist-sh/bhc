@@ -1889,8 +1889,10 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
                 format!("{}", val)
             }
             3 => {
-                // Bool: ADT with tag 0=False, 1=True
-                let tag = *(ptr as *const i64);
+                // Bool: 0=False, 1=True — either boxed, or the tag itself
+                // as a tagged immediate (what a comparison or `elem` answers
+                // with). Dereferencing an immediate reads address 0.
+                let tag = nullary_tag(ptr, 1);
                 if tag != 0 {
                     "True".to_string()
                 } else {
@@ -1920,6 +1922,20 @@ unsafe fn show_elem(ptr: *const u8, type_tag: i64) -> String {
     }
 }
 
+/// Read the constructor tag of a nullary-constructor value.
+///
+/// `max_tag` is the largest tag the type has: at or below it the value cannot
+/// be a heap address, so it IS the tag. Above it, the tag is the first word of
+/// the boxed value.
+unsafe fn nullary_tag(ptr: *const u8, max_tag: usize) -> i64 {
+    let raw = ptr as usize;
+    if raw <= max_tag {
+        #[allow(clippy::cast_possible_wrap)]
+        return raw as i64;
+    }
+    unsafe { *(ptr as *const i64) }
+}
+
 /// Read a [Char] linked list into a Rust String.
 /// List layout: Nil=[tag=0], Cons=[tag=1][head@+8][tail@+16]
 unsafe fn read_char_list(mut list_ptr: *const u8) -> String {
@@ -1940,6 +1956,50 @@ unsafe fn read_char_list(mut list_ptr: *const u8) -> String {
         }
         result
     }
+}
+
+/// Compare a Haskell `String` against a NUL-terminated pattern.
+///
+/// A string LITERAL lowers to a cons list of `Char` (see `build_cons`), but a
+/// string that came from the RTS is a C string, and codegen cannot always tell
+/// which one a scrutinee is. The two are distinguishable at runtime: a list
+/// cell's first word is its constructor tag, 0 (nil) or 1 (cons), and no
+/// printable C string starts with those bytes. Anything else is read as a C
+/// string.
+///
+/// Returns 1 when the two are equal, 0 otherwise.
+///
+/// # Safety
+/// `list_ptr` must be null, a `[Char]` cons list, or a NUL-terminated string;
+/// `pat` must be a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_string_eq_cstr(list_ptr: *const u8, pat: *const c_char) -> i64 {
+    if pat.is_null() {
+        return 0;
+    }
+    let want = match unsafe { CStr::from_ptr(pat) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    if list_ptr.is_null() {
+        // A null string is the empty one — `bhc_force` passes null through and
+        // nil is sometimes elided.
+        return i64::from(want.is_empty());
+    }
+    let tag = unsafe { *(list_ptr as *const i64) };
+    if tag == 0 {
+        return i64::from(want.is_empty());
+    }
+    if tag != 1 {
+        // Not a list cell: read it as a C string.
+        let got = match unsafe { CStr::from_ptr(list_ptr as *const c_char) }.to_str() {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        return i64::from(got == want);
+    }
+    let got = unsafe { read_char_list(list_ptr) };
+    i64::from(got == want)
 }
 
 /// Show String - wraps a `[Char]` list in quotes: "\"hello\""
@@ -2074,8 +2134,10 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
                 format!("{}", val)
             }
             3 => {
-                // Bool: ADT with tag 0=False, 1=True
-                let tag = *(ptr as *const i64);
+                // Bool: 0=False, 1=True — either boxed, or the tag itself
+                // as a tagged immediate (what a comparison or `elem` answers
+                // with). Dereferencing an immediate reads address 0.
+                let tag = nullary_tag(ptr, 1);
                 if tag != 0 {
                     "True".to_string()
                 } else {
@@ -2098,8 +2160,9 @@ unsafe fn show_any(ptr: *const u8, desc: &ShowTypeDesc) -> String {
             }
             6 => "()".to_string(),
             7 => {
-                // Ordering: ADT with tag 0=LT, 1=EQ, 2=GT
-                let tag = *(ptr as *const i64);
+                // Ordering: 0=LT, 1=EQ, 2=GT (see Bool above for why this is
+                // not a plain dereference).
+                let tag = nullary_tag(ptr, 2);
                 match tag {
                     0 => "LT".to_string(),
                     1 => "EQ".to_string(),

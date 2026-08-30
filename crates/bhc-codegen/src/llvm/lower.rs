@@ -5505,6 +5505,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Comparison operators return tagged-int-as-pointer, while functions like `even`/`odd`
     /// return proper Bool ADT structs. This helper handles both representations.
     fn extract_bool_tag(&self, bool_ptr: PointerValue<'ctx>) -> CodegenResult<IntValue<'ctx>> {
+        self.extract_nullary_tag(bool_ptr, 1)
+    }
+
+    /// Extract the constructor tag of a NULLARY-constructor ADT that may have
+    /// arrived either boxed or as a tagged immediate.
+    ///
+    /// `max_immediate` is the largest tag the type has, so a value at or below
+    /// it cannot be a heap address and IS the tag. Reading such a value as a
+    /// pointer dereferences address 0/1/2 — `show (elem 'b' "abc")` segfaulted
+    /// exactly there, because `elem` answers with an immediate while `even`
+    /// answers with a box.
+    fn extract_nullary_tag(
+        &self,
+        bool_ptr: PointerValue<'ctx>,
+        max_immediate: u64,
+    ) -> CodegenResult<IntValue<'ctx>> {
         let tm = self.type_mapper();
         let i64_type = tm.i64_type();
 
@@ -5530,7 +5546,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::ULE,
                 raw_int,
-                i64_type.const_int(1, false),
+                i64_type.const_int(max_immediate, false),
                 "is_tagged_bool",
             )
             .map_err(|e| CodegenError::Internal(format!("extract_bool_tag: cmp: {:?}", e)))?;
@@ -5569,6 +5585,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         result.add_incoming(&[(&raw_int, tagged_block), (&adt_tag, adt_end_block)]);
 
         Ok(result.as_basic_value().into_int_value())
+    }
+
+    /// Read a Bool operand as 0/1 whichever representation it arrived in.
+    ///
+    /// `ptr_to_int` on a BOXED Bool yields its ADDRESS, which is never zero —
+    /// so `not` on a boxed Bool answered False for both inputs (`map not
+    /// [True,False]` was `[False,False]`).
+    fn bool_operand_to_int(&self, val: BasicValueEnum<'ctx>) -> CodegenResult<IntValue<'ctx>> {
+        match val {
+            BasicValueEnum::IntValue(i) => Ok(i),
+            BasicValueEnum::PointerValue(p) => self.extract_bool_tag(p),
+            other => Err(CodegenError::TypeError(format!(
+                "expected a Bool operand, got {:?}",
+                other.get_type()
+            ))),
+        }
     }
 
     /// Extract a field from an ADT value.
@@ -15286,7 +15318,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // the ADDRESS: `not False` came back as a garbage pointer that
                 // tested as false, so `if not False` took the wrong branch.
                 // Flip the TAG and hand back a fresh Bool.
-                let tag = self.extract_adt_tag(p)?;
+                //
+                // The pointer may also BE the tag: `elem`/`==` and a Bool that
+                // travelled through a list element answer with an immediate,
+                // and reading that as a box dereferences address 0 or 1.
+                let tag = self.extract_bool_tag(p)?;
                 let one = tm.i64_type().const_int(1, false);
                 let flipped = self
                     .builder()
@@ -15985,6 +16021,53 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             Ty::Con(con) => con.name.as_str() == "String",
             Ty::Forall(_, body) => self.is_string_type(body),
+            _ => false,
+        }
+    }
+
+    /// Check if a type is `Data.Text.Text`.
+    fn is_text_type(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Con(con) => {
+                let n = con.name.as_str();
+                n == "Text" || n.ends_with(".Text") || n == "LazyText" || n.ends_with(".LazyText")
+            }
+            Ty::App(f, _) => self.is_text_type(f),
+            Ty::Forall(_, body) => self.is_text_type(body),
+            _ => false,
+        }
+    }
+
+    /// Whether an expression produces a `Text`.
+    ///
+    /// A `Text` is an opaque RTS handle, not a list, so comparing two of them
+    /// with the pointer path answered False for every pair of equal strings —
+    /// `fmt == "markdown"` was never true anywhere in pandoc. Recognised from
+    /// the Core type where there is one, and otherwise from the result type of
+    /// the function being applied (Core leaves most variables `Ty::Error`).
+    fn is_text_expr(&self, expr: &Expr) -> bool {
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        if self.is_text_type(&expr.ty()) {
+            return true;
+        }
+        match expr {
+            Expr::TyApp(inner, _, _) => self.is_text_expr(inner),
+            Expr::Var(v, _) => self.is_text_type(&v.ty),
+            Expr::App(f, _, _) => {
+                let mut cur = f.as_ref();
+                while let Expr::App(inner, _, _) = cur {
+                    cur = inner.as_ref();
+                }
+                match cur {
+                    Expr::Var(v, _) => self.is_text_type(result_of(&v.ty)),
+                    _ => false,
+                }
+            }
             _ => false,
         }
     }
@@ -25271,7 +25354,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         )))
                     }
                 };
-                let tag = self.extract_adt_tag(ptr)?;
+                let tag = self.extract_bool_tag(ptr)?;
                 tag.into()
             }
             ShowCoerce::Ordering => {
@@ -25306,7 +25389,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         )))
                     }
                 };
-                let tag = self.extract_adt_tag(ptr)?;
+                let tag = self.extract_nullary_tag(ptr, 2)?;
                 tag.into()
             }
             _ => unreachable!("compound coercions handled above"),
@@ -42556,6 +42639,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         match expr {
             // Empty list []
             Expr::Var(v, _) if v.name.as_str() == "[]" => true,
+            // A string literal IS a `[Char]` — it lowers to a cons list
+            // (`build_cons`), so `"a" == "a"` compared two heap POINTERS and
+            // was False for every pair of equal strings.
+            Expr::Lit(Literal::String(_), _, _) => true,
             // Cons application: (:) head tail
             Expr::App(func, _, _) => {
                 // Check if this is a (:) application
@@ -49063,7 +49150,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
 
             PrimOp::Not => {
-                let val = self.ptr_to_int(args[0].into_pointer_value())?;
+                let val = self.bool_operand_to_int(args[0])?;
                 let is_zero = self
                     .builder()
                     .build_int_compare(
@@ -49226,7 +49313,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Check if an expression is a saturated primitive operation.
-    fn is_saturated_primop<'a>(&self, expr: &'a Expr) -> Option<(PrimOp, Vec<&'a Expr>)> {
+    /// The third component is the OPERATOR's own type. Core leaves most
+    /// variables `Ty::Error`, but an operator occurrence is a `Ty::Fun` and
+    /// those the type checker's span-keyed types do reach (`annotate_ty`), so
+    /// `(==) :: [Char] -> [Char] -> Bool` is how `a == b` on two String
+    /// variables can be told from a comparison of two boxed scalars.
+    fn is_saturated_primop<'a>(&self, expr: &'a Expr) -> Option<(PrimOp, Vec<&'a Expr>, Ty)> {
         // Collect arguments while unwrapping applications
         let mut args = Vec::new();
         let mut current = expr;
@@ -49246,7 +49338,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             if let Some((op, arity)) = self.primitive_op_info(var.name.as_str()) {
                 args.reverse();
                 if args.len() == arity as usize {
-                    return Some((op, args));
+                    return Some((op, args, var.ty.clone()));
                 }
             }
         }
@@ -49259,6 +49351,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         op: PrimOp,
         args: &[&Expr],
+        op_ty: &Ty,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // Check if operands are Rational — dispatch to RTS
         if !args.is_empty() && self.is_rational_expr(args[0]) {
@@ -49380,7 +49473,27 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             PrimOp::Eq | PrimOp::Ne | PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge => {
                 // Check if we're comparing lists - need special handling
                 // Since type info may be Error, check structurally if expr is a list
-                let is_list = Self::is_list_expr(args[0]);
+                // Text is an opaque RTS handle: compare it through the RTS,
+                // not as a pointer and not as a list.
+                if self.is_text_expr(args[0])
+                    || self.is_text_expr(args[1])
+                    || matches!(op_ty, Ty::Fun(a, _) if self.is_text_type(a))
+                {
+                    return self.lower_text_comparison(op, args);
+                }
+
+                // Either side settles it: `fmt == "markdown"` has a
+                // variable on the left whose Core type is usually `Ty::Error`,
+                // and only the literal on the right says "these are lists".
+                // `String` reaches Core as the unexpanded synonym
+                // (`Ty::Con("String")`), which is how a function parameter
+                // carries its declared type — and a String IS a list.
+                let listish = |this: &Self, t: &Ty| this.is_list_type(t) || this.is_string_type(t);
+                let is_list = Self::is_list_expr(args[0])
+                    || Self::is_list_expr(args[1])
+                    || listish(self, &args[0].ty())
+                    || listish(self, &args[1].ty())
+                    || matches!(op_ty, Ty::Fun(a, _) if listish(self, a));
                 if is_list {
                     // List comparison - dispatch to builtin list comparison
                     let lhs = self.lower_expr(args[0])?.ok_or_else(|| {
@@ -49389,7 +49502,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     let rhs = self.lower_expr(args[1])?.ok_or_else(|| {
                         CodegenError::Internal("primop arg has no value".to_string())
                     })?;
-                    return self.lower_list_comparison(op, lhs, rhs);
+                    // The list walk needs two heap pointers. A scalar here
+                    // means the "this is a list" guess was wrong (an unboxed
+                    // Char comparison in pandoc's `Shared` reached it), so
+                    // compare as scalars rather than crashing.
+                    if lhs.is_pointer_value() && rhs.is_pointer_value() {
+                        return self.lower_list_comparison(op, lhs, rhs);
+                    }
+                    return self.lower_comparison(op, lhs, rhs);
                 }
 
                 // Check if we're comparing user ADTs with derived Eq
@@ -49790,6 +49910,81 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower a list comparison operation (== or /= for lists).
     /// This generates a loop that compares elements one by one.
+    /// Compare two `Text` values through the RTS.
+    ///
+    /// `bhc_text_eq` and `bhc_text_compare` were declared but never called:
+    /// `==` on two Texts fell through to the integer path and compared their
+    /// handle ADDRESSES, so it answered False for every pair of equal strings.
+    fn lower_text_comparison(
+        &mut self,
+        op: PrimOp,
+        args: &[&Expr],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let lhs = self
+            .lower_expr(args[0])?
+            .ok_or_else(|| CodegenError::Internal("text cmp: no lhs value".to_string()))?;
+        let rhs = self
+            .lower_expr(args[1])?
+            .ok_or_else(|| CodegenError::Internal("text cmp: no rhs value".to_string()))?;
+        let lhs = self.value_to_ptr(lhs)?;
+        let rhs = self.value_to_ptr(rhs)?;
+        let i64_type = self.type_mapper().i64_type();
+        match op {
+            PrimOp::Eq | PrimOp::Ne => {
+                let eq_fn = *self.functions.get(&VarId::new(1000204)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_eq not declared".to_string())
+                })?;
+                let res = self
+                    .builder()
+                    .build_call(eq_fn, &[lhs.into(), rhs.into()], "text_eq")
+                    .map_err(|e| CodegenError::Internal(format!("text eq call: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text eq returned void".to_string()))?
+                    .into_int_value();
+                let out = if matches!(op, PrimOp::Ne) {
+                    self.builder()
+                        .build_xor(res, i64_type.const_int(1, false), "text_ne")
+                        .map_err(|e| CodegenError::Internal(format!("text ne xor: {:?}", e)))?
+                } else {
+                    res
+                };
+                Ok(Some(out.into()))
+            }
+            PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge => {
+                let cmp_fn = *self.functions.get(&VarId::new(1000205)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_compare not declared".to_string())
+                })?;
+                let res = self
+                    .builder()
+                    .build_call(cmp_fn, &[lhs.into(), rhs.into()], "text_cmp")
+                    .map_err(|e| CodegenError::Internal(format!("text cmp call: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text cmp returned void".to_string()))?
+                    .into_int_value();
+                let pred = match op {
+                    PrimOp::Lt => inkwell::IntPredicate::SLT,
+                    PrimOp::Le => inkwell::IntPredicate::SLE,
+                    PrimOp::Gt => inkwell::IntPredicate::SGT,
+                    _ => inkwell::IntPredicate::SGE,
+                };
+                let bit = self
+                    .builder()
+                    .build_int_compare(pred, res, i64_type.const_zero(), "text_ord")
+                    .map_err(|e| CodegenError::Internal(format!("text ord cmp: {:?}", e)))?;
+                let out = self
+                    .builder()
+                    .build_int_z_extend(bit, i64_type, "text_ord_i64")
+                    .map_err(|e| CodegenError::Internal(format!("text ord zext: {:?}", e)))?;
+                Ok(Some(out.into()))
+            }
+            _ => Err(CodegenError::Internal(
+                "non-comparison op in text comparison".to_string(),
+            )),
+        }
+    }
+
     fn lower_list_comparison(
         &mut self,
         op: PrimOp,
@@ -50446,7 +50641,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
             }
             PrimOp::Not => {
-                let i = self.to_int_value(arg)?;
+                let i = self.bool_operand_to_int(arg)?;
                 let zero = self.type_mapper().i64_type().const_zero();
                 let one = self.type_mapper().i64_type().const_int(1, false);
 
@@ -50512,8 +50707,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         // Check if this is a saturated primitive operation
-        if let Some((op, prim_args)) = self.is_saturated_primop(&full_app) {
-            return self.lower_primop(op, &prim_args);
+        if let Some((op, prim_args, op_ty)) = self.is_saturated_primop(&full_app) {
+            return self.lower_primop(op, &prim_args, &op_ty);
         }
 
         // Check if this is a saturated constructor application
@@ -52125,10 +52320,166 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let scrut_ty = scrut.ty();
 
         if has_datacon {
+            // A `String` case can mix both: `case takeExtension p of { ".md" ->
+            // ..; ['.',d] -> ..; _ -> .. }` has string literals AND cons
+            // alternatives over one `[Char]` scrutinee. Try the literals first
+            // — they are the more specific patterns, and source order puts them
+            // first — then hand what is left to the tag switch.
+            let has_string_lit = alts.iter().any(
+                |alt| matches!(&alt.con, AltCon::Lit(Literal::String(s)) if !s.as_str().is_empty()),
+            );
+            if has_string_lit {
+                return self.lower_case_string_then_datacon(scrut_val, alts, &scrut_ty);
+            }
             self.lower_case_datacon(scrut_val, alts, &scrut_ty)
         } else {
             self.lower_case_literal(scrut_val, alts)
         }
+    }
+
+    /// Lower a case whose alternatives mix string literals with constructors.
+    ///
+    /// Emits one `bhc_string_eq_cstr` test per literal, in source order, and
+    /// falls through to the ordinary constructor dispatch for everything else.
+    fn lower_case_string_then_datacon(
+        &mut self,
+        scrut_val: BasicValueEnum<'ctx>,
+        alts: &[Alt],
+        scrut_ty: &Ty,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let scrut_ptr = self.value_to_ptr(scrut_val)?;
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+        let merge_block = self
+            .llvm_context()
+            .append_basic_block(current_fn, "mixed_case_merge");
+        let str_eq_fn = self.get_or_declare_string_eq_cstr()?;
+
+        let mut lit_alts: Vec<&Alt> = Vec::new();
+        let mut rest: Vec<Alt> = Vec::new();
+        for alt in alts {
+            match &alt.con {
+                AltCon::Lit(Literal::String(s)) if !s.as_str().is_empty() => lit_alts.push(alt),
+                _ => rest.push(alt.clone()),
+            }
+        }
+
+        let mut phi_values: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            Vec::new();
+        let one = self.type_mapper().i64_type().const_int(1, false);
+        for (i, alt) in lit_alts.iter().enumerate() {
+            let AltCon::Lit(Literal::String(sym)) = &alt.con else {
+                unreachable!("partitioned above")
+            };
+            let match_block = self
+                .llvm_context()
+                .append_basic_block(current_fn, &format!("mixed_match_{i}"));
+            let next_block = self
+                .llvm_context()
+                .append_basic_block(current_fn, &format!("mixed_next_{i}"));
+            let str_const = self
+                .module
+                .add_global_string(&format!("mixed_pat_{i}"), sym.as_str());
+            let cmp = self
+                .builder()
+                .build_call(
+                    str_eq_fn,
+                    &[scrut_ptr.into(), str_const.into()],
+                    "mixed_eq_result",
+                )
+                .map_err(|e| CodegenError::Internal(format!("string eq call: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("string eq returned void".to_string()))?
+                .into_int_value();
+            let is_equal = self
+                .builder()
+                .build_int_compare(inkwell::IntPredicate::EQ, cmp, one, "mixed_eq")
+                .map_err(|e| CodegenError::Internal(format!("int cmp: {:?}", e)))?;
+            self.builder()
+                .build_conditional_branch(is_equal, match_block, next_block)
+                .map_err(|e| CodegenError::Internal(format!("cond branch: {:?}", e)))?;
+
+            self.builder().position_at_end(match_block);
+            if let Some(result) = self.lower_expr(&alt.rhs)? {
+                let end = self.builder().get_insert_block().unwrap();
+                if end.get_terminator().is_none() {
+                    phi_values.push((result, end));
+                    self.builder()
+                        .build_unconditional_branch(merge_block)
+                        .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+                }
+            } else if self
+                .builder()
+                .get_insert_block()
+                .is_some_and(|b| b.get_terminator().is_none())
+            {
+                self.builder()
+                    .build_unconditional_branch(merge_block)
+                    .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+            }
+            self.builder().position_at_end(next_block);
+        }
+
+        // Everything the literals did not claim.
+        if rest.is_empty() {
+            self.builder()
+                .build_unreachable()
+                .map_err(|e| CodegenError::Internal(format!("unreachable: {:?}", e)))?;
+        } else {
+            let fallback = self.lower_case_datacon(scrut_val, &rest, scrut_ty)?;
+            if let Some(result) = fallback {
+                let end = self.builder().get_insert_block().unwrap();
+                if end.get_terminator().is_none() {
+                    phi_values.push((result, end));
+                    self.builder()
+                        .build_unconditional_branch(merge_block)
+                        .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+                }
+            } else if self
+                .builder()
+                .get_insert_block()
+                .is_some_and(|b| b.get_terminator().is_none())
+            {
+                self.builder()
+                    .build_unconditional_branch(merge_block)
+                    .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
+            }
+        }
+
+        self.builder().position_at_end(merge_block);
+        if phi_values.is_empty() {
+            self.builder()
+                .build_unreachable()
+                .map_err(|e| CodegenError::Internal(format!("unreachable: {:?}", e)))?;
+            return Ok(None);
+        }
+        let target_type = phi_values[0].0.get_type();
+        let mut coerced: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            Vec::new();
+        for (val, block) in &phi_values {
+            if val.get_type() == target_type {
+                coerced.push((*val, *block));
+            } else if let Some(term) = block.get_terminator() {
+                self.builder().position_before(&term);
+                let c = self.coerce_to_type(*val, target_type)?;
+                coerced.push((c, *block));
+            } else {
+                coerced.push((*val, *block));
+            }
+        }
+        self.builder().position_at_end(merge_block);
+        let phi = self
+            .builder()
+            .build_phi(target_type, "mixed_case_result")
+            .map_err(|e| CodegenError::Internal(format!("phi: {:?}", e)))?;
+        for (val, block) in &coerced {
+            phi.add_incoming(&[(val, *block)]);
+        }
+        Ok(Some(phi.as_basic_value()))
     }
 
     /// Lower a case expression with literal patterns.
@@ -52492,8 +52843,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .llvm_context()
             .append_basic_block(current_fn, "str_case_merge");
 
-        // Get or declare strcmp
-        let strcmp_fn = self.get_or_declare_strcmp()?;
+        // Compare against the pattern with the RTS helper, which knows both
+        // representations a `String` can arrive in (cons list or C string).
+        let str_eq_fn = self.get_or_declare_string_eq_cstr()?;
 
         // Separate literal alts from default
         let mut literal_alts: Vec<(&Symbol, &Alt)> = Vec::new();
@@ -52559,27 +52911,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .module
                 .add_global_string(&format!("str_pat_{}", i), sym.as_str());
 
-            // Call strcmp(scrut, pattern)
+            // Call bhc_string_eq_cstr(scrut, pattern) — 1 when equal
             let cmp_result = self
                 .builder()
                 .build_call(
-                    strcmp_fn,
+                    str_eq_fn,
                     &[scrut_ptr.into(), str_const.into()],
-                    "strcmp_result",
+                    "str_eq_result",
                 )
-                .map_err(|e| CodegenError::Internal(format!("failed to call strcmp: {:?}", e)))?
+                .map_err(|e| CodegenError::Internal(format!("failed to call string eq: {:?}", e)))?
                 .try_as_basic_value()
                 .basic()
-                .ok_or_else(|| CodegenError::Internal("strcmp returned void".to_string()))?;
+                .ok_or_else(|| CodegenError::Internal("string eq returned void".to_string()))?;
 
-            // strcmp returns 0 for equal strings
-            let zero = self.type_mapper().i32_type().const_zero();
+            let one = self.type_mapper().i64_type().const_int(1, false);
             let is_equal = self
                 .builder()
                 .build_int_compare(
                     inkwell::IntPredicate::EQ,
                     cmp_result.into_int_value(),
-                    zero,
+                    one,
                     "str_eq",
                 )
                 .map_err(|e| CodegenError::Internal(format!("failed to build int cmp: {:?}", e)))?;
@@ -52664,17 +53015,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
-    /// Get or declare the strcmp function.
-    fn get_or_declare_strcmp(&self) -> CodegenResult<FunctionValue<'ctx>> {
-        let name = "strcmp";
+    /// Get or declare the RTS's string/pattern comparison.
+    ///
+    /// `strcmp` is the wrong tool for a Haskell `String`: a string literal
+    /// lowers to a cons list of `Char` (`build_cons`), so comparing the
+    /// scrutinee's bytes against a C string read a list cell's tag word and
+    /// never matched — `case ext of ".md" -> ..` silently took the default.
+    fn get_or_declare_string_eq_cstr(&self) -> CodegenResult<FunctionValue<'ctx>> {
+        let name = "bhc_string_eq_cstr";
         if let Some(fn_val) = self.module.get_function(name) {
             return Ok(fn_val);
         }
-
-        // int strcmp(const char*, const char*)
         let tm = self.type_mapper();
         let fn_type = tm
-            .i32_type()
+            .i64_type()
             .fn_type(&[tm.ptr_type().into(), tm.ptr_type().into()], false);
         Ok(self.module.add_function(name, fn_type))
     }

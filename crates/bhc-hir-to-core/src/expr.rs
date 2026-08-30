@@ -525,6 +525,15 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 {
                     return Ok(method_expr);
                 }
+            } else if class_name.as_str() == "MonadTrans" {
+                // `lift` into a USER transformer. Without this it falls through
+                // to the ambient-layer builtin, which for anything that is not
+                // a known layer means `TransformerLayer::IO` — where lift is
+                // identity, so the lifted action is handed on unwrapped and
+                // parsec's bind then runs it as a parser.
+                if let Some(method_expr) = ctx.select_monad_trans_method(name, def_ref.span) {
+                    return Ok(method_expr);
+                }
             } else if ctx.is_user_class(class_name) {
                 // No direct dict in scope — try superclass extraction.
                 // If we have MyOrd in scope and need MyEq, extract MyEq from MyOrd.

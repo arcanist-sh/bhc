@@ -2,7 +2,7 @@ just 6
 nothing
 nothing
 right 30
-left
+left div0
 [11,21,12,22]
 just 2
 nothing

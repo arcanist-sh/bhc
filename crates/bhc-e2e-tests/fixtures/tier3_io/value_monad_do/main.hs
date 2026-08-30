@@ -33,7 +33,7 @@ describe Nothing  = "nothing"
 describe (Just n) = "just " ++ show n
 
 describeE :: Either String Int -> String
-describeE (Left _)  = "left"
+describeE (Left e)  = "left " ++ e
 describeE (Right n) = "right " ++ show n
 
 main :: IO ()

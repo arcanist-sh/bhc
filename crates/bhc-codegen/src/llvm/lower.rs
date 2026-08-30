@@ -6228,6 +6228,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Data.Sequence.deleteAt" => Some(2),
             "Data.Sequence.fromList" => Some(1),
             "Data.Sequence.toList" => Some(1),
+            "Data.Foldable.toList" | "toList" => Some(1),
             "Data.Sequence.replicate" => Some(2),
             "Data.Sequence.viewl" => Some(1),
             "Data.Sequence.viewr" => Some(1),
@@ -7526,6 +7527,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Data.Sequence.deleteAt" => self.lower_builtin_seq_delete_at(args[0], args[1]),
             "Data.Sequence.fromList" => self.lower_builtin_seq_from_list(args[0]),
             "Data.Sequence.toList" => self.lower_builtin_seq_to_list(args[0]),
+            // `Data.Foldable.toList` on a Seq is how pandoc's `Builder` turns
+            // its `Many` back into a list — `B.doc` is `Pandoc nullMeta .
+            // toList` — and it had no implementation at all, so `readMarkdown`
+            // aborted with "stub: Data.Foldable.toList not implemented".
+            "Data.Foldable.toList" | "toList" => self.lower_builtin_foldable_to_list(args[0]),
             "Data.Sequence.replicate" => self.lower_builtin_seq_replicate(args[0], args[1]),
             "Data.Sequence.viewl" => self.lower_builtin_seq_viewl(args[0]),
             "Data.Sequence.viewr" => self.lower_builtin_seq_viewr(args[0]),
@@ -16993,6 +16999,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         | "Data.Set.toDescList"
                         | "Data.Set.elems"
                         | "Data.Sequence.toList"
+                        | "Data.Foldable.toList"
+                        | "toList"
                 )
             }
             _ => false,
@@ -20600,7 +20608,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let fn_type2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
 
             // pair = m(m, s)
-            let m_fn = self.extract_closure_fn_ptr(m)?;
+            let m_fn = self.checked_closure_fn_ptr(m, "ExceptT-over-StateT bind: action")?;
             let pair = self
                 .builder()
                 .build_indirect_call(fn_type2, m_fn, &[m.into(), s.into()], "bind_st_pair")
@@ -44029,6 +44037,58 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(fn_ptr.into_pointer_value())
     }
 
+    /// Load a closure's code pointer and refuse to jump to a null one.
+    ///
+    /// A transformer's bind calls its action through word 0, so a value that
+    /// is not a closure jumps to whatever that word holds — usually address 0,
+    /// and a bare SIGSEGV two frames deep. `bhc_bad_action` names the object
+    /// instead, and backtraces through the generated code when
+    /// `RUST_BACKTRACE` asks.
+    fn checked_closure_fn_ptr(
+        &mut self,
+        closure_ptr: PointerValue<'ctx>,
+        site: &str,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let fn_ptr = self.extract_closure_fn_ptr(closure_ptr)?;
+        let Some(current_fn) = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+        else {
+            return Ok(fn_ptr);
+        };
+        let bad_fn = match self.module.get_function("bhc_bad_action") {
+            Some(f) => f,
+            None => {
+                let tm = self.type_mapper();
+                let ty = self
+                    .llvm_ctx
+                    .void_type()
+                    .fn_type(&[tm.ptr_type().into(), tm.ptr_type().into()], false);
+                self.module.add_function("bhc_bad_action", ty)
+            }
+        };
+        let bad_bb = self.llvm_ctx.append_basic_block(current_fn, "action_bad");
+        let ok_bb = self.llvm_ctx.append_basic_block(current_fn, "action_ok");
+        let is_null = self
+            .builder()
+            .build_is_null(fn_ptr, "action_fn_null")
+            .map_err(|e| CodegenError::Internal(format!("action null check: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(is_null, bad_bb, ok_bb)
+            .map_err(|e| CodegenError::Internal(format!("action null br: {:?}", e)))?;
+        self.builder().position_at_end(bad_bb);
+        let site_str = self.module.add_global_string("bad_action_site", site);
+        self.builder()
+            .build_call(bad_fn, &[closure_ptr.into(), site_str.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("bad_action call: {:?}", e)))?;
+        self.builder()
+            .build_unreachable()
+            .map_err(|e| CodegenError::Internal(format!("bad_action unreachable: {:?}", e)))?;
+        self.builder().position_at_end(ok_bb);
+        Ok(fn_ptr)
+    }
+
     /// Extract an element from a closure's environment.
     fn extract_closure_env_elem(
         &self,
@@ -54289,15 +54349,27 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     Ty::Error
                 }
             }
-            Ty::App(_con_ty, arg_ty) => {
-                // For type applications like `Maybe Int`, we need to look up
-                // the constructor's field types and substitute type arguments.
-                // For now, just propagate the argument type for single-arg constructors.
-                if con.arity == 1 && field_idx == 0 {
-                    (**arg_ty).clone()
-                } else {
-                    Ty::Error
+            Ty::App(con_ty, arg_ty) => {
+                // `Maybe Int` has one parameter, so a one-field constructor's
+                // field IS that argument. `Either String Int` has two, and
+                // which one a constructor takes is not knowable from the
+                // application alone — reading `Left`'s field as the LAST
+                // argument typed a String as an Int and unboxed it, so
+                // `"L" ++ e` failed to compile with "append expects a list".
+                //
+                // The constructor's own declared field type settles it when it
+                // is concrete; otherwise `Ty::Error` leaves the field boxed,
+                // which is what an unknown type has always meant here.
+                let one_param = matches!(con_ty.as_ref(), Ty::Con(_));
+                if one_param && con.arity == 1 && field_idx == 0 {
+                    return (**arg_ty).clone();
                 }
+                self.con_field_types
+                    .get(con.name.as_str())
+                    .and_then(|tys| tys.get(field_idx))
+                    .filter(|t| !matches!(t, Ty::Error | Ty::Var(_)))
+                    .cloned()
+                    .unwrap_or(Ty::Error)
             }
             _ => {
                 // For other types, we can't infer - return Error and let codegen handle it
@@ -55070,6 +55142,75 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Seq.toList: iterate backward from count-1 to 0, consing elements
+    /// `Data.Foldable.toList` — a Seq becomes a list, a list is already one.
+    ///
+    /// Which it is has to be settled at runtime: pandoc's `Many` is a newtype
+    /// over `Seq` and the newtype is erased, so the type says nothing by the
+    /// time codegen sees it. A cons cell's first word is its constructor tag,
+    /// 0 or 1; a Seq handle's is the pointer to its elements, which cannot be.
+    fn lower_builtin_foldable_to_list(
+        &mut self,
+        arg_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.is_list_type(&arg_expr.ty()) || self.is_string_type(&arg_expr.ty()) {
+            return self.lower_expr(arg_expr);
+        }
+        let val = self
+            .lower_expr(arg_expr)?
+            .ok_or_else(|| CodegenError::Internal("toList: no argument".to_string()))?;
+        let ptr = self.value_to_ptr(val)?;
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("toList: no current function".to_string()))?;
+        let tm = self.type_mapper();
+        let word0 = self
+            .builder()
+            .build_load(tm.i64_type(), ptr, "tolist_word0")
+            .map_err(|e| CodegenError::Internal(format!("toList word0: {:?}", e)))?
+            .into_int_value();
+        let is_list = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::ULE,
+                word0,
+                tm.i64_type().const_int(1, false),
+                "tolist_is_list",
+            )
+            .map_err(|e| CodegenError::Internal(format!("toList cmp: {:?}", e)))?;
+        let list_bb = self.llvm_ctx.append_basic_block(current_fn, "tolist_list");
+        let seq_bb = self.llvm_ctx.append_basic_block(current_fn, "tolist_seq");
+        let merge_bb = self.llvm_ctx.append_basic_block(current_fn, "tolist_merge");
+        self.builder()
+            .build_conditional_branch(is_list, list_bb, seq_bb)
+            .map_err(|e| CodegenError::Internal(format!("toList br: {:?}", e)))?;
+
+        self.builder().position_at_end(list_bb);
+        self.builder()
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Internal(format!("toList list br: {:?}", e)))?;
+        let list_end = self.builder().get_insert_block().unwrap();
+
+        self.builder().position_at_end(seq_bb);
+        let converted = self.seq_to_list_from_ptr(ptr)?.ok_or_else(|| {
+            CodegenError::Internal("toList: seq conversion gave no value".to_string())
+        })?;
+        let converted = self.value_to_ptr(converted)?;
+        self.builder()
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Internal(format!("toList seq br: {:?}", e)))?;
+        let seq_end = self.builder().get_insert_block().unwrap();
+
+        self.builder().position_at_end(merge_bb);
+        let phi = self
+            .builder()
+            .build_phi(self.type_mapper().ptr_type(), "tolist_result")
+            .map_err(|e| CodegenError::Internal(format!("toList phi: {:?}", e)))?;
+        phi.add_incoming(&[(&ptr, list_end), (&converted, seq_end)]);
+        Ok(Some(phi.as_basic_value()))
+    }
+
     fn lower_builtin_seq_to_list(
         &mut self,
         seq_expr: &Expr,
@@ -55078,6 +55219,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(seq_expr)?
             .ok_or_else(|| CodegenError::Internal("seq_to_list: no seq".to_string()))?;
         let seq_ptr = self.value_to_ptr(seq)?;
+        self.seq_to_list_from_ptr(seq_ptr)
+    }
+
+    /// Walk a Seq's elements into a cons list, from an already-lowered handle.
+    fn seq_to_list_from_ptr(
+        &mut self,
+        seq_ptr: PointerValue<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let tm = self.type_mapper();
 
         // Get element count

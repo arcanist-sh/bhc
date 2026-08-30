@@ -797,6 +797,37 @@ fn pap_resume_table(m: usize) -> *const u8 {
 ///
 /// `closure` must be a valid closure with its physical arity in word 1,
 /// strictly greater than `args.len()`.
+/// Report an object that reached a monadic bind where an action belongs.
+///
+/// A transformer's bind calls its action through the code pointer in word 0,
+/// so a value that is not a closure — an ADT with tag 0, say — jumps to
+/// whatever that word holds, usually address 0. Naming the object and its
+/// first words, with a backtrace when `RUST_BACKTRACE` asks, is the
+/// difference between a bare SIGSEGV and knowing which action was wrong.
+///
+/// # Safety
+/// `site` must be a NUL-terminated string. `obj` is only dereferenced when it
+/// is non-null and aligned.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_bad_action(obj: *const u8, site: *const c_char) -> ! {
+    let where_ = if site.is_null() {
+        "<unknown>".to_string()
+    } else {
+        unsafe { CStr::from_ptr(site) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let mut detail = String::new();
+    if !obj.is_null() && (obj as usize) % 8 == 0 && (obj as usize) > 0xffff {
+        let w0 = unsafe { *(obj as *const usize) };
+        let w1 = unsafe { *(obj.add(8) as *const usize) };
+        detail = format!(" word0={w0:#x} word1={w1:#x}");
+    }
+    rts_abort(&format!(
+        "{where_}: the action at {obj:p} is not a closure{detail}"
+    ));
+}
+
 unsafe fn pap_create(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
     let arity = unsafe { *(closure.add(8) as *const i64) } as usize;
     let k = args.len();

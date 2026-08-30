@@ -305,6 +305,11 @@ fn test_tier3_builtin_point_free_native() {
 }
 
 #[test]
+fn test_tier3_foldable_to_list_native() {
+    run_native_test("tier3_io/foldable_to_list", Profile::Default);
+}
+
+#[test]
 fn test_tier3_value_monad_do_native() {
     run_native_test("tier3_io/value_monad_do", Profile::Default);
 }

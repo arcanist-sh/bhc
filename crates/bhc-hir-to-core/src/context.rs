@@ -2853,6 +2853,83 @@ impl LowerContext {
         self.class_registry.register_instance(instance_info);
     }
 
+    /// Select a `MonadTrans` method — in practice `lift` — from the instance
+    /// for the transformer this occurrence lifts INTO, matched by head
+    /// constructor.
+    ///
+    /// `lift` is otherwise lowered from the ambient transformer layer, and a
+    /// user transformer is not one of those layers: a `ParsecT` action falls
+    /// back to `TransformerLayer::IO`, where lift is IDENTITY. So `lift
+    /// getCommonState` inside a parser yields the bare action and parsec's
+    /// bind then runs THAT as a parser. parsec's own
+    /// `$instance_lift_ParsecT` was compiled and present the whole time;
+    /// nothing ever reached it.
+    ///
+    /// The transformer comes from the OCCURRENCE's own type — `m a -> ParsecT
+    /// s u m a` — because an inline parser passed as an argument has no
+    /// binding of its own to ask, and the enclosing one returns in the
+    /// CALLER's monad. Matching on the head is what makes this work where
+    /// `select_method_by_result_type` cannot: `MonadTrans`'s instance head is
+    /// a constructor applied to its own variables, so the occurrence type is
+    /// never fully concrete.
+    ///
+    /// The builtin transformers are deliberately left alone — their `lift` has
+    /// a codegen fast path that knows each layer's representation.
+    pub(crate) fn select_monad_trans_method(
+        &self,
+        method: Symbol,
+        span: Span,
+    ) -> Option<core::Expr> {
+        fn head_con(ty: &Ty) -> Option<&bhc_types::TyCon> {
+            match ty {
+                Ty::Con(tc) => Some(tc),
+                Ty::App(f, _) => head_con(f),
+                _ => None,
+            }
+        }
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        let occ = self
+            .resolved_expr_ty_opt(span)
+            .or_else(|| self.expr_ty_opt(span));
+        let head = occ
+            .as_ref()
+            .and_then(|t| head_con(result_of(t)))
+            .map(|c| c.name)
+            .or_else(|| {
+                self.current_binding_sig()
+                    .and_then(|s| head_con(result_of(s)))
+                    .map(|c| c.name)
+            })?;
+        if matches!(
+            head.as_str(),
+            "StateT" | "ReaderT" | "ExceptT" | "WriterT" | "IO"
+        ) {
+            return None;
+        }
+        let instances = self
+            .class_registry
+            .instances
+            .get(&Symbol::intern("MonadTrans"))?;
+        let inst = instances.iter().find(|i| {
+            i.instance_types
+                .first()
+                .and_then(head_con)
+                .is_some_and(|c| c.name == head)
+        })?;
+        let def_id = inst.methods.get(&method).copied()?;
+        let var = self.lookup_var(def_id).cloned()?;
+        // Referenced bare. `lift :: Monad m => m a -> t m a` carries its own
+        // `Monad m`, but the compiled instance method does not take that
+        // dictionary as a leading argument — applying one made parsec's
+        // `lift` a partial application of a non-closure.
+        Some(core::Expr::Var(var, span))
+    }
+
     /// Resolve a class-method reference by the RESULT type recorded for its
     /// use site. Nullary/result-position methods (`def :: Default a => a`)
     /// have no argument to drive specialization and no dictionary in scope;

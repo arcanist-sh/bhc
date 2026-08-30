@@ -27688,7 +27688,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let ptr_type = self.type_mapper().ptr_type();
         let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
         let x_ptr = self.value_to_ptr(x_val)?;
-        let g_fn = self.extract_closure_fn_ptr(g_ptr)?;
+        let g_fn = self.checked_closure_fn_ptr(g_ptr, "(.): the second function")?;
         let gx = self
             .builder()
             .build_indirect_call(fn_type, g_fn, &[g_ptr.into(), x_ptr.into()], "gx")
@@ -27697,7 +27697,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal(".: g(x) void".to_string()))?;
         let gx_ptr = self.value_to_ptr(gx)?;
-        let f_fn = self.extract_closure_fn_ptr(f_ptr)?;
+        let f_fn = self.checked_closure_fn_ptr(f_ptr, "(.): the first function")?;
         let result = self
             .builder()
             .build_indirect_call(fn_type, f_fn, &[f_ptr.into(), gx_ptr.into()], "compose")

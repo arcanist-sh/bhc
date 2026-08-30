@@ -608,6 +608,17 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
         // Get environment pointer (at offset 24)
         let env_ptr = unsafe { obj.add(24) };
 
+        // A thunk tag with no eval function is not a thunk: something built
+        // an object whose first word happens to equal the thunk tag, and
+        // jumping through word 1 lands at address 0. Name it instead.
+        if eval_fn_ptr.is_null() {
+            let w2 = unsafe { *(obj.add(16) as *const usize) };
+            rts_abort(&format!(
+                "force: the object at {obj:p} is tagged as a thunk but has no eval \
+                 function (word2={w2:#x}); it is most likely not a thunk"
+            ));
+        }
+
         // The eval function has signature: fn(env: *mut u8) -> *mut u8
         // It takes the environment array and returns the evaluated value
         let eval_fn: extern "C" fn(*mut u8) -> *mut u8 =

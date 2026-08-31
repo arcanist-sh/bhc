@@ -27685,27 +27685,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             BasicValueEnum::PointerValue(p) => p,
             _ => return Err(CodegenError::TypeError(".: f must be closure".to_string())),
         };
-        let ptr_type = self.type_mapper().ptr_type();
-        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
         let x_ptr = self.value_to_ptr(x_val)?;
-        let g_fn = self.checked_closure_fn_ptr(g_ptr, "(.): the second function")?;
+        // Apply through the closure machinery rather than a fixed
+        // one-argument indirect call: either side may itself be a partial
+        // application whose arity is not one — `three 1 . succ` composes a
+        // 2-of-3 partial — and a raw call would under-apply it, reading the
+        // missing argument from a garbage register.
         let gx = self
-            .builder()
-            .build_indirect_call(fn_type, g_fn, &[g_ptr.into(), x_ptr.into()], "gx")
-            .map_err(|e| CodegenError::Internal(format!(".: g(x) failed: {:?}", e)))?
-            .try_as_basic_value()
-            .basic()
+            .apply_closure_values(g_ptr, &[x_ptr], false)?
             .ok_or_else(|| CodegenError::Internal(".: g(x) void".to_string()))?;
         let gx_ptr = self.value_to_ptr(gx)?;
-        let f_fn = self.checked_closure_fn_ptr(f_ptr, "(.): the first function")?;
-        let result = self
-            .builder()
-            .build_indirect_call(fn_type, f_fn, &[f_ptr.into(), gx_ptr.into()], "compose")
-            .map_err(|e| CodegenError::Internal(format!(".: f(g(x)) failed: {:?}", e)))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal(".: f(g(x)) void".to_string()))?;
-        Ok(Some(result))
+        self.apply_closure_values(f_ptr, &[gx_ptr], false)
     }
 
     // ========================================================================
@@ -46469,9 +46459,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         self.in_tail_position = was_tail;
 
-        // Create closure with captured args
+        // Create closure with captured args. Its arity is what the wrapper
+        // still WANTS, so that over-application splits instead of calling a
+        // one-parameter wrapper with three arguments: parsec's `parsecMap`
+        // passes `cok . f` — a 2-of-3 partial `(.)` — as a continuation, and
+        // the continuation is then invoked with all three of `a s' err`.
         let fn_ptr = wrapper_fn.as_global_value().as_pointer_value();
-        let closure_ptr = self.alloc_closure(fn_ptr, &captured_vals)?;
+        let closure_ptr = self.alloc_closure_with_arity(fn_ptr, &captured_vals, n_remaining)?;
         Ok(Some(closure_ptr.into()))
     }
 
@@ -46638,19 +46632,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "$" if args.len() >= 2 => {
                 // ($) :: (a -> b) -> a -> b
                 let func = args[0].into_pointer_value();
-                let fn_ptr = self.extract_closure_fn_ptr(func)?;
-                let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                // See `(.)` below: apply through the closure machinery so a
+                // partial application is not called short.
+                let arg_ptr = self.value_to_ptr(args[1])?;
                 let result = self
-                    .builder()
-                    .build_indirect_call(
-                        fn_type,
-                        fn_ptr,
-                        &[func.into(), args[1].into()],
-                        "dollar_result",
-                    )
-                    .map_err(|e| CodegenError::Internal(format!("$ call failed: {:?}", e)))?
-                    .try_as_basic_value()
-                    .basic()
+                    .apply_closure_values(func, &[arg_ptr], false)?
                     .ok_or_else(|| CodegenError::Internal("$: returned void".to_string()))?;
                 Ok(Some(result))
             }
@@ -46660,36 +46646,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let g = args[1].into_pointer_value();
                 let x = args[2];
 
-                // Apply g to x first
-                let g_fn_ptr = self.extract_closure_fn_ptr(g)?;
-                let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                // Apply through the closure machinery, not a fixed
+                // one-argument indirect call: either side may be a partial
+                // application wanting more than one argument. `three 1 . id`
+                // calls `three 1` with ONE argument here, and the lifted body
+                // reads its other two from whatever the registers held.
+                let x_ptr = self.value_to_ptr(x)?;
                 let g_result = self
-                    .builder()
-                    .build_indirect_call(fn_type, g_fn_ptr, &[g.into(), x.into()], "compose_g")
-                    .map_err(|e| CodegenError::Internal(format!("compose g call failed: {:?}", e)))?
-                    .try_as_basic_value()
-                    .basic()
+                    .apply_closure_values(g, &[x_ptr], false)?
                     .ok_or_else(|| {
                         CodegenError::Internal("compose g: returned void".to_string())
                     })?;
-
-                // Apply f to (g x)
-                let f_fn_ptr = self.extract_closure_fn_ptr(f)?;
-                let f_result = self
-                    .builder()
-                    .build_indirect_call(
-                        fn_type,
-                        f_fn_ptr,
-                        &[f.into(), g_result.into()],
-                        "compose_f",
-                    )
-                    .map_err(|e| CodegenError::Internal(format!("compose f call failed: {:?}", e)))?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or_else(|| {
-                        CodegenError::Internal("compose f: returned void".to_string())
-                    })?;
-                Ok(Some(f_result))
+                let g_ptr = self.value_to_ptr(g_result)?;
+                self.apply_closure_values(f, &[g_ptr], false)
             }
             "fmap" | "<$>" => {
                 // fmap :: (a -> b) -> f a -> f b
@@ -51708,9 +51677,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             wrapper_fn
         };
 
-        // Create closure pointing to the wrapper with applied args as env
+        // Create closure pointing to the wrapper with applied args as env.
+        // The recorded arity is what remains, so over-applying this PAP splits
+        // rather than passing extra arguments to a wrapper that has no
+        // parameters for them.
         let wrapper_ptr = wrapper_fn.as_global_value().as_pointer_value();
-        let closure_ptr = self.alloc_closure(wrapper_ptr, &applied_vals)?;
+        #[allow(clippy::cast_possible_truncation)]
+        let closure_ptr =
+            self.alloc_closure_with_arity(wrapper_ptr, &applied_vals, num_remaining as u32)?;
 
         Ok(Some(closure_ptr.into()))
     }

@@ -310,6 +310,11 @@ fn test_tier3_constrained_value_superclass_native() {
 }
 
 #[test]
+fn test_tier3_overapplied_partial_native() {
+    run_native_test("tier3_io/overapplied_partial", Profile::Default);
+}
+
+#[test]
 fn test_tier3_foldable_to_list_native() {
     run_native_test("tier3_io/foldable_to_list", Profile::Default);
 }

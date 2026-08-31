@@ -547,14 +547,19 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
                 // instruction address, and printing `bhc_force`'s own runtime
                 // address alongside it gives the ASLR slide, which is what
                 // turns the value into a symbol (`nm` address + slide).
-                eprintln!("BHC_TRAP_CODE_OBJ: forcing MISALIGNED {o:#x} (bhc_force at {here:#x})");
-                unsafe { std::ptr::null::<u64>().read_volatile() };
+                // `rts_abort` backtraces under RUST_BACKTRACE, and because it
+                // is called from here the trace walks the GENERATED frames —
+                // which is what names the Haskell function at fault.
+                rts_abort(&format!(
+                    "force: MISALIGNED object {o:#x} (bhc_force at {here:#x}); \
+                     it is most likely a raw instruction address"
+                ));
             }
             if o > here.saturating_sub(0x200_0000) && o < here + 0x40_0000 {
-                eprintln!(
-                    "BHC_TRAP_CODE_OBJ: forcing code address {o:#x} (bhc_force at {here:#x})"
-                );
-                unsafe { std::ptr::null::<u64>().read_volatile() };
+                rts_abort(&format!(
+                    "force: CODE ADDRESS {o:#x} (bhc_force at {here:#x}); \
+                     a function pointer is flowing as a value"
+                ));
             }
         }
     }

@@ -987,10 +987,14 @@ pub fn register_imported_names(
         // For non-qualified imports, also bind the unqualified name. Bind when
         // nothing is bound yet, OR when this is an imported class method (which
         // must shadow a same-named builtin).
+        let leaked = ctx.qualified_leak_names.contains(&name);
         if !import.qualified
-            && (ctx.lookup_value(name).is_none() || imported_methods.contains(&name))
+            && (ctx.lookup_value(name).is_none() || imported_methods.contains(&name) || leaked)
         {
             ctx.bind_value(name, def_id);
+            // A name held only by a qualified import's alias-backing stub is
+            // now genuinely in scope; it must not be taken back again.
+            ctx.qualified_leak_names.remove(&name);
         }
     }
 

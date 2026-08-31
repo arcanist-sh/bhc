@@ -14,7 +14,7 @@ use bhc_intern::Symbol;
 use bhc_span::Span;
 use bhc_types::Scheme;
 use indexmap::IndexMap;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// A unique identifier for scopes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -229,6 +229,10 @@ pub struct LowerContext {
     /// function with the wrong arity. The interface loader consults this to
     /// give the SECOND claimant a module-qualified Core name.
     pub interface_value_modules: FxHashMap<Symbol, String>,
+    /// Bare names bound only because a QUALIFIED import of a stub module needed
+    /// something for its alias to resolve through. Such a name is not really in
+    /// scope, so an import that genuinely exports it may take it back.
+    pub qualified_leak_names: FxHashSet<Symbol>,
     /// Constructors loaded from `.bhi` interfaces for codegen metadata:
     /// (name, tag, arity, owning type name, is_newtype).
     pub interface_constructors: Vec<(String, u32, u32, Option<String>, bool)>,
@@ -293,6 +297,7 @@ impl LowerContext {
             interface_type_aliases: Vec::new(),
             interface_symbols: Vec::new(),
             interface_value_modules: FxHashMap::default(),
+            qualified_leak_names: FxHashSet::default(),
             interface_constructors: Vec::new(),
             interface_instances: Vec::new(),
             interface_classes: Vec::new(),

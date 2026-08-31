@@ -676,6 +676,11 @@ fn test_tier3_mapm_user_monad_native() {
 }
 
 #[test]
+fn test_tier3_applicative_via_ap_native() {
+    run_native_test("tier3_io/applicative_via_ap", Profile::Default);
+}
+
+#[test]
 fn test_tier3_zipwithm_basic_native() {
     run_native_test("tier3_io/zipwithm_basic", Profile::Default);
 }

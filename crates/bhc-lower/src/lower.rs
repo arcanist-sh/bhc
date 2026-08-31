@@ -6238,6 +6238,17 @@ fn register_standard_module_exports(
                 ctx.define(def_id, def_name, DefKind::StubValue, Span::default());
             }
             ctx.bind_value(unqualified, def_id);
+            if is_qualified_import {
+                // A `qualified` import does not put the bare name in scope; the
+                // binding exists only so `Alias.name` can resolve through it.
+                // Record it so a later import that genuinely exports the name
+                // may take it back — `import qualified Data.Attoparsec.Text as
+                // A` claimed bare `anyChar` in pandoc's Markdown reader, and
+                // the later `import Text.Pandoc.Parsing`, which binds a bare
+                // name only when nothing holds it, could not; every `anyChar`
+                // in the reader was attoparsec's stub.
+                ctx.qualified_leak_names.insert(unqualified);
+            }
             // Bind the qualified alias directly to this stub as well. Otherwise
             // `Qualifier.name` resolves only through the shadowable unqualified
             // indirection (`register_qualified_name` above), so a module that

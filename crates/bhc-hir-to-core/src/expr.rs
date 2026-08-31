@@ -391,6 +391,33 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         // occurrence type pins `f` to a user monad, synthesize its body
         // `\b -> if b then pure () else empty` with both methods resolved at
         // that instance.
+        // `ap :: Monad m => m (a -> b) -> m a -> m b` in VALUE position —
+        // parsec writes `instance Applicative (ParsecT s u m) where (<*>) = ap`.
+        // codegen has no implementation and emits `stub: ap not implemented`,
+        // which is where `readMarkdown` stopped once its parsers ran at all.
+        if name.as_str() == "ap" {
+            // The occurrence type when typeck recorded one, else the instance
+            // being defined — `(<*>) = ap` is a bare Var with no type of its
+            // own, and it is exactly the case that matters.
+            let m_ty = match ctx.resolved_expr_ty_opt(def_ref.span) {
+                Some(Ty::Fun(_, r1)) => match r1.as_ref() {
+                    Ty::Fun(_, r2) => match r2.as_ref() {
+                        Ty::App(m, _) => Some(m.as_ref().clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            }
+            .or_else(|| ctx.current_instance_type().cloned());
+            if let Some(m_ty) = m_ty {
+                if !monad_runs_eagerly(&m_ty) && applied_head_name(&m_ty).is_some() {
+                    if let Some(lam) = lower_ap_lambda(ctx, &m_ty, def_ref.span) {
+                        return Ok(lam);
+                    }
+                }
+            }
+        }
         if name.as_str() == "guard" {
             if let Some(Ty::Fun(_, r)) = ctx.resolved_expr_ty_opt(def_ref.span) {
                 if let Ty::App(f_ty, _) = r.as_ref() {
@@ -2251,6 +2278,121 @@ fn nullary_var(name: &str, span: Span) -> core::Expr {
 /// Rewritten to a fold through the monad's own `>>=` and `pure`. `foldr` is
 /// fine to build the chain in any order: constructing an action of a
 /// non-eager monad has no effect.
+/// `\mf mx -> mf >>= \g -> mx >>= \v -> pure (g v)` at `monad_ty`: `ap` used
+/// as a value, which is how parsec defines `<*>` for `ParsecT`.
+fn lower_ap_lambda(ctx: &mut LowerContext, monad_ty: &Ty, span: Span) -> Option<core::Expr> {
+    let bind_e = ctx.resolve_method_at_concrete_type(
+        Symbol::intern(">>="),
+        Symbol::intern("Monad"),
+        monad_ty,
+        span,
+    )?;
+    let pure_e = ctx.resolve_method_at_concrete_type(
+        Symbol::intern("pure"),
+        Symbol::intern("Applicative"),
+        monad_ty,
+        span,
+    )?;
+    let mf = ctx.fresh_var("$ap_mf", Ty::Error, span);
+    let mx = ctx.fresh_var("$ap_mx", Ty::Error, span);
+    let g = ctx.fresh_var("$ap_g", Ty::Error, span);
+    let v = ctx.fresh_var("$ap_v", Ty::Error, span);
+    let app2 = |h: core::Expr, a: core::Expr, b: core::Expr| {
+        core::Expr::App(
+            Box::new(core::Expr::App(Box::new(h), Box::new(a), span)),
+            Box::new(b),
+            span,
+        )
+    };
+    let applied = core::Expr::App(
+        Box::new(core::Expr::Var(g.clone(), span)),
+        Box::new(core::Expr::Var(v.clone(), span)),
+        span,
+    );
+    let inner = app2(
+        bind_e.clone(),
+        core::Expr::Var(mx.clone(), span),
+        core::Expr::Lam(
+            v,
+            Box::new(core::Expr::App(Box::new(pure_e), Box::new(applied), span)),
+            span,
+        ),
+    );
+    let body = app2(
+        bind_e,
+        core::Expr::Var(mf.clone(), span),
+        core::Expr::Lam(g, Box::new(inner), span),
+    );
+    Some(core::Expr::Lam(
+        mf,
+        Box::new(core::Expr::Lam(mx, Box::new(body), span)),
+        span,
+    ))
+}
+
+/// `ap mf mx` = `mf >>= \g -> mx >>= \v -> pure (g v)`, at a monad codegen
+/// does not run eagerly.
+fn lower_monadic_ap(
+    ctx: &mut LowerContext,
+    mf: &hir::Expr,
+    mx: &hir::Expr,
+    head_span: Span,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let Some(monad_ty) = traversal_monad_ty(ctx, span, head_span, 2) else {
+        return Ok(None);
+    };
+    if monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none() {
+        return Ok(None);
+    }
+    let Some(bind_e) = ctx.resolve_method_at_concrete_type(
+        Symbol::intern(">>="),
+        Symbol::intern("Monad"),
+        &monad_ty,
+        span,
+    ) else {
+        return Ok(None);
+    };
+    let Some(pure_e) = ctx.resolve_method_at_concrete_type(
+        Symbol::intern("pure"),
+        Symbol::intern("Applicative"),
+        &monad_ty,
+        span,
+    ) else {
+        return Ok(None);
+    };
+    let mf_core = lower_expr(ctx, mf)?;
+    let mx_core = lower_expr(ctx, mx)?;
+    let g = ctx.fresh_var("$ap_g", Ty::Error, span);
+    let v = ctx.fresh_var("$ap_v", Ty::Error, span);
+    let app2 = |h: core::Expr, a: core::Expr, b: core::Expr| {
+        core::Expr::App(
+            Box::new(core::Expr::App(Box::new(h), Box::new(a), span)),
+            Box::new(b),
+            span,
+        )
+    };
+    let applied = core::Expr::App(
+        Box::new(core::Expr::Var(g.clone(), span)),
+        Box::new(core::Expr::Var(v.clone(), span)),
+        span,
+    );
+    let inner = app2(
+        bind_e.clone(),
+        mx_core,
+        core::Expr::Lam(
+            v,
+            Box::new(core::Expr::App(Box::new(pure_e), Box::new(applied), span)),
+            span,
+        ),
+    );
+    Ok(Some(app2(
+        bind_e,
+        mf_core,
+        core::Expr::Lam(g, Box::new(inner), span),
+    )))
+}
+
 fn try_lower_monadic_traversal(
     ctx: &mut LowerContext,
     f: &hir::Expr,
@@ -2269,6 +2411,11 @@ fn try_lower_monadic_traversal(
     let Some(name) = ctx.lookup_var(head_ref.def_id).map(|v| v.name) else {
         return Ok(None);
     };
+    // `ap mf mx` is `<*>` written through the Monad; codegen has no
+    // implementation for it and aborts with `stub: ap not implemented`.
+    if name.as_str() == "ap" && args.len() == 2 {
+        return lower_monadic_ap(ctx, args[0], args[1], head_ref.span, span);
+    }
     // `collect`: the result list is kept. `elems`: the arguments are already
     // actions, there is no function to apply.
     let (collect, elems, flipped) = match (name.as_str(), args.len()) {

@@ -2164,12 +2164,258 @@ fn try_lower_spine_with_dicts(
 /// argument type, we resolve dictionaries at this concrete type. This handles
 /// cases like `describe Red` where `describe` is a class method of `Describable`
 /// and `Red` is a `Color` constructor.
+
+/// The type constructor at the head of an applied type: `ParsecT s u m a` has
+/// head `ParsecT`.
+fn applied_head_name(ty: &Ty) -> Option<Symbol> {
+    match ty {
+        Ty::Con(tc) => Some(tc.name),
+        Ty::App(f, _) => applied_head_name(f),
+        _ => None,
+    }
+}
+
+/// The monad a traversal runs in, from the type typeck recorded for the whole
+/// application (`m ()` for `mapM_`), else the enclosing binding's result type.
+fn traversal_monad_ty(
+    ctx: &LowerContext,
+    span: Span,
+    head_span: Span,
+    n_args: usize,
+) -> Option<Ty> {
+    let from_occurrence = ctx.resolved_expr_ty_opt(span).and_then(|t| match t {
+        Ty::App(m, _) => Some(*m),
+        _ => None,
+    });
+    from_occurrence
+        .or_else(|| {
+            // Nothing recorded for the application itself — a non-final `do`
+            // statement often has none. The HEAD's instantiated type carries
+            // the same answer behind its arrows.
+            let mut t = ctx.resolved_expr_ty_opt(head_span)?;
+            for _ in 0..n_args {
+                match t {
+                    Ty::Fun(_, ret) => t = *ret,
+                    _ => return None,
+                }
+            }
+            match t {
+                Ty::App(m, _) => Some(*m),
+                _ => None,
+            }
+        })
+        .or_else(|| {
+            let mut result = ctx.current_binding_sig()?;
+            while let Ty::Fun(_, ret) = result {
+                result = ret.as_ref();
+            }
+            match result {
+                Ty::App(m, _) => Some(m.as_ref().clone()),
+                _ => None,
+            }
+        })
+}
+
+/// A monad whose actions codegen runs as it builds them. For those, and only
+/// those, `mapM_ f xs` really is `map f xs` with the result dropped.
+fn monad_runs_eagerly(ty: &Ty) -> bool {
+    matches!(
+        applied_head_name(ty)
+            .map(|n| n.as_str().to_string())
+            .as_deref(),
+        Some("IO" | "StateT" | "ReaderT" | "ExceptT" | "WriterT" | "Identity" | "Maybe" | "Either")
+    )
+}
+
+fn nullary_var(name: &str, span: Span) -> core::Expr {
+    core::Expr::Var(
+        Var {
+            name: Symbol::intern(name),
+            id: VarId::new(0),
+            ty: Ty::Error,
+        },
+        span,
+    )
+}
+
+/// `mapM_`, `forM_`, `mapM`, `forM`, `traverse`, `traverse_`, `sequence` and
+/// `sequence_` at a monad that is NOT run eagerly.
+///
+/// codegen lowers `mapM_ f xs` to `map f xs` and returns null. That is right
+/// for bhc's IO, where building an action IS running it — and wrong everywhere
+/// else: at `ParsecT` each `f x` is a parser VALUE, so mapping builds a list of
+/// parsers that nobody runs, and the null travels on as the action. pandoc's
+/// `checkNotes` and `reportLogMessages` end in `mapM_`, so `readMarkdown`
+/// segfaulted on an EMPTY document.
+///
+/// Rewritten to a fold through the monad's own `>>=` and `pure`. `foldr` is
+/// fine to build the chain in any order: constructing an action of a
+/// non-eager monad has no effect.
+fn try_lower_monadic_traversal(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    // Spine: either `Var name a1 a2` (two arguments) or `Var name a1` (one).
+    let (head_ref, args): (&DefRef, Vec<&hir::Expr>) = match f {
+        hir::Expr::Var(dr) => (dr, vec![x]),
+        hir::Expr::App(inner, a1, _) => match inner.as_ref() {
+            hir::Expr::Var(dr) => (dr, vec![a1.as_ref(), x]),
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let Some(name) = ctx.lookup_var(head_ref.def_id).map(|v| v.name) else {
+        return Ok(None);
+    };
+    // `collect`: the result list is kept. `elems`: the arguments are already
+    // actions, there is no function to apply.
+    let (collect, elems, flipped) = match (name.as_str(), args.len()) {
+        ("mapM_" | "traverse_" | "mapA_", 2) => (false, false, false),
+        ("mapM" | "traverse", 2) => (true, false, false),
+        ("forM_" | "for_", 2) => (false, false, true),
+        ("forM" | "for", 2) => (true, false, true),
+        ("sequence_" | "sequenceA_", 1) => (false, true, false),
+        ("sequence" | "sequenceA", 1) => (true, true, false),
+        _ => return Ok(None),
+    };
+    let monad_ty = match traversal_monad_ty(ctx, span, head_ref.span, args.len()) {
+        Some(t) => t,
+        None => {
+            if std::env::var("BHC_DBG_TRAV").is_ok() {
+                eprintln!("trav {}: no monad type", name.as_str());
+            }
+            return Ok(None);
+        }
+    };
+    if std::env::var("BHC_DBG_TRAV").is_ok() {
+        eprintln!(
+            "trav {}: monad {:?}",
+            name.as_str(),
+            applied_head_name(&monad_ty)
+        );
+    }
+    if monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none() {
+        return Ok(None);
+    }
+    let Some(bind_e) = ctx.resolve_method_at_concrete_type(
+        Symbol::intern(">>="),
+        Symbol::intern("Monad"),
+        &monad_ty,
+        span,
+    ) else {
+        return Ok(None);
+    };
+    let Some(pure_e) = ctx.resolve_method_at_concrete_type(
+        Symbol::intern("pure"),
+        Symbol::intern("Applicative"),
+        &monad_ty,
+        span,
+    ) else {
+        return Ok(None);
+    };
+
+    let (fn_expr, list_expr) = if elems {
+        (None, args[0])
+    } else if flipped {
+        (Some(args[1]), args[0])
+    } else {
+        (Some(args[0]), args[1])
+    };
+    let list_core = lower_expr(ctx, list_expr)?;
+    let fn_core = match fn_expr {
+        Some(e) => Some(lower_expr(ctx, e)?),
+        None => None,
+    };
+
+    let app2 = |g: core::Expr, a: core::Expr, b: core::Expr| {
+        core::Expr::App(
+            Box::new(core::Expr::App(Box::new(g), Box::new(a), span)),
+            Box::new(b),
+            span,
+        )
+    };
+
+    let elem = ctx.fresh_var("$trav_x", Ty::Error, span);
+    let rest = ctx.fresh_var("$trav_k", Ty::Error, span);
+    // `f x`, or the element itself when it already is the action.
+    let action = match fn_core {
+        Some(g) => core::Expr::App(
+            Box::new(g),
+            Box::new(core::Expr::Var(elem.clone(), span)),
+            span,
+        ),
+        None => core::Expr::Var(elem.clone(), span),
+    };
+
+    let step_body = if collect {
+        let v = ctx.fresh_var("$trav_v", Ty::Error, span);
+        let vs = ctx.fresh_var("$trav_vs", Ty::Error, span);
+        let cons = app2(
+            nullary_var(":", span),
+            core::Expr::Var(v.clone(), span),
+            core::Expr::Var(vs.clone(), span),
+        );
+        let inner = app2(
+            bind_e.clone(),
+            core::Expr::Var(rest.clone(), span),
+            core::Expr::Lam(
+                vs,
+                Box::new(core::Expr::App(
+                    Box::new(pure_e.clone()),
+                    Box::new(cons),
+                    span,
+                )),
+                span,
+            ),
+        );
+        app2(
+            bind_e.clone(),
+            action,
+            core::Expr::Lam(v, Box::new(inner), span),
+        )
+    } else {
+        let ignored = ctx.fresh_var("$trav_ignored", Ty::Error, span);
+        app2(
+            bind_e.clone(),
+            action,
+            core::Expr::Lam(ignored, Box::new(core::Expr::Var(rest.clone(), span)), span),
+        )
+    };
+
+    let step = core::Expr::Lam(
+        elem,
+        Box::new(core::Expr::Lam(rest, Box::new(step_body), span)),
+        span,
+    );
+    let seed = core::Expr::App(
+        Box::new(pure_e),
+        Box::new(if collect {
+            nullary_var("[]", span)
+        } else {
+            nullary_var("()", span)
+        }),
+        span,
+    );
+    Ok(Some(core::Expr::App(
+        Box::new(app2(nullary_var("foldr", span), step, seed)),
+        Box::new(list_core),
+        span,
+    )))
+}
+
 fn lower_app(
     ctx: &mut LowerContext,
     f: &hir::Expr,
     x: &hir::Expr,
     span: Span,
 ) -> LowerResult<core::Expr> {
+    // `mapM_`/`mapM`/`sequence_`/… at a monad codegen does not run eagerly.
+    if let Some(result) = try_lower_monadic_traversal(ctx, f, x, span)? {
+        return Ok(result);
+    }
+
     // A constrained function passed as a value argument: resolve its
     // dictionaries from the type at which the call uses it (determined by this
     // call's arguments). Handles both a concrete callee parameter and a

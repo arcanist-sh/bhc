@@ -751,6 +751,36 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 ) {
                     return Ok(dicted);
                 }
+                // Still nothing. For a constrained VALUE the argument can only
+                // be supplied here, and leaving it off does not leave the
+                // function unsaturated — it shifts every later argument into
+                // the dictionary's place. parsec's `getState :: Monad m =>
+                // ParsecT s u m u` inside a class method whose OWN constraint
+                // is where GHC finds the `Monad m` (`getOption :: Stream s m t
+                // => …` in pandoc's `HasReaderOptions`) has no dictionary in
+                // scope at all, and it was the continuation that landed in the
+                // slot. A null placeholder keeps the arity honest: these
+                // dictionaries are threaded to a callee that never selects
+                // through them, and a crash reading one is a better outcome
+                // than a parser jumping through its own continuation.
+                if !matches!(
+                    occurrence_or_scheme_ty(ctx, def_ref, &scheme_ty),
+                    Ty::Fun(..)
+                ) {
+                    let mut result = base_expr;
+                    for _ in &user_constraints {
+                        result = core::Expr::App(
+                            Box::new(result),
+                            Box::new(core::Expr::Lit(
+                                core::Literal::Int(0),
+                                Ty::Error,
+                                def_ref.span,
+                            )),
+                            def_ref.span,
+                        );
+                    }
+                    return Ok(result);
+                }
                 return Ok(base_expr);
             }
 
@@ -1196,6 +1226,14 @@ fn concrete_applied_result_ty(ctx: &LowerContext, e: &hir::Expr) -> Option<Ty> {
 /// unless the occurrence's recorded type pins every constraint to a fully
 /// concrete one *and* every dictionary resolves. Half-applying dictionaries
 /// would shift argument slots, which is worse than not applying them.
+/// The type this occurrence was inferred at, or the declared one when typeck
+/// recorded nothing for the span. Used only to tell a constrained VALUE from a
+/// constrained FUNCTION.
+fn occurrence_or_scheme_ty(ctx: &LowerContext, def_ref: &DefRef, scheme_ty: &Ty) -> Ty {
+    ctx.resolved_expr_ty_opt(def_ref.span)
+        .unwrap_or_else(|| scheme_ty.clone())
+}
+
 fn lower_constrained_value_at_occurrence(
     ctx: &mut LowerContext,
     def_ref: &DefRef,

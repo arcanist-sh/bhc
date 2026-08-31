@@ -327,6 +327,11 @@ pub struct Lowering<'ctx, 'm> {
     functions: FxHashMap<VarId, FunctionValue<'ctx>>,
     /// Counter for generating unique closure names.
     closure_counter: u32,
+    /// Name of the top-level binding currently being lowered. Only used to
+    /// label `__closure_<mod>.<n>` symbols under `BHC_DBG_CLOSURE`, so that a
+    /// runtime backtrace naming a numbered closure can be traced back to the
+    /// Haskell binding it came from.
+    dbg_enclosing_bind: String,
     /// Mapping from constructor names to metadata (tag, arity).
     /// This is populated from DataCon entries in case alternatives.
     constructor_metadata: FxHashMap<String, ConstructorMeta>,
@@ -439,6 +444,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             env: FxHashMap::default(),
             functions: FxHashMap::default(),
             closure_counter: 0,
+            dbg_enclosing_bind: String::new(),
             constructor_metadata: FxHashMap::default(),
             in_tail_position: false,
             captured_local_fns: FxHashSet::default(),
@@ -494,6 +500,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             env: FxHashMap::default(),
             functions: FxHashMap::default(),
             closure_counter: 0,
+            dbg_enclosing_bind: String::new(),
             constructor_metadata: FxHashMap::default(),
             in_tail_position: false,
             captured_local_fns: FxHashSet::default(),
@@ -44390,6 +44397,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     fn next_closure_name(&mut self) -> String {
         let counter = self.closure_counter;
         self.closure_counter += 1;
+        if std::env::var("BHC_DBG_CLOSURE").is_ok() {
+            eprintln!(
+                "closure {}.{} <- {}",
+                self.module_name.as_deref().unwrap_or("?"),
+                counter,
+                self.dbg_enclosing_bind
+            );
+        }
         if let Some(ref mod_name) = self.module_name {
             format!("__closure_{}.{}", mod_name, counter)
         } else {
@@ -45307,6 +45322,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Lower a function definition.
     fn lower_function_def(&mut self, var: &Var, expr: &Expr) -> CodegenResult<()> {
+        self.dbg_enclosing_bind = var.name.as_str().to_string();
         let fn_val = self.functions.get(&var.id).copied().ok_or_else(|| {
             CodegenError::Internal(format!("function not declared: {}", var.name.as_str()))
         })?;

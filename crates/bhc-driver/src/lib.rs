@@ -2754,12 +2754,14 @@ impl Compiler {
             // Resolve the module's interface (honoring exposed-modules) and
             // chase any whole-module re-exports it declares.
             let mut visited = FxHashSet::default();
+            let mut memo: FxHashMap<String, ModuleExports> = FxHashMap::default();
             if let Some(exports) = self.load_interface_exports_chasing(
                 &module_name,
                 &flat_dirs,
                 &packages,
                 ctx,
                 &mut visited,
+                &mut memo,
             ) {
                 cache.insert(sym, exports);
             }
@@ -2969,7 +2971,18 @@ impl Compiler {
         packages: &[ConfPackage],
         ctx: &mut LowerContext,
         visited: &mut FxHashSet<String>,
+        memo: &mut FxHashMap<String, ModuleExports>,
     ) -> Option<ModuleExports> {
+        // A module reached twice in one traversal must give its exports both
+        // times. `visited` alone made the second visit answer None, which is
+        // right for a CYCLE and wrong for a diamond: `Org.Parsing` re-exports
+        // `QuoteContext (..)` from `Text.Pandoc.Parsing`, which an earlier
+        // sibling had already chased, so the constructors were never expanded
+        // and `InSingleQuote` was unbound in every Org reader. Memoize the
+        // finished result; `visited` now only marks work in progress.
+        if let Some(done) = memo.get(module_name) {
+            return Some(done.clone());
+        }
         if !visited.insert(module_name.to_string()) {
             return None;
         }
@@ -2998,7 +3011,7 @@ impl Compiler {
                 continue;
             }
             if let Some(sub) =
-                self.load_interface_exports_chasing(origin, flat_dirs, packages, ctx, visited)
+                self.load_interface_exports_chasing(origin, flat_dirs, packages, ctx, visited, memo)
             {
                 for (k, v) in sub.values {
                     exports.values.entry(k).or_insert(v);
@@ -3045,10 +3058,19 @@ impl Compiler {
             // (..) children below.
             let mut sub_exports: Option<&ModuleExports> = None;
             let mut resolved = None;
+            // A candidate that merely has the TYPE is not as good as one that
+            // also has its `(..)` CHILDREN. `Text.Pandoc.Readers.Org.Parsing`
+            // re-exports `QuoteContext (..)` and lists two open imports as
+            // candidates; the first carries the type but none of its
+            // constructors, and stopping there left `InSingleQuote` unbound in
+            // every Org reader. Prefer a candidate with children, keeping the
+            // first bare hit as the fallback.
+            let mut chosen: Option<&str> = None;
+            let mut fallback: Option<(&str, bhc_hir::DefId)> = None;
             for candidate in origin.split(';').filter(|c| !c.is_empty()) {
                 if !chased.contains_key(candidate) {
                     let sub = self.load_interface_exports_chasing(
-                        candidate, flat_dirs, packages, ctx, visited,
+                        candidate, flat_dirs, packages, ctx, visited, memo,
                     );
                     chased.insert(candidate, sub);
                 }
@@ -3058,28 +3080,28 @@ impl Compiler {
                     } else {
                         sub.values.get(&sym).copied()
                     };
-                    if hit.is_some() {
-                        resolved = hit;
+                    let Some(hit) = hit else { continue };
+                    let has_children = !is_type
+                        || sub.class_methods.contains_key(&sym)
+                        || sub.constructors.values().any(|c| c.type_con_name == sym);
+                    if has_children {
+                        resolved = Some(hit);
+                        chosen = Some(candidate);
                         break;
+                    }
+                    if fallback.is_none() {
+                        fallback = Some((candidate, hit));
                     }
                 }
             }
-            if resolved.is_some() {
-                // Re-borrow the resolving candidate's exports (the loop's
-                // borrow ended at break).
-                for candidate in origin.split(';').filter(|c| !c.is_empty()) {
-                    if let Some(sub) = chased.get(candidate).and_then(|sub| sub.as_ref()) {
-                        let hit = if is_type {
-                            sub.types.contains_key(&sym)
-                        } else {
-                            sub.values.contains_key(&sym)
-                        };
-                        if hit {
-                            sub_exports = Some(sub);
-                            break;
-                        }
-                    }
+            if resolved.is_none() {
+                if let Some((candidate, hit)) = fallback {
+                    resolved = Some(hit);
+                    chosen = Some(candidate);
                 }
+            }
+            if let Some(candidate) = chosen {
+                sub_exports = chased.get(candidate).and_then(|sub| sub.as_ref());
             }
             // A re-exported type carries its `(..)` children: class methods
             // (with their class_methods entry, so Class(..) imports resolve)
@@ -3132,6 +3154,7 @@ impl Compiler {
                 exports.values.insert(sym, def_id);
             }
         }
+        memo.insert(module_name.to_string(), exports.clone());
         Some(exports)
     }
 

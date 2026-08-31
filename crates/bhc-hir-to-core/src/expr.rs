@@ -755,6 +755,19 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 ctx.dict_in_scope_or_via_superclass(c.class, def_ref.span)
                     .is_some()
             });
+            // One in-scope dictionary used to divert this reference into the
+            // per-constraint loop below, which SKIPS any constraint it cannot
+            // place — so `anyChar :: (Monad m, Stream s m Char,
+            // UpdateSourcePos s Char) => …` got its `Monad` from the enclosing
+            // `PandocMonad` superclass and neither of the other two, and the
+            // parser was applied to its arguments one slot over. Resolving the
+            // whole set at the occurrence is all-or-nothing by construction, so
+            // try it first whichever dictionaries happen to be in scope.
+            if let Some(dicted) =
+                lower_constrained_value_all_dicts(ctx, def_ref, &scheme_ty, &user_constraints)
+            {
+                return Ok(dicted);
+            }
             if all_deferred && !any_in_scope {
                 // "Defer to App-level" assumes this reference is the head of an
                 // application, so an argument type will pin the constraint. A
@@ -770,15 +783,7 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 // still defer: `lower_app` builds its own head var precisely to
                 // avoid resolving a dictionary twice, and applying one here as
                 // well would shift every later argument.
-                if let Some(dicted) = lower_constrained_value_at_occurrence(
-                    ctx,
-                    def_ref,
-                    &scheme_ty,
-                    &user_constraints,
-                ) {
-                    return Ok(dicted);
-                }
-                // Still nothing. For a constrained VALUE the argument can only
+                // For a constrained VALUE the argument can only
                 // be supplied here, and leaving it off does not leave the
                 // function unsaturated — it shifts every later argument into
                 // the dictionary's place. parsec's `getState :: Monad m =>
@@ -811,6 +816,16 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 return Ok(base_expr);
             }
 
+            // The occurrence's instantiation, used to pin constraints the
+            // declared scheme leaves open: `char :: (Monad m, Stream s m Char,
+            // UpdateSourcePos s Char) => Char -> ParsecT s u m Char` used at
+            // `Sources` pins `s` even where `m` stays a variable.
+            let occ_subst = ctx.resolved_expr_ty_opt(def_ref.span).map(|occ| {
+                let mut subst = bhc_types::Subst::new();
+                match_ty(&scheme_ty, &occ, &mut subst);
+                subst
+            });
+
             // Apply dictionaries for each user-defined class constraint
             let mut result = base_expr;
             for constraint in &user_constraints {
@@ -818,13 +833,47 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 // scope — directly, or as a superclass of one that is.
                 let from_scope =
                     ctx.dict_in_scope_or_via_superclass(constraint.class, def_ref.span);
-                if constraint.args.iter().any(has_type_variables) && from_scope.is_none() {
+                let instantiated = occ_subst.as_ref().map(|subst| {
+                    Constraint::new_multi(
+                        constraint.class,
+                        constraint.args.iter().map(|a| subst.apply(a)).collect(),
+                        constraint.span,
+                    )
+                });
+                // Resolvable as soon as the occurrence pins ONE argument:
+                // `instance Monad m => Stream Sources m Char` is selected by
+                // `Sources` alone, and requiring every argument to be concrete
+                // rejected it for the `m` a constrained binding still holds
+                // open.
+                let from_occurrence = instantiated
+                    .as_ref()
+                    .filter(|c| c.args.iter().any(|a| !has_type_variables(a)))
+                    .and_then(|c| ctx.resolve_dictionary(c, def_ref.span));
+                if constraint.args.iter().any(has_type_variables)
+                    && from_scope.is_none()
+                    && from_occurrence.is_none()
+                {
+                    // Nothing can fill this one. Skipping it does not leave the
+                    // reference unsaturated — it moves every later dictionary,
+                    // and then every value argument, one slot up. `anyChar`'s
+                    // `Stream`/`UpdateSourcePos` were skipped this way while its
+                    // `Monad` came from the enclosing superclass, and pandoc's
+                    // `string = mapM char` applied a parser to its continuation.
+                    result = core::Expr::App(
+                        Box::new(result),
+                        Box::new(core::Expr::Lit(
+                            core::Literal::Int(0),
+                            Ty::Error,
+                            def_ref.span,
+                        )),
+                        def_ref.span,
+                    );
                     continue;
                 }
 
                 // Try to resolve the dictionary
-                if let Some(dict_expr) = ctx
-                    .resolve_dictionary(constraint, def_ref.span)
+                if let Some(dict_expr) = from_occurrence
+                    .or_else(|| ctx.resolve_dictionary(constraint, def_ref.span))
                     .or(from_scope)
                 {
                     result = core::Expr::App(Box::new(result), Box::new(dict_expr), def_ref.span);
@@ -1259,6 +1308,67 @@ fn concrete_applied_result_ty(ctx: &LowerContext, e: &hir::Expr) -> Option<Ty> {
 fn occurrence_or_scheme_ty(ctx: &LowerContext, def_ref: &DefRef, scheme_ty: &Ty) -> Ty {
     ctx.resolved_expr_ty_opt(def_ref.span)
         .unwrap_or_else(|| scheme_ty.clone())
+}
+
+/// Every dictionary a constrained VALUE needs, from whichever source has it.
+///
+/// `lower_constrained_value_at_occurrence` gives up unless the occurrence pins
+/// EVERY constraint to a concrete type. `anyChar :: (Monad m, Stream s m Char,
+/// UpdateSourcePos s Char) => ParsecT s u m Char` used inside a
+/// `PandocMonad m =>` binding pins `s` and `u` but leaves `m` a variable, so it
+/// gave up — and the per-constraint loop then applied only the `Monad` it could
+/// reach through the enclosing superclass and SKIPPED the other two, so the
+/// parser was applied to its arguments two slots over.
+///
+/// Each constraint is resolved at the occurrence-instantiated type, else from a
+/// dictionary in scope (directly or as a superclass), else filled with a null
+/// placeholder. One argument per constraint, always: a missing slot does not
+/// leave the value unsaturated, it shifts everything after it.
+fn lower_constrained_value_all_dicts(
+    ctx: &mut LowerContext,
+    def_ref: &DefRef,
+    scheme_ty: &Ty,
+    constraints: &[Constraint],
+) -> Option<core::Expr> {
+    let occ_ty = ctx.resolved_expr_ty_opt(def_ref.span)?;
+    let mut subst = bhc_types::Subst::new();
+    match_ty(scheme_ty, &occ_ty, &mut subst);
+    // A function instantiation means this is a constrained *function*; those
+    // resolve at the application site, which builds its own head var.
+    if matches!(subst.apply(scheme_ty), Ty::Fun(..)) {
+        return None;
+    }
+    let var = ctx.lookup_var(def_ref.def_id).cloned()?;
+    let mut dicts = Vec::with_capacity(constraints.len());
+    let mut any_real = false;
+    for c in constraints {
+        let instantiated = Constraint::new_multi(
+            c.class,
+            c.args.iter().map(|a| subst.apply(a)).collect(),
+            c.span,
+        );
+        let dict = ctx
+            .resolve_dictionary(&instantiated, def_ref.span)
+            .or_else(|| ctx.dict_in_scope_or_via_superclass(c.class, def_ref.span));
+        if dict.is_some() {
+            any_real = true;
+        }
+        dicts.push(dict.unwrap_or(core::Expr::Lit(
+            core::Literal::Int(0),
+            Ty::Error,
+            def_ref.span,
+        )));
+    }
+    // Nothing was found at all — leave the reference alone rather than burying
+    // it under placeholders; the caller's own paths may still do better.
+    if !any_real {
+        return None;
+    }
+    let mut result = core::Expr::Var(var, def_ref.span);
+    for dict in dicts {
+        result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
+    }
+    Some(result)
 }
 
 fn lower_constrained_value_at_occurrence(
@@ -2210,11 +2320,17 @@ fn traversal_monad_ty(
     head_span: Span,
     n_args: usize,
 ) -> Option<Ty> {
+    // Every source is tried in turn and the first with a CONCRETE head wins:
+    // an eta-expanded point-free binding (`string = mapM char`) records an
+    // application type whose head is still a variable, and stopping at it
+    // declined the rewrite even though the signature named `ParsecT`.
+    let mut candidates: Vec<Ty> = Vec::new();
     let from_occurrence = ctx.resolved_expr_ty_opt(span).and_then(|t| match t {
         Ty::App(m, _) => Some(*m),
         _ => None,
     });
-    from_occurrence
+    candidates.extend(from_occurrence.clone());
+    let rest = None
         .or_else(|| {
             // Nothing recorded for the application itself — a non-final `do`
             // statement often has none. The HEAD's instantiated type carries
@@ -2247,7 +2363,13 @@ fn traversal_monad_ty(
         // monad. Wrong for a traversal at some OTHER monad inside an instance
         // — but then no `Monad` instance resolves at this type and the rewrite
         // declines anyway.
-        .or_else(|| ctx.current_instance_type().cloned())
+        .or_else(|| ctx.current_instance_type().cloned());
+    candidates.extend(rest);
+    candidates
+        .iter()
+        .find(|t| applied_head_name(t).is_some())
+        .or_else(|| candidates.first())
+        .cloned()
 }
 
 /// A monad whose actions codegen runs as it builds them. For those, and only
@@ -2546,16 +2668,27 @@ fn try_lower_monadic_traversal(
     }
     // `collect`: the result list is kept. `elems`: the arguments are already
     // actions, there is no function to apply.
-    let (collect, elems, flipped) = match (name.as_str(), args.len()) {
-        ("mapM_" | "traverse_" | "mapA_", 2) => (false, false, false),
-        ("mapM" | "traverse", 2) => (true, false, false),
-        ("forM_" | "for_", 2) => (false, false, true),
-        ("forM" | "for", 2) => (true, false, true),
-        ("sequence_" | "sequenceA_", 1) => (false, true, false),
-        ("sequence" | "sequenceA", 1) => (true, true, false),
+    // `missing_list`: the function is there but the container is not, which is
+    // how a point-free definition arrives — `string = mapM char` is eta
+    // expanded only after lowering, so HIR holds `mapM char` alone. The
+    // rewrite supplies the container as a lambda parameter.
+    let (collect, elems, flipped, missing_list) = match (name.as_str(), args.len()) {
+        ("mapM_" | "traverse_" | "mapA_", 2) => (false, false, false, false),
+        ("mapM_" | "traverse_" | "mapA_", 1) => (false, false, false, true),
+        ("mapM" | "traverse", 2) => (true, false, false, false),
+        ("mapM" | "traverse", 1) => (true, false, false, true),
+        ("forM_" | "for_", 2) => (false, false, true, false),
+        ("forM" | "for", 2) => (true, false, true, false),
+        ("sequence_" | "sequenceA_", 1) => (false, true, false, false),
+        ("sequence" | "sequenceA", 1) => (true, true, false, false),
         _ => return Ok(None),
     };
-    let monad_ty = match traversal_monad_ty(ctx, span, head_ref.span, args.len()) {
+    let n_arrows = if missing_list {
+        args.len() + 1
+    } else {
+        args.len()
+    };
+    let monad_ty = match traversal_monad_ty(ctx, span, head_ref.span, n_arrows) {
         Some(t) => t,
         None => {
             if std::env::var("BHC_DBG_TRAV").is_ok() {
@@ -2591,14 +2724,25 @@ fn try_lower_monadic_traversal(
         return Ok(None);
     };
 
-    let (fn_expr, list_expr) = if elems {
-        (None, args[0])
+    let (fn_expr, list_expr) = if missing_list {
+        (Some(args[0]), None)
+    } else if elems {
+        (None, Some(args[0]))
     } else if flipped {
-        (Some(args[1]), args[0])
+        (Some(args[1]), Some(args[0]))
     } else {
-        (Some(args[0]), args[1])
+        (Some(args[0]), Some(args[1]))
     };
-    let list_core = lower_expr(ctx, list_expr)?;
+    let list_param = if missing_list {
+        Some(ctx.fresh_var("$trav_xs", Ty::Error, span))
+    } else {
+        None
+    };
+    let list_core = match (list_expr, &list_param) {
+        (Some(e), _) => lower_expr(ctx, e)?,
+        (None, Some(v)) => core::Expr::Var(v.clone(), span),
+        (None, None) => return Ok(None),
+    };
     let fn_core = match fn_expr {
         Some(e) => Some(lower_expr(ctx, e)?),
         None => None,
@@ -2673,11 +2817,15 @@ fn try_lower_monadic_traversal(
         }),
         span,
     );
-    Ok(Some(core::Expr::App(
+    let folded = core::Expr::App(
         Box::new(app2(nullary_var("foldr", span), step, seed)),
         Box::new(list_core),
         span,
-    )))
+    );
+    Ok(Some(match list_param {
+        Some(v) => core::Expr::Lam(v, Box::new(folded), span),
+        None => folded,
+    }))
 }
 
 fn lower_app(

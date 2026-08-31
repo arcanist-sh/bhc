@@ -1851,6 +1851,52 @@ impl LowerContext {
                 }
             }
         }
+        // Multi-parameter dictionaries, whose superclass constrains a
+        // parameter that is not the first: `class Monad m => Stream s m t`
+        // records `superclass_params = [[1]]`, so a `Stream s m a` in scope
+        // does carry the `Monad m` its uses need. Skipping these left parsec's
+        // `getState :: Monad m => …` with no dictionary inside any
+        // `Stream s m a =>` binding, and its continuation argument landed in
+        // the dictionary's slot.
+        //
+        // Offered AFTER the single-parameter hops so an exact single-parameter
+        // match still wins, and only for a DIRECT superclass — a longer chain
+        // would need each hop's parameter mapping, and guessing one is worse
+        // than leaving the slot empty.
+        for scope in self.dict_scope.iter().rev() {
+            for (class, var) in scope {
+                let Some(args) = self.lookup_dict_args(*class) else {
+                    continue;
+                };
+                if args.len() < 2 {
+                    continue;
+                }
+                let Some(info) = self.class_registry.lookup_class(*class) else {
+                    continue;
+                };
+                let supers = info.superclasses.clone();
+                let super_params = info.superclass_params.clone();
+                for (i, sup) in supers.iter().enumerate() {
+                    if *sup == *class || out.iter().any(|(c, _, _, _)| c == sup) {
+                        continue;
+                    }
+                    let single_param = self
+                        .class_registry
+                        .lookup_class(*sup)
+                        .is_some_and(|c| c.param_count == 1);
+                    if !single_param {
+                        continue;
+                    }
+                    let Some([idx]) = super_params.get(i).map(Vec::as_slice) else {
+                        continue;
+                    };
+                    let Some(arg) = args.get(*idx) else {
+                        continue;
+                    };
+                    out.push((*sup, vec![arg.clone()], var.clone(), vec![i]));
+                }
+            }
+        }
         out
     }
 

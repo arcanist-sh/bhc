@@ -46146,8 +46146,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // gets the other's semantics. Mapping every non-alphanumeric character
         // to `_` is not injective — `IO.>>` and `IO.<*>` both become `IO___`,
         // as do `StateT.>>=` and `StateT.<*>`. Escape by code point instead.
+        // A wrapper is cached by name for the whole module, but some builtins
+        // mean different things at different transformer layers — `return` is
+        // the identity at IO and a state-threading closure under `ExceptT`.
+        // Without the layer in the name, whichever layer reached the builtin
+        // first would define it for every other.
+        let layer_tag = match self.current_transformer_layer() {
+            TransformerLayer::IO => "",
+            TransformerLayer::StateT => "_stateT",
+            TransformerLayer::ReaderT => "_readerT",
+            TransformerLayer::ExceptT => "_exceptT",
+            TransformerLayer::WriterT => "_writerT",
+        };
         let wrapper_name = format!(
-            "builtin_wrapper_{}",
+            "builtin_wrapper_{}{layer_tag}",
             name.chars()
                 .map(|c| if c.is_alphanumeric() {
                     c.to_string()
@@ -46593,8 +46605,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // `IO.pure` is the same identity, under the qualified name an IO
             // dictionary slot carries (see `transformer_method_name`).
             "return" | "pure" | "IO.pure" => {
-                // return :: a -> m a
-                // For our simple IO model, just return the value
+                // At the IO layer a value IS the action, so this is the
+                // identity. Under a transformer it is not: an `ExceptT` action
+                // is a closure that yields `Right x`, threading state when it
+                // sits over `StateT`. As a first-class VALUE — parsec's
+                // `return . Consumed . return` — the identity handed the bind a
+                // bare `Consumed` where an action belongs, which is where
+                // `readMarkdown` ended up.
+                if name != "IO.pure"
+                    && matches!(self.current_transformer_layer(), TransformerLayer::ExceptT)
+                {
+                    let over_st = self.transformer_stack.is_except_t_over_state_t();
+                    return self.except_t_pure_from_value(args[0], over_st);
+                }
                 Ok(Some(args[0]))
             }
             "id" => {

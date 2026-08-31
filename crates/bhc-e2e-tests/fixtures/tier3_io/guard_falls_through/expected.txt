@@ -1,0 +1,8 @@
+huge
+big
+small 1
+middling
+outside
+pos
+neg
+zero

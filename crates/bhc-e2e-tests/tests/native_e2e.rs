@@ -315,6 +315,11 @@ fn test_tier3_pattern_synonym_view_native() {
 }
 
 #[test]
+fn test_tier3_guard_falls_through_native() {
+    run_native_test("tier3_io/guard_falls_through", Profile::Default);
+}
+
+#[test]
 fn test_tier3_overapplied_partial_native() {
     run_native_test("tier3_io/overapplied_partial", Profile::Default);
 }

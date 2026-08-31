@@ -621,9 +621,14 @@ pub fn compile_match_to_expr(
     // Check exhaustiveness
     check_exhaustiveness_tree(ctx, &tree, value_def.name.as_str());
 
-    // Check for redundant equations
+    // Check for redundant equations. The tree is built from PATTERNS alone, so
+    // an equation reached only when an earlier guard fails looks unreachable
+    // in it — `f v | p v = a` followed by `f v = b` is not redundant.
     let total_equations = value_def.equations.len();
-    check_overlap(ctx, &tree, total_equations, value_def.name.as_str());
+    let any_guards = value_def.equations.iter().any(|eq| !eq.guards.is_empty());
+    if !any_guards {
+        check_overlap(ctx, &tree, total_equations, value_def.name.as_str());
+    }
 
     // Convert decision tree to Core expression
     tree_to_core(ctx, tree)
@@ -1366,7 +1371,13 @@ fn compile_equations_linear(
         let rhs = if eq.guards.is_empty() {
             lower_expr(ctx, &eq.rhs)?
         } else {
-            compile_guarded_rhs(ctx, &eq.guards, &eq.rhs, eq.span)?
+            compile_guarded_rhs(
+                ctx,
+                &eq.guards,
+                &eq.rhs,
+                eq.span,
+                make_pattern_error(eq.span),
+            )?
         };
 
         let remaining_alts = compile_equations_linear(ctx, &equations[1..], args, span)?;
@@ -1437,10 +1448,34 @@ fn compile_equations_linear(
             }
         }
 
+        // A guard that FAILS falls through to the next equation. Where this
+        // equation's patterns are irrefutable — which is the only shape
+        // `lower_clause` keeps guards in the HIR for — no later alternative
+        // can be reached by matching, so the remaining equations belong in the
+        // guard's failure branch and nowhere else. No duplication follows.
+        let irrefutable = !eq.pats.is_empty()
+            && eq.pats.iter().all(is_irrefutable_pat)
+            && !eq.guards.is_empty()
+            && equations.len() > 1;
+        let guard_failure = if irrefutable {
+            let remaining = compile_equations_linear(ctx, &equations[1..], args, span)?;
+            match args.first() {
+                Some(arg) => core::Expr::Case(
+                    Box::new(core::Expr::Var(arg.clone(), span)),
+                    remaining,
+                    Ty::Error,
+                    span,
+                ),
+                None => make_pattern_error(eq.span),
+            }
+        } else {
+            make_pattern_error(eq.span)
+        };
+
         let rhs = if eq.guards.is_empty() {
             lower_expr(ctx, &eq.rhs)?
         } else {
-            compile_guarded_rhs(ctx, &eq.guards, &eq.rhs, eq.span)?
+            compile_guarded_rhs(ctx, &eq.guards, &eq.rhs, eq.span, guard_failure)?
         };
 
         if !existential_classes.is_empty() {
@@ -1461,9 +1496,11 @@ fn compile_equations_linear(
             alts.push(tuple_alt);
         }
 
-        if equations.len() > 1 {
+        if equations.len() > 1 && !irrefutable {
             let remaining = compile_equations_linear(ctx, &equations[1..], args, span)?;
             alts.extend(remaining);
+        } else if irrefutable {
+            // Already compiled into the guard's failure branch above.
         } else {
             alts.push(Alt {
                 con: AltCon::Default,
@@ -1559,6 +1596,7 @@ fn compile_guarded_rhs(
     guards: &[hir::Guard],
     rhs: &hir::Expr,
     span: Span,
+    on_failure: core::Expr,
 ) -> LowerResult<core::Expr> {
     if guards.is_empty() {
         return lower_expr(ctx, rhs);
@@ -1575,10 +1613,20 @@ fn compile_guarded_rhs(
     // The innermost if checks the last guard
     for guard in guards.iter().rev() {
         let cond = lower_expr(ctx, &guard.cond)?;
-        result = make_if(cond, result, make_pattern_error(span), span);
+        result = make_if(cond, result, on_failure.clone(), span);
     }
 
     Ok(result)
+}
+
+/// Whether a pattern always matches, so no later alternative can be reached
+/// through it.
+fn is_irrefutable_pat(pat: &Pat) -> bool {
+    match pat {
+        Pat::Wild(_) | Pat::Var(_, _, _) => true,
+        Pat::Ann(inner, _, _) | Pat::As(_, _, inner, _) => is_irrefutable_pat(inner),
+        _ => false,
+    }
 }
 
 /// Compile a tuple of patterns into a single alternative.

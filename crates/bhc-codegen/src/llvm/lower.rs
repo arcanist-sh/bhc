@@ -27691,10 +27691,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // application whose arity is not one — `three 1 . succ` composes a
         // 2-of-3 partial — and a raw call would under-apply it, reading the
         // missing argument from a garbage register.
+        let _ = self.checked_closure_fn_ptr(g_ptr, "(.): the SECOND function")?;
         let gx = self
             .apply_closure_values(g_ptr, &[x_ptr], false)?
             .ok_or_else(|| CodegenError::Internal(".: g(x) void".to_string()))?;
         let gx_ptr = self.value_to_ptr(gx)?;
+        let _ = self.checked_closure_fn_ptr(f_ptr, "(.): the FIRST function")?;
         self.apply_closure_values(f_ptr, &[gx_ptr], false)
     }
 
@@ -46675,12 +46677,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // calls `three 1` with ONE argument here, and the lifted body
                 // reads its other two from whatever the registers held.
                 let x_ptr = self.value_to_ptr(x)?;
+                let _ = self.checked_closure_fn_ptr(g, "(.) value: the SECOND function")?;
                 let g_result = self
                     .apply_closure_values(g, &[x_ptr], false)?
                     .ok_or_else(|| {
                         CodegenError::Internal("compose g: returned void".to_string())
                     })?;
                 let g_ptr = self.value_to_ptr(g_result)?;
+                let _ = self.checked_closure_fn_ptr(f, "(.) value: the FIRST function")?;
                 self.apply_closure_values(f, &[g_ptr], false)
             }
             "fmap" | "<$>" => {

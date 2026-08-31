@@ -6752,6 +6752,20 @@ fn lower_instance_method(
 }
 
 /// Lower a function clause.
+/// Whether an AST pattern always matches, so no later equation can be reached
+/// through it.
+fn ast_pat_is_irrefutable(pat: &ast::Pat) -> bool {
+    match pat {
+        ast::Pat::Wildcard(_) | ast::Pat::Var(_, _) => true,
+        ast::Pat::Paren(inner, _)
+        | ast::Pat::Lazy(inner, _)
+        | ast::Pat::Bang(inner, _)
+        | ast::Pat::Ann(inner, _, _)
+        | ast::Pat::As(_, inner, _) => ast_pat_is_irrefutable(inner),
+        _ => false,
+    }
+}
+
 fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir::Equation> {
     ctx.in_scope(|ctx| {
         // Bind pattern variables
@@ -6789,17 +6803,56 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
         let (rhs, guards) = match &clause.rhs {
             ast::Rhs::Simple(expr, _) => (lower_expr(ctx, expr), Vec::new()),
             ast::Rhs::Guarded(guarded_rhss, _) => {
-                // For guarded RHS, we desugar to nested if expressions
-                let rhs = desugar::desugar_guarded_rhs(
-                    ctx,
-                    guarded_rhss,
-                    clause.span,
-                    &|ctx, e| lower_expr(ctx, e),
-                    &|ctx, p| lower_pat(ctx, p),
-                );
+                // Desugaring a guarded RHS here can only fall through to an
+                // error, but a guard that fails must fall through to the next
+                // EQUATION. Where the patterns are irrefutable that matters
+                // most: nothing after such an equation is reachable by
+                // matching, so `f v | p v = a` followed by `f v = b` returned a
+                // pattern-match error for every `v` failing `p` — and warned
+                // that the second equation was unreachable.
+                //
+                // For one alternative whose guards are all boolean, keep the
+                // guards in the HIR instead. The equation compiler chains them
+                // to the following equations. Anything else — several
+                // alternatives, or a pattern guard, which HIR's `Guard` cannot
+                // hold — keeps the old desugaring.
+                let single_boolean = guarded_rhss.len() == 1
+                    && guarded_rhss[0]
+                        .guards
+                        .iter()
+                        .all(|g| matches!(g, ast::Guard::Expr(_, _)));
+                let irrefutable =
+                    !clause.pats.is_empty() && clause.pats.iter().all(ast_pat_is_irrefutable);
+                if single_boolean && irrefutable {
+                    let grhs = &guarded_rhss[0];
+                    let conds: Vec<hir::Guard> = grhs
+                        .guards
+                        .iter()
+                        .map(|g| match g {
+                            ast::Guard::Expr(e, sp) => hir::Guard {
+                                cond: lower_expr(ctx, e),
+                                span: *sp,
+                            },
+                            ast::Guard::Pattern(_, _, sp) => hir::Guard {
+                                cond: lower_expr(ctx, &grhs.body),
+                                span: *sp,
+                            },
+                        })
+                        .collect();
+                    (lower_expr(ctx, &grhs.body), conds)
+                } else {
+                    // For guarded RHS, we desugar to nested if expressions
+                    let rhs = desugar::desugar_guarded_rhs(
+                        ctx,
+                        guarded_rhss,
+                        clause.span,
+                        &|ctx, e| lower_expr(ctx, e),
+                        &|ctx, p| lower_pat(ctx, p),
+                    );
 
-                // We don't need guards in HIR for this; they're already desugared
-                (rhs, Vec::new())
+                    // We don't need guards in HIR for this; they're already desugared
+                    (rhs, Vec::new())
+                }
             }
         };
 

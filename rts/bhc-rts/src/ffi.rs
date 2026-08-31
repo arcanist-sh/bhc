@@ -835,9 +835,13 @@ pub unsafe extern "C" fn bhc_bad_action(obj: *const u8, site: *const c_char) -> 
     };
     let mut detail = String::new();
     if !obj.is_null() && (obj as usize) % 8 == 0 && (obj as usize) > 0xffff {
-        let w0 = unsafe { *(obj as *const usize) };
-        let w1 = unsafe { *(obj.add(8) as *const usize) };
-        detail = format!(" word0={w0:#x} word1={w1:#x}");
+        let words: Vec<String> = (0..6)
+            .map(|i| {
+                let w = unsafe { *(obj.add(i * 8) as *const usize) };
+                format!("{w:#x}")
+            })
+            .collect();
+        detail = format!(" words=[{}]", words.join(", "));
     }
     rts_abort(&format!(
         "{where_}: the action at {obj:p} is not a closure{detail}"

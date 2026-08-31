@@ -51379,7 +51379,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // threaded as the env; a direct call passes a null env and
                     // reads the captures from address 0. A top-level function is
                     // only in `functions`, so it still takes the direct path.
-                    if let Some(closure_val) = self.env.get(&var.id).copied() {
+                    //
+                    // Only for a local that actually CAPTURES, though. One that
+                    // captures nothing still has a closure in `env`, allocated
+                    // in the frame of whatever function was being lowered when
+                    // its `let` was reached — and a sibling lifted function
+                    // reading it refers to an SSA value from another function
+                    // body, which is what pandoc's `Citeproc` and `Writers.RST`
+                    // failed LLVM verification on. With nothing to thread, the
+                    // direct call is right everywhere.
+                    let closure_backed = self.captured_local_fns.contains(&var.id);
+                    if let Some(closure_val) =
+                        self.env.get(&var.id).copied().filter(|_| closure_backed)
+                    {
                         // When under-applied, `apply_closure_values` cannot form
                         // a PAP (it does not know the arity statically), so build
                         // the PAP directly with the closure as the threaded env —
@@ -51915,7 +51927,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // word is a function ADDRESS, which reads as a non-negative tag).
         let closure_ptr = self.build_force(closure_ptr.into())?.into_pointer_value();
 
-        let fn_ptr = self.extract_closure_fn_ptr(closure_ptr)?;
+        let fn_ptr = self.checked_closure_fn_ptr(closure_ptr, "closure call")?;
 
         // A single argument cannot over-apply, but it CAN under-apply (a CPS
         // continuation invoked `eerr err` one argument at a time onto a

@@ -6526,6 +6526,24 @@ fn subst_pat(pat: &ast::Pat, subst: &FxHashMap<Symbol, &ast::Pat>, span: Span) -
             let new_inner = subst_pat(inner, subst, span);
             ast::Pat::Paren(Box::new(new_inner), *s)
         }
+        // A view pattern's RESULT is where the synonym's arguments live:
+        // pandoc-types' `SimpleFigure` binds its target through
+        // `(isFigureTarget -> Just tgt)`. Without this the whole view was
+        // copied verbatim and `tgt` stayed the synonym's own variable, which
+        // nothing had bound. The view function itself is not a pattern and is
+        // carried through unchanged.
+        ast::Pat::View(expr, inner, s) => {
+            let new_inner = subst_pat(inner, subst, span);
+            ast::Pat::View(expr.clone(), Box::new(new_inner), *s)
+        }
+        ast::Pat::Lazy(inner, s) => {
+            let new_inner = subst_pat(inner, subst, span);
+            ast::Pat::Lazy(Box::new(new_inner), *s)
+        }
+        ast::Pat::Bang(inner, s) => {
+            let new_inner = subst_pat(inner, subst, span);
+            ast::Pat::Bang(Box::new(new_inner), *s)
+        }
         // Literals, wildcards, etc. pass through unchanged
         _ => pat.clone(),
     }
@@ -8107,6 +8125,17 @@ fn lower_pat(ctx: &mut LowerContext, pat: &ast::Pat) -> hir::Pat {
 
         ast::Pat::Record(con, fields, has_wildcard, span) => {
             let con_name = con.name;
+            // `SimpleFigure {}` names a pattern synonym and matches it whatever
+            // its arguments are — pandoc's `Writers.Texinfo` uses exactly that
+            // to ask "is this a figure?". Expand with a wildcard per argument.
+            if fields.is_empty() && !*has_wildcard {
+                if let Some((syn_args, syn_pat)) = ctx.lookup_pattern_synonym(con_name).cloned() {
+                    let wilds: Vec<ast::Pat> =
+                        syn_args.iter().map(|_| ast::Pat::Wildcard(*span)).collect();
+                    let expanded = substitute_pattern_synonym(&syn_pat, &syn_args, &wilds, *span);
+                    return lower_pat(ctx, &expanded);
+                }
+            }
             if let Some(def_id) = resolve_constructor(ctx, con_name, *span) {
                 let con_ref = ctx.def_ref(def_id, *span);
                 let mut hir_field_pats: Vec<hir::FieldPat> = Vec::with_capacity(fields.len());

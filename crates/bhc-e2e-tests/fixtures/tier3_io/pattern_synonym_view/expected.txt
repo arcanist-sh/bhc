@@ -1,0 +1,4 @@
+figure t
+plain other
+True
+False

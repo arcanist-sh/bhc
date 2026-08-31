@@ -3441,7 +3441,54 @@ impl Compiler {
             ));
         }
 
+        // Pattern synonyms travel with their right-hand side, so a use here
+        // expands exactly as it does in the defining module. Registering only
+        // the NAME would resolve the use and then match the wrong constructor.
+        for ps in &iface.pattern_synonyms {
+            let name = Symbol::intern(&ps.name);
+            if ctx.lookup_pattern_synonym(name).is_some() {
+                continue;
+            }
+            let args: Vec<Symbol> = ps.args.iter().map(|a| Symbol::intern(a)).collect();
+            ctx.register_pattern_synonym(name, args, Self::interface_pat_to_ast(&ps.pattern));
+        }
+
         exports
+    }
+
+    /// Rebuild an AST pattern from the interface's restricted form.
+    fn interface_pat_to_ast(pat: &bhc_interface::InterfacePat) -> bhc_ast::Pat {
+        use bhc_interface::InterfacePat as P;
+        let span = bhc_span::Span::default();
+        let ident = |n: &str| bhc_intern::Ident::new(Symbol::intern(n));
+        match pat {
+            P::Wildcard => bhc_ast::Pat::Wildcard(span),
+            P::Var(n) => bhc_ast::Pat::Var(ident(n), span),
+            P::Con(n, args) => bhc_ast::Pat::Con(
+                ident(n),
+                args.iter().map(Self::interface_pat_to_ast).collect(),
+                span,
+            ),
+            P::Infix(l, op, r) => bhc_ast::Pat::Infix(
+                Box::new(Self::interface_pat_to_ast(l)),
+                ident(op),
+                Box::new(Self::interface_pat_to_ast(r)),
+                span,
+            ),
+            P::Tuple(ps) => {
+                bhc_ast::Pat::Tuple(ps.iter().map(Self::interface_pat_to_ast).collect(), span)
+            }
+            P::List(ps) => {
+                bhc_ast::Pat::List(ps.iter().map(Self::interface_pat_to_ast).collect(), span)
+            }
+            P::View(f, inner) => bhc_ast::Pat::View(
+                Box::new(bhc_ast::Expr::Var(ident(f), span)),
+                Box::new(Self::interface_pat_to_ast(inner)),
+                span,
+            ),
+            P::Int(n) => bhc_ast::Pat::Lit(bhc_ast::Lit::Int(*n), span),
+            P::Str(t) => bhc_ast::Pat::Lit(bhc_ast::Lit::String(t.clone()), span),
+        }
     }
 
     /// Generate code with multi-module support (module-qualified symbol names).

@@ -310,6 +310,11 @@ fn test_tier3_constrained_value_superclass_native() {
 }
 
 #[test]
+fn test_tier3_pattern_synonym_view_native() {
+    run_native_test("tier3_io/pattern_synonym_view", Profile::Default);
+}
+
+#[test]
 fn test_tier3_overapplied_partial_native() {
     run_native_test("tier3_io/overapplied_partial", Profile::Default);
 }

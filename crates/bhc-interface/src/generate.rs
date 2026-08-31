@@ -4,8 +4,9 @@
 //! enabling separate compilation and type checking without source code.
 
 use crate::{
-    ClassMethod, Constraint, DataConstructor, ExportedClass, ExportedInstance, ExportedType,
-    ExportedValue, Kind, ModuleInterface, Type, TypeDefinition, TypeSignature,
+    ClassMethod, Constraint, DataConstructor, ExportedClass, ExportedInstance,
+    ExportedPatternSynonym, ExportedType, ExportedValue, InterfacePat, Kind, ModuleInterface, Type,
+    TypeDefinition, TypeSignature,
 };
 use bhc_ast::Module as AstModule;
 use bhc_types::Ty as TyckTy;
@@ -403,7 +404,72 @@ pub fn generate_interface(
         });
     }
 
+    // Pattern synonyms, right-hand side included. Exporting only the NAME (as
+    // an opaque constructor) resolves a use and then matches the wrong thing:
+    // pandoc-types' `SimpleFigure` stands for a `Para` holding an `Image`, and
+    // its consumers — `Writers.MediaWiki`, `Writers.Texinfo` — need the shape,
+    // not a stand-in.
+    for decl in &ast.decls {
+        if let bhc_ast::Decl::PatternSynonym(ps) = decl {
+            if let Some(pattern) = convert_pat(&ps.pattern) {
+                iface.pattern_synonyms.push(ExportedPatternSynonym {
+                    name: ps.name.name.as_str().to_string(),
+                    args: ps.args.iter().map(|a| a.as_str().to_string()).collect(),
+                    pattern,
+                });
+            }
+        }
+    }
+
     iface
+}
+
+/// Convert an AST pattern to the interface's restricted form.
+///
+/// `None` for anything the restricted form cannot express, which leaves the
+/// synonym unexported rather than exported wrongly.
+fn convert_pat(pat: &bhc_ast::Pat) -> Option<InterfacePat> {
+    use bhc_ast::Pat;
+    Some(match pat {
+        Pat::Wildcard(_) => InterfacePat::Wildcard,
+        Pat::Var(i, _) => InterfacePat::Var(i.name.as_str().to_string()),
+        Pat::Paren(inner, _) | Pat::Bang(inner, _) | Pat::Lazy(inner, _) => convert_pat(inner)?,
+        Pat::Ann(inner, _, _) => convert_pat(inner)?,
+        Pat::Con(i, args, _) => InterfacePat::Con(
+            i.name.as_str().to_string(),
+            args.iter().map(convert_pat).collect::<Option<Vec<_>>>()?,
+        ),
+        Pat::QualCon(_, i, args, _) => InterfacePat::Con(
+            i.name.as_str().to_string(),
+            args.iter().map(convert_pat).collect::<Option<Vec<_>>>()?,
+        ),
+        Pat::Infix(l, op, r, _) => InterfacePat::Infix(
+            Box::new(convert_pat(l)?),
+            op.name.as_str().to_string(),
+            Box::new(convert_pat(r)?),
+        ),
+        Pat::Tuple(ps, _) => {
+            InterfacePat::Tuple(ps.iter().map(convert_pat).collect::<Option<Vec<_>>>()?)
+        }
+        Pat::List(ps, _) => {
+            InterfacePat::List(ps.iter().map(convert_pat).collect::<Option<Vec<_>>>()?)
+        }
+        Pat::Lit(lit, _) => match lit {
+            bhc_ast::Lit::Int(n) => InterfacePat::Int(*n),
+            bhc_ast::Lit::String(t) => InterfacePat::Str(t.to_string()),
+            _ => return None,
+        },
+        // Only a bare function name as the view: anything else would need an
+        // expression language in the interface.
+        Pat::View(expr, inner, _) => {
+            let name = match expr.as_ref() {
+                bhc_ast::Expr::Var(i, _) => i.name.as_str().to_string(),
+                _ => return None,
+            };
+            InterfacePat::View(name, Box::new(convert_pat(inner)?))
+        }
+        Pat::Record(..) | Pat::QualRecord(..) | Pat::As(..) => return None,
+    })
 }
 
 /// Convert an AST constructor declaration to an interface DataConstructor.

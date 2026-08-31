@@ -326,6 +326,50 @@ pub struct ModuleInterface {
     /// `construct_dictionary` defaults).
     #[serde(default)]
     pub class_defaults: Vec<InstanceMethodImpl>,
+    /// Exported `pattern` declarations, right-hand side included.
+    #[serde(default)]
+    pub pattern_synonyms: Vec<ExportedPatternSynonym>,
+}
+
+/// A pattern in the restricted shape a pattern synonym's right-hand side
+/// takes. Rich enough for what `pattern` declarations are written with, and
+/// small enough to serialize; anything outside it makes the synonym
+/// unexportable rather than wrong.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum InterfacePat {
+    /// `_`
+    Wildcard,
+    /// `x`
+    Var(String),
+    /// `Just x`, `Para [..]`
+    Con(String, Vec<InterfacePat>),
+    /// `x : xs`
+    Infix(Box<InterfacePat>, String, Box<InterfacePat>),
+    /// `(a, b)`
+    Tuple(Vec<InterfacePat>),
+    /// `[a, b]`
+    List(Vec<InterfacePat>),
+    /// `(f -> p)` — the view function named, applied to the scrutinee.
+    View(String, Box<InterfacePat>),
+    /// An integer literal.
+    Int(i64),
+    /// A string literal.
+    Str(String),
+}
+
+/// An exported `pattern` declaration.
+///
+/// The right-hand side travels, not just the name: a consumer expands a use
+/// of the synonym exactly as the defining module does. An opaque constructor
+/// would resolve the name and then match the wrong thing.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExportedPatternSynonym {
+    /// The synonym's name.
+    pub name: String,
+    /// Its argument names, in order.
+    pub args: Vec<String>,
+    /// The pattern it stands for.
+    pub pattern: InterfacePat,
 }
 
 /// A dependency on another interface.
@@ -356,6 +400,7 @@ impl ModuleInterface {
             reexports: HashMap::new(),
             instance_methods: Vec::new(),
             class_defaults: Vec::new(),
+            pattern_synonyms: Vec::new(),
         }
     }
 

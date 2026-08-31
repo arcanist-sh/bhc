@@ -2241,6 +2241,13 @@ fn traversal_monad_ty(
                 _ => None,
             }
         })
+        // An instance method's body has neither: parsec's
+        // `p1 <* p2 = do { x1 <- p1; void p2; return x1 }` is the `<*` of
+        // `instance Applicative (ParsecT s u m)`, and the instance names the
+        // monad. Wrong for a traversal at some OTHER monad inside an instance
+        // — but then no `Monad` instance resolves at this type and the rewrite
+        // declines anyway.
+        .or_else(|| ctx.current_instance_type().cloned())
 }
 
 /// A monad whose actions codegen runs as it builds them. For those, and only
@@ -2278,6 +2285,90 @@ fn nullary_var(name: &str, span: Span) -> core::Expr {
 /// Rewritten to a fold through the monad's own `>>=` and `pure`. `foldr` is
 /// fine to build the chain in any order: constructing an action of a
 /// non-eager monad has no effect.
+/// What `lower_monadic_lift` does with the bound results.
+#[derive(Clone, Copy)]
+enum MonadicShape {
+    /// `pure ()` — `void`.
+    Unit,
+    /// `pure (f v1 .. vn)` — `liftM`, `liftM2`.
+    ApplyFn,
+}
+
+/// `void a`, `liftM f a`, `liftM2 f a b` at a monad codegen does not run
+/// eagerly: bind each action in order, then `pure` the result.
+fn lower_monadic_lift(
+    ctx: &mut LowerContext,
+    args: &[&hir::Expr],
+    n_actions: usize,
+    shape: MonadicShape,
+    head_span: Span,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let Some(monad_ty) = traversal_monad_ty(ctx, span, head_span, args.len()) else {
+        return Ok(None);
+    };
+    if monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none() {
+        return Ok(None);
+    }
+    let Some(bind_e) = ctx.resolve_method_at_concrete_type(
+        Symbol::intern(">>="),
+        Symbol::intern("Monad"),
+        &monad_ty,
+        span,
+    ) else {
+        return Ok(None);
+    };
+    let Some(pure_e) = ctx.resolve_method_at_concrete_type(
+        Symbol::intern("pure"),
+        Symbol::intern("Applicative"),
+        &monad_ty,
+        span,
+    ) else {
+        return Ok(None);
+    };
+    // The actions are the LAST `n_actions` arguments; anything before them is
+    // the function `liftM`/`liftM2` applies.
+    let split = args.len() - n_actions;
+    let fn_core = match shape {
+        MonadicShape::ApplyFn => Some(lower_expr(ctx, args[0])?),
+        MonadicShape::Unit => None,
+    };
+    let mut action_cores = Vec::with_capacity(n_actions);
+    for a in &args[split..] {
+        action_cores.push(lower_expr(ctx, a)?);
+    }
+    let binders: Vec<Var> = (0..n_actions)
+        .map(|i| ctx.fresh_var(&format!("$lift_v{i}"), Ty::Error, span))
+        .collect();
+    let result = match shape {
+        MonadicShape::Unit => nullary_var("()", span),
+        MonadicShape::ApplyFn => {
+            let mut e = fn_core.expect("ApplyFn always lowers its function");
+            for b in &binders {
+                e = core::Expr::App(
+                    Box::new(e),
+                    Box::new(core::Expr::Var(b.clone(), span)),
+                    span,
+                );
+            }
+            e
+        }
+    };
+    let mut body = core::Expr::App(Box::new(pure_e), Box::new(result), span);
+    for (action, binder) in action_cores.into_iter().zip(binders).rev() {
+        body = core::Expr::App(
+            Box::new(core::Expr::App(
+                Box::new(bind_e.clone()),
+                Box::new(action),
+                span,
+            )),
+            Box::new(core::Expr::Lam(binder, Box::new(body), span)),
+            span,
+        );
+    }
+    Ok(Some(body))
+}
+
 /// `\mf mx -> mf >>= \g -> mx >>= \v -> pure (g v)` at `monad_ty`: `ap` used
 /// as a value, which is how parsec defines `<*>` for `ParsecT`.
 fn lower_ap_lambda(ctx: &mut LowerContext, monad_ty: &Ty, span: Span) -> Option<core::Expr> {
@@ -2415,6 +2506,17 @@ fn try_lower_monadic_traversal(
     // implementation for it and aborts with `stub: ap not implemented`.
     if name.as_str() == "ap" && args.len() == 2 {
         return lower_monadic_ap(ctx, args[0], args[1], head_ref.span, span);
+    }
+    // `void`, `liftM` and `liftM2` are the same shape: bind each action, then
+    // `pure` of something built from the results. parsec's `<*` is
+    // `do { x <- p; void q; return x }`, so `anyChar <* anyChar` crashed.
+    if let Some((n_actions, build)) = match (name.as_str(), args.len()) {
+        ("void", 1) => Some((1usize, MonadicShape::Unit)),
+        ("liftM" | "fmapM", 2) => Some((1, MonadicShape::ApplyFn)),
+        ("liftM2", 3) => Some((2, MonadicShape::ApplyFn)),
+        _ => None,
+    } {
+        return lower_monadic_lift(ctx, &args, n_actions, build, head_ref.span, span);
     }
     // `collect`: the result list is kept. `elems`: the arguments are already
     // actions, there is no function to apply.
@@ -2810,6 +2912,15 @@ fn lower_app(
                                 }
                             }
                         }
+                    }
+                    //  4. the instance being defined. parsec's `<*` is
+                    //     `do { x1 <- p1; void p2; return x1 }` inside
+                    //     `instance Applicative (ParsecT s u m)`; none of the
+                    //     above pins the monad there, so `return x1` stayed a
+                    //     builtin and handed the Char on raw — a later
+                    //     dereference of `0x61`.
+                    if let Some(inst_ty) = ctx.current_instance_type().cloned() {
+                        candidates.push(inst_ty);
                     }
                     for monad_ty in candidates {
                         // Builtin monads (IO/StateT/…) take codegen's fast path.

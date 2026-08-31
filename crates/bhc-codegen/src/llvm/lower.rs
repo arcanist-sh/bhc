@@ -1587,7 +1587,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                 (0..total_params).map(|_| ptr_type.into()).collect();
             let fn_type = ptr_type.fn_type(&param_types, false);
-            let fn_val = self.module.add_function(&sym.llvm_name, fn_type);
+            // The same symbol is declared under both its bare and its
+            // module-qualified name; adding it twice would make LLVM uniquify
+            // the second into `Mod.name.1`, which links to nothing.
+            let fn_val = match self.module.llvm_module().get_function(&sym.llvm_name) {
+                Some(existing) => existing,
+                None => self.module.add_function(&sym.llvm_name, fn_type),
+            };
             self.external_functions.insert(sym.name, fn_val);
         }
         Ok(())

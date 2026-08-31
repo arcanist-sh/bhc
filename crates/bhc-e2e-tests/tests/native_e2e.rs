@@ -195,6 +195,14 @@ fn test_tier2_multimodule_chain_native() {
     run_native_test("tier2_functions/multimodule_chain", Profile::Default);
 }
 
+#[test]
+fn test_tier2_multimodule_name_collision_native() {
+    run_native_test(
+        "tier2_functions/multimodule_name_collision",
+        Profile::Default,
+    );
+}
+
 // =============================================================================
 // Tier 3: IO Tests
 // =============================================================================

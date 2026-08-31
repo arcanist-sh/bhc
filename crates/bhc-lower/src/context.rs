@@ -221,6 +221,14 @@ pub struct LowerContext {
     /// these into module-qualified extern declarations so cross-module
     /// calls link against the real symbol instead of a local stub.
     pub interface_symbols: Vec<(Symbol, String, u32)>,
+    /// The defining module of each bare name already claimed by a loaded
+    /// interface. Two imported modules can export the SAME name (parsec's
+    /// `Text.Parsec.Char.satisfy` and pandoc's `Text.Pandoc.Sources.satisfy`),
+    /// and Core `Var`s carry only the bare name — so codegen would resolve
+    /// both to whichever extern was declared first and call the wrong
+    /// function with the wrong arity. The interface loader consults this to
+    /// give the SECOND claimant a module-qualified Core name.
+    pub interface_value_modules: FxHashMap<Symbol, String>,
     /// Constructors loaded from `.bhi` interfaces for codegen metadata:
     /// (name, tag, arity, owning type name, is_newtype).
     pub interface_constructors: Vec<(String, u32, u32, Option<String>, bool)>,
@@ -284,6 +292,7 @@ impl LowerContext {
             defs: IndexMap::default(),
             interface_type_aliases: Vec::new(),
             interface_symbols: Vec::new(),
+            interface_value_modules: FxHashMap::default(),
             interface_constructors: Vec::new(),
             interface_instances: Vec::new(),
             interface_classes: Vec::new(),

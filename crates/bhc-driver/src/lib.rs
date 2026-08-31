@@ -626,9 +626,19 @@ impl Compiler {
         let mut imported_symbols: Vec<CompiledSymbol> = Vec::new();
         for (name, origin, arity) in &lower_ctx.interface_symbols {
             if seen_symbols.insert(*name) {
+                // A name the loader already qualified (two interfaces export
+                // it) is its own LLVM symbol; qualifying again would produce
+                // `Mod.Mod.name`.
+                let bare = name.as_str();
+                let prefix = format!("{}.", origin);
+                let llvm_name = if let Some(rest) = bare.strip_prefix(&prefix) {
+                    format!("{}.{}", origin, rest)
+                } else {
+                    format!("{}.{}", origin, bare)
+                };
                 imported_symbols.push(CompiledSymbol {
                     name: *name,
-                    llvm_name: format!("{}.{}", origin, name.as_str()),
+                    llvm_name,
                     param_count: *arity as usize,
                 });
             }
@@ -1631,10 +1641,25 @@ impl Compiler {
             .on_phase_start(CompilePhase::Codegen, &unit.module_name);
 
         // Collect imported symbols from all already-compiled modules
+        // Each symbol is declared under its bare name AND under its
+        // module-qualified name: a value whose bare name several modules export
+        // is referred to by the qualified name in Core (see `lower_with_registry`),
+        // and the bare key alone cannot tell the two apart.
         let imported_symbols: Vec<CompiledSymbol> = registry
             .modules
             .values()
-            .flat_map(|info| info.symbols.iter().cloned())
+            .flat_map(|info| {
+                info.symbols.iter().flat_map(|s| {
+                    [
+                        s.clone(),
+                        CompiledSymbol {
+                            name: Symbol::intern(&s.llvm_name),
+                            llvm_name: s.llvm_name.clone(),
+                            param_count: s.param_count,
+                        },
+                    ]
+                })
+            })
             .collect();
 
         // Collect imported constructor metadata for codegen
@@ -2564,6 +2589,25 @@ impl Compiler {
         // Each module's lowering starts DefIds from the same base, so raw DefIds
         // from one module will collide with another's.
         let mut cache = ModuleCache::new();
+        // A name DEFINED by more than one already-compiled module is ambiguous
+        // once it reaches Core, which carries only the bare name — codegen
+        // would resolve every use to whichever module's extern was declared
+        // last and call it with the wrong arity. Every definer of such a name
+        // gets a module-qualified Core name, so the choice does not depend on
+        // registry iteration order. Counting DEFINITIONS and not exports
+        // matters: two modules that both re-export a third module's name are
+        // not ambiguous, and qualifying them would name a symbol that no
+        // object defines.
+        let mut def_counts: FxHashMap<Symbol, usize> = FxHashMap::default();
+        let mut defined_in: FxHashMap<&str, FxHashSet<Symbol>> = FxHashMap::default();
+        for (mod_name, info) in &registry.modules {
+            let own = defined_in.entry(mod_name.as_str()).or_default();
+            for symbol in &info.symbols {
+                if own.insert(symbol.name) {
+                    *def_counts.entry(symbol.name).or_insert(0) += 1;
+                }
+            }
+        }
         for (name, info) in &registry.modules {
             let sym = Symbol::intern(name);
             let mut remapped_exports = info.exports.clone();
@@ -2572,9 +2616,18 @@ impl Compiler {
             let mut new_values = FxHashMap::default();
             for (&val_name, &_old_def_id) in &remapped_exports.values {
                 let fresh_id = ctx.fresh_def_id();
+                let ambiguous = def_counts.get(&val_name).copied().unwrap_or(0) > 1
+                    && defined_in
+                        .get(name.as_str())
+                        .is_some_and(|own| own.contains(&val_name));
+                let core_name = if ambiguous {
+                    Symbol::intern(&format!("{}.{}", name, val_name.as_str()))
+                } else {
+                    val_name
+                };
                 ctx.define(
                     fresh_id,
-                    val_name,
+                    core_name,
                     bhc_lower::DefKind::ImportedValue,
                     bhc_span::Span::default(),
                 );
@@ -3213,18 +3266,38 @@ impl Compiler {
             let name = Symbol::intern(&value.name);
             let fresh_id = ctx.fresh_def_id();
             let scheme = converter.convert_type_signature(&value.signature);
+            // A Core `Var` carries only the bare name, and codegen keys its
+            // extern table on it. When a SECOND interface exports a name some
+            // other module already claimed, give this one a module-qualified
+            // Core name so the two stay distinguishable all the way to the
+            // call — otherwise every use resolves to the first declaration and
+            // calls a different function, with a different arity, whose leading
+            // dictionary parameter the caller never passes.
+            let core_name = match ctx.interface_value_modules.get(&name) {
+                Some(owner) if owner != module_name => {
+                    Symbol::intern(&format!("{}.{}", module_name, value.name))
+                }
+                Some(_) => name,
+                None => {
+                    ctx.interface_value_modules
+                        .insert(name, module_name.to_string());
+                    name
+                }
+            };
             ctx.define_with_type(
                 fresh_id,
-                name,
+                core_name,
                 bhc_lower::DefKind::Value,
                 bhc_span::Span::default(),
                 scheme,
             );
+            // Keyed by the BARE name: that is what `Module.name` qualified
+            // access and unqualified resolution look up.
             exports.values.insert(name, fresh_id);
             // Record for module-qualified extern declaration at codegen.
             if let Some(arity) = value.arity {
                 ctx.interface_symbols
-                    .push((name, module_name.to_string(), arity));
+                    .push((core_name, module_name.to_string(), arity));
             }
         }
 

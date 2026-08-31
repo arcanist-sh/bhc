@@ -2510,6 +2510,32 @@ fn try_lower_monadic_traversal(
     // `void`, `liftM` and `liftM2` are the same shape: bind each action, then
     // `pure` of something built from the results. parsec's `<*` is
     // `do { x <- p; void q; return x }`, so `anyChar <* anyChar` crashed.
+    // `when c a` / `unless c a` — codegen's versions run the action as they
+    // build it, so at `ParsecT` the parser ran during construction and the
+    // caller got whatever it returned.
+    if let ("when" | "unless", 2) = (name.as_str(), args.len()) {
+        if let Some(monad_ty) = traversal_monad_ty(ctx, span, head_ref.span, 2) {
+            if !monad_runs_eagerly(&monad_ty) && applied_head_name(&monad_ty).is_some() {
+                if let Some(pure_e) = ctx.resolve_method_at_concrete_type(
+                    Symbol::intern("pure"),
+                    Symbol::intern("Applicative"),
+                    &monad_ty,
+                    span,
+                ) {
+                    let cond = lower_expr(ctx, args[0])?;
+                    let action = lower_expr(ctx, args[1])?;
+                    let skip =
+                        core::Expr::App(Box::new(pure_e), Box::new(nullary_var("()", span)), span);
+                    let (then_e, else_e) = if name.as_str() == "when" {
+                        (action, skip)
+                    } else {
+                        (skip, action)
+                    };
+                    return Ok(Some(make_if_expr(cond, then_e, else_e, span)));
+                }
+            }
+        }
+    }
     if let Some((n_actions, build)) = match (name.as_str(), args.len()) {
         ("void", 1) => Some((1usize, MonadicShape::Unit)),
         ("liftM" | "fmapM", 2) => Some((1, MonadicShape::ApplyFn)),

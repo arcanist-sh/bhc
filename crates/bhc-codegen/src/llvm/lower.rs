@@ -4882,6 +4882,24 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             None,
         );
         self.functions.insert(VarId::new(1000915), rat_show);
+        // Character predicates missing from the original set — pandoc's
+        // `anyOrderedListMarker` aborted on `stub: isAsciiLower not implemented`.
+        for (name, id) in [
+            ("bhc_char_is_ascii_lower", 1000916usize),
+            ("bhc_char_is_ascii_upper", 1000917),
+            ("bhc_char_is_oct_digit", 1000918),
+            ("bhc_char_is_separator", 1000919),
+            ("bhc_char_is_latin1", 1000920),
+        ] {
+            let f = self.module.llvm_module().add_function(
+                name,
+                self.llvm_ctx
+                    .bool_type()
+                    .fn_type(&[self.llvm_ctx.i32_type().into()], false),
+                None,
+            );
+            self.functions.insert(VarId::new(id), f);
+        }
     }
 
     // ========================================================================
@@ -5901,6 +5919,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "isPunctuation" => Some(1),
             "isSpace" => Some(1),
             "isSymbol" => Some(1),
+            "isAsciiLower" => Some(1),
+            "isAsciiUpper" => Some(1),
+            "isOctDigit" => Some(1),
+            "isSeparator" => Some(1),
+            "isLatin1" => Some(1),
             "isUpper" => Some(1),
             "toLower" => Some(1),
             "toUpper" => Some(1),
@@ -7054,6 +7077,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "isNumber" => self.lower_builtin_char_pred(args[0], 1000043, "is_number"),
             "isPunctuation" => self.lower_builtin_char_pred(args[0], 1000044, "is_punct"),
             "isSymbol" => self.lower_builtin_char_pred(args[0], 1000045, "is_symbol"),
+            "isAsciiLower" => self.lower_builtin_char_pred(args[0], 1000916, "is_ascii_lower"),
+            "isAsciiUpper" => self.lower_builtin_char_pred(args[0], 1000917, "is_ascii_upper"),
+            "isOctDigit" => self.lower_builtin_char_pred(args[0], 1000918, "is_oct_digit"),
+            "isSeparator" => self.lower_builtin_char_pred(args[0], 1000919, "is_separator"),
+            "isLatin1" => self.lower_builtin_char_pred(args[0], 1000920, "is_latin1"),
             "toLower" => self.lower_builtin_char_conv(args[0], 1000037, "to_lower"),
             "toUpper" => self.lower_builtin_char_conv(args[0], 1000036, "to_upper"),
             "digitToInt" => self.lower_builtin_digit_to_int(args[0]),
@@ -16720,6 +16748,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         | "isControl"
                         | "isDigit"
                         | "isHexDigit"
+                        | "isAsciiLower"
+                        | "isAsciiUpper"
+                        | "isOctDigit"
+                        | "isSeparator"
+                        | "isLatin1"
                         | "isLetter"
                         | "isLower"
                         | "isNumber"
@@ -17096,6 +17129,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         | "isControl"
                         | "isDigit"
                         | "isHexDigit"
+                        | "isAsciiLower"
+                        | "isAsciiUpper"
+                        | "isOctDigit"
+                        | "isSeparator"
+                        | "isLatin1"
                         | "isLetter"
                         | "isLower"
                         | "isNumber"
@@ -49049,7 +49087,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // E.37: Data.Char predicates as first-class functions
             "isAlpha" | "isDigit" | "isAlphaNum" | "isSpace" | "isUpper" | "isLower"
             | "isPrint" | "isAscii" | "isControl" | "isHexDigit" | "isLetter" | "isNumber"
-            | "isPunctuation" | "isSymbol" => {
+            | "isPunctuation" | "isSymbol" | "isAsciiLower" | "isAsciiUpper" | "isOctDigit"
+            | "isSeparator" | "isLatin1" => {
                 let rts_id = match name {
                     "isAlpha" => 1000030,
                     "isDigit" => 1000031,
@@ -49065,6 +49104,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     "isNumber" => 1000043,
                     "isPunctuation" => 1000044,
                     "isSymbol" => 1000045,
+                    "isAsciiLower" => 1000916,
+                    "isAsciiUpper" => 1000917,
+                    "isOctDigit" => 1000918,
+                    "isSeparator" => 1000919,
+                    "isLatin1" => 1000920,
                     _ => unreachable!(),
                 };
                 let int_val = self.coerce_to_int(args[0])?;

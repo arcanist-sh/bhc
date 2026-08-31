@@ -3796,6 +3796,12 @@ impl Builtins {
             ("isAsciiLower", {
                 Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))
             }),
+            ("isOctDigit", {
+                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))
+            }),
+            ("isSeparator", {
+                Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))
+            }),
             ("isAsciiUpper", {
                 Scheme::mono(Ty::fun(self.char_ty.clone(), self.bool_ty.clone()))
             }),

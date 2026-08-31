@@ -100,6 +100,36 @@ pub extern "C" fn bhc_char_is_hex_digit(c: u32) -> bool {
     char::from_u32(c).is_some_and(|c| c.is_ascii_hexdigit())
 }
 
+/// Check if character is an ASCII lowercase letter
+#[no_mangle]
+pub extern "C" fn bhc_char_is_ascii_lower(c: u32) -> bool {
+    char::from_u32(c).is_some_and(|c| c.is_ascii_lowercase())
+}
+
+/// Check if character is an ASCII uppercase letter
+#[no_mangle]
+pub extern "C" fn bhc_char_is_ascii_upper(c: u32) -> bool {
+    char::from_u32(c).is_some_and(|c| c.is_ascii_uppercase())
+}
+
+/// Check if character is an octal digit
+#[no_mangle]
+pub extern "C" fn bhc_char_is_oct_digit(c: u32) -> bool {
+    ('0'..='7').contains(&(c as u8 as char)) && c < 128
+}
+
+/// Check if character is a separator (space or Unicode separator)
+#[no_mangle]
+pub extern "C" fn bhc_char_is_separator(c: u32) -> bool {
+    char::from_u32(c).is_some_and(|c| c == ' ' || c.is_whitespace() && !c.is_control())
+}
+
+/// Check if character is in Latin-1
+#[no_mangle]
+pub extern "C" fn bhc_char_is_latin1(c: u32) -> bool {
+    c <= 255
+}
+
 /// Check if character is a letter (alias for is_alpha)
 #[no_mangle]
 pub extern "C" fn bhc_char_is_letter(c: u32) -> bool {

@@ -681,6 +681,11 @@ fn test_tier3_applicative_via_ap_native() {
 }
 
 #[test]
+fn test_tier3_char_predicates_ascii_native() {
+    run_native_test("tier3_io/char_predicates_ascii", Profile::Default);
+}
+
+#[test]
 fn test_tier3_zipwithm_basic_native() {
     run_native_test("tier3_io/zipwithm_basic", Profile::Default);
 }

@@ -909,6 +909,8 @@ impl LowerContext {
             "isLatin1",
             "isAsciiLower",
             "isAsciiUpper",
+            "isOctDigit",
+            "isSeparator",
             // Show helpers
             "showString",
             "showChar",

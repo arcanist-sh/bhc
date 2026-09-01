@@ -192,45 +192,72 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                 binding_types.push((var_ids, fresh_ty));
             }
 
-            // Step 2: Check each binding's RHS and unify with pre-registered type
-            for (binding, (_var_ids, expected_ty)) in bindings.iter().zip(binding_types.iter()) {
-                let rhs_ty = infer_expr(ctx, &binding.rhs);
+            // Steps 2 and 3, per DEPENDENCY GROUP. A `where` block is not one
+            // monomorphic pass: a binding nothing else in the block depends on
+            // is generalized before its users are checked, so it may be used
+            // at two types. `Readers.Pod`'s `linkDest sp close ex` takes
+            // `char '>'` in one clause and a Text-valued parser in the other.
+            let group_order = {
+                let binds: Vec<Vec<DefId>> = binding_types
+                    .iter()
+                    .map(|(vars, _)| vars.iter().map(|(_, id)| *id).collect())
+                    .collect();
+                let refs: Vec<Vec<DefId>> = bindings
+                    .iter()
+                    .map(|b| {
+                        let mut r = Vec::new();
+                        crate::binding_groups::collect_expr_references(&b.rhs, &mut r);
+                        r
+                    })
+                    .collect();
+                crate::binding_groups::local_binding_order(&binds, &refs)
+            };
 
-                // If there's a signature, unify with it
-                if let Some(sig) = &binding.sig {
-                    ctx.unify(&rhs_ty, &sig.ty, binding.span);
+            for group in &group_order {
+                // Step 2: Check each binding's RHS and unify with pre-registered type
+                for &i in group {
+                    let binding = &bindings[i];
+                    let expected_ty = &binding_types[i].1;
+                    let rhs_ty = infer_expr(ctx, &binding.rhs);
+
+                    // If there's a signature, unify with it
+                    if let Some(sig) = &binding.sig {
+                        ctx.unify(&rhs_ty, &sig.ty, binding.span);
+                    }
+
+                    // Unify with the pre-registered type
+                    ctx.unify(&rhs_ty, expected_ty, binding.span);
+
+                    // Check pattern
+                    ctx.check_pattern(&binding.pat, &rhs_ty);
                 }
 
-                // Unify with the pre-registered type
-                ctx.unify(&rhs_ty, expected_ty, binding.span);
-
-                // Check pattern
-                ctx.check_pattern(&binding.pat, &rhs_ty);
-            }
-
-            // Step 3: Generalize binding types (update the environment)
-            // For pattern bindings, check_pattern has already set the correct types.
-            // We need to look up each variable's actual type and generalize it,
-            // rather than using the whole binding type.
-            for (binding, (var_ids, _ty)) in bindings.iter().zip(binding_types.iter()) {
-                // For simple variable patterns, the var's type is the binding type
-                // For complex patterns (Con, As, etc.), each var has its own type
-                for (name, def_id) in var_ids {
-                    // Look up the current type for this variable (set by check_pattern)
-                    let var_ty = ctx
-                        .env
-                        .lookup_def_id(*def_id)
-                        .map(|s| ctx.apply_subst(&s.ty))
-                        .unwrap_or_else(|| ctx.fresh_ty());
-                    let scheme = ctx.generalize(&var_ty);
-                    ctx.env.insert_local(*name, scheme.clone());
-                    ctx.env.insert_global(*def_id, scheme);
-                }
-                // For simple variable bindings, also add the generalized type annotation if present
-                if let Some(sig) = &binding.sig {
-                    if var_ids.len() == 1 {
-                        let (_name, def_id) = &var_ids[0];
-                        ctx.env.insert_global(*def_id, sig.clone());
+                // Step 3: Generalize binding types (update the environment)
+                // For pattern bindings, check_pattern has already set the correct types.
+                // We need to look up each variable's actual type and generalize it,
+                // rather than using the whole binding type.
+                for &i in group {
+                    let binding = &bindings[i];
+                    let var_ids = &binding_types[i].0;
+                    // For simple variable patterns, the var's type is the binding type
+                    // For complex patterns (Con, As, etc.), each var has its own type
+                    for (name, def_id) in var_ids {
+                        // Look up the current type for this variable (set by check_pattern)
+                        let var_ty = ctx
+                            .env
+                            .lookup_def_id(*def_id)
+                            .map(|s| ctx.apply_subst(&s.ty))
+                            .unwrap_or_else(|| ctx.fresh_ty());
+                        let scheme = ctx.generalize(&var_ty);
+                        ctx.env.insert_local(*name, scheme.clone());
+                        ctx.env.insert_global(*def_id, scheme);
+                    }
+                    // For simple variable bindings, also add the generalized type annotation if present
+                    if let Some(sig) = &binding.sig {
+                        if var_ids.len() == 1 {
+                            let (_name, def_id) = &var_ids[0];
+                            ctx.env.insert_global(*def_id, sig.clone());
+                        }
                     }
                 }
             }

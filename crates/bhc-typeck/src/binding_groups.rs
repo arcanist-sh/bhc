@@ -164,7 +164,7 @@ fn collect_references(item: &Item) -> Vec<DefId> {
 }
 
 /// Collect `DefId`s from an expression.
-fn collect_expr_references(expr: &Expr, refs: &mut Vec<DefId>) {
+pub(crate) fn collect_expr_references(expr: &Expr, refs: &mut Vec<DefId>) {
     match expr {
         Expr::Var(def_ref) | Expr::Con(def_ref) => {
             refs.push(def_ref.def_id);
@@ -221,6 +221,41 @@ fn collect_expr_references(expr: &Expr, refs: &mut Vec<DefId>) {
         }
         Expr::Lit(_, _) | Expr::Error(_) => {}
     }
+}
+
+/// Dependency-ordered groups of LOCAL (`let` / `where`) bindings, by index.
+///
+/// `binds[i]` is what binding `i` binds, `refs[i]` what its right-hand side
+/// references. Groups come out dependencies-first, so a binding can be
+/// GENERALIZED before anything that uses it is checked. Without the ordering
+/// the whole `where` block is one monomorphic pass and the first use fixes the
+/// type: pandoc's `Readers.Pod` binds `linkDest sp close ex` and calls it with
+/// `close = char '>'` in one clause and a Text-valued parser in the other,
+/// which is only well typed if `linkDest` is generalized first.
+#[must_use]
+pub fn local_binding_order(binds: &[Vec<DefId>], refs: &[Vec<DefId>]) -> Vec<Vec<usize>> {
+    let mut def_to_idx: FxHashMap<DefId, usize> = FxHashMap::default();
+    for (idx, defs) in binds.iter().enumerate() {
+        for d in defs {
+            def_to_idx.insert(*d, idx);
+        }
+    }
+    let mut graph: DiGraph<usize, ()> = DiGraph::new();
+    let nodes: Vec<NodeIndex> = (0..binds.len()).map(|i| graph.add_node(i)).collect();
+    for (idx, rs) in refs.iter().enumerate() {
+        for r in rs {
+            if let Some(&ref_idx) = def_to_idx.get(r) {
+                if ref_idx != idx {
+                    graph.add_edge(nodes[idx], nodes[ref_idx], ());
+                }
+            }
+        }
+    }
+    // Kosaraju returns sinks first — dependencies before dependents.
+    kosaraju_scc(&graph)
+        .into_iter()
+        .map(|scc| scc.into_iter().map(|n| graph[n]).collect())
+        .collect()
 }
 
 #[cfg(test)]

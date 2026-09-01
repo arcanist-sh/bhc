@@ -842,7 +842,7 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
             // declared scheme leaves open: `char :: (Monad m, Stream s m Char,
             // UpdateSourcePos s Char) => Char -> ParsecT s u m Char` used at
             // `Sources` pins `s` even where `m` stays a variable.
-            let occ_subst = ctx.resolved_expr_ty_opt(def_ref.span).map(|occ| {
+            let occ_subst = refined_occurrence_ty(ctx, def_ref.span).map(|occ| {
                 let mut subst = bhc_types::Subst::new();
                 match_ty(&scheme_ty, &occ, &mut subst);
                 subst
@@ -1352,7 +1352,7 @@ fn lower_constrained_value_all_dicts(
     scheme_ty: &Ty,
     constraints: &[Constraint],
 ) -> Option<core::Expr> {
-    let occ_ty = ctx.resolved_expr_ty_opt(def_ref.span)?;
+    let occ_ty = refined_occurrence_ty(ctx, def_ref.span)?;
     let mut subst = bhc_types::Subst::new();
     match_ty(scheme_ty, &occ_ty, &mut subst);
     // A function instantiation means this is a constrained *function*; those
@@ -1426,6 +1426,299 @@ fn callee_param_tys_and_subst(
     Some((param_tys, subst))
 }
 
+/// Whether the type contains an error hole. A hint built from one would bind a
+/// constrained variable to nothing and make a leaf *look* resolved.
+fn ty_has_error(ty: &Ty) -> bool {
+    match ty {
+        Ty::Error => true,
+        Ty::Var(_) | Ty::Con(_) | Ty::Prim(_) | Ty::Nat(_) | Ty::TyList(_) => false,
+        Ty::App(f, a) | Ty::Fun(f, a) => ty_has_error(f) || ty_has_error(a),
+        Ty::Tuple(tys) => tys.iter().any(ty_has_error),
+        Ty::List(elem) => ty_has_error(elem),
+        Ty::Forall(_, body) => ty_has_error(body),
+    }
+}
+
+/// A compact one-line rendering of a type, for the propagation trace.
+pub(crate) fn dbg_ty(ty: &Ty) -> String {
+    match ty {
+        Ty::Var(v) => format!("t{}", v.id),
+        Ty::Con(c) => c.name.as_str().to_string(),
+        Ty::Prim(_) => "#".into(),
+        Ty::App(f, a) => format!("({} {})", dbg_ty(f), dbg_ty(a)),
+        Ty::Fun(a, r) => format!("({} -> {})", dbg_ty(a), dbg_ty(r)),
+        Ty::Tuple(ts) => format!("({})", ts.iter().map(dbg_ty).collect::<Vec<_>>().join(",")),
+        Ty::List(e) => format!("[{}]", dbg_ty(e)),
+        Ty::Forall(_, b) => dbg_ty(b),
+        Ty::Error => "ERR".into(),
+        Ty::Nat(_) | Ty::TyList(_) => "?".into(),
+    }
+}
+
+/// How many arrows a type has at its top level: `a -> b -> c` has two.
+fn arrow_count(ty: &Ty) -> usize {
+    let mut n = 0;
+    let mut cur = ty;
+    while let Ty::Fun(_, r) = cur {
+        n += 1;
+        cur = r.as_ref();
+    }
+    n
+}
+
+/// Push a caller's expected type inward, recording it for every sub-expression
+/// that shares it, so a constrained value buried under an unconstrained head
+/// can still resolve its own dictionary.
+///
+/// `readWithM (try (id pB)) …` is the shape that needs this: `readWithM`'s
+/// parameter names the stream type `Sources`, `try` and `id` pass it straight
+/// through, and `pB :: Stream s m Char => …` is the leaf whose dictionary
+/// depends on it. Typeck recorded `pB`'s occurrence as a row of bare variables,
+/// so without the hint the constraint resolves to nothing and the slot becomes
+/// a null placeholder — which is a parser run through its own continuation.
+/// The head's type comes from typeck rather than from a scheme, so a BUILTIN
+/// head (`maybe`, `id`, `either`) carries the type inward just as a declared
+/// one does; this is why pandoc's `orderedListStart` (`try (maybe
+/// anyOrderedListMarker … mbstydelim)`) is reached at all.
+fn prop_dbg() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("BHC_DBG_PROP").is_some())
+}
+
+pub(crate) fn propagate_expected_ty(
+    ctx: &mut LowerContext,
+    expr: &hir::Expr,
+    expected: &Ty,
+    depth: u32,
+) {
+    if prop_dbg() {
+        let kind = match expr {
+            Expr::Var(dr) => format!(
+                "Var {:?}",
+                ctx.lookup_var(dr.def_id)
+                    .map(|v| v.name.as_str().to_string())
+            ),
+            Expr::App(..) => "App".into(),
+            Expr::Lam(..) => "Lam".into(),
+            Expr::Let(..) => "Let".into(),
+            Expr::Case(..) => "Case".into(),
+            other => format!("{:?}", std::mem::discriminant(other)),
+        };
+        eprintln!(
+            "{}PROP {} <- {}",
+            "  ".repeat(depth as usize),
+            kind,
+            crate::expr::dbg_ty(expected)
+        );
+    }
+    // The walk is bounded: a deeply nested spine gains nothing from more
+    // levels, and the hint only ever refines what typeck already recorded.
+    if depth > 6 || ty_has_error(expected) {
+        return;
+    }
+    match expr {
+        Expr::Var(def_ref) => {
+            ctx.record_expected_ty(def_ref.span, expected.clone());
+        }
+        Expr::Ann(inner, _, _) | Expr::TypeApp(inner, _, _) => {
+            propagate_expected_ty(ctx, inner, expected, depth + 1);
+        }
+        Expr::If(_, then_e, else_e, _) => {
+            propagate_expected_ty(ctx, then_e, expected, depth + 1);
+            propagate_expected_ty(ctx, else_e, expected, depth + 1);
+        }
+        Expr::Let(_, body, _) => {
+            propagate_expected_ty(ctx, body, expected, depth + 1);
+        }
+        Expr::Case(_, alts, _) => {
+            for alt in alts {
+                propagate_expected_ty(ctx, &alt.rhs, expected, depth + 1);
+            }
+        }
+        Expr::Lam(pats, body, _) => {
+            let mut result = expected;
+            for _ in 0..pats.len() {
+                let Ty::Fun(_, ret) = result else { return };
+                result = ret.as_ref();
+            }
+            let result = result.clone();
+            propagate_expected_ty(ctx, body, &result, depth + 1);
+        }
+        Expr::App(..) => {
+            let mut head: &hir::Expr = expr;
+            let mut args: Vec<&hir::Expr> = Vec::new();
+            while let Expr::App(f, a, _) = head {
+                args.push(a.as_ref());
+                head = f.as_ref();
+            }
+            args.reverse();
+            while let Expr::TypeApp(inner, _, _) | Expr::Ann(inner, _, _) = head {
+                head = inner.as_ref();
+            }
+            // A monadic operator's own type does not carry the hint: typeck
+            // records `>>=` at its occurrence as `(a -> m b) -> m b` — one
+            // arrow for two arguments — so the spine walk below bails and the
+            // whole right-hand side of every `do` block loses the stream type.
+            // The shape is known instead: both operands live in the SAME
+            // monad as the result, differing only in the value they carry.
+            if let Expr::Var(dr) = head {
+                let name = ctx.lookup_var(dr.def_id).map(|v| v.name);
+                if let Some(operand_tys) =
+                    name.and_then(|n| monadic_operand_tys(n.as_str(), expected, args.len()))
+                {
+                    for (want, a) in operand_tys.iter().zip(args.iter()) {
+                        if let Some(want) = want {
+                            propagate_expected_ty(ctx, a, want, depth + 1);
+                        }
+                    }
+                    return;
+                }
+            }
+            // `f $ x` IS `f x` for this purpose. Peeling `$`'s own scheme
+            // stops at its result variable and carries nothing inward, and
+            // pandoc writes every one of these parsers as `try $ do …`.
+            if let Expr::Var(dr) = head {
+                if ctx
+                    .lookup_var(dr.def_id)
+                    .is_some_and(|v| v.name.as_str() == "$")
+                    && args.len() >= 2
+                {
+                    let rebuilt_head = args[0];
+                    let rest: Vec<&hir::Expr> = args[1..].to_vec();
+                    propagate_spine(ctx, rebuilt_head, &rest, expected, depth);
+                    return;
+                }
+            }
+            propagate_spine(ctx, head, &args, expected, depth);
+        }
+        _ => {}
+    }
+}
+
+/// The expected type of each operand of a monadic/applicative operator, given
+/// the expected type of the whole application. `None` for an operand whose type
+/// this says nothing about.
+///
+/// The monad is whatever `expected` is applied to — `ParsecT Sources ParserState
+/// m` for `ParsecT Sources ParserState m Int` — and the carried value is left
+/// unknown, which is all a nested parser needs to resolve its `Stream`
+/// dictionary.
+fn monadic_operand_tys(name: &str, expected: &Ty, nargs: usize) -> Option<Vec<Option<Ty>>> {
+    if nargs != 2 {
+        return None;
+    }
+    let Ty::App(monad, _) = expected else {
+        return None;
+    };
+    // A stand-in for "some value type" — deliberately outside the ranges
+    // typeck and lowering allocate from, so it can never capture a real one.
+    let unknown = Ty::Var(bhc_types::TyVar::new_star(0xFFE0_0000));
+    let in_monad = Ty::App(monad.clone(), Box::new(unknown));
+    let whole = Some(expected.clone());
+    let operand = Some(in_monad);
+    match name {
+        // Both operands are actions; the result is the second one's.
+        ">>" | "*>" => Some(vec![operand, whole]),
+        // The first operand's action IS the result; the second is discarded.
+        "<*" => Some(vec![whole, operand]),
+        // `p >>= k`: `p` is an action, `k` returns the result.
+        ">>=" => Some(vec![operand, None]),
+        "=<<" => Some(vec![None, operand]),
+        // Both branches have the whole type.
+        "<|>" | "mplus" => Some(vec![whole.clone(), whole]),
+        // `f <$> p` / `mf <*> p`: only the right operand is an action here.
+        "<$>" | "fmap" | "<*>" => Some(vec![None, operand]),
+        _ => None,
+    }
+}
+
+/// The application-spine half of [`propagate_expected_ty`]: solve the head's
+/// type variables from the expected result type (and from whatever the sibling
+/// arguments already pin), then push each instantiated parameter type into the
+/// matching argument.
+fn propagate_spine(
+    ctx: &mut LowerContext,
+    head: &hir::Expr,
+    args: &[&hir::Expr],
+    expected: &Ty,
+    depth: u32,
+) {
+    let mut head = head;
+    while let Expr::TypeApp(inner, _, _) | Expr::Ann(inner, _, _) = head {
+        head = inner.as_ref();
+    }
+    // The head's DECLARED type, else its instantiated one. The
+    // declared type is preferred because typeck can record an
+    // occurrence whose result is still an unsolved variable — `try`
+    // arrives as `ParsecT ?s ?u ?m Int -> ?r`, and matching `?r`
+    // against the expected type binds nothing the parameter shares.
+    // The occurrence is the fallback that carries the hint through a
+    // BUILTIN head (`id`, `maybe`, `either`), which has no scheme.
+    let declared = match head {
+        Expr::Var(dr) => ctx.lookup_scheme(dr.def_id).map(|sc| sc.ty.clone()),
+        _ => None,
+    };
+    let head_ty = declared
+        .filter(|t| arrow_count(t) >= args.len())
+        .or_else(|| ctx.resolved_expr_ty_opt(head.span()));
+    if prop_dbg() {
+        let hn = match head {
+            Expr::Var(dr) | Expr::Con(dr) => format!(
+                "{:?}",
+                ctx.lookup_var(dr.def_id)
+                    .map(|v| v.name.as_str().to_string())
+            ),
+            o => format!("{:?}", std::mem::discriminant(o)),
+        };
+        eprintln!(
+            "{}SPINE head={} nargs={} ty={}",
+            "  ".repeat(depth as usize),
+            hn,
+            args.len(),
+            head_ty.as_ref().map_or("NONE".to_string(), dbg_ty)
+        );
+    }
+    let Some(head_ty) = head_ty else {
+        return;
+    };
+    let mut param_tys: Vec<Ty> = Vec::new();
+    let mut cur = &head_ty;
+    for _ in 0..args.len() {
+        let Ty::Fun(a, r) = cur else { return };
+        param_tys.push(a.as_ref().clone());
+        cur = r.as_ref();
+    }
+    let mut subst = bhc_types::Subst::new();
+    match_ty(cur, expected, &mut subst);
+    // Sibling arguments pin what the result type leaves open.
+    for (pty, a) in param_tys.iter().zip(args.iter()) {
+        if let Some(at) = try_infer_arg_type(ctx, a) {
+            match_ty(pty, &at, &mut subst);
+        }
+    }
+    for (pty, a) in param_tys.iter().zip(args.iter()) {
+        let inner = subst.apply(pty);
+        propagate_expected_ty(ctx, a, &inner, depth + 1);
+    }
+}
+
+/// The type of the occurrence at `span`, refined by any expected type a caller
+/// pushed inward. The recorded type keeps its structure — the hint only
+/// substitutes its variables — so a hint that is *less* informative than what
+/// typeck inferred cannot lose anything.
+fn refined_occurrence_ty(ctx: &LowerContext, span: Span) -> Option<Ty> {
+    let recorded = ctx.resolved_expr_ty_opt(span);
+    let Some(hint) = ctx.expected_ty_opt(span) else {
+        return recorded;
+    };
+    let Some(recorded) = recorded else {
+        return Some(hint);
+    };
+    let mut subst = bhc_types::Subst::new();
+    match_ty(&recorded, &hint, &mut subst);
+    Some(subst.apply(&recorded))
+}
+
 /// Lower a value argument, applying its dictionaries when it is a constrained
 /// function/value used at a known concrete type — e.g. a parser
 /// `digit :: Stream s Identity t => Parsec s u Char` passed to `parse`, whose
@@ -1438,6 +1731,10 @@ fn lower_value_arg(
     expected_ty: Option<&Ty>,
 ) -> LowerResult<core::Expr> {
     if let Some(exp) = expected_ty {
+        // Record what this position expects for every sub-expression that
+        // shares the type, so a constrained value under an unconstrained head
+        // can resolve its own dictionary. See `propagate_expected_ty`.
+        propagate_expected_ty(ctx, arg, exp, 0);
         // Even if the expected type still has variables (e.g. a parser's result
         // type `a`, fixed by context rather than by arguments), attempt dict
         // application: `lower_constrained_fn_value` only requires the

@@ -89,6 +89,19 @@ pub struct LowerContext {
     /// unless threaded from `TypedModule::resolved_expr_types`.
     resolved_expr_types: crate::ExprTypeMap,
 
+    /// The type a CALLER expects a sub-expression to have, keyed by `Span`.
+    ///
+    /// Typeck records an occurrence's type as it inferred it, and for a parser
+    /// nested inside another argument that is a row of bare variables:
+    /// `readWithM (try (id pB))` leaves `pB` at `ParsecT ?s ?u ?m Int`, so its
+    /// own `Stream ?s ?m Char` constraint resolves to nothing and the slot
+    /// becomes a null placeholder the parser is then run through. The concrete
+    /// stream type is only known one level out, at `readWithM`'s parameter —
+    /// `lower_value_arg` pushes it inward here, so the leaf can refine what
+    /// typeck recorded. Read via `expected_ty_opt`; a hint never replaces a
+    /// recorded type, it only substitutes that type's variables.
+    expected_arg_tys: crate::ExprTypeMap,
+
     /// Constructor metadata (`DefId` -> `ConstructorInfo`).
     /// This maps constructor `DefIds` to their metadata including tag and type.
     constructor_map: FxHashMap<DefId, ConstructorInfo>,
@@ -201,6 +214,7 @@ impl LowerContext {
             type_schemes: FxHashMap::default(),
             expr_types: FxHashMap::default(),
             resolved_expr_types: FxHashMap::default(),
+            expected_arg_tys: FxHashMap::default(),
             constructor_map: FxHashMap::default(),
             constructor_field_types: FxHashMap::default(),
             field_selector_map: FxHashMap::default(),
@@ -264,6 +278,19 @@ impl LowerContext {
             .get(&span)
             .cloned()
             .or_else(|| self.expr_ty_opt(span))
+    }
+
+    /// Record the type a caller expects the expression at `span` to have. See
+    /// [`expected_arg_tys`](Self::expected_arg_tys).
+    pub(crate) fn record_expected_ty(&mut self, span: bhc_span::Span, ty: Ty) {
+        self.expected_arg_tys.insert(span, ty);
+    }
+
+    /// The caller's expected type for the expression at `span`, if one was
+    /// pushed inward.
+    #[must_use]
+    pub(crate) fn expected_ty_opt(&self, span: bhc_span::Span) -> Option<Ty> {
+        self.expected_arg_tys.get(&span).cloned()
     }
 
     /// Look up the type for a definition from the type checker.
@@ -3965,6 +3992,28 @@ impl LowerContext {
                     self.register_dict(*class_name, dict_var.clone());
                 } else {
                     self.register_dict_at(*class_name, constraint.args.clone(), dict_var.clone());
+                }
+            }
+        }
+
+        // Push the declared RESULT type into each equation's right-hand side.
+        // A binding's own signature is the only place the concrete stream type
+        // appears in `myOLS mb = try (maybe anyOrderedListMarker … mb)`:
+        // nothing CALLS this parser at a known type inside the module, so
+        // without the hint `anyOrderedListMarker`'s `Stream` dictionary
+        // resolves to a null placeholder and the parser is run through it.
+        if let Some(sig) = self.current_binding_sig.clone() {
+            for eq in &value_def.equations {
+                let mut result = &sig;
+                let mut peeled = 0;
+                while peeled < eq.pats.len() {
+                    let Ty::Fun(_, ret) = result else { break };
+                    result = ret.as_ref();
+                    peeled += 1;
+                }
+                if peeled == eq.pats.len() {
+                    let result = result.clone();
+                    crate::expr::propagate_expected_ty(self, &eq.rhs, &result, 0);
                 }
             }
         }

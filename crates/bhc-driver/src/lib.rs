@@ -531,8 +531,8 @@ impl Compiler {
             lower_ctx
                 .interface_constructors
                 .iter()
-                .filter(|(name, _, _, _, _)| !builtins.contains(name.as_str()))
-                .filter_map(|(name, tag, arity, type_name, is_newtype)| {
+                .filter(|(name, _, _, _, _, _)| !builtins.contains(name.as_str()))
+                .filter_map(|(name, tag, arity, type_name, is_newtype, _)| {
                     let sym = Symbol::intern(name);
                     let def_id = lower_ctx.lookup_constructor(sym)?;
                     let field_names = lower_ctx
@@ -646,7 +646,7 @@ impl Compiler {
         let imported_constructors: Vec<(String, ConstructorMeta)> = lower_ctx
             .interface_constructors
             .iter()
-            .map(|(name, tag, arity, type_name, is_newtype)| {
+            .map(|(name, tag, arity, type_name, is_newtype, field_types)| {
                 (
                     name.clone(),
                     ConstructorMeta {
@@ -654,6 +654,7 @@ impl Compiler {
                         arity: *arity,
                         type_name: type_name.clone(),
                         is_newtype: *is_newtype,
+                        field_types: field_types.clone(),
                     },
                 )
             })
@@ -1675,6 +1676,7 @@ impl Compiler {
                             arity: con_info.arity as u32,
                             type_name: None,
                             is_newtype: con_info.is_newtype,
+                            field_types: Vec::new(),
                         },
                     )
                 })
@@ -3383,6 +3385,10 @@ impl Compiler {
                         con.fields.len() as u32,
                         Some(exported_type.name.clone()),
                         is_newtype,
+                        con.fields
+                            .iter()
+                            .map(|f| converter.convert_type(f))
+                            .collect(),
                     ));
 
                     // Record field ACCESSORS are values at use sites

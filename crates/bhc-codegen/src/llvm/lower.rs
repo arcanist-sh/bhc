@@ -102,6 +102,10 @@ pub struct ConstructorMeta {
     pub type_name: Option<String>,
     /// Whether this constructor is a newtype constructor (identity at runtime).
     pub is_newtype: bool,
+    /// The declared type of each field, in order. Carried for an IMPORTED
+    /// newtype so codegen can see what it wraps: a monad defined as a newtype
+    /// has its transformer layer in its content.
+    pub field_types: Vec<Ty>,
 }
 
 /// A symbol exported by an already-compiled module, used for cross-module linking.
@@ -425,6 +429,13 @@ pub struct Lowering<'ctx, 'm> {
     /// Declared field types per constructor name (from `CoreConstructor`). Used to
     /// recover a pattern-bound field's (otherwise erased) type for `show` dispatch.
     con_field_types: FxHashMap<String, Vec<Ty>>,
+    /// A NEWTYPE's underlying type, by type name.
+    ///
+    /// A newtype is identity at runtime, so a monad defined as one has its
+    /// layer in whatever it wraps: pandoc's `newtype Future s a = Future
+    /// (Reader s a)` derives its Monad, and `return x :: Future s a` must
+    /// build the Reader closure `runF` will call.
+    newtype_underlying: FxHashMap<String, Ty>,
     /// Type recovered for a case-pattern binder from its constructor's field type,
     /// keyed by the binder's `VarId`. Consulted by `print`/`show` dispatch so a
     /// non-`Int` field (e.g. `Bool`) is not misprinted as an integer.
@@ -477,6 +488,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             integer_vars: FxHashSet::default(),
             adt_show_vars: FxHashMap::default(),
             con_field_types: FxHashMap::default(),
+            newtype_underlying: FxHashMap::default(),
             binder_field_types: FxHashMap::default(),
             stub_functions: FxHashMap::default(),
         };
@@ -533,6 +545,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             integer_vars: FxHashSet::default(),
             adt_show_vars: FxHashMap::default(),
             con_field_types: FxHashMap::default(),
+            newtype_underlying: FxHashMap::default(),
             binder_field_types: FxHashMap::default(),
             stub_functions: FxHashMap::default(),
         };
@@ -664,6 +677,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // Structure is App(App(Con(T), x), m) where we're at the outer App
                     // Here, inner2 = Con(T), monad_arg = m (but we need to check inner/arg differently)
                     if let Ty::Con(tycon) = inner2.as_ref() {
+                        // `Reader r a` IS `ReaderT r Identity a`, and the same
+                        // for State/Writer/Except. The second argument here is
+                        // the RESULT type, not an inner monad, so the stack
+                        // ends at this layer. Without this a `Reader` action
+                        // built by `return` compiled at the ambient IO layer,
+                        // where return is the identity — `runReader` then read
+                        // a function pointer off an Int. pandoc's `Future`
+                        // wraps exactly this, and `block` runs it on every
+                        // block it parses.
+                        if let Some(l) = identity_based_monad_layer(tycon.name.as_str()) {
+                            stack.push(l);
+                            return;
+                        }
                         let layer = match tycon.name.as_str() {
                             "StateT" => Some(TransformerLayer::StateT),
                             "ReaderT" => Some(TransformerLayer::ReaderT),
@@ -686,6 +712,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // Check if it's IO
                     if tycon.name.as_str() == "IO" {
                         stack.push(TransformerLayer::IO);
+                        return;
+                    }
+                    // `Reader r` awaiting its result type is already the layer.
+                    if let Some(l) = identity_based_monad_layer(tycon.name.as_str()) {
+                        stack.push(l);
                         return;
                     }
                     // Otherwise, single-param application, continue
@@ -1615,6 +1646,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     arity,
                     type_name: None,
                     is_newtype: false,
+                    field_types: Vec::new(),
                 },
             );
         }
@@ -6978,7 +7010,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 if self.transformer_stack.is_writer_t_over_state_t() {
                     return self.lower_builtin_writer_t_pure(args[0]);
                 }
-                match self.current_transformer_layer() {
+                // An action whose OWN type names an Identity-based monad
+                // (`return mempty :: Reader s Blocks`) is at that layer
+                // wherever it is written: nothing pushed it on the stack,
+                // because such a value is usually built far from where it is
+                // run. Compiled at the ambient IO layer `return` is the
+                // identity, and `runReader` then reads a function pointer off
+                // the value itself.
+                let layer = self
+                    .builtin_result_monad_layer()
+                    .unwrap_or_else(|| self.current_transformer_layer());
+                match layer {
                     TransformerLayer::ReaderT => self.lower_builtin_reader_t_pure(args[0]),
                     TransformerLayer::StateT => self.lower_builtin_state_t_pure(args[0]),
                     TransformerLayer::ExceptT => self.lower_builtin_except_t_pure(args[0]),
@@ -16444,6 +16486,36 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// were `IO`, where an action IS its value: `x <- half n` bound `x` to the
     /// whole `Just`, nothing short-circuited on `Nothing`, and the answer was
     /// arithmetic on a heap address.
+    /// The transformer layer named by the type of the builtin being lowered,
+    /// when that type is an Identity-based monad synonym. See
+    /// `identity_based_monad_layer`.
+    fn builtin_result_monad_layer(&self) -> Option<TransformerLayer> {
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        fn head(t: &Ty) -> &Ty {
+            match t {
+                Ty::App(f, _) => head(f),
+                other => other,
+            }
+        }
+        let mut ty = result_of(&self.current_builtin_ty).clone();
+        // A newtype is identity at runtime, so its layer is its content's.
+        // Bounded: a chain of newtypes over a monad is at most a few deep, and
+        // a cycle is not possible in well-formed Haskell but must not hang.
+        for _ in 0..4 {
+            let Ty::Con(c) = head(&ty) else { return None };
+            if let Some(l) = identity_based_monad_layer(c.name.as_str()) {
+                return Some(l);
+            }
+            ty = self.newtype_underlying.get(c.name.as_str())?.clone();
+        }
+        None
+    }
+
     fn value_monad_of_ty(&self, ty: &Ty) -> Option<ValueMonad> {
         fn result_of(t: &Ty) -> &Ty {
             match t {
@@ -44504,6 +44576,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.con_field_types
                     .insert(con.name.clone(), con.field_types.clone());
             }
+            if con.is_newtype && con.field_types.len() == 1 {
+                if let Some(ref type_name) = con.type_name {
+                    self.newtype_underlying
+                        .insert(type_name.clone(), con.field_types[0].clone());
+                }
+            }
             if let Some(meta) = self.constructor_metadata.get_mut(&con.name) {
                 if let Some(ref type_name) = con.type_name {
                     if meta.type_name.is_none() {
@@ -56028,9 +56106,31 @@ pub fn lower_core_module_multimodule_with_constructors<'ctx>(
             if let Some(m) = lowering.constructor_metadata.get_mut(name.as_str()) {
                 m.is_newtype = true;
             }
+            // What an imported newtype wraps: a monad written as one has its
+            // transformer layer there, and `return` at that type must build
+            // the layer's action rather than the ambient one's.
+            if let (Some(type_name), Some(field)) = (&meta.type_name, meta.field_types.first()) {
+                lowering
+                    .newtype_underlying
+                    .insert(type_name.clone(), field.clone());
+            }
         }
     }
     lowering.lower_module(core_module)
+}
+
+/// The transformer layer of a monad written as its Identity-based synonym:
+/// `Reader r a` is `ReaderT r Identity a`, `State s a` is `StateT s Identity a`,
+/// and likewise for `Writer` and `Except`. The synonym takes the RESULT type
+/// where the transformer takes an inner monad, so a stack ends at this layer.
+fn identity_based_monad_layer(name: &str) -> Option<TransformerLayer> {
+    match name {
+        "Reader" => Some(TransformerLayer::ReaderT),
+        "State" => Some(TransformerLayer::StateT),
+        "Writer" => Some(TransformerLayer::WriterT),
+        "Except" => Some(TransformerLayer::ExceptT),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

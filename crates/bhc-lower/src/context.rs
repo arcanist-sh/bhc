@@ -170,6 +170,13 @@ pub type DefMap = IndexMap<DefId, DefInfo>;
 /// An instance's superclass dictionary is otherwise looked up at the
 /// instance's FIRST type, which for a multi-parameter class is the wrong
 /// one and matches no instance.
+/// An imported data constructor as threaded from module interfaces:
+/// (name, tag, arity, owning type, whether it is a newtype, field types).
+///
+/// The field types are what let codegen see through an imported NEWTYPE: a
+/// monad defined as one has its transformer layer in whatever it wraps.
+pub type InterfaceConstructorEntry = (String, u32, u32, Option<String>, bool, Vec<bhc_types::Ty>);
+
 pub type InterfaceClassEntry = (
     Symbol,
     Vec<Symbol>,
@@ -235,7 +242,7 @@ pub struct LowerContext {
     pub qualified_leak_names: FxHashSet<Symbol>,
     /// Constructors loaded from `.bhi` interfaces for codegen metadata:
     /// (name, tag, arity, owning type name, is_newtype).
-    pub interface_constructors: Vec<(String, u32, u32, Option<String>, bool)>,
+    pub interface_constructors: Vec<InterfaceConstructorEntry>,
     /// Instances loaded from `.bhi` interfaces: (class name, instance types,
     /// the instance's own method names). hir-to-core registers these so
     /// class-method calls on concrete types specialize to

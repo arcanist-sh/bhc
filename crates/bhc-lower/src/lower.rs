@@ -3211,6 +3211,12 @@ fn register_standard_module_exports(
             "Tok",
             "TokType",
             "SourcePos",
+            // commonmark re-exports parsec's SourcePos accessors, and
+            // Readers.CommonMark uses them without listing them in its
+            // `Text.Pandoc.Parsing` import.
+            "sourceName",
+            "sourceLine",
+            "sourceColumn",
             // Commonmark.Extensions syntax specs
             "alertSpec",
             "attributesSpec",
@@ -6097,6 +6103,15 @@ fn register_standard_module_exports(
                 }
             }
         } else if module_name == "Djot"
+            // `Data.Text.Read`'s `decimal`/`hexadecimal`/`signed` are the names
+            // of pandoc's own list-marker parsers (`Text.Pandoc.Parsing.Lists`
+            // exports `decimal :: … ParsecT s st m (ListNumberStyle, Int)`),
+            // which every reader has in scope unqualified. Readers.Pod writes
+            // `TR.decimal @Integer` and got the PARSER — the type application
+            // landed on the STREAM parameter and it asked for `Stream Integer
+            // Text Char`. Read's exports are unimplemented externals, so a stub
+            // of their own is what they should be.
+            || module_name == "Data.Text.Read"
             || module_name == "Djot.AST"
             || module_name == "Text.Jira.Markup"
             || module_name == "Data.Ipynb"

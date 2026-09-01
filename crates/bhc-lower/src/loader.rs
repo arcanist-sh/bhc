@@ -831,9 +831,20 @@ pub fn apply_import_spec(exports: &ModuleExports, spec: &Option<ast::ImportSpec>
                             if constructors.is_empty() {
                                 // Type(..) or Class(..) — import constructors belonging to this type
                                 // AND all values (class methods are lowercase values)
+                                let mut is_data_type = false;
                                 for (&name, info) in &exports.constructors {
                                     if info.type_con_name == ident.name {
                                         filtered.constructors.insert(name, info.clone());
+                                        is_data_type = true;
+                                        // `T(..)` brings T's record selectors,
+                                        // which are exported as values.
+                                        if let Some(fields) = &info.field_names {
+                                            for field in fields {
+                                                if let Some(&fid) = exports.values.get(field) {
+                                                    filtered.values.insert(*field, fid);
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 // Import class methods if this is a class
@@ -844,8 +855,17 @@ pub fn apply_import_spec(exports: &ModuleExports, spec: &Option<ast::ImportSpec>
                                         }
                                     }
                                     filtered.class_methods.insert(ident.name, methods.clone());
-                                } else {
-                                    // Fallback: import all values (legacy behavior)
+                                } else if !is_data_type {
+                                    // Neither a known class nor a known data
+                                    // type: nothing says which values belong to
+                                    // it, so take them all. A DATA type's
+                                    // `(..)` must not, though — `import
+                                    // Text.Pandoc.CSV (CSVOptions(..), …)`
+                                    // then brought in CSV's own unexported
+                                    // `escaped :: … -> Parser Char`, which
+                                    // shadowed `Text.Pandoc.Parsing.escaped`
+                                    // and typed every `escaped anyChar` in
+                                    // Readers.RST at `Parsec Text ()`.
                                     for (&name, &def_id) in &exports.values {
                                         filtered.values.insert(name, def_id);
                                     }

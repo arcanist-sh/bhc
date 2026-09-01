@@ -3153,13 +3153,48 @@ impl LowerContext {
         inst_ty: &Ty,
         span: Span,
     ) -> Option<bhc_core::Expr> {
-        let own_method = {
-            let (instance, _subst) = self.class_registry.resolve_instance(class_name, inst_ty)?;
-            instance.methods.get(&method).copied()
+        let (own_method, own_constraints) = {
+            let (instance, subst) = self.class_registry.resolve_instance(class_name, inst_ty)?;
+            let cs: Vec<Constraint> = instance
+                .instance_constraints
+                .iter()
+                .filter(|c| self.class_registry.constraint_needs_dict_param(c.class))
+                .map(|c| {
+                    Constraint::new_multi(
+                        c.class,
+                        c.args.iter().map(|a| subst.apply(a)).collect(),
+                        span,
+                    )
+                })
+                .collect();
+            (instance.methods.get(&method).copied(), cs)
         };
         if let Some(def_id) = own_method {
             let var = self.lookup_var(def_id)?.clone();
-            return Some(bhc_core::Expr::Var(var, span));
+            let mut result = bhc_core::Expr::Var(var, span);
+            // A CONSTRAINED instance compiles each of its methods behind one
+            // lambda per constraint: `instance (Semigroup a, Monoid a) =>
+            // Monoid (Future s a)` makes `$instance_mempty_Future_v_v` a
+            // two-dictionary function. Selecting it bare handed `runF` a
+            // closure where pandoc's `block` expected a `Future`, and every
+            // block it parsed jumped through it. A slot is never skipped —
+            // one that cannot be resolved gets a null placeholder, the same
+            // way dictionary CONSTRUCTION treats it.
+            for c in own_constraints {
+                // The instance head names the type through whatever synonym the
+                // use site wrote — `Blocks` is `Many Block`, and no instance
+                // matches the synonym.
+                let c = Constraint::new_multi(
+                    c.class,
+                    c.args.iter().map(|a| self.expand_type_aliases(a)).collect(),
+                    span,
+                );
+                let dict = self
+                    .resolve_dictionary(&c, span)
+                    .unwrap_or(bhc_core::Expr::Lit(core::Literal::Int(0), Ty::Error, span));
+                result = bhc_core::Expr::App(Box::new(result), Box::new(dict), span);
+            }
+            return Some(result);
         }
         // Instance omits the method (class default): go through dictionary
         // construction, which fills the slot by applying the default fn to a
@@ -3612,6 +3647,18 @@ impl LowerContext {
                             fields.iter().map(|f| f.name).collect()
                         }
                     };
+                    // What the newtype WRAPS. Codegen reads this to find the
+                    // transformer layer of a monad defined as a newtype —
+                    // pandoc's `newtype Future s a = Future (Reader s a)`
+                    // derives its Monad, so `return x :: Future s a` must
+                    // build the Reader closure `runF` calls. Data declarations
+                    // record the same thing further down.
+                    let field_tys: Vec<Ty> = match &newtype_def.con.fields {
+                        bhc_hir::ConFields::Positional(tys) => tys.clone(),
+                        bhc_hir::ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
+                    };
+                    self.constructor_field_types
+                        .insert(newtype_def.con.name, field_tys);
                     self.register_constructor(
                         newtype_def.con.id,
                         ConstructorInfo {
@@ -3749,22 +3796,24 @@ impl LowerContext {
                     let prev_instance_class = self.current_instance_class.take();
                     self.current_instance_class = Some(instance_def.class);
                     for method_def in &instance_def.methods {
-                        if inst_constraints.is_empty() {
+                        let lowered = if inst_constraints.is_empty() {
                             // No instance constraints — lower normally
                             // (`lower_value_def` eta-expands point-free
                             // bodies to the declared arity).
-                            if let Some(bind) = self.lower_value_def(method_def)? {
-                                bindings.push(bind);
-                            }
+                            self.lower_value_def(method_def)?
                         } else {
                             // Instance has user-class constraints — wrap method body
                             // with dict lambdas so dictionary construction can apply them.
-                            if let Some(bind) = self.lower_instance_method_with_constraints(
+                            self.lower_instance_method_with_constraints(
                                 method_def,
                                 &inst_constraints,
-                            )? {
-                                bindings.push(bind);
+                            )?
+                        };
+                        if let Some(mut bind) = lowered {
+                            if let Some(inst_ty) = self.current_instance_type.clone() {
+                                annotate_monad_head_tys(&mut bind, &inst_ty);
                             }
+                            bindings.push(bind);
                         }
                     }
                     self.current_instance_type = prev_instance_type;
@@ -4959,6 +5008,60 @@ fn lazify_recursive_parser_calls(bindings: &mut [Bind]) {
         for (v, e) in pairs {
             if cycle_members.contains(&v.name) {
                 rewrite(e.as_mut(), &cycle_members, &arities);
+            }
+        }
+    }
+}
+
+/// Give an instance method's bare `return`/`pure`/`>>=`/`>>` heads the
+/// INSTANCE's type as their result.
+///
+/// Typeck records nothing for them — an instance method body is the one place
+/// with no other source of the monad — so codegen chose the ambient layer,
+/// where `return` is the identity. `instance Monoid (Future s a)` writing
+/// `mempty = return mempty` then handed `runF` a plain list, and every block
+/// pandoc parsed called it as a function. Only an untyped head is touched, so
+/// a recorded type always wins.
+fn annotate_monad_head_tys(bind: &mut Bind, inst_ty: &Ty) {
+    fn go(e: &mut core::Expr, inst_ty: &Ty) {
+        match e {
+            core::Expr::Var(v, _) => {
+                if matches!(v.name.as_str(), "return" | "pure" | ">>=" | ">>")
+                    && matches!(v.ty, Ty::Error)
+                {
+                    v.ty = Ty::Fun(Box::new(Ty::Error), Box::new(inst_ty.clone()));
+                }
+            }
+            core::Expr::App(f, a, _) => {
+                go(f, inst_ty);
+                go(a, inst_ty);
+            }
+            core::Expr::Lam(_, body, _) => go(body, inst_ty),
+            core::Expr::Let(b, body, _) => {
+                match b.as_mut() {
+                    Bind::NonRec(_, rhs) => go(rhs, inst_ty),
+                    Bind::Rec(bs) => {
+                        for (_, rhs) in bs {
+                            go(rhs, inst_ty);
+                        }
+                    }
+                }
+                go(body, inst_ty);
+            }
+            core::Expr::Case(scrut, alts, _, _) => {
+                go(scrut, inst_ty);
+                for alt in alts {
+                    go(&mut alt.rhs, inst_ty);
+                }
+            }
+            _ => {}
+        }
+    }
+    match bind {
+        Bind::NonRec(_, rhs) => go(rhs, inst_ty),
+        Bind::Rec(bs) => {
+            for (_, rhs) in bs {
+                go(rhs, inst_ty);
             }
         }
     }

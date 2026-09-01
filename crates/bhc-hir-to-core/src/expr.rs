@@ -520,6 +520,14 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 }
             }
         }
+        // A QUALIFIED reference to a monad-family operator inside an instance
+        // body means the ENCLOSING instance's method. parsec writes `(>>) =
+        // (Applicative.*>)` in `instance Monad (ParsecT s u m)`, and
+        // `Control.Applicative` is an unimplemented external, so `>>` at every
+        // parser called a stub — pandoc's `readMarkdown` aborted in the first
+        // `do` block it reached. Drop the qualifier and let the dispatch below
+        // find the instance's own `*>`.
+        let name = instance_local_qualified_method(ctx, name).unwrap_or(name);
         // Check if this is a class method
         let is_method = ctx.is_class_method(name);
         // `return` is in NO class's method list: the builtin Monad layout is
@@ -2420,6 +2428,30 @@ fn lower_constrained_fn_app(
         result = core::Expr::App(Box::new(result), Box::new(arg_core), def_ref.span);
     }
     Ok(Some(result))
+}
+
+/// The unqualified name of a QUALIFIED monad-family operator referenced inside
+/// an instance body for a non-builtin monad — `Applicative.*>` written in
+/// parsec's `instance Monad (ParsecT s u m)`. `None` for everything else, so an
+/// ordinary qualified name (`T.length`) is untouched.
+fn instance_local_qualified_method(ctx: &LowerContext, name: Symbol) -> Option<Symbol> {
+    let s = name.as_str();
+    let bare = s
+        .rsplit_once('.')
+        .map(|(_, b)| b)
+        .filter(|b| !b.is_empty())?;
+    if !matches!(
+        bare,
+        "*>" | "<*" | "<*>" | ">>=" | ">>" | "<|>" | "<$>" | "pure" | "return" | "fmap" | "mplus"
+    ) {
+        return None;
+    }
+    let inst_ty = ctx.current_instance_type()?;
+    if LowerContext::is_builtin_monad_type(inst_ty) {
+        return None;
+    }
+    let bare = Symbol::intern(bare);
+    ctx.is_class_method(bare).map(|_| bare)
 }
 
 /// Whether `expr` references a constrained user *function* used as a value

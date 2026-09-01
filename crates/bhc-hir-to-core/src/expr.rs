@@ -121,13 +121,22 @@ fn ty_is_annotatable(ty: &Ty) -> bool {
     // Lists and tuples are pointers too, and a bound list had the same problem
     // an ADT did: `let xs = ["ab"] in print xs` printed the LIST's address.
     //
-    // A String is `[Char]`, and annotating one puts a Char back in front of
-    // codegen's width inference — `icmp eq i32 %to_char, i64 44`, which fails
-    // LLVM verification. The `milestone_e_json` fixture catches it. A list OF
-    // strings is fine: only the outer type is annotated, and its elements are
-    // described by the show descriptor rather than by a binder type.
-    if let Ty::List(elem) = ty {
-        return !matches!(elem.as_ref(), Ty::Con(tc) if tc.name.as_str() == "Char");
+    // Only when the ELEMENT type is known, though. A `String` is `[Char]`, and
+    // annotating one puts a Char back in front of codegen's width inference —
+    // `icmp eq i32 %to_char, i64 44`, which fails LLVM verification; the
+    // `milestone_e_json` fixture catches that. Worse, typeck records the
+    // element of a String it has not resolved as a plain type VARIABLE, and
+    // `[a]` names nothing codegen can act on: the WASM backend read the C
+    // string behind `getLine` as a cons list, so
+    // `putStrLn ("Sum for " ++ label ++ ":")` printed `Sum for p` and a NUL
+    // byte. A list OF strings is still fine — only the outer type is
+    // annotated, and its elements are described by the show descriptor.
+    if let Some(elem) = list_element(ty) {
+        return match elem {
+            Ty::Con(tc) => tc.name.as_str() != "Char",
+            Ty::List(_) | Ty::Tuple(_) | Ty::App(_, _) => true,
+            _ => false,
+        };
     }
     if matches!(ty, Ty::Tuple(_)) {
         return true;
@@ -147,6 +156,19 @@ fn ty_is_annotatable(ty: &Ty) -> bool {
                 | "IO"
         ),
         _ => false,
+    }
+}
+
+/// The element of a list type, whichever way it is spelled: `Ty::List` is sugar
+/// for `App(Con "[]", elem)` and both reach here.
+fn list_element(ty: &Ty) -> Option<&Ty> {
+    match ty {
+        Ty::List(elem) => Some(elem.as_ref()),
+        Ty::App(f, elem) => match f.as_ref() {
+            Ty::Con(tc) if tc.name.as_str() == "[]" => Some(elem.as_ref()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -1312,8 +1334,8 @@ fn occurrence_or_scheme_ty(ctx: &LowerContext, def_ref: &DefRef, scheme_ty: &Ty)
 
 /// Every dictionary a constrained VALUE needs, from whichever source has it.
 ///
-/// `lower_constrained_value_at_occurrence` gives up unless the occurrence pins
-/// EVERY constraint to a concrete type. `anyChar :: (Monad m, Stream s m Char,
+/// Resolving the whole set at once, and only when the occurrence pins EVERY
+/// constraint to a concrete type, was not enough. `anyChar :: (Monad m, Stream s m Char,
 /// UpdateSourcePos s Char) => ParsecT s u m Char` used inside a
 /// `PandocMonad m =>` binding pins `s` and `u` but leaves `m` a variable, so it
 /// gave up — and the per-constraint loop then applied only the `Monad` it could
@@ -1364,48 +1386,6 @@ fn lower_constrained_value_all_dicts(
     if !any_real {
         return None;
     }
-    let mut result = core::Expr::Var(var, def_ref.span);
-    for dict in dicts {
-        result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
-    }
-    Some(result)
-}
-
-fn lower_constrained_value_at_occurrence(
-    ctx: &mut LowerContext,
-    def_ref: &DefRef,
-    scheme_ty: &Ty,
-    constraints: &[Constraint],
-) -> Option<core::Expr> {
-    let occ_ty = ctx.resolved_expr_ty_opt(def_ref.span)?;
-    let mut subst = bhc_types::Subst::new();
-    match_ty(scheme_ty, &occ_ty, &mut subst);
-    // A function instantiation means this is a constrained *function*; those
-    // resolve at the application site, which builds its own head var.
-    if matches!(subst.apply(scheme_ty), Ty::Fun(..)) {
-        return None;
-    }
-    let instantiated: Vec<Constraint> = constraints
-        .iter()
-        .map(|c| {
-            Constraint::new_multi(
-                c.class,
-                c.args.iter().map(|a| subst.apply(a)).collect(),
-                c.span,
-            )
-        })
-        .collect();
-    if instantiated
-        .iter()
-        .any(|c| c.args.iter().any(has_type_variables))
-    {
-        return None;
-    }
-    let mut dicts = Vec::with_capacity(instantiated.len());
-    for c in &instantiated {
-        dicts.push(ctx.resolve_dictionary(c, def_ref.span)?);
-    }
-    let var = ctx.lookup_var(def_ref.def_id).cloned()?;
     let mut result = core::Expr::Var(var, def_ref.span);
     for dict in dicts {
         result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
@@ -2294,14 +2274,6 @@ fn try_lower_spine_with_dicts(
     Ok(Some(result))
 }
 
-/// Lower a function application, handling dictionary-passing for class methods
-/// and constrained functions when the argument type is known.
-///
-/// When `f` is a class method or constrained function and we can infer the
-/// argument type, we resolve dictionaries at this concrete type. This handles
-/// cases like `describe Red` where `describe` is a class method of `Describable`
-/// and `Red` is a `Color` constructor.
-
 /// The type constructor at the head of an applied type: `ParsecT s u m a` has
 /// head `ParsecT`.
 fn applied_head_name(ty: &Ty) -> Option<Symbol> {
@@ -2828,6 +2800,13 @@ fn try_lower_monadic_traversal(
     }))
 }
 
+/// Lower a function application, handling dictionary-passing for class methods
+/// and constrained functions when the argument type is known.
+///
+/// When `f` is a class method or constrained function and we can infer the
+/// argument type, we resolve dictionaries at this concrete type. This handles
+/// cases like `describe Red` where `describe` is a class method of `Describable`
+/// and `Red` is a `Color` constructor.
 fn lower_app(
     ctx: &mut LowerContext,
     f: &hir::Expr,

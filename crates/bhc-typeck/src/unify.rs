@@ -62,6 +62,17 @@ fn try_expand_type_alias(ctx: &TyCtxt, ty: &Ty) -> Option<Ty> {
         _ => return None,
     };
 
+    // An ASSOCIATED TYPE shadows any same-named synonym. bhc registers
+    // skylighting's `type Token = (TokenType, Text)` as a builtin alias, and
+    // pandoc's roff lexers declare `type Token x` as a family of the
+    // `RoffLikeLexer` class — so every `Lexer m x (Token x)` in Roff.hs and
+    // Mdoc/Lex.hs expanded to the skylighting tuple applied to `x`, and
+    // `macroArg <|> escape` reported `expected [], found (TokenType, Text)`.
+    // A family reduces through its instances, never by substitution.
+    if ctx.env.is_assoc_type_name(head_sym) {
+        return None;
+    }
+
     // Look up in user-defined type aliases
     // Try both the full name and the unqualified name (strip module qualifier)
     let (params, rhs) = ctx.type_aliases.get(&head_sym).or_else(|| {
@@ -393,6 +404,39 @@ fn check_unreduced_type_family(ctx: &TyCtxt, ty: &Ty) -> Option<(Symbol, Vec<Ty>
     }
 
     None
+}
+
+/// If `family_side` is an unreduced application of an associated type family
+/// and `concrete` is a type exactly one of that family's equations produces,
+/// unify the family's arguments with that equation's and report success.
+///
+/// This is injectivity: it is what lets `Lexer m x (Token x)` be used at a
+/// parser named only by its STATE type. See `TypeEnv::invert_assoc_type`.
+fn try_invert_type_family(ctx: &mut TyCtxt, family_side: &Ty, concrete: &Ty, span: Span) -> bool {
+    let Some((name, args)) = extract_type_family_app(family_side) else {
+        return false;
+    };
+    if args.is_empty() || !ctx.env.is_assoc_type_name(name) {
+        return false;
+    }
+    // Only worth inverting while the arguments are still open; a family with
+    // concrete arguments that did not reduce has no equation to invert to.
+    if !args.iter().any(|a| !a.free_vars().is_empty()) {
+        return false;
+    }
+    if extract_type_family_app(concrete).is_some_and(|(n, _)| ctx.env.is_assoc_type_name(n)) {
+        return false;
+    }
+    let Some(eq_args) = ctx.env.invert_assoc_type(name, concrete) else {
+        return false;
+    };
+    if eq_args.len() != args.len() {
+        return false;
+    }
+    for (arg, eq_arg) in args.iter().zip(eq_args.iter()) {
+        unify(ctx, arg, eq_arg, span);
+    }
+    true
 }
 
 /// Extract the type constructor name and arguments from a potential type family application.
@@ -779,6 +823,15 @@ fn unify_inner(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
 
         // Different type structures: mismatch
         _ => {
+            // An unreduced INJECTIVE family meeting a concrete type determines
+            // its own argument: `State ?x ~ RoffState` gives `?x =
+            // RoffTokens`, which is what then reduces `Token ?x` to
+            // `[LinePart]`. Try both directions before reporting anything.
+            if try_invert_type_family(ctx, t1, t2, span)
+                || try_invert_type_family(ctx, t2, t1, span)
+            {
+                return;
+            }
             // Check if either type is an unreduced type family application.
             // If so, provide a more specific error message.
             if let Some((name, args, class_name)) = check_unreduced_type_family(ctx, t1) {

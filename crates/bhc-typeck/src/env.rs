@@ -460,6 +460,82 @@ impl TypeEnv {
 
         // 2. Fall back to associated type families
         self.reduce_assoc_type_family(family_name, args)
+            // 3. …and, when the CLASS is not visible, straight off the
+            // instances. pandoc's roff lexers declare `type Token x` in
+            // `Text.Pandoc.Readers.Roff.Escape` and write `type Token
+            // RoffTokens = [LinePart]` in the modules that import it; an
+            // imported class carries no associated types across a `.bhi`, so
+            // the equation an instance states here is the only record of the
+            // family that exists. Matching it needs no class.
+            .or_else(|| self.reduce_assoc_type_from_impls(family_name, args))
+    }
+
+    /// Reduce `family_name args` using any INSTANCE's associated-type equation,
+    /// without consulting the class that declared the family. See
+    /// [`reduce_type_family`].
+    fn reduce_assoc_type_from_impls(&self, family_name: Symbol, args: &[Ty]) -> Option<Ty> {
+        for instances in self.instances.values() {
+            for instance in instances {
+                for impl_ in &instance.assoc_type_impls {
+                    if impl_.name != family_name || impl_.args.len() != args.len() {
+                        continue;
+                    }
+                    if let Some(subst) = self.match_instance_types(&impl_.args, args, &[]) {
+                        return Some(subst.apply(&impl_.rhs));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Invert an INJECTIVE associated type: given the family's right-hand side,
+    /// recover the arguments that produce it.
+    ///
+    /// pandoc's roff lexers declare `type State x = a | a -> x`, so `State ?x ~
+    /// RoffState` determines `?x = RoffTokens` — and nothing else does: the
+    /// lexers name their parsers `RoffLexer m` / `Lexer m`, never the token
+    /// type, so without this every `escape` in Roff.hs and Mdoc/Lex.hs keeps an
+    /// unreduced `Token ?x` and cannot meet `[LinePart]`.
+    ///
+    /// Only a right-hand side matched by EXACTLY ONE equation inverts; an
+    /// ambiguous one says nothing about the argument and is left alone.
+    #[must_use]
+    pub fn invert_assoc_type(&self, family_name: Symbol, rhs: &Ty) -> Option<Vec<Ty>> {
+        let mut found: Option<Vec<Ty>> = None;
+        for instances in self.instances.values() {
+            for instance in instances {
+                for impl_ in &instance.assoc_type_impls {
+                    if impl_.name != family_name {
+                        continue;
+                    }
+                    let pattern_vars: Vec<TyVar> = impl_.rhs.free_vars();
+                    if self.match_types(&impl_.rhs, rhs, &pattern_vars).is_none() {
+                        continue;
+                    }
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some(impl_.args.clone());
+                }
+            }
+        }
+        found
+    }
+
+    /// Whether any class declares, or any instance defines, an associated type
+    /// of this name. A type FAMILY reduces through its equations; it must never
+    /// be substituted like a synonym, even when a same-named synonym exists.
+    #[must_use]
+    pub fn is_assoc_type_name(&self, name: Symbol) -> bool {
+        if self.lookup_assoc_type(name).is_some() {
+            return true;
+        }
+        self.instances.values().any(|instances| {
+            instances
+                .iter()
+                .any(|i| i.assoc_type_impls.iter().any(|a| a.name == name))
+        })
     }
 
     /// Try to reduce a standalone type family application.

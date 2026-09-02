@@ -563,7 +563,13 @@ pub fn compile_match_to_expr(
 
     if has_view || has_guards {
         // Fall back to linear compilation for view patterns and guards
-        let alts = compile_equations_linear(ctx, &value_def.equations, args, value_def.span)?;
+        let alts = compile_equations_linear(
+            ctx,
+            &value_def.equations,
+            args,
+            value_def.span,
+            value_def.equations.len(),
+        )?;
         let scrutinee = if args.len() == 1 {
             core::Expr::Var(args[0].clone(), value_def.span)
         } else {
@@ -1339,11 +1345,34 @@ fn collect_reached_rows(tree: &DecisionTree, reached: &mut std::collections::Has
 
 /// Linear (equation-by-equation) compilation for view patterns and guards.
 /// This preserves the original approach for cases the decision tree doesn't handle.
+/// How many equations a function may have before an UNGUARDED equation stops
+/// getting a fallthrough join point.
+///
+/// The join point holds the remaining equations and is cloned into every
+/// alternative the equation expands to, while those equations also stay in the
+/// alternative list — so the Core roughly doubles per equation.
+/// `Writers.LaTeX.Lang` is ~120 equations of
+/// `toBabel (Lang "de" _ (Just "AT") vars _ _)`, and building join points for
+/// all of them took it from compiling in 1.2s to not finishing in two minutes.
+///
+/// Guarded equations always get one — a guard has no other way to reach the
+/// next equation, and they are few. Below this budget unguarded equations get
+/// one too, which is what a refutable NESTED sub-pattern needs:
+/// `preprocessArgs ("--":xs)` before `preprocessArgs (x:xs)` — four equations —
+/// is how pandoc reads its command line.
+///
+/// The real fix is to bind the join point ONCE outside the case rather than
+/// cloning it into each alternative, which means this function returning an
+/// expression rather than a `Vec<Alt>`. Until then this bounds the blowup at
+/// 2^12 nodes for the functions that still get it.
+const JOIN_POINT_EQUATION_BUDGET: usize = 12;
+
 fn compile_equations_linear(
     ctx: &mut LowerContext,
     equations: &[hir::Equation],
     args: &[Var],
     span: Span,
+    total_equations: usize,
 ) -> LowerResult<Vec<Alt>> {
     if equations.is_empty() {
         return Ok(vec![Alt {
@@ -1380,7 +1409,8 @@ fn compile_equations_linear(
             )?
         };
 
-        let remaining_alts = compile_equations_linear(ctx, &equations[1..], args, span)?;
+        let remaining_alts =
+            compile_equations_linear(ctx, &equations[1..], args, span, total_equations)?;
 
         let fallthrough_expr = if let Some(arg) = args.first() {
             core::Expr::Case(
@@ -1469,12 +1499,24 @@ fn compile_equations_linear(
         // re-registers every pattern variable, and the first copy is then
         // left holding stale ones.
         let remaining_alts = if equations.len() > 1 {
-            Some(compile_equations_linear(ctx, &equations[1..], args, span)?)
+            Some(compile_equations_linear(
+                ctx,
+                &equations[1..],
+                args,
+                span,
+                total_equations,
+            )?)
         } else {
             None
         };
+        // See JOIN_POINT_EQUATION_BUDGET: a guarded equation always gets the
+        // join point, an unguarded one only while the function is small
+        // enough that cloning the remaining equations into its alternatives
+        // stays bounded.
+        let join_point_affordable =
+            !eq.guards.is_empty() || total_equations <= JOIN_POINT_EQUATION_BUDGET;
         let fallthrough = match (&remaining_alts, args.first()) {
-            (Some(remaining), Some(arg)) => Some(core::Expr::Case(
+            (Some(remaining), Some(arg)) if join_point_affordable => Some(core::Expr::Case(
                 Box::new(core::Expr::Var(arg.clone(), span)),
                 remaining.clone(),
                 Ty::Error,

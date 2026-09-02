@@ -441,7 +441,43 @@ fn desugar_stmts_for_comp(
             let body = desugar_stmts_for_comp(ctx, expr, rest, span, lower_expr, lower_pat);
             ctx.exit_scope();
 
-            let lambda = hir::Expr::Lam(vec![p], Box::new(body), span);
+            // A REFUTABLE generator pattern FILTERS: `[x | Just x <- xs]`
+            // keeps the Justs and skips everything else. Binding it straight
+            // as the lambda's parameter left no fallback, and the first
+            // element that did not match crashed — `[c | Option [c] _ (OptArg
+            // _ "true|false") _ <- options]` is how pandoc's option
+            // preprocessor asks which flags are boolean.
+            let lambda = if pat_is_irrefutable(pat) {
+                hir::Expr::Lam(vec![p], Box::new(body), span)
+            } else {
+                let scrut_name = Symbol::intern("$lcgen");
+                let scrut_id = ctx.fresh_def_id();
+                ctx.define(scrut_id, scrut_name, crate::context::DefKind::Value, span);
+                let scrut_ref = hir::Expr::Var(ctx.def_ref(scrut_id, span));
+                let case = hir::Expr::Case(
+                    Box::new(scrut_ref),
+                    vec![
+                        hir::CaseAlt {
+                            pat: p,
+                            guards: vec![],
+                            rhs: body,
+                            span,
+                        },
+                        hir::CaseAlt {
+                            pat: hir::Pat::Wild(span),
+                            guards: vec![],
+                            rhs: hir::Expr::List(vec![], span),
+                            span,
+                        },
+                    ],
+                    span,
+                );
+                hir::Expr::Lam(
+                    vec![hir::Pat::Var(scrut_name, scrut_id, span)],
+                    Box::new(case),
+                    span,
+                )
+            };
 
             let concat_map_sym = Symbol::intern("concatMap");
             let concat_map = make_var_ref(ctx, concat_map_sym, *qual_span);
@@ -670,6 +706,20 @@ fn desugar_guards(
                 }
             }
         }
+    }
+}
+
+/// Whether a pattern always matches. Only these can be a lambda parameter
+/// without a fallback; everything else FILTERS when it appears as a list
+/// comprehension's generator. See `desugar_stmts_for_comp`.
+fn pat_is_irrefutable(pat: &ast::Pat) -> bool {
+    match pat {
+        ast::Pat::Var(..) | ast::Pat::Wildcard(..) | ast::Pat::Lazy(..) => true,
+        ast::Pat::Tuple(ps, _) => ps.iter().all(pat_is_irrefutable),
+        ast::Pat::Bang(inner, _) | ast::Pat::Paren(inner, _) => pat_is_irrefutable(inner),
+        ast::Pat::Ann(inner, _, _) => pat_is_irrefutable(inner),
+        ast::Pat::As(_, inner, _) => pat_is_irrefutable(inner),
+        _ => false,
     }
 }
 

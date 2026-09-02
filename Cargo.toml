@@ -89,11 +89,11 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.21"
+version = "0.2.22"
 edition = "2021"
 rust-version = "1.82"
 license = "BSD-3-Clause"
-repository = "https://github.com/raskell-io/bhc"
+repository = "https://github.com/arcanist-sh/bhc"
 homepage = "https://bhc.raskell.io"
 authors = ["BHC Contributors"]
 keywords = ["haskell", "compiler", "llvm", "functional"]

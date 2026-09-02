@@ -192,7 +192,7 @@ fn annotate_ty(ctx: &LowerContext, span: bhc_span::Span, core: core::Expr) -> co
 
 fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<core::Expr> {
     match expr {
-        Expr::Lit(lit, span) => lower_lit(lit, *span),
+        Expr::Lit(lit, span) => lower_lit_at(ctx, lit, *span),
 
         Expr::Var(def_ref) => lower_var(ctx, def_ref),
 
@@ -273,6 +273,47 @@ fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<cor
                 *span,
             ))
         }
+    }
+}
+
+/// Lower a literal, packing a STRING literal that is used at type `Text`.
+///
+/// bhc's `Text` is a real struct — `bhc_text_pack` walks a char list and
+/// allocates a `{data ptr, offset, byte_len}` header, and every `Data.Text.*`
+/// RTS entry point reads that header. A string literal is a char list, so an
+/// OverloadedStrings literal at type `Text` was handed to those functions
+/// unconverted: `TIO.putStrLn ("hello" :: Text)` printed an empty line and
+/// `T.length` on it segfaulted. `fromString` is gone by Core (it lowers to
+/// identity, which is right for `String`), so the conversion has to key off the
+/// literal's own occurrence type.
+fn lower_lit_at(ctx: &LowerContext, lit: &Lit, span: Span) -> LowerResult<core::Expr> {
+    let core_lit = lower_lit(lit, span)?;
+    if !matches!(lit, Lit::String(_)) {
+        return Ok(core_lit);
+    }
+    match refined_occurrence_ty(ctx, span) {
+        Some(ty) if ty_head_is(&ty, "Text") => {
+            let pack = Var {
+                name: Symbol::intern("Data.Text.pack"),
+                id: VarId::new(0),
+                ty: Ty::Error,
+            };
+            Ok(core::Expr::App(
+                Box::new(core::Expr::Var(pack, span)),
+                Box::new(core_lit),
+                span,
+            ))
+        }
+        _ => Ok(core_lit),
+    }
+}
+
+/// Whether a type's head constructor is named `name`.
+fn ty_head_is(ty: &Ty, name: &str) -> bool {
+    match ty {
+        Ty::Con(c) => c.name.as_str() == name,
+        Ty::App(f, _) => ty_head_is(f, name),
+        _ => false,
     }
 }
 

@@ -3010,6 +3010,19 @@ impl LowerContext {
                 self.current_binding_sig()
                     .and_then(|s| head_con(result_of(s)))
                     .map(|c| c.name)
+            })
+            // An instance method's own type is the CLASS's generic one, whose
+            // head is a variable, and typeck records nothing for a `lift` in
+            // that position. The enclosing instance says which transformer:
+            // pandoc writes `getCommonState = lift getCommonState` in
+            // `instance PandocMonad m => PandocMonad (ParsecT s st m)`, and
+            // without this the `lift` stayed a builtin at the ambient layer —
+            // where it is the identity — so every parser that asked for the
+            // common state ran a PandocIO action instead.
+            .or_else(|| {
+                self.current_instance_type()
+                    .and_then(head_con)
+                    .map(|c| c.name)
             })?;
         if matches!(
             head.as_str(),
@@ -3136,7 +3149,16 @@ impl LowerContext {
         if dbg {
             eprintln!("[dispatch] {method}: inst_ty = {inst_ty:?}");
         }
-        if !ty_is_concrete(&inst_ty) {
+        // A TRANSFORMER instance is named by its head: `instance PandocMonad m
+        // => PandocMonad (ParsecT s st m)` is selected by `ParsecT` alone, and
+        // its arguments are variables by construction. Requiring every
+        // argument concrete rejected `ParsecT Sources ParserState ?m`, so
+        // pandoc's `getCommonState` inside a parser fell back to the
+        // dictionary for the ENCLOSING monad and handed the parser an
+        // ExceptT-over-StateT action to run. The instance match below is what
+        // actually gates dispatch; a variable-HEADED type still cannot select.
+        if !ty_is_concrete(&inst_ty) && !head_is_concrete_with_instance(self, class_name, &inst_ty)
+        {
             return None;
         }
         self.method_at_instance_type(class_name, method, &inst_ty, span)
@@ -5011,6 +5033,23 @@ fn lazify_recursive_parser_calls(bindings: &mut [Bind]) {
             }
         }
     }
+}
+
+/// Whether `ty`'s HEAD is a type constructor for which `class_name` has an
+/// instance. See the concreteness gate in `select_method_by_result_type`.
+fn head_is_concrete_with_instance(ctx: &LowerContext, class_name: Symbol, ty: &Ty) -> bool {
+    fn head(t: &Ty) -> &Ty {
+        match t {
+            Ty::App(f, _) => head(f),
+            other => other,
+        }
+    }
+    let Ty::Con(_) = head(ty) else {
+        return false;
+    };
+    ctx.class_registry
+        .resolve_instance(class_name, ty)
+        .is_some()
 }
 
 /// Give an instance method's bare `return`/`pure`/`>>=`/`>>` heads the

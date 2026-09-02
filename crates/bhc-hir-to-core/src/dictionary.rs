@@ -381,10 +381,21 @@ impl ClassRegistry {
         let instances = self.instances.get(&class);
         let instances = instances?;
 
-        for inst in instances {
-            let result = types_match_multi(&inst.instance_types, types);
-            if let Some(subst) = result {
-                return Some((inst, subst));
+        // Most specific first. A VARIABLE-headed instance head matches
+        // anything, so whichever such instance is registered first would
+        // otherwise answer for every type: pandoc's `getCommonState` at
+        // `ParsecT Sources ParserState m` picked up a `PandocMonad`
+        // instance that is not ParsecT's, and the parser ran an action
+        // belonging to another monad. Require the head constructors to
+        // agree first, then fall back to the permissive match.
+        for require_head in [true, false] {
+            for inst in instances {
+                if require_head && !instance_heads_agree(&inst.instance_types, types) {
+                    continue;
+                }
+                if let Some(subst) = types_match_multi(&inst.instance_types, types) {
+                    return Some((inst, subst));
+                }
             }
         }
         None
@@ -473,6 +484,35 @@ impl ClassRegistry {
 
 use bhc_types::types_match_multi;
 
+/// Whether every instance-head argument names the same type CONSTRUCTOR as the
+/// corresponding query argument. An instance head that is a bare variable does
+/// not agree — it matches everything, and is only reached on the second,
+/// permissive pass. See `resolve_instance_multi`.
+fn instance_heads_agree(inst_tys: &[Ty], tys: &[Ty]) -> bool {
+    fn head_con(ty: &Ty) -> Option<Symbol> {
+        let mut cur = ty;
+        while let Ty::App(f, _) = cur {
+            cur = f;
+        }
+        match cur {
+            Ty::Con(c) => Some(c.name),
+            Ty::List(_) => Some(Symbol::intern("[]")),
+            _ => None,
+        }
+    }
+    inst_tys.len() == tys.len()
+        && inst_tys
+            .iter()
+            .zip(tys)
+            .all(|(i, t)| match (head_con(i), head_con(t)) {
+                (Some(a), Some(b)) => a == b,
+                // The query says nothing: any instance may still answer.
+                (_, None) => true,
+                // A variable-headed instance is the less specific choice.
+                (None, Some(_)) => false,
+            })
+}
+
 /// Context for dictionary construction during lowering.
 pub struct DictContext<'a> {
     /// The class registry.
@@ -557,6 +597,53 @@ impl<'a> DictContext<'a> {
     /// filled. See `scope_dicts`.
     pub fn set_scope_dicts(&mut self, dicts: Vec<(Symbol, Vec<Ty>, Var)>) {
         self.scope_dicts = dicts;
+    }
+
+    /// A dictionary in scope at the construction site for this very
+    /// constraint, matched by HEAD so `m` lines up with `m` and never with a
+    /// different monad.
+    ///
+    /// An instance's OWN constraint often stays a variable: building
+    /// `PandocMonad (ParsecT s st m)` needs `PandocMonad m`, which no instance
+    /// can supply — but the enclosing binding is constrained by exactly that
+    /// and holds the dictionary. Without this the slot was a null placeholder
+    /// and every method the instance defines through it read a field off null.
+    fn dict_in_scope_by_head(&self, constraint: &Constraint, span: Span) -> Option<core::Expr> {
+        let matches = |class: &Symbol, args: &Vec<Ty>| {
+            *class == constraint.class
+                && args.len() == constraint.args.len()
+                && args
+                    .iter()
+                    .zip(&constraint.args)
+                    .all(|(a, b)| same_head(a, b))
+        };
+        if let Some((_, _, var)) = self
+            .scope_dicts
+            .iter()
+            .find(|(class, args, _)| matches(class, args))
+        {
+            return Some(core::Expr::Var(var.clone(), span));
+        }
+        let (_, _, base, path) = self
+            .scope_super_dicts
+            .iter()
+            .find(|(class, args, _, _)| matches(class, args))?;
+        let mut cur = core::Expr::Var(base.clone(), span);
+        for idx in path {
+            cur = core::Expr::App(
+                Box::new(core::Expr::Var(
+                    Var {
+                        name: Symbol::intern(&format!("$sel_{idx}")),
+                        id: VarId::new(0),
+                        ty: Ty::Error,
+                    },
+                    span,
+                )),
+                Box::new(cur),
+                span,
+            );
+        }
+        Some(cur)
     }
 
     /// Offer the dictionaries reachable from one in scope by superclass
@@ -826,6 +913,7 @@ impl<'a> DictContext<'a> {
                     span,
                 };
                 self.get_dictionary(&concrete, span)
+                    .or_else(|| self.dict_in_scope_by_head(&concrete, span))
                     .unwrap_or(core::Expr::Lit(core::Literal::Int(0), Ty::Error, span))
             })
             .collect();

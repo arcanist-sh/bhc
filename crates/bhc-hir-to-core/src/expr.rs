@@ -346,18 +346,25 @@ fn binding_returns_in_dict_monad(ctx: &LowerContext, class_name: Symbol) -> bool
 /// was ever in scope and these methods went to the concrete-instance dispatch
 /// below; refusing restores exactly that behaviour instead of guessing.
 fn in_scope_dict_matches(ctx: &LowerContext, class_name: Symbol, span: Span) -> bool {
-    if !ctx.is_monad_family_class(class_name) {
-        return true;
-    }
     let Some(dict_ty) = ctx.lookup_dict_ty(class_name).cloned() else {
         // No recorded type: this dictionary predates the witness (an
         // existential pattern match, say), so keep the old behaviour.
         return true;
     };
-    ctx.resolved_expr_ty_opt(span)
+    let occ_head = refined_occurrence_ty(ctx, span)
         .as_ref()
-        .and_then(monad_head_of_method_occurrence)
-        .is_some_and(|occ_head| same_type_head(&dict_ty, &occ_head))
+        .and_then(monad_head_of_method_occurrence);
+    match occ_head {
+        // A dictionary for one monad must not answer for another, whatever
+        // the class. `readWithM p` runs `p` at `ParsecT Sources st m` inside a
+        // `PandocMonad m =>` binding, so pandoc's `getCommonState` — a
+        // PandocMonad method the ParsecT instance defines as `lift
+        // getCommonState` — was selected from the dictionary for `m` and the
+        // parser was handed an ExceptT-over-StateT action to run.
+        Some(occ_head) => same_type_head(&dict_ty, &occ_head),
+        // Nothing recorded: keep what each class kind did before.
+        None => !ctx.is_monad_family_class(class_name),
+    }
 }
 
 /// Whether two types name the same monad, comparing only head constructors —
@@ -378,14 +385,27 @@ pub(crate) fn same_type_head(a: &Ty, b: &Ty) -> bool {
 }
 
 pub(crate) fn monad_head_of_method_occurrence(ty: &Ty) -> Option<Ty> {
-    let target = match ty {
-        Ty::Fun(a, _) => a.as_ref(),
-        t => t,
-    };
-    match target {
-        Ty::App(m, _) => Some(m.as_ref().clone()),
-        _ => None,
+    fn applied_to(ty: &Ty) -> Option<Ty> {
+        match ty {
+            Ty::App(m, _) => Some(m.as_ref().clone()),
+            _ => None,
+        }
     }
+    fn result_of(ty: &Ty) -> &Ty {
+        match ty {
+            Ty::Fun(_, r) => result_of(r),
+            t => t,
+        }
+    }
+    let from_first_arg = match ty {
+        Ty::Fun(a, _) => applied_to(a),
+        t => applied_to(t),
+    };
+    // `>>=` and friends carry the monad in their first argument; a method
+    // like `getsCommonState :: (CommonState -> a) -> m a` carries it only in
+    // the RESULT, and without that the occurrence said nothing and the
+    // dictionary in scope answered for a monad that was not the use site's.
+    from_first_arg.or_else(|| applied_to(result_of(ty)))
 }
 
 /// Lower a variable reference to Core.
@@ -592,6 +612,23 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                     return Ok(method_expr);
                 }
             } else if ctx.is_user_class(class_name) {
+                // When the occurrence's own monad is KNOWN to differ from the
+                // dictionary in scope, the instance is the answer and a
+                // superclass hop is not — every hop reaches that same wrong
+                // dictionary. `readWithM p` runs `p` at `ParsecT Sources st m`
+                // inside a `PandocMonad m =>` binding, so pandoc's
+                // `getCommonState` was selected from the dictionary for `m`
+                // and the parser was handed an ExceptT-over-StateT action.
+                if !dict_matches && ctx.lookup_dict(class_name).is_some() {
+                    if let Some(method_expr) = ctx.select_method_by_result_type(
+                        class_name,
+                        name,
+                        def_ref.def_id,
+                        def_ref.span,
+                    ) {
+                        return Ok(method_expr);
+                    }
+                }
                 // No direct dict in scope — try superclass extraction.
                 // If we have MyOrd in scope and need MyEq, extract MyEq from MyOrd.
                 if let Some(method_expr) =
@@ -1707,6 +1744,15 @@ fn propagate_spine(
     for (pty, a) in param_tys.iter().zip(args.iter()) {
         let inner = subst.apply(pty);
         propagate_expected_ty(ctx, a, &inner, depth + 1);
+    }
+    // The head's own instantiated type, so a CLASS METHOD at this position
+    // knows which monad it is being used at even where typeck recorded only a
+    // variable — the whole body of an instance method is such a place.
+    if let Expr::Var(dr) = head {
+        let instantiated = subst.apply(&head_ty);
+        if !ty_has_error(&instantiated) {
+            ctx.record_expected_ty(dr.span, instantiated);
+        }
     }
 }
 
@@ -3181,6 +3227,28 @@ fn lower_app(
                                 span,
                             ));
                         }
+                    }
+                }
+
+                // The occurrence's own monad decides when the dictionary in
+                // scope is for a DIFFERENT one. pandoc's `getsCommonState` —
+                // a PandocMonad method with a class default — is called
+                // inside a parser from a `PandocMonad m =>` binding, and
+                // selecting it from the dictionary for `m` handed the parser
+                // an action belonging to the base monad.
+                if is_user && !dict_matches && ctx.lookup_dict(class_name).is_some() {
+                    if let Some(method_expr) = ctx.select_method_by_result_type(
+                        class_name,
+                        method_name,
+                        def_ref.def_id,
+                        def_ref.span,
+                    ) {
+                        let x_core = lower_expr(ctx, x)?;
+                        return Ok(core::Expr::App(
+                            Box::new(method_expr),
+                            Box::new(x_core),
+                            span,
+                        ));
                     }
                 }
 

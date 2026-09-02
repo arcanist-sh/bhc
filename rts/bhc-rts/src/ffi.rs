@@ -4058,6 +4058,70 @@ pub extern "C" fn bhc_get_current_directory() -> *mut c_char {
     }
 }
 
+/// Decodes a possibly-null C string, lossily.
+///
+/// # Safety
+///
+/// `s` must be either null or a pointer to a valid, NUL-terminated C string.
+unsafe fn cstr_to_string(s: *const c_char) -> Option<String> {
+    if s.is_null() {
+        return None;
+    }
+    Some(unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned())
+}
+
+/// `getXdgDirectory` — the XDG base directory for `tag`, with `suffix` appended.
+///
+/// `tag` follows directory's `XdgDirectory` constructor order: 0 `XdgData`,
+/// 1 `XdgConfig`, 2 `XdgCache`, 3 `XdgState`. Each honours its `XDG_*_HOME`
+/// environment variable and otherwise falls back to the specified default
+/// under `$HOME`. Returns null when `$HOME` is not set and the variable is
+/// absent, which is the case pandoc's `defaultUserDataDir` treats as "no
+/// user data directory".
+///
+/// # Safety
+///
+/// `suffix` must be either null or a pointer to a valid, NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_get_xdg_directory(tag: i64, suffix: *const c_char) -> *mut c_char {
+    let (var, default) = match tag {
+        1 => ("XDG_CONFIG_HOME", ".config"),
+        2 => ("XDG_CACHE_HOME", ".cache"),
+        3 => ("XDG_STATE_HOME", ".local/state"),
+        _ => ("XDG_DATA_HOME", ".local/share"),
+    };
+    let base = match std::env::var(var) {
+        Ok(v) if !v.is_empty() => v,
+        _ => match std::env::var("HOME") {
+            Ok(home) if !home.is_empty() => format!("{home}/{default}"),
+            _ => return ptr::null_mut(),
+        },
+    };
+    let path = match unsafe { cstr_to_string(suffix) } {
+        Some(sfx) if !sfx.is_empty() => format!("{base}/{sfx}"),
+        _ => base,
+    };
+    CString::new(path).map_or(ptr::null_mut(), |cs| cs.into_raw())
+}
+
+/// `getAppUserDataDirectory` — `$HOME/.<name>`, the unix spelling.
+///
+/// # Safety
+///
+/// `name` must be either null or a pointer to a valid, NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_get_app_user_data_directory(name: *const c_char) -> *mut c_char {
+    let home = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => h,
+        _ => return ptr::null_mut(),
+    };
+    let path = match unsafe { cstr_to_string(name) } {
+        Some(n) if !n.is_empty() => format!("{home}/.{n}"),
+        _ => home,
+    };
+    CString::new(path).map_or(ptr::null_mut(), |cs| cs.into_raw())
+}
+
 /// Create a directory (and parents). No-op on error.
 ///
 /// # Safety

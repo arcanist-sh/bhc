@@ -172,7 +172,41 @@ fn list_element(ty: &Ty) -> Option<&Ty> {
     }
 }
 
+/// The monad-family methods whose Core type is read ONLY to choose a
+/// transformer implementation, never to size a value.
+fn is_monad_method_name(name: &str) -> bool {
+    matches!(
+        name,
+        ">>=" | ">>" | "=<<" | "return" | "pure" | "fmap" | "<*>" | "<$>"
+    )
+}
+
 fn annotate_ty(ctx: &LowerContext, span: bhc_span::Span, core: core::Expr) -> core::Expr {
+    // A monad method takes the RESOLVED occurrence type. Its raw one is
+    // whatever a single pass left behind — `foldl' (>>=) …` records
+    // `(t606 t604) -> ((t604 -> t606 t608) -> t606 t608)`, a bare type
+    // VARIABLE for the monad — while the resolved map has
+    // `ExceptT e IO Int -> …`. Codegen reads exactly this to pick the
+    // transformer implementation, and with a variable it falls back to IO:
+    // `foldl' (>>=) (return 0) [step]` at ExceptT ran the action, got an
+    // `Either`, and passed THAT to the continuation as if it were the value.
+    //
+    // Deliberately confined to these names. The resolved map is documented as
+    // dispatch-only — typing every Core node from it regresses codegen widths —
+    // and a monad method's type is never used for a width.
+    if let core::Expr::Var(ref v, _) = core {
+        if matches!(v.ty, Ty::Error) && is_monad_method_name(v.name.as_str()) {
+            if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
+                if ty_is_annotatable(&resolved) {
+                    if let core::Expr::Var(mut v, s) = core {
+                        v.ty = resolved;
+                        return core::Expr::Var(v, s);
+                    }
+                    unreachable!("matched Var above")
+                }
+            }
+        }
+    }
     let Some(ty) = ctx.expr_ty_opt(span) else {
         return core;
     };
@@ -465,6 +499,20 @@ pub(crate) fn monad_head_of_method_occurrence(ty: &Ty) -> Option<Ty> {
 fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr> {
     // First, check if this is a class method reference
     let var_name = ctx.lookup_var(def_ref.def_id).map(|v| v.name);
+
+    if std::env::var_os("BHC_DBG_MONOP").is_some() {
+        if let Some(n) = var_name {
+            if matches!(n.as_str(), ">>=" | ">>" | "=<<" | "return" | "pure") {
+                eprintln!(
+                    "MONOP {} raw={:?} resolved={:?} refined={:?}",
+                    n.as_str(),
+                    ctx.expr_ty_opt(def_ref.span).map(|t| dbg_ty(&t)),
+                    ctx.resolved_expr_ty_opt(def_ref.span).map(|t| dbg_ty(&t)),
+                    refined_occurrence_ty(ctx, def_ref.span).map(|t| dbg_ty(&t)),
+                );
+            }
+        }
+    }
 
     if let Some(name) = var_name {
         // `guard :: Alternative f => Bool -> f ()` — an external constrained

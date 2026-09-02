@@ -4696,6 +4696,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .llvm_module()
                 .add_function("bhc_get_current_directory", void_to_ptr, None);
         self.functions.insert(VarId::new(1000317), get_cur_dir);
+        // bhc_get_xdg_directory(i64 tag, *i8 suffix) -> *i8
+        let i64_ty = self.type_mapper().i64_type();
+        let ptr_ty = self.type_mapper().ptr_type();
+        let xdg_ty = ptr_ty.fn_type(&[i64_ty.into(), ptr_ty.into()], false);
+        let get_xdg = self
+            .module
+            .llvm_module()
+            .add_function("bhc_get_xdg_directory", xdg_ty, None);
+        self.functions.insert(VarId::new(1000931), get_xdg);
+        // bhc_get_app_user_data_directory(*i8 name) -> *i8
+        let app_dir_ty = ptr_ty.fn_type(&[ptr_ty.into()], false);
+        let get_app_dir = self.module.llvm_module().add_function(
+            "bhc_get_app_user_data_directory",
+            app_dir_ty,
+            None,
+        );
+        self.functions.insert(VarId::new(1000932), get_app_dir);
         // bhc_new_unique() -> i64 (Data.Unique: process-unique id)
         let new_unique = self.module.llvm_module().add_function(
             "bhc_new_unique",
@@ -6040,6 +6057,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "hFlush" => Some(1),
             "hIsEOF" => Some(1),
             "hSetBuffering" => Some(2),
+            // Handle configuration bhc has nothing to configure for: it always
+            // writes UTF-8 with LF newlines. Accepting them as no-ops is what
+            // lets a program that sets them up front (pandoc's `App`) run.
+            "hSetNewlineMode" => Some(2),
+            "hSetEncoding" => Some(2),
+            "hSetBinaryMode" => Some(2),
             "stdin" => Some(0),
             "stdout" => Some(0),
             "stderr" => Some(0),
@@ -6057,6 +6080,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "exitWith" => Some(1),
             "hGetContents" => Some(1),
             "getCurrentDirectory" => Some(0),
+            "getXdgDirectory" => Some(2),
+            "getAppUserDataDirectory" => Some(1),
             "createDirectory" => Some(1),
             "listDirectory" => Some(1),
 
@@ -7147,10 +7172,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "hPutStrLn" => self.lower_builtin_hputstrln(args[0], args[1]),
             "hFlush" => self.lower_builtin_hflush(args[0]),
             "hIsEOF" => self.lower_builtin_hiseof(args[0]),
-            "hSetBuffering" => self.lower_builtin_hset_buffering(args[0], args[1]),
-            "stdin" => self.lower_builtin_std_handle(1060, "stdin"),
-            "stdout" => self.lower_builtin_std_handle(1061, "stdout"),
-            "stderr" => self.lower_builtin_std_handle(1062, "stderr"),
+            "hSetBuffering" | "hSetNewlineMode" | "hSetEncoding" | "hSetBinaryMode" => {
+                self.lower_builtin_hset_buffering(args[0], args[1])
+            }
+            // 1000060/61/62 — NOT 1060/61/62, which is what these read for as
+            // long as the three handles only ever reached codegen as closure
+            // wrappers and this direct path was dead.
+            "stdin" => self.lower_builtin_std_handle(1000060, "stdin"),
+            "stdout" => self.lower_builtin_std_handle(1000061, "stdout"),
+            "stderr" => self.lower_builtin_std_handle(1000062, "stderr"),
             "doesFileExist" => self.lower_builtin_file_pred(args[0], 1000063, "exists"),
             "doesDirectoryExist" => self.lower_builtin_file_pred(args[0], 1000064, "is_dir"),
             "removeFile" => self.lower_builtin_remove_file(args[0]),
@@ -7166,6 +7196,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "exitWith" => self.lower_builtin_exit_with(args[0]),
             "hGetContents" => self.lower_builtin_hgetcontents(args[0]),
             "getCurrentDirectory" => self.lower_builtin_get_current_directory(),
+            "getXdgDirectory" => self.lower_builtin_get_xdg_directory(args[0], args[1]),
+            "getAppUserDataDirectory" => self.lower_builtin_app_user_data_directory(args[0]),
             "createDirectory" => self.lower_builtin_create_directory(args[0]),
             "listDirectory" => self.lower_builtin_list_directory(args[0]),
 
@@ -24476,13 +24508,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower `hSetBuffering` (stub).
+    /// Lower a handle-configuration call to a no-op that still evaluates both
+    /// operands: `hSetBuffering`, `hSetNewlineMode`, `hSetEncoding` and
+    /// `hSetBinaryMode` all describe properties bhc's IO does not vary.
     fn lower_builtin_hset_buffering(
         &mut self,
         handle_expr: &Expr,
-        mode_expr: &Expr,
+        _mode_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // The MODE is deliberately not lowered. It is pure data whose value
+        // nothing here reads, and it is typically a constructor bhc stubs —
+        // `NewlineMode`, `BufferMode` — so evaluating it aborts the program on
+        // a call that is supposed to do nothing.
         let _ = self.lower_expr(handle_expr)?;
-        let _ = self.lower_expr(mode_expr)?;
         Ok(Some(self.type_mapper().ptr_type().const_null().into()))
     }
 
@@ -24838,6 +24876,89 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 CodegenError::Internal("getCurrentDirectory: returned void".to_string())
             })?;
         Ok(Some(result))
+    }
+
+    /// Lower `getXdgDirectory :: XdgDirectory -> FilePath -> IO FilePath`.
+    ///
+    /// The `XdgDirectory` argument comes from a stub module, so it has no
+    /// runtime representation to read a tag out of; the constructor is instead
+    /// recognised by name at the call site (every real use writes it
+    /// literally) and defaults to `XdgData`, which is what pandoc asks for.
+    fn lower_builtin_get_xdg_directory(
+        &mut self,
+        which_expr: &Expr,
+        suffix_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let tag = match Self::xdg_constructor_name(which_expr) {
+            Some("XdgConfig") => 1,
+            Some("XdgCache") => 2,
+            Some("XdgState") => 3,
+            _ => 0,
+        };
+        let suffix_val = self
+            .lower_expr(suffix_expr)?
+            .ok_or_else(|| CodegenError::Internal("getXdgDirectory: no suffix".to_string()))?;
+        let suffix_ptr = self.value_to_ptr(suffix_val)?;
+        let suffix_cstr = self.char_list_to_cstring(suffix_ptr)?;
+        let rts_fn = self.functions.get(&VarId::new(1000931)).ok_or_else(|| {
+            CodegenError::Internal("bhc_get_xdg_directory not declared".to_string())
+        })?;
+        let tag_val = self.type_mapper().i64_type().const_int(tag, false);
+        let result = self
+            .builder()
+            .build_call(*rts_fn, &[tag_val.into(), suffix_cstr.into()], "getxdg")
+            .map_err(|e| CodegenError::Internal(format!("getXdgDirectory call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("getXdgDirectory: returned void".to_string()))?;
+        let ptr = self.value_to_ptr(result)?;
+        Ok(Some(self.cstring_to_char_list(ptr)?.into()))
+    }
+
+    /// The `XdgDirectory` constructor a call names, if it names one literally.
+    fn xdg_constructor_name(expr: &Expr) -> Option<&'static str> {
+        let name = match expr {
+            Expr::Var(v, ..) => v.name.as_str(),
+            _ => return None,
+        };
+        // The name may arrive qualified (`D.XdgConfig`); the constructor is the
+        // last dotted component.
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        match bare {
+            "XdgData" => Some("XdgData"),
+            "XdgConfig" => Some("XdgConfig"),
+            "XdgCache" => Some("XdgCache"),
+            "XdgState" => Some("XdgState"),
+            _ => None,
+        }
+    }
+
+    /// Lower `getAppUserDataDirectory :: FilePath -> IO FilePath`.
+    fn lower_builtin_app_user_data_directory(
+        &mut self,
+        name_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let name_val = self.lower_expr(name_expr)?.ok_or_else(|| {
+            CodegenError::Internal("getAppUserDataDirectory: no name".to_string())
+        })?;
+        let name_ptr = self.value_to_ptr(name_val)?;
+        let name_cstr = self.char_list_to_cstring(name_ptr)?;
+        let rts_fn = self.functions.get(&VarId::new(1000932)).ok_or_else(|| {
+            CodegenError::Internal("bhc_get_app_user_data_directory not declared".to_string())
+        })?;
+        let result = self
+            .builder()
+            .build_call(*rts_fn, &[name_cstr.into()], "appdatadir")
+            .map_err(|e| {
+                CodegenError::Internal(format!("getAppUserDataDirectory call failed: {:?}", e))
+            })?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| {
+                CodegenError::Internal("getAppUserDataDirectory: returned void".to_string())
+            })?;
+        let ptr = self.value_to_ptr(result)?;
+        Ok(Some(self.cstring_to_char_list(ptr)?.into()))
     }
 
     /// Lower `createDirectory`.
@@ -45861,20 +45982,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // (parsec's `try`) shadows the builtin — fall through to
                     // the external branch below instead.
                     let arity = self.builtin_info(name).unwrap();
-                    if matches!(
-                        name,
-                        "Data.Set.empty" | "Data.Map.empty" | "Data.Text.empty" | "Data.List.empty"
-                    ) {
-                        // A nullary container builtin in value position IS its
-                        // result: `mempty` dispatched to `Data.Set.empty` must
-                        // produce the empty set, not an arity-0 closure —
-                        // bhc_force passes closures through (their first word
-                        // reads as a non-negative tag), so no consumer ever
-                        // evaluates the wrapper and strict RTS ops
-                        // (`bhc_set_member`) walk it as container data.
-                        // Restricted to the Monoid-dispatch targets: other
-                        // nullary builtins (`stderr`) have no value-position
-                        // lowering and must keep the wrapper.
+                    if arity == 0 {
+                        // A NULLARY builtin in value position IS its result.
+                        // An arity-0 closure wrapper is useless — it can only
+                        // ever be called with no arguments to produce the same
+                        // value — and it is actively wrong: bhc_force passes
+                        // closures through (their first word reads as a
+                        // non-negative tag), so no consumer evaluates the
+                        // wrapper. `mempty` dispatched to `Data.Set.empty` has
+                        // to be the empty set for `bhc_set_member` to walk it,
+                        // and `hPutStrLn stdout …` has to be handed the actual
+                        // handle — pandoc's `--version` aborted on
+                        // `stub: stdout not implemented` because the wrapper
+                        // reached the closure-call path with nothing to call.
                         self.lower_builtin(name, &[])
                     } else {
                         self.create_builtin_closure(name, arity)
@@ -49684,6 +49804,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     || name.starts_with("Data.IntSet.")
                 {
                     self.lower_builtin_container_direct(name, args)
+                } else if args.is_empty() && self.builtin_info(name) == Some(0) {
+                    // A nullary builtin whose wrapper closure was called.
+                    self.lower_builtin(name, &[])
                 } else if let Some(result) = self.lower_builtin_via_expr_path(name, args)? {
                     // Most builtins are implemented only in `lower_builtin`,
                     // which wants `Expr`s. Reaching one as a VALUE — passed to

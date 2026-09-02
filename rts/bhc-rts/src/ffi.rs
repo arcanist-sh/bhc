@@ -3916,11 +3916,14 @@ pub unsafe extern "C" fn bhc_lookupEnv(name: *const c_char) -> *mut c_char {
 /// Get command line arguments as a cons-cell list of C strings.
 #[no_mangle]
 pub extern "C" fn bhc_get_args() -> *mut u8 {
-    let args: Vec<String> = std::env::args().collect();
+    // `getArgs` excludes the program name, and each element is a Haskell
+    // `String`. Returning `std::env::args()` verbatim as C strings gave
+    // pandoc its own name as an input file and crashed anything that read
+    // one as a list.
+    let args: Vec<String> = std::env::args().skip(1).collect();
     let mut list = unsafe { alloc_nil() };
     for arg in args.iter().rev() {
-        let cs = CString::new(arg.as_str()).unwrap_or_default();
-        list = unsafe { alloc_cons(cs.into_raw() as *mut u8, list) };
+        list = unsafe { alloc_cons(alloc_hs_string(arg), list) };
     }
     list
 }
@@ -4009,6 +4012,22 @@ pub extern "C" fn bhc_cstr_unlines(list: *const u8) -> *mut c_char {
     CString::new(joined).map_or(ptr::null_mut(), |cs| cs.into_raw())
 }
 
+/// Build a Haskell `String` from a Rust one: a cons list whose heads are the
+/// char codes stored IN the pointer slot, which is how codegen reads `[Char]`
+/// (`lower_print_char_list` does `ptr_to_int` on each head).
+///
+/// The environment entry points used to hand back raw C strings, and every
+/// consumer — `putStrLn`, `++`, `length` — walked them as cons cells.
+unsafe fn alloc_hs_string(s: &str) -> *mut u8 {
+    unsafe {
+        let mut list = alloc_nil();
+        for ch in s.chars().rev() {
+            list = alloc_cons(ch as u32 as usize as *mut u8, list);
+        }
+        list
+    }
+}
+
 /// Join a cons-cell list of C strings with `' '`.
 #[no_mangle]
 pub extern "C" fn bhc_cstr_unwords(list: *const u8) -> *mut c_char {
@@ -4019,11 +4038,12 @@ pub extern "C" fn bhc_cstr_unwords(list: *const u8) -> *mut c_char {
 
 /// Get the program name. Returns heap-allocated C string.
 #[no_mangle]
-pub extern "C" fn bhc_get_prog_name() -> *mut c_char {
-    match std::env::args().next() {
-        Some(name) => CString::new(name).map_or(ptr::null_mut(), |cs| cs.into_raw()),
-        None => CString::new("bhc").map_or(ptr::null_mut(), |cs| cs.into_raw()),
-    }
+pub extern "C" fn bhc_get_prog_name() -> *mut u8 {
+    // A Haskell `String`, not a C string: `getProgName >>= putStrLn` walked
+    // the C string as cons cells and segfaulted.
+    let full = std::env::args().next().unwrap_or_else(|| "bhc".to_string());
+    let base = full.rsplit('/').next().unwrap_or(&full).to_string();
+    unsafe { alloc_hs_string(&base) }
 }
 
 /// Get the current working directory. Returns heap-allocated C string.
@@ -5144,9 +5164,10 @@ mod tests {
 
     #[test]
     fn test_get_prog_name() {
+        // A Haskell `String` now: a cons list, not a C string.
         let name = bhc_get_prog_name();
         assert!(!name.is_null());
-        unsafe { bhc_free_string(name) };
+        assert_eq!(unsafe { *(name as *const i64) }, 1, "a non-empty cons cell");
     }
 
     #[test]

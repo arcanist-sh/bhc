@@ -6305,6 +6305,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Data.Text.empty" => Some(0),
             "Data.List.empty" => Some(0),
             "Data.List.append" => Some(2),
+            "Data.Maybe.append" => Some(2),
             "Data.List.concat" => Some(1),
             "Data.Text.singleton" => Some(1),
             "Data.Text.pack" => Some(1),
@@ -7626,6 +7627,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // builtin `Monoid [a]` instance has something to dispatch to.
             "Data.List.empty" => Ok(Some(self.build_nil()?.into())),
             "Data.List.append" => self.lower_builtin_append(args[0], args[1]),
+            "Data.Maybe.append" => self.lower_builtin_maybe_append(args[0], args[1]),
             "Data.List.concat" => self.lower_builtin_concat(args[0]),
             "Data.Text.singleton" => {
                 self.lower_builtin_text_unary_int_to_ptr(args[0], 1000201, "text_singleton")
@@ -26122,8 +26124,63 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             return self.lower_builtin_map(func_expr, action_expr);
         }
 
+        // A TRANSFORMER action is not an IO one. `fmap` fell through to the
+        // IO path for every layer, so `adjustOpts <$> foldl' (>>=) (return
+        // defaults) actions` in pandoc's option parser ran an
+        // ExceptT-over-IO closure with IO's calling convention. The layer
+        // comes from the action's own type first — the ambient stack is only
+        // right when the action was built here.
+        // The ACTION's own type first; the ambient layer only when it says
+        // nothing. `adjustOpts <$> foldl' (>>=) (return defaults) actions` in
+        // pandoc's option parser has no recorded type for the fold, and the
+        // IO path ran an ExceptT-over-IO closure with IO's convention. The
+        // Maybe and list checks above come first, so a `Maybe` mapped inside
+        // `runExceptT` is still a Maybe.
+        let layer_of_action =
+            self.transformer_layer_of_ty(&action_expr.ty()).or_else(|| {
+                match self.current_transformer_layer() {
+                    TransformerLayer::IO => None,
+                    other => Some(other),
+                }
+            });
+        if let Some(layer) = layer_of_action {
+            match layer {
+                TransformerLayer::ExceptT => {
+                    return self.lower_builtin_except_t_fmap(func_expr, action_expr)
+                }
+                TransformerLayer::StateT => {
+                    return self.lower_builtin_state_t_fmap(func_expr, action_expr)
+                }
+                TransformerLayer::ReaderT => {
+                    return self.lower_builtin_reader_t_fmap(func_expr, action_expr)
+                }
+                TransformerLayer::WriterT => {
+                    return self.lower_builtin_writer_t_fmap(func_expr, action_expr)
+                }
+                TransformerLayer::IO => {}
+            }
+        }
+
         // Fallback: IO fmap (apply function to action result)
         self.lower_fmap_io(func_expr, action_expr)
+    }
+
+    /// The transformer layer a TYPE names, if any — the outermost of the stack
+    /// its head describes. Used where an action's own type is a better guide
+    /// than the ambient layer.
+    fn transformer_layer_of_ty(&self, ty: &Ty) -> Option<TransformerLayer> {
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        let mut stack = Vec::new();
+        self.extract_transformer_stack_recursive(result_of(ty), &mut stack);
+        stack
+            .first()
+            .copied()
+            .filter(|l| *l != TransformerLayer::IO)
     }
 
     /// Lower fmap for a user-defined ADT with derived Functor.
@@ -31283,8 +31340,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             _ => return Err(CodegenError::TypeError("elem expects a list".to_string())),
         };
 
-        let tm = self.type_mapper();
-        let ptr_type = tm.ptr_type();
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_ty = self.type_mapper().i64_type();
         let current_fn = self
             .builder()
             .get_insert_block()
@@ -31306,7 +31363,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Convert search value to i64 for comparison
         let val_int = self
             .builder()
-            .build_ptr_to_int(val_ptr, tm.i64_type(), "val_int")
+            .build_ptr_to_int(val_ptr, i64_ty, "val_int")
             .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
 
         self.builder()
@@ -31326,7 +31383,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_int_compare(
                 inkwell::IntPredicate::EQ,
                 tag,
-                tm.i64_type().const_zero(),
+                i64_ty.const_zero(),
                 "is_empty",
             )
             .map_err(|e| CodegenError::Internal(format!("cmp: {:?}", e)))?;
@@ -31342,31 +31399,57 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let tail_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
 
-        let head_int = self
-            .builder()
-            .build_ptr_to_int(head_ptr, tm.i64_type(), "head_int")
-            .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
-        let is_equal = self
-            .builder()
-            .build_int_compare(inkwell::IntPredicate::EQ, head_int, val_int, "is_equal")
-            .map_err(|e| CodegenError::Internal(format!("cmp: {:?}", e)))?;
+        // Comparing the ADDRESSES is only right for a scalar element. `elem
+        // "output" names` on a list of strings was always False; walk the
+        // elements structurally when the value being searched for is a list.
+        let elementwise = Self::is_list_expr(val_expr)
+            || self.is_list_type(&val_expr.ty())
+            || self.is_string_type(&val_expr.ty());
+        let is_equal = if elementwise {
+            let cmp = self
+                .lower_list_comparison(PrimOp::Eq, head_ptr.into(), val_ptr.into())?
+                .ok_or_else(|| CodegenError::Internal("elem: comparison has no value".to_string()))?
+                .into_int_value();
+            self.builder()
+                .build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    cmp,
+                    cmp.get_type().const_zero(),
+                    "is_equal",
+                )
+                .map_err(|e| CodegenError::Internal(format!("cmp: {:?}", e)))?
+        } else {
+            let head_int = self
+                .builder()
+                .build_ptr_to_int(head_ptr, i64_ty, "head_int")
+                .map_err(|e| CodegenError::Internal(format!("ptr_to_int: {:?}", e)))?;
+            self.builder()
+                .build_int_compare(inkwell::IntPredicate::EQ, head_int, val_int, "is_equal")
+                .map_err(|e| CodegenError::Internal(format!("cmp: {:?}", e)))?
+        };
 
+        // The structural walk leaves the builder in ITS merge block, which is
+        // the real predecessor of the loop header from here.
+        let compare_exit = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("elem: no current block".to_string()))?;
         self.builder()
             .build_conditional_branch(is_equal, found_block, loop_header)
             .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
 
-        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, loop_body)]);
+        list_phi.add_incoming(&[(&list_ptr, entry_block), (&tail_ptr, compare_exit)]);
 
         // Found: return True = int_to_ptr(1)
         self.builder().position_at_end(found_block);
-        let true_val = self.int_to_ptr(tm.i64_type().const_int(1, false))?;
+        let true_val = self.int_to_ptr(i64_ty.const_int(1, false))?;
         self.builder()
             .build_unconditional_branch(merge_block)
             .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
 
         // Not found: return False = int_to_ptr(0)
         self.builder().position_at_end(not_found_block);
-        let false_val = self.int_to_ptr(tm.i64_type().const_zero())?;
+        let false_val = self.int_to_ptr(i64_ty.const_zero())?;
         self.builder()
             .build_unconditional_branch(merge_block)
             .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
@@ -31380,6 +31463,115 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         result_phi.add_incoming(&[(&true_val, found_block), (&false_val, not_found_block)]);
 
         Ok(Some(result_phi.as_basic_value()))
+    }
+
+    /// `Semigroup (Maybe a)`: `Nothing <> b = b`, `a <> Nothing = a`.
+    ///
+    /// bhc had no instance at all, so `optInputFiles opts <> mbArgs` in
+    /// pandoc's option parser lowered to an unresolved method and segfaulted.
+    /// Two `Just`s would need the ELEMENT's instance, which is not available
+    /// here — that case aborts with a message rather than guessing, the way
+    /// the builtin Monoid methods already prefer a loud stub to a silent
+    /// wrong answer.
+    fn lower_builtin_maybe_append(
+        &mut self,
+        lhs_expr: &Expr,
+        rhs_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let lhs = self
+            .lower_expr(lhs_expr)?
+            .ok_or_else(|| CodegenError::Internal("Maybe <>: no lhs".to_string()))?;
+        let rhs = self
+            .lower_expr(rhs_expr)?
+            .ok_or_else(|| CodegenError::Internal("Maybe <>: no rhs".to_string()))?;
+        let lhs_ptr = self.value_to_ptr(lhs)?;
+        let rhs_ptr = self.value_to_ptr(rhs)?;
+        let ptr_type = self.type_mapper().ptr_type();
+        let i64_ty = self.type_mapper().i64_type();
+
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+        let take_rhs = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "maybe_app_rhs");
+        let check_rhs = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "maybe_app_check_rhs");
+        let take_lhs = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "maybe_app_lhs");
+        let both = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "maybe_app_both");
+        let merge = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "maybe_app_merge");
+
+        let lhs_tag = self.extract_adt_tag(lhs_ptr)?;
+        let lhs_nothing = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                lhs_tag,
+                i64_ty.const_zero(),
+                "l_nothing",
+            )
+            .map_err(|e| CodegenError::Internal(format!("maybe <> cmp: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(lhs_nothing, take_rhs, check_rhs)
+            .map_err(|e| CodegenError::Internal(format!("maybe <> br: {:?}", e)))?;
+
+        self.builder().position_at_end(check_rhs);
+        let rhs_tag = self.extract_adt_tag(rhs_ptr)?;
+        let rhs_nothing = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                rhs_tag,
+                i64_ty.const_zero(),
+                "r_nothing",
+            )
+            .map_err(|e| CodegenError::Internal(format!("maybe <> cmp: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(rhs_nothing, take_lhs, both)
+            .map_err(|e| CodegenError::Internal(format!("maybe <> br: {:?}", e)))?;
+
+        self.builder().position_at_end(take_rhs);
+        self.builder()
+            .build_unconditional_branch(merge)
+            .map_err(|e| CodegenError::Internal(format!("maybe <> br: {:?}", e)))?;
+
+        self.builder().position_at_end(take_lhs);
+        self.builder()
+            .build_unconditional_branch(merge)
+            .map_err(|e| CodegenError::Internal(format!("maybe <> br: {:?}", e)))?;
+
+        self.builder().position_at_end(both);
+        let error_msg = self.module.add_global_string(
+            "maybe_append_both",
+            "Semigroup (Maybe a): <> of two Justs needs the element's instance",
+        );
+        let error_fn = *self
+            .functions
+            .get(&VarId::new(1000006))
+            .ok_or_else(|| CodegenError::Internal("bhc_error not declared".to_string()))?;
+        self.builder()
+            .build_call(error_fn, &[error_msg.into()], "")
+            .map_err(|e| CodegenError::Internal(format!("maybe <> error call: {:?}", e)))?;
+        self.builder()
+            .build_unreachable()
+            .map_err(|e| CodegenError::Internal(format!("maybe <> unreachable: {:?}", e)))?;
+
+        self.builder().position_at_end(merge);
+        let phi = self
+            .builder()
+            .build_phi(ptr_type, "maybe_app")
+            .map_err(|e| CodegenError::Internal(format!("maybe <> phi: {:?}", e)))?;
+        phi.add_incoming(&[(&rhs_ptr, take_rhs), (&lhs_ptr, take_lhs)]);
+        Ok(Some(phi.as_basic_value()))
     }
 
     /// Lower `notElem :: Eq a => a -> [a] -> Bool`.

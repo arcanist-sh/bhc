@@ -5853,6 +5853,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "undefined" => Some(0),
             "throw" | "throwIO" => Some(1),
             "catch" => Some(2),
+            "handle" => Some(2),
             "try" => Some(1),
             "bracket" => Some(3),
             "finally" | "onException" => Some(2),
@@ -6736,6 +6737,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "undefined" => self.lower_builtin_undefined(),
             "throw" | "throwIO" => self.lower_builtin_throw(args[0]),
             "catch" => self.lower_builtin_catch(args[0], args[1]),
+            // `handle` IS `catch` with its arguments the other way round.
+            // Without it pandoc's `handleOptInfo` — `E.handle (handleError .
+            // Left) $ …` — aborted on a stub.
+            "handle" => self.lower_builtin_catch(args[1], args[0]),
             "try" => self.lower_builtin_try(args[0]),
             "bracket" => self.lower_builtin_bracket(args[0], args[1], args[2]),
             "finally" => self.lower_builtin_finally(args[0], args[1]),

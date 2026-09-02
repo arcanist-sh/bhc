@@ -7050,6 +7050,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // the value itself.
                 let layer = self
                     .builtin_result_monad_layer()
+                    .or_else(|| self.transformer_layer_when_ambient_is_bare_io())
                     .unwrap_or_else(|| self.current_transformer_layer());
                 match layer {
                     TransformerLayer::ReaderT => self.lower_builtin_reader_t_pure(args[0]),
@@ -16553,6 +16554,98 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             ty = self.newtype_underlying.get(c.name.as_str())?.clone();
         }
         None
+    }
+
+    /// The layer-specific spelling of a monad method whose occurrence type names
+    /// a transformer — `ExceptT.>>=` for a `>>=` written at `ExceptT e m`.
+    ///
+    /// Only used where the method is a first-class VALUE. In an application the
+    /// method's type reaches `lower_builtin` through `current_builtin_ty` and
+    /// the layer is resolved there; a closure has no such moment, so the name
+    /// has to carry the layer.
+    ///
+    /// Returns None unless the qualified spelling is itself a known builtin, so
+    /// this can only ever redirect to an implementation that exists.
+    fn layer_qualified_builtin_name(&self, name: &str, ty: &Ty) -> Option<String> {
+        if !matches!(
+            name,
+            ">>=" | ">>" | "return" | "pure" | "fmap" | "<*>" | "=<<"
+        ) {
+            return None;
+        }
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        fn head(t: &Ty) -> &Ty {
+            match t {
+                Ty::App(f, _) => head(f),
+                other => other,
+            }
+        }
+        let Ty::Con(c) = head(result_of(ty)) else {
+            return None;
+        };
+        if !matches!(
+            c.name.as_str(),
+            "ExceptT" | "StateT" | "ReaderT" | "WriterT"
+        ) {
+            return None;
+        }
+        let qualified = format!("{}.{}", c.name.as_str(), name);
+        self.builtin_info(&qualified).map(|_| qualified)
+    }
+
+    /// The transformer this operation's OWN result type names, but only when the
+    /// ambient stack has nothing on it.
+    ///
+    /// The ambient stack is pushed from the ENCLOSING BINDING's declared type
+    /// (see where `extract_transformer_stack_from_type` is called for a
+    /// function). A lambda that is lifted out of a data structure has no such
+    /// enclosing binding: for
+    ///
+    /// ```haskell
+    /// acts :: [Int -> ExceptT String IO Int]
+    /// acts = [\x -> return (x + 1)]
+    /// ```
+    ///
+    /// the CAF's type is a LIST, so nothing is pushed, `return` compiles at the
+    /// bare IO layer, and `runExceptT` then reads an IO action as an ExceptT
+    /// one and segfaults. The identical lambda bound directly —
+    /// `one :: Int -> ExceptT String IO Int` — always worked, because there the
+    /// binding's type reaches the body.
+    ///
+    /// Restricted to a bare-IO ambient on purpose: where a layer HAS been
+    /// pushed it is more specific than this (nested stacks like ExceptT over
+    /// StateT are decided before we get here), so it must keep priority.
+    fn transformer_layer_when_ambient_is_bare_io(&self) -> Option<TransformerLayer> {
+        if self.current_transformer_layer() != TransformerLayer::IO {
+            return None;
+        }
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        fn head(t: &Ty) -> &Ty {
+            match t {
+                Ty::App(f, _) => head(f),
+                other => other,
+            }
+        }
+        let Ty::Con(c) = head(result_of(&self.current_builtin_ty)) else {
+            return None;
+        };
+        match c.name.as_str() {
+            "ExceptT" => Some(TransformerLayer::ExceptT),
+            "StateT" => Some(TransformerLayer::StateT),
+            "ReaderT" => Some(TransformerLayer::ReaderT),
+            "WriterT" => Some(TransformerLayer::WriterT),
+            _ => None,
+        }
     }
 
     fn value_monad_of_ty(&self, ty: &Ty) -> Option<ValueMonad> {
@@ -45982,6 +46075,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // (parsec's `try`) shadows the builtin — fall through to
                     // the external branch below instead.
                     let arity = self.builtin_info(name).unwrap();
+                    // A monad method passed as a VALUE keeps no record of the
+                    // layer it was written at: the closure is called later,
+                    // from inside a higher-order builtin, where nothing has
+                    // set `current_builtin_ty` and the ambient stack belongs
+                    // to whoever is running. `foldl' (>>=) (return defaults)
+                    // actions` — how pandoc threads its option actions — bound
+                    // at the bare IO layer and crashed. The occurrence type
+                    // still names the monad HERE, so resolve the layer now and
+                    // build the closure for the layer-specific variant.
+                    if let Some(qualified) = self.layer_qualified_builtin_name(name, &var.ty) {
+                        let qualified_arity = self.builtin_info(&qualified).unwrap_or(arity);
+                        return self.create_builtin_closure(&qualified, qualified_arity);
+                    }
                     if arity == 0 {
                         // A NULLARY builtin in value position IS its result.
                         // An arity-0 closure wrapper is useless — it can only

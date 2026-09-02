@@ -1146,12 +1146,24 @@ impl Builtins {
                 )
             }),
             ("liftIO", {
-                // liftIO :: IO a -> IO a (identity for base IO)
+                // liftIO :: MonadIO m => IO a -> m a
+                //
+                // Typing it `IO a -> IO a` is right only where the target
+                // monad IS IO, and wrong everywhere else — pandoc's
+                // `runIOorExplode $ … >>= liftIO . write` in
+                // App.CommandLineOptions reported `expected PandocIO, found
+                // IO`. The polymorphic type covers the identity case as `m :=
+                // IO`. This is the scheme a module gets when it does not
+                // import `liftIO` explicitly: `Control.Monad.Trans` re-exports
+                // it in mtl, and pandoc imports it that way.
+                let m_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let m = TyVar::new(BUILTIN_TYVAR_M, m_kind);
                 let io_a = Ty::App(
                     Box::new(Ty::Con(self.io_con.clone())),
                     Box::new(Ty::Var(a.clone())),
                 );
-                Scheme::poly(vec![a.clone()], Ty::fun(io_a.clone(), io_a))
+                let ma = Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Var(a.clone())));
+                Scheme::poly(vec![m, a.clone()], Ty::fun(io_a, ma))
             }),
             // Reader/State monad operations (simplified/polymorphic)
             ("ask", {
@@ -8343,9 +8355,16 @@ impl Builtins {
         );
 
         // IO.liftIO is identity: IO a -> IO a
+        //
+        // Registered under its OWN name, the way hir-to-core names this DefId.
+        // Sharing the bare name overwrote the polymorphic `liftIO` above in
+        // the by-name scope, so a module that does not import `liftIO`
+        // explicitly typed every use as `IO a -> IO a` — pandoc's
+        // `runIOorExplode $ … >>= liftIO . write` in App.CommandLineOptions
+        // then reported `expected PandocIO, found IO`.
         env.register_value(
             DefId::new(10012),
-            Symbol::intern("liftIO"),
+            Symbol::intern("IO.liftIO"),
             Scheme::poly(vec![a.clone()], Ty::fun(io_a.clone(), io_a.clone())),
         );
 

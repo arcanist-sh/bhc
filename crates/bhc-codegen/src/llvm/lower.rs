@@ -24656,6 +24656,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.lower_builtin_get_env(name_expr)
     }
 
+    /// Continue building in a FRESH block after a terminator.
+    ///
+    /// `exitSuccess` ends the block with `unreachable`, but whatever the
+    /// source wrote after it still gets lowered — and appending to a block
+    /// that already has a terminator is what LLVM calls "Terminator found in
+    /// the middle of a basic block". The new block is unreachable and LLVM
+    /// discards it; it exists so the instructions have somewhere legal to go.
+    /// pandoc's `optToOutputSettings` reaches this through `exitSuccess` in a
+    /// `case` branch.
+    fn start_unreachable_block(&mut self, name: &str) -> CodegenResult<()> {
+        let Some(current_fn) = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+        else {
+            return Ok(());
+        };
+        let bb = self.llvm_ctx.append_basic_block(current_fn, name);
+        self.builder().position_at_end(bb);
+        Ok(())
+    }
+
     /// Lower `exitSuccess`.
     fn lower_builtin_exit_success(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let rts_fn = self
@@ -24668,6 +24690,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder()
             .build_unreachable()
             .map_err(|e| CodegenError::Internal(format!("unreachable failed: {:?}", e)))?;
+        self.start_unreachable_block("after_exit_success")?;
         Ok(Some(self.type_mapper().ptr_type().const_null().into()))
     }
 
@@ -24683,6 +24706,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder()
             .build_unreachable()
             .map_err(|e| CodegenError::Internal(format!("unreachable failed: {:?}", e)))?;
+        self.start_unreachable_block("after_exit_failure")?;
         Ok(Some(self.type_mapper().ptr_type().const_null().into()))
     }
 
@@ -48660,14 +48684,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let rts_fn = self.functions.get(&VarId::new(1000456)).ok_or_else(|| {
                     CodegenError::Internal("bhc_lazy_bs_write_file not declared".to_string())
                 })?;
-                let result = self
-                    .builder()
-                    .build_call(*rts_fn, &[args[0].into(), args[1].into()], "lbs_write_file")
-                    .map_err(|e| CodegenError::Internal(format!("lbs_write_file: {:?}", e)))?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or_else(|| CodegenError::Internal("lbs_write_file: void".to_string()))?;
-                Ok(Some(result))
+                self.builder()
+                    .build_call(*rts_fn, &[args[0].into(), args[1].into()], "")
+                    .map_err(|e| CodegenError::Internal(format!("lbs_write_file: {:?}", e)))?;
+                // The RTS entry point returns void; `writeFile` is `IO ()`, so
+                // the unit is a null pointer. Demanding a basic value here made
+                // `Text.Pandoc.App` fail codegen outright.
+                Ok(Some(self.type_mapper().ptr_type().const_null().into()))
             }
 
             // Data.ByteString.Lazy.Char8 — direct RTS dispatch

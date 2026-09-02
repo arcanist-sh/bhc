@@ -6828,6 +6828,15 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                 // to the following equations. Anything else — several
                 // alternatives, or a pattern guard, which HIR's `Guard` cannot
                 // hold — keeps the old desugaring.
+                // Only a SINGLE-argument clause keeps its guards in HIR. The
+                // equation compiler's fallthrough re-cases on args[0], which
+                // is the whole scrutinee only when there is one argument; a
+                // multi-argument clause's alternatives are built over ALL the
+                // arguments by `compile_tuple_pattern`, and routing a guard
+                // failure into those crashed the program —
+                // `lookup' k ((k', v) : rest) | k == k' = v` segfaulted where
+                // desugaring the guards here works.
+                let single_scrutinee = clause.pats.len() == 1;
                 let single_boolean = guarded_rhss.len() == 1
                     && guarded_rhss[0]
                         .guards
@@ -6852,7 +6861,7 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                         !g.guards.is_empty()
                             && g.guards.iter().all(|x| matches!(x, ast::Guard::Expr(_, _)))
                     });
-                if !single_boolean && all_boolean {
+                if !single_boolean && all_boolean && single_scrutinee {
                     let span = clause.span;
                     let mk_bool = |ctx: &mut LowerContext, name: &str| -> hir::Expr {
                         let sym = Symbol::intern(name);
@@ -6905,7 +6914,7 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                         .map(|cond| vec![hir::Guard { cond, span }])
                         .unwrap_or_default();
                     (rhs, guards)
-                } else if single_boolean {
+                } else if single_boolean && single_scrutinee {
                     let grhs = &guarded_rhss[0];
                     let conds: Vec<hir::Guard> = grhs
                         .guards

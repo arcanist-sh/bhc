@@ -1513,8 +1513,15 @@ fn compile_equations_linear(
         // join point, an unguarded one only while the function is small
         // enough that cloning the remaining equations into its alternatives
         // stays bounded.
-        let join_point_affordable =
-            !eq.guards.is_empty() || total_equations <= JOIN_POINT_EQUATION_BUDGET;
+        // The join point re-cases on args[0], so it is only meaningful when
+        // that IS the whole scrutinee. A multi-argument equation's
+        // alternatives are built by `compile_tuple_pattern` over ALL the
+        // arguments, and casing arg0 against those alternatives matches a
+        // tuple's alternatives against a single value:
+        // `lookup' k ((k', v) : rest) | k == k' = v` segfaulted.
+        let single_scrutinee = eq.pats.len() == 1;
+        let join_point_affordable = single_scrutinee
+            && (!eq.guards.is_empty() || total_equations <= JOIN_POINT_EQUATION_BUDGET);
         let fallthrough = match (&remaining_alts, args.first()) {
             (Some(remaining), Some(arg)) if join_point_affordable => Some(core::Expr::Case(
                 Box::new(core::Expr::Var(arg.clone(), span)),

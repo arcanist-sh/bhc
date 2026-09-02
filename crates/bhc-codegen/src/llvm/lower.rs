@@ -50981,6 +50981,36 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 PrimOp::Ge => IntPredicate::SGE,
                 _ => return Err(CodegenError::Internal("invalid comparison op".to_string())),
             };
+            // Two integers of DIFFERENT widths cannot be compared: LLVM
+            // rejects it as "Both operands to ICmp instruction are not of the
+            // same type". A `Char` pattern-bound from a list arrives narrower
+            // than the `Int` it is compared against, which is how a
+            // character-by-character string equality failed to compile at all.
+            // Sign extension is safe for every integral bhc boxes here — a
+            // Char's code point is positive.
+            let (l, r) = {
+                let lw = l.get_type().get_bit_width();
+                let rw = r.get_type().get_bit_width();
+                if lw == rw {
+                    (l, r)
+                } else if lw < rw {
+                    let ext = this
+                        .builder()
+                        .build_int_s_extend(l, r.get_type(), "cmp_lhs_ext")
+                        .map_err(|e| {
+                            CodegenError::Internal(format!("failed to widen lhs: {:?}", e))
+                        })?;
+                    (ext, r)
+                } else {
+                    let ext = this
+                        .builder()
+                        .build_int_s_extend(r, l.get_type(), "cmp_rhs_ext")
+                        .map_err(|e| {
+                            CodegenError::Internal(format!("failed to widen rhs: {:?}", e))
+                        })?;
+                    (l, ext)
+                }
+            };
             let cmp = this
                 .builder()
                 .build_int_compare(pred, l, r, "cmp")

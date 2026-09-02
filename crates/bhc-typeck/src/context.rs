@@ -2003,91 +2003,101 @@ impl TyCtxt {
                 // different modules.
                 _ => {
                     is_builtin_con = false;
-                    if let (Some(arity), Some(type_con_name), Some(type_param_count)) = (
-                        def_info.arity,
-                        def_info.type_con_name,
-                        def_info.type_param_count,
-                    ) {
-                        // Build proper polymorphic type: forall a1 .. an b1 .. bm. b1 -> b2 -> ... -> bm -> TypeCon a1 .. an
-                        // where a1..an are result type params and b1..bm are field type params
+                    // The interface's own scheme when it carried one. The
+                    // synthesis below gives every field a FRESH variable
+                    // unrelated to the result's parameters, so
+                    // `NoArg :: a -> ArgDescr a` arrives as `b -> ArgDescr a`
+                    // and a lambda checked against it keeps a free type. It is
+                    // still computed, for its side effects.
+                    let iface_scheme = def_info.type_scheme.clone();
+                    let synthesized =
+                        if let (Some(arity), Some(type_con_name), Some(type_param_count)) = (
+                            def_info.arity,
+                            def_info.type_con_name,
+                            def_info.type_param_count,
+                        ) {
+                            // Build proper polymorphic type: forall a1 .. an b1 .. bm. b1 -> b2 -> ... -> bm -> TypeCon a1 .. an
+                            // where a1..an are result type params and b1..bm are field type params
 
-                        // Create result type parameters (a1 .. an)
-                        let result_type_params: Vec<TyVar> = (0..type_param_count)
-                            .map(|i| TyVar::new_star(0xFFFE_0000 + i as u32))
-                            .collect();
-
-                        // Create field type parameters (b1 .. bm) - these must also be quantified
-                        let field_type_params: Vec<TyVar> = (0..arity)
-                            .map(|i| TyVar::new_star(0xFFFF_0000 + i as u32))
-                            .collect();
-
-                        // Build the result type: TypeCon a1 a2 ... an
-                        let kind = Self::compute_type_con_kind(type_param_count);
-                        let type_con = TyCon::new(type_con_name, kind);
-                        let result_ty = result_type_params
-                            .iter()
-                            .fold(Ty::Con(type_con), |acc, param| {
-                                Ty::App(Box::new(acc), Box::new(Ty::Var(param.clone())))
-                            });
-
-                        // Build the constructor type: b1 -> b2 -> ... -> bm -> ResultType
-                        // Build from inside out: result <- bm <- bm-1 <- ... <- b1
-                        let field_types: Vec<Ty> = field_type_params
-                            .iter()
-                            .map(|tv| Ty::Var(tv.clone()))
-                            .collect();
-
-                        let mut con_ty = result_ty;
-                        for field_ty in field_types.iter().rev() {
-                            con_ty = Ty::fun(field_ty.clone(), con_ty);
-                        }
-
-                        // Track constructor → type mapping for RecordUpdate
-                        self.type_to_data_cons
-                            .entry(type_con_name)
-                            .or_default()
-                            .push(def_info.id);
-
-                        // If we have field names, register field definitions for record construction
-                        // Note: we don't store the field types here since they're quantified
-                        // and will be instantiated fresh each time. We only need the names.
-                        if let Some(ref field_names) = def_info.field_names {
-                            let field_defs: Vec<(Symbol, Ty)> = field_names
-                                .iter()
-                                .zip(field_types.iter())
-                                .map(|(name, ty)| (*name, ty.clone()))
+                            // Create result type parameters (a1 .. an)
+                            let result_type_params: Vec<TyVar> = (0..type_param_count)
+                                .map(|i| TyVar::new_star(0xFFFE_0000 + i as u32))
                                 .collect();
-                            self.con_field_defs.insert(def_info.id, field_defs);
-                        }
 
-                        // Combine all type parameters: result params + field params
-                        let all_params: Vec<TyVar> = result_type_params
-                            .into_iter()
-                            .chain(field_type_params)
-                            .collect();
+                            // Create field type parameters (b1 .. bm) - these must also be quantified
+                            let field_type_params: Vec<TyVar> = (0..arity)
+                                .map(|i| TyVar::new_star(0xFFFF_0000 + i as u32))
+                                .collect();
 
-                        Scheme::poly(all_params, con_ty)
-                    } else if let Some(arity) = def_info.arity {
-                        // No type info, fall back to fresh type variables
-                        let result = self.fresh_ty();
-                        let mut con_ty = result;
-                        for _ in 0..arity {
-                            let arg = self.fresh_ty();
-                            con_ty = Ty::fun(arg, con_ty);
-                        }
-                        Scheme::mono(con_ty)
-                    } else {
-                        // No arity info: a PROPERLY POLYMORPHIC `forall a. a`, so
-                        // each use instantiates its own fresh var. A `mono(fresh)`
-                        // here would share ONE free var across every use of the
-                        // constructor, so using the same arity-less stub con as a
-                        // pattern (e.g. `Text (CData _ s _)`, arity 1) and as an
-                        // expression (`Text $ CData …`) pins that single var two
-                        // ways and conflicts (`expected (t -> t), found Content`
-                        // in Text.Pandoc.Readers.JATS).
-                        let v = TyVar::new_star(0xFFFF_0000);
-                        Scheme::poly(vec![v.clone()], Ty::Var(v))
-                    }
+                            // Build the result type: TypeCon a1 a2 ... an
+                            let kind = Self::compute_type_con_kind(type_param_count);
+                            let type_con = TyCon::new(type_con_name, kind);
+                            let result_ty =
+                                result_type_params
+                                    .iter()
+                                    .fold(Ty::Con(type_con), |acc, param| {
+                                        Ty::App(Box::new(acc), Box::new(Ty::Var(param.clone())))
+                                    });
+
+                            // Build the constructor type: b1 -> b2 -> ... -> bm -> ResultType
+                            // Build from inside out: result <- bm <- bm-1 <- ... <- b1
+                            let field_types: Vec<Ty> = field_type_params
+                                .iter()
+                                .map(|tv| Ty::Var(tv.clone()))
+                                .collect();
+
+                            let mut con_ty = result_ty;
+                            for field_ty in field_types.iter().rev() {
+                                con_ty = Ty::fun(field_ty.clone(), con_ty);
+                            }
+
+                            // Track constructor → type mapping for RecordUpdate
+                            self.type_to_data_cons
+                                .entry(type_con_name)
+                                .or_default()
+                                .push(def_info.id);
+
+                            // If we have field names, register field definitions for record construction
+                            // Note: we don't store the field types here since they're quantified
+                            // and will be instantiated fresh each time. We only need the names.
+                            if let Some(ref field_names) = def_info.field_names {
+                                let field_defs: Vec<(Symbol, Ty)> = field_names
+                                    .iter()
+                                    .zip(field_types.iter())
+                                    .map(|(name, ty)| (*name, ty.clone()))
+                                    .collect();
+                                self.con_field_defs.insert(def_info.id, field_defs);
+                            }
+
+                            // Combine all type parameters: result params + field params
+                            let all_params: Vec<TyVar> = result_type_params
+                                .into_iter()
+                                .chain(field_type_params)
+                                .collect();
+
+                            Scheme::poly(all_params, con_ty)
+                        } else if let Some(arity) = def_info.arity {
+                            // No type info, fall back to fresh type variables
+                            let result = self.fresh_ty();
+                            let mut con_ty = result;
+                            for _ in 0..arity {
+                                let arg = self.fresh_ty();
+                                con_ty = Ty::fun(arg, con_ty);
+                            }
+                            Scheme::mono(con_ty)
+                        } else {
+                            // No arity info: a PROPERLY POLYMORPHIC `forall a. a`, so
+                            // each use instantiates its own fresh var. A `mono(fresh)`
+                            // here would share ONE free var across every use of the
+                            // constructor, so using the same arity-less stub con as a
+                            // pattern (e.g. `Text (CData _ s _)`, arity 1) and as an
+                            // expression (`Text $ CData …`) pins that single var two
+                            // ways and conflicts (`expected (t -> t), found Content`
+                            // in Text.Pandoc.Readers.JATS).
+                            let v = TyVar::new_star(0xFFFF_0000);
+                            Scheme::poly(vec![v.clone()], Ty::Var(v))
+                        };
+                    iface_scheme.unwrap_or(synthesized)
                 }
             };
 

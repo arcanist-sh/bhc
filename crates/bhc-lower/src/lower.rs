@@ -6586,7 +6586,7 @@ fn ensure_tuple_constructor(ctx: &mut LowerContext, arity: usize, span: Span) ->
     // Register on-the-fly for large tuples beyond the builtins
     let type_name = Symbol::intern(&format!("Tuple{arity}"));
     let id = ctx.fresh_def_id();
-    ctx.define_constructor_with_type(id, tuple_sym, span, arity, type_name, arity, None);
+    ctx.define_constructor_with_type(id, tuple_sym, span, arity, type_name, arity, None, None);
     id
 }
 

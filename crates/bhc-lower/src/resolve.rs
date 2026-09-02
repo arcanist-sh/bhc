@@ -281,6 +281,7 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
                         type_name,
                         type_param_count,
                         field_names,
+                        None,
                     );
                     ctx.bind_constructor(con_name, con_def_id);
 
@@ -309,6 +310,7 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
                         arity,
                         type_name,
                         type_param_count,
+                        None,
                         None,
                     );
                     ctx.bind_constructor(con_name, con_def_id);
@@ -341,6 +343,7 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
                     type_name,
                     type_param_count,
                     field_names,
+                    None,
                 );
                 ctx.bind_constructor(con_name, con_def_id);
 
@@ -440,6 +443,7 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
                         type_name,
                         type_param_count,
                         field_names,
+                        None,
                     );
                     ctx.bind_constructor(con_name, con_def_id);
 
@@ -464,6 +468,7 @@ pub fn collect_module_definitions(ctx: &mut LowerContext, module: &ast::Module) 
                         arity,
                         type_name,
                         type_param_count,
+                        None,
                         None,
                     );
                     ctx.bind_constructor(con_name, con_def_id);

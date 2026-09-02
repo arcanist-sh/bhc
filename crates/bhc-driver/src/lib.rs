@@ -2050,6 +2050,7 @@ impl Compiler {
                         tag,
                         field_names,
                         is_newtype,
+                        type_scheme: None,
                     };
                     exports.constructors.insert(export_con_name, con_info);
                     // Also export constructor as a value (constructors are
@@ -2197,6 +2198,7 @@ impl Compiler {
                     tag: 0,
                     field_names: None,
                     is_newtype: false,
+                    type_scheme: None,
                 },
             );
             exports.values.insert(name, def_id);
@@ -2263,6 +2265,7 @@ impl Compiler {
                                 tag: tag as u32,
                                 field_names,
                                 is_newtype: false,
+                                type_scheme: None,
                             },
                         );
                         // Also export constructor as a value (for use in expressions)
@@ -2291,6 +2294,7 @@ impl Compiler {
                                 tag: tag as u32,
                                 field_names: None,
                                 is_newtype: false,
+                                type_scheme: None,
                             },
                         );
                         exports.values.insert(con_name, con_id);
@@ -2319,6 +2323,7 @@ impl Compiler {
                             tag: 0,
                             field_names: None,
                             is_newtype: true,
+                            type_scheme: None,
                         },
                     );
                     exports.values.insert(con_name, con_id);
@@ -2373,6 +2378,7 @@ impl Compiler {
                             tag: 0,
                             field_names: None,
                             is_newtype: false,
+                            type_scheme: None,
                         },
                     );
                     exports.values.insert(name, con_id);
@@ -2663,6 +2669,7 @@ impl Compiler {
                     con_info.type_con_name,
                     con_info.type_param_count,
                     con_info.field_names.clone(),
+                    con_info.type_scheme.clone(),
                 );
                 let mut new_info = con_info.clone();
                 new_info.def_id = fresh_id;
@@ -3354,6 +3361,82 @@ impl Compiler {
                         .as_ref()
                         .map(|names| names.iter().map(|n| Symbol::intern(n)).collect::<Vec<_>>());
 
+                    // A field whose type MENTIONS one of the type's parameters
+                    // gets its real type. Without this the checker synthesizes
+                    // the constructor from arity alone and gives every field a
+                    // FRESH variable unrelated to the result, so
+                    // `NoArg :: a -> ArgDescr a` arrives as `b -> ArgDescr a`:
+                    // checking `NoArg (\o -> return o{…})` against
+                    // `ArgDescr (Opt -> ExceptT e IO Opt)` pins the result and
+                    // leaves the LAMBDA's type free. `return` inside it then
+                    // has no monad to dispatch on and compiles at IO, and the
+                    // ExceptT consumer segfaults. The same code with a
+                    // locally-declared ADT always worked.
+                    //
+                    // Fields that mention NO parameter keep the fresh variable.
+                    // Their real type is equally knowable, but pinning it
+                    // tightens every monomorphic constructor at once — which
+                    // took the pandoc sweep from 221 to 206, exposing latent
+                    // bugs elsewhere that are not this fix's business.
+                    //
+                    // Params convert first and share the converter's var map
+                    // with the fields, so `a` in a field IS `a` in the head.
+                    converter.reset_vars();
+                    let con_param_vars: Vec<bhc_types::TyVar> = exported_type
+                        .params
+                        .iter()
+                        .filter_map(|p| {
+                            match converter.convert_type(&bhc_interface::Type::Var(p.clone())) {
+                                bhc_types::Ty::Var(v) => Some(v),
+                                _ => None,
+                            }
+                        })
+                        .collect();
+                    let con_scheme = if con_param_vars.len() == exported_type.params.len()
+                        && !con_param_vars.is_empty()
+                    {
+                        let mut quantified = con_param_vars.clone();
+                        let mut field_tys = Vec::with_capacity(con.fields.len());
+                        for (i, f) in con.fields.iter().enumerate() {
+                            let converted = converter.convert_type(f);
+                            if ty_mentions_any(&converted, &con_param_vars) {
+                                field_tys.push(converted);
+                            } else {
+                                #[allow(clippy::cast_possible_truncation)]
+                                let v = bhc_types::TyVar::new_star(0xFFFD_0000 + i as u32);
+                                quantified.push(v.clone());
+                                field_tys.push(bhc_types::Ty::Var(v));
+                            }
+                        }
+                        let head = con_param_vars.iter().fold(
+                            bhc_types::Ty::Con(bhc_types::TyCon::new(
+                                type_name,
+                                (0..exported_type.params.len()).fold(
+                                    bhc_types::Kind::Star,
+                                    |k, _| {
+                                        bhc_types::Kind::Arrow(
+                                            Box::new(bhc_types::Kind::Star),
+                                            Box::new(k),
+                                        )
+                                    },
+                                ),
+                            )),
+                            |acc, p| {
+                                bhc_types::Ty::App(
+                                    Box::new(acc),
+                                    Box::new(bhc_types::Ty::Var(p.clone())),
+                                )
+                            },
+                        );
+                        let ty = field_tys
+                            .into_iter()
+                            .rev()
+                            .fold(head, |acc, f| bhc_types::Ty::fun(f, acc));
+                        Some(bhc_types::Scheme::poly(quantified, ty))
+                    } else {
+                        None
+                    };
+
                     ctx.define_constructor_with_type(
                         fresh_con_id,
                         con_name,
@@ -3362,6 +3445,7 @@ impl Compiler {
                         type_name,
                         exported_type.params.len(),
                         field_names.clone(),
+                        con_scheme.clone(),
                     );
 
                     #[allow(clippy::cast_possible_truncation)]
@@ -3373,6 +3457,7 @@ impl Compiler {
                         tag: tag as u32,
                         field_names,
                         is_newtype,
+                        type_scheme: con_scheme,
                     };
                     exports.constructors.insert(con_name, con_info);
 
@@ -5838,6 +5923,18 @@ impl CompilerBuilder {
     /// Returns an error if the compiler cannot be created.
     pub fn build(self) -> CompileResult<Compiler> {
         Compiler::new(self.options)
+    }
+}
+
+/// Whether `ty` mentions any of `vars`.
+fn ty_mentions_any(ty: &bhc_types::Ty, vars: &[bhc_types::TyVar]) -> bool {
+    use bhc_types::Ty;
+    match ty {
+        Ty::Var(v) => vars.iter().any(|p| p == v),
+        Ty::App(a, b) | Ty::Fun(a, b) => ty_mentions_any(a, vars) || ty_mentions_any(b, vars),
+        Ty::List(a) => ty_mentions_any(a, vars),
+        Ty::Tuple(ts) => ts.iter().any(|t| ty_mentions_any(t, vars)),
+        _ => false,
     }
 }
 

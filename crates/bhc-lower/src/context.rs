@@ -2381,6 +2381,7 @@ impl LowerContext {
         type_con_name: Symbol,
         type_param_count: usize,
         field_names: Option<Vec<Symbol>>,
+        type_scheme: Option<Scheme>,
     ) {
         self.defs.insert(
             id,
@@ -2393,7 +2394,7 @@ impl LowerContext {
                 type_con_name: Some(type_con_name),
                 type_param_count: Some(type_param_count),
                 field_names,
-                type_scheme: None,
+                type_scheme,
             },
         );
     }

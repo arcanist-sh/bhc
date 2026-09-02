@@ -83,6 +83,9 @@ pub struct ConstructorInfo {
     pub field_names: Option<Vec<Symbol>>,
     /// Whether this constructor is a newtype constructor (identity at runtime).
     pub is_newtype: bool,
+    /// The constructor's real type, read from the interface. `None` when it did
+    /// not come from one, or when no field mentions a type parameter.
+    pub type_scheme: Option<bhc_types::Scheme>,
 }
 
 /// Exports collected from a loaded module.
@@ -436,6 +439,7 @@ fn collect_decl_exports(
                             type_name,
                             type_param_count,
                             field_names.clone(),
+                            None,
                         );
                         exports.constructors.insert(
                             con_name,
@@ -447,6 +451,7 @@ fn collect_decl_exports(
                                 tag: tag as u32,
                                 field_names,
                                 is_newtype: false,
+                                type_scheme: None,
                             },
                         );
 
@@ -498,6 +503,7 @@ fn collect_decl_exports(
                         type_name,
                         type_param_count,
                         field_names.clone(),
+                        None,
                     );
                     exports.constructors.insert(
                         con_name,
@@ -509,6 +515,7 @@ fn collect_decl_exports(
                             tag: 0,
                             field_names,
                             is_newtype: true,
+                            type_scheme: None,
                         },
                     );
 
@@ -645,6 +652,7 @@ fn collect_pattern_synonym_export(
         type_con_name,
         type_param_count,
         None,
+        None,
     );
     exports.constructors.insert(
         name,
@@ -656,6 +664,7 @@ fn collect_pattern_synonym_export(
             tag: 0,
             field_names: None,
             is_newtype: false,
+            type_scheme: None,
         },
     );
 }

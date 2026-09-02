@@ -7512,6 +7512,15 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
             if let Some(def_id) = ctx.resolve_qualified_var(qualifier, name) {
                 // Warn if this is a stub
                 let qual_name = format!("{}.{}", module_name, name.as_str());
+                if std::env::var("BHC_DBG_QV").is_ok() {
+                    eprintln!(
+                        "QV {} -> {:?} name={:?} kind={:?}",
+                        qual_name,
+                        def_id,
+                        ctx.defs.get(&def_id).map(|i| i.name.as_str().to_string()),
+                        ctx.defs.get(&def_id).map(|i| i.kind)
+                    );
+                }
                 ctx.warn_if_stub(def_id, &qual_name, *span);
                 hir::Expr::Var(ctx.def_ref(def_id, *span))
             } else {

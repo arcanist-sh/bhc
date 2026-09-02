@@ -343,8 +343,14 @@ pub enum Literal {
     Int(i64),
     /// Arbitrary precision integer.
     Integer(i128),
-    /// Single-precision float.
-    Float(f32),
+    /// Floating literal, at DOUBLE precision.
+    ///
+    /// This was `f32`, and `hir-to-core` wrote every floating literal through
+    /// `as f32`, so `0.001 :: Double` reached codegen as the nearest single —
+    /// printing `1.0000000474974513e-3`. Haskell's defaulting makes a bare
+    /// floating literal a `Double`, so the wider type is the correct one to
+    /// carry; a `Float` context narrows at use.
+    Float(f64),
     /// Double-precision float.
     Double(f64),
     /// A character.

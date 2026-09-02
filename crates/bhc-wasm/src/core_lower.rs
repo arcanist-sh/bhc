@@ -1347,7 +1347,7 @@ impl<'a> WasmLowering<'a> {
             }
             // Floating-point literals are boxed: a pointer to an 8-byte f64 cell.
             Literal::Float(f) => {
-                self.emit_boxed_double(f64::from(*f), instrs, local_count);
+                self.emit_boxed_double(*f, instrs, local_count);
             }
             Literal::Double(d) => {
                 self.emit_boxed_double(*d, instrs, local_count);

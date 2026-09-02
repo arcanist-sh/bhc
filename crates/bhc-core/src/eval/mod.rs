@@ -1335,7 +1335,7 @@ impl Evaluator {
         match lit {
             Literal::Int(n) => Value::Int(*n),
             Literal::Integer(n) => Value::Integer(*n),
-            Literal::Float(n) => Value::Float(*n),
+            Literal::Float(n) => Value::Float(*n as f32),
             Literal::Double(n) => Value::Double(*n),
             Literal::Char(c) => Value::Char(*c),
             Literal::String(s) => Value::String(s.as_str().into()),
@@ -7944,7 +7944,9 @@ impl Evaluator {
                 let matches = match (lit, value) {
                     (Literal::Int(a), Value::Int(b)) => *a == *b,
                     (Literal::Integer(a), Value::Integer(b)) => *a == *b,
-                    (Literal::Float(a), Value::Float(b)) => (*a - *b).abs() < f32::EPSILON,
+                    (Literal::Float(a), Value::Float(b)) => {
+                        (*a - f64::from(*b)).abs() < f64::from(f32::EPSILON)
+                    }
                     (Literal::Double(a), Value::Double(b)) => (*a - *b).abs() < f64::EPSILON,
                     (Literal::Char(a), Value::Char(b)) => *a == *b,
                     (Literal::String(a), Value::String(b)) => a.as_str() == b.as_ref(),

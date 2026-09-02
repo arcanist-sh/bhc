@@ -23,6 +23,14 @@ enum PrimOp {
     Sub,
     Mul,
     Div,
+    /// Fractional `/`, which is NEVER integer division.
+    ///
+    /// `/` and `div` both used to lower to `Div`, so by the time codegen chose
+    /// an instruction the difference was gone and the choice fell to the
+    /// operand TYPES. For `1 / 3 :: Double` those are integer literals, so it
+    /// emitted `sdiv` and the program printed `0`. `1.0 / 3.0` was right, which
+    /// is what made it hard to see.
+    FDiv,
     Mod,
     Rem,
     Quot,
@@ -5612,6 +5620,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             CodegenError::Internal(format!("failed to truncate: {:?}", e))
                         })?
                 };
+                Ok(result.into())
+            }
+            // Integer into a floating slot: a genuine integer, converted with
+            // `sitofp` rather than reinterpreted. An f64 never arrives as a raw
+            // IntValue — it is a FloatValue or a boxed pointer — which is the
+            // same reasoning `coerce_to_f64` records for its own IntValue arm.
+            //
+            // Reachable since `/` became fractional division: an integer
+            // operand of `1 / 3 :: Double` now flows into a double slot where
+            // before it stayed on the integer path and silently did `sdiv`.
+            (BasicValueEnum::IntValue(i), inkwell::types::BasicTypeEnum::FloatType(float_ty)) => {
+                let result = self
+                    .builder()
+                    .build_signed_int_to_float(i, float_ty, "coerce_sitofp")
+                    .map_err(|e| {
+                        CodegenError::Internal(format!("failed to convert int to float: {:?}", e))
+                    })?;
                 Ok(result.into())
             }
             _ => {
@@ -44126,7 +44151,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             PrimOp::Add => (1000903, "bhc_rational_add"),
             PrimOp::Sub => (1000904, "bhc_rational_sub"),
             PrimOp::Mul => (1000905, "bhc_rational_mul"),
-            PrimOp::Div => (1000906, "bhc_rational_div"),
+            PrimOp::Div | PrimOp::FDiv => (1000906, "bhc_rational_div"),
             PrimOp::Negate => (1000907, "bhc_rational_negate"),
             PrimOp::Abs => (1000908, "bhc_rational_abs"),
             PrimOp::Signum => (1000909, "bhc_rational_signum"),
@@ -46262,9 +46287,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // downstream f64 path (math RTS calls, boxing).
                 let is_float32 = matches!(ty, Ty::Con(c) if c.name.as_str() == "Float");
                 if is_float32 {
-                    Ok(tm.f32_type().const_float(*f as f64).into())
+                    Ok(tm.f32_type().const_float(*f).into())
                 } else {
-                    Ok(tm.f64_type().const_float(*f as f64).into())
+                    Ok(tm.f64_type().const_float(*f).into())
                 }
             }
 
@@ -46540,7 +46565,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "+" | "GHC.Num.+" => Some((PrimOp::Add, 2)),
             "-" | "GHC.Num.-" => Some((PrimOp::Sub, 2)),
             "*" | "GHC.Num.*" => Some((PrimOp::Mul, 2)),
-            "/" | "GHC.Real./" => Some((PrimOp::Div, 2)),
+            "/" | "GHC.Real./" => Some((PrimOp::FDiv, 2)),
             "div" | "GHC.Real.div" => Some((PrimOp::Div, 2)),
             "mod" | "GHC.Real.mod" => Some((PrimOp::Mod, 2)),
             "rem" | "GHC.Real.rem" => Some((PrimOp::Rem, 2)),
@@ -50232,6 +50257,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             | PrimOp::Sub
             | PrimOp::Mul
             | PrimOp::Div
+            | PrimOp::FDiv
             | PrimOp::Mod
             | PrimOp::Rem
             | PrimOp::Quot => {
@@ -50248,6 +50274,25 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     }
                     PrimOp::Mod | PrimOp::Rem => {
                         self.builder().build_int_signed_rem(lhs, rhs, "rem")
+                    }
+                    // `/` reaching the unboxed-integer path still divides as
+                    // fractions: convert both sides to f64 and back.
+                    PrimOp::FDiv => {
+                        let f64_ty = tm.f64_type();
+                        let lf = self
+                            .builder()
+                            .build_signed_int_to_float(lhs, f64_ty, "fdiv_l")
+                            .map_err(|e| CodegenError::Internal(format!("fdiv lhs: {:?}", e)))?;
+                        let rf = self
+                            .builder()
+                            .build_signed_int_to_float(rhs, f64_ty, "fdiv_r")
+                            .map_err(|e| CodegenError::Internal(format!("fdiv rhs: {:?}", e)))?;
+                        let q = self
+                            .builder()
+                            .build_float_div(lf, rf, "fdiv")
+                            .map_err(|e| CodegenError::Internal(format!("fdiv: {:?}", e)))?;
+                        // Unboxed, as `lower_float_arith` returns.
+                        return Ok(q.into());
                     }
                     _ => unreachable!(),
                 }
@@ -50586,6 +50631,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 | PrimOp::Sub
                 | PrimOp::Mul
                 | PrimOp::Div
+                | PrimOp::FDiv
                 | PrimOp::Negate
                 | PrimOp::Abs
                 | PrimOp::Signum
@@ -50625,6 +50671,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 | PrimOp::Sub
                 | PrimOp::Mul
                 | PrimOp::Div
+                | PrimOp::FDiv
                 | PrimOp::Mod
                 | PrimOp::Rem
                 | PrimOp::Quot
@@ -50647,6 +50694,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 | PrimOp::Sub
                 | PrimOp::Mul
                 | PrimOp::Div
+                | PrimOp::FDiv
                 | PrimOp::Mod
                 | PrimOp::Rem
                 | PrimOp::Quot
@@ -50668,6 +50716,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             | PrimOp::Sub
             | PrimOp::Mul
             | PrimOp::Div
+            | PrimOp::FDiv
             | PrimOp::Mod
             | PrimOp::Rem
             | PrimOp::Quot => {
@@ -50683,7 +50732,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // the floating type and route through the unboxing float path.
                 let t0 = args[0].ty();
                 let t1 = args[1].ty();
-                if self.is_double_type(&t0)
+                // `/` is Fractional division and takes the float path whatever
+                // the operands LOOK like. In `1 / 3 :: Double` both are integer
+                // literals, so a type-driven choice picks `sdiv` and the
+                // program prints 0 — while `1.0 / 3.0` is right, which is what
+                // hid it. `div` and `quot` are the integer operators.
+                if op == PrimOp::FDiv
+                    || self.is_double_type(&t0)
                     || self.is_float_type(&t0)
                     || self.is_double_type(&t1)
                     || self.is_float_type(&t1)
@@ -51034,7 +51089,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             PrimOp::Add => self.builder().build_float_add(l, r, "fadd"),
             PrimOp::Sub => self.builder().build_float_sub(l, r, "fsub"),
             PrimOp::Mul => self.builder().build_float_mul(l, r, "fmul"),
-            PrimOp::Div | PrimOp::Quot => self.builder().build_float_div(l, r, "fdiv"),
+            PrimOp::Div | PrimOp::FDiv | PrimOp::Quot => {
+                self.builder().build_float_div(l, r, "fdiv")
+            }
             PrimOp::Mod | PrimOp::Rem => self.builder().build_float_rem(l, r, "frem"),
             _ => return Err(CodegenError::Internal("invalid float arith op".to_string())),
         };
@@ -51071,7 +51128,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     PrimOp::Add => self.builder().build_float_add(l, r, "fadd"),
                     PrimOp::Sub => self.builder().build_float_sub(l, r, "fsub"),
                     PrimOp::Mul => self.builder().build_float_mul(l, r, "fmul"),
-                    PrimOp::Div | PrimOp::Quot => self.builder().build_float_div(l, r, "fdiv"),
+                    PrimOp::Div | PrimOp::FDiv | PrimOp::Quot => {
+                        self.builder().build_float_div(l, r, "fdiv")
+                    }
                     PrimOp::Mod | PrimOp::Rem => self.builder().build_float_rem(l, r, "frem"),
                     _ => return Err(CodegenError::Internal("invalid arith op".to_string())),
                 };
@@ -51522,7 +51581,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             PrimOp::Add => self.builder().build_float_add(l, r, "fadd"),
             PrimOp::Sub => self.builder().build_float_sub(l, r, "fsub"),
             PrimOp::Mul => self.builder().build_float_mul(l, r, "fmul"),
-            PrimOp::Div | PrimOp::Quot => self.builder().build_float_div(l, r, "fdiv"),
+            PrimOp::Div | PrimOp::FDiv | PrimOp::Quot => {
+                self.builder().build_float_div(l, r, "fdiv")
+            }
             PrimOp::Mod | PrimOp::Rem => self.builder().build_float_rem(l, r, "frem"),
             _ => return Err(CodegenError::Internal("invalid arith op".to_string())),
         };
@@ -53943,7 +54004,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         for alt in alts {
             match &alt.con {
-                AltCon::Lit(Literal::Float(f)) => literal_alts.push((*f as f64, alt)),
+                AltCon::Lit(Literal::Float(f)) => literal_alts.push((*f, alt)),
                 AltCon::Lit(Literal::Double(d)) => literal_alts.push((*d, alt)),
                 AltCon::Default => default_alt = Some(alt),
                 _ => {

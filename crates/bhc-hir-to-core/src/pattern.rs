@@ -473,7 +473,7 @@ enum PatHead {
 fn hir_lit_to_core(lit: &hir::Lit) -> Literal {
     match lit {
         hir::Lit::Int(n) => Literal::Int(*n as i64),
-        hir::Lit::Float(f) => Literal::Float(*f as f32),
+        hir::Lit::Float(f) => Literal::Float(*f),
         hir::Lit::Char(c) => Literal::Char(*c),
         hir::Lit::String(s) => Literal::String(*s),
     }

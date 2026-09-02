@@ -355,7 +355,7 @@ fn ty_head_is(ty: &Ty, name: &str) -> bool {
 fn lower_lit(lit: &Lit, span: Span) -> LowerResult<core::Expr> {
     let core_lit = match lit {
         Lit::Int(n) => Literal::Int(*n as i64),
-        Lit::Float(f) => Literal::Float(*f as f32),
+        Lit::Float(f) => Literal::Float(*f),
         Lit::Char(c) => Literal::Char(*c),
         Lit::String(s) => Literal::String(*s),
     };

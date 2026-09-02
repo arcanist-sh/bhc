@@ -329,7 +329,7 @@ impl LowerContext {
         match lit {
             Literal::Int(n) => LowerResult::Scalar(ScalarValue::Int(*n)),
             Literal::Integer(n) => LowerResult::Scalar(ScalarValue::Int(*n as i64)),
-            Literal::Float(f) => LowerResult::Scalar(ScalarValue::Float(f64::from(*f))),
+            Literal::Float(f) => LowerResult::Scalar(ScalarValue::Float(*f)),
             Literal::Double(d) => LowerResult::Scalar(ScalarValue::Float(*d)),
             Literal::Char(_) | Literal::String(_) => LowerResult::NotTensor,
         }

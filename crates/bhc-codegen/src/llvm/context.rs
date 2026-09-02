@@ -30,6 +30,14 @@ pub struct LlvmContext {
 impl LlvmContext {
     /// Create a new LLVM context for the given configuration.
     pub fn new(config: CodegenConfig) -> CodegenResult<Self> {
+        // Register LLVM's targets before asking for one. This used to happen
+        // only in `LlvmBackend::new`, so a context built directly failed with
+        // "no targets are registered" unless something else had constructed a
+        // backend first — which made `test_module_verification` pass or fail
+        // depending on the order the test binary happened to run its tests in.
+        // `initialize_all` is idempotent, so doing it here costs nothing.
+        inkwell::targets::Target::initialize_all(&inkwell::targets::InitializationConfig::default());
+
         let context = Context::create();
 
         // Create target machine

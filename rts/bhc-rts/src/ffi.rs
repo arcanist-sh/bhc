@@ -308,18 +308,43 @@ fn format_double(n: f64) -> String {
         }
     } else if n.is_nan() {
         "NaN".to_string()
+    } else if n == 0.0 {
+        // Covers -0.0, whose magnitude would otherwise take the scientific
+        // branch and render as `0.0e0`.
+        if n.is_sign_negative() {
+            "-0.0".to_string()
+        } else {
+            "0.0".to_string()
+        }
+    } else if n.abs() >= 0.1 && n.abs() < 1e7 {
+        // Haskell's `show` for a Double is the SHORTEST decimal that reads back
+        // as the same value, fixed-point while the magnitude is in [0.1, 10^7)
+        // and scientific outside it. Rust's `{}` is also shortest-round-trip,
+        // so it agrees digit for digit; only the trailing `.0` has to be added.
+        //
+        // This used to be `{n:.6}` — six fractional digits — which silently
+        // truncated every Double: `sqrt 2` printed `1.414214` where Haskell
+        // says `1.4142135623730951`. The comment justified it as "matching the
+        // WASM backend and the conformance fixtures", but the fixtures had been
+        // written to match this function, so the two agreed with each other and
+        // neither agreed with Haskell. `ghc_differential.py` is what broke the
+        // circle.
+        let s = format!("{n}");
+        if s.contains('.') {
+            s
+        } else {
+            s + ".0"
+        }
     } else {
-        // BHC renders Double with up to 6 fractional digits — matching the WASM
-        // backend's `double_to_str` and the conformance fixtures — with trailing
-        // zeros stripped but at least one digit after the decimal point.
-        let mut s = format!("{n:.6}");
-        while s.ends_with('0') {
-            s.pop();
+        // Scientific: one digit before the point, and Haskell always writes a
+        // fractional part, so `1e-3` becomes `1.0e-3`.
+        let s = format!("{n:e}");
+        match s.split_once('e') {
+            Some((mantissa, exp)) if !mantissa.contains('.') => {
+                format!("{mantissa}.0e{exp}")
+            }
+            _ => s,
         }
-        if s.ends_with('.') {
-            s.push('0');
-        }
-        s
     }
 }
 

@@ -2263,12 +2263,13 @@ impl LowerContext {
             // builtins: `Data.Map.member` is implemented, but a stub bound
             // under the exact alias `M` won the lookup, so `M.member` aborted
             // at runtime — in every pandoc module, which all write
-            // `import qualified Data.Map as M`.
+            // `import qualified Data.Map as M`. `E.catch` sat here for the same
+            // reason and lost the same way: `catch` IS a builtin, but the stub
+            // bound under the alias `E` won `resolve_qualified_var`'s first
+            // lookup, so pandoc's `E.catch` aborted.
             "member",
             "notMember",
             "fromListWith",
-            // Control.Exception qualified
-            "E.catch",
             // Misc XMonad internal stubs
             "buildScript",
             "stackYaml",

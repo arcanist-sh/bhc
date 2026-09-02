@@ -6778,20 +6778,6 @@ fn lower_instance_method(
 }
 
 /// Lower a function clause.
-/// Whether an AST pattern always matches, so no later equation can be reached
-/// through it.
-fn ast_pat_is_irrefutable(pat: &ast::Pat) -> bool {
-    match pat {
-        ast::Pat::Wildcard(_) | ast::Pat::Var(_, _) => true,
-        ast::Pat::Paren(inner, _)
-        | ast::Pat::Lazy(inner, _)
-        | ast::Pat::Bang(inner, _)
-        | ast::Pat::Ann(inner, _, _)
-        | ast::Pat::As(_, inner, _) => ast_pat_is_irrefutable(inner),
-        _ => false,
-    }
-}
-
 fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir::Equation> {
     ctx.in_scope(|ctx| {
         // Bind pattern variables
@@ -6847,9 +6833,79 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                         .guards
                         .iter()
                         .all(|g| matches!(g, ast::Guard::Expr(_, _)));
-                let irrefutable =
-                    !clause.pats.is_empty() && clause.pats.iter().all(ast_pat_is_irrefutable);
-                if single_boolean && irrefutable {
+                // Refutability no longer matters: the equation compiler now
+                // sends a failing guard to the NEXT equation whatever the
+                // patterns look like (a join point in `compile_equations_
+                // linear`). Desugaring here instead can only fall through to
+                // an error, which is what made `f (x:xs) | p x = … ; f (x:xs)
+                // = …` raise "Non-exhaustive patterns" the moment `p x` was
+                // False — pandoc's `preprocessArgs` refused every command line
+                // that way.
+                // Several guarded alternatives, all boolean, are handled the
+                // same way: the RHS keeps its nested ifs and the HIR guard
+                // becomes their DISJUNCTION, so the equation compiler falls
+                // through to the next equation exactly when no alternative
+                // fires. pandoc's `preprocessArgs` has two such alternatives
+                // and refused every command line without this.
+                let all_boolean = !guarded_rhss.is_empty()
+                    && guarded_rhss.iter().all(|g| {
+                        !g.guards.is_empty()
+                            && g.guards.iter().all(|x| matches!(x, ast::Guard::Expr(_, _)))
+                    });
+                if !single_boolean && all_boolean {
+                    let span = clause.span;
+                    let mk_bool = |ctx: &mut LowerContext, name: &str| -> hir::Expr {
+                        let sym = Symbol::intern(name);
+                        match ctx
+                            .lookup_constructor(sym)
+                            .or_else(|| ctx.lookup_value(sym))
+                        {
+                            Some(id) => hir::Expr::Con(ctx.def_ref(id, span)),
+                            None => {
+                                let id = ctx.fresh_def_id();
+                                ctx.define(id, sym, DefKind::Constructor, span);
+                                hir::Expr::Con(ctx.def_ref(id, span))
+                            }
+                        }
+                    };
+                    let mut disjunction: Option<hir::Expr> = None;
+                    for grhs in guarded_rhss.iter().rev() {
+                        let mut conj: Option<hir::Expr> = None;
+                        for g in grhs.guards.iter().rev() {
+                            let ast::Guard::Expr(e, gsp) = g else {
+                                continue;
+                            };
+                            let cond = lower_expr(ctx, e);
+                            conj = Some(match conj {
+                                None => cond,
+                                Some(rest) => {
+                                    let f = mk_bool(ctx, "False");
+                                    hir::Expr::If(Box::new(cond), Box::new(rest), Box::new(f), *gsp)
+                                }
+                            });
+                        }
+                        if let Some(c) = conj {
+                            disjunction = Some(match disjunction {
+                                None => c,
+                                Some(rest) => {
+                                    let t = mk_bool(ctx, "True");
+                                    hir::Expr::If(Box::new(c), Box::new(t), Box::new(rest), span)
+                                }
+                            });
+                        }
+                    }
+                    let rhs = desugar::desugar_guarded_rhs(
+                        ctx,
+                        guarded_rhss,
+                        clause.span,
+                        &|ctx, e| lower_expr(ctx, e),
+                        &|ctx, p| lower_pat(ctx, p),
+                    );
+                    let guards = disjunction
+                        .map(|cond| vec![hir::Guard { cond, span }])
+                        .unwrap_or_default();
+                    (rhs, guards)
+                } else if single_boolean {
                     let grhs = &guarded_rhss[0];
                     let conds: Vec<hir::Guard> = grhs
                         .guards

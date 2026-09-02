@@ -1448,59 +1448,109 @@ fn compile_equations_linear(
             }
         }
 
-        // A guard that FAILS falls through to the next equation. Where this
-        // equation's patterns are irrefutable — which is the only shape
-        // `lower_clause` keeps guards in the HIR for — no later alternative
-        // can be reached by matching, so the remaining equations belong in the
-        // guard's failure branch and nowhere else. No duplication follows.
+        // A guard that FAILS falls through to the next equation — whatever
+        // this equation's patterns look like. Restricting that to IRREFUTABLE
+        // patterns left `f (x:xs) | p x = … ; f (x:xs) = …` raising
+        // "Non-exhaustive patterns" the moment `p x` was False, which is how
+        // pandoc's `preprocessArgs` refuses every command line.
+        //
+        // The remaining equations go behind a JOIN POINT — a lambda bound
+        // once and called from each guard's failure branch — so several
+        // guards on one equation do not each carry a copy, and the later
+        // alternatives keep their place in the case as well.
+        // Patterns that always match leave no later alternative reachable BY
+        // MATCHING, so the remaining equations belong only in the guard's
+        // failure branch.
         let irrefutable = !eq.pats.is_empty()
             && eq.pats.iter().all(is_irrefutable_pat)
             && !eq.guards.is_empty()
             && equations.len() > 1;
-        let guard_failure = if irrefutable {
-            let remaining = compile_equations_linear(ctx, &equations[1..], args, span)?;
-            match args.first() {
-                Some(arg) => core::Expr::Case(
-                    Box::new(core::Expr::Var(arg.clone(), span)),
-                    remaining,
-                    Ty::Error,
-                    span,
-                ),
-                None => make_pattern_error(eq.span),
-            }
+        // Compile the remaining equations ONCE. Compiling them a second time
+        // re-registers every pattern variable, and the first copy is then
+        // left holding stale ones.
+        let remaining_alts = if equations.len() > 1 {
+            Some(compile_equations_linear(ctx, &equations[1..], args, span)?)
         } else {
-            make_pattern_error(eq.span)
+            None
+        };
+        let fallthrough = match (&remaining_alts, args.first()) {
+            (Some(remaining), Some(arg)) => Some(core::Expr::Case(
+                Box::new(core::Expr::Var(arg.clone(), span)),
+                remaining.clone(),
+                Ty::Error,
+                span,
+            )),
+            _ => None,
+        };
+
+        let join_var = fallthrough
+            .as_ref()
+            .map(|_| ctx.fresh_var("$guardfail", Ty::Error, span));
+        let guard_failure = match &join_var {
+            Some(jv) => core::Expr::App(
+                Box::new(core::Expr::Var(jv.clone(), span)),
+                Box::new(core::Expr::Lit(core::Literal::Int(0), Ty::Error, span)),
+                span,
+            ),
+            None => make_pattern_error(eq.span),
         };
 
         let rhs = if eq.guards.is_empty() {
             lower_expr(ctx, &eq.rhs)?
         } else {
-            compile_guarded_rhs(ctx, &eq.guards, &eq.rhs, eq.span, guard_failure)?
+            compile_guarded_rhs(ctx, &eq.guards, &eq.rhs, eq.span, guard_failure.clone())?
         };
 
         if !existential_classes.is_empty() {
             ctx.pop_dict_scope();
         }
 
+        let mut these_alts: Vec<Alt> = Vec::new();
         if eq.pats.is_empty() {
-            alts.push(Alt {
+            these_alts.push(Alt {
                 con: AltCon::Default,
                 binders: vec![],
                 rhs,
             });
         } else if eq.pats.len() == 1 {
-            let expanded_alts = lower_pat_with_or_to_alts(ctx, &eq.pats[0], rhs, eq.span)?;
-            alts.extend(expanded_alts);
+            let expanded_alts = lower_pat_with_or_to_alts_with_fallthrough(
+                ctx,
+                &eq.pats[0],
+                rhs,
+                eq.span,
+                join_var.as_ref().map(|_| guard_failure.clone()),
+            )?;
+            these_alts.extend(expanded_alts);
         } else {
             let tuple_alt = compile_tuple_pattern(ctx, &eq.pats, rhs, eq.span)?;
-            alts.push(tuple_alt);
+            these_alts.push(tuple_alt);
         }
 
-        if equations.len() > 1 && !irrefutable {
-            let remaining = compile_equations_linear(ctx, &equations[1..], args, span)?;
-            alts.extend(remaining);
-        } else if irrefutable {
-            // Already compiled into the guard's failure branch above.
+        // Bind the join point around the WHOLE alternative, so a nested
+        // sub-pattern failure can reach it too.
+        if let (Some(jv), Some(body)) = (join_var, fallthrough) {
+            for alt in &mut these_alts {
+                let param = ctx.fresh_var("$gfarg", Ty::Error, span);
+                let lam = core::Expr::Lam(param, Box::new(body.clone()), span);
+                let inner = std::mem::replace(
+                    &mut alt.rhs,
+                    core::Expr::Lit(core::Literal::Int(0), Ty::Error, span),
+                );
+                alt.rhs = core::Expr::Let(
+                    Box::new(core::Bind::NonRec(jv.clone(), Box::new(lam))),
+                    Box::new(inner),
+                    span,
+                );
+            }
+        }
+        alts.extend(these_alts);
+
+        if let Some(remaining) = remaining_alts {
+            if !irrefutable {
+                alts.extend(remaining);
+            }
+            // An irrefutable pattern leaves no later alternative reachable by
+            // MATCHING; those equations live in the guard's failure branch.
         } else {
             alts.push(Alt {
                 con: AltCon::Default,
@@ -1935,18 +1985,31 @@ fn cross_product<T: Clone>(vecs: &[Vec<T>]) -> Vec<Vec<T>> {
 /// For nested or-patterns like `Just (Left x | Right x) -> e`, this produces:
 /// - `Just (Left x) -> e`
 /// - `Just (Right x) -> e`
-pub fn lower_pat_with_or_to_alts(
+///
+/// A NESTED sub-pattern that fails falls through to `fallthrough` rather than
+/// raising a pattern-match error.
+///
+/// `f (0:xs) = … ; f (x:xs) = …` needs this: the outer cons matches, the inner
+/// `0` does not, and the second equation is where control belongs.
+pub fn lower_pat_with_or_to_alts_with_fallthrough(
     ctx: &mut LowerContext,
     pat: &hir::Pat,
     rhs: core::Expr,
     span: Span,
+    fallthrough: Option<core::Expr>,
 ) -> LowerResult<Vec<Alt>> {
     // Use deep flattening to handle nested or-patterns
     let expanded = flatten_nested_or_patterns(pat);
     let mut alts = Vec::with_capacity(expanded.len());
 
     for sub_pat in expanded {
-        let alt = lower_pat_to_alt(ctx, &sub_pat, rhs.clone(), span)?;
+        let alt = lower_pat_to_alt_with_fallthrough(
+            ctx,
+            &sub_pat,
+            rhs.clone(),
+            span,
+            fallthrough.clone(),
+        )?;
         alts.push(alt);
     }
 
@@ -2069,7 +2132,7 @@ mod tests {
         let right = Box::new(Pat::Lit(hir::Lit::Int(2), span));
         let or_pat = Pat::Or(left, right, span);
 
-        let result = lower_pat_with_or_to_alts(&mut ctx, &or_pat, rhs, span);
+        let result = lower_pat_with_or_to_alts_with_fallthrough(&mut ctx, &or_pat, rhs, span, None);
         assert!(result.is_ok());
 
         let alts = result.unwrap();

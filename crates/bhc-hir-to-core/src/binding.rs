@@ -30,11 +30,74 @@ pub fn preregister_bindings(ctx: &mut LowerContext, bindings: &[Binding]) -> Low
     let mut vars = Vec::with_capacity(bindings.len());
 
     for binding in bindings {
-        let var = preregister_pattern(ctx, &binding.pat)?;
+        let mut var = preregister_pattern(ctx, &binding.pat)?;
+        // Give a simple binder its TYPE. Registering it as `Ty::Error` left
+        // every occurrence untyped, and codegen reads an operand's type to
+        // decide what a comparison means — `let nm = takeWhile … in any (\l ->
+        // l == nm) names` compared two heap addresses and was always False,
+        // while the same code with `nm` a top-level signed binding worked.
+        match &binding.pat {
+            Pat::Var(_, def_id, _) => {
+                if matches!(var.ty, Ty::Error) {
+                    if let Some(t) = crate::expr::local_binding_ty(ctx, binding, *def_id) {
+                        var.ty = t;
+                        ctx.register_var(*def_id, var.clone());
+                    }
+                }
+            }
+            // A TUPLE (or constructor) pattern's components each get the
+            // matching part of the right-hand side's type. `let (nm, _) = span
+            // … in any (\l -> l == nm) names` left `nm` untyped, and codegen
+            // reads an operand's type to decide what `==` means.
+            other => {
+                if let Some(ty) = crate::expr::binding_rhs_ty(ctx, binding) {
+                    retype_pattern_binders(ctx, other, &ty);
+                }
+            }
+        }
         vars.push(var);
     }
 
     Ok(vars)
+}
+
+/// Give each binder of a pattern the matching component of `ty`.
+///
+/// Only structure the pattern and the type agree on is used: a tuple pattern
+/// against a tuple type, a single-field wrapper against whatever it wraps.
+/// Anything else is left as it was.
+fn retype_pattern_binders(ctx: &mut LowerContext, pat: &Pat, ty: &Ty) {
+    match pat {
+        Pat::Var(name, def_id, _) => {
+            if matches!(ty, Ty::Error) {
+                return;
+            }
+            let existing = ctx.lookup_var(*def_id).map(|v| v.id);
+            let id = match existing {
+                Some(id) => id,
+                None => ctx.fresh_id(),
+            };
+            ctx.register_var(
+                *def_id,
+                Var {
+                    name: *name,
+                    id,
+                    ty: ty.clone(),
+                },
+            );
+        }
+        Pat::As(_, _, inner, _) | Pat::Ann(inner, _, _) => retype_pattern_binders(ctx, inner, ty),
+        Pat::Con(_, sub_pats, _) => {
+            if let Ty::Tuple(tys) = ty {
+                if tys.len() == sub_pats.len() {
+                    for (p, t) in sub_pats.iter().zip(tys) {
+                        retype_pattern_binders(ctx, p, t);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Pre-register a pattern's bound variable in the context.

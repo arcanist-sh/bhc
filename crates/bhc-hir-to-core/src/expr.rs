@@ -4666,11 +4666,16 @@ fn lower_let_bindings(
                 .filter(|&j| fvs.contains(&names[j]))
                 .collect();
             deps.push(d);
-            let var = ctx.lookup_var(def_id).cloned().unwrap_or_else(|| Var {
+            let mut var = ctx.lookup_var(def_id).cloned().unwrap_or_else(|| Var {
                 name,
                 id: ctx.fresh_id(),
                 ty: Ty::Error,
             });
+            if matches!(var.ty, Ty::Error) {
+                if let Some(t) = local_binding_ty(ctx, b, def_id) {
+                    var.ty = t;
+                }
+            }
             pairs.push((var, Box::new(rhs)));
         }
 
@@ -4779,6 +4784,39 @@ fn strongly_connected_components(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
     sccs
 }
 
+/// The type of a local binding's RIGHT-HAND SIDE, for spreading over a pattern
+/// binding's components. See `local_binding_ty`.
+pub(crate) fn binding_rhs_ty(ctx: &LowerContext, binding: &hir::Binding) -> Option<Ty> {
+    binding
+        .sig
+        .as_ref()
+        .map(|s| s.ty.clone())
+        .or_else(|| ctx.resolved_expr_ty_opt(binding.rhs.span()))
+        .filter(|t| !matches!(t, Ty::Error))
+}
+
+/// The declared or inferred type of a LOCAL binding, for the Core `Var` that
+/// binds it.
+///
+/// A `let`-bound variable used to carry `Ty::Error`, and codegen reads that
+/// type to decide what a comparison MEANS: `let nm = takeWhile … in any (\l ->
+/// l == nm) names` compared two heap ADDRESSES and was always False, while the
+/// same code with `nm` a top-level signed binding worked. Both operands being
+/// untyped is what sends `==` down the scalar path.
+pub(crate) fn local_binding_ty(
+    ctx: &LowerContext,
+    binding: &hir::Binding,
+    def_id: DefId,
+) -> Option<Ty> {
+    binding
+        .sig
+        .as_ref()
+        .map(|s| s.ty.clone())
+        .or_else(|| ctx.lookup_scheme(def_id).map(|s| s.ty.clone()))
+        .or_else(|| ctx.resolved_expr_ty_opt(binding.rhs.span()))
+        .filter(|t| !matches!(t, Ty::Error))
+}
+
 /// Lower a single let binding.
 /// For simple variable patterns, creates a let binding.
 /// For complex patterns, creates a case expression.
@@ -4861,11 +4899,16 @@ fn lower_single_let_binding(
         // Simple variable pattern: let x = e in body
         hir::Pat::Var(name, def_id, _) => {
             let rhs = lower_local_binding_rhs(ctx, binding, *def_id)?;
-            let var = ctx.lookup_var(*def_id).cloned().unwrap_or_else(|| Var {
+            let mut var = ctx.lookup_var(*def_id).cloned().unwrap_or_else(|| Var {
                 name: *name,
                 id: ctx.fresh_id(),
                 ty: Ty::Error,
             });
+            if matches!(var.ty, Ty::Error) {
+                if let Some(t) = local_binding_ty(ctx, binding, *def_id) {
+                    var.ty = t;
+                }
+            }
 
             // Check if the binding is self-recursive
             let free_vars = collect_free_vars(&rhs);

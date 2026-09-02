@@ -1184,6 +1184,34 @@ impl LowerContext {
                 });
         }
 
+        // `Semigroup (Maybe a)`. bhc had no instance, so pandoc's option
+        // parser — `optInputFiles opts <> mbArgs` — lowered `<>` to an
+        // unresolved method and segfaulted. The Nothing cases are exact; two
+        // `Just`s need the ELEMENT's instance and abort with a message.
+        {
+            let maybe_head = Ty::App(
+                Box::new(Ty::Con(bhc_types::TyCon::new(
+                    Symbol::intern("Maybe"),
+                    bhc_types::Kind::Arrow(
+                        Box::new(bhc_types::Kind::Star),
+                        Box::new(bhc_types::Kind::Star),
+                    ),
+                ))),
+                Box::new(Ty::Var(bhc_types::TyVar::new_star(0xFFF7_0005))),
+            );
+            let mut sg_methods = FxHashMap::default();
+            sg_methods.insert(Symbol::intern("<>"), DefId::new(790_012));
+            self.class_registry
+                .register_instance(crate::dictionary::InstanceInfo {
+                    class: Symbol::intern("Semigroup"),
+                    instance_types: vec![maybe_head],
+                    methods: sg_methods,
+                    superclass_instances: Vec::new(),
+                    assoc_type_impls: FxHashMap::default(),
+                    instance_constraints: Vec::new(),
+                });
+        }
+
         // Lists get builtin `Semigroup` and `Monoid` instances.
         // Without this, `"ab" <> "cd"` and `[1,2] <> [3]` lowered to an
         // unresolved-method stub. `mappend` and `mconcat` would work too, but
@@ -1490,6 +1518,7 @@ impl LowerContext {
             "Data.List.append",
             "Data.List.empty",
             "Data.List.concat",
+            "Data.Maybe.append",
         ]
         .iter()
         .enumerate()

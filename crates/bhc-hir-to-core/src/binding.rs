@@ -66,7 +66,7 @@ pub fn preregister_bindings(ctx: &mut LowerContext, bindings: &[Binding]) -> Low
 /// Only structure the pattern and the type agree on is used: a tuple pattern
 /// against a tuple type, a single-field wrapper against whatever it wraps.
 /// Anything else is left as it was.
-fn retype_pattern_binders(ctx: &mut LowerContext, pat: &Pat, ty: &Ty) {
+pub(crate) fn retype_pattern_binders(ctx: &mut LowerContext, pat: &Pat, ty: &Ty) {
     match pat {
         Pat::Var(name, def_id, _) => {
             if matches!(ty, Ty::Error) {
@@ -236,6 +236,17 @@ pub fn lower_bindings(
 #[allow(dead_code)]
 fn lower_single_binding(ctx: &mut LowerContext, binding: &Binding) -> LowerResult<Bind> {
     let (var, names) = extract_binding_info(ctx, &binding.pat)?;
+
+    // Hand the binder's type down to the right-hand side, so a `let`-bound
+    // FUNCTION can type its parameters from it. A local binding has no entry in
+    // the scheme table — that is filled for top-level definitions only — so
+    // without this its parameters stay `Ty::Error` however it is annotated, and
+    // `let d x y = sqrt (x*x + y*y) :: Double` multiplies two boxed doubles on
+    // the INTEGER path and prints 0.0 where the same definition at top level is
+    // correct.
+    if !matches!(var.ty, Ty::Error) {
+        ctx.record_expected_ty(binding.rhs.span(), var.ty.clone());
+    }
 
     // Lower the RHS
     let rhs = lower_expr(ctx, &binding.rhs)?;

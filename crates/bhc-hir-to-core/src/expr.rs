@@ -4487,6 +4487,20 @@ fn lower_lambda(
         register_pattern_vars(ctx, pat, &mut pat_vars);
     }
 
+    // If a caller said what this lambda's type is — `lower_single_binding`
+    // passes the binder's — peel one arrow per parameter and give each binder
+    // its type. The registration above happens BEFORE the body is lowered
+    // precisely so every occurrence in the body sees the same Var, so retyping
+    // here reaches all of them.
+    if let Some(expected) = ctx.expected_ty_opt(span) {
+        let mut ty = expected;
+        for pat in pats {
+            let Ty::Fun(arg_ty, ret_ty) = ty else { break };
+            crate::binding::retype_pattern_binders(ctx, pat, arg_ty.as_ref());
+            ty = ret_ty.as_ref().clone();
+        }
+    }
+
     // Now lower the body (pattern vars are registered)
     let body_core = lower_expr(ctx, body)?;
 
@@ -4594,7 +4608,20 @@ fn lower_let(
 
     // First, pre-register all binding variables so they're available
     // when lowering the body (and for recursive references in RHSes)
-    let _vars = preregister_bindings(ctx, bindings)?;
+    let vars = preregister_bindings(ctx, bindings)?;
+
+    // Hand each binder's type down to its right-hand side, so a `let`-bound
+    // FUNCTION can type its parameters from it (see `lower_lambda`). A local
+    // binding has no entry in the scheme table — that is filled for top-level
+    // definitions only — so without this its parameters stay `Ty::Error`
+    // however it is annotated, and `let d x y = sqrt (x*x + y*y) :: Double`
+    // multiplies two boxed doubles on the INTEGER path and prints 0.0 where the
+    // same definition at top level is correct.
+    for (binding, var) in bindings.iter().zip(&vars) {
+        if !matches!(var.ty, Ty::Error) {
+            ctx.record_expected_ty(binding.rhs.span(), var.ty.clone());
+        }
+    }
 
     // Now lower the body - it can reference the bound variables
     let body_core = lower_expr(ctx, body)?;

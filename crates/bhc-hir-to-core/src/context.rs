@@ -4731,12 +4731,23 @@ impl LowerContext {
         // Try to extract parameter types from the function's type signature
         // so that type-directed method resolution can use them.
         let mut param_types: Vec<Ty> = Vec::new();
-        if let Some(scheme) = self.lookup_scheme(value_def.id) {
-            let mut ty = &scheme.ty;
+        // A LOCAL binding has no entry in the scheme table — that is filled for
+        // top-level definitions — but `preregister_bindings` does put its type
+        // on the binder itself. Without this fallback a `let`-bound function's
+        // parameters were `Ty::Error` however it was annotated, so
+        // `let d x y = sqrt (x*x + y*y) :: Double` multiplied two boxed doubles
+        // on the INTEGER path and printed 0.0, while the identical definition
+        // at top level was correct.
+        let signature = self
+            .lookup_scheme(value_def.id)
+            .map(|scheme| scheme.ty.clone())
+            .or_else(|| self.lookup_var(value_def.id).map(|v| v.ty.clone()))
+            .filter(|ty| !matches!(ty, Ty::Error));
+        if let Some(mut ty) = signature {
             for _ in 0..arity {
                 if let Ty::Fun(arg_ty, ret_ty) = ty {
                     param_types.push(arg_ty.as_ref().clone());
-                    ty = ret_ty.as_ref();
+                    ty = ret_ty.as_ref().clone();
                 } else {
                     break;
                 }

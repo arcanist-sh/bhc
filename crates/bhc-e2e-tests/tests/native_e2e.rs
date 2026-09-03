@@ -125,6 +125,16 @@ fn test_tier2_lazy_infinite_native() {
     run_native_test("tier2_functions/lazy_infinite", Profile::Default);
 }
 
+// A function with a lazy parameter that is ALSO used as a first-class value.
+// Both sides of a call must agree that a parameter is a thunk, and an indirect
+// call cannot agree — so escape analysis has to exclude this function and keep
+// it eager. If that ever breaks, the indirect call passes a value where the
+// callee forces a thunk, which corrupts silently rather than failing loudly.
+#[test]
+fn test_tier2_lazy_escaping_fn_native() {
+    run_native_test("tier2_functions/lazy_escaping_fn", Profile::Default);
+}
+
 #[test]
 fn test_tier2_float_math_native() {
     run_native_test("tier2_functions/float_math", Profile::Default);

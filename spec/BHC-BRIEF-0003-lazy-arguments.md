@@ -79,16 +79,76 @@ evidence that arguments are lazy. They are not.
 
 Thunk every non-trivial argument at every call site; force only at scrutinee and
 primitive positions. Then add a demand/strictness pass so the common case does
-not allocate a thunk per argument — `bhc-core` has `demand.rs` and
-worker/wrapper already, currently gated to lazy profiles.
+not allocate a thunk per argument — `bhc-core` has `demand.rs`
+(`analyze_module` → per-argument `Strict`/`Lazy`) and worker/wrapper already,
+currently gated to lazy profiles.
 
-- **Correct.** Matches the language.
-- **Blast radius is the whole backend.** Every call path in codegen, plus WASM,
-  plus the RTS's forcing discipline.
-- **Cost is dominated by the strictness pass**, not the thunking. Without it,
-  every arithmetic argument allocates and every tight loop regresses.
-- Needs its own gated campaign — several rounds of the 221-module sweep, the
-  ladder, the battery and the GHC differential. Not an afternoon.
+**A cannot be built on today's calling convention, and this is the finding that
+matters.** Audited 2026-09-03:
+
+- `value_to_ptr` lowers an `Int` argument with `build_int_to_ptr` — a BIT-CAST,
+  not a heap box, despite its "box the integer" comment. An `Int` argument is
+  the integer itself sitting in a pointer register.
+- So a callee cannot force its parameters. `bhc_force` is tag-driven: it reads
+  an `i64` at offset 0. Handed the integer `7`, it dereferences address 7.
+- There is **no pointer-tagging scheme** in the RTS or codegen — nothing marks a
+  word as immediate-versus-heap.
+
+The consequence: *both sides of every call must agree on which arguments are
+thunks*, and that cannot be arranged. A caller may be a direct call in this
+module (controllable), a closure/apply path (not), or another module (not).
+Demand signatures do not rescue this — they tell you what a function needs, not
+what every caller did.
+
+**So A's first step is not thunking. It is making an argument forceable**, by
+one of:
+
+1. **Pointer tagging** (what GHC does). Low bit set = immediate, clear = heap
+   object; `bhc_force` passes immediates through untouched. Touches every
+   `value_to_ptr`/`ptr_to_int`, every RTS entry point that receives a value, and
+   the WASM backend. It does not need a GC (BHC's is a leak allocator today),
+   which removes the usual hardest part.
+2. **Uniformly boxing every argument.** Simpler to reason about, and much
+   slower — an allocation per argument until the strictness pass claws it back.
+
+Tagging is the better end state; boxing is the easier thing to measure against.
+
+### The escape-analysis shortcut does not work — ATTEMPTED AND REVERTED 2026-09-03
+
+Before paying for a convention change, an apparent shortcut: if a function never
+ESCAPES — referenced only as the head of a direct application — then every call
+site is visible, so caller and callee CAN agree which parameters are thunks
+without changing how a value is represented. `demand.rs` supplies the
+`Strict`/`Lazy` mask; the caller thunks lazy arguments and the callee marks
+those parameters as `thunked_vars` so its uses force.
+
+It was built, and it worked on the cases it was aimed at — `myConst 1 (loop 0)`
+returned `1`, a DIVERGING argument that is not a syntactic bottom, which the
+stopgap cannot do. Pandoc stayed at 221/221 and the ladder and battery passed.
+
+**It is still unsound, and the reason generalises: escape analysis over
+`core_module.bindings` cannot see every reference, because CODEGEN SYNTHESIZES
+REFERENCES THAT CORE NEVER SHOWS IT** — derived instance methods and dictionary
+slots among them. "Every call site is visible" was never true.
+
+It failed on `tier3_io/derive_foldable`: `foldr (+) 10 Nothing2` crashed with
+`misaligned pointer dereference: address ... is 0xa`. `0xa` is 10 — the initial
+accumulator. In the `Nothing2` branch `z` is unused, so demand marked it Lazy
+and the callee forced it, but that call arrives through dictionary dispatch for
+the derived `Foldable`, not through `lower_direct_call_inner`, so no caller ever
+thunked it. `tier2_functions/tco` also broke.
+
+**Do not retry this without a whole-program view of references that includes
+what codegen invents.** The patch is at `/tmp/callbyneed-slice.patch` for
+reference. The guard fixture `tier2_functions/lazy_escaping_fn` stays: it pins
+the invariant that a lazy-parameter function used as a VALUE must remain eager,
+which is the shape that corrupts silently rather than failing loudly.
+
+- **Blast radius is the whole backend**, plus WASM, plus the RTS.
+- **Cost is dominated by the calling-convention change**, not the thunking and
+  not the strictness pass.
+- Needs its own gated campaign, several rounds of the 221-module sweep, the
+  ladder, the battery and the GHC differential. Weeks, not an afternoon.
 
 ### B. Thunk only what can diverge — IMPLEMENTED
 
@@ -136,9 +196,9 @@ laziness.
 **B first, A as the real answer.** B unblocks the `many` family and buys the
 ability to run more real Haskell — which is what surfaces the next bug, the way
 the GHC differential surfaced three `Double` bugs in one run. A is the correct
-end state and should not be attempted until Core carries types
-(`BHC-BRIEF-0002`), because the strictness pass that makes A affordable needs
-them.
+end state. It needs typed Core (`BHC-BRIEF-0002`) for the strictness pass that
+makes it affordable, and — established above — a forceable-argument
+representation before any of that is even sound.
 
 ## Prerequisites
 

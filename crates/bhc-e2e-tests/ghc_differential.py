@@ -43,6 +43,18 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 BHC = os.path.join(ROOT, "target/debug/bhc")
 ENV = dict(os.environ)
 ENV.setdefault("LLVM_SYS_211_PREFIX", "/opt/homebrew/opt/llvm@21")
+
+# A BHC-produced binary links against the stdlib shared objects in target/, and
+# it is run from a scratch directory, so the loader needs to be told where they
+# are. `bhc-e2e-tests/src/native.rs` does the same thing for the Rust harness.
+# Without it every fixture touching Data.Map, Data.Text or Data.Char dies with
+# "libbhc_containers.so: cannot open shared object file" — on Linux only, which
+# is how it reached CI green from a macOS machine.
+_LIB_VAR = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+_LIB_DIRS = [os.path.join(ROOT, d) for d in ("target/debug", "target/release")]
+_LIB_DIRS = [d for d in _LIB_DIRS if os.path.isdir(d)]
+if _LIB_DIRS:
+    ENV[_LIB_VAR] = os.pathsep.join(_LIB_DIRS + ([ENV[_LIB_VAR]] if ENV.get(_LIB_VAR) else []))
 VERBOSE = "-v" in sys.argv
 
 BHC_WORK = "/tmp/bhc-ghcdiff/bhc"

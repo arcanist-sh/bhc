@@ -113,6 +113,53 @@ jobs:
       - name: Test
         run: cargo test --all-targets
 
+  differential:
+    name: GHC Differential
+    runs-on: ubuntu-latest
+    # Runs every fixture under BHC and under GHC and compares, with GHC as
+    # ground truth. The per-backend suites only check a fixture against its own
+    # `expected.txt`, which is worth exactly as much as whoever wrote it — a
+    # fixture written to match BHC agrees with BHC forever. This is the job that
+    # notices BHC means something different from Haskell.
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 21 all
+          sudo apt-get install -y libpolly-21-dev libopenblas-dev
+          echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> $GITHUB_ENV
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install GHC
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.8.2'
+          enable-stack: false
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-stable-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build bhc
+        run: cargo build -p bhc -p bhc-rts -p bhc-base -p bhc-containers -p bhc-text
+
+      - name: Differential against GHC
+        run: |
+          echo "BHC_GHC=$(which ghc)" >> $GITHUB_ENV
+          BHC_GHC=$(which ghc) python3 crates/bhc-e2e-tests/ghc_differential.py
+
   miri:
     name: Miri
     runs-on: ubuntu-latest

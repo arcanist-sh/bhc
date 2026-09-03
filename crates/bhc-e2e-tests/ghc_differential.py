@@ -27,7 +27,12 @@ Usage:
                                                                 # (e.g. ad-hoc probes)
 
 Exit status is non-zero when BHC disagrees with GHC, or fails on something GHC
-builds, so this is usable as a gate.
+builds, so this is usable as a gate — it runs as the `differential` CI job.
+
+`KNOWN_FAILURES` lists the fixtures BHC is known to get wrong, each with its
+reason. Those are reported but do not fail the build, so the debt stays visible
+without blocking. A known failure that starts PASSING also fails the run, so the
+list is pruned rather than left to rot.
 
 Requires a built `target/debug/bhc` and a GHC. The GHC is found via $BHC_GHC,
 then hx's managed toolchain, then PATH.
@@ -43,6 +48,21 @@ VERBOSE = "-v" in sys.argv
 BHC_WORK = "/tmp/bhc-ghcdiff/bhc"
 GHC_WORK = "/tmp/bhc-ghcdiff/ghc"
 META = {"expected.txt", "stdin.txt", "test.toml"}
+
+# Fixtures BHC is known to get wrong, with the reason. Listed here so the run
+# can gate CI without the debt going silent: a known failure is reported and
+# does not fail the build, and a known failure that starts PASSING is reported
+# too, so this list gets pruned instead of rotting.
+#
+# Nothing belongs here that has not been diagnosed. "It fails and I do not know
+# why" is a red build, not an entry.
+KNOWN_FAILURES = {
+    "tier3_io/stdin_echo":
+        "native stdin read path segfaults; pre-existing, see the #[ignore] on "
+        "test_tier3_milestone_d_csv_parser_native",
+    "tier3_io/stdin_readln":
+        "same native stdin read path",
+}
 
 
 def find_ghc():
@@ -156,6 +176,7 @@ def main():
         dirs = sorted({os.path.dirname(p) for p in glob.glob(f"{fix}/*.hs")})
 
     cats, rows, bad_expectations = {}, [], []
+    known_rows, fixed_rows = [], []
     for d in dirs:
         name = os.path.relpath(d, fix) or os.path.basename(d)
         srcs = sources(d)
@@ -187,9 +208,19 @@ def main():
         if g_ok and expected is not None and g_out != expected:
             bad_expectations.append((name, g_out, expected))
 
+        known = name in KNOWN_FAILURES
+        if known and cat in ("DIVERGE", "bhc fails"):
+            cat = "known failure"
+        elif known:
+            cat = "KNOWN FAILURE NOW PASSES"
+
         cats[cat] = cats.get(cat, 0) + 1
         if cat in ("DIVERGE", "bhc fails"):
             rows.append((cat, name, b_out, g_out, b_err))
+        elif cat == "known failure":
+            known_rows.append((name, KNOWN_FAILURES[name]))
+        elif cat == "KNOWN FAILURE NOW PASSES":
+            fixed_rows.append(name)
 
     print("=== bhc vs ghc ===")
     for k in sorted(cats):
@@ -213,8 +244,21 @@ def main():
             print(f"      ghc:      {g!r}")
             print(f"      expected: {e!r}")
 
+    if known_rows:
+        print("\n=== known failures (not gating) ===")
+        for name, why in sorted(known_rows):
+            print(f"  {name}: {why}")
+
+    if fixed_rows:
+        print("\n=== known failures that now PASS — remove from KNOWN_FAILURES ===")
+        for name in sorted(fixed_rows):
+            print(f"  {name}")
+
     failures = cats.get("DIVERGE", 0) + cats.get("bhc fails", 0)
-    return 1 if failures else 0
+    # A stale KNOWN_FAILURES entry is also a failure: it means the list is
+    # claiming something is broken that is not, and the next real regression
+    # there would be swallowed.
+    return 1 if failures or fixed_rows else 0
 
 
 if __name__ == "__main__":

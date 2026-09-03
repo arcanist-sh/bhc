@@ -418,6 +418,10 @@ pub struct Lowering<'ctx, 'm> {
     /// E.44: Set of variable IDs that were thunked (lazy let-bindings).
     /// When these variables are looked up, they must be forced via bhc_force.
     thunked_vars: FxHashSet<VarId>,
+    /// Top-level CAFs in this module whose body is a bottom (`error`,
+    /// `undefined`). Only these are worth passing to a callee as a thunk — see
+    /// `arg_should_thunk`.
+    bottom_cafs: FxHashSet<VarId>,
     /// Top-level nullary (0-lambda) bindings that participate in a
     /// reference cycle among top-level nullary bindings (mutually recursive
     /// parser CAFs like pandoc's `block`/`yamlMetaBlock'`). Value-position
@@ -492,6 +496,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             current_builtin_ty: Ty::Error,
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
+            bottom_cafs: FxHashSet::default(),
             recursive_caf_ids: FxHashSet::default(),
             integer_vars: FxHashSet::default(),
             adt_show_vars: FxHashMap::default(),
@@ -549,6 +554,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             current_builtin_ty: Ty::Error,
             overloaded_strings: false,
             thunked_vars: FxHashSet::default(),
+            bottom_cafs: FxHashSet::default(),
             recursive_caf_ids: FxHashSet::default(),
             integer_vars: FxHashSet::default(),
             adt_show_vars: FxHashMap::default(),
@@ -44792,6 +44798,43 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Trivial expressions are cheap to evaluate and have no side effects,
     /// so they can be evaluated eagerly without waste.
     /// Everything else should be thunked for lazy evaluation.
+    /// Whether an argument's evaluation can diverge, and so should be passed as a
+    /// thunk rather than evaluated at the call site.
+    ///
+    /// Deliberately NARROW. A callee does not force its parameters — an `Int`
+    /// argument is a raw value bit-cast to a pointer, not a heap object, so
+    /// forcing indiscriminately would dereference an integer. Passing a thunk is
+    /// therefore only safe where the callee either never touches the argument
+    /// (which is the case this exists for) or would have died evaluating it
+    /// anyway. Restricting to expressions that can actually diverge keeps both
+    /// halves of that true.
+    ///
+    /// Recognised: an application of `error`/`undefined`/`errorWithoutStackTrace`,
+    /// and a reference to a CAF (a nullary top-level binding, such as
+    /// `boom = error "BOOM"`).
+    fn arg_should_thunk(&self, expr: &Expr) -> bool {
+        match expr {
+            // Only a CAF whose body is a BOTTOM. Every CAF was too broad:
+            // `runId compute` handed `runId` a thunk it pattern-matched as a
+            // value. See `detect_bottom_cafs`.
+            Expr::Var(v, _) => self.bottom_cafs.contains(&v.id),
+            Expr::App(..) => {
+                let mut head = expr;
+                while let Expr::App(f, _, _) = head {
+                    head = f.as_ref();
+                }
+                matches!(
+                    self.app_head_var_name(expr),
+                    Some("error" | "undefined" | "errorWithoutStackTrace")
+                ) || matches!(head, Expr::Var(v, _)
+                        if matches!(v.name.as_str(),
+                            "error" | "undefined" | "errorWithoutStackTrace"))
+            }
+            Expr::Tick(_, inner, _) | Expr::Cast(inner, _, _) => self.arg_should_thunk(inner),
+            _ => false,
+        }
+    }
+
     fn is_trivial_expr(expr: &Expr) -> bool {
         match expr {
             // Literals are trivial
@@ -45073,6 +45116,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // value-position references lower to lazy thunks (see
         // `recursive_caf_ids`).
         self.detect_recursive_cafs(&core_module.bindings);
+        self.detect_bottom_cafs(&core_module.bindings);
 
         // Declare foreign imports (creates C declarations and BHC wrappers)
         self.declare_foreign_imports(&core_module.foreign_imports)?;
@@ -45119,6 +45163,47 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// laziness would not strictly require is safe (the apply path forces
     /// thunk callees), while missing a cycle re-introduces the infinite
     /// eager construction loop.
+    /// Record the top-level CAFs whose body is a bottom.
+    ///
+    /// `arg_should_thunk` used to treat EVERY CAF reference as worth thunking,
+    /// which broke any callee that actually uses the value: `runId compute`,
+    /// where `compute` is an ordinary nullary binding, pattern-matched a thunk
+    /// pointer and printed it. A callee does not force its parameters, so only
+    /// a CAF that would DIVERGE if evaluated is safe to defer — such a callee
+    /// either never touches it, or was going to die on it anyway.
+    ///
+    /// Confined to this module's own bindings on purpose: an imported CAF's
+    /// body is not here to inspect, so it stays eager.
+    fn detect_bottom_cafs(&mut self, bindings: &[Bind]) {
+        for bind in bindings {
+            let pairs: Vec<(&Var, &Expr)> = match bind {
+                Bind::NonRec(var, expr) => vec![(var, expr.as_ref())],
+                Bind::Rec(ps) => ps.iter().map(|(v, e)| (v, e.as_ref())).collect(),
+            };
+            for (var, expr) in pairs {
+                if self.count_lambda_params(expr) == 0 && Self::is_bottom_expr(expr) {
+                    self.bottom_cafs.insert(var.id);
+                }
+            }
+        }
+    }
+
+    /// Whether an expression is a direct application of a bottom.
+    fn is_bottom_expr(expr: &Expr) -> bool {
+        let mut head = expr;
+        while let Expr::App(f, _, _) = head {
+            head = f.as_ref();
+        }
+        match head {
+            Expr::Var(v, _) => matches!(
+                v.name.as_str(),
+                "error" | "undefined" | "errorWithoutStackTrace"
+            ),
+            Expr::Tick(_, inner, _) | Expr::Cast(inner, _, _) => Self::is_bottom_expr(inner),
+            _ => false,
+        }
+    }
+
     fn detect_recursive_cafs(&mut self, bindings: &[Bind]) {
         if std::env::var("BHC_NO_CAF_THUNK").is_ok() {
             return;
@@ -52449,6 +52534,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Lower remaining arguments and convert to pointers
         for (i, arg_expr) in args.iter().enumerate() {
+            // An argument whose evaluation can DIVERGE is passed as a thunk, so
+            // a callee that never uses it never runs it. Haskell is
+            // call-by-need and this is not — but `myConst 1 (error "BOOM")`
+            // printing BOOM rather than 1 is the shape that breaks parsec's
+            // `many`, whose empty-ok continuation is a bottom it never calls.
+            // See spec/BHC-BRIEF-0003 for why this is a stopgap and what
+            // replaces it.
+            if self.arg_should_thunk(arg_expr) {
+                if let Some(thunk) = self.lower_lazy(arg_expr)? {
+                    llvm_args.push(self.value_to_ptr(thunk)?.into());
+                    continue;
+                }
+            }
             if let Some(val) = self.lower_expr(arg_expr)? {
                 // E.45: If callee expects Integer at this position and we have an Int value,
                 // promote to Integer via bhc_integer_from_i64 instead of int_to_ptr
@@ -52824,8 +52922,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Allocate the ADT value
         let adt_ptr = self.alloc_adt(tag, arity)?;
 
-        // Store each argument as a field
+        // Store each argument as a field. A field whose evaluation can DIVERGE
+        // is stored as a thunk, for the same reason as a function argument
+        // (`arg_should_thunk`): `fst (2, error "BOOM")` must not run the second
+        // component. A field that is later projected and used reaches whatever
+        // forces it, and one that would have diverged eagerly was already fatal.
         for (i, arg_expr) in args.iter().enumerate() {
+            if self.arg_should_thunk(arg_expr) {
+                if let Some(thunk) = self.lower_lazy(arg_expr)? {
+                    self.store_adt_field(adt_ptr, arity, i as u32, thunk)?;
+                    continue;
+                }
+            }
             if let Some(arg_val) = self.lower_expr(arg_expr)? {
                 self.store_adt_field(adt_ptr, arity, i as u32, arg_val)?;
             }

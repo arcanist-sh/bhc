@@ -1,7 +1,7 @@
 # BHC-BRIEF-0003 — Lazy function arguments: stop evaluating what the callee may never use
 
 **Document ID:** BHC-BRIEF-0003
-**Status:** Scoped, not started. Repro verified still failing 2026-09-03.
+**Status:** Option B IMPLEMENTED 2026-09-03. Option A still open.
 **Owner:** build agent
 **References:** `rules/013-optimization.md` (demand analysis, worker/wrapper);
 `.claude/CLAUDE.md` Phase 2.3 ("Thunks & Laziness 🟢"); `spec/BHC-BRIEF-0002`
@@ -90,24 +90,46 @@ worker/wrapper already, currently gated to lazy profiles.
 - Needs its own gated campaign — several rounds of the 221-module sweep, the
   ladder, the battery and the GHC differential. Not an afternoon.
 
-### B. Thunk only what can diverge
+### B. Thunk only what can diverge — IMPLEMENTED
 
-Thunk an argument only when its lowering **can fail or loop**:
+Thunk an argument only when its lowering **can diverge**:
 
-- a reference to a CAF,
-- an application of `error`/`undefined`/a known bottom,
-- a variable already bound to a thunk.
+- an application of `error`/`undefined`/`errorWithoutStackTrace`,
+- a reference to a CAF **whose body is one of those**.
 
-Leave literals, variables, lambdas and saturated constructor applications eager.
+Leave everything else eager. Applied at both function call sites
+(`lower_direct_call_inner`) and constructor applications
+(`lower_constructor_application`) — `fst (2, error "BOOM")` needs the second.
 
-- **Not call-by-need.** A non-terminating argument that is not syntactically one
-  of the above still diverges.
-- **But it covers the observed failures**, including `manyErr`, without a
-  strictness pass and without regressing arithmetic.
-- Small enough to gate in one round.
-- **Risk:** it is a heuristic, and BHC's stated philosophy is predictability over
-  folklore. If taken, it must be documented as a *stopgap with a named
-  successor*, not as laziness.
+**Two things the implementation taught that this brief originally had wrong:**
+
+**A callee cannot simply force its parameters.** `value_to_ptr` means an `Int`
+argument is a raw value bit-cast to a pointer, not a heap object; forcing it
+would dereference an integer. `bhc_force` is tag-driven, and the RTS already
+carries a guard for "an object whose first word happens to equal the thunk tag".
+So blanket forcing is UNSOUND, not merely slow. Deferring an argument is
+therefore only safe where the callee either never touches it, or would have died
+evaluating it anyway — which is what confines B to expressions that can diverge.
+
+**"A reference to a CAF" was too broad.** Every CAF, thunked, broke any callee
+that uses the value: `runId compute`, with `compute` an ordinary nullary
+binding, pattern-matched a thunk pointer and printed it instead of `30`. Caught
+by the GHC differential in a fixture with nothing to do with laziness. The rule
+is now "a CAF whose body is a bottom", recorded by `detect_bottom_cafs` from the
+module's OWN bindings — an imported CAF's body is not there to inspect, so it
+stays eager.
+
+## Result of B
+
+All four fixtures in `tier2_functions/lazy_*` match GHC, including the original
+`myConst 1 boom` and `fst (2, boom)`, with no strictness pass and no change to
+arithmetic.
+
+**What B is not.** A non-terminating argument that is not syntactically a bottom
+still diverges, and a bottom that IS used now crashes rather than printing its
+message. It is a heuristic, and BHC's philosophy is predictability over
+folklore — so it stands as a *stopgap with a named successor* (option A), not as
+laziness.
 
 ## Recommendation
 

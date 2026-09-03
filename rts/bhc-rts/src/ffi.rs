@@ -744,8 +744,51 @@ pub unsafe extern "C" fn bhc_is_thunk(obj: *const u8) -> c_int {
 ///
 /// `closure` must be a valid closure whose first word is a function taking
 /// `args.len()` pointer arguments after the env pointer.
+/// Whether `BHC_DBG_PAP` tracing is on.
+///
+/// Cached: `pap_call_closure` is on the hot path of every partial application,
+/// and reading the environment there would allocate on each call.
+fn pap_dbg() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("BHC_DBG_PAP").is_some())
+}
+
 unsafe fn pap_call_closure(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
     let fn_ptr = unsafe { *(closure as *const *const u8) };
+    // BHC_DBG_PAP: the saturated call jumps through the closure's first word.
+    // When that word is not a function pointer the jump lands somewhere
+    // arbitrary and the crash report names only the caller, so print the
+    // closure, the target and the arity before committing to the jump.
+    // `pap_call_closure` is a TEXT address, so the gap between it and the
+    // target is what distinguishes "plausible code" from "data read as code".
+    if pap_dbg() {
+        let here = pap_call_closure as *const () as usize;
+        let t = fn_ptr as usize;
+        let plausible =
+            t != 0 && t % 4 == 0 && t > here.saturating_sub(0x400_0000) && t < here + 0x400_0000;
+        let arity = unsafe { *(closure.add(8) as *const i64) };
+        let argdesc: Vec<String> = args
+            .iter()
+            .map(|a| {
+                let v = *a as usize;
+                // A plausible heap object is 8-aligned and non-null; anything
+                // else passed where a value belongs is what corrupts the callee.
+                if v == 0 {
+                    "null".to_string()
+                } else if v % 8 != 0 {
+                    format!("{v:#x}!misaligned")
+                } else {
+                    format!("{v:#x}")
+                }
+            })
+            .collect();
+        eprintln!(
+            "PAP call closure={closure:p} fn={fn_ptr:p} arity={arity} nargs={}              slide_base={here:#x} args=[{}] {}",
+            args.len(),
+            argdesc.join(", "),
+            if plausible { "" } else { "<-- NOT A CODE ADDRESS" }
+        );
+    }
     let c = closure;
     let a = args;
     macro_rules! arg_ty {
@@ -888,6 +931,23 @@ unsafe fn pap_create(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
         ));
     }
     let m = arity - k;
+    if pap_dbg() {
+        let bad: Vec<String> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| (**a as usize) % 8 != 0 && !(*a).is_null())
+            .map(|(i, a)| format!("arg{i}={:#x}", *a as usize))
+            .collect();
+        let cfn = unsafe { *(closure as *const *const u8) };
+        eprintln!(
+            "PAP create closure={closure:p} fn={cfn:p} arity={arity} k={k} m={m}{}",
+            if bad.is_empty() {
+                String::new()
+            } else {
+                format!("  MISALIGNED CAPTURED: {}", bad.join(", "))
+            }
+        );
+    }
     let pap = bhc_alloc(32 + 8 * k);
     unsafe {
         *(pap as *mut *const u8) = pap_resume_table(m);

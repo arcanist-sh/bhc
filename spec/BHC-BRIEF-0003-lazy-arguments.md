@@ -211,9 +211,40 @@ representation before any of that is even sound.
    unforced `let`, infinite list with a finite consumer. Each must pass under
    GHC first — that is the point.
 
+## The same problem blocks pandoc TODAY (traced 2026-09-03)
+
+`readMarkdown` was believed to die on a separate bug — "a raw function pointer
+reaching parsec's `eerr` slot". **That is stale.** The frontier moved, and what
+it dies on now is the SAME representation problem this brief is about, which
+makes the calling-convention work the current blocker rather than distant
+groundwork.
+
+Traced with `BHC_DBG_PAP` (added for this) plus `BHC_DBG_CLOSURE`:
+
+1. The crash is three levels into PAP resumption from `Text.Parsec.Prim.runPT`,
+   only 10 frames deep — not a stack overflow.
+2. The jump target is valid and identical each time, so the fault is INSIDE the
+   callee, not at the jump.
+3. Symbolised through the ASLR slide (`slide = runtime(pap_call_closure) -
+   nm(pap_call_closure)`), the callee is `__closure_Text.Parsec.Prim.96`, which
+   `BHC_DBG_CLOSURE` attributes to **`parserBind`**.
+4. The PAP CAPTURES `0x4` at creation, with `k=1, m=2`. That is `k x` inside
+   `parserBind`: `k :: a -> ParsecT …` has codegen arity 3, so applying one
+   argument builds a PAP holding `x`.
+5. With `x` an unboxed `Int`, the later saturated call hands the raw `4` to code
+   that dereferences it.
+
+**A tested and REJECTED hypothesis:** "`parserBind` breaks on unboxed results".
+`PB1.hs` — a parser returning `Int`, and a bind chain of two — works
+(`one=4`, `chain=8`). The failure needs specifically a PARTIAL application
+capturing an unboxed value in a polymorphic slot.
+
+So a polymorphic `a` has no single representation in BHC, and that is what stops
+a document conversion — independent of laziness.
+
 ## Non-goals
 
-- `readMarkdown` working. Separate bug, named above.
+- `readMarkdown` working. NOTE: no longer a separate bug — see above.
 - Full call-by-need semantics under option B.
 - Performance. A will regress hot loops until the strictness pass lands; that is
   expected and must be measured, not assumed.

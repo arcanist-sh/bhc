@@ -3747,6 +3747,15 @@ impl Compiler {
                 .map_err(|e| CompileError::CodegenError(e.to_string()))?;
         }
 
+        // BHC_DUMP_LLVM: write the UNOPTIMIZED IR (named blocks intact) so a
+        // faulting closure can be pinned to a named basic block rather than
+        // read out of the ARM. Written before verify/optimize on purpose.
+        if let Ok(dir) = std::env::var("BHC_DUMP_LLVM") {
+            let path = std::path::Path::new(&dir).join(format!("{module_name}.ll"));
+            let _ = std::fs::write(&path, module.as_llvm_ir());
+            eprintln!("BHC_DUMP_LLVM: wrote {}", path.display());
+        }
+
         module
             .verify()
             .map_err(|e| CompileError::CodegenError(e.to_string()))?;

@@ -939,6 +939,16 @@ unsafe fn pap_create(closure: *mut u8, args: &[*mut u8]) -> *mut u8 {
             .map(|(i, a)| format!("arg{i}={:#x}", *a as usize))
             .collect();
         let cfn = unsafe { *(closure as *const *const u8) };
+        if !bad.is_empty() {
+            // Name the generated function that built this PAP. The captured
+            // argument is what later reaches a slot expecting a heap object,
+            // and the crash happens far from here, so the creation site is the
+            // only place the culprit is still on the stack.
+            eprintln!(
+                "PAP create BACKTRACE:\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
         eprintln!(
             "PAP create closure={closure:p} fn={cfn:p} arity={arity} k={k} m={m}{}",
             if bad.is_empty() {

@@ -211,36 +211,47 @@ representation before any of that is even sound.
    unforced `let`, infinite list with a finite consumer. Each must pass under
    GHC first — that is the point.
 
-## The same problem blocks pandoc TODAY (traced 2026-09-03)
+## readMarkdown's crash, run to ground under lldb (2026-09-03)
 
-`readMarkdown` was believed to die on a separate bug — "a raw function pointer
-reaching parsec's `eerr` slot". **That is stale.** The frontier moved, and what
-it dies on now is the SAME representation problem this brief is about, which
-makes the calling-convention work the current blocker rather than distant
-groundwork.
+Earlier notes in this brief blamed, in turn, "no uniform representation for a
+polymorphic value", then "PAP argument threading". Both were readings of ARM
+disassembly and both were wrong. Under a debugger the cause is unambiguous and
+is neither.
 
-Traced with `BHC_DBG_PAP` (added for this) plus `BHC_DBG_CLOSURE`:
+Tools: `BHC_DUMP_LLVM=<dir>` (added) dumps the UNOPTIMISED IR with named blocks;
+`BHC_DBG_PAP` traces PAP create/call; then plain `lldb -b`.
 
-1. The crash is three levels into PAP resumption from `Text.Parsec.Prim.runPT`,
-   only 10 frames deep — not a stack overflow.
-2. The jump target is valid and identical each time, so the fault is INSIDE the
-   callee, not at the jump.
-3. Symbolised through the ASLR slide (`slide = runtime(pap_call_closure) -
-   nm(pap_call_closure)`), the callee is `__closure_Text.Parsec.Prim.96`, which
-   `BHC_DBG_CLOSURE` attributes to **`parserBind`**.
-4. The PAP CAPTURES `0x4` at creation, with `k=1, m=2`. That is `k x` inside
-   `parserBind`: `k :: a -> ParsecT …` has codegen arity 3, so applying one
-   argument builds a PAP holding `x`.
-5. With `x` an unboxed `Int`, the later saturated call hands the raw `4` to code
-   that dereferences it.
+Chain:
+1. `MiniPandoc2` crashes with `EXC_BAD_ACCESS (code=2)` at a `udf` (data
+   executed as code), 3 levels into PAP resumption from `runPT`.
+2. The IR names the site: `__closure_Text.Parsec.Prim.96`, which
+   `BHC_DBG_CLOSURE` attributes to **`parserBind`**. It is the compiled
+   `unParser (k a) s' …` — force `env_elem_3` (the continuation `k`), read its
+   fn-ptr, call it with the value. (The `adt_bool` block a few lines up is a
+   red herring: its scrutinee is `errorIsUnknown err`, a legitimate Bool.)
+3. lldb at the fault: the called object `k` = `env_elem_3` is at `0x103784090`
+   with `word0 = 0x1037840a8` (= **self + 0x18**) and `word1 = 0`, rest zeros.
+   `word0 = self + 24` is the **`BhcText` header layout** (`data_ptr =
+   header + HEADER_SIZE`, `offset = 0`). Calling `word0` as a fn-ptr jumps to
+   `self+0x18` → `udf`.
 
-**A tested and REJECTED hypothesis:** "`parserBind` breaks on unboxed results".
-`PB1.hs` — a parser returning `Int`, and a bind chain of two — works
-(`one=4`, `chain=8`). The failure needs specifically a PARTIAL application
-capturing an unboxed value in a polymorphic slot.
+**So closure 96 captured a `Text` value in the `k` continuation slot and calls
+it as a function.** The value argument (`a`) is a valid heap pointer in the
+crashing instance — the `0x4` seen in an earlier instance was a separate,
+non-fatal case. This is an **environment mis-capture** in how `parserBind`'s
+`eok`/`cok` closure is built: a `Text` (the parser's input, or a `Text` field
+of the state) is threaded into the slot that should hold `k`.
 
-So a polymorphic `a` has no single representation in BHC, and that is what stops
-a document conversion — independent of laziness.
+**Not** laziness, **not** arity, **not** the calling convention. Do not start
+pointer tagging on the strength of this crash.
+
+**Next action:** find where `__closure_Text.Parsec.Prim.96`'s environment is
+constructed (the capture list for `parserBind`'s continuation), and why a `Text`
+reaches the `k` slot. `BHC_DUMP_LLVM` on `Prim.hs` plus the Core dump for
+`parserBind` should show the env layout; compare the slot index that codegen
+stores `k` into against the one closure 96 loads (`env_elem_3`, i.e. index 3 of
+a 5-slot env). An off-by-one or a Text/continuation swap in that layout is the
+likely shape.
 
 ## Non-goals
 

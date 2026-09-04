@@ -65,37 +65,89 @@ full gate stay green.
 
 ---
 
-## 1b. Option parsing crashes the same way — arity over-count of a monad continuation
+## 1b. Option parsing crash — FIXED (a377e71)
+
+**Was:** `bin_PANDOC -f native -t native doc` segfaulted in `bhc_force` at
+`0x3ff800` inside `__closure_Text.Pandoc.App.CommandLineOptions.130`, the
+`options` action fold, before readMarkdown.
+
+**Root cause (was task 1b's hypothesis, then isolated):** the partial
+application of a function extracted from a constructor FIELD. `getOpt'` pulls
+an arity-2 `ReqArg (\arg opt -> …)` action out of its `OptDescr` and applies
+ONE arg (`f arg`); `apply_closure_values`' `n == 1 && tail` shortcut emitted a
+direct saturated call without consulting the callee's arity, so the arity-2
+body ran with its second parameter read from a garbage register. Minimal repro
+`FV7.hs` (6 lines, `getf (ReqA f _) s = f s`), full-fold repro `OPTS2b.hs`.
+
+**Fix (a377e71, landed on main, gated):** branch on the closure's recorded
+physical arity in that path — direct tail call for arity 0/1 (TCO preserved),
+`bhc_pap_create_1` for arity > 1. Recompiling the vendored `System.Console.
+GetOpt` + `App/CommandLineOptions` with the fixed compiler cleared the
+closure-130 crash; pandoc now advances to blocker 1c below.
+
+---
+
+## 1c. `fmap`/`<$>` over a `Maybe` container mis-lowers to a list `map` — the NEW pandoc blocker
 
 **Detailed home:** this file; memory `project_pandoc_link.md`.
 
-**Symptom:** `bin_PANDOC -f native -t native doc` (ANY real option) segfaults
-(EXC_BAD_ACCESS code=1) in `bhc_force` at `0x3ff800`, inside
-`__closure_Text.Pandoc.App.CommandLineOptions.130` — an option action in the
-`options :: [OptDescr (Opt -> ExceptT OptInfo IO Opt)]` list. This is hit BEFORE
-readMarkdown; it is the first blocker for a document conversion.
-`--version`/`--help`/`--list-*` still work (no option actions run).
+**Symptom:** after 1b, `bin_PANDOC -f native -t native doc` segfaults
+(EXC_BAD_ACCESS code=1) in `builtin_partial_map_1of2 + 96` (`ldr x8, [x21]`,
+x21 = a garbage/code pointer), called from
+`__closure_Text.Pandoc.App.CommandLineOptions.5` (`adjustOpts`) →
+`parseOptionsFromArgs` → `Main.main`. The crashing expression is
+`adjustOpts`'s `map normalizePath <$> (optInputFiles opts <> mbArgs)`.
 
-**Root cause (IR-verified, corrected):** closure 130 is arity **2** — and that
-is CORRECT: the source is `ReqArg (\arg opt -> return opt{…})`, so the action
-takes `arg` then `opt`. It forces `%2` (opt), reads it as the 82-field `Opt`
-record, and `%2` = `0x3ff800` — a GARBAGE opt. So the crash is not arity: the
-`foldl' (>>=) (return defaults) actions` fold produces a garbage accumulator.
-This is the **OPTS2** case — the ExceptT `>>=` in the fold resolving to the
-wrong monad / mis-threading the record value — which yesterday's monad-method
-resolved-type fix (`61e7a9b`, which fixed the Int-valued `BINDV`) did NOT close
-for the record-valued OptDescr shape. `bin_PANDOC --version` works because no
-option action runs.
+**Isolated repros (in `~/Development/pandoc-harness`, `/tmp/R1*.hs`):**
+- `R1f`: `map length <$> Just ["hi","yo"]` consumed by `sum` → **6** (works —
+  the container has a literal `Just` head).
+- `R1d`: `let c = (Nothing::Maybe [String]) <> Just [...]; map length <$> c`
+  consumed by `sum` → **SIGSEGV** (the container is a let-bound Var).
+- `R1`:  `map length <$> (a <> b)` with `a,b` let-bound → SIGSEGV.
+- `R1g`/`R1h`: `case (Nothing <> Just xs) of Just ys -> length ys` / `map
+  length ys` → **3** / **[2,2,2]**. So `Nothing <> Just xs` produces a
+  perfectly valid `Just [good list]` — `<>` resolves correctly to
+  `$dictSemigroup_Maybe` → `Data.Maybe.append` (confirmed in the Core dump via
+  `BHC_DUMP_BIND=main`). The bug is ONLY the `<$>` dispatch.
 
-**Next action:** reproduce `OPTS2` — `foldl' (>>=) (return r0) fns` where
-`fns :: [Rec -> ExceptT e IO Rec]` are extracted from an imported `OptDescr`,
-`Rec` an 80-field record — and trace why the ExceptT bind produces a garbage
-accumulator. Compare the `>>=` dispatch (dictionary / resolved-type) against the
-Int-valued `BINDV` that works. Likely the record `Opt` value is threaded through
-the wrong monad's bind. Verify with `bin_PANDOC -f native -t native`.
+**What is known (verified, not guessed):**
+- The HIR→Core output (before the simplifier) is
+  `Case(App(App(Var "<$>" :: Maybe [Int], App(map, length)), Var c :: Maybe
+  String), …)` — `<$>` is present and both it and `c` carry a concrete `Maybe`
+  type. `-O0` still crashes, so the simplifier is NOT the culprit.
+- Codegen turns this into a DIRECT `map length c` (the crash is `main` →
+  `builtin_partial_map_1of2(c)`, i.e. the `map length` partial applied straight
+  to the `Maybe`, which walks `Just x` as a cons whose tail is garbage).
+- A type-based Maybe/list check ADDED to codegen `lower_builtin_fmap` (the
+  expression-position fmap handler, dispatched from `is_saturated_builtin` /
+  `lower_builtin` name `"<$>"`) had NO effect, and a probe at its entry never
+  fired — so `<$>` does NOT reach `lower_builtin_fmap` for this shape. Probes at
+  `is_saturated_builtin`, `lower_application`'s generic Var branch, and
+  `lower_builtin_direct`'s `"fmap"` arm ALSO never fired for `map`/`<$>` on
+  fresh (uncached) files, despite `builtin_partial_map_1of2`
+  (`create_partial_builtin_closure`, only called from `lower_application`)
+  being in the object. **The exact codegen path that lowers this `<$>` is not
+  yet found — the probes contradict the binary; resolve THAT first.**
+- Two paths appear to exist by whether a package-db is present: without one,
+  `<$>` is a builtin (and `lower_builtin_fmap`'s `expr_looks_like_list(a<>b)`
+  wrongly claims `<>` is a list — operands are Vars so
+  `expr_looks_like_maybe` can't catch it); with a package-db (the pandoc/R1d
+  case) `<$>` may be an EXTERNAL import that shadows the builtin in
+  `is_saturated_builtin`, routing to a naive apply. Confirm which.
 
-**Tools:** `BHC_DUMP_LLVM=<dir>` (committed) named closure 130 and its arity;
-`BHC_DBG_CLOSURE` mapped it to `options`; lldb confirmed the force target.
+**Next action:** instrument the ACTUAL lowering site (add a print at the top of
+`lower_expr`'s `App`/`Case`-scrutinee handling and follow `map length <$> c`
+down) to find where `<$>` becomes `App(map length, c)`. Then dispatch `fmap`
+by the container's recorded TYPE (`is_maybe_type(action_expr.ty())`,
+`is_list_type(...)`) at that real site — the type is reliably `Maybe [a]` there
+(the Core dump proves it), unlike the structural `expr_looks_like_*` heuristics
+which fail for a let-bound Var or a `<>`. Do NOT trust `lower_builtin_fmap`
+alone. Also fix the no-package-db path (`expr_looks_like_list` must not claim a
+`<>` whose result type is `Maybe`).
+
+**Tools:** `BHC_DUMP_BIND=main` (already in `lower_module_with_imports`) dumps a
+binding's Core — this was the decisive step. `--dump-ir core` is UNPLUMBED (a
+no-op; the flag is parsed at `bhc/src/main.rs:64` but never used).
 
 ## 2. Native stdin read path segfaults
 

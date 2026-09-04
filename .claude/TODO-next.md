@@ -38,7 +38,17 @@ the CPS state) is threaded into the slot that should hold `k`.
 **NOT** laziness, arity, or the value-representation / calling-convention problem.
 So this does **not** need pointer tagging (option A in BHC-BRIEF-0003).
 
-**Next action:** find where closure 96's environment is built (the capture list
+**Update 2026-09-04:** the env LAYOUT is consistent (fill and read agree slot 3
+= k), so parserBind genuinely receives a `Text` as `k` — at an INLINED bind site
+(parserBind has `{-# INLINE #-}`; the `parserBind` symbol is unused, so a
+breakpoint on it never fires). `k` is a DIRECT empty `Text` (byte_len 0), not a
+thunk (`BHC_DBG_FORCETEXT` never fires). Ruled out: cross-module `def`
+(dispatches correctly), `return ""`, `option ""`, `*>`/`<*`/`>>` with `pure ""`.
+A new codegen guard (committed) turns the silent `udf` into a named
+`bhc_bad_action` "not a closure" error. Likely the same arity-over-count root as
+1b — see there.
+
+**Next action (superseded by 1b's arity hypothesis):** find where closure 96's environment is built (the capture list
 for `parserBind`'s continuation) and why a `Text` reaches index 3. Compare the
 slot codegen *stores* `k` into against the slot closure 96 *loads*
 (`env_elem_3`). Likely an off-by-one or a Text/continuation swap.
@@ -54,6 +64,38 @@ separate, later milestone — do not scope it into this task); the differential 
 full gate stay green.
 
 ---
+
+## 1b. Option parsing crashes the same way — arity over-count of a monad continuation
+
+**Detailed home:** this file; memory `project_pandoc_link.md`.
+
+**Symptom:** `bin_PANDOC -f native -t native doc` (ANY real option) segfaults
+(EXC_BAD_ACCESS code=1) in `bhc_force` at `0x3ff800`, inside
+`__closure_Text.Pandoc.App.CommandLineOptions.130` — an option action in the
+`options :: [OptDescr (Opt -> ExceptT OptInfo IO Opt)]` list. This is hit BEFORE
+readMarkdown; it is the first blocker for a document conversion.
+`--version`/`--help`/`--list-*` still work (no option actions run).
+
+**Root cause (IR-verified, corrected):** closure 130 is arity **2** — and that
+is CORRECT: the source is `ReqArg (\arg opt -> return opt{…})`, so the action
+takes `arg` then `opt`. It forces `%2` (opt), reads it as the 82-field `Opt`
+record, and `%2` = `0x3ff800` — a GARBAGE opt. So the crash is not arity: the
+`foldl' (>>=) (return defaults) actions` fold produces a garbage accumulator.
+This is the **OPTS2** case — the ExceptT `>>=` in the fold resolving to the
+wrong monad / mis-threading the record value — which yesterday's monad-method
+resolved-type fix (`61e7a9b`, which fixed the Int-valued `BINDV`) did NOT close
+for the record-valued OptDescr shape. `bin_PANDOC --version` works because no
+option action runs.
+
+**Next action:** reproduce `OPTS2` — `foldl' (>>=) (return r0) fns` where
+`fns :: [Rec -> ExceptT e IO Rec]` are extracted from an imported `OptDescr`,
+`Rec` an 80-field record — and trace why the ExceptT bind produces a garbage
+accumulator. Compare the `>>=` dispatch (dictionary / resolved-type) against the
+Int-valued `BINDV` that works. Likely the record `Opt` value is threaded through
+the wrong monad's bind. Verify with `bin_PANDOC -f native -t native`.
+
+**Tools:** `BHC_DUMP_LLVM=<dir>` (committed) named closure 130 and its arity;
+`BHC_DBG_CLOSURE` mapped it to `options`; lldb confirmed the force target.
 
 ## 2. Native stdin read path segfaults
 

@@ -657,6 +657,22 @@ pub unsafe extern "C" fn bhc_force(obj: *mut u8) -> *mut u8 {
         // Call the evaluation function with the environment
         let result = eval_fn(env_ptr);
 
+        // BHC_DBG_FORCETEXT: a thunk that evaluates to a `Text` (word0 =
+        // self+HEADER_SIZE) is the shape that reaches parsec's continuation
+        // slot and crashes when called as a function. Print the thunk's
+        // eval-fn address so it can be slide-symbolised to the Haskell binding
+        // that BUILT the thunk — the continuation caller the crash backtrace
+        // cannot reach (CPS unwinds the stack).
+        if force_text_dbg() && !result.is_null() && (result as usize) % 8 == 0 {
+            let w0 = unsafe { *(result as *const usize) };
+            if w0 == (result as usize) + 24 {
+                let here = bhc_force as *const () as usize;
+                eprintln!(
+                    "FORCETEXT thunk={obj:p} eval_fn={eval_fn_ptr:p} -> Text {result:p};                      bhc_force at {here:#x}"
+                );
+            }
+        }
+
         // Publish the result, then the INDIRECTION tag (both Release so a
         // reader that Acquire-loads the tag sees the result pointer)
         let result_slot = unsafe { &*(obj.add(8) as *const AtomicPtr<u8>) };
@@ -748,6 +764,11 @@ pub unsafe extern "C" fn bhc_is_thunk(obj: *const u8) -> c_int {
 ///
 /// Cached: `pap_call_closure` is on the hot path of every partial application,
 /// and reading the environment there would allocate on each call.
+fn force_text_dbg() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("BHC_DBG_FORCETEXT").is_some())
+}
+
 fn pap_dbg() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| std::env::var_os("BHC_DBG_PAP").is_some())

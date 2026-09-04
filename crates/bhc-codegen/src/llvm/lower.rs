@@ -44698,8 +44698,45 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .builder()
             .build_is_null(fn_ptr, "action_fn_null")
             .map_err(|e| CodegenError::Internal(format!("action null check: {:?}", e)))?;
+        // Also trip on the BhcText header signature: a `Text` object's word 0 is
+        // `self + HEADER_SIZE` (24), a data pointer into itself, not a code
+        // address. When a `Text` (or a thunk that forces to one) is mistakenly
+        // called as a closure, its word 0 is loaded as the fn-ptr and the jump
+        // lands `self + 24` in the heap → `udf`. `readMarkdown` dies exactly
+        // this way (a `Text` in `parserBind`'s continuation slot); routing it to
+        // `bhc_bad_action` names the object and the call site instead.
+        let tm = self.type_mapper();
+        let fn_as_int = self
+            .builder()
+            .build_ptr_to_int(fn_ptr, tm.i64_type(), "fn_as_int")
+            .map_err(|e| CodegenError::Internal(format!("action fn ptr_to_int: {:?}", e)))?;
+        let obj_as_int = self
+            .builder()
+            .build_ptr_to_int(closure_ptr, tm.i64_type(), "obj_as_int")
+            .map_err(|e| CodegenError::Internal(format!("action obj ptr_to_int: {:?}", e)))?;
+        let obj_plus_hdr = self
+            .builder()
+            .build_int_add(
+                obj_as_int,
+                tm.i64_type().const_int(24, false),
+                "obj_plus_hdr",
+            )
+            .map_err(|e| CodegenError::Internal(format!("action add: {:?}", e)))?;
+        let is_text = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                fn_as_int,
+                obj_plus_hdr,
+                "fn_is_text",
+            )
+            .map_err(|e| CodegenError::Internal(format!("action text cmp: {:?}", e)))?;
+        let is_bad = self
+            .builder()
+            .build_or(is_null, is_text, "action_bad_fn")
+            .map_err(|e| CodegenError::Internal(format!("action or: {:?}", e)))?;
         self.builder()
-            .build_conditional_branch(is_null, bad_bb, ok_bb)
+            .build_conditional_branch(is_bad, bad_bb, ok_bb)
             .map_err(|e| CodegenError::Internal(format!("action null br: {:?}", e)))?;
         self.builder().position_at_end(bad_bb);
         let site_str = self.module.add_global_string("bad_action_site", site);

@@ -52775,16 +52775,89 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         let fn_ptr = self.checked_closure_fn_ptr(closure_ptr, "closure call")?;
 
-        // A single argument cannot over-apply, but it CAN under-apply (a CPS
-        // continuation invoked `eerr err` one argument at a time onto a
-        // 2-param lifted lambda reads its second parameter from a garbage
-        // register). Keep the direct emission only for tail position, where
-        // the tail-call marking matters for recursive parser loops; a
-        // non-tail single-arg apply falls through to the switch below, whose
-        // default block carries the under-application PAP check (the 1..n
-        // split-case loop is empty for n == 1).
+        // A single argument cannot over-apply, but it CAN under-apply: a
+        // field-extracted `\s x -> …` (arity 2) applied to ONE arg (`f s`)
+        // must build a PAP, not run its 2-param body with the second arg read
+        // from a garbage register. The direct tail path used to skip that
+        // check to keep tail-call marking for recursive parser loops, which
+        // crashed `getf (ReqA f _) s = f s` and pandoc's `ReqArg` option
+        // actions. Branch on the recorded arity: direct tail call when it is 0
+        // (unknown) or 1 — preserving the tail marking for the common case —
+        // and a PAP when it is > 1.
         if n == 1 && tail {
-            return self.build_indirect_apply(fn_ptr, closure_ptr, arg_vals, tail);
+            let arity = self.load_closure_arity(closure_ptr)?;
+            let i64t = self.type_mapper().i64_type();
+            let is_underapp = self
+                .builder()
+                .build_int_compare(
+                    inkwell::IntPredicate::SGT,
+                    arity,
+                    i64t.const_int(1, false),
+                    "tail1_underapp",
+                )
+                .map_err(|e| CodegenError::Internal(format!("tail1 underapp cmp: {:?}", e)))?;
+            let current_fn = self
+                .builder()
+                .get_insert_block()
+                .and_then(|b| b.get_parent())
+                .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+            let direct_bb = self
+                .llvm_context()
+                .append_basic_block(current_fn, "tail1_direct");
+            let pap_bb = self
+                .llvm_context()
+                .append_basic_block(current_fn, "tail1_pap");
+            let merge_bb = self
+                .llvm_context()
+                .append_basic_block(current_fn, "tail1_merge");
+            self.builder()
+                .build_conditional_branch(is_underapp, pap_bb, direct_bb)
+                .map_err(|e| CodegenError::Internal(format!("tail1 br: {:?}", e)))?;
+
+            // Direct: arity 0 or 1 — a saturated (or over-, impossible for n=1)
+            // call. Tail-marked so a recursive 1-arg loop keeps its TCO.
+            self.builder().position_at_end(direct_bb);
+            let direct_val = self
+                .build_indirect_apply(fn_ptr, closure_ptr, arg_vals, tail)?
+                .unwrap_or_else(|| ptr_type.const_null().into());
+            let direct_end = self.builder().get_insert_block().unwrap();
+            self.builder()
+                .build_unconditional_branch(merge_bb)
+                .map_err(|e| CodegenError::Internal(format!("tail1 direct br: {:?}", e)))?;
+
+            // Under-application: build a 1-arg PAP over the closure.
+            self.builder().position_at_end(pap_bb);
+            let pap_fn = if let Some(f) = self.module.get_function("bhc_pap_create_1") {
+                f
+            } else {
+                let params: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> =
+                    vec![ptr_type.into(), ptr_type.into()];
+                let ty = ptr_type.fn_type(&params, false);
+                self.module.add_function("bhc_pap_create_1", ty)
+            };
+            let pap_val = self
+                .builder()
+                .build_call(
+                    pap_fn,
+                    &[closure_ptr.into(), arg_vals[0].into()],
+                    "tail1_pap_val",
+                )
+                .map_err(|e| CodegenError::Internal(format!("tail1 pap call: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("tail1 pap: void".to_string()))?;
+            let pap_end = self.builder().get_insert_block().unwrap();
+            self.builder()
+                .build_unconditional_branch(merge_bb)
+                .map_err(|e| CodegenError::Internal(format!("tail1 pap br: {:?}", e)))?;
+
+            self.builder().position_at_end(merge_bb);
+            let phi = self
+                .builder()
+                .build_phi(ptr_type, "tail1_result")
+                .map_err(|e| CodegenError::Internal(format!("tail1 phi: {:?}", e)))?;
+            phi.add_incoming(&[(&direct_val, direct_end), (&pap_val, pap_end)]);
+            return Ok(Some(phi.as_basic_value()));
         }
 
         // n >= 2: branch on the recorded physical arity. Cases 1..n split

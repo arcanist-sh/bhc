@@ -16338,6 +16338,73 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Whether an expression produces a `Maybe`. `fmap`/`<$>` dispatch needs
+    /// this: a `<>`/`mappend` result and most locals reach codegen as
+    /// `Ty::Error`, so `map f <$> (optInputFiles opts <> mbArgs)` in pandoc's
+    /// `adjustOpts` had no visible container type and fell through to the IO
+    /// default, applying `f` to the whole `Just` and walking it as a list.
+    /// Checked three ways: the fmap head's recorded RESULT type `f b` (the
+    /// container's functor, reliably concrete here — `Maybe [FilePath]` — even
+    /// when the container expression's own type is erased); the container's own
+    /// type; and structurally (`Just`/`Nothing`, `<>` operands, a
+    /// Maybe-returning function like a record selector).
+    fn functor_result_is_maybe(&self) -> bool {
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        self.is_maybe_type(result_of(&self.current_builtin_ty))
+            .is_some()
+    }
+
+    fn functor_result_is_list(&self) -> bool {
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        self.is_list_type(result_of(&self.current_builtin_ty))
+    }
+
+    fn container_looks_like_maybe(&self, expr: &Expr) -> bool {
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        if self.is_maybe_type(&expr.ty()).is_some() || self.expr_looks_like_maybe(expr) {
+            return true;
+        }
+        match expr {
+            Expr::TyApp(e, _, _) | Expr::Cast(e, _, _) | Expr::Tick(_, e, _) => {
+                self.container_looks_like_maybe(e)
+            }
+            Expr::Var(v, _) => self.is_maybe_type(&v.ty).is_some(),
+            Expr::App(f, arg, _) => {
+                let mut cur = f.as_ref();
+                let mut first_arg = arg.as_ref();
+                while let Expr::App(inner, a, _) = cur {
+                    first_arg = a.as_ref();
+                    cur = inner.as_ref();
+                }
+                if let Expr::Var(v, _) = cur {
+                    if matches!(v.name.as_str(), "<>" | "mappend") {
+                        return self.container_looks_like_maybe(first_arg)
+                            || self.container_looks_like_maybe(arg);
+                    }
+                    return self.is_maybe_type(result_of(&v.ty)).is_some();
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether an expression produces a `Text`.
     /// Whether an expression produces a `Text`.
     ///
     /// A `Text` is an opaque RTS handle, not a list, so comparing two of them
@@ -26364,13 +26431,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
         }
 
-        // Check if action_expr looks like a Maybe value
-        if self.expr_looks_like_maybe(action_expr) {
+        // Dispatch by the container's functor. Prefer the fmap head's recorded
+        // RESULT type `f b` — it is the container's functor and stays concrete
+        // (`Maybe [FilePath]`) even when the container EXPRESSION is a
+        // type-erased `<>` result, as in pandoc's `adjustOpts`
+        // `map normalizePath <$> (optInputFiles opts <> mbArgs)`. Fall back to
+        // the container's own type and structure. Maybe is checked before List.
+        if self.functor_result_is_maybe() || self.container_looks_like_maybe(action_expr) {
             return self.lower_fmap_maybe(func_expr, action_expr);
         }
 
-        // Check if action_expr looks like a List value
-        if self.expr_looks_like_list(action_expr) {
+        // Check if action_expr looks like a List value.
+        if self.functor_result_is_list()
+            || self.expr_looks_like_list(action_expr)
+            || self.is_list_type(&action_expr.ty())
+        {
             return self.lower_builtin_map(func_expr, action_expr);
         }
 

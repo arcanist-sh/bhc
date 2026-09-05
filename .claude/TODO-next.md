@@ -144,11 +144,26 @@ compiler does NOT fix it, so it is a live codegen bug, not a stale object.
 still crashes. This is the CPS/continuation-threading area, a known multi-session
 problem.
 
-**Next action:** instruction-step `bin_PT3` under lldb through
-`runP -> runPT -> runParsecT` to the exact null `blr`, and identify which
-continuation/closure carries the null fn-ptr (dump `__closure_...226/228` and
-check whether they are built with a real code pointer). Likely a
-continuation-closure construction or a newtype-`unParser` representation bug.
+**ROOT (traced 2026-09-05):** the crash is a TAIL `br` to a null pointer, folded
+through `runP -bl-> runPT -tail-> runParsecT`. `runParsecT` (Prim.ll:2651) builds
+its four continuations (`__closure_…1/4/7/10`, arities 3/1/3/1) each capturing
+`%1` — the MONAD dict `m` — in their env, then applies the parser (all applies
+bad-action-checked). `runP` calls `runPT(null, …)` and `runPT` calls
+`runParsecT(null, field_0, parser, state)`, so the dict threaded into the
+continuations is `null`/`field_0`. When the parser (`return 7` = `parserReturn`)
+invokes a continuation and that continuation does `m (Reply …)` — i.e. calls the
+monad's `return`/method via the captured (null) dict — it branches to a null fn
+-ptr. So this is DICTIONARY THREADING through the CPS continuations for the
+`Monad m` (here `Identity`) parameter of `runParsecT`: the dict is null/wrong.
+The `bhc_bad_action` guards do not cover it because the null call is inside the
+continuation-closure body (generated code), not one of runParsecT's own applies.
+
+**Next action:** make `runP`/`runPT`/`runParsecT` thread a real `Monad Identity`
+dict (not `null`) into the continuations — or specialize the Identity case so the
+continuations' `return`/`>>=` use the Identity builtins instead of a dict method.
+Check how the `Monad m` dict is (not) constructed at the `runP`→`runPT`→
+`runParsecT` boundary; the `ptr null` first argument at each call is the smoking
+gun. Verify with PT3.hs (`parse (return 7)` → `ok: 7`).
 Gate against the parsec repros AND the full sweep/differential.
 
 **Done when:** `PT3.hs` prints `ok: 7` and `PT.hs` prints `ok: native`;

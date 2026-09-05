@@ -1639,7 +1639,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 Some(existing) => existing,
                 None => self.module.add_function(&sym.llvm_name, fn_type),
             };
-            self.external_functions.insert(sym.name, fn_val);
+            // A bare name that is a codegen builtin must NOT be shadowed by an
+            // imported symbol of the same name. `App.hs` imports `when` from
+            // `Control.Monad` (a builtin), but `Text.Pandoc.Writers.OpenDocument`
+            // also defines an unrelated `when`; registered under the bare name it
+            // shadowed the builtin in `is_saturated_builtin`, so `when
+            // (optDumpArgs opts)` called OpenDocument's `Doc`-valued `when`
+            // (undefined in App.o → stubbed) and fired on a False flag. The
+            // qualified LLVM symbol (`sym.llvm_name`) is still declared above, so
+            // a genuine QUALIFIED use of the imported function still links.
+            if self.builtin_info(sym.name.as_str()).is_none() {
+                self.external_functions.insert(sym.name, fn_val);
+            }
         }
         Ok(())
     }

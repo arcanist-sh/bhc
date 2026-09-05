@@ -5737,13 +5737,64 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_unconditional_branch(merge_block)
             .map_err(|e| CodegenError::Internal(format!("extract_bool_tag: branch: {:?}", e)))?;
 
-        // ADT path: load tag from struct
+        // ADT path: it is a heap pointer, not a tagged immediate. It may be a
+        // THUNK, though — a lazily-evaluated nullary value such as a record
+        // selector result. Reading a thunk's header (tag -1) as the constructor
+        // tag made `when (optDumpArgs opts)` fire on a `False` field in pandoc's
+        // `convertWithOpts`. Force to WHNF first — but the forced value can be
+        // EITHER a boxed constructor or a tagged immediate (a Bool that came
+        // from a comparison, e.g. `optDumpArgs = n > 5`), so re-run the
+        // tagged-vs-boxed check on the result rather than dereferencing a
+        // 0/1 immediate as a struct.
         self.builder().position_at_end(adt_block);
-        let adt_tag = self.extract_adt_tag(bool_ptr)?;
-        let adt_end_block = self
+        let forced_ptr = self.build_force(bool_ptr.into())?.into_pointer_value();
+        let forced_raw = self
+            .builder()
+            .build_ptr_to_int(forced_ptr, i64_type, "forced_raw")
+            .map_err(|e| {
+                CodegenError::Internal(format!("extract_bool_tag: ptr_to_int: {:?}", e))
+            })?;
+        let forced_is_tagged = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::ULE,
+                forced_raw,
+                i64_type.const_int(max_immediate, false),
+                "forced_is_tagged",
+            )
+            .map_err(|e| CodegenError::Internal(format!("extract_bool_tag: cmp: {:?}", e)))?;
+        let adt_imm_block = self.llvm_ctx.append_basic_block(current_fn, "bool_adt_imm");
+        let adt_box_block = self.llvm_ctx.append_basic_block(current_fn, "bool_adt_box");
+        let adt_merge = self
+            .llvm_ctx
+            .append_basic_block(current_fn, "bool_adt_merge");
+        self.builder()
+            .build_conditional_branch(forced_is_tagged, adt_imm_block, adt_box_block)
+            .map_err(|e| CodegenError::Internal(format!("extract_bool_tag: branch: {:?}", e)))?;
+
+        self.builder().position_at_end(adt_imm_block);
+        self.builder()
+            .build_unconditional_branch(adt_merge)
+            .map_err(|e| CodegenError::Internal(format!("extract_bool_tag: branch: {:?}", e)))?;
+
+        self.builder().position_at_end(adt_box_block);
+        let boxed_tag = self.extract_adt_tag(forced_ptr)?;
+        let adt_box_end = self
             .builder()
             .get_insert_block()
             .ok_or_else(|| CodegenError::Internal("extract_bool_tag: no block".to_string()))?;
+        self.builder()
+            .build_unconditional_branch(adt_merge)
+            .map_err(|e| CodegenError::Internal(format!("extract_bool_tag: branch: {:?}", e)))?;
+
+        self.builder().position_at_end(adt_merge);
+        let adt_phi = self
+            .builder()
+            .build_phi(i64_type, "adt_tag")
+            .map_err(|e| CodegenError::Internal(format!("extract_bool_tag: phi: {:?}", e)))?;
+        adt_phi.add_incoming(&[(&forced_raw, adt_imm_block), (&boxed_tag, adt_box_end)]);
+        let adt_tag = adt_phi.as_basic_value().into_int_value();
+        let adt_end_block = adt_merge;
         self.builder()
             .build_unconditional_branch(merge_block)
             .map_err(|e| CodegenError::Internal(format!("extract_bool_tag: branch: {:?}", e)))?;
@@ -13819,7 +13870,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Bool is an ADT with tag 0=False, 1=True — extract the tag
         let bool_int = match bool_val {
-            BasicValueEnum::PointerValue(p) => self.extract_adt_tag(p)?,
+            BasicValueEnum::PointerValue(p) => self.extract_bool_tag(p)?,
             BasicValueEnum::IntValue(i) => i,
             _ => return Err(CodegenError::TypeError("guard expects Bool".to_string())),
         };
@@ -26902,7 +26953,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("when: no cond".to_string()))?;
         // Bool is an ADT with tag 0=False, 1=True — extract the tag
         let bool_int = match cond_val {
-            BasicValueEnum::PointerValue(p) => self.extract_adt_tag(p)?,
+            BasicValueEnum::PointerValue(p) => self.extract_bool_tag(p)?,
             BasicValueEnum::IntValue(i) => i,
             _ => return Err(CodegenError::TypeError("when expects Bool".to_string())),
         };
@@ -26949,7 +27000,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .ok_or_else(|| CodegenError::Internal("unless: no cond".to_string()))?;
         // Bool is an ADT with tag 0=False, 1=True — extract the tag
         let bool_int = match cond_val {
-            BasicValueEnum::PointerValue(p) => self.extract_adt_tag(p)?,
+            BasicValueEnum::PointerValue(p) => self.extract_bool_tag(p)?,
             BasicValueEnum::IntValue(i) => i,
             _ => return Err(CodegenError::TypeError("unless expects Bool".to_string())),
         };
@@ -27273,7 +27324,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Bool is an ADT with tag 0=False, 1=True — use extract_adt_tag (not ptr_to_int!)
         let bool_int = match pred_result {
-            BasicValueEnum::PointerValue(p) => self.extract_adt_tag(p)?,
+            BasicValueEnum::PointerValue(p) => self.extract_bool_tag(p)?,
             BasicValueEnum::IntValue(i) => i,
             _ => {
                 return Err(CodegenError::TypeError(

@@ -3276,6 +3276,22 @@ pub extern "C" fn bhc_get_masking_state() -> i64 {
     BHC_MASK_STATE.with(|cell| cell.get())
 }
 
+/// `System.Posix.Terminal.queryTerminal :: Fd -> IO Bool` — whether the file
+/// descriptor refers to a terminal. Returns 1 (True) or 0 (False). Only the
+/// standard descriptors are recognised; any other fd answers False (pandoc only
+/// ever asks about stdout, to decide whether to colourise diagnostics).
+#[no_mangle]
+pub extern "C" fn bhc_query_terminal(fd: i64) -> i64 {
+    use std::io::IsTerminal;
+    let is_tty = match fd {
+        0 => std::io::stdin().is_terminal(),
+        1 => std::io::stdout().is_terminal(),
+        2 => std::io::stderr().is_terminal(),
+        _ => false,
+    };
+    i64::from(is_tty)
+}
+
 /// Set the async exception masking state.
 #[no_mangle]
 pub extern "C" fn bhc_set_masking_state(state: i64) {

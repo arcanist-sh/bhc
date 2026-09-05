@@ -4510,6 +4510,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .llvm_module()
                 .add_function("bhc_get_masking_state", get_mask_type, None);
         self.functions.insert(VarId::new(1000824), get_mask_fn);
+        // bhc_query_terminal(i64 fd) -> i64 (1 = isatty, 0 = not)
+        let query_term_type = i64_type.fn_type(&[i64_type.into()], false);
+        let query_term_fn =
+            self.module
+                .llvm_module()
+                .add_function("bhc_query_terminal", query_term_type, None);
+        self.functions.insert(VarId::new(1000950), query_term_fn);
         // bhc_finally(action_fn, action_env, cleanup_fn, cleanup_env) -> ptr
         let finally_type = ptr_type.fn_type(
             &[
@@ -5969,6 +5976,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "finally" | "onException" => Some(2),
             "mask" | "mask_" | "uninterruptibleMask" | "uninterruptibleMask_" => Some(1),
             "getMaskingState" => Some(0),
+            "queryTerminal" => Some(1),
+            "stdInput" => Some(0),
+            "stdOutput" => Some(0),
+            "stdError" => Some(0),
             "toException" => Some(1),
             "fromException" => Some(1),
             "displayException" => Some(1),
@@ -6872,6 +6883,24 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.lower_builtin_mask_simple(args[0], true)
             }
             "getMaskingState" => self.lower_builtin_get_masking_state(),
+            "stdInput" => Ok(Some(
+                self.int_to_ptr(self.type_mapper().i64_type().const_int(0, false))?
+                    .into(),
+            )),
+            "stdOutput" => Ok(Some(
+                self.int_to_ptr(self.type_mapper().i64_type().const_int(1, false))?
+                    .into(),
+            )),
+            "stdError" => Ok(Some(
+                self.int_to_ptr(self.type_mapper().i64_type().const_int(2, false))?
+                    .into(),
+            )),
+            "queryTerminal" => {
+                let v = self
+                    .lower_expr(args[0])?
+                    .ok_or_else(|| CodegenError::Internal("queryTerminal: no fd".to_string()))?;
+                self.query_terminal_from_value(v)
+            }
             "toException" => self.lower_builtin_to_exception(args[0]),
             "fromException" => self.lower_builtin_from_exception(args[0]),
             "displayException" => self.lower_builtin_display_exception(args[0]),
@@ -15586,6 +15615,42 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             })?;
 
         Ok(Some(result))
+    }
+
+    /// Lower `queryTerminal :: Fd -> IO Bool` — call `bhc_query_terminal(fd)`
+    /// and return the resulting Bool (tagged 0/1). The `Fd` arrives as a tagged
+    /// integer (`stdInput`/`stdOutput`/`stdError` lower to 0/1/2).
+    fn query_terminal_from_value(
+        &mut self,
+        fd_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let fd_int = match fd_val {
+            BasicValueEnum::IntValue(i) => i,
+            BasicValueEnum::PointerValue(p) => self
+                .builder()
+                .build_ptr_to_int(p, self.type_mapper().i64_type(), "fd_int")
+                .map_err(|e| {
+                    CodegenError::Internal(format!("queryTerminal ptr_to_int: {:?}", e))
+                })?,
+            _ => {
+                return Err(CodegenError::TypeError(
+                    "queryTerminal expects an Fd".to_string(),
+                ))
+            }
+        };
+        let rts_fn = self
+            .functions
+            .get(&VarId::new(1000950))
+            .ok_or_else(|| CodegenError::Internal("bhc_query_terminal not declared".to_string()))?;
+        let result = self
+            .builder()
+            .build_call(*rts_fn, &[fd_int.into()], "query_terminal")
+            .map_err(|e| CodegenError::Internal(format!("queryTerminal call: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("queryTerminal: returned void".to_string()))?;
+        // Result is i64 0/1 — a tagged Bool.
+        Ok(Some(self.int_to_ptr(result.into_int_value())?.into()))
     }
 
     /// Lower `getMaskingState` — returns a MaskingState ADT.
@@ -50058,6 +50123,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // Async exception masking
             "getMaskingState" => self.lower_builtin_get_masking_state(),
+            "stdInput" => Ok(Some(
+                self.int_to_ptr(self.type_mapper().i64_type().const_int(0, false))?
+                    .into(),
+            )),
+            "stdOutput" => Ok(Some(
+                self.int_to_ptr(self.type_mapper().i64_type().const_int(1, false))?
+                    .into(),
+            )),
+            "stdError" => Ok(Some(
+                self.int_to_ptr(self.type_mapper().i64_type().const_int(2, false))?
+                    .into(),
+            )),
+            "queryTerminal" => self.query_terminal_from_value(args[0]),
             "mask_" => {
                 // mask_ with pre-lowered action arg
                 let action_closure = args[0].into_pointer_value();

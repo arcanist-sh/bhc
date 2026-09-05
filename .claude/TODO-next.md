@@ -99,61 +99,62 @@ is erased). Pandoc option parsing then runs without crashing.
 
 ---
 
-## 1d. A codegen-builtin control name (`when`) is overwritten by an unrelated module's same-named function — the CURRENT pandoc blocker
+## 1d. `when` name-collision — FIXED (f35f5b0), and `queryTerminal` implemented (414162f)
 
-**Symptom:** `bin_PANDOC -f native -t native doc` no longer crashes but prints
-`-` then the input filename and exits 0 — the body of `when (optDumpArgs opts)`
-in `convertWithOpts` (the `--dump-args` path) fires even though `optDumpArgs` is
-`False`, so pandoc dumps its args and `exitSuccess` before doing the conversion.
+`declare_external_symbols` registered imported symbols under their bare name, so
+`OpenDocument.when` shadowed the `Control.Monad.when` builtin and pandoc's
+`when (optDumpArgs opts)` fired on a False flag. Fixed by not registering a
+bare-name external for a name that is a codegen builtin. Then `convertWithOpts`
+needed `queryTerminal stdOutput` (both stubs) — implemented `bhc_query_terminal`
+(via `std::io::IsTerminal`) plus `stdInput`/`stdOutput`/`stdError`. Pandoc now
+runs option parsing, terminal detection, and reaches `parseFlavoredFormat`.
 
-**Root cause (minimal repro):** `App.o` references an UNDEFINED, mis-qualified
-`_Text.Pandoc.Writers.OpenDocument.when`. App.hs `import Control.Monad (when)`,
-but `when` resolves to `Text.Pandoc.Writers.OpenDocument.when` — an unrelated
-`when :: Bool -> Doc Text -> Doc Text` (the only other top-level `when` in
-pandoc). That symbol is undefined in App.o → stubbed by the harness → the
-condition misreads. Two-module repro (`~/Development/pandoc-harness/repros/`):
-- `ModA.hs` exports its own `when :: Bool -> Int -> Int`.
-- `Main.hs`: `import Control.Monad (when)` + `import ModA (foo)` → `when` binds to
-  `ModA.when` (wrong); `when False $ act` FIRES.
-- `Main2.hs`: same but WITHOUT `import ModA` → `when` resolves to the builtin
-  correctly. So importing an unrelated module that merely DEFINES `when` (even
-  when you import only `foo` from it) corrupts the `Control.Monad.when` binding.
+---
 
-**ROOT CAUSE (backtrace-confirmed):** the rebind is
-`collect_module_definitions` (resolve.rs:250) → `lower_module_with_cache`
-(lower.rs:221). `load_module` (loader.rs:755) finds an imported module's SOURCE
-(`find_module_file` prefers the `.hs` in the search path over the `.bhi`),
-parses it, and its top-level definitions are bound into the SHARED
-`LowerContext` scope via `collect_module_definitions`' unconditional
-`ctx.bind_value(name, fresh_def_id)`. So a transitively-loaded module's
-top-level `when` (OpenDocument.when / ModA.when) OVERWRITES the earlier builtin
-`when` (DefId 124) in the importer's unqualified namespace — the last write
-wins. `bind_value` backtrace showed exactly: `when -> 124` (builtins, via
-`define_builtins`) then `when -> 12751` (via `collect_module_definitions`).
-Confirmed the source path is the trigger: HIDING `ModA.hs` (leaving only its
-`.bhi`+`.o` in the package-db) makes the compile FAIL to resolve `foo` — so bhc
-relies on lowering the SOURCE of imported modules, and that lowering leaks every
-top-level name into the shared scope. `register_imported_names` was ruled out (a
-probe there never fired for `when`).
+## 1e. parsec's CPS core (`runP`/`runParsecT`) crashes — the CURRENT pandoc blocker
 
-**Next action (architectural — gate hard):** imported/dependency modules must be
-lowered in an ISOLATED scope (or resolved from `.bhi` only), exposing solely
-their EXPORTS filtered by the import list — not leaking every top-level binding
-into the importer's unqualified scope. Options: (a) push/pop a child scope
-around each dependency's `collect_module_definitions`+lowering so its bare
-bindings don't persist; (b) make the `.bhi`-only import path complete enough that
-source re-lowering of dependencies is unnecessary (hiding the source currently
-breaks resolution); (c) as a narrow stopgap, have `collect_module_definitions`
-refuse to overwrite an existing builtin binding when lowering a NON-primary
-(dependency) module. (a)/(b) are the real fixes; all touch shared import
-resolution — gate against the full 221-module sweep + differential, which depend
-on current behavior (and are full of collision special-cases: Djot, Citeproc,
-Blaze). Minimal repro: `~/Development/pandoc-harness/repros/{ModA,Main,Main2}.hs`.
+**Symptom:** `bin_PANDOC -f native -t native doc` reaches
+`Text.Pandoc.Format.parseFlavoredFormat` (parsing the `-f native` flavor) and
+crashes calling a null/`0x1` fn-ptr inside `Text.Parsec.Prim.runP + 208`.
 
-**Done when:** `Main.hs` prints only its non-FIRED output; `bin_PANDOC -f native
--t native /tmp/doc.native` emits the converted native AST (`[Para [Str
-"Hello",Space,Str "world"]]`) instead of `-`/filename; the sweep + differential
-stay green.
+**Isolated to the parsec CORE (minimal repros in pandoc-harness/repros):**
+- `PT3.hs`: `parse (return (7::Int)) "src" "xyz"` → crash (Bus error).
+- `PT.hs`:  `parse (string "native") "src" "native"` → crash (SIGSEGV).
+Even the SIMPLEST parser (`return 7`) crashes, so it is not parser-specific —
+`runP`/`runPT`/`runParsecT` themselves are miscompiled. Recompiling the whole
+parsec chain (Pos/Error/Prim/Char/Combinator/facade) + Format with the CURRENT
+compiler does NOT fix it, so it is a live codegen bug, not a stale object.
+
+**What is known (from the unoptimised IR, `BHC_DUMP_LLVM` on `Text.Parsec.Prim`):**
+- `runP p u name s = runIdentity (runPT ...)`; runP tail-calls `runPT`, which
+  calls `runParsecT` (Prim.ll:2651), the CPS runner.
+- `runParsecT` does `tail call unParser(null, parser)` to get the parser's CPS
+  function, then applies it to the state and the four continuations
+  (`cok`/`cerr`/`eok`/`eerr`, built as `__closure_Text.Parsec.Prim.226/228/…`),
+  each apply guarded by a bad-action (null/Text) check that routes to
+  `bhc_bad_action`.
+- The crash is a RAW null call (not `bhc_bad_action`), so it bypasses those
+  checks — most likely the PARSER's own body calling a continuation
+  (`return`'s `eok`) whose closure fn-ptr is null, or `unParser`/the ParsecT
+  newtype yielding a non-closure. The bt collapses to `runP+208 -> 0x0`
+  because the runPT/runParsecT frames are tail-call-folded.
+
+**History:** memory `project_parsec_compile.md` — a minimal dict-PAP simulation
+(`MinD.hs`) was fixed (prints 17, 2026-09-02), but REAL parsec's `runParsecT`
+still crashes. This is the CPS/continuation-threading area, a known multi-session
+problem.
+
+**Next action:** instruction-step `bin_PT3` under lldb through
+`runP -> runPT -> runParsecT` to the exact null `blr`, and identify which
+continuation/closure carries the null fn-ptr (dump `__closure_...226/228` and
+check whether they are built with a real code pointer). Likely a
+continuation-closure construction or a newtype-`unParser` representation bug.
+Gate against the parsec repros AND the full sweep/differential.
+
+**Done when:** `PT3.hs` prints `ok: 7` and `PT.hs` prints `ok: native`;
+`bin_PANDOC -f native -t native /tmp/doc.native` gets past `parseFlavoredFormat`.
+
+---
 
 ## 2. Native stdin read path segfaults
 

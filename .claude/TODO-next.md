@@ -119,27 +119,36 @@ condition misreads. Two-module repro (`~/Development/pandoc-harness/repros/`):
   correctly. So importing an unrelated module that merely DEFINES `when` (even
   when you import only `foo` from it) corrupts the `Control.Monad.when` binding.
 
-**What is known:** `BHC_DBG_BIND` (a temporary probe in `LowerContext::bind_value`,
-reverted) shows `when` bound first to the builtin (DefId 124, kind Value) then
-REBOUND to `ModA.when` (a fresh Value DefId) — the last binding wins. The final
-def links to the real module's symbol (`OpenDocument.when`), which is undefined
-in App.o. `Control.Monad` is a builtin module with no `.bhi`
-(`register_standard_module_exports`, `lower.rs:801`), and `when` is a codegen
-builtin (`lower_builtin_when`, and `builtin_info`), so it should never be
-displaced by an unrelated user `when`.
+**ROOT CAUSE (backtrace-confirmed):** the rebind is
+`collect_module_definitions` (resolve.rs:250) → `lower_module_with_cache`
+(lower.rs:221). `load_module` (loader.rs:755) finds an imported module's SOURCE
+(`find_module_file` prefers the `.hs` in the search path over the `.bhi`),
+parses it, and its top-level definitions are bound into the SHARED
+`LowerContext` scope via `collect_module_definitions`' unconditional
+`ctx.bind_value(name, fresh_def_id)`. So a transitively-loaded module's
+top-level `when` (OpenDocument.when / ModA.when) OVERWRITES the earlier builtin
+`when` (DefId 124) in the importer's unqualified namespace — the last write
+wins. `bind_value` backtrace showed exactly: `when -> 124` (builtins, via
+`define_builtins`) then `when -> 12751` (via `collect_module_definitions`).
+Confirmed the source path is the trigger: HIDING `ModA.hs` (leaving only its
+`.bhi`+`.o` in the package-db) makes the compile FAIL to resolve `foo` — so bhc
+relies on lowering the SOURCE of imported modules, and that lowering leaks every
+top-level name into the shared scope. `register_imported_names` was ruled out (a
+probe there never fired for `when`).
 
-**Next action:** find the rebind. `register_imported_names` (loader.rs:970) binds
-an unqualified name only when `lookup_value(name).is_none() || imported_methods
-.contains(name) || leaked` — so the builtin `when` (already bound) should be
-safe; check whether `when` wrongly appears in ModA's `class_methods`
-(`imported_methods`) or `qualified_leak_names`, or whether a second lowering pass
-/ the `--package-db` preload rebinds it. The fix: a name that is a codegen
-builtin control function (`when`/`unless`/`guard`/…) — or more generally, any
-name explicitly imported from a builtin module — must not be displaced by a
-same-named top-level function from a module the program does not import that name
-from. Gate against the 221-module pandoc sweep (this touches shared import
-resolution, `register_standard_module_exports`/`register_imported_names`, which
-is full of collision special-cases — Djot, Citeproc, Blaze).
+**Next action (architectural — gate hard):** imported/dependency modules must be
+lowered in an ISOLATED scope (or resolved from `.bhi` only), exposing solely
+their EXPORTS filtered by the import list — not leaking every top-level binding
+into the importer's unqualified scope. Options: (a) push/pop a child scope
+around each dependency's `collect_module_definitions`+lowering so its bare
+bindings don't persist; (b) make the `.bhi`-only import path complete enough that
+source re-lowering of dependencies is unnecessary (hiding the source currently
+breaks resolution); (c) as a narrow stopgap, have `collect_module_definitions`
+refuse to overwrite an existing builtin binding when lowering a NON-primary
+(dependency) module. (a)/(b) are the real fixes; all touch shared import
+resolution — gate against the full 221-module sweep + differential, which depend
+on current behavior (and are full of collision special-cases: Djot, Citeproc,
+Blaze). Minimal repro: `~/Development/pandoc-harness/repros/{ModA,Main,Main2}.hs`.
 
 **Done when:** `Main.hs` prints only its non-FIRED output; `bin_PANDOC -f native
 -t native /tmp/doc.native` emits the converted native AST (`[Para [Str

@@ -87,67 +87,64 @@ closure-130 crash; pandoc now advances to blocker 1c below.
 
 ---
 
-## 1c. `fmap`/`<$>` over a `Maybe` container mis-lowers to a list `map` — the NEW pandoc blocker
+## 1c. fmap over a type-erased Maybe — FIXED (60979d3)
 
-**Detailed home:** this file; memory `project_pandoc_link.md`.
+`map f <$> (optInputFiles opts <> mbArgs)` in `adjustOpts` crashed: the fmap
+dispatch decided Maybe-vs-list from the container expression's own type, which is
+`Ty::Error` for a `<>` result, so it fell to the IO default and applied `f` to
+the whole `Just`, walking it as a list. Fixed by dispatching on the fmap head's
+recorded RESULT type `f b` (`functor_result_is_maybe`, read from
+`current_builtin_ty` — concrete `Maybe [FilePath]` even when the container's type
+is erased). Pandoc option parsing then runs without crashing.
 
-**Symptom:** after 1b, `bin_PANDOC -f native -t native doc` segfaults
-(EXC_BAD_ACCESS code=1) in `builtin_partial_map_1of2 + 96` (`ldr x8, [x21]`,
-x21 = a garbage/code pointer), called from
-`__closure_Text.Pandoc.App.CommandLineOptions.5` (`adjustOpts`) →
-`parseOptionsFromArgs` → `Main.main`. The crashing expression is
-`adjustOpts`'s `map normalizePath <$> (optInputFiles opts <> mbArgs)`.
+---
 
-**Isolated repros (in `~/Development/pandoc-harness`, `/tmp/R1*.hs`):**
-- `R1f`: `map length <$> Just ["hi","yo"]` consumed by `sum` → **6** (works —
-  the container has a literal `Just` head).
-- `R1d`: `let c = (Nothing::Maybe [String]) <> Just [...]; map length <$> c`
-  consumed by `sum` → **SIGSEGV** (the container is a let-bound Var).
-- `R1`:  `map length <$> (a <> b)` with `a,b` let-bound → SIGSEGV.
-- `R1g`/`R1h`: `case (Nothing <> Just xs) of Just ys -> length ys` / `map
-  length ys` → **3** / **[2,2,2]**. So `Nothing <> Just xs` produces a
-  perfectly valid `Just [good list]` — `<>` resolves correctly to
-  `$dictSemigroup_Maybe` → `Data.Maybe.append` (confirmed in the Core dump via
-  `BHC_DUMP_BIND=main`). The bug is ONLY the `<$>` dispatch.
+## 1d. A codegen-builtin control name (`when`) is overwritten by an unrelated module's same-named function — the CURRENT pandoc blocker
 
-**What is known (verified, not guessed):**
-- The HIR→Core output (before the simplifier) is
-  `Case(App(App(Var "<$>" :: Maybe [Int], App(map, length)), Var c :: Maybe
-  String), …)` — `<$>` is present and both it and `c` carry a concrete `Maybe`
-  type. `-O0` still crashes, so the simplifier is NOT the culprit.
-- Codegen turns this into a DIRECT `map length c` (the crash is `main` →
-  `builtin_partial_map_1of2(c)`, i.e. the `map length` partial applied straight
-  to the `Maybe`, which walks `Just x` as a cons whose tail is garbage).
-- A type-based Maybe/list check ADDED to codegen `lower_builtin_fmap` (the
-  expression-position fmap handler, dispatched from `is_saturated_builtin` /
-  `lower_builtin` name `"<$>"`) had NO effect, and a probe at its entry never
-  fired — so `<$>` does NOT reach `lower_builtin_fmap` for this shape. Probes at
-  `is_saturated_builtin`, `lower_application`'s generic Var branch, and
-  `lower_builtin_direct`'s `"fmap"` arm ALSO never fired for `map`/`<$>` on
-  fresh (uncached) files, despite `builtin_partial_map_1of2`
-  (`create_partial_builtin_closure`, only called from `lower_application`)
-  being in the object. **The exact codegen path that lowers this `<$>` is not
-  yet found — the probes contradict the binary; resolve THAT first.**
-- Two paths appear to exist by whether a package-db is present: without one,
-  `<$>` is a builtin (and `lower_builtin_fmap`'s `expr_looks_like_list(a<>b)`
-  wrongly claims `<>` is a list — operands are Vars so
-  `expr_looks_like_maybe` can't catch it); with a package-db (the pandoc/R1d
-  case) `<$>` may be an EXTERNAL import that shadows the builtin in
-  `is_saturated_builtin`, routing to a naive apply. Confirm which.
+**Symptom:** `bin_PANDOC -f native -t native doc` no longer crashes but prints
+`-` then the input filename and exits 0 — the body of `when (optDumpArgs opts)`
+in `convertWithOpts` (the `--dump-args` path) fires even though `optDumpArgs` is
+`False`, so pandoc dumps its args and `exitSuccess` before doing the conversion.
 
-**Next action:** instrument the ACTUAL lowering site (add a print at the top of
-`lower_expr`'s `App`/`Case`-scrutinee handling and follow `map length <$> c`
-down) to find where `<$>` becomes `App(map length, c)`. Then dispatch `fmap`
-by the container's recorded TYPE (`is_maybe_type(action_expr.ty())`,
-`is_list_type(...)`) at that real site — the type is reliably `Maybe [a]` there
-(the Core dump proves it), unlike the structural `expr_looks_like_*` heuristics
-which fail for a let-bound Var or a `<>`. Do NOT trust `lower_builtin_fmap`
-alone. Also fix the no-package-db path (`expr_looks_like_list` must not claim a
-`<>` whose result type is `Maybe`).
+**Root cause (minimal repro):** `App.o` references an UNDEFINED, mis-qualified
+`_Text.Pandoc.Writers.OpenDocument.when`. App.hs `import Control.Monad (when)`,
+but `when` resolves to `Text.Pandoc.Writers.OpenDocument.when` — an unrelated
+`when :: Bool -> Doc Text -> Doc Text` (the only other top-level `when` in
+pandoc). That symbol is undefined in App.o → stubbed by the harness → the
+condition misreads. Two-module repro (`~/Development/pandoc-harness/repros/`):
+- `ModA.hs` exports its own `when :: Bool -> Int -> Int`.
+- `Main.hs`: `import Control.Monad (when)` + `import ModA (foo)` → `when` binds to
+  `ModA.when` (wrong); `when False $ act` FIRES.
+- `Main2.hs`: same but WITHOUT `import ModA` → `when` resolves to the builtin
+  correctly. So importing an unrelated module that merely DEFINES `when` (even
+  when you import only `foo` from it) corrupts the `Control.Monad.when` binding.
 
-**Tools:** `BHC_DUMP_BIND=main` (already in `lower_module_with_imports`) dumps a
-binding's Core — this was the decisive step. `--dump-ir core` is UNPLUMBED (a
-no-op; the flag is parsed at `bhc/src/main.rs:64` but never used).
+**What is known:** `BHC_DBG_BIND` (a temporary probe in `LowerContext::bind_value`,
+reverted) shows `when` bound first to the builtin (DefId 124, kind Value) then
+REBOUND to `ModA.when` (a fresh Value DefId) — the last binding wins. The final
+def links to the real module's symbol (`OpenDocument.when`), which is undefined
+in App.o. `Control.Monad` is a builtin module with no `.bhi`
+(`register_standard_module_exports`, `lower.rs:801`), and `when` is a codegen
+builtin (`lower_builtin_when`, and `builtin_info`), so it should never be
+displaced by an unrelated user `when`.
+
+**Next action:** find the rebind. `register_imported_names` (loader.rs:970) binds
+an unqualified name only when `lookup_value(name).is_none() || imported_methods
+.contains(name) || leaked` — so the builtin `when` (already bound) should be
+safe; check whether `when` wrongly appears in ModA's `class_methods`
+(`imported_methods`) or `qualified_leak_names`, or whether a second lowering pass
+/ the `--package-db` preload rebinds it. The fix: a name that is a codegen
+builtin control function (`when`/`unless`/`guard`/…) — or more generally, any
+name explicitly imported from a builtin module — must not be displaced by a
+same-named top-level function from a module the program does not import that name
+from. Gate against the 221-module pandoc sweep (this touches shared import
+resolution, `register_standard_module_exports`/`register_imported_names`, which
+is full of collision special-cases — Djot, Citeproc, Blaze).
+
+**Done when:** `Main.hs` prints only its non-FIRED output; `bin_PANDOC -f native
+-t native /tmp/doc.native` emits the converted native AST (`[Para [Str
+"Hello",Space,Str "world"]]`) instead of `-`/filename; the sweep + differential
+stay green.
 
 ## 2. Native stdin read path segfaults
 

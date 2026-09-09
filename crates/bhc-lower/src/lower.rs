@@ -6072,34 +6072,73 @@ fn register_standard_module_exports(
             // For modules with typed sigs, create a direct value binding for
             // qualified names (e.g., T.groupBy -> DefId named "Data.Text.groupBy").
             // This prevents T.groupBy from resolving to the Prelude's groupBy.
+            let full_qualified = Symbol::intern(&format!("{module_name}.{export}"));
+            // A curated set of modules whose full-name primops (`Data.Map.empty`,
+            // `Data.Text.length`, `Data.Text.IO.readFile`, ...) are registered as
+            // REAL, correctly-typed, working builtins in `define_builtins`. For
+            // these we bind the import alias straight to the primop (see below).
+            // Other `has_typed_sigs` modules keep the fresh-stub behavior even
+            // though a same-named builtin may exist: `Data.Text.Lazy`'s primops
+            // carry strict-`Text` result sigs (an alias binding surfaced
+            // "expected LazyText, found Text"), and `Data.Sequence`/`Data.Foldable`
+            // primops are reached correctly only through the by-name codegen path
+            // a stub dispatch takes — binding the alias to their real DefId
+            // crashed at runtime. Widen this set only after verifying the primop
+            // end to end.
+            let prefer_real_builtin = matches!(
+                module_name,
+                "Data.Map"
+                    | "Data.Map.Strict"
+                    | "Data.Map.Lazy"
+                    | "Data.IntMap"
+                    | "Data.IntMap.Strict"
+                    | "Data.IntMap.Lazy"
+                    | "Data.IntSet"
+                    | "Data.Set"
+                    | "Data.Text"
+                    | "Data.Text.IO"
+            );
             if ctx.lookup_value(aliased_qualified).is_none() {
-                let qual_def_id = ctx.fresh_def_id();
-                let qual_def_name = Symbol::intern(&format!("{module_name}.{export}"));
-                if is_constructor {
-                    ctx.define(
-                        qual_def_id,
-                        qual_def_name,
-                        DefKind::StubConstructor,
-                        Span::default(),
-                    );
+                // Prefer an existing REAL builtin bound under the full module
+                // name. `define_builtins` registers the container/text primops
+                // (`Data.Map.empty`, `Data.Text.length`, ...) as real values;
+                // unconditionally binding the alias to a fresh `StubValue` here
+                // clobbered them, so `M.empty` / `T.length` resolved to a stub and
+                // warned "external package not implemented" even though the primop
+                // exists and runs. Bind the alias straight to the primop when one
+                // is present; only synthesize a stub when there is genuinely no
+                // builtin (e.g. `T.groupBy`), keeping it distinct from Prelude's.
+                let real_builtin = ctx
+                    .lookup_value(full_qualified)
+                    .filter(|d| prefer_real_builtin && !ctx.is_stub(*d));
+                if let Some(def_id) = real_builtin {
+                    ctx.bind_value(aliased_qualified, def_id);
                 } else {
-                    ctx.define(
-                        qual_def_id,
-                        qual_def_name,
-                        DefKind::StubValue,
-                        Span::default(),
-                    );
+                    let qual_def_id = ctx.fresh_def_id();
+                    let qual_def_name = full_qualified;
+                    if is_constructor {
+                        ctx.define(
+                            qual_def_id,
+                            qual_def_name,
+                            DefKind::StubConstructor,
+                            Span::default(),
+                        );
+                    } else {
+                        ctx.define(
+                            qual_def_id,
+                            qual_def_name,
+                            DefKind::StubValue,
+                            Span::default(),
+                        );
+                    }
+                    ctx.bind_value(aliased_qualified, qual_def_id);
                 }
-                ctx.bind_value(aliased_qualified, qual_def_id);
             }
             // Also register under the full module name if different from alias
-            if qualifier != module_name {
-                let full_qualified = Symbol::intern(&format!("{module_name}.{export}"));
-                if ctx.lookup_value(full_qualified).is_none() {
-                    // Re-use the aliased DefId
-                    if let Some(def_id) = ctx.lookup_value(aliased_qualified) {
-                        ctx.bind_value(full_qualified, def_id);
-                    }
+            if qualifier != module_name && ctx.lookup_value(full_qualified).is_none() {
+                // Re-use the aliased DefId
+                if let Some(def_id) = ctx.lookup_value(aliased_qualified) {
+                    ctx.bind_value(full_qualified, def_id);
                 }
             }
         } else if module_name == "Djot"

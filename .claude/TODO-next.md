@@ -344,6 +344,40 @@ literal — so `readMarkdown` runs on real options. (Note: pandoc's INTERNAL
 Data.Text usage already works — bhc-text — it's only the probe-main's direct
 Data.Text.IO/Default calls that stub.)
 
+**Data.Text.IO + Data.Default def — DONE 2026-09-09 (fae20ad, 4ba8eb7, ff9644f).**
+- **Data.Text.IO / alias-qualified builtins (fae20ad):** the real bug was that
+  `import qualified Data.Text as T` (and Data.Text.IO, Data.Map, ...) bound every
+  alias-qualified name (`T.length`, `TIO.readFile`) to a FRESH StubValue in
+  `register_standard_module_exports`, clobbering the real primops
+  `define_builtins` registers under the full name. Fixed by binding the alias
+  straight to the primop for a curated safe set (Map/Set/IntMap/IntSet, Data.Text,
+  Data.Text.IO). Excluded Data.Text.Lazy (strict-Text result sigs) and
+  Data.Sequence/Data.Foldable (only work through the by-name stub dispatch) — they
+  regressed lazy_text_basic/foldable_to_list; widen only after per-primop
+  verification. The probe now reads the real input file (INPUT_LEN matches).
+- **Data.Default def (4ba8eb7):** `def :: Default a => a` is result-type-determined
+  like `mempty`; Data.Default is external so bhc only sees pandoc's INSTANCES.
+  Wired like Monoid: registered the Default class (method `def`) in hir-to-core,
+  added Default to MONAD_FAMILY_CLASSES + BUILTIN_CLASS_NAMES + the is_value_class
+  set (expr.rs x3), registered `def` at a FIXED DefId (10350) in both bhc-lower and
+  bhc-typeck (fixed id avoids sequential-array position drift across crates),
+  dropped `def` from the stub list. `def` now dispatches to Con(ReaderOptions) /
+  Con(WriterOptions) — verified in the probe. NOTE: cross-module dispatch needs the
+  callee's `.bhi` to preserve the concrete arg type; readMarkdown's does. A
+  minimal artifact where it does NOT (`getCol :: Opts -> Int` from a stripped .bhi)
+  leaves `def`'s occ type a var — same occurrence-pinning gap as the Identity case.
+- **RTS (ff9644f):** bhc_show_exception only reads the payload as a C-string for
+  IO/ErrorCall tags now; a raw Haskell exception (PandocError) no longer segfaults
+  the top-level handler.
+
+**NEXT for a real conversion:** `readMarkdown def txt >>= writeHtml5String def`
+now runs on REAL inputs and throws a PandocError deep in execution (reported as
+`<<exception>>`, exit 1). Find what it throws — likely a deeper pandoc-side stub
+(many alias-qualified names outside the curated set, plus genuine externals:
+Data.ByteString, Data.Time, zip) or a real parser-logic bug. Next step: make the
+top-level handler show the PandocError's actual message (needs pandoc's exception
+representation), or bisect readMarkdown with a trivial input.
+
 ## 2. Native stdin read path segfaults
 
 **Detailed home:** `KNOWN_FAILURES` in `crates/bhc-e2e-tests/ghc_differential.py`;

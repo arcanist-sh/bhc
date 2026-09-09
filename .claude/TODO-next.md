@@ -325,6 +325,25 @@ shift arguments:
        (pandoc's `Stream s Identity t`), an annotation, or the call chain, it now
        works. pandoc pins Identity explicitly, so (ii) does not block it.
 
+**pandoc after the fix (2026-09-09):** re-swept all 221 pandoc-3.6.4 modules
+with the fixed bhc — **221/221, 0 failing** (no regression from the codegen
+change). The `MiniPandoc2` probe (`readMarkdown def txt >>= writeHtml5String def`
+under `runIOorExplode`) now runs PAST the old `parse` crash — it prints
+`INPUT_LEN` and reaches `readMarkdown` execution — then throws, because the
+probe's OWN main uses stubbed external functions: `TIO.readFile`, `TIO.putStrLn`,
+`T.length` (Data.Text.IO) and `def` (Data.Default) are "external package not
+implemented" stubs, so `readMarkdown` is handed garbage ReaderOptions/input and
+fails. `runIOorExplode` catches it, but the thrown exception's payload is a
+non-null INVALID pointer, so `bhc_show_exception`'s `CStr::from_ptr` strlen-faults
+(the `payload.is_null()` guard can't catch a garbage-but-non-null pointer). This
+is external-stub territory, NOT the parse bug and NOT a codegen regression.
+NEXT toward end-to-end conversion: give the probe real inputs — implement/vendor
+`Data.Default def` for ReaderOptions and `Data.Text.IO` (readFile/putStrLn), or
+build a probe that constructs ReaderOptions without `def` and feeds a `Text`
+literal — so `readMarkdown` runs on real options. (Note: pandoc's INTERNAL
+Data.Text usage already works — bhc-text — it's only the probe-main's direct
+Data.Text.IO/Default calls that stub.)
+
 ## 2. Native stdin read path segfaults
 
 **Detailed home:** `KNOWN_FAILURES` in `crates/bhc-e2e-tests/ghc_differential.py`;

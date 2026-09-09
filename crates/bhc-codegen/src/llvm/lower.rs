@@ -47694,7 +47694,39 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             // Identity operations (newtype = pass through)
             "Identity" | "runIdentity" | "Identity.pure" => Ok(Some(args[0])),
-            "Identity.fmap" | "Identity.>>=" | "Identity.<*>" => {
+            "Identity.>>=" => {
+                // `(Identity m) >>= k = k m`. Unlike `fmap`/`<*>` (whose FIRST
+                // argument is the function), `>>=` takes the monadic value
+                // FIRST (`args[0]` = `m`) and the continuation SECOND
+                // (`args[1]` = `k`). Reached only as a VALUE through a resolved
+                // `Monad m` dictionary (`create_builtin_closure`); the direct
+                // application path lowers `>>=` via `lower_builtin_bind`, which
+                // already orders the arguments this way. Grouping `>>=` with
+                // `fmap`/`<*>` here treated the boxed value `m` as a closure and
+                // branched to its first word (`br 0x1`), so every polymorphic
+                // `Monad m =>` function instantiated at `Identity` miscompiled.
+                let func = args[1].into_pointer_value();
+                let val = args[0];
+                let fn_ptr = self.extract_closure_fn_ptr(func)?;
+                let val_ptr = self.value_to_ptr(val)?;
+                let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                let result = self
+                    .builder()
+                    .build_indirect_call(
+                        fn_type,
+                        fn_ptr,
+                        &[func.into(), val_ptr.into()],
+                        "identity_bind",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("Identity bind failed: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| {
+                        CodegenError::Internal("Identity.>>=: returned void".to_string())
+                    })?;
+                Ok(Some(result))
+            }
+            "Identity.fmap" | "Identity.<*>" => {
                 // Apply function to value
                 let func = args[0].into_pointer_value();
                 let val = args[1];

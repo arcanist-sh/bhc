@@ -293,6 +293,38 @@ continuation — then make it hop to Applicative `pure`. Tool: the lldb
 step-to-crash script (`/tmp/step2.py`, limit 120000, `br set -r Prim.parse$`)
 pinned the branch. Repro PT3.hs.
 
+**✅ FIXED 2026-09-09 — the true root cause was NOT `return`→`>>=` in the
+frontend (the Core hop `$sel_1 ($sel_0 $dMonad)` for `return` is CORRECT). The
+crash was a codegen ARGUMENT-ORDER bug in the first-class `Identity.>>=` dict
+wrapper.** Minimal pure repro (no parsec): `foo :: Monad m => m Int -> m Int;
+foo m = m >>= \res -> return res` at `Identity` printed a garbage pointer;
+monomorphic `Identity Int -> Identity Int` and IO both worked. In
+`bhc-codegen/src/llvm/lower.rs`'s VALUE-based `lower_builtin_direct` (~47697),
+`Identity.>>=` was grouped with `Identity.fmap`/`Identity.<*>`, which take the
+FUNCTION first (`args[0]`). But `(Identity m) >>= k = k m` takes the monadic
+VALUE first (`args[0] = m`) and the continuation second (`args[1] = k`). The
+shared code treated the boxed value `m` as a closure, loaded its first word, and
+branched to it (`br 0x1`). Split `Identity.>>=` into its own arm with
+`func = args[1]`, `val = args[0]`. This value path is reached ONLY when the
+`Monad Identity` dict is threaded through a polymorphic function (the direct
+application path uses `lower_builtin_bind`, whose order was already correct — why
+monomorphic worked). `parse (return 7)` → `ok: 7`, `parse (string "native")` →
+`ok: native`. Gate: fmt/clippy clean, cargo test 2822/0, ghc_differential
+219/0/2.
+
+TWO ADJACENT (pre-existing, NOT this crash) gaps found while bisecting, recorded
+for later — both make a polymorphic `Monad m =>` call MISS its dictionary and
+shift arguments:
+  (i) Maybe/list/Either have NO registered Monad/Applicative/Functor dict
+      instances (only IO/Identity/ReaderT/ExceptT/StateT are in the registry);
+      they are codegen builtins. `foo m = return 5` at `Maybe` → garbage.
+  (ii) typeck does not PIN `m := Identity` when Identity is determined only by
+       `runIdentity` in result position or by the `Identity` constructor in an
+       argument (constructor/accessor types not propagated), leaving `m` a free
+       var so the dict can't resolve. When `m` is pinned by a signature
+       (pandoc's `Stream s Identity t`), an annotation, or the call chain, it now
+       works. pandoc pins Identity explicitly, so (ii) does not block it.
+
 ## 2. Native stdin read path segfaults
 
 **Detailed home:** `KNOWN_FAILURES` in `crates/bhc-e2e-tests/ghc_differential.py`;

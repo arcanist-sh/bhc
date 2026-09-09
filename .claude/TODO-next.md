@@ -200,6 +200,35 @@ Applicative field 1 = `Identity.pure` (Applicative dict thunk 238 field_1).
 
 ---
 
+**UPDATE 2026-09-09 (mechanism nailed + a working-but-too-broad fix):** the
+`Stream TokStream` mis-selection is the fundep-completion in
+`resolve_constrained_fn_dicts` (expr.rs ~2174). When a `Stream s Identity t`
+constraint has only `m = Identity` concrete (`s`, `t` still variables), the
+completion builds `pat`/`tgt` from the concrete query positions — here just
+`[m]` — and EVERY `Stream` instance has `m` as a variable, so
+`types_match_multi([m_var],[Identity])` matches ALL of them and `find_map` grabs
+the FIRST (LaTeX's `TokStream`), inventing `s := TokStream`, `t := Tok`. That
+baked LaTeX's `uncons` into runP's dict.
+
+Adding a guard — `if !pat.iter().any(has_concrete_head) { return None }`
+(`has_concrete_head` peels `App` to a `Con`/`List`/`Tuple` head) — makes runP
+STOP building a concrete dict and instead THREAD its `%1` param
+(`runP` becomes `tail call runPT(null, %1, …)`, verified in IR), and makes
+Main's `parse` at `[Char]` resolve the real list instance. BUT it REGRESSES
+`test_compile_to_executable` and `test_print_primitive`: some legit fundep
+completion also has an all-variable-head matched `pat` and needs to complete. So
+the guard is too broad — REVERTED. A correct guard must distinguish the
+ambiguous case (MANY instances match the concrete positions — parsec's `Stream`)
+from a determined one (exactly one matches). Try: complete only when the
+concrete positions match a UNIQUE instance (collect all non-trivial merges,
+require exactly one), rather than a head check. Gate against the two named tests
+AND the parsec repros AND the sweep.
+
+After the Stream threading is fixed, the crash MOVES (runP+208 → `parse`+96,
+still a `0x1` tail-call into runPT/runParsecT) — that is the SECONDARY
+`return` → `$sel_1` (Monad `>>=`) continuation issue above, which will then need
+its own (targeted, not `None => true`) fix. So 1e needs BOTH.
+
 ## 2. Native stdin read path segfaults
 
 **Detailed home:** `KNOWN_FAILURES` in `crates/bhc-e2e-tests/ghc_differential.py`;

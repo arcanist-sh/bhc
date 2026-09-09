@@ -2166,49 +2166,69 @@ fn resolve_constrained_fn_dicts(
                     .instances
                     .get(&c.class)
                     .and_then(|instances| {
-                        instances.iter().find_map(|inst| {
-                            if inst.instance_types.len() != concrete_args.len() {
-                                return None;
-                            }
-                            let mut pat = Vec::new();
-                            let mut tgt = Vec::new();
-                            for (it, a) in inst.instance_types.iter().zip(&concrete_args) {
-                                if !has_type_variables(a) {
-                                    pat.push(it.clone());
-                                    tgt.push(a.clone());
+                        // Complete only when the matching instances AGREE.
+                        // parsec's polymorphic `Stream s Identity t` matches
+                        // EVERY Stream instance through its non-discriminating
+                        // `m = Identity` position, each proposing a different
+                        // `s`/`t` (TokStream / Sources / …); taking the first
+                        // (the old `find_map`) baked LaTeX's `Stream TokStream`
+                        // `uncons` into runP's dict. Requiring agreement leaves
+                        // such an ambiguous constraint polymorphic so its
+                        // in-scope dict parameter is threaded, while a uniquely
+                        // determined fundep (a `[Char]` stream pins the list
+                        // instance, hence `t = Char`) still completes.
+                        let proposals: Vec<Vec<Ty>> = instances
+                            .iter()
+                            .filter_map(|inst| {
+                                if inst.instance_types.len() != concrete_args.len() {
+                                    return None;
                                 }
-                            }
-                            if pat.is_empty() {
-                                return None;
-                            }
-                            let subst = bhc_types::types_match_multi(&pat, &tgt)?;
-                            let filled: Vec<Ty> =
-                                inst.instance_types.iter().map(|t| subst.apply(t)).collect();
-                            // Merge per position: take the instance's type where it
-                            // became concrete, keep ours where the instance stays
-                            // parametric. `Monad m => Stream Sources m Char` fills
-                            // the dependent `t = Char` while `m` — parametric in
-                            // BOTH the call site and the instance — stays our
-                            // variable (readWithM is polymorphic in it). The old
-                            // all-or-nothing check rejected exactly that shape and
-                            // the Stream dictionary was silently omitted.
-                            let merged: Vec<Ty> = filled
-                                .iter()
-                                .zip(&concrete_args)
-                                .map(|(f, ours)| {
-                                    if has_type_variables(ours) && !has_type_variables(f) {
-                                        f.clone()
-                                    } else {
-                                        ours.clone()
+                                let mut pat = Vec::new();
+                                let mut tgt = Vec::new();
+                                for (it, a) in inst.instance_types.iter().zip(&concrete_args) {
+                                    if !has_type_variables(a) {
+                                        pat.push(it.clone());
+                                        tgt.push(a.clone());
                                     }
-                                })
-                                .collect();
-                            if merged.iter().zip(&concrete_args).all(|(m, ours)| m == ours) {
-                                None
-                            } else {
-                                Some(merged)
+                                }
+                                if pat.is_empty() {
+                                    return None;
+                                }
+                                let subst = bhc_types::types_match_multi(&pat, &tgt)?;
+                                let filled: Vec<Ty> =
+                                    inst.instance_types.iter().map(|t| subst.apply(t)).collect();
+                                // Merge per position: take the instance's type where it
+                                // became concrete, keep ours where the instance stays
+                                // parametric. `Monad m => Stream Sources m Char` fills
+                                // the dependent `t = Char` while `m` — parametric in
+                                // BOTH the call site and the instance — stays our
+                                // variable (readWithM is polymorphic in it). The old
+                                // all-or-nothing check rejected exactly that shape and
+                                // the Stream dictionary was silently omitted.
+                                let merged: Vec<Ty> = filled
+                                    .iter()
+                                    .zip(&concrete_args)
+                                    .map(|(f, ours)| {
+                                        if has_type_variables(ours) && !has_type_variables(f) {
+                                            f.clone()
+                                        } else {
+                                            ours.clone()
+                                        }
+                                    })
+                                    .collect();
+                                if merged.iter().zip(&concrete_args).all(|(m, ours)| m == ours) {
+                                    None
+                                } else {
+                                    Some(merged)
+                                }
+                            })
+                            .collect();
+                        match proposals.first() {
+                            Some(first) if proposals.iter().all(|p| p == first) => {
+                                Some(first.clone())
                             }
-                        })
+                            _ => None,
+                        }
                     });
             if let Some(completed_args) = completed {
                 concrete_args = completed_args;
@@ -2346,51 +2366,71 @@ fn resolve_user_dicts(
                     .instances
                     .get(&c.class)
                     .and_then(|instances| {
-                        instances.iter().find_map(|inst| {
-                            if inst.instance_types.len() != concrete_args.len() {
-                                return None;
-                            }
-                            let mut pat = Vec::new();
-                            let mut tgt = Vec::new();
-                            for (it, a) in inst.instance_types.iter().zip(&concrete_args) {
-                                if !has_type_variables(a) {
-                                    pat.push(it.clone());
-                                    tgt.push(a.clone());
+                        // Complete only when the matching instances AGREE.
+                        // parsec's polymorphic `Stream s Identity t` matches
+                        // EVERY Stream instance through its non-discriminating
+                        // `m = Identity` position, each proposing a different
+                        // `s`/`t` (TokStream / Sources / …); taking the first
+                        // (the old `find_map`) baked LaTeX's `Stream TokStream`
+                        // `uncons` into runP's dict. Requiring agreement leaves
+                        // such an ambiguous constraint polymorphic so its
+                        // in-scope dict parameter is threaded, while a uniquely
+                        // determined fundep (a `[Char]` stream pins the list
+                        // instance, hence `t = Char`) still completes.
+                        let proposals: Vec<Vec<Ty>> = instances
+                            .iter()
+                            .filter_map(|inst| {
+                                if inst.instance_types.len() != concrete_args.len() {
+                                    return None;
                                 }
-                            }
-                            if pat.is_empty() {
-                                return None;
-                            }
-                            let sub = bhc_types::types_match_multi(&pat, &tgt)?;
-                            let filled: Vec<Ty> =
-                                inst.instance_types.iter().map(|t| sub.apply(t)).collect();
-                            if !filled.iter().any(has_type_variables) {
-                                return Some(filled);
-                            }
-                            // The instance matched every pinned argument but
-                            // left one of its OWN variables standing: `instance
-                            // Monad m => Stream Sources m Char` matched against
-                            // `Stream Sources ? Char` still has `m`. Keep OUR
-                            // argument in the open positions so the constraint
-                            // names the caller's `m`, and let construction fill
-                            // the instance's context from the dictionaries in
-                            // scope — the same route the enclosing call already
-                            // takes for `runParserT`'s own `Stream` dictionary.
-                            let kept: Vec<Ty> = inst
-                                .instance_types
-                                .iter()
-                                .zip(&concrete_args)
-                                .map(|(it, ours)| {
-                                    let f = sub.apply(it);
-                                    if has_type_variables(&f) {
-                                        ours.clone()
-                                    } else {
-                                        f
+                                let mut pat = Vec::new();
+                                let mut tgt = Vec::new();
+                                for (it, a) in inst.instance_types.iter().zip(&concrete_args) {
+                                    if !has_type_variables(a) {
+                                        pat.push(it.clone());
+                                        tgt.push(a.clone());
                                     }
-                                })
-                                .collect();
-                            Some(kept)
-                        })
+                                }
+                                if pat.is_empty() {
+                                    return None;
+                                }
+                                let sub = bhc_types::types_match_multi(&pat, &tgt)?;
+                                let filled: Vec<Ty> =
+                                    inst.instance_types.iter().map(|t| sub.apply(t)).collect();
+                                if !filled.iter().any(has_type_variables) {
+                                    return Some(filled);
+                                }
+                                // The instance matched every pinned argument but
+                                // left one of its OWN variables standing: `instance
+                                // Monad m => Stream Sources m Char` matched against
+                                // `Stream Sources ? Char` still has `m`. Keep OUR
+                                // argument in the open positions so the constraint
+                                // names the caller's `m`, and let construction fill
+                                // the instance's context from the dictionaries in
+                                // scope — the same route the enclosing call already
+                                // takes for `runParserT`'s own `Stream` dictionary.
+                                let kept: Vec<Ty> = inst
+                                    .instance_types
+                                    .iter()
+                                    .zip(&concrete_args)
+                                    .map(|(it, ours)| {
+                                        let f = sub.apply(it);
+                                        if has_type_variables(&f) {
+                                            ours.clone()
+                                        } else {
+                                            f
+                                        }
+                                    })
+                                    .collect();
+                                Some(kept)
+                            })
+                            .collect();
+                        match proposals.first() {
+                            Some(first) if proposals.iter().all(|p| p == first) => {
+                                Some(first.clone())
+                            }
+                            _ => None,
+                        }
                     });
             // Leave it to other paths (bare lowering) if still not concrete.
             concrete_args = completed?;

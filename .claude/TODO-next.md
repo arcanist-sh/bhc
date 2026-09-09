@@ -229,6 +229,32 @@ still a `0x1` tail-call into runPT/runParsecT) — that is the SECONDARY
 `return` → `$sel_1` (Monad `>>=`) continuation issue above, which will then need
 its own (targeted, not `None => true`) fix. So 1e needs BOTH.
 
+**UPDATE 2026-09-09 (bug A FIXED — b9086a6):** the fundep-completion now
+completes only when the matching instances AGREE (collect all proposals; use the
+common one, else leave it polymorphic). `runP` now threads its `%1` Stream dict
+(`tail call runPT(null, %1, …)`) instead of baking LaTeX's `TokStream` `uncons`;
+`[Char]`/`Sources` streams still resolve. Gated green (2820 + 2 flaky-WASM that
+pass 149/0 in isolation; differential 219/0). parsec STILL crashes, now purely on
+bug B below.
+
+**Bug B is the remaining blocker (confirmed with A in place):** `eok`
+(`__closure_Text.Parsec.Prim.7`) resolves `return` to `field_1` of the captured
+(now-correct Identity) Monad dict — `field_1 = Identity.>>=` (Monad layout
+`[superclass_Applicative, >>=, >>]`). It must instead hop the superclass to the
+Applicative dict and take its `pure` (`$sel_1 ($sel_0 monad_dict)`, verified
+= `Identity.pure`, Applicative dict field_1). The value-position `return` arm
+(expr.rs ~657) does exactly this hop but is gated by
+`binding_returns_in_dict_monad`, which is false for the lambda-lifted `where`
+continuation (no signature of its own). The broad relaxation
+(`None => true`) was REVERTED — it regresses `test_tier2_user_monad`,
+`test_tier3_applicative_seq_transformer`, `test_tier3_applicative_via_ap`,
+`test_tier3_any_all` (routes `return` via the in-scope Monad dict even when the
+lambda's return is for a DIFFERENT/builtin monad). A correct fix must route only
+when the lifted continuation's monad matches the captured dict — needs the
+ENCLOSING binding's monad (runParsecT is `Monad m =>`), which `current_binding_sig`
+does not surface for a lifted binding, OR fix codegen's bare-`return`
+→ Monad-`field_1` assumption to hop to Applicative. Repro: PT3.hs.
+
 ## 2. Native stdin read path segfaults
 
 **Detailed home:** `KNOWN_FAILURES` in `crates/bhc-e2e-tests/ghc_differential.py`;

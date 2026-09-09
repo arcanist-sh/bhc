@@ -255,6 +255,22 @@ ENCLOSING binding's monad (runParsecT is `Monad m =>`), which `current_binding_s
 does not surface for a lifted binding, OR fix codegen's bare-`return`
 → Monad-`field_1` assumption to hop to Applicative. Repro: PT3.hs.
 
+**CORRECTION 2026-09-09 (accuracy):** with fix A landed, `parse (return 7)` still
+crashes at a `0x1` tail-call folded through `parse`+96 → `runPT` → `runParsecT`.
+The "bug B = `return` → Monad `$sel_1`" reading above is UNCONFIRMED: the
+pre-fix-A `eok` IR showed one direct `field_1` load of the captured dict, but the
+post-fix-A `runParsecT` Core shows `$sel_0`/`$sel_1` (superclass) hops present —
+though those cover EVERY dict access in the CPS runner (Stream `uncons`, Monad
+`>>=`, Applicative `pure`), so a grep cannot attribute them to `return`. Two
+targeted `return`-routing attempts both failed to change the crash:
+`binding_returns_in_dict_monad` `None => true` (regressed user-monad/applicative
+tests) and `|| in_scope_dict_matches` (no effect — the lifted continuation has no
+recorded occurrence monad). NEXT: instruction-step `bin_PT3` under lldb through
+`runPT`→`runParsecT` to the exact null `blr`/`br`, and identify WHICH dict method
+(the continuation `return`, the Stream `uncons`, or a CPS continuation closure)
+carries the `0x1` — do NOT assume it is `return` again. Then fix that specific
+method's resolution. Repro PT3.hs / PT.hs in pandoc-harness/repros.
+
 ## 2. Native stdin read path segfaults
 
 **Detailed home:** `KNOWN_FAILURES` in `crates/bhc-e2e-tests/ghc_differential.py`;

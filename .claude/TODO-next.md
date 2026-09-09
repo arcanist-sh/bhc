@@ -169,6 +169,35 @@ Gate against the parsec repros AND the full sweep/differential.
 **Done when:** `PT3.hs` prints `ok: 7` and `PT.hs` prints `ok: native`;
 `bin_PANDOC -f native -t native /tmp/doc.native` gets past `parseFlavoredFormat`.
 
+**UPDATE 2026-09-05 (deeper root — the ACTUAL crash):** `BHC_DUMP_LLVM` on
+`Text.Parsec.Prim` shows the `Stream` dict `runP` builds (thunk 242) has
+`field_0` = the Monad Identity superclass (correct) but `field_1` (`uncons`) =
+`pap_Text.Pandoc.Readers.LaTeX.Parsing.$instance_uncons_TokStream_v_Tok` —
+LaTeX's `Stream TokStream m Tok` instance! parsec's generic `runP :: Stream s
+Identity t => …` had its `Stream s` dictionary CONCRETIZED to an arbitrary
+visible `Stream` instance (LaTeX's `TokStream`) instead of threaded as a
+parameter / matched to the call's `[Char]` type. `parse … "xyz"` then calls
+LaTeX's `uncons` (expecting a `TokStream`) on a `String` → the `0x1` call. db-go
+exposes many `Stream` instances (`[tok]`/Prim.hs:475, ByteString, Text,
+`Sources`, `TokStream`); `[tok]` is the one `[Char]` needs. This is the SAME
+class as the `when`→`OpenDocument.when` collision (1d) but for INSTANCE selection
+of a polymorphic constraint whose type is a variable. THIS is the real fix
+target — deep dictionary-passing / instance-resolution machinery.
+
+**SECONDARY (real, but not the crash):** `return` in the lifted continuations
+resolves to `$sel_1` of the Monad dict (`>>=`), not Applicative `pure`. A broad
+fix — route value-position `return` via the superclass whenever a where/let/
+lambda binding (no own sig) has a Monad dict in scope
+(`binding_returns_in_dict_monad` `None => true`) — was TRIED and REVERTED: it
+regresses `test_tier2_user_monad`, `test_tier3_applicative_seq_transformer`,
+`test_tier3_applicative_via_ap`, `test_tier3_any_all` (mis-routes `return` in
+lifted bindings whose monad is NOT the enclosing dict's). A correct fix must
+route only when the lifted binding's monad provably matches the in-scope Monad
+dict, and make the env-captured dict reachable by `select_method_via_superclass`
+(it lives in the continuation's closure env, not `dict_scope`). The IR confirms
+the hop is otherwise correct: with the broad fix, `$sel_1 ($sel_0 $dMonad)` =
+Applicative field 1 = `Identity.pure` (Applicative dict thunk 238 field_1).
+
 ---
 
 ## 2. Native stdin read path segfaults

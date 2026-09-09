@@ -271,6 +271,28 @@ recorded occurrence monad). NEXT: instruction-step `bin_PT3` under lldb through
 carries the `0x1` — do NOT assume it is `return` again. Then fix that specific
 method's resolution. Repro PT3.hs / PT.hs in pandoc-harness/repros.
 
+**CONFIRMED 2026-09-09 (instruction-stepped — bug B is real and IS `return`→`>>=`):**
+stepping `bin_PT3` to the exact faulting branch shows it is
+`builtin_wrapper_Identity_2e_3e_3e_3d` (`Identity.>>=`) executing `br x3` with
+`x3 = 0x1`. So the continuation's `return` resolved to the Monad dictionary's
+`>>=` (field 1) and, invoked, tail-branches to a garbage continuation. The
+"unconfirmed" note above is superseded — bug B is the sole remaining `parse`
+crash. `return` must resolve to Applicative `pure` (`$sel_1 ($sel_0 monad_dict)`),
+not `$sel_1 monad_dict` (`>>=`).
+
+The value-position `return` arm (expr.rs ~657) does the correct superclass hop
+but its gate (`binding_returns_in_dict_monad`) is false for the lambda-lifted
+`where` continuation. Both attempted relaxations FAILED: `None => true`
+regressed user-monad/applicative tests; `|| in_scope_dict_matches` had no effect
+(the lifted continuation carries no recorded occurrence monad). So `return`→`>>=`
+is emitted by some OTHER path (not this arm). NEXT: instrument every
+`return`-resolution site (this arm; lower_app Case 1.5 applied-`return`; any
+codegen bare-`return`→Monad-field_1 fallback) with a print, recompile
+`Text.Parsec.Prim`, and find which one emits `$sel_1 monad_dict` for the
+continuation — then make it hop to Applicative `pure`. Tool: the lldb
+step-to-crash script (`/tmp/step2.py`, limit 120000, `br set -r Prim.parse$`)
+pinned the branch. Repro PT3.hs.
+
 ## 2. Native stdin read path segfaults
 
 **Detailed home:** `KNOWN_FAILURES` in `crates/bhc-e2e-tests/ghc_differential.py`;

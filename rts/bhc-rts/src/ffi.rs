@@ -2920,19 +2920,28 @@ pub extern "C" fn bhc_show_exception(exc: *mut u8) -> *mut u8 {
     let tag = bhc_exc_get_tag(exc);
     let payload = bhc_exc_get_payload(exc);
 
-    let payload_str = if payload.is_null() {
-        "<null>".to_string()
-    } else {
-        unsafe { CStr::from_ptr(payload as *const c_char) }
-            .to_str()
-            .unwrap_or("<invalid utf8>")
-            .to_string()
-    };
-
+    // Only IO exceptions and `ErrorCall` are constructed by
+    // `bhc_make_some_exception` with a C-string payload; for those the payload
+    // is safe to read as a NUL-terminated string. Anything else reaching the
+    // top-level handler is a raw Haskell exception value thrown via
+    // `throw`/`throwError` (e.g. pandoc's `PandocError`): its first word is the
+    // value's own constructor tag, not one of ours, and its "payload" slot is an
+    // arbitrary boxed field — dereferencing it as a C-string walks off into
+    // unmapped memory and segfaults the handler (which is how an uncaught
+    // `PandocError` crashed instead of reporting). Report those generically
+    // rather than guessing at a layout we do not own.
     let msg = match tag {
-        EXC_TAG_IO_EXCEPTION => payload_str.to_string(),
-        EXC_TAG_ERROR_CALL => payload_str.to_string(),
-        _ => payload_str.to_string(),
+        EXC_TAG_IO_EXCEPTION | EXC_TAG_ERROR_CALL => {
+            if payload.is_null() {
+                "<null>".to_string()
+            } else {
+                unsafe { CStr::from_ptr(payload as *const c_char) }
+                    .to_str()
+                    .unwrap_or("<invalid utf8>")
+                    .to_string()
+            }
+        }
+        _ => "<<exception>>".to_string(),
     };
 
     CString::new(msg)

@@ -6204,6 +6204,20 @@ impl Builtins {
             }
         }
 
+        // data-default's `def :: Default a => a` at fixed DefId 10350 (kept in
+        // sync with bhc-lower). Result-type-determined, exactly like `mempty`:
+        // the bare `poly a. a` scheme lets each use site pin `a` to the concrete
+        // type, which hir-to-core then dispatches to the local `instance
+        // Default a` method.
+        {
+            let a = TyVar::new_star(BUILTIN_TYVAR_A);
+            env.register_value(
+                DefId::new(10350),
+                Symbol::intern("def"),
+                Scheme::poly(vec![a.clone()], Ty::Var(a)),
+            );
+        }
+
         // IORef operations at fixed DefIds 10400-10404
         {
             let a = TyVar::new_star(BUILTIN_TYVAR_A);

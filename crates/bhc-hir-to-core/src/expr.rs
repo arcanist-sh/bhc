@@ -677,7 +677,7 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                     return Ok(method_expr);
                 }
             } else if !ctx.is_user_class(class_name)
-                && matches!(class_name.as_str(), "Semigroup" | "Monoid")
+                && matches!(class_name.as_str(), "Semigroup" | "Monoid" | "Default")
             {
                 // The builtin VALUE classes. `mempty` has no argument to
                 // dispatch on and no dictionary in scope at a top-level use,
@@ -797,7 +797,8 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                     // Semigroup/Monoid parameterize over the VALUE type itself:
                     // take the first parameter (or result) directly, unwrapping
                     // one list for `mconcat :: [a] -> a`.
-                    let is_value_class = matches!(class_name.as_str(), "Semigroup" | "Monoid");
+                    let is_value_class =
+                        matches!(class_name.as_str(), "Semigroup" | "Monoid" | "Default");
                     let m_head = if is_value_class {
                         let target = match &occ_ty {
                             Ty::Fun(a, _) => a.as_ref(),
@@ -3831,7 +3832,8 @@ fn lower_app(
                         // Semigroup/Monoid parameterize over the VALUE type
                         // itself (Inlines), not a type constructor — the
                         // span-recorded result type IS the class parameter.
-                        let is_value_class = matches!(class_name.as_str(), "Semigroup" | "Monoid");
+                        let is_value_class =
+                            matches!(class_name.as_str(), "Semigroup" | "Monoid" | "Default");
                         let inferred = inferred_args.or(inferred_x).or_else(|| {
                             // Fallback: use monad context stack for nested >>=/>>/return
                             if is_value_class {

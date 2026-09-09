@@ -1140,6 +1140,24 @@ impl LowerContext {
         };
         self.class_registry.register_class(monoid_class);
 
+        // `Default` (data-default). The class is declared in an external package
+        // bhc never sees; only pandoc's `instance Default ReaderOptions where
+        // def = …` reaches us. Registering the class here lets those instances
+        // bind against it and lets `def` (a result-type-determined value method,
+        // exactly like `mempty`) dispatch to the concrete instance instead of
+        // stubbing. See MONAD_FAMILY_CLASSES / the `is_value_class` set.
+        let default_class = ClassInfo {
+            name: Symbol::intern("Default"),
+            param_count: 1,
+            methods: vec![Symbol::intern("def")],
+            method_types: FxHashMap::default(),
+            superclasses: vec![],
+            superclass_params: vec![],
+            defaults: FxHashMap::default(),
+            assoc_types: vec![],
+        };
+        self.class_registry.register_class(default_class);
+
         // Builtin `Semigroup Text` / `Monoid Text` instances: Text is a
         // builtin type with no Haskell instance declaration anywhere, so
         // dispatch at the concrete type would otherwise find nothing and

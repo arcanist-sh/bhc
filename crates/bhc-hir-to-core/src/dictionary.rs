@@ -208,6 +208,10 @@ pub(crate) const MONAD_FAMILY_CLASSES: &[&str] = &[
     "MonadPlus",
     "Semigroup",
     "Monoid",
+    // `Default`'s `def` is a bare result-type-determined value method, dispatched
+    // by the same occurrence-type path as `mempty` (see the `is_value_class` set
+    // in expr.rs). Gating that path requires membership here.
+    "Default",
 ];
 
 /// Builtin classes that are NOT user classes even when a `ClassInfo` is
@@ -251,6 +255,9 @@ pub(crate) const BUILTIN_CLASS_NAMES: &[&str] = &[
     // undispatched).
     "Alternative",
     "MonadPlus",
+    // `def` dispatches through the value-class occurrence path, not user-class
+    // dictionary passing; keep it out of the user-class set.
+    "Default",
 ];
 
 /// The representation suffix for a transformer whose methods depend on the

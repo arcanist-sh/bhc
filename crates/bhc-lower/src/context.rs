@@ -1364,6 +1364,18 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
+        // data-default's `def` at fixed DefId 10350 (kept in sync with
+        // bhc-typeck's registration). A result-type-determined value method
+        // (`def :: Default a => a`) dispatched like `mempty`; a fixed id keeps
+        // its scheme aligned across crates without depending on the sequential
+        // builtin-array positions.
+        {
+            let sym = Symbol::intern("def");
+            let def_id = DefId::new(10350);
+            self.define(def_id, sym, DefKind::Value, Span::default());
+            self.bind_value(sym, def_id);
+        }
+
         // IORef operations at fixed DefIds 10400-10404
         let ioref_builtins: &[(usize, &str)] = &[
             (10400, "newIORef"),
@@ -2278,8 +2290,7 @@ impl LowerContext {
             "compiledWithXinerama",
             "launch'",
             "Default.def",
-            "def", // Data.Default
-            "f",   // generic variable
+            "f", // generic variable
             "width",
             "height",
             "least",

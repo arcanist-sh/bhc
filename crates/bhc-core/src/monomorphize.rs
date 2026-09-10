@@ -72,6 +72,7 @@ pub fn monomorphize_module(
         imported,
         newtypes,
         memo: FxHashMap::default(),
+        cur_monad: Ty::Error,
         new_bindings: Vec::new(),
         resolved,
     };
@@ -171,6 +172,11 @@ struct Ctx<'a> {
     newtypes: &'a FxHashMap<bhc_intern::Symbol, (Vec<TyVar>, Ty)>,
     /// Memo of specializations, keyed by (binder name, concrete-type string).
     memo: FxHashMap<(String, String), Var>,
+    /// The concrete monad of the specialization currently being cloned. Used to
+    /// specialize a callee whose occurrence type was erased (`Ty::Error`): every
+    /// polymorphic-monad call inside a clone runs in this monad. `Ty::Error` at the
+    /// top level (no active specialization).
+    cur_monad: Ty,
     /// Specialized bindings produced by this pass.
     new_bindings: Vec<Bind>,
     /// Typeck's span-keyed occurrence types (final substitution). Occurrence
@@ -307,45 +313,57 @@ fn try_seed(v: &Var, span: Span, resolved: &FxHashMap<Span, Ty>, ctx: &mut Ctx) 
         return None;
     }
     let (orig_var, orig_body) = ctx.source_binding(v)?;
-    get_or_specialize(&orig_var, &orig_body, &cty, ctx)
+    let cm = concrete_monad_of(&orig_var.ty, &cty)?;
+    get_or_specialize(&orig_var, &orig_body, &cm, ctx)
 }
 
-/// Get or create the specialization of a top-level binding (local or imported)
-/// at the concrete type `conc_ty`.
+/// The concrete monad a call is at: the image of the callee's single quantified
+/// variable when the callee's RESULT type is matched against the concrete
+/// occurrence's result. Only the result is matched, not the whole function type —
+/// cross-module occurrence types can carry a wrong ARGUMENT type (pandoc's
+/// `writeHtmlString'` records `Text` where its first parameter is `WriterState`),
+/// which is harmless: the monad variable lives in the result (`… -> m a` or
+/// `… -> StateT s m a`), and matching results extracts it for both shapes.
+fn concrete_monad_of(binder_ty: &Ty, conc_ty: &Ty) -> Option<Ty> {
+    let mut binder_vars = Vec::new();
+    collect_tyvars(binder_ty, &mut binder_vars);
+    if binder_vars.len() != 1 {
+        return None;
+    }
+    let mut m = Subst::new();
+    if !match_ty(ultimate_result(binder_ty), ultimate_result(conc_ty), &mut m) {
+        return None;
+    }
+    m.get(&binder_vars[0])
+        .cloned()
+        .filter(|c| !has_free_tyvar(c))
+}
+
+/// Get or create the specialization of a top-level binding (local or imported) at
+/// `concrete_monad` — the monad its single quantified variable maps to.
 ///
 /// Only single-monad bindings are specialized: the binder type must have EXACTLY
-/// ONE free type variable (the monad `m`; everything else already concrete). Then
-/// every free type variable anywhere in the body — regardless of the per-
-/// occurrence fresh ids Core assigns — denotes that same `m`, so all of them map
-/// to the one concrete monad. A binding with more than one free variable
-/// (element-polymorphic as well as monad-polymorphic) is left untouched: mapping
-/// its non-monad variables would be unsound, so we skip rather than risk it.
-fn get_or_specialize(orig_var: &Var, orig_body: &Expr, conc_ty: &Ty, ctx: &mut Ctx) -> Option<Var> {
+/// ONE free type variable (the monad `m`; everything else already concrete). Every
+/// free type variable in the body then denotes that same `m` (regardless of the
+/// per-occurrence fresh ids Core assigns), so all map to `concrete_monad`. A
+/// binding with more than one free variable is left untouched — mapping its
+/// non-monad variables would be unsound.
+fn get_or_specialize(
+    orig_var: &Var,
+    orig_body: &Expr,
+    concrete_monad: &Ty,
+    ctx: &mut Ctx,
+) -> Option<Var> {
     let mut binder_vars = Vec::new();
     collect_tyvars(&orig_var.ty, &mut binder_vars);
     if binder_vars.len() != 1 {
         return None;
     }
     let mb = binder_vars[0].clone();
-    // The concrete monad = image of the single binder variable when the binder's
-    // RESULT type is matched against the concrete instantiation's result. Only the
-    // result is matched, not the whole function type: cross-module occurrence
-    // types can carry a wrong argument type (pandoc's `writeHtmlString'` records
-    // `Text` where its first parameter is `WriterState`), which is harmless — the
-    // monad variable lives in the result (`… -> m a` or `… -> StateT s m a`), and
-    // matching results extracts it for both shapes.
-    let mut binder_match = Subst::new();
-    if !match_ty(
-        ultimate_result(&orig_var.ty),
-        ultimate_result(conc_ty),
-        &mut binder_match,
-    ) {
+    if has_free_tyvar(concrete_monad) || !mentions_transformer(concrete_monad) {
         return None;
     }
-    let concrete_monad = binder_match.get(&mb)?.clone();
-    if has_free_tyvar(&concrete_monad) {
-        return None;
-    }
+    let concrete_monad = concrete_monad.clone();
 
     let key = (orig_var.name.to_string(), format!("{concrete_monad:?}"));
     if let Some(spec) = ctx.memo.get(&key) {
@@ -374,7 +392,9 @@ fn get_or_specialize(orig_var: &Var, orig_body: &Expr, conc_ty: &Ty, ctx: &mut C
     // Memoize BEFORE recursing so a (mutually) recursive body resolves to this
     // same specialization instead of looping.
     ctx.memo.insert(key, spec_var.clone());
+    let saved_monad = std::mem::replace(&mut ctx.cur_monad, concrete_monad.clone());
     let spec_body = specialize_body(orig_body, &subst, ctx);
+    ctx.cur_monad = saved_monad;
     ctx.new_bindings
         .push(Bind::NonRec(spec_var.clone(), Box::new(spec_body)));
     Some(spec_var)
@@ -449,10 +469,30 @@ fn specialize_body(e: &Expr, subst: &Subst, ctx: &mut Ctx) -> Expr {
                 let base_ty = ctx.resolved.get(span).unwrap_or(&v.ty);
                 unfold_newtypes(&subst.apply(base_ty), ctx.newtypes, 0)
             };
+            // A usable occurrence type that is a ground transformer stack: specialize
+            // the callee at the monad that type names.
             if !has_free_tyvar(&new_ty) && mentions_transformer(&new_ty) {
                 if let Some((ov, ob)) = ctx.source_binding(v) {
                     if has_free_tyvar(&ov.ty) {
-                        if let Some(spec) = get_or_specialize(&ov, &ob, &new_ty, ctx) {
+                        if let Some(cm) = concrete_monad_of(&ov.ty, &new_ty) {
+                            if let Some(spec) = get_or_specialize(&ov, &ob, &cm, ctx) {
+                                return Expr::Var(spec, *span);
+                            }
+                        }
+                    }
+                }
+            } else if matches!(ctx.resolved.get(span).unwrap_or(&v.ty), Ty::Error)
+                && mentions_transformer(&ctx.cur_monad)
+            {
+                // The occurrence type was ERASED (pandoc's `lift $ setupTranslations
+                // meta` records `Ty::Error`), so there is no transformer to read from
+                // it. But every polymorphic-monad call inside a clone specialized at
+                // `cur_monad` runs in that same monad (the writer's inner monad IS it,
+                // even under `lift`), so specialize the callee at `cur_monad`.
+                let cur = ctx.cur_monad.clone();
+                if let Some((ov, ob)) = ctx.source_binding(v) {
+                    if has_free_tyvar(&ov.ty) {
+                        if let Some(spec) = get_or_specialize(&ov, &ob, &cur, ctx) {
                             return Expr::Var(spec, *span);
                         }
                     }

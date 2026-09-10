@@ -31,15 +31,24 @@ With these, `writeHtml5String` and its chain specialize (35 specializations incl
 instance methods), `bhc_eval_stes`/`bhc_except_t_bind_over_st` run correctly, and the writer
 reaches `setupTranslations`.
 
-### Next blocker: `setupTranslations` (and its class)
-`setupTranslations :: PandocMonad m => Meta -> m ()` (Writers/Shared.hs, called `lift`ed from
-HTML.hs:281) is emitted as a `stub: … not implemented` and panics at runtime. Its occurrence
-type in the clone comes back CONCRETE-but-not-a-transformer (`vty_free=false`,
-`mentions_transformer=false`), so the pass skips specializing it, and codegen — lacking an
-extern for a transitively-imported symbol — stubs it. Two things to resolve: (a) why the
-occurrence type is not the transformer stack under `lift` (likely erased/mis-recorded), so the
-pass specializes it; and/or (b) declare externs for transitively-referenced concrete symbols so
-codegen resolves rather than stubs them.
+### `setupTranslations` — FIXED (erased-occurrence-type fallback)
+`setupTranslations :: PandocMonad m => Meta -> m ()` (Writers/Shared.hs, `lift`ed from
+HTML.hs:281) had occurrence type `Ty::Error` in the clone (erased under `lift`), so there was no
+transformer to read and the pass skipped it. Fix: thread the enclosing specialization's concrete
+monad (`Ctx::cur_monad`) through `specialize_body`, and when an occurrence type is `Ty::Error`,
+specialize the callee at `cur_monad`. Sound because every polymorphic-monad call inside a clone
+runs in that same monad — even under `lift`, the writer's inner monad IS `cur_monad` (PandocIO).
+Also refactored: `get_or_specialize` now takes the concrete monad directly; `concrete_monad_of`
+extracts it by matching only the ultimate RESULT types. The writer now specializes past
+`setupTranslations`.
+
+### Next blocker: transitive externs for PURE symbols
+`lookupMetaString :: Text -> Meta -> Text` (Writers/Shared.hs:434, a PURE function) is now the
+stub. It is NOT monomorphization — a specialized clone references a concrete function from a
+transitively-imported module, but the driver only declares externs (`interface_symbols`) for
+DIRECT imports, so codegen stubs it. Fix is codegen/linking, not this pass: declare externs for
+transitively-referenced symbols (qualified `Module.name` + arity, resolving to the DB `.o`).
+Care needed on bare-name collisions across modules. Likely more such stubs follow.
 
 **Remaining for the REAL pandoc writer** (beyond this mechanism): (a) `PandocMonad m =>` is a
 Monad SUPERCLASS with ~17 methods — the pass rewrites the Monad `>>=`/`>>` selectors but

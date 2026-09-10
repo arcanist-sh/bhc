@@ -44562,6 +44562,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "AppendMode" => return Some((2, 0)), // tag=2, arity=0
             "ReadWriteMode" => return Some((3, 0)), // tag=3, arity=0
 
+            // Data.Sequence view constructors. `lower_builtin_seq_viewl`/`viewr`
+            // build these ADTs directly: `EmptyL`/`EmptyR` as tag 0 / 0 fields
+            // and `:<`/`:>` as tag 1 / 2 fields (head+tail-seq, init-seq+last).
+            // Matching them (pandoc-types' `Inlines <> Inlines` melds via
+            // `case (viewr xs, viewl ys) of … xs' :> x, y :< ys' → …`) must use
+            // the SAME tags, or a bare stub-constructor tag walks the wrong field.
+            "EmptyL" => return Some((0, 0)),
+            ":<" => return Some((1, 2)),
+            "EmptyR" => return Some((0, 0)),
+            ":>" => return Some((1, 2)),
+
             _ => {}
         }
 

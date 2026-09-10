@@ -1144,38 +1144,103 @@ pub unsafe extern "C" fn bhc_intset_elem_at(set_ptr: *mut u8, index: i64) -> i64
 }
 
 // ========================================================================
-// Data.Sequence operations (Vec-backed)
+// Data.Sequence operations (cons-list-backed)
 // ========================================================================
+//
+// A Seq is represented as an ordinary bhc cons list: nil is `[i64 tag=0]` and
+// cons is `[i64 tag=1, ptr head, ptr tail]` (24 bytes) — the SAME layout as
+// `[a]`. pandoc's Builder types (`Inlines`/`Blocks` = `Many (Seq a)`) reach
+// their elements through the GENERIC `Foldable`/`toList`, which walks a cons
+// list; an earlier opaque `Vec`-backed Seq could not be consumed that way and
+// crashed (see the `foldable_to_list` fixture). Keeping a Seq list-shaped makes
+// every Seq-specific primop and every generic Foldable/list use agree on one
+// representation, so `fromList`/`toList` are the identity and a Seq flows
+// wherever a list is expected.
 
-/// Opaque Seq type: Vec<*mut u8> behind a Box.
-type RtsSeq = Vec<*mut u8>;
+/// Allocate a nil cons cell `[i64 tag=0]` (24 bytes, matching the cons layout).
+fn seq_nil() -> *mut u8 {
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
+        let cell = std::alloc::alloc(layout);
+        *(cell as *mut i64) = 0;
+        cell
+    }
+}
+
+/// Allocate a cons cell `[i64 tag=1, ptr head, ptr tail]` (24 bytes).
+fn seq_cons_cell(head: *mut u8, tail: *mut u8) -> *mut u8 {
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
+        let cell = std::alloc::alloc(layout);
+        *(cell as *mut i64) = 1;
+        *(cell.add(8) as *mut *mut u8) = head;
+        *(cell.add(16) as *mut *mut u8) = tail;
+        cell
+    }
+}
+
+/// Walk a Seq (cons list) into a Vec of its element pointers.
+///
+/// # Safety
+/// `seq_ptr` must be null or a valid bhc cons list (tag 0 nil / tag 1 cons).
+unsafe fn seq_to_vec(seq_ptr: *mut u8) -> Vec<*mut u8> {
+    let mut v = Vec::new();
+    let mut cur = seq_ptr;
+    while !cur.is_null() && *(cur as *const i64) != 0 {
+        v.push(*(cur.add(8) as *const *mut u8));
+        cur = *(cur.add(16) as *const *mut u8);
+    }
+    v
+}
+
+/// Build a Seq (cons list) from a slice of element pointers.
+fn vec_to_seq(v: &[*mut u8]) -> *mut u8 {
+    let mut acc = seq_nil();
+    for &e in v.iter().rev() {
+        acc = seq_cons_cell(e, acc);
+    }
+    acc
+}
+
+/// Walk to the element at `idx` (borrowed), or null if out of range.
+///
+/// # Safety
+/// `seq_ptr` must be null or a valid bhc cons list.
+unsafe fn seq_nth(seq_ptr: *mut u8, idx: i64) -> *mut u8 {
+    if idx < 0 {
+        return ptr::null_mut();
+    }
+    let mut cur = seq_ptr;
+    let mut i = idx;
+    while !cur.is_null() && *(cur as *const i64) != 0 {
+        if i == 0 {
+            return *(cur.add(8) as *const *mut u8);
+        }
+        i -= 1;
+        cur = *(cur.add(16) as *const *mut u8);
+    }
+    ptr::null_mut()
+}
 
 /// Create an empty sequence.
 #[no_mangle]
 pub extern "C" fn bhc_seq_empty() -> *mut u8 {
-    Box::into_raw(Box::new(Vec::<*mut u8>::new())) as *mut u8
+    seq_nil()
 }
 
 /// Create a singleton sequence.
 #[no_mangle]
 pub extern "C" fn bhc_seq_singleton(elem: *mut u8) -> *mut u8 {
-    Box::into_raw(Box::new(vec![elem])) as *mut u8
+    seq_cons_cell(elem, seq_nil())
 }
 
 /// Check if sequence is empty. Returns 1 if empty, 0 otherwise.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
-/// valid and not be mutated concurrently for the duration of the call.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_null(seq_ptr: *mut u8) -> i64 {
-    if seq_ptr.is_null() {
-        return 1;
-    }
-    let s = &*(seq_ptr as *const RtsSeq);
-    if s.is_empty() {
+    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
         1
     } else {
         0
@@ -1185,255 +1250,155 @@ pub unsafe extern "C" fn bhc_seq_null(seq_ptr: *mut u8) -> i64 {
 /// Get the length of a sequence.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
-/// valid and not be mutated concurrently for the duration of the call.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_length(seq_ptr: *mut u8) -> i64 {
-    if seq_ptr.is_null() {
-        return 0;
+    let mut n = 0i64;
+    let mut cur = seq_ptr;
+    while !cur.is_null() && *(cur as *const i64) != 0 {
+        n += 1;
+        cur = *(cur.add(16) as *const *mut u8);
     }
-    let s = &*(seq_ptr as *const RtsSeq);
-    s.len() as i64
+    n
 }
 
-/// Index into a sequence. Panics on out-of-bounds.
+/// Index into a sequence; out-of-range yields null.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
-/// valid and not be mutated concurrently for the duration of the call.
-/// Out-of-range `idx` values yield null rather than reading out of bounds. The
-/// returned element pointer is borrowed from the sequence and is only valid
-/// while the sequence remains live.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call. The
+/// returned pointer is borrowed from the sequence.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_index(seq_ptr: *mut u8, idx: i64) -> *mut u8 {
-    if seq_ptr.is_null() {
-        return ptr::null_mut();
-    }
-    let s = &*(seq_ptr as *const RtsSeq);
-    let i = idx as usize;
-    if i < s.len() {
-        s[i]
-    } else {
-        ptr::null_mut()
-    }
+    seq_nth(seq_ptr, idx)
 }
 
 /// Lookup by index, returning null if out-of-bounds (for Maybe wrapping).
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
-/// valid and not be mutated concurrently for the duration of the call. The
-/// returned element pointer is borrowed from the sequence and is only valid
-/// while the sequence remains live.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call. The
+/// returned pointer is borrowed from the sequence.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_lookup(idx: i64, seq_ptr: *mut u8) -> *mut u8 {
-    if seq_ptr.is_null() {
-        return ptr::null_mut();
-    }
-    let s = &*(seq_ptr as *const RtsSeq);
-    let i = idx as usize;
-    if i < s.len() {
-        s[i]
-    } else {
-        ptr::null_mut()
-    }
+    seq_nth(seq_ptr, idx)
 }
 
-/// Prepend an element (`<|`). Returns a new sequence.
+/// Prepend an element (`<|`). O(1) — shares the tail.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
-/// valid and not be mutated concurrently for the duration of the call; it is
-/// cloned rather than mutated, so the input sequence is left intact.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_cons(elem: *mut u8, seq_ptr: *mut u8) -> *mut u8 {
-    let mut v = if seq_ptr.is_null() {
-        Vec::new()
+    let tail = if seq_ptr.is_null() {
+        seq_nil()
     } else {
-        (*(seq_ptr as *const RtsSeq)).clone()
+        seq_ptr
     };
-    v.insert(0, elem);
-    Box::into_raw(Box::new(v)) as *mut u8
+    seq_cons_cell(elem, tail)
 }
 
 /// Append an element (`|>`). Returns a new sequence.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
-/// valid and not be mutated concurrently for the duration of the call; it is
-/// cloned rather than mutated, so the input sequence is left intact.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_snoc(seq_ptr: *mut u8, elem: *mut u8) -> *mut u8 {
-    let mut v = if seq_ptr.is_null() {
-        Vec::new()
-    } else {
-        (*(seq_ptr as *const RtsSeq)).clone()
-    };
+    let mut v = seq_to_vec(seq_ptr);
     v.push(elem);
-    Box::into_raw(Box::new(v)) as *mut u8
+    vec_to_seq(&v)
 }
 
-/// Concatenate two sequences (`><`). Returns a new sequence.
+/// Concatenate two sequences (`><`). Shares the spine of `seq2`.
 ///
 /// # Safety
-///
-/// `seq1` and `seq2` must each be either null or point to a live `RtsSeq`
-/// previously returned by one of the `bhc_seq_*` constructors. Both pointees
-/// must remain valid and not be mutated concurrently for the duration of the
-/// call; they are read/cloned, not mutated.
+/// `seq1` and `seq2` must each be null or a valid bhc cons list, valid for the
+/// call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_append(seq1: *mut u8, seq2: *mut u8) -> *mut u8 {
-    let mut v1 = if seq1.is_null() {
-        Vec::new()
-    } else {
-        (*(seq1 as *const RtsSeq)).clone()
-    };
-    if !seq2.is_null() {
-        let s2 = &*(seq2 as *const RtsSeq);
-        v1.extend_from_slice(s2);
+    let v1 = seq_to_vec(seq1);
+    let mut acc = if seq2.is_null() { seq_nil() } else { seq2 };
+    for &e in v1.iter().rev() {
+        acc = seq_cons_cell(e, acc);
     }
-    Box::into_raw(Box::new(v1)) as *mut u8
+    acc
 }
 
 /// Take first n elements. Returns a new sequence.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
-/// valid and not be mutated concurrently for the duration of the call; it is
-/// cloned rather than mutated, so the input sequence is left intact.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_take(n: i64, seq_ptr: *mut u8) -> *mut u8 {
-    if seq_ptr.is_null() {
-        return bhc_seq_empty();
-    }
-    let s = &*(seq_ptr as *const RtsSeq);
-    let take_n = (n as usize).min(s.len());
-    Box::into_raw(Box::new(s[..take_n].to_vec())) as *mut u8
+    let v = seq_to_vec(seq_ptr);
+    let take_n = (n.max(0) as usize).min(v.len());
+    vec_to_seq(&v[..take_n])
 }
 
 /// Drop first n elements. Returns a new sequence.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
-/// valid and not be mutated concurrently for the duration of the call; it is
-/// cloned rather than mutated, so the input sequence is left intact.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_drop(n: i64, seq_ptr: *mut u8) -> *mut u8 {
-    if seq_ptr.is_null() {
-        return bhc_seq_empty();
-    }
-    let s = &*(seq_ptr as *const RtsSeq);
-    let drop_n = (n as usize).min(s.len());
-    Box::into_raw(Box::new(s[drop_n..].to_vec())) as *mut u8
+    let v = seq_to_vec(seq_ptr);
+    let drop_n = (n.max(0) as usize).min(v.len());
+    vec_to_seq(&v[drop_n..])
 }
 
 /// Reverse a sequence. Returns a new sequence.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
-/// valid and not be mutated concurrently for the duration of the call; it is
-/// cloned rather than mutated, so the input sequence is left intact.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_reverse(seq_ptr: *mut u8) -> *mut u8 {
-    if seq_ptr.is_null() {
-        return bhc_seq_empty();
-    }
-    let s = &*(seq_ptr as *const RtsSeq);
-    let mut v = s.clone();
+    let mut v = seq_to_vec(seq_ptr);
     v.reverse();
-    Box::into_raw(Box::new(v)) as *mut u8
+    vec_to_seq(&v)
 }
 
-/// Update element at index. Returns a new sequence.
+/// Update element at index. Out-of-range leaves it unchanged.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
-/// valid and not be mutated concurrently for the duration of the call; it is
-/// cloned rather than mutated, so the input sequence is left intact.
-/// Out-of-range `idx` values leave the cloned sequence unchanged.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_update(idx: i64, elem: *mut u8, seq_ptr: *mut u8) -> *mut u8 {
-    if seq_ptr.is_null() {
-        return bhc_seq_empty();
-    }
-    let s = &*(seq_ptr as *const RtsSeq);
-    let mut v = s.clone();
+    let mut v = seq_to_vec(seq_ptr);
     let i = idx as usize;
-    if i < v.len() {
+    if idx >= 0 && i < v.len() {
         v[i] = elem;
     }
-    Box::into_raw(Box::new(v)) as *mut u8
+    vec_to_seq(&v)
 }
 
-/// Insert element at index. Returns a new sequence.
+/// Insert element at index (clamped to length). Returns a new sequence.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
-/// valid and not be mutated concurrently for the duration of the call; it is
-/// cloned rather than mutated, so the input sequence is left intact. The
-/// insertion index is clamped to the sequence length.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_insert_at(idx: i64, elem: *mut u8, seq_ptr: *mut u8) -> *mut u8 {
-    let mut v = if seq_ptr.is_null() {
-        Vec::new()
-    } else {
-        (*(seq_ptr as *const RtsSeq)).clone()
-    };
-    let i = (idx as usize).min(v.len());
+    let mut v = seq_to_vec(seq_ptr);
+    let i = (idx.max(0) as usize).min(v.len());
     v.insert(i, elem);
-    Box::into_raw(Box::new(v)) as *mut u8
+    vec_to_seq(&v)
 }
 
-/// Delete element at index. Returns a new sequence.
+/// Delete element at index. Out-of-range leaves it unchanged.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
-/// valid and not be mutated concurrently for the duration of the call; it is
-/// cloned rather than mutated, so the input sequence is left intact.
-/// Out-of-range `idx` values leave the cloned sequence unchanged.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_delete_at(idx: i64, seq_ptr: *mut u8) -> *mut u8 {
-    if seq_ptr.is_null() {
-        return bhc_seq_empty();
-    }
-    let s = &*(seq_ptr as *const RtsSeq);
-    let mut v = s.clone();
+    let mut v = seq_to_vec(seq_ptr);
     let i = idx as usize;
-    if i < v.len() {
+    if idx >= 0 && i < v.len() {
         v.remove(i);
     }
-    Box::into_raw(Box::new(v)) as *mut u8
+    vec_to_seq(&v)
 }
 
 /// Get element count (for toList iteration). Same as length.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors and must remain valid for
-/// the duration of the call.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_elem_count(seq_ptr: *mut u8) -> i64 {
     bhc_seq_length(seq_ptr)
@@ -1442,143 +1407,98 @@ pub unsafe extern "C" fn bhc_seq_elem_count(seq_ptr: *mut u8) -> i64 {
 /// Get element at index (for toList iteration). Same as index.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors and must remain valid for
-/// the duration of the call. The returned element pointer is borrowed from the
-/// sequence and is only valid while the sequence remains live.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call. The
+/// returned pointer is borrowed from the sequence.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_elem_at(seq_ptr: *mut u8, idx: i64) -> *mut u8 {
-    bhc_seq_index(seq_ptr, idx)
+    seq_nth(seq_ptr, idx)
 }
 
 /// Replicate: create a sequence of n copies of an element.
 #[no_mangle]
 pub extern "C" fn bhc_seq_replicate(n: i64, elem: *mut u8) -> *mut u8 {
     let count = if n < 0 { 0 } else { n as usize };
-    Box::into_raw(Box::new(vec![elem; count])) as *mut u8
+    let mut acc = seq_nil();
+    for _ in 0..count {
+        acc = seq_cons_cell(elem, acc);
+    }
+    acc
 }
 
 /// ViewL tag: 0 if empty, 1 if non-empty.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors and must remain valid for
-/// the duration of the call.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewl_tag(seq_ptr: *mut u8) -> i64 {
-    if seq_ptr.is_null() {
-        return 0;
-    }
-    let s = &*(seq_ptr as *const RtsSeq);
-    if s.is_empty() {
+    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
         0
     } else {
         1
     }
 }
 
-/// ViewL head: first element (undefined if empty).
+/// ViewL head: first element, or null if empty.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors and must remain valid for
-/// the duration of the call. Returns null for null/empty inputs. The returned
-/// element pointer is borrowed from the sequence and is only valid while the
-/// sequence remains live.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call. The
+/// returned pointer is borrowed from the sequence.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewl_head(seq_ptr: *mut u8) -> *mut u8 {
-    if seq_ptr.is_null() {
-        return ptr::null_mut();
-    }
-    let s = &*(seq_ptr as *const RtsSeq);
-    if s.is_empty() {
+    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
         ptr::null_mut()
     } else {
-        s[0]
+        *(seq_ptr.add(8) as *const *mut u8)
     }
 }
 
-/// ViewL tail: all elements after first. Returns a new sequence.
+/// ViewL tail: all elements after the first. O(1) — shares the tail spine.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
-/// valid and not be mutated concurrently for the duration of the call; it is
-/// read/cloned, not mutated.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewl_tail(seq_ptr: *mut u8) -> *mut u8 {
-    if seq_ptr.is_null() {
-        return bhc_seq_empty();
+    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
+        seq_nil()
+    } else {
+        *(seq_ptr.add(16) as *const *mut u8)
     }
-    let s = &*(seq_ptr as *const RtsSeq);
-    if s.is_empty() {
-        return bhc_seq_empty();
-    }
-    Box::into_raw(Box::new(s[1..].to_vec())) as *mut u8
 }
 
 /// ViewR tag: 0 if empty, 1 if non-empty.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors and must remain valid for
-/// the duration of the call.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewr_tag(seq_ptr: *mut u8) -> i64 {
-    if seq_ptr.is_null() {
-        return 0;
-    }
-    let s = &*(seq_ptr as *const RtsSeq);
-    if s.is_empty() {
+    if seq_ptr.is_null() || *(seq_ptr as *const i64) == 0 {
         0
     } else {
         1
     }
 }
 
-/// ViewR last: last element (undefined if empty).
+/// ViewR last: last element, or null if empty.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors and must remain valid for
-/// the duration of the call. Returns null for null/empty inputs. The returned
-/// element pointer is borrowed from the sequence and is only valid while the
-/// sequence remains live.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call. The
+/// returned pointer is borrowed from the sequence.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewr_last(seq_ptr: *mut u8) -> *mut u8 {
-    if seq_ptr.is_null() {
-        return ptr::null_mut();
-    }
-    let s = &*(seq_ptr as *const RtsSeq);
-    if s.is_empty() {
-        ptr::null_mut()
-    } else {
-        *s.last().unwrap()
-    }
+    let v = seq_to_vec(seq_ptr);
+    v.last().copied().unwrap_or(ptr::null_mut())
 }
 
-/// ViewR init: all elements except last. Returns a new sequence.
+/// ViewR init: all elements except the last. Returns a new sequence.
 ///
 /// # Safety
-///
-/// `seq_ptr` must either be null or point to a live `RtsSeq` previously
-/// returned by one of the `bhc_seq_*` constructors. The pointee must remain
-/// valid and not be mutated concurrently for the duration of the call; it is
-/// read/cloned, not mutated.
+/// `seq_ptr` must be null or a valid bhc cons list, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_seq_viewr_init(seq_ptr: *mut u8) -> *mut u8 {
-    if seq_ptr.is_null() {
-        return bhc_seq_empty();
+    let v = seq_to_vec(seq_ptr);
+    if v.is_empty() {
+        seq_nil()
+    } else {
+        vec_to_seq(&v[..v.len() - 1])
     }
-    let s = &*(seq_ptr as *const RtsSeq);
-    if s.is_empty() {
-        return bhc_seq_empty();
-    }
-    Box::into_raw(Box::new(s[..s.len() - 1].to_vec())) as *mut u8
 }

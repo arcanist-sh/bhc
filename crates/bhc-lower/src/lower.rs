@@ -6080,11 +6080,17 @@ fn register_standard_module_exports(
             // Other `has_typed_sigs` modules keep the fresh-stub behavior even
             // though a same-named builtin may exist: `Data.Text.Lazy`'s primops
             // carry strict-`Text` result sigs (an alias binding surfaced
-            // "expected LazyText, found Text"), and `Data.Sequence`/`Data.Foldable`
-            // primops are reached correctly only through the by-name codegen path
-            // a stub dispatch takes — binding the alias to their real DefId
-            // crashed at runtime. Widen this set only after verifying the primop
-            // end to end.
+            // "expected LazyText, found Text"), and `Data.Foldable` primops are
+            // reached correctly only through the by-name codegen path a stub
+            // dispatch takes — binding the alias to their real DefId crashed at
+            // runtime. Widen this set only after verifying the primop end to end.
+            //
+            // `Data.Sequence` was in that excluded group while its Seq was an
+            // opaque Vec (generic `Foldable.toList` could not walk it); now that a
+            // Seq IS an ordinary cons list (bhc-containers), `Seq.singleton`,
+            // `<|`, `><`, `fromList`, `toList`, … resolve to the real primops and
+            // interoperate with lists/Foldable — which is what pandoc's Builder
+            // (`Inlines`/`Blocks` = `Many (Seq a)`) needs.
             let prefer_real_builtin = matches!(
                 module_name,
                 "Data.Map"
@@ -6095,6 +6101,7 @@ fn register_standard_module_exports(
                     | "Data.IntMap.Lazy"
                     | "Data.IntSet"
                     | "Data.Set"
+                    | "Data.Sequence"
                     | "Data.Text"
                     | "Data.Text.IO"
             );
@@ -6274,6 +6281,27 @@ fn register_standard_module_exports(
         if !is_explicitly_imported {
             // Skip unqualified registration — this name wasn't in the explicit
             // import list. Qualified names (e.g., T.foldr) are still registered above.
+        } else if !is_qualified_import
+            && ctx.lookup_value(unqualified).is_none()
+            && ctx
+                .lookup_value(Symbol::intern(&format!("{module_name}.{export}")))
+                .is_some_and(|d| !ctx.is_stub(d))
+        {
+            // The full-name primop is a REAL builtin (the curated `has_typed_sigs`
+            // set bound `Module.name` straight to it above). An unqualified import
+            // brings the bare name into scope, so bind it to that same primop
+            // instead of a fresh stub. `import Data.Sequence ((|>), viewr, viewl)`
+            // in pandoc-types' Builder needs bare `|>`/`viewr`/`viewl` to be the
+            // real Seq ops, not stubs — its `Inlines <> Inlines` is written with
+            // them. (Non-curated `has_typed_sigs` modules leave a stub at the full
+            // name, so this branch is skipped and the stub path below runs.)
+            let def_id = ctx
+                .lookup_value(Symbol::intern(&format!("{module_name}.{export}")))
+                .unwrap();
+            ctx.bind_value(unqualified, def_id);
+            if is_constructor {
+                ctx.bind_constructor(unqualified, def_id);
+            }
         } else if ctx.lookup_value(unqualified).is_none() {
             // No existing binding — create a stub for this imported name.
             let def_id = ctx.fresh_def_id();

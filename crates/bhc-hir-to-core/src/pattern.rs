@@ -162,7 +162,11 @@ pub fn lower_pat_to_alt_with_fallthrough(
                     (
                         info.name,
                         info.type_name,
-                        info.tag,
+                        // A fixed-tag builtin reached as an import stub (e.g.
+                        // `Seq.:<`/`Seq.:>` in pandoc-types' Builder `<>`) carries
+                        // a placeholder tag; prefer the fixed one so the alt lands
+                        // on the branch `viewl`/`viewr` actually built.
+                        get_constructor_tag(info.name.as_str(), info.tag),
                         info.existential_dict_count,
                     )
                 } else if let Some(var) = ctx.lookup_var(def_ref.def_id) {
@@ -678,7 +682,20 @@ fn pat_head(ctx: &LowerContext, pat: &hir::Pat) -> PatHead {
         Pat::Lit(lit, _) => PatHead::Lit(literal_key(lit)),
         Pat::Con(def_ref, sub_pats, _) => {
             if let Some(info) = ctx.lookup_constructor_or_by_name(def_ref.def_id) {
-                PatHead::Con(info.type_name, info.name, info.tag, info.arity)
+                // A builtin constructor with a fixed tag (Bool/Maybe/…, and the
+                // Data.Sequence `ViewL`/`ViewR` constructors) may be reached as an
+                // IMPORT STUB carrying a placeholder tag/arity — `Seq.:<`/`Seq.:>`
+                // in pandoc-types' Builder `<>`. Prefer the fixed tag, and where
+                // the stub records no fields, trust the pattern's own field count
+                // so `y :< ys'` binds head and tail rather than reading zero
+                // fields and walking garbage.
+                let tag = get_constructor_tag(info.name.as_str(), info.tag);
+                let arity = if info.arity == 0 && !sub_pats.is_empty() {
+                    sub_pats.len() as u32
+                } else {
+                    info.arity
+                };
+                PatHead::Con(info.type_name, info.name, tag, arity)
             } else {
                 // Fallback: use name-based lookup
                 let name = ctx
@@ -1837,6 +1854,11 @@ fn make_if(cond: core::Expr, then_br: core::Expr, else_br: core::Expr, span: Spa
 /// that match what the LLVM codegen expects. For user-defined types,
 /// we fall back to the `DefId` index.
 fn get_constructor_tag(name: &str, fallback: u32) -> u32 {
+    // Strip a module qualifier so an import stub's qualified name still matches
+    // the fixed-tag table: `Data.Sequence.EmptyL` → `EmptyL`,
+    // `Data.Sequence.:<` → `:<`. A constructor name never itself contains `.`,
+    // and unmatched names fall through to `fallback` unchanged.
+    let name = name.rsplit('.').next().unwrap_or(name);
     match name {
         // Bool constructors
         "False" => 0,
@@ -1881,6 +1903,16 @@ fn get_constructor_tag(name: &str, fallback: u32) -> u32 {
         "L1" => 0,
         "R1" => 1,
         ":*:" => 0,
+
+        // Data.Sequence view constructors — must match the tags
+        // `lower_builtin_seq_viewl`/`viewr` build and codegen's `constructor_info`
+        // reports (`EmptyL`/`EmptyR` tag 0, `:<`/`:>` tag 1). Without this they
+        // fell back to their DefId, so a `case viewl s of EmptyL … ; _ :< _ …`
+        // matched the wrong alternative (empty sequences took the `:<` branch).
+        "EmptyL" => 0,
+        ":<" => 1,
+        "EmptyR" => 0,
+        ":>" => 1,
 
         // User-defined constructors: use fallback
         _ => fallback,

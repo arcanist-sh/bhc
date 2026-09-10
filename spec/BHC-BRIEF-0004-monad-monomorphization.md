@@ -52,10 +52,20 @@ reached transitively via the regular recursion). Reverted the fallback; App comp
 the `concrete_monad_of`/result-match refactor and the transitive-extern work.
 
 ### Two remaining blockers for the writer (each its own effort)
-1. **`runReaderT` over more inner monads** (codegen). `lower_builtin_run_reader_t` handles ReaderT
-   over IO and StateT only; pandoc needs it over ExceptT-over-StateT (the stes inner) and likely
-   more. This is the stes-style transformer-codegen work for ReaderT-topped stacks. With it, the
-   erased-occurrence fallback can be re-enabled and the writer specializes past `setupTranslations`.
+1. **The whole `ReaderT`-over-`ExceptT`-over-`StateT` stack** (codegen) — NOT a targeted
+   `runReaderT` fix. Investigated 2026-09-10 with the isolated repro `pandoc-harness/big/RRT.hs`
+   (`runReaderT comp 5` for `comp :: ReaderT Int (ExceptT String (StateT Int IO)) Int`, no
+   monomorphization). `lower_builtin_run_reader_t` errors on this inner monad, but that is only a
+   symptom: the whole stack is lowered with INCONSISTENT op representations — `comp` uses generic
+   `bhc_reader_t_{ask,bind,lift,pure}` plus a 2-arg StateT-over-IO `bhc_state_t_get` (via
+   `bhc_except_t_lift_auto_over_st`), and `comp` itself is a 1-arg CAF, not the flat 3-arg the
+   `run_reader_t_over_state_t` handler assumes. Routing the ExceptT inner to either the StateT or
+   the IO/direct handler makes `RRT` COMPILE but crash at runtime (misaligned deref) — worse than
+   the clear "not supported" error — because `comp`'s body is mis-built. Both attempts were
+   reverted. The real fix is implementing this stack end-to-end (its own closure protocol + all
+   ops: `ask`/`bind`/`lift`/`get`/`put`/`throwError`/`return` and the runners), a stes-style
+   transformer-codegen effort of comparable size. With it, the erased-occurrence fallback can be
+   re-enabled and the writer specializes past `setupTranslations`.
 2. **Sound recovery of erased occurrence types.** The fallback (specialize at `cur_monad`) is a
    heuristic that mis-fires (App). A principled signal for the monad of a `Ty::Error` occurrence
    (e.g. transporting the defining module's `resolved_expr_types`, or not erasing under `lift`)

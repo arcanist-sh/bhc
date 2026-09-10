@@ -327,10 +327,19 @@ fn get_or_specialize(orig_var: &Var, orig_body: &Expr, conc_ty: &Ty, ctx: &mut C
         return None;
     }
     let mb = binder_vars[0].clone();
-    // The concrete monad = image of the single binder variable when the binder
-    // type is matched against the concrete instantiation.
+    // The concrete monad = image of the single binder variable when the binder's
+    // RESULT type is matched against the concrete instantiation's result. Only the
+    // result is matched, not the whole function type: cross-module occurrence
+    // types can carry a wrong argument type (pandoc's `writeHtmlString'` records
+    // `Text` where its first parameter is `WriterState`), which is harmless — the
+    // monad variable lives in the result (`… -> m a` or `… -> StateT s m a`), and
+    // matching results extracts it for both shapes.
     let mut binder_match = Subst::new();
-    if !match_ty(&orig_var.ty, conc_ty, &mut binder_match) {
+    if !match_ty(
+        ultimate_result(&orig_var.ty),
+        ultimate_result(conc_ty),
+        &mut binder_match,
+    ) {
         return None;
     }
     let concrete_monad = binder_match.get(&mb)?.clone();
@@ -576,6 +585,15 @@ fn monad_sel_builtin(sel: &str) -> Option<&'static str> {
         "$sel_2" => Some(">>"),
         _ => None,
     }
+}
+
+/// The ultimate result of a function type (all leading `->` arrows stripped).
+fn ultimate_result(ty: &Ty) -> &Ty {
+    let mut r = ty;
+    while let Ty::Fun(_, b) = r {
+        r = b;
+    }
+    r
 }
 
 fn has_free_tyvar(ty: &Ty) -> bool {

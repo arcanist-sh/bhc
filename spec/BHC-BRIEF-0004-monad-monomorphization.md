@@ -1,13 +1,45 @@
 # BHC-BRIEF-0004 — Monomorphize polymorphic-monad functions at their concrete transformer stack
 
 **Document ID:** BHC-BRIEF-0004
-**Status:** The full pandoc SHAPE works, 2026-09-10. `big/xmod4/` — a polymorphic writer in
-one module, a concrete monad defined as a NEWTYPE (`AppM`, exactly `PandocIO`'s shape) in a
-second imported module, and a driver in a third that runs the writer at that newtype — prints
-`Right 5`. So: same-module (`PolyW`), cross-module (`xmod`), newtype base monad (`xmod3`), and
-imported newtype (`xmod4`) all work. Pass in `crates/bhc-core/src/monomorphize.rs`;
-cross-module transport (bodies + newtype/synonym defs) via `.bhc` sidecars. Depends on the
-stes stack (DONE, 175fd86).
+**Status:** The REAL pandoc writer's monad machinery runs, 2026-09-10. `pandoc-harness/
+WriterProbe.hs` (`runIOorExplode (writeHtml5String def doc)` on a hand-built `Pandoc`) compiles,
+links, and executes `writeHtml5String @ PandocIO` fully through the specialized stes machinery
+(`bhc_eval_stes` runs) — no longer crashing in the transformer bind. It now stops at a
+per-function stub (`setupTranslations`, see below), NOT a monomorphization/transformer bug.
+The mechanism (`crates/bhc-core/src/monomorphize.rs`) handles same-module (`PolyW`),
+cross-module (`xmod`), newtype base monad (`xmod3`), and imported newtype (`xmod4`), all
+`Right 5`. Cross-module transport (bodies + newtype/synonym defs + import list, for a
+transitive-closure BFS) via `.bhc` sidecars. Depends on the stes stack (DONE, 175fd86).
+
+## Getting the real writer to run its monad machinery (2026-09-10)
+
+Three fixes past the `xmod4` shape were needed for the actual writer:
+
+1. **Transitive `.bhc` loading.** `PandocIO` is defined in `Text.Pandoc.Class.PandocIO`, which
+   the driver imports only transitively (via `Text.Pandoc.Class`); the writer's helper chain
+   spans modules too. Each sidecar now records its module's imports, and the loader BFSes the
+   import closure (bounded — a whole-DB scan was O(modules²) across a sweep).
+2. **Match ultimate RESULT types, not whole function types.** A cross-module occurrence type can
+   carry a wrong ARGUMENT type — pandoc's `writeHtmlString'` records `Text` where its first
+   parameter is `WriterState` — which made the full-type match fail. The monad variable lives in
+   the result (`… -> m a` or `… -> StateT s m a`); matching only `ultimate_result` extracts it
+   for both shapes and ignores the corrupt arg.
+3. **Newtype/synonym unfolding transported cross-module** (already above): the driver unfolds
+   `PandocIO` via the transported expansion map.
+
+With these, `writeHtml5String` and its chain specialize (35 specializations incl. the PandocIO
+instance methods), `bhc_eval_stes`/`bhc_except_t_bind_over_st` run correctly, and the writer
+reaches `setupTranslations`.
+
+### Next blocker: `setupTranslations` (and its class)
+`setupTranslations :: PandocMonad m => Meta -> m ()` (Writers/Shared.hs, called `lift`ed from
+HTML.hs:281) is emitted as a `stub: … not implemented` and panics at runtime. Its occurrence
+type in the clone comes back CONCRETE-but-not-a-transformer (`vty_free=false`,
+`mentions_transformer=false`), so the pass skips specializing it, and codegen — lacking an
+extern for a transitively-imported symbol — stubs it. Two things to resolve: (a) why the
+occurrence type is not the transformer stack under `lift` (likely erased/mis-recorded), so the
+pass specializes it; and/or (b) declare externs for transitively-referenced concrete symbols so
+codegen resolves rather than stubs them.
 
 **Remaining for the REAL pandoc writer** (beyond this mechanism): (a) `PandocMonad m =>` is a
 Monad SUPERCLASS with ~17 methods — the pass rewrites the Monad `>>=`/`>>` selectors but

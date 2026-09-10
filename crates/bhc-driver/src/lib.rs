@@ -1394,7 +1394,14 @@ impl Compiler {
         // can specialize these polymorphic bodies and unfold that monad locally
         // (cross-module monomorphization, BHC-BRIEF-0004).
         if let Some(ref hidir) = self.session.options.output_interface_dir {
-            Self::write_core_sidecar(hidir, hir.name.as_str(), &core.bindings, &newtypes);
+            let imports: Vec<String> = hir.imports.iter().map(|i| i.module.to_string()).collect();
+            Self::write_core_sidecar(
+                hidir,
+                hir.name.as_str(),
+                &core.bindings,
+                &newtypes,
+                &imports,
+            );
         }
         // Load the transported bodies and type expansions of imported modules, so
         // the pass can specialize an imported writer at an imported newtype monad.
@@ -1535,13 +1542,14 @@ impl Compiler {
         module_name: &str,
         bindings: &[Bind],
         newtypes: &FxHashMap<bhc_intern::Symbol, (Vec<bhc_types::TyVar>, bhc_types::Ty)>,
+        imports: &[String],
     ) {
         let path = Self::core_sidecar_path(hidir, module_name);
         let expansions: Vec<(bhc_intern::Symbol, Vec<bhc_types::TyVar>, bhc_types::Ty)> = newtypes
             .iter()
             .map(|(name, (params, ty))| (*name, params.clone(), ty.clone()))
             .collect();
-        if let Ok(bytes) = bincode::serialize(&(bindings, &expansions)) {
+        if let Ok(bytes) = bincode::serialize(&(bindings, &expansions, imports)) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent.as_std_path());
             }
@@ -1564,6 +1572,7 @@ impl Compiler {
         type Sidecar = (
             Vec<Bind>,
             Vec<(bhc_intern::Symbol, Vec<bhc_types::TyVar>, bhc_types::Ty)>,
+            Vec<String>,
         );
         let mut out: FxHashMap<String, (bhc_core::Var, Expr)> = FxHashMap::default();
         let mut expansions: FxHashMap<bhc_intern::Symbol, (Vec<bhc_types::TyVar>, bhc_types::Ty)> =
@@ -1575,36 +1584,53 @@ impl Compiler {
         for db in &self.session.options.package_dbs {
             dirs.push(db);
         }
-        for import in &hir.imports {
+        // BFS the TRANSITIVE import closure: a concrete monad (PandocIO) is often
+        // defined in a transitively imported module, and the writer's helper chain
+        // can span modules, but a whole-DB scan is O(modules^2) across a sweep.
+        // Each sidecar records its own module's imports, so we follow them.
+        let mut queue: std::collections::VecDeque<String> =
+            hir.imports.iter().map(|i| i.module.to_string()).collect();
+        let mut visited: FxHashSet<String> = FxHashSet::default();
+        while let Some(module) = queue.pop_front() {
+            if !visited.insert(module.clone()) {
+                continue;
+            }
+            let mut found = None;
             for dir in &dirs {
-                let path = Self::core_sidecar_path(dir, import.module.as_str());
-                let Ok(bytes) = std::fs::read(path.as_std_path()) else {
-                    continue;
-                };
-                let Ok((mut binds, nts)) = bincode::deserialize::<Sidecar>(&bytes) else {
-                    continue;
-                };
-                for (name, params, ty) in nts {
-                    expansions.entry(name).or_insert((params, ty));
+                let path = Self::core_sidecar_path(dir, &module);
+                if let Ok(bytes) = std::fs::read(path.as_std_path()) {
+                    found = Some(bytes);
+                    break;
                 }
-                // The transported bindings carry the SOURCE module's VarIds, which
-                // can collide with this module's; give them fresh disjoint ids so
-                // codegen (which keys functions by VarId) never confuses an
-                // imported body's internal var with a local one.
-                bhc_core::monomorphize::refresh_var_ids(&mut binds);
-                for b in binds {
-                    match b {
-                        Bind::NonRec(v, e) => {
+            }
+            let Some(bytes) = found else { continue };
+            let Ok((mut binds, nts, imports)) = bincode::deserialize::<Sidecar>(&bytes) else {
+                continue;
+            };
+            for imp in imports {
+                if !visited.contains(&imp) {
+                    queue.push_back(imp);
+                }
+            }
+            for (name, params, ty) in nts {
+                expansions.entry(name).or_insert((params, ty));
+            }
+            // The transported bindings carry the SOURCE module's VarIds, which
+            // can collide with this module's; give them fresh disjoint ids so
+            // codegen (which keys functions by VarId) never confuses an imported
+            // body's internal var with a local one.
+            bhc_core::monomorphize::refresh_var_ids(&mut binds);
+            for b in binds {
+                match b {
+                    Bind::NonRec(v, e) => {
+                        out.entry(v.name.to_string()).or_insert((v, *e));
+                    }
+                    Bind::Rec(bs) => {
+                        for (v, e) in bs {
                             out.entry(v.name.to_string()).or_insert((v, *e));
-                        }
-                        Bind::Rec(bs) => {
-                            for (v, e) in bs {
-                                out.entry(v.name.to_string()).or_insert((v, *e));
-                            }
                         }
                     }
                 }
-                break;
             }
         }
         (out, expansions)

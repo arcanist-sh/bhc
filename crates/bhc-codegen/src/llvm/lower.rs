@@ -3585,6 +3585,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             None,
         );
         self.functions.insert(VarId::new(1000345), f1000345);
+        // bhc_text_split (predicate-based: (fn_ptr, env_ptr, text) -> list of Text)
+        let f1000351 = self.module.llvm_module().add_function(
+            "bhc_text_split",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000351), f1000351);
         // bhc_text_take_while
         let f1000346 = self.module.llvm_module().add_function(
             "bhc_text_take_while",
@@ -6488,6 +6495,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Data.Text.all" => Some(2),
             "Data.Text.break" => Some(2),
             "Data.Text.span" => Some(2),
+            "Data.Text.split" => Some(2),
             "Data.Text.takeWhile" => Some(2),
             "Data.Text.dropWhile" => Some(2),
             "Data.Text.dropWhileEnd" => Some(2),
@@ -7959,6 +7967,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             "Data.Text.span" => {
                 self.lower_builtin_text_closure_ptr(args[0], args[1], 1000345, "text_span")
+            }
+            "Data.Text.split" => {
+                self.lower_builtin_text_closure_ptr(args[0], args[1], 1000351, "text_split")
             }
             "Data.Text.takeWhile" => {
                 self.lower_builtin_text_closure_ptr(args[0], args[1], 1000346, "text_take_while")
@@ -49134,6 +49145,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or_else(|| CodegenError::Internal("text_span: void".to_string()))?;
+                Ok(Some(result))
+            }
+            "Data.Text.split" => {
+                let rts_fn = self
+                    .functions
+                    .get(&VarId::new(1000351))
+                    .ok_or_else(|| CodegenError::Internal("text_split not declared".to_string()))?;
+                let cl = self.value_to_ptr(args[0])?;
+                let fnp = self.extract_closure_fn_ptr(cl)?;
+                let result = self
+                    .builder()
+                    .build_call(
+                        *rts_fn,
+                        &[fnp.into(), cl.into(), args[1].into()],
+                        "text_split",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("text_split: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text_split: void".to_string()))?;
                 Ok(Some(result))
             }
             "Data.Text.takeWhile" => {

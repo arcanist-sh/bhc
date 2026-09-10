@@ -1552,6 +1552,7 @@ impl LowerContext {
             (11234, "Data.Text.lines"),
             (11235, "Data.Text.splitOn"),
             (11236, "Data.Text.replace"),
+            (11237, "Data.Text.split"),
             // Data.Text.Encoding
             (11238, "Data.Text.Encoding.encodeUtf8"),
             (11239, "Data.Text.Encoding.decodeUtf8"),

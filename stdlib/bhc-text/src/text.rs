@@ -928,6 +928,35 @@ pub extern "C" fn bhc_text_lines(text: *const u8) -> *mut u8 {
     }
 }
 
+/// `T.split p t`: split `t` into pieces at each character satisfying `p`, with
+/// the separators dropped. Consecutive separators yield empty pieces and a
+/// trailing separator yields a trailing empty piece (`split (==',') "a,,b," =
+/// ["a","","b",""]`); `split p ""` is `[""]`. Returns a BHC cons-list of Text.
+#[no_mangle]
+pub extern "C" fn bhc_text_split(
+    fn_ptr: extern "C" fn(*mut u8, i64) -> i64,
+    env_ptr: *mut u8,
+    text: *const u8,
+) -> *mut u8 {
+    unsafe {
+        if text.is_null() {
+            return build_text_list(&[b"".as_slice()]);
+        }
+        let s = text_as_str(text);
+        let bytes = s.as_bytes();
+        let mut pieces: Vec<&[u8]> = Vec::new();
+        let mut start = 0usize;
+        for (i, c) in s.char_indices() {
+            if fn_ptr(env_ptr, c as i64) != 0 {
+                pieces.push(&bytes[start..i]);
+                start = i + c.len_utf8();
+            }
+        }
+        pieces.push(&bytes[start..]);
+        build_text_list(&pieces)
+    }
+}
+
 /// Split a Text on a substring delimiter.
 ///
 /// Returns a BHC cons-list of Text values.

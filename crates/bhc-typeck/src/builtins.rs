@@ -5276,6 +5276,17 @@ impl Builtins {
                 )),
             ),
             (
+                // split :: (Char -> Bool) -> Text -> [Text]
+                "Data.Text.split",
+                Scheme::mono(Ty::fun(
+                    Ty::fun(self.char_ty.clone(), self.bool_ty.clone()),
+                    Ty::fun(
+                        self.text_ty.clone(),
+                        Ty::List(Box::new(self.text_ty.clone())),
+                    ),
+                )),
+            ),
+            (
                 "Data.Text.replace",
                 Scheme::mono(Ty::fun(
                     self.text_ty.clone(),
@@ -7240,6 +7251,16 @@ impl Builtins {
                 Symbol::intern("Data.Text.splitOn"),
                 Scheme::mono(Ty::fun(
                     text_ty.clone(),
+                    Ty::fun(text_ty.clone(), Ty::List(Box::new(text_ty.clone()))),
+                )),
+            );
+
+            // split :: (Char -> Bool) -> Text -> [Text]
+            env.register_value(
+                DefId::new(11237),
+                Symbol::intern("Data.Text.split"),
+                Scheme::mono(Ty::fun(
+                    Ty::fun(self.char_ty.clone(), self.bool_ty.clone()),
                     Ty::fun(text_ty.clone(), Ty::List(Box::new(text_ty.clone()))),
                 )),
             );

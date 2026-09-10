@@ -643,7 +643,27 @@ impl Compiler {
                 });
             }
         }
-        let imported_constructors: Vec<(String, ConstructorMeta)> = lower_ctx
+        // Externs + constructor metadata for functions/constructors reachable only
+        // transitively — the specialized clones the monomorphizer emits reference
+        // them (pandoc's pure `lookupMetaString`, the `Lang` constructor), but the
+        // interface only lists DIRECT imports. Only needed when this module actually
+        // emitted specializations (`$$mono` bindings); the transitive BFS is skipped
+        // for the polymorphic library modules that make up most of a sweep.
+        let has_specializations = core.bindings.iter().any(|b| match b {
+            Bind::NonRec(v, _) => v.name.as_str().contains("$$mono"),
+            Bind::Rec(bs) => bs.iter().any(|(v, _)| v.name.as_str().contains("$$mono")),
+        });
+        let (transitive_externs, transitive_cons) = if has_specializations {
+            self.transitive_extern_symbols(&hir)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        for sym in transitive_externs {
+            if seen_symbols.insert(sym.name) {
+                imported_symbols.push(sym);
+            }
+        }
+        let mut imported_constructors: Vec<(String, ConstructorMeta)> = lower_ctx
             .interface_constructors
             .iter()
             .map(|(name, tag, arity, type_name, is_newtype, field_types)| {
@@ -659,6 +679,17 @@ impl Compiler {
                 )
             })
             .collect();
+        {
+            let mut seen_con: FxHashSet<String> = imported_constructors
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect();
+            for (name, meta) in transitive_cons {
+                if seen_con.insert(name.clone()) {
+                    imported_constructors.push((name, meta));
+                }
+            }
+        }
         let object_path = self.codegen_multimodule(
             &unit.module_name,
             &core,
@@ -1401,24 +1432,37 @@ impl Compiler {
                 &core.bindings,
                 &newtypes,
                 &imports,
+                &core.constructors,
             );
         }
-        // Load the transported bodies and type expansions of imported modules, so
-        // the pass can specialize an imported writer at an imported newtype monad.
-        let (imported_bodies, imported_newtypes) = self.load_imported_core_bodies(hir);
-        for (name, def) in imported_newtypes {
-            newtypes.entry(name).or_insert(def);
-        }
-
-        // Monomorphize polymorphic-monad functions at their concrete transformer
-        // stacks (BHC-BRIEF-0004). Runs on the freshly-lowered Core (original Var
-        // spans still match `resolved_expr_types`), before the simplifier.
-        let mono = bhc_core::monomorphize::monomorphize_module(
-            &mut core,
-            &typed.resolved_expr_types,
-            &imported_bodies,
-            &newtypes,
-        );
+        // Monomorphization can only fire if some occurrence has a GROUND result
+        // type headed by a type constructor (a concrete monad — a transformer
+        // stack, or a newtype like PandocIO over one). A purely polymorphic module
+        // (the common case in a library sweep) has none, so skip loading the
+        // transitive `.bhc` closure and running the pass entirely — that keeps the
+        // whole-project sweep from paying the cross-module cost per module.
+        let maybe_concrete_monad = typed.resolved_expr_types.values().any(|t| {
+            !Self::ty_has_free_var(t)
+                && matches!(Self::ultimate_result_ty(t), bhc_types::Ty::App(..))
+        });
+        let mono = if maybe_concrete_monad {
+            // Load the transported bodies and type expansions of imported modules,
+            // so the pass can specialize an imported writer at an imported newtype.
+            let (imported_bodies, imported_newtypes) = self.load_imported_core_bodies(hir);
+            for (name, def) in imported_newtypes {
+                newtypes.entry(name).or_insert(def);
+            }
+            // Runs on the freshly-lowered Core (original Var spans still match
+            // `resolved_expr_types`), before the simplifier. (BHC-BRIEF-0004.)
+            bhc_core::monomorphize::monomorphize_module(
+                &mut core,
+                &typed.resolved_expr_types,
+                &imported_bodies,
+                &newtypes,
+            )
+        } else {
+            0
+        };
         if mono > 0 {
             debug!(specialized = mono, "monad monomorphization complete");
         }
@@ -1543,18 +1587,137 @@ impl Compiler {
         bindings: &[Bind],
         newtypes: &FxHashMap<bhc_intern::Symbol, (Vec<bhc_types::TyVar>, bhc_types::Ty)>,
         imports: &[String],
+        constructors: &[bhc_core::CoreConstructor],
     ) {
         let path = Self::core_sidecar_path(hidir, module_name);
         let expansions: Vec<(bhc_intern::Symbol, Vec<bhc_types::TyVar>, bhc_types::Ty)> = newtypes
             .iter()
             .map(|(name, (params, ty))| (*name, params.clone(), ty.clone()))
             .collect();
-        if let Ok(bytes) = bincode::serialize(&(bindings, &expansions, imports)) {
+        if let Ok(bytes) = bincode::serialize(&(bindings, &expansions, imports, constructors)) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent.as_std_path());
             }
             let _ = std::fs::write(path.as_std_path(), bytes);
         }
+    }
+
+    /// Extern declarations for every top-level function reachable through the
+    /// transitive import closure, as `CompiledSymbol { name, llvm_name =
+    /// "Module.name", param_count }`. The monomorphization pass emits specialized
+    /// clones that reference concrete functions (e.g. pandoc's `lookupMetaString`)
+    /// defined in transitively-imported modules; the `-c` codegen path only
+    /// declares externs for DIRECT imports, so without these codegen stubs those
+    /// references and they panic at runtime. Deduped by name (first wins), so a
+    /// direct-import symbol added earlier is not overridden.
+    /// Whether a type mentions any free type variable.
+    fn ty_has_free_var(t: &bhc_types::Ty) -> bool {
+        use bhc_types::Ty;
+        match t {
+            Ty::Var(_) => true,
+            Ty::App(a, b) | Ty::Fun(a, b) => Self::ty_has_free_var(a) || Self::ty_has_free_var(b),
+            Ty::List(a) => Self::ty_has_free_var(a),
+            Ty::Tuple(ts) => ts.iter().any(Self::ty_has_free_var),
+            Ty::Forall(_, b) => Self::ty_has_free_var(b),
+            _ => false,
+        }
+    }
+
+    /// The ultimate result of a function type (all leading `->` arrows stripped).
+    fn ultimate_result_ty(t: &bhc_types::Ty) -> &bhc_types::Ty {
+        let mut r = t;
+        while let bhc_types::Ty::Fun(_, b) = r {
+            r = b;
+        }
+        r
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn transitive_extern_symbols(
+        &self,
+        hir: &HirModule,
+    ) -> (Vec<CompiledSymbol>, Vec<(String, ConstructorMeta)>) {
+        type Sidecar = (
+            Vec<Bind>,
+            Vec<(bhc_intern::Symbol, Vec<bhc_types::TyVar>, bhc_types::Ty)>,
+            Vec<String>,
+            Vec<bhc_core::CoreConstructor>,
+        );
+        fn lambda_arity(mut e: &Expr) -> usize {
+            let mut n = 0;
+            while let Expr::Lam(_, b, _) = e {
+                n += 1;
+                e = b;
+            }
+            n
+        }
+        let mut dirs: Vec<&Utf8PathBuf> = Vec::new();
+        if let Some(ref hidir) = self.session.options.output_interface_dir {
+            dirs.push(hidir);
+        }
+        for db in &self.session.options.package_dbs {
+            dirs.push(db);
+        }
+        let mut out: Vec<CompiledSymbol> = Vec::new();
+        let mut cons: Vec<(String, ConstructorMeta)> = Vec::new();
+        let mut seen: FxHashSet<bhc_intern::Symbol> = FxHashSet::default();
+        let mut seen_con: FxHashSet<String> = FxHashSet::default();
+        let mut queue: std::collections::VecDeque<String> =
+            hir.imports.iter().map(|i| i.module.to_string()).collect();
+        let mut visited: FxHashSet<String> = FxHashSet::default();
+        while let Some(module) = queue.pop_front() {
+            if !visited.insert(module.clone()) {
+                continue;
+            }
+            let mut bytes = None;
+            for dir in &dirs {
+                let path = Self::core_sidecar_path(dir, &module);
+                if let Ok(b) = std::fs::read(path.as_std_path()) {
+                    bytes = Some(b);
+                    break;
+                }
+            }
+            let Some(bytes) = bytes else { continue };
+            let Ok((binds, _nts, imports, constructors)) = bincode::deserialize::<Sidecar>(&bytes)
+            else {
+                continue;
+            };
+            for imp in imports {
+                if !visited.contains(&imp) {
+                    queue.push_back(imp);
+                }
+            }
+            for b in &binds {
+                let pairs: Vec<(&bhc_core::Var, &Expr)> = match b {
+                    Bind::NonRec(v, e) => vec![(v, e.as_ref())],
+                    Bind::Rec(bs) => bs.iter().map(|(v, e)| (v, e.as_ref())).collect(),
+                };
+                for (v, body) in pairs {
+                    if seen.insert(v.name) {
+                        out.push(CompiledSymbol {
+                            name: v.name,
+                            llvm_name: format!("{}.{}", module, v.name.as_str()),
+                            param_count: lambda_arity(body),
+                        });
+                    }
+                }
+            }
+            for c in constructors {
+                if seen_con.insert(c.name.clone()) {
+                    cons.push((
+                        c.name.clone(),
+                        ConstructorMeta {
+                            tag: c.tag,
+                            arity: c.arity,
+                            type_name: c.type_name.clone(),
+                            is_newtype: c.is_newtype,
+                            field_types: c.field_types.clone(),
+                        },
+                    ));
+                }
+            }
+        }
+        (out, cons)
     }
 
     /// Load the transported Core bodies of the modules this one imports, keyed by
@@ -1573,6 +1736,7 @@ impl Compiler {
             Vec<Bind>,
             Vec<(bhc_intern::Symbol, Vec<bhc_types::TyVar>, bhc_types::Ty)>,
             Vec<String>,
+            Vec<bhc_core::CoreConstructor>,
         );
         let mut out: FxHashMap<String, (bhc_core::Var, Expr)> = FxHashMap::default();
         let mut expansions: FxHashMap<bhc_intern::Symbol, (Vec<bhc_types::TyVar>, bhc_types::Ty)> =
@@ -1604,7 +1768,8 @@ impl Compiler {
                 }
             }
             let Some(bytes) = found else { continue };
-            let Ok((mut binds, nts, imports)) = bincode::deserialize::<Sidecar>(&bytes) else {
+            let Ok((mut binds, nts, imports, _cons)) = bincode::deserialize::<Sidecar>(&bytes)
+            else {
                 continue;
             };
             for imp in imports {

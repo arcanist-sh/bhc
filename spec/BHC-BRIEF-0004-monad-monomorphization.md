@@ -31,24 +31,36 @@ With these, `writeHtml5String` and its chain specialize (35 specializations incl
 instance methods), `bhc_eval_stes`/`bhc_except_t_bind_over_st` run correctly, and the writer
 reaches `setupTranslations`.
 
-### `setupTranslations` — FIXED (erased-occurrence-type fallback)
-`setupTranslations :: PandocMonad m => Meta -> m ()` (Writers/Shared.hs, `lift`ed from
-HTML.hs:281) had occurrence type `Ty::Error` in the clone (erased under `lift`), so there was no
-transformer to read and the pass skipped it. Fix: thread the enclosing specialization's concrete
-monad (`Ctx::cur_monad`) through `specialize_body`, and when an occurrence type is `Ty::Error`,
-specialize the callee at `cur_monad`. Sound because every polymorphic-monad call inside a clone
-runs in that same monad — even under `lift`, the writer's inner monad IS `cur_monad` (PandocIO).
-Also refactored: `get_or_specialize` now takes the concrete monad directly; `concrete_monad_of`
-extracts it by matching only the ultimate RESULT types. The writer now specializes past
-`setupTranslations`.
+### Transitive externs + constructors — LANDED (cross-module reference resolution)
+A specialized clone references concrete functions and constructors from TRANSITIVELY-imported
+modules (pandoc's pure `lookupMetaString`, the `Lang` constructor), but the `-c` path only
+declares externs/constructor-metadata for DIRECT imports, so codegen stubbed them and they
+panicked at runtime. Fix (driver, `transitive_extern_symbols`): the `.bhc` sidecar now also
+carries the module's import list and its `constructors`; the driver BFSes the transitive import
+closure and declares externs (`Module.name` + lambda-count arity) and constructor metadata for
+everything reachable, deduped by name (direct imports win). Gated on the module actually having
+`$$mono` specializations, and body-loading/mono is skipped unless `resolved` has a ground result
+headed by a type con — so the polymorphic library modules that make up a sweep pay nothing.
 
-### Next blocker: transitive externs for PURE symbols
-`lookupMetaString :: Text -> Meta -> Text` (Writers/Shared.hs:434, a PURE function) is now the
-stub. It is NOT monomorphization — a specialized clone references a concrete function from a
-transitively-imported module, but the driver only declares externs (`interface_symbols`) for
-DIRECT imports, so codegen stubs it. Fix is codegen/linking, not this pass: declare externs for
-transitively-referenced symbols (qualified `Module.name` + arity, resolving to the DB `.o`).
-Care needed on bare-name collisions across modules. Likely more such stubs follow.
+### `setupTranslations` — REVERTED (was fixed, regressed pandoc App)
+The erased-occurrence-type fallback (specialize a `Ty::Error`-typed callee at the enclosing
+`cur_monad`) got the writer past `setupTranslations`, but it also specialized a `ReaderT`-using
+function in `Text.Pandoc.App` at a concrete ExceptT-over-StateT monad, and codegen cannot yet run
+`runReaderT` over a non-IO/StateT inner monad (`lower_builtin_run_reader_t`) — so App failed to
+compile (221→220). Guarding the fallback on the direct callee did not help (the `runReaderT` is
+reached transitively via the regular recursion). Reverted the fallback; App compiles again. Kept
+the `concrete_monad_of`/result-match refactor and the transitive-extern work.
+
+### Two remaining blockers for the writer (each its own effort)
+1. **`runReaderT` over more inner monads** (codegen). `lower_builtin_run_reader_t` handles ReaderT
+   over IO and StateT only; pandoc needs it over ExceptT-over-StateT (the stes inner) and likely
+   more. This is the stes-style transformer-codegen work for ReaderT-topped stacks. With it, the
+   erased-occurrence fallback can be re-enabled and the writer specializes past `setupTranslations`.
+2. **Sound recovery of erased occurrence types.** The fallback (specialize at `cur_monad`) is a
+   heuristic that mis-fires (App). A principled signal for the monad of a `Ty::Error` occurrence
+   (e.g. transporting the defining module's `resolved_expr_types`, or not erasing under `lift`)
+   would replace it.
+Pandoc will surface further codegen coverage gaps past these — each a bounded extension.
 
 **Remaining for the REAL pandoc writer** (beyond this mechanism): (a) `PandocMonad m =>` is a
 Monad SUPERCLASS with ~17 methods — the pass rewrites the Monad `>>=`/`>>` selectors but

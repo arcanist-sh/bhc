@@ -72,7 +72,6 @@ pub fn monomorphize_module(
         imported,
         newtypes,
         memo: FxHashMap::default(),
-        cur_monad: Ty::Error,
         new_bindings: Vec::new(),
         resolved,
     };
@@ -172,11 +171,6 @@ struct Ctx<'a> {
     newtypes: &'a FxHashMap<bhc_intern::Symbol, (Vec<TyVar>, Ty)>,
     /// Memo of specializations, keyed by (binder name, concrete-type string).
     memo: FxHashMap<(String, String), Var>,
-    /// The concrete monad of the specialization currently being cloned. Used to
-    /// specialize a callee whose occurrence type was erased (`Ty::Error`): every
-    /// polymorphic-monad call inside a clone runs in this monad. `Ty::Error` at the
-    /// top level (no active specialization).
-    cur_monad: Ty,
     /// Specialized bindings produced by this pass.
     new_bindings: Vec<Bind>,
     /// Typeck's span-keyed occurrence types (final substitution). Occurrence
@@ -392,9 +386,7 @@ fn get_or_specialize(
     // Memoize BEFORE recursing so a (mutually) recursive body resolves to this
     // same specialization instead of looping.
     ctx.memo.insert(key, spec_var.clone());
-    let saved_monad = std::mem::replace(&mut ctx.cur_monad, concrete_monad.clone());
     let spec_body = specialize_body(orig_body, &subst, ctx);
-    ctx.cur_monad = saved_monad;
     ctx.new_bindings
         .push(Bind::NonRec(spec_var.clone(), Box::new(spec_body)));
     Some(spec_var)
@@ -478,22 +470,6 @@ fn specialize_body(e: &Expr, subst: &Subst, ctx: &mut Ctx) -> Expr {
                             if let Some(spec) = get_or_specialize(&ov, &ob, &cm, ctx) {
                                 return Expr::Var(spec, *span);
                             }
-                        }
-                    }
-                }
-            } else if matches!(ctx.resolved.get(span).unwrap_or(&v.ty), Ty::Error)
-                && mentions_transformer(&ctx.cur_monad)
-            {
-                // The occurrence type was ERASED (pandoc's `lift $ setupTranslations
-                // meta` records `Ty::Error`), so there is no transformer to read from
-                // it. But every polymorphic-monad call inside a clone specialized at
-                // `cur_monad` runs in that same monad (the writer's inner monad IS it,
-                // even under `lift`), so specialize the callee at `cur_monad`.
-                let cur = ctx.cur_monad.clone();
-                if let Some((ov, ob)) = ctx.source_binding(v) {
-                    if has_free_tyvar(&ov.ty) {
-                        if let Some(spec) = get_or_specialize(&ov, &ob, &cur, ctx) {
-                            return Expr::Var(spec, *span);
                         }
                     }
                 }

@@ -62,6 +62,7 @@
 pub mod demand;
 pub mod escape;
 pub mod eval;
+pub mod monomorphize;
 pub mod pretty;
 pub mod simplify;
 pub mod specialize;

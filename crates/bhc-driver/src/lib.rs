@@ -1356,6 +1356,15 @@ impl Compiler {
         )
         .map_err(CompileError::from)?;
 
+        // Monomorphize polymorphic-monad functions at their concrete transformer
+        // stacks (BHC-BRIEF-0004). Runs on the freshly-lowered Core (original Var
+        // spans still match `resolved_expr_types`), before the simplifier.
+        let mono =
+            bhc_core::monomorphize::monomorphize_module(&mut core, &typed.resolved_expr_types);
+        if mono > 0 {
+            debug!(specialized = mono, "monad monomorphization complete");
+        }
+
         // Core IR optimization (simplifier)
         if self.session.options.opt_level != bhc_session::OptLevel::None {
             let exported_names = hir.exports.as_ref().map(|exports| {

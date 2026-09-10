@@ -1,7 +1,43 @@
 # BHC-BRIEF-0004 — Monomorphize polymorphic-monad functions at their concrete transformer stack
 
 **Document ID:** BHC-BRIEF-0004
-**Status:** OPEN. Blocker characterized + minimal repros landed 2026-09-10. Depends on the stes stack (DONE, 175fd86).
+**Status:** SAME-MODULE CASE IMPLEMENTED 2026-09-10 — `big/PolyW.hs` (a `Monad m =>`
+function that `evalStateT`s over a concrete stes stack) prints `Right 5`. Pass in
+`crates/bhc-core/src/monomorphize.rs`. Cross-module (pandoc's real case) + type-synonym
+expansion still open. Depends on the stes stack (DONE, 175fd86).
+
+## Implementation notes (2026-09-10)
+
+Landed `bhc-core/src/monomorphize.rs`, run in the driver right after
+`lower_module_with_imports` (before the simplifier, so original `Var` spans still
+key `resolved_expr_types`). Beyond the type-substitution design below, two further
+codegen realities had to be handled, each found by dumping `PolyW`:
+
+1. **The `Monad m =>` dictionary over-applies the Core type.** `poly x` is
+   `App(App(poly, $dMonad), x)`, but `poly`'s recorded type mentions only `x`, so
+   `Expr::ty()` collapses to `Ty::Error` and `evalStateT` mis-routed. Fixed with
+   `monadic_action_ty` in `lower.rs`: when the action's `.ty()` is `Error`, use the
+   spine head's ultimate result type (all `->` stripped), which is exactly the
+   monad regardless of dictionary args.
+2. **The do-block `>>=`/`>>` are dict-method selections, not builtins.** A
+   `Monad m` do-block lowers sequencing as `$sel_1 $dMonad` / `$sel_2 $dMonad`; the
+   transformer-stack `Monad` dictionary is a NULL placeholder, so the compiled body
+   reads a null slot and bails (this is why the polymorphic path never ran — the
+   original `poly` has the same null-guard). The pass rewrites `$sel_1 $dMonad` →
+   builtin `>>=` and `$sel_2 $dMonad` → `>>` inside every specialized (concrete-
+   monad) body, so codegen routes them by the concrete ambient stack to
+   `stes_bind`/`stes_then` — exactly as a hand-written concrete do-block compiles.
+   `modify`/`get`/`return` were already plain builtins.
+
+Gate at implementation: `cargo test --all-targets` 2822/0; `ghc_differential` clean;
+5 new unit tests. The pass is conservative (fires only for a module-local binding
+with exactly one free tyvar, used at a ground transformer stack), so it does not
+fire on ordinary `Monad m` code (e.g. an IO-instance call).
+
+Remaining: (a) **cross-module** — pandoc's writer is imported, and the pass is
+same-module only, so it does not yet reach `writeHtml5String`; (b) **type-synonym
+expansion** (prerequisite below) — `big/PolyW5.hs` still crashes; (c) `pure`/`return`
+via a dictionary `$sel_0` is not rewritten (only `>>=`/`>>`); pandoc may need it.
 **Owner:** build agent
 **References:** `.claude/CLAUDE.md` Phase 9.5 (Cross-Transformer Codegen); `rules/013-optimization.md` (§ Dictionary Specialization, O.4); `spec/BHC-BRIEF-0002` (typed Core IR — this needs complete Core types)
 **Audited against source:** 2026-09-10
@@ -63,44 +99,65 @@ arity and the caller's `evalStateT` reads it off-by-one → segfault. Confirmed 
 LLVM dump: polymorphic `poly` emits `bhc_state_t_get/modify/pure` (2-arg);
 concrete `poly` emits `bhc_stes_*` (3-arg).
 
-The concrete type IS present in the IR but thrown away. HIR→Core emits
-`Expr::TyApp(inner, concrete_ty, span)` at instantiation sites
-(`crates/bhc-hir-to-core/src/expr.rs:4516`; enum at `crates/bhc-core/src/lib.rs:148`,
-whose `Expr::ty()` even instantiates the `Forall`). Codegen erases it
-(lower.rs:47221-47224: `Expr::TyApp(expr, _ty, _span) => self.lower_expr(expr)`).
+**Where the concrete instantiation actually lives (corrected 2026-09-10 by a Core
+dump of `big/PolyW.hs`).** The brief originally assumed the concrete monad rides
+on an `Expr::TyApp`. It does NOT for ordinary polymorphic function calls:
+
+- The whole module has **zero** `Expr::TyApp` nodes. HIR→Core emits `TyApp` only
+  for class methods / explicit `@ty` (expr.rs:4506-4516), not for a plain
+  `writeThing 5 :: MyIO Int`.
+- The Core **occurrence** `Var(writeThing).ty` stays the polymorphic monotype
+  `Int -> (Var 55) Int`; likewise `evalStateT` inside the body carries a fresh
+  `(Var 603)`. Top-level binder `Var.ty` is a monotype with FREE tyvars (no
+  `Forall`); the quantified scheme lives separately in `typed.def_schemes` /
+  `merged_schemes`.
+- The concrete instantiation survives ONLY in typeck's span-keyed
+  `resolved_expr_types: FxHashMap<Span, Ty>` (bhc-typeck lib.rs:105; the final-
+  substitution version of `expr_types`). For PolyW the `writeThing` occurrence
+  token (span 678–688) maps to `Int -> ExceptT String (StateT Int IO) Int` —
+  the concrete `Int -> MyIO Int`. This map is already threaded into HIR→Core
+  (`lower_module_with_imports(..., Some(&typed.resolved_expr_types), ...)`,
+  driver lib.rs) and every Core `Expr::Var(v, span)` still carries that `span`,
+  so `resolved_expr_types[span]` is the bridge from an occurrence to its concrete
+  instantiation.
 
 There is **no** existing pass that clones a polymorphic function with a concrete
 type substituted into its body. `crates/bhc-core/src/specialize.rs` only inlines
-`$sel_N dict` method selections on known dictionary tuples; worker/wrapper is a
-strictness split. The `Monad`-witness hook (`dictionary.rs:172-215`) fixes only
-`return`/`pure` DISPATCH for a polymorphic monad, not the stack REPRESENTATION.
-(Investigation 2026-09-10, full transcript in session notes.)
+`$sel_N dict` method selections; worker/wrapper is a strictness split. The
+`Monad`-witness hook (`dictionary.rs:172-215`) fixes only `return`/`pure`
+DISPATCH, not the stack REPRESENTATION. (Investigation 2026-09-10.)
 
-## Design — a Core→Core monomorphization pass (Option A; the only option with a hook)
+## Design — a monomorphization pass seeded by `resolved_expr_types`
 
-New pass in `bhc-core` (call it `monomorphize.rs`), run in the driver pipeline
-(`crates/bhc-driver/src/lib.rs`, after `simplify`, ideally before
-`specialize_dictionaries`), producing extra concrete Core bindings that codegen
-then lowers with the right stack — no codegen change to the single-lowering model
-(codegen's `functions` map is already `VarId`-keyed and can hold many instances).
+Run in HIR→Core (where `resolved_expr_types` is in hand) as a post-pass over the
+lowered Core module, or as a Core→Core pass in `bhc-core` given the span→type map.
+It produces extra concrete Core bindings that codegen then lowers with the right
+stack — no codegen change to the single-lowering model (codegen's `functions` map
+is already `VarId`-keyed and can hold many instances).
 
 Worklist:
 
-1. **Seed.** Scan Core for saturated uses of a top-level binding `f` whose scheme
-   quantifies a monad variable `m`, where the instantiation of `m` at the use
-   site (read from the enclosing `Expr::TyApp`'s concrete `Ty`, item above) is a
-   concrete transformer stack (StateT/ReaderT/ExceptT/WriterT/IO spine, no free
-   vars). Record `(f, subst = {m := concrete})`.
-2. **Specialize.** For each distinct `(f, subst)`, clone `f`'s Core body and apply
-   `subst` to EVERY type in it — `Var{ty}`, every `Expr::ty()`-bearing node, and
-   the binder's own scheme — using the existing `Subst`. Give the clone a fresh
-   `VarId` and a derived name (`f$$<mangled-monad>`). Drop the now-satisfied
-   `Monad m` dictionary parameter (or leave it dead for the simplifier).
-3. **Redirect.** Replace the seeding call's `TyApp(Var(f), concrete)` head with
-   `Var(f_spec)`.
-4. **Recurse.** The clone's body may itself apply other polymorphic functions at
-   `m` (e.g. `writeThing` → `poly`); seed those too. Iterate to fixpoint; memoize
-   by `(VarId, canonicalized subst)` and cap depth.
+1. **Seed.** Walk all Core bodies. For each occurrence `Expr::Var(v, span)` where
+   `v` is a top-level binding whose monotype has a free tyvar in a transformer
+   position, look up `ty_c = resolved_expr_types[span]`. If `ty_c` is a concrete
+   transformer stack (StateT/ReaderT/ExceptT/WriterT/IO spine, no free vars) that
+   differs from `v.ty`, derive `subst` by structurally matching `v.ty` against
+   `ty_c` (one-sided: only `v.ty`'s tyvars bind). Record `(v.id, subst)` and mark
+   the occurrence for redirect.
+2. **Specialize.** For each distinct `(v.id, subst)`, clone the binding's Core
+   body and apply `subst` to EVERY type in it — `Var{ty}` on every occurrence,
+   every `Expr::ty()`-bearing node (`Lit`, `Case`), the binder's own monotype —
+   with the existing `bhc_types::Subst`. Fresh `VarId`, derived name
+   (`v$$<mangled-monad>`).
+3. **Redirect.** Replace each seeding occurrence `Var(v, span)` with
+   `Var(v_spec, span)`.
+4. **Recurse.** In the clone, an inner occurrence `Var(g, _)` that was
+   `g :: … (Var 55) …` now reads (post-subst) `g :: … MyIO …` on its own `Var.ty`
+   — so the sub-seed comes from the SUBSTITUTED occurrence type, NOT from
+   `resolved_expr_types` (the clone has no spans in that map). Match `g`'s binder
+   monotype against the substituted occurrence type to get `g`'s subst; enqueue
+   `(g.id, subst_g)`. Iterate to fixpoint; memoize by `(VarId, canonical subst)`
+   and cap depth. (In PolyW this is exactly `writeThing@MyIO` → `poly@MyIO`.)
 
 ## Prerequisite bug — expand type synonyms in the transformer-stack derivation
 

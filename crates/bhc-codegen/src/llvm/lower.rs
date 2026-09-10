@@ -20503,17 +20503,48 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(closure.into()))
     }
 
-    /// evalStateT m s = fst(m(s))
+    /// The type of a monadic action expression, robust to the dictionary
+    /// argument that `Monad m =>` (and friends) insert in Core.
     ///
-    /// For nested transformers like `StateT s (ReaderT r IO)`, this returns
-    /// a ReaderT closure instead of executing directly.
+    /// `poly x` for `poly :: Monad m => Int -> StateT Int m a` is lowered as
+    /// `App(App(poly, $dMonad), x)`, but `poly`'s recorded type mentions only the
+    /// `Int` parameter — so the extra dictionary argument over-applies the type
+    /// and `Expr::ty()` collapses to `Ty::Error`. When that happens, fall back to
+    /// the spine head's ultimate result type (all `->` arrows stripped): for a
+    /// saturated action that is exactly the monad type, and it is unaffected by
+    /// however many dictionary arguments the call carries.
+    fn monadic_action_ty(&self, m_expr: &Expr) -> Ty {
+        let direct = m_expr.ty();
+        if !matches!(direct, Ty::Error) {
+            return direct;
+        }
+        let mut head = m_expr;
+        loop {
+            match head {
+                Expr::App(f, _, _) | Expr::TyApp(f, _, _) => head = f,
+                Expr::Lazy(i, _) | Expr::Tick(_, i, _) => head = i,
+                _ => break,
+            }
+        }
+        let mut ty = head.ty();
+        while let Ty::Fun(_, res) = ty {
+            ty = *res;
+        }
+        ty
+    }
+
+    /// `evalStateT m s = fst (m s)`.
+    ///
+    /// For nested transformers (`StateT s (ReaderT r IO)`, the stes stack, …)
+    /// this re-presents the computation in the inner monad rather than executing
+    /// directly.
     fn lower_builtin_eval_state_t(
         &mut self,
         m_expr: &Expr,
         s_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // Check if this is a nested transformer by examining the type
-        let m_ty = m_expr.ty();
+        let m_ty = self.monadic_action_ty(m_expr);
         let inner_monad = self.extract_inner_monad_from_state_t(&m_ty);
 
         match inner_monad {

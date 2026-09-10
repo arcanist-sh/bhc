@@ -378,6 +378,31 @@ Data.ByteString, Data.Time, zip) or a real parser-logic bug. Next step: make the
 top-level handler show the PandocError's actual message (needs pandoc's exception
 representation), or bisect readMarkdown with a trivial input.
 
+**2026-09-10 — Text `<>`-literal dispatch bug FIXED (a1c3cdb); readMarkdown
+narrowed to an internal garbage `Left`.**
+- **FIXED — a value-class method dispatched on the wrong operand type.** For a
+  value class (Semigroup/Monoid/Default) the class parameter IS the RESULT type,
+  but the applied-method dispatch tried `try_infer_arg_type` on operands first,
+  and an OverloadedStrings string-literal operand infers as `[Char]` even when its
+  real type is Text. So `"pfx:" <> t` (both Text) dispatched to the LIST `<>`
+  (`Data.List.append`), walked the BhcText struct as a cons cell, and crashed —
+  pervasive in pandoc. Fix (expr.rs applied-method value-class branch): prefer the
+  span result type (concrete head) before operand inference. Standalone repro
+  (local ADT + Text fields + `<>`) fixed; gate cargo test 2822/0, diff 219/0/2.
+- **readMarkdown still fails on trivial input, narrowed:** `runIO (return 42)` →
+  `Right 42` (runIO plumbing is FINE); `renderError` works on hand-built
+  PandocErrors (renderer is FINE); but `runIO (readMarkdown def "hello")` returns
+  `Left <garbage 0x1>` — the error VALUE readMarkdown constructs is corrupt (the
+  0x1 dictionary/PAP/transformer-threading family). No `bhc_throw` fires (pure
+  `Left` via ExceptT). NEXT: the bug is inside readMarkdown's own execution
+  (`readWithM`/`parseMarkdown` over the ParsecT-in-PandocMonad stack) — either a
+  mis-constructed PandocError or a successful parse mis-wrapped as Left. Isolate by
+  running `parseMarkdown` / `readWithM` pieces directly, or lldb-tracing where the
+  0x1 enters the Left. GOTCHA: matching PandocError constructors in a Main-side
+  `case` segfaults on readMarkdown's value (cross-module constructor-tag scheme) —
+  use pandoc's own `renderError` to inspect, and it faults precisely because the
+  value is garbage. Probes in pandoc-harness/ (QReader/QRun2/QRender/big/).
+
 ## 2. Native stdin read path segfaults
 
 **Detailed home:** `KNOWN_FAILURES` in `crates/bhc-e2e-tests/ghc_differential.py`;

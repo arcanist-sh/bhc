@@ -419,6 +419,29 @@ deep.**
   PandocError value is 0x1; runIO + renderError both proven fine, so it is inside
   readWithM/parseMarkdown's ParsecT-in-PandocMonad execution.
 
+**2026-09-10 — Data.Sequence builtins FIXED + Data.Text.split; writer now
+past Builder `<>` and into the writer monad.**
+- **Data.Sequence (6087bc6):** Seq is now a cons list (bhc-containers), so it IS a
+  `[a]` and generic `Foldable`/`toList` walks it; added to the curated alias set +
+  unqualified real-builtin binding; view constructors `EmptyL`/`:<`/`EmptyR`/`:>`
+  get their fixed tags via `constructor_info` + `get_constructor_tag` (which now
+  strips a module qualifier so the `Data.Sequence.:>` stub name matches), with the
+  case-alt builder overriding the stub tag and trusting the pattern's field count.
+  `Inlines <> Inlines` (viewr/viewl meld) works; `foldable_to_list` passes.
+- **Data.Text.split (eed02f7):** implemented `bhc_text_split` (predicate) + wired
+  codegen/lower/typeck at fixed DefId 11237. The writer used it.
+- **Writer now blocked on TRANSFORMER codegen, not Seq:** the `writeHtml5String`
+  probe builds the Pandoc AST and enters `Text.Pandoc.Writers.HTML.writeHtmlString'`
+  → `bhc_state_t_bind` → `bhc_except_t_bind_over_st`, which aborts: the monadic
+  action is a bare value (null fn_ptr) where a state-threading closure
+  `\s -> (Right a, s')` is expected (`ExceptT-over-StateT bind: action is not a
+  closure`). This is the writer's `StateT`-over-`ExceptT`-over-`StateT` stack —
+  same "transformer return/action not a closure" family as the readMarkdown
+  garbage-Left. NEXT: find which action (likely a `return`/`pure`/lifted value at
+  the writer's first bind) fails to lower to the state-threading closure form in
+  the ExceptT-over-StateT representation (bhc_except_t_bind_over_st, lower.rs
+  ~21110; the pure side is `except_t_pure_*`). Probe: pandoc-harness/QWriter.hs.
+
 ## 2. Native stdin read path segfaults
 
 **Detailed home:** `KNOWN_FAILURES` in `crates/bhc-e2e-tests/ghc_differential.py`;

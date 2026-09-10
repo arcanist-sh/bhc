@@ -490,6 +490,33 @@ CONCRETE case (58bd156); writer\'s real blockers are now pinned and are deeper.*
 Repros: pandoc-harness/big/ET{2,3,4}.hs (fast, staticlib-only link) +
 /tmp/ett.sh. The ExceptT-over-StateT bind itself is correct.
 
+**2026-09-10 (cont 3) — REVERTED the partial evalStateT-over-ExceptT fix; the
+writer needs a transformer-codegen REDESIGN, mapped below.** The partial fix made
+`evalStateT get 10` (and any `get`/`put`/`modify` computation) compile then crash
+instead of failing cleanly, so it was reverted to the honest "not yet supported"
+compile error. Root cause, fully characterized via `pandoc-harness/big/ET{2..5}.hs`:
+
+The StateT operations over an `ExceptT e (StateT s2 IO)` inner monad have NO
+consistent representation:
+- `return`/`pure` lift through ExceptT → `(Right a, s')`;
+- `get`/`put`/`modify` do NOT → raw `(a, s')`, and the state `Int` is UNBOXED
+  (`bhc_force` faults on `0xa`/`0xb`);
+- the whole 3-layer stack is FLATTENED to a 2-arg `(a, s')` pair (bhc_state_t_bind/
+  then/get/modify), so the inner `s2` and the `Either` short-circuit have nowhere
+  to live.
+
+A real fix is a coordinated redesign so a `StateT s1 (ExceptT e (StateT s2 IO))`
+computation has ONE representation — every op (`return`/`get`/`put`/`modify`/
+`bind`/`then`/`throwError`) Either-lifts its result and threads/boxes both states
+— and `runStateT`/`evalStateT`/`execStateT` consume exactly that. PLUS the writer
+is compiled POLYMORPHICALLY (`writeHtmlString' :: PandocMonad m => …`), so even a
+correct concrete representation isn\'t reached unless the writer is monomorphized
+at `PandocIO` (or transformer ops dispatch through a runtime dict). These are
+architectural, multi-part changes — not the localized bind/evalStateT fix the
+symptom suggested. The ExceptT-over-StateT bind and `evalStateT` of a pure
+computation are correct; the gap is the StateT ops\' inner-monad lifting + Int
+boxing + polymorphic specialization.
+
 ## 2. Native stdin read path segfaults
 
 **Detailed home:** `KNOWN_FAILURES` in `crates/bhc-e2e-tests/ghc_differential.py`;

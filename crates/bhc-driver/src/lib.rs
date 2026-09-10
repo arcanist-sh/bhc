@@ -1356,16 +1356,52 @@ impl Compiler {
         )
         .map_err(CompileError::from)?;
 
-        // Transport this module's freshly-lowered (pre-simplifier) Core bodies to
-        // a `.bhc` sidecar next to its `.bhi`, so a module that imports it and
-        // pins a concrete monad can specialize these polymorphic bodies locally
+        // Type expansions (name -> (params, underlying type)) so a concrete monad
+        // written over a transformer stack via a newtype (pandoc's PandocIO, the
+        // test AppM) or a type synonym (`type MyIO = ExceptT ...`) is unfolded to
+        // that stack for transformer detection. The mtl identity-based synonyms
+        // (`Reader`/`State`/`Writer`/`Except`) are EXCLUDED — codegen recognizes
+        // those by name and handles them specially, so expanding them here would
+        // mis-route them.
+        let mut newtypes: FxHashMap<bhc_intern::Symbol, (Vec<bhc_types::TyVar>, bhc_types::Ty)> =
+            typed
+                .type_aliases
+                .iter()
+                .filter(|(name, _)| {
+                    !matches!(
+                        name.as_str(),
+                        "Reader" | "State" | "Writer" | "Except" | "RWS"
+                    )
+                })
+                .map(|(name, (params, ty))| (*name, (params.clone(), ty.clone())))
+                .collect();
+        for item in &hir.items {
+            let bhc_hir::Item::Newtype(nt) = item else {
+                continue;
+            };
+            let underlying = match &nt.con.fields {
+                bhc_hir::ConFields::Positional(tys) => tys.first().cloned(),
+                bhc_hir::ConFields::Named(fields) => fields.first().map(|f| f.ty.clone()),
+            };
+            if let Some(underlying) = underlying {
+                newtypes.insert(nt.name, (nt.params.clone(), underlying));
+            }
+        }
+
+        // Transport this module's freshly-lowered (pre-simplifier) Core bodies AND
+        // its type expansions to a `.bhc` sidecar next to its `.bhi`, so a module
+        // that imports it and pins a concrete monad (defined here, e.g. PandocIO)
+        // can specialize these polymorphic bodies and unfold that monad locally
         // (cross-module monomorphization, BHC-BRIEF-0004).
         if let Some(ref hidir) = self.session.options.output_interface_dir {
-            Self::write_core_sidecar(hidir, hir.name.as_str(), &core.bindings);
+            Self::write_core_sidecar(hidir, hir.name.as_str(), &core.bindings, &newtypes);
         }
-        // Load the transported bodies of imported modules for the pass to
-        // specialize across the module boundary.
-        let imported_bodies = self.load_imported_core_bodies(hir);
+        // Load the transported bodies and type expansions of imported modules, so
+        // the pass can specialize an imported writer at an imported newtype monad.
+        let (imported_bodies, imported_newtypes) = self.load_imported_core_bodies(hir);
+        for (name, def) in imported_newtypes {
+            newtypes.entry(name).or_insert(def);
+        }
 
         // Monomorphize polymorphic-monad functions at their concrete transformer
         // stacks (BHC-BRIEF-0004). Runs on the freshly-lowered Core (original Var
@@ -1374,6 +1410,7 @@ impl Compiler {
             &mut core,
             &typed.resolved_expr_types,
             &imported_bodies,
+            &newtypes,
         );
         if mono > 0 {
             debug!(specialized = mono, "monad monomorphization complete");
@@ -1493,9 +1530,18 @@ impl Compiler {
     /// so importing modules can specialize its polymorphic-monad bodies at a
     /// concrete monad (cross-module monomorphization). Best-effort: a failure
     /// just means cross-module specialization will not fire for this module.
-    fn write_core_sidecar(hidir: &Utf8Path, module_name: &str, bindings: &[Bind]) {
+    fn write_core_sidecar(
+        hidir: &Utf8Path,
+        module_name: &str,
+        bindings: &[Bind],
+        newtypes: &FxHashMap<bhc_intern::Symbol, (Vec<bhc_types::TyVar>, bhc_types::Ty)>,
+    ) {
         let path = Self::core_sidecar_path(hidir, module_name);
-        if let Ok(bytes) = bincode::serialize(bindings) {
+        let expansions: Vec<(bhc_intern::Symbol, Vec<bhc_types::TyVar>, bhc_types::Ty)> = newtypes
+            .iter()
+            .map(|(name, (params, ty))| (*name, params.clone(), ty.clone()))
+            .collect();
+        if let Ok(bytes) = bincode::serialize(&(bindings, &expansions)) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent.as_std_path());
             }
@@ -1507,11 +1553,21 @@ impl Compiler {
     /// binder name, from `.bhc` sidecars in the hidir and package-db directories
     /// (the same flat layout `.bhi` files use). Used by the monomorphization pass
     /// to clone and specialize an imported polymorphic-monad function.
+    #[allow(clippy::type_complexity)]
     fn load_imported_core_bodies(
         &self,
         hir: &HirModule,
-    ) -> FxHashMap<String, (bhc_core::Var, Expr)> {
+    ) -> (
+        FxHashMap<String, (bhc_core::Var, Expr)>,
+        FxHashMap<bhc_intern::Symbol, (Vec<bhc_types::TyVar>, bhc_types::Ty)>,
+    ) {
+        type Sidecar = (
+            Vec<Bind>,
+            Vec<(bhc_intern::Symbol, Vec<bhc_types::TyVar>, bhc_types::Ty)>,
+        );
         let mut out: FxHashMap<String, (bhc_core::Var, Expr)> = FxHashMap::default();
+        let mut expansions: FxHashMap<bhc_intern::Symbol, (Vec<bhc_types::TyVar>, bhc_types::Ty)> =
+            FxHashMap::default();
         let mut dirs: Vec<&Utf8PathBuf> = Vec::new();
         if let Some(ref hidir) = self.session.options.output_interface_dir {
             dirs.push(hidir);
@@ -1525,9 +1581,12 @@ impl Compiler {
                 let Ok(bytes) = std::fs::read(path.as_std_path()) else {
                     continue;
                 };
-                let Ok(mut binds) = bincode::deserialize::<Vec<Bind>>(&bytes) else {
+                let Ok((mut binds, nts)) = bincode::deserialize::<Sidecar>(&bytes) else {
                     continue;
                 };
+                for (name, params, ty) in nts {
+                    expansions.entry(name).or_insert((params, ty));
+                }
                 // The transported bindings carry the SOURCE module's VarIds, which
                 // can collide with this module's; give them fresh disjoint ids so
                 // codegen (which keys functions by VarId) never confuses an
@@ -1548,7 +1607,7 @@ impl Compiler {
                 break;
             }
         }
-        out
+        (out, expansions)
     }
 
     fn check_escape_analysis(&self, core: &CoreModule) -> CompileResult<()> {

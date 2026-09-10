@@ -17,13 +17,18 @@
 //! The concrete instantiation is not in the Core (there are no `TyApp`s for
 //! ordinary polymorphic calls, and occurrence `Var.ty`s stay polymorphic); it
 //! survives only in typeck's span-keyed `resolved_expr_types`. This pass reads
-//! that map, and for each module-local top-level binding used at a concrete
-//! transformer stack it emits a specialized copy with the monad variable
-//! substituted throughout — so codegen re-derives the right stack from the
-//! specialized (now concrete) type. The original binding is left in place.
+//! that map, and for each top-level binding used at a concrete transformer stack
+//! it emits a specialized copy with the monad variable substituted throughout —
+//! so codegen re-derives the right stack from the specialized (now concrete)
+//! type. The original binding is left in place.
 //!
-//! Scope of this pass: SAME-MODULE only (the callee's body must be a binding of
-//! this module). Cross-module specialization is a follow-up.
+//! The binding may be defined in THIS module or an imported one: the driver
+//! transports every module's Core bodies (and newtype/synonym definitions) in a
+//! `.bhc` sidecar next to its `.bhi`, and passes the imported bodies (`imported`)
+//! and type expansions (`newtypes`) here. So a `PandocMonad m =>` writer defined
+//! in one module and run at a concrete `PandocIO` (a newtype over the stes stack)
+//! in another specializes in the driver module, transitively through the whole
+//! writer chain.
 
 use crate::simplify::expr_util::fresh_var_id;
 use crate::{Alt, Bind, CoreModule, Expr, Var, VarId};
@@ -46,6 +51,7 @@ pub fn monomorphize_module(
     module: &mut CoreModule,
     resolved: &FxHashMap<Span, Ty>,
     imported: &FxHashMap<String, (Var, Expr)>,
+    newtypes: &FxHashMap<bhc_intern::Symbol, (Vec<TyVar>, Ty)>,
 ) -> usize {
     // Index every module-local top-level binding by VarId (NonRec + Rec members).
     let mut top: FxHashMap<VarId, (Var, Expr)> = FxHashMap::default();
@@ -64,6 +70,7 @@ pub fn monomorphize_module(
     let mut ctx = Ctx {
         top,
         imported,
+        newtypes,
         memo: FxHashMap::default(),
         new_bindings: Vec::new(),
         resolved,
@@ -158,6 +165,10 @@ struct Ctx<'a> {
     top: FxHashMap<VarId, (Var, Expr)>,
     /// Imported top-level bodies, by binder name (from `.bhc` sidecars).
     imported: &'a FxHashMap<String, (Var, Expr)>,
+    /// Newtype definitions (name -> (params, underlying type)), so a concrete
+    /// instantiation written as a newtype over a transformer stack (e.g. pandoc's
+    /// `PandocIO`) is unfolded to that stack before transformer detection.
+    newtypes: &'a FxHashMap<bhc_intern::Symbol, (Vec<TyVar>, Ty)>,
     /// Memo of specializations, keyed by (binder name, concrete-type string).
     memo: FxHashMap<(String, String), Var>,
     /// Specialized bindings produced by this pass.
@@ -231,8 +242,67 @@ impl Ctx<'_> {
     }
 }
 
+/// Expand newtype constructors in `ty` to their underlying types (recursively),
+/// so a concrete monad written as a newtype over a transformer stack — e.g.
+/// pandoc's `PandocIO = ExceptT PandocError (StateT CommonState IO)`, or the test
+/// `AppM` — is seen as that stack. Newtypes are representationally transparent, so
+/// substituting the underlying stack into the specialized body is sound.
+fn unfold_newtypes(
+    ty: &Ty,
+    nts: &FxHashMap<bhc_intern::Symbol, (Vec<TyVar>, Ty)>,
+    depth: usize,
+) -> Ty {
+    if depth > 32 || nts.is_empty() {
+        return ty.clone();
+    }
+    // Peel the application spine to find the head constructor and its arguments.
+    let mut head = ty;
+    let mut args: Vec<&Ty> = Vec::new();
+    while let Ty::App(f, x) = head {
+        args.push(x);
+        head = f;
+    }
+    args.reverse();
+    if let Ty::Con(c) = head {
+        if let Some((params, underlying)) = nts.get(&c.name) {
+            if args.len() >= params.len() {
+                let mut subst = Subst::new();
+                for (p, a) in params.iter().zip(&args) {
+                    subst.insert(p, unfold_newtypes(a, nts, depth + 1));
+                }
+                let mut result = subst.apply(underlying);
+                for a in &args[params.len()..] {
+                    result = Ty::App(
+                        Box::new(result),
+                        Box::new(unfold_newtypes(a, nts, depth + 1)),
+                    );
+                }
+                return unfold_newtypes(&result, nts, depth + 1);
+            }
+        }
+    }
+    match ty {
+        Ty::App(f, x) => Ty::App(
+            Box::new(unfold_newtypes(f, nts, depth + 1)),
+            Box::new(unfold_newtypes(x, nts, depth + 1)),
+        ),
+        Ty::Fun(a, b) => Ty::Fun(
+            Box::new(unfold_newtypes(a, nts, depth + 1)),
+            Box::new(unfold_newtypes(b, nts, depth + 1)),
+        ),
+        Ty::List(a) => Ty::List(Box::new(unfold_newtypes(a, nts, depth + 1))),
+        Ty::Tuple(ts) => Ty::Tuple(
+            ts.iter()
+                .map(|t| unfold_newtypes(t, nts, depth + 1))
+                .collect(),
+        ),
+        Ty::Forall(vs, b) => Ty::Forall(vs.clone(), Box::new(unfold_newtypes(b, nts, depth + 1))),
+        other => other.clone(),
+    }
+}
+
 fn try_seed(v: &Var, span: Span, resolved: &FxHashMap<Span, Ty>, ctx: &mut Ctx) -> Option<Var> {
-    let cty = resolved.get(&span)?.clone();
+    let cty = unfold_newtypes(resolved.get(&span)?, ctx.newtypes, 0);
     if has_free_tyvar(&cty) || !mentions_transformer(&cty) {
         return None;
     }
@@ -368,7 +438,7 @@ fn specialize_body(e: &Expr, subst: &Subst, ctx: &mut Ctx) -> Expr {
             // an imported clone body, whose spans are not in this module's map).
             let new_ty = {
                 let base_ty = ctx.resolved.get(span).unwrap_or(&v.ty);
-                subst.apply(base_ty)
+                unfold_newtypes(&subst.apply(base_ty), ctx.newtypes, 0)
             };
             if !has_free_tyvar(&new_ty) && mentions_transformer(&new_ty) {
                 if let Some((ov, ob)) = ctx.source_binding(v) {
@@ -620,5 +690,31 @@ mod tests {
         assert_eq!(monad_sel_builtin("$sel_2"), Some(">>"));
         assert_eq!(monad_sel_builtin("$sel_0"), None);
         assert_eq!(monad_sel_builtin("modify"), None);
+    }
+
+    #[test]
+    fn newtype_unfolds_to_underlying_stack() {
+        // `newtype AppM a = AppM (ExceptT String (StateT Int IO) a)`
+        let a = TyVar::new(1, Kind::Star);
+        let underlying = app(
+            app(con("ExceptT"), con("String")),
+            app(
+                app(app(con("StateT"), con("Int")), con("IO")),
+                Ty::Var(a.clone()),
+            ),
+        );
+        let mut nts: FxHashMap<Symbol, (Vec<TyVar>, Ty)> = FxHashMap::default();
+        nts.insert(Symbol::intern("AppM"), (vec![a], underlying));
+        // `AppM Int` unfolds to `ExceptT String (StateT Int IO) Int`.
+        let unfolded = unfold_newtypes(&app(con("AppM"), con("Int")), &nts, 0);
+        assert!(mentions_transformer(&unfolded));
+        assert!(!has_free_tyvar(&unfolded));
+        let expected = app(
+            app(con("ExceptT"), con("String")),
+            app(app(app(con("StateT"), con("Int")), con("IO")), con("Int")),
+        );
+        assert_eq!(unfolded, expected);
+        // A plain non-newtype type is unchanged.
+        assert_eq!(unfold_newtypes(&con("Int"), &nts, 0), con("Int"));
     }
 }

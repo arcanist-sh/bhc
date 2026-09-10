@@ -1,14 +1,34 @@
 # BHC-BRIEF-0004 — Monomorphize polymorphic-monad functions at their concrete transformer stack
 
 **Document ID:** BHC-BRIEF-0004
-**Status:** SAME-MODULE + CROSS-MODULE (explicit transformer stacks) IMPLEMENTED 2026-09-10.
-`big/PolyW.hs` (same-module) and `big/xmod/` (a polymorphic writer in one module run at a
-concrete stes stack in another) both print `Right 5`. Pass in
-`crates/bhc-core/src/monomorphize.rs`; cross-module transport via `.bhc` sidecars.
-**Remaining for real pandoc: NEWTYPE unfolding** — `PandocIO` (and `big/xmod3/`'s `AppM`) is a
-newtype over the stes stack, so the concrete instantiation reads as an opaque `Con` and the
-pass (and codegen's stack walkers) do not recognize it as a transformer; the seed does not
-fire. Plus type-synonym expansion. Depends on the stes stack (DONE, 175fd86).
+**Status:** The full pandoc SHAPE works, 2026-09-10. `big/xmod4/` — a polymorphic writer in
+one module, a concrete monad defined as a NEWTYPE (`AppM`, exactly `PandocIO`'s shape) in a
+second imported module, and a driver in a third that runs the writer at that newtype — prints
+`Right 5`. So: same-module (`PolyW`), cross-module (`xmod`), newtype base monad (`xmod3`), and
+imported newtype (`xmod4`) all work. Pass in `crates/bhc-core/src/monomorphize.rs`;
+cross-module transport (bodies + newtype/synonym defs) via `.bhc` sidecars. Depends on the
+stes stack (DONE, 175fd86).
+
+**Remaining for the REAL pandoc writer** (beyond this mechanism): (a) `PandocMonad m =>` is a
+Monad SUPERCLASS with ~17 methods — the pass rewrites the Monad `>>=`/`>>` selectors but
+PandocMonad methods (`getCommonState`, `logOutput`, …) still dispatch through the PandocMonad
+dictionary, which must resolve to `PandocIO`'s (compiled) instance methods; (b) the seed only
+fires when the `evalStateT` argument is a SEPARATE function (`pandocToHtml …`, as pandoc has),
+not an inline `do`-block — an inline block's Core type is erased (`big/xmod4/` with an inline
+block fails); (c) the monomorphic type-synonym-over-transformer case (`PolyW5`) is a distinct
+CODEGEN-walker issue, not this pass.
+
+## Newtype / synonym unfolding (2026-09-10)
+
+`PandocIO`/`AppM` is a newtype over the stes stack, so a concrete instantiation reads as an
+opaque `Con` and `mentions_transformer` is false — the seed would not fire. `unfold_newtypes`
+expands newtype and (non-mtl) synonym constructors to their underlying types before every
+transformer check; newtypes are representationally transparent, so substituting the underlying
+stack into the specialized body is sound. The `newtype → underlying` map is built in the driver
+from HIR `Item::Newtype` + `typed.type_aliases` (excluding the mtl identity synonyms
+`Reader`/`State`/`Writer`/`Except`/`RWS`, which codegen recognizes by name), and is TRANSPORTED
+in the `.bhc` sidecar so an imported concrete monad (`PandocIO`, defined in a module the driver
+imports) is unfolded in the driver.
 
 ## Cross-module implementation (2026-09-10)
 

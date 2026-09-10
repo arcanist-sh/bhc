@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bincode = { workspace = true }
 # Internal crates - core compilation
 bhc-span = { workspace = true }
 bhc-diagnostics = { workspace = true }

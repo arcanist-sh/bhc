@@ -457,6 +457,7 @@ dependencies = [
  "bhc-typeck",
  "bhc-types",
  "bhc-wasm",
+ "bincode",
  "camino",
  "pretty_assertions",
  "rayon",

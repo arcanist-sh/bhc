@@ -18,9 +18,26 @@ static INTERNER: LazyLock<Interner> = LazyLock::new(Interner::new);
 ///
 /// Symbols are cheap to copy and compare (O(1) equality).
 /// The actual string data is stored in a global interner.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Symbol(u32);
+
+// A symbol's `u32` is an index into a per-process interner, so it is meaningless
+// across processes. Serialize the STRING and re-intern on read, so serialized
+// Core (e.g. the `.bhc` cross-module body sidecars) round-trips between separate
+// compiler invocations. Same-process round-trips still land on a valid symbol.
+impl Serialize for Symbol {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Symbol {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(Symbol::intern(&s))
+    }
+}
 
 impl Symbol {
     /// Intern a string and return its symbol.

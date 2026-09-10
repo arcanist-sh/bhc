@@ -34,8 +34,19 @@ use bhc_types::{Subst, Ty, TyVar};
 use rustc_hash::FxHashMap;
 
 /// Specialize polymorphic-monad functions at their concrete transformer stacks.
+///
+/// `imported` carries the Core bodies of top-level bindings from modules this one
+/// imports (transported via `.bhc` sidecars, keyed by binder name); it lets the
+/// pass specialize a `PandocMonad m =>` writer defined in another module at the
+/// concrete monad the current module pins — the cross-module case. When empty the
+/// pass is same-module only.
+///
 /// Returns the number of specialized bindings created.
-pub fn monomorphize_module(module: &mut CoreModule, resolved: &FxHashMap<Span, Ty>) -> usize {
+pub fn monomorphize_module(
+    module: &mut CoreModule,
+    resolved: &FxHashMap<Span, Ty>,
+    imported: &FxHashMap<String, (Var, Expr)>,
+) -> usize {
     // Index every module-local top-level binding by VarId (NonRec + Rec members).
     let mut top: FxHashMap<VarId, (Var, Expr)> = FxHashMap::default();
     for bind in &module.bindings {
@@ -52,6 +63,7 @@ pub fn monomorphize_module(module: &mut CoreModule, resolved: &FxHashMap<Span, T
     }
     let mut ctx = Ctx {
         top,
+        imported,
         memo: FxHashMap::default(),
         new_bindings: Vec::new(),
         resolved,
@@ -77,11 +89,77 @@ pub fn monomorphize_module(module: &mut CoreModule, resolved: &FxHashMap<Span, T
     created
 }
 
+/// Give every `VarId` in these bindings a fresh, globally-unique id (consistently:
+/// a binder and all its uses stay linked). Used on Core bodies transported from
+/// another module via a `.bhc` sidecar, whose ids belong to the source module and
+/// would otherwise collide with the importing module's own ids. Names and types
+/// are untouched, so name-based references and codegen's name-keyed builtin/extern
+/// dispatch are unaffected.
+pub fn refresh_var_ids(bindings: &mut [Bind]) {
+    let mut map: FxHashMap<VarId, VarId> = FxHashMap::default();
+    for b in bindings.iter_mut() {
+        refresh_bind(b, &mut map);
+    }
+}
+
+fn refresh_var(v: &mut Var, map: &mut FxHashMap<VarId, VarId>) {
+    v.id = *map.entry(v.id).or_insert_with(fresh_var_id);
+}
+
+fn refresh_bind(b: &mut Bind, map: &mut FxHashMap<VarId, VarId>) {
+    match b {
+        Bind::NonRec(v, e) => {
+            refresh_var(v, map);
+            refresh_expr(e, map);
+        }
+        Bind::Rec(bs) => {
+            for (v, e) in bs {
+                refresh_var(v, map);
+                refresh_expr(e, map);
+            }
+        }
+    }
+}
+
+fn refresh_expr(e: &mut Expr, map: &mut FxHashMap<VarId, VarId>) {
+    match e {
+        Expr::Var(v, _) => refresh_var(v, map),
+        Expr::App(f, x, _) => {
+            refresh_expr(f, map);
+            refresh_expr(x, map);
+        }
+        Expr::TyApp(f, _, _) => refresh_expr(f, map),
+        Expr::Lam(v, b, _) => {
+            refresh_var(v, map);
+            refresh_expr(b, map);
+        }
+        Expr::TyLam(_, b, _) | Expr::Lazy(b, _) | Expr::Cast(b, _, _) | Expr::Tick(_, b, _) => {
+            refresh_expr(b, map);
+        }
+        Expr::Let(bind, body, _) => {
+            refresh_bind(bind, map);
+            refresh_expr(body, map);
+        }
+        Expr::Case(s, alts, _, _) => {
+            refresh_expr(s, map);
+            for a in alts {
+                for bd in &mut a.binders {
+                    refresh_var(bd, map);
+                }
+                refresh_expr(&mut a.rhs, map);
+            }
+        }
+        Expr::Lit(_, _, _) | Expr::Type(_, _) | Expr::Coercion(_, _) => {}
+    }
+}
+
 struct Ctx<'a> {
     /// Module-local top-level bindings, by VarId.
     top: FxHashMap<VarId, (Var, Expr)>,
-    /// Memo of specializations, keyed by (original id, concrete-type string).
-    memo: FxHashMap<(VarId, String), Var>,
+    /// Imported top-level bodies, by binder name (from `.bhc` sidecars).
+    imported: &'a FxHashMap<String, (Var, Expr)>,
+    /// Memo of specializations, keyed by (binder name, concrete-type string).
+    memo: FxHashMap<(String, String), Var>,
     /// Specialized bindings produced by this pass.
     new_bindings: Vec<Bind>,
     /// Typeck's span-keyed occurrence types (final substitution). Occurrence
@@ -135,19 +213,35 @@ fn redirect_seeds(e: &mut Expr, resolved: &FxHashMap<Span, Ty>, ctx: &mut Ctx) {
 /// If `v` (at occurrence `span`) is a module-local polymorphic-monad binding
 /// instantiated at a concrete transformer stack (per `resolved`), return the
 /// specialized variable to use in its place.
-fn try_seed(v: &Var, span: Span, resolved: &FxHashMap<Span, Ty>, ctx: &mut Ctx) -> Option<Var> {
-    if !ctx.top.contains_key(&v.id) || !has_free_tyvar(&v.ty) {
-        return None;
+impl Ctx<'_> {
+    /// The source binding for an occurrence: a module-local binding (by VarId) or
+    /// an imported one (by binder name, from a `.bhc` sidecar).
+    ///
+    /// The by-id lookup is validated by name: inside a clone of an IMPORTED body
+    /// the occurrence ids belong to the source module and can collide with this
+    /// module's own VarIds, so a bare `top.get(id)` may return an unrelated local
+    /// binding. When the names disagree we fall through to the imported map.
+    fn source_binding(&self, v: &Var) -> Option<(Var, Expr)> {
+        if let Some(b) = self.top.get(&v.id) {
+            if b.0.name == v.name {
+                return Some(b.clone());
+            }
+        }
+        self.imported.get(v.name.as_str()).cloned()
     }
-    let cty = resolved.get(&span)?;
-    if has_free_tyvar(cty) || !mentions_transformer(cty) {
-        return None;
-    }
-    get_or_specialize(v.id, cty, ctx)
 }
 
-/// Get or create the specialization of module-local top-level binding `id` at the
-/// concrete type `conc_ty`.
+fn try_seed(v: &Var, span: Span, resolved: &FxHashMap<Span, Ty>, ctx: &mut Ctx) -> Option<Var> {
+    let cty = resolved.get(&span)?.clone();
+    if has_free_tyvar(&cty) || !mentions_transformer(&cty) {
+        return None;
+    }
+    let (orig_var, orig_body) = ctx.source_binding(v)?;
+    get_or_specialize(&orig_var, &orig_body, &cty, ctx)
+}
+
+/// Get or create the specialization of a top-level binding (local or imported)
+/// at the concrete type `conc_ty`.
 ///
 /// Only single-monad bindings are specialized: the binder type must have EXACTLY
 /// ONE free type variable (the monad `m`; everything else already concrete). Then
@@ -156,8 +250,7 @@ fn try_seed(v: &Var, span: Span, resolved: &FxHashMap<Span, Ty>, ctx: &mut Ctx) 
 /// to the one concrete monad. A binding with more than one free variable
 /// (element-polymorphic as well as monad-polymorphic) is left untouched: mapping
 /// its non-monad variables would be unsound, so we skip rather than risk it.
-fn get_or_specialize(id: VarId, conc_ty: &Ty, ctx: &mut Ctx) -> Option<Var> {
-    let (orig_var, orig_body) = ctx.top.get(&id)?.clone();
+fn get_or_specialize(orig_var: &Var, orig_body: &Expr, conc_ty: &Ty, ctx: &mut Ctx) -> Option<Var> {
     let mut binder_vars = Vec::new();
     collect_tyvars(&orig_var.ty, &mut binder_vars);
     if binder_vars.len() != 1 {
@@ -175,7 +268,7 @@ fn get_or_specialize(id: VarId, conc_ty: &Ty, ctx: &mut Ctx) -> Option<Var> {
         return None;
     }
 
-    let key = (id, format!("{concrete_monad:?}"));
+    let key = (orig_var.name.to_string(), format!("{concrete_monad:?}"));
     if let Some(spec) = ctx.memo.get(&key) {
         return Some(spec.clone());
     }
@@ -186,7 +279,7 @@ fn get_or_specialize(id: VarId, conc_ty: &Ty, ctx: &mut Ctx) -> Option<Var> {
     let mut subst = Subst::new();
     subst.insert(&mb, concrete_monad.clone());
     let mut body_vars = Vec::new();
-    collect_body_tyvars(&orig_body, ctx.resolved, &mut body_vars);
+    collect_body_tyvars(orig_body, ctx.resolved, &mut body_vars);
     for tv in body_vars {
         subst.insert(&tv, concrete_monad.clone());
     }
@@ -202,7 +295,7 @@ fn get_or_specialize(id: VarId, conc_ty: &Ty, ctx: &mut Ctx) -> Option<Var> {
     // Memoize BEFORE recursing so a (mutually) recursive body resolves to this
     // same specialization instead of looping.
     ctx.memo.insert(key, spec_var.clone());
-    let spec_body = specialize_body(&orig_body, &subst, ctx);
+    let spec_body = specialize_body(orig_body, &subst, ctx);
     ctx.new_bindings
         .push(Bind::NonRec(spec_var.clone(), Box::new(spec_body)));
     Some(spec_var)
@@ -271,16 +364,19 @@ fn specialize_body(e: &Expr, subst: &Subst, ctx: &mut Ctx) -> Expr {
             // Occurrence `Var.ty`s can use per-occurrence fresh tyvars unrelated
             // to the enclosing binding's quantified variable, so prefer typeck's
             // span-keyed occurrence type (which is consistent) as the base to
-            // substitute into; fall back to the Core `Var.ty`.
-            let base_ty = ctx.resolved.get(span).unwrap_or(&v.ty);
-            let new_ty = subst.apply(base_ty);
-            if ctx.top.contains_key(&v.id)
-                && has_free_tyvar(&v.ty)
-                && !has_free_tyvar(&new_ty)
-                && mentions_transformer(&new_ty)
-            {
-                if let Some(spec) = get_or_specialize(v.id, &new_ty, ctx) {
-                    return Expr::Var(spec, *span);
+            // substitute into; fall back to the Core `Var.ty` (the only source for
+            // an imported clone body, whose spans are not in this module's map).
+            let new_ty = {
+                let base_ty = ctx.resolved.get(span).unwrap_or(&v.ty);
+                subst.apply(base_ty)
+            };
+            if !has_free_tyvar(&new_ty) && mentions_transformer(&new_ty) {
+                if let Some((ov, ob)) = ctx.source_binding(v) {
+                    if has_free_tyvar(&ov.ty) {
+                        if let Some(spec) = get_or_specialize(&ov, &ob, &new_ty, ctx) {
+                            return Expr::Var(spec, *span);
+                        }
+                    }
                 }
             }
             Expr::Var(Var::new(v.name, v.id, new_ty), *span)

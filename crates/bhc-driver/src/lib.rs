@@ -1356,11 +1356,25 @@ impl Compiler {
         )
         .map_err(CompileError::from)?;
 
+        // Transport this module's freshly-lowered (pre-simplifier) Core bodies to
+        // a `.bhc` sidecar next to its `.bhi`, so a module that imports it and
+        // pins a concrete monad can specialize these polymorphic bodies locally
+        // (cross-module monomorphization, BHC-BRIEF-0004).
+        if let Some(ref hidir) = self.session.options.output_interface_dir {
+            Self::write_core_sidecar(hidir, hir.name.as_str(), &core.bindings);
+        }
+        // Load the transported bodies of imported modules for the pass to
+        // specialize across the module boundary.
+        let imported_bodies = self.load_imported_core_bodies(hir);
+
         // Monomorphize polymorphic-monad functions at their concrete transformer
         // stacks (BHC-BRIEF-0004). Runs on the freshly-lowered Core (original Var
         // spans still match `resolved_expr_types`), before the simplifier.
-        let mono =
-            bhc_core::monomorphize::monomorphize_module(&mut core, &typed.resolved_expr_types);
+        let mono = bhc_core::monomorphize::monomorphize_module(
+            &mut core,
+            &typed.resolved_expr_types,
+            &imported_bodies,
+        );
         if mono > 0 {
             debug!(specialized = mono, "monad monomorphization complete");
         }
@@ -1469,6 +1483,74 @@ impl Compiler {
     /// Programs compiled with the Embedded profile cannot have escaping allocations
     /// because there is no garbage collector. This method runs escape analysis on
     /// the Core IR and returns an error if any allocations escape.
+    /// Path of the Core-body sidecar for a module, mirroring the `.bhi` layout
+    /// (`<dir>/<module/path>.bhc`).
+    fn core_sidecar_path(dir: &Utf8Path, module_name: &str) -> Utf8PathBuf {
+        dir.join(module_name.replace('.', "/") + ".bhc")
+    }
+
+    /// Serialize a module's freshly-lowered Core bindings to its `.bhc` sidecar,
+    /// so importing modules can specialize its polymorphic-monad bodies at a
+    /// concrete monad (cross-module monomorphization). Best-effort: a failure
+    /// just means cross-module specialization will not fire for this module.
+    fn write_core_sidecar(hidir: &Utf8Path, module_name: &str, bindings: &[Bind]) {
+        let path = Self::core_sidecar_path(hidir, module_name);
+        if let Ok(bytes) = bincode::serialize(bindings) {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent.as_std_path());
+            }
+            let _ = std::fs::write(path.as_std_path(), bytes);
+        }
+    }
+
+    /// Load the transported Core bodies of the modules this one imports, keyed by
+    /// binder name, from `.bhc` sidecars in the hidir and package-db directories
+    /// (the same flat layout `.bhi` files use). Used by the monomorphization pass
+    /// to clone and specialize an imported polymorphic-monad function.
+    fn load_imported_core_bodies(
+        &self,
+        hir: &HirModule,
+    ) -> FxHashMap<String, (bhc_core::Var, Expr)> {
+        let mut out: FxHashMap<String, (bhc_core::Var, Expr)> = FxHashMap::default();
+        let mut dirs: Vec<&Utf8PathBuf> = Vec::new();
+        if let Some(ref hidir) = self.session.options.output_interface_dir {
+            dirs.push(hidir);
+        }
+        for db in &self.session.options.package_dbs {
+            dirs.push(db);
+        }
+        for import in &hir.imports {
+            for dir in &dirs {
+                let path = Self::core_sidecar_path(dir, import.module.as_str());
+                let Ok(bytes) = std::fs::read(path.as_std_path()) else {
+                    continue;
+                };
+                let Ok(mut binds) = bincode::deserialize::<Vec<Bind>>(&bytes) else {
+                    continue;
+                };
+                // The transported bindings carry the SOURCE module's VarIds, which
+                // can collide with this module's; give them fresh disjoint ids so
+                // codegen (which keys functions by VarId) never confuses an
+                // imported body's internal var with a local one.
+                bhc_core::monomorphize::refresh_var_ids(&mut binds);
+                for b in binds {
+                    match b {
+                        Bind::NonRec(v, e) => {
+                            out.entry(v.name.to_string()).or_insert((v, *e));
+                        }
+                        Bind::Rec(bs) => {
+                            for (v, e) in bs {
+                                out.entry(v.name.to_string()).or_insert((v, *e));
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        out
+    }
+
     fn check_escape_analysis(&self, core: &CoreModule) -> CompileResult<()> {
         use bhc_core::escape::check_embedded_safe;
 

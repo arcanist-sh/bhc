@@ -1,10 +1,39 @@
 # BHC-BRIEF-0004 — Monomorphize polymorphic-monad functions at their concrete transformer stack
 
 **Document ID:** BHC-BRIEF-0004
-**Status:** SAME-MODULE CASE IMPLEMENTED 2026-09-10 — `big/PolyW.hs` (a `Monad m =>`
-function that `evalStateT`s over a concrete stes stack) prints `Right 5`. Pass in
-`crates/bhc-core/src/monomorphize.rs`. Cross-module (pandoc's real case) + type-synonym
-expansion still open. Depends on the stes stack (DONE, 175fd86).
+**Status:** SAME-MODULE + CROSS-MODULE (explicit transformer stacks) IMPLEMENTED 2026-09-10.
+`big/PolyW.hs` (same-module) and `big/xmod/` (a polymorphic writer in one module run at a
+concrete stes stack in another) both print `Right 5`. Pass in
+`crates/bhc-core/src/monomorphize.rs`; cross-module transport via `.bhc` sidecars.
+**Remaining for real pandoc: NEWTYPE unfolding** — `PandocIO` (and `big/xmod3/`'s `AppM`) is a
+newtype over the stes stack, so the concrete instantiation reads as an opaque `Con` and the
+pass (and codegen's stack walkers) do not recognize it as a transformer; the seed does not
+fire. Plus type-synonym expansion. Depends on the stes stack (DONE, 175fd86).
+
+## Cross-module implementation (2026-09-10)
+
+The concrete instance (`m = PandocIO`/`MyIO`) is pinned in the USING module's
+`resolved_expr_types`, but the writer's Core BODY lives in the defining module and
+`.bhi` carries no bodies. So:
+
+- Each module writes its freshly-lowered (pre-simplifier) Core bindings to a `.bhc`
+  sidecar next to its `.bhi` (`write_core_sidecar`, bincode of `Vec<Bind>`). A
+  module loads the `.bhc` of every module it imports (`load_imported_core_bodies`),
+  keyed by binder name — including non-exported helpers, so the whole writer chain
+  is available and specializes transitively.
+- **`Symbol` had to serialize as its STRING, not its interner id** (a `u32`
+  meaningless across processes) — otherwise the transported names decode to garbage.
+  Custom `Serialize`/`Deserialize` on `bhc_intern::Symbol`; `.bhi` already used
+  `String` names so it is unaffected.
+- The pass takes an `imported: &FxHashMap<String,(Var,Expr)>` and resolves an
+  occurrence's source binding by VarId (local) OR by name (imported).
+  `source_binding` VALIDATES the by-id hit's name, because an imported clone body's
+  ids belong to the source module and collide with the importing module's — without
+  the guard, `top.get(id)` returned an unrelated local binding (this exact bug made
+  `poly` resolve to `runMyIO`).
+- Transported bodies are alpha-renamed to fresh disjoint ids on load
+  (`refresh_var_ids`), so codegen's VarId-keyed function/extern dispatch never
+  confuses an imported body's internal var with a local one. Names/types untouched.
 
 ## Implementation notes (2026-09-10)
 

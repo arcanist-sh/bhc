@@ -19855,6 +19855,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let fst = self.extract_pair_fst(pair)?;
                 Ok(Some(fst.into()))
             }
+            Some(TransformerLayer::ExceptT) => {
+                // StateT s1 (ExceptT e (StateT s2 IO)) — pandoc's reader/writer
+                // stack (PandocIO = ExceptT PandocError (StateT CommonState IO)
+                // with the writer's StateT WriterState on top).
+                self.lower_eval_state_t_over_except_t_st(m_expr, s_expr)
+            }
             Some(_other) => {
                 // Other nested transformers - not yet supported
                 Err(CodegenError::Internal(
@@ -19862,6 +19868,81 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 ))
             }
         }
+    }
+
+    /// `evalStateT (m :: StateT s1 (ExceptT e (StateT s2 IO)) a) s0`
+    ///   :: ExceptT e (StateT s2 IO) a
+    ///
+    /// bhc builds a StateT computation over this stack with the plain 2-arg
+    /// `bhc_state_t_bind`/`bhc_state_t_then` closures, so running it with its own
+    /// state — `m(m, s0)` — returns `(Either e a, s1')`: the StateT `return`
+    /// already threads the inner `ExceptT` `Right`/`Left`, so the pair's first
+    /// component IS the full `Either` (not a bare `a`). `evalStateT` drops the
+    /// StateT final state `s1'` and re-presents that `Either` as the surrounding
+    /// `ExceptT`-over-`StateT` action `\(self, s2) -> (Either e a, s2)`.
+    fn lower_eval_state_t_over_except_t_st(
+        &mut self,
+        m_expr: &Expr,
+        s_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let m_val = self.lower_expr(m_expr)?.ok_or_else(|| {
+            CodegenError::Internal("evalStateT/ExceptT-st: m has no value".to_string())
+        })?;
+        let s_val = self.lower_expr(s_expr)?.ok_or_else(|| {
+            CodegenError::Internal("evalStateT/ExceptT-st: s has no value".to_string())
+        })?;
+
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = "bhc_eval_state_t_over_except_t_st";
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+
+            // Params: (env, s2). env = [m, s0].
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s2 = func.get_nth_param(1).unwrap();
+            let m = self.extract_closure_env_elem(env, 2, 0)?;
+            let s0 = self.extract_closure_env_elem(env, 2, 1)?;
+
+            // pair = m(m, s0) : (Either e a, s1')  — inner effects already run.
+            let fn_type2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            let m_fn = self.checked_closure_fn_ptr(m, "evalStateT/ExceptT-st: action")?;
+            let pair = self
+                .builder()
+                .build_indirect_call(fn_type2, m_fn, &[m.into(), s0.into()], "eval_pair")
+                .map_err(|e| CodegenError::Internal(format!("evalStateT/ExceptT-st m: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("evalStateT/ExceptT-st m: void".to_string()))?
+                .into_pointer_value();
+
+            // fst is the full `Either e a`; thread the inner state s2 unchanged.
+            let either = self.extract_pair_fst(pair)?;
+            let result_pair = self.alloc_pair(either.into(), s2)?;
+            self.builder()
+                .build_return(Some(&result_pair))
+                .map_err(|e| {
+                    CodegenError::Internal(format!("evalStateT/ExceptT-st return: {:?}", e))
+                })?;
+
+            if let Some(bb) = saved_bb {
+                self.builder().position_at_end(bb);
+            }
+        }
+
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let m_ptr = self.value_to_ptr(m_val)?;
+        let s_ptr = self.value_to_ptr(s_val)?;
+        let closure_ptr = self.alloc_closure(
+            fn_ptr,
+            &[
+                (VarId::new(900000), m_ptr.into()),
+                (VarId::new(900001), s_ptr.into()),
+            ],
+        )?;
+        Ok(Some(closure_ptr.into()))
     }
 
     /// Extract the inner monad from a StateT type.

@@ -277,6 +277,37 @@ impl TransformerStack {
             })
     }
 
+    /// Check if this is a nested `StateT` over (`ExceptT` over `StateT`) context —
+    /// pandoc's reader/writer stack (`StateT WriterState (ExceptT PandocError
+    /// (StateT CommonState IO))`). The top three layers are exactly
+    /// `[StateT, ExceptT, StateT]`.
+    ///
+    /// Such a computation is represented as a 2-arg closure `\(self, s1) -> inner`
+    /// where `inner` is an ExceptT-over-StateT closure of `(a, s1')`; the StateT
+    /// layer is a thin wrapper over the existing `bhc_except_t_*_over_st` machinery
+    /// (see `st_over_et_st_*`).
+    fn is_state_t_over_except_t_over_state_t(&self) -> bool {
+        // The current layer is StateT, and the first layer below it that is NOT
+        // StateT is an `ExceptT` immediately over a `StateT`. Auto-lift pushes
+        // extra StateT layers on top while lowering the do-block, so the raw
+        // stack can look like [StateT, StateT, StateT, ExceptT, StateT, IO]; the
+        // *semantic* shape is still one outer StateT over ExceptT-over-StateT.
+        if self.layers.first() != Some(&TransformerLayer::StateT) {
+            return false;
+        }
+        match self
+            .layers
+            .iter()
+            .position(|&l| l != TransformerLayer::StateT)
+        {
+            Some(i) => {
+                self.layers.get(i) == Some(&TransformerLayer::ExceptT)
+                    && self.layers.get(i + 1) == Some(&TransformerLayer::StateT)
+            }
+            None => false,
+        }
+    }
+
     /// Check if this is a nested ExceptT over ReaderT context.
     ///
     /// Returns true if the top two layers are [ExceptT, ReaderT] with no additional
@@ -824,6 +855,24 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         native_layer: TransformerLayer,
         current_layer: TransformerLayer,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // In a StateT-over-(ExceptT-over-StateT) do-block, an ExceptT-native LHS
+        // (e.g. `throwError e >>= k`) must go through `stes_lift`/`stes_bind` so
+        // it short-circuits; the generic StateT lift below would build a 2-arg
+        // StateT-over-IO closure that `stes_bind` calls with the wrong arity.
+        if native_layer == TransformerLayer::ExceptT
+            && self
+                .transformer_stack
+                .is_state_t_over_except_t_over_state_t()
+        {
+            let lifted = self
+                .lower_stes_inner_lifted(lhs_expr)?
+                .ok_or_else(|| CodegenError::Internal("stes bind-lift: no value".to_string()))?;
+            let k_val = self.lower_expr(rhs_expr)?.ok_or_else(|| {
+                CodegenError::Internal("stes bind-lift: continuation has no value".to_string())
+            })?;
+            return self.lower_stes_bind(lifted, k_val);
+        }
+
         // Lower the LHS with its native context to get the inner action
         self.push_transformer_layer(native_layer);
         let inner_val = self
@@ -852,6 +901,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         native_layer: TransformerLayer,
         current_layer: TransformerLayer,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // See `lower_bind_with_auto_lift`: an ExceptT-native LHS in a stes
+        // do-block must short-circuit via `stes_then`.
+        if native_layer == TransformerLayer::ExceptT
+            && self
+                .transformer_stack
+                .is_state_t_over_except_t_over_state_t()
+        {
+            let lifted = self
+                .lower_stes_inner_lifted(lhs_expr)?
+                .ok_or_else(|| CodegenError::Internal("stes then-lift: no value".to_string()))?;
+            let m2_val = self.lower_expr(rhs_expr)?.ok_or_else(|| {
+                CodegenError::Internal("stes then-lift: RHS has no value".to_string())
+            })?;
+            return self.lower_stes_then(lifted, m2_val);
+        }
+
         // Lower the LHS with its native context to get the inner action
         self.push_transformer_layer(native_layer);
         let inner_val = self.lower_expr(lhs_expr)?.ok_or_else(|| {
@@ -18862,8 +18927,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // StateT s IO - direct execution
                 self.lower_run_state_t_direct(m_expr, s_expr)
             }
+            Some(TransformerLayer::ExceptT) => self.lower_stes_run_family(m_expr, s_expr, "run"),
             Some(_other) => Err(CodegenError::Internal(
-                "runStateT over non-IO/ReaderT inner monad not yet supported".to_string(),
+                "runStateT over non-IO/ReaderT/ExceptT inner monad not yet supported".to_string(),
             )),
         }
     }
@@ -19029,6 +19095,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     fn lower_builtin_get(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let _ptr_type = self.type_mapper().ptr_type();
 
+        // StateT over (ExceptT over StateT) — pandoc's stack.
+        if self
+            .transformer_stack
+            .is_state_t_over_except_t_over_state_t()
+        {
+            return self.lower_stes_get();
+        }
+
         // ReaderT-over-StateT: state is at param 2
         if self.transformer_stack.is_reader_t_over_state_t() {
             let fn_name = "bhc_state_t_get_rt_over_st";
@@ -19091,6 +19165,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let s_val = self
             .lower_expr(s_expr)?
             .ok_or_else(|| CodegenError::Internal("put: s has no value".to_string()))?;
+
+        if self
+            .transformer_stack
+            .is_state_t_over_except_t_over_state_t()
+        {
+            return self.lower_stes_put(s_val);
+        }
 
         let ptr_type = self.type_mapper().ptr_type();
 
@@ -19156,6 +19237,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let f_val = self
             .lower_expr(f_expr)?
             .ok_or_else(|| CodegenError::Internal("modify: f has no value".to_string()))?;
+
+        if self
+            .transformer_stack
+            .is_state_t_over_except_t_over_state_t()
+        {
+            return self.lower_stes_modify(f_val);
+        }
 
         let ptr_type = self.type_mapper().ptr_type();
 
@@ -19295,6 +19383,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(x_expr)?
             .ok_or_else(|| CodegenError::Internal("StateT.pure: x has no value".to_string()))?;
 
+        if self
+            .transformer_stack
+            .is_state_t_over_except_t_over_state_t()
+        {
+            return self.lower_stes_return(x_val);
+        }
+
         let _ptr_type = self.type_mapper().ptr_type();
         let is_nested = self.transformer_stack.is_state_t_over_reader_t();
         let fn_name = if is_nested {
@@ -19348,6 +19443,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let k_val = self
             .lower_expr(k_expr)?
             .ok_or_else(|| CodegenError::Internal("StateT.>>=: k has no value".to_string()))?;
+
+        if self
+            .transformer_stack
+            .is_state_t_over_except_t_over_state_t()
+        {
+            return self.lower_stes_bind(m_val, k_val);
+        }
 
         let ptr_type = self.type_mapper().ptr_type();
         let is_nested = self.transformer_stack.is_state_t_over_reader_t();
@@ -19512,6 +19614,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let m2_val = self
             .lower_expr(m2_expr)?
             .ok_or_else(|| CodegenError::Internal("StateT.>>: m2 has no value".to_string()))?;
+
+        if self
+            .transformer_stack
+            .is_state_t_over_except_t_over_state_t()
+        {
+            return self.lower_stes_then(m1_val, m2_val);
+        }
 
         let ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_state_t_then";
@@ -19828,6 +19937,572 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(closure_ptr.into()))
     }
 
+    // ========================================================================
+    // StateT over (ExceptT over StateT) — pandoc's PandocIO + writer stack
+    // (`StateT WriterState (ExceptT PandocError (StateT CommonState IO))`).
+    //
+    // A computation is a 3-arg closure
+    //     c(self, s1, s2) -> (Either e (a, s1'), s2')
+    // threading BOTH the outer StateT state `s1` and the inner StateT state `s2`,
+    // with the ExceptT `Left` short-circuiting. Each op below builds such a
+    // closure. `evalStateT`/`runStateT`/`execStateT` re-present it as a 2-arg
+    // ExceptT-over-StateT closure `\(self, s2) -> (Either e X, s2')`, which the
+    // enclosing monad's `bhc_except_t_bind_over_st` consumes directly. Gated on
+    // `TransformerStack::is_state_t_over_except_t_over_state_t`.
+    // ========================================================================
+
+    /// Wrap `(value, new_s1)` as `(Right (value, new_s1), s2)` and return it —
+    /// the shared tail of `return`/`get`/`put`/`modify`.
+    fn stes_ok(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        new_s1: BasicValueEnum<'ctx>,
+        s2: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<()> {
+        let v_s1 = self.alloc_pair(value, new_s1)?;
+        let right = self.alloc_adt(1, 1)?;
+        self.store_adt_field(right, 1, 0, v_s1.into())?;
+        let pair = self.alloc_pair(right.into(), s2)?;
+        self.builder()
+            .build_return(Some(&pair))
+            .map_err(|e| CodegenError::Internal(format!("stes_ok return: {:?}", e)))?;
+        Ok(())
+    }
+
+    /// `return a` = `\(env=[a], s1, s2) -> (Right (a, s1), s2)`.
+    fn lower_stes_return(
+        &mut self,
+        a_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self.get_or_create_nested_transformer_fn("bhc_stes_return");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s1 = func.get_nth_param(1).unwrap();
+            let s2 = func.get_nth_param(2).unwrap();
+            let a = self.extract_closure_env_elem(env, 1, 0)?;
+            self.stes_ok(a.into(), s1, s2)?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let a_ptr = self.value_to_ptr(a_val)?;
+        let closure = self.alloc_closure(fn_ptr, &[(VarId::new(900000), a_ptr.into())])?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `get` = `\(_env, s1, s2) -> (Right (s1, s1), s2)`.
+    fn lower_stes_get(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self.get_or_create_nested_transformer_fn("bhc_stes_get");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let s1 = func.get_nth_param(1).unwrap();
+            let s2 = func.get_nth_param(2).unwrap();
+            self.stes_ok(s1, s1, s2)?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let closure = self.alloc_closure(fn_ptr, &[])?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `put s'` = `\(env=[s'], _s1, s2) -> (Right ((), s'), s2)`.
+    fn lower_stes_put(
+        &mut self,
+        s_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let func = self.get_or_create_nested_transformer_fn("bhc_stes_put");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s2 = func.get_nth_param(2).unwrap();
+            let s_new = self.extract_closure_env_elem(env, 1, 0)?;
+            let unit = ptr_type.const_null();
+            self.stes_ok(unit.into(), s_new.into(), s2)?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let s_ptr = self.value_to_ptr(s_val)?;
+        let closure = self.alloc_closure(fn_ptr, &[(VarId::new(900000), s_ptr.into())])?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `modify f` = `\(env=[f], s1, s2) -> (Right ((), f s1), s2)`.
+    fn lower_stes_modify(
+        &mut self,
+        f_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let func = self.get_or_create_nested_transformer_fn("bhc_stes_modify");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s1 = func.get_nth_param(1).unwrap();
+            let s2 = func.get_nth_param(2).unwrap();
+            let f = self.extract_closure_env_elem(env, 1, 0)?;
+            let fn2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            let f_fn = self.checked_closure_fn_ptr(f, "stes modify: f")?;
+            let s1_new = self
+                .builder()
+                .build_indirect_call(fn2, f_fn, &[f.into(), s1.into()], "stes_modify_s")
+                .map_err(|e| CodegenError::Internal(format!("stes modify f: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("stes modify f: void".to_string()))?;
+            let unit = ptr_type.const_null();
+            self.stes_ok(unit.into(), s1_new, s2)?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let f_ptr = self.value_to_ptr(f_val)?;
+        let closure = self.alloc_closure(fn_ptr, &[(VarId::new(900000), f_ptr.into())])?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `throwError e` = `\(env=[e], _s1, s2) -> (Left e, s2)`.
+    fn lower_stes_throw(
+        &mut self,
+        e_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self.get_or_create_nested_transformer_fn("bhc_stes_throw");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s2 = func.get_nth_param(2).unwrap();
+            let e = self.extract_closure_env_elem(env, 1, 0)?;
+            let left = self.alloc_adt(0, 1)?;
+            self.store_adt_field(left, 1, 0, e.into())?;
+            let pair = self.alloc_pair(left.into(), s2)?;
+            self.builder()
+                .build_return(Some(&pair))
+                .map_err(|e| CodegenError::Internal(format!("stes throw return: {:?}", e)))?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let e_ptr = self.value_to_ptr(e_val)?;
+        let closure = self.alloc_closure(fn_ptr, &[(VarId::new(900000), e_ptr.into())])?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `lift inner` (inner :: ExceptT-over-StateT closure) =
+    /// `\(env=[inner], s1, s2) -> case inner(inner, s2) of
+    ///     (Right a, s2')  -> (Right (a, s1), s2')
+    ///     (Left e, s2')   -> (Left e, s2')`.
+    fn lower_stes_lift(
+        &mut self,
+        inner_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let func = self.get_or_create_nested_transformer_fn("bhc_stes_lift");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let right_bb = self.llvm_ctx.append_basic_block(func, "right");
+            let left_bb = self.llvm_ctx.append_basic_block(func, "left");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s1 = func.get_nth_param(1).unwrap();
+            let s2 = func.get_nth_param(2).unwrap();
+            let inner = self.extract_closure_env_elem(env, 1, 0)?;
+            let fn2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            let inner_fn = self.checked_closure_fn_ptr(inner, "stes lift: inner")?;
+            let ipair = self
+                .builder()
+                .build_indirect_call(fn2, inner_fn, &[inner.into(), s2.into()], "stes_lift_i")
+                .map_err(|e| CodegenError::Internal(format!("stes lift inner: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("stes lift inner: void".to_string()))?
+                .into_pointer_value();
+            let either = self.extract_pair_fst(ipair)?;
+            let s2p = self.extract_pair_snd(ipair)?;
+            let tag = self.extract_adt_tag(either)?;
+            let is_right = self
+                .builder()
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    tag,
+                    self.type_mapper().i64_type().const_int(1, false),
+                    "stes_lift_isr",
+                )
+                .map_err(|e| CodegenError::Internal(format!("stes lift cmp: {:?}", e)))?;
+            self.builder()
+                .build_conditional_branch(is_right, right_bb, left_bb)
+                .map_err(|e| CodegenError::Internal(format!("stes lift br: {:?}", e)))?;
+            self.builder().position_at_end(left_bb);
+            let lpair = self.alloc_pair(either.into(), s2p.into())?;
+            self.builder()
+                .build_return(Some(&lpair))
+                .map_err(|e| CodegenError::Internal(format!("stes lift left: {:?}", e)))?;
+            self.builder().position_at_end(right_bb);
+            let a = self.extract_adt_field(either, 1, 0)?;
+            self.stes_ok(a.into(), s1, s2p.into())?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let inner_ptr = self.value_to_ptr(inner_val)?;
+        let closure = self.alloc_closure(fn_ptr, &[(VarId::new(900000), inner_ptr.into())])?;
+        Ok(Some(closure.into()))
+    }
+
+    /// Lower an inner-monad expression (an `ExceptT`-over-`StateT` action such as
+    /// `throwError e`) that appears in a `stes` (StateT-over-ExceptT-over-StateT)
+    /// do-block, and lift it to the outer StateT so it participates in the 3-arg
+    /// `stes_*` protocol. The generic StateT auto-lift path (via
+    /// `apply_lift_for_layer` then `lower_state_t_bind_with_value`) produces an
+    /// incompatible 2-arg StateT-over-IO closure, so `throwError` would not
+    /// short-circuit; this instead lowers the action under the *inner*
+    /// `[ExceptT, StateT, IO]` stack (making `throwError` take the `..._over_st`
+    /// 2-arg path) and wraps the result with `stes_lift`.
+    fn lower_stes_inner_lifted(
+        &mut self,
+        inner_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // The stes stack is [StateT, .., StateT, ExceptT, StateT, IO] (auto-lift
+        // may prepend extra StateTs). The inner monad is everything from the
+        // first non-StateT layer onward: [ExceptT, StateT, IO].
+        let inner_start = self
+            .transformer_stack
+            .layers
+            .iter()
+            .position(|&l| l != TransformerLayer::StateT)
+            .unwrap_or(0);
+        let saved = self.transformer_stack.layers.clone();
+        self.transformer_stack.layers = saved[inner_start..].to_vec();
+        let inner_res = self.lower_expr(inner_expr);
+        self.transformer_stack.layers = saved;
+        let inner_val = inner_res?.ok_or_else(|| {
+            CodegenError::Internal("stes inner-lift: inner has no value".to_string())
+        })?;
+        self.lower_stes_lift(inner_val)
+    }
+
+    /// `(m >>= k)` = `\(env=[m,k], s1, s2) ->
+    ///   case m(m, s1, s2) of
+    ///     (Left e, s2')          -> (Left e, s2')
+    ///     (Right (a, s1'), s2')  -> (k a)(k a, s1', s2')`.
+    fn lower_stes_bind(
+        &mut self,
+        m_val: BasicValueEnum<'ctx>,
+        k_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let func = self.get_or_create_nested_transformer_fn("bhc_stes_bind");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let right_bb = self.llvm_ctx.append_basic_block(func, "right");
+            let left_bb = self.llvm_ctx.append_basic_block(func, "left");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s1 = func.get_nth_param(1).unwrap();
+            let s2 = func.get_nth_param(2).unwrap();
+            let m = self.extract_closure_env_elem(env, 2, 0)?;
+            let k = self.extract_closure_env_elem(env, 2, 1)?;
+            let fn3 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+            let m_fn = self.checked_closure_fn_ptr(m, "stes bind: m")?;
+            let pair = self
+                .builder()
+                .build_indirect_call(fn3, m_fn, &[m.into(), s1.into(), s2.into()], "stes_bind_m")
+                .map_err(|e| CodegenError::Internal(format!("stes bind m: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("stes bind m: void".to_string()))?
+                .into_pointer_value();
+            let either = self.extract_pair_fst(pair)?;
+            let s2p = self.extract_pair_snd(pair)?;
+            let tag = self.extract_adt_tag(either)?;
+            let is_right = self
+                .builder()
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    tag,
+                    self.type_mapper().i64_type().const_int(1, false),
+                    "stes_bind_isr",
+                )
+                .map_err(|e| CodegenError::Internal(format!("stes bind cmp: {:?}", e)))?;
+            self.builder()
+                .build_conditional_branch(is_right, right_bb, left_bb)
+                .map_err(|e| CodegenError::Internal(format!("stes bind br: {:?}", e)))?;
+            // Left: propagate (Left e, s2').
+            self.builder().position_at_end(left_bb);
+            let lpair = self.alloc_pair(either.into(), s2p.into())?;
+            self.builder()
+                .build_return(Some(&lpair))
+                .map_err(|e| CodegenError::Internal(format!("stes bind left: {:?}", e)))?;
+            // Right (a, s1'): kr = k(k, a); result = kr(kr, s1', s2').
+            self.builder().position_at_end(right_bb);
+            let a_s1 = self.extract_adt_field(either, 1, 0)?;
+            let a = self.extract_pair_fst(a_s1)?;
+            let s1p = self.extract_pair_snd(a_s1)?;
+            let fn2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            let k_fn = self.checked_closure_fn_ptr(k, "stes bind: k")?;
+            let kr = self
+                .builder()
+                .build_indirect_call(fn2, k_fn, &[k.into(), a.into()], "stes_bind_kr")
+                .map_err(|e| CodegenError::Internal(format!("stes bind k: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("stes bind k: void".to_string()))?
+                .into_pointer_value();
+            let kr_fn = self.checked_closure_fn_ptr(kr, "stes bind: kr")?;
+            let result = self
+                .builder()
+                .build_indirect_call(
+                    fn3,
+                    kr_fn,
+                    &[kr.into(), s1p.into(), s2p.into()],
+                    "stes_bind_res",
+                )
+                .map_err(|e| CodegenError::Internal(format!("stes bind kr call: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("stes bind kr: void".to_string()))?;
+            self.builder()
+                .build_return(Some(&result))
+                .map_err(|e| CodegenError::Internal(format!("stes bind res return: {:?}", e)))?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let m_ptr = self.value_to_ptr(m_val)?;
+        let k_ptr = self.value_to_ptr(k_val)?;
+        let closure = self.alloc_closure(
+            fn_ptr,
+            &[
+                (VarId::new(900000), m_ptr.into()),
+                (VarId::new(900001), k_ptr.into()),
+            ],
+        )?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `(m1 >> m2)` = `\(env=[m1,m2], s1, s2) ->
+    ///   case m1(m1, s1, s2) of
+    ///     (Left e, s2')          -> (Left e, s2')
+    ///     (Right (_, s1'), s2')  -> m2(m2, s1', s2')`.
+    fn lower_stes_then(
+        &mut self,
+        m1_val: BasicValueEnum<'ctx>,
+        m2_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let func = self.get_or_create_nested_transformer_fn("bhc_stes_then");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let right_bb = self.llvm_ctx.append_basic_block(func, "right");
+            let left_bb = self.llvm_ctx.append_basic_block(func, "left");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s1 = func.get_nth_param(1).unwrap();
+            let s2 = func.get_nth_param(2).unwrap();
+            let m1 = self.extract_closure_env_elem(env, 2, 0)?;
+            let m2 = self.extract_closure_env_elem(env, 2, 1)?;
+            let fn3 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+            let m1_fn = self.checked_closure_fn_ptr(m1, "stes then: m1")?;
+            let pair = self
+                .builder()
+                .build_indirect_call(
+                    fn3,
+                    m1_fn,
+                    &[m1.into(), s1.into(), s2.into()],
+                    "stes_then_m1",
+                )
+                .map_err(|e| CodegenError::Internal(format!("stes then m1: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("stes then m1: void".to_string()))?
+                .into_pointer_value();
+            let either = self.extract_pair_fst(pair)?;
+            let s2p = self.extract_pair_snd(pair)?;
+            let tag = self.extract_adt_tag(either)?;
+            let is_right = self
+                .builder()
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    tag,
+                    self.type_mapper().i64_type().const_int(1, false),
+                    "stes_then_isr",
+                )
+                .map_err(|e| CodegenError::Internal(format!("stes then cmp: {:?}", e)))?;
+            self.builder()
+                .build_conditional_branch(is_right, right_bb, left_bb)
+                .map_err(|e| CodegenError::Internal(format!("stes then br: {:?}", e)))?;
+            self.builder().position_at_end(left_bb);
+            let lpair = self.alloc_pair(either.into(), s2p.into())?;
+            self.builder()
+                .build_return(Some(&lpair))
+                .map_err(|e| CodegenError::Internal(format!("stes then left: {:?}", e)))?;
+            self.builder().position_at_end(right_bb);
+            let u_s1 = self.extract_adt_field(either, 1, 0)?;
+            let s1p = self.extract_pair_snd(u_s1)?;
+            let m2_fn = self.checked_closure_fn_ptr(m2, "stes then: m2")?;
+            let result = self
+                .builder()
+                .build_indirect_call(
+                    fn3,
+                    m2_fn,
+                    &[m2.into(), s1p.into(), s2p.into()],
+                    "stes_then_res",
+                )
+                .map_err(|e| CodegenError::Internal(format!("stes then m2: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("stes then m2: void".to_string()))?;
+            self.builder()
+                .build_return(Some(&result))
+                .map_err(|e| CodegenError::Internal(format!("stes then res return: {:?}", e)))?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let m1_ptr = self.value_to_ptr(m1_val)?;
+        let m2_ptr = self.value_to_ptr(m2_val)?;
+        let closure = self.alloc_closure(
+            fn_ptr,
+            &[
+                (VarId::new(900000), m1_ptr.into()),
+                (VarId::new(900001), m2_ptr.into()),
+            ],
+        )?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `evalStateT c s1` / `runStateT` / `execStateT` for the stack: return a
+    /// 2-arg ExceptT-over-StateT closure `\(self, s2) -> …` that runs
+    /// `c(c, s1, s2)` and keeps, respectively, the value `a`, the pair `(a, s1')`,
+    /// or the final state `s1'` (each still under the ExceptT `Either`).
+    fn lower_stes_run_family(
+        &mut self,
+        m_expr: &Expr,
+        s_expr: &Expr,
+        which: &'static str, // "eval" | "run" | "exec"
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // The StateT computation argument must be lowered with the StateT layer
+        // ON TOP of the enclosing ExceptT-over-StateT stack, so its own
+        // `get`/`put`/`modify`/`>>=`/`return` route to the `stes_*` 3-arg ops
+        // (an inline `do` block here would otherwise be lowered under the bare
+        // `[ExceptT, StateT]` context and take the 2-arg StateT-over-IO path,
+        // which this run-family then calls with the wrong arity).
+        self.push_transformer_layer(TransformerLayer::StateT);
+        let m_res = self.lower_expr(m_expr);
+        self.pop_transformer_layer();
+        let m_val = m_res?
+            .ok_or_else(|| CodegenError::Internal(format!("{which}StateT/stes: m no value")))?;
+        let s_val = self
+            .lower_expr(s_expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{which}StateT/stes: s no value")))?;
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_name = match which {
+            "eval" => "bhc_eval_stes",
+            "run" => "bhc_run_stes",
+            _ => "bhc_exec_stes",
+        };
+        let func = self.get_or_create_transformer_fn(fn_name);
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s2 = func.get_nth_param(1).unwrap();
+            let c = self.extract_closure_env_elem(env, 2, 0)?;
+            let s1 = self.extract_closure_env_elem(env, 2, 1)?;
+            let fn3 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+            let c_fn = self.checked_closure_fn_ptr(c, "stes run: c")?;
+            let pair = self
+                .builder()
+                .build_indirect_call(fn3, c_fn, &[c.into(), s1.into(), s2.into()], "stes_run_c")
+                .map_err(|e| CodegenError::Internal(format!("stes run c: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("stes run c: void".to_string()))?
+                .into_pointer_value();
+            // pair = (Either e (a, s1'), s2'). For "run" the Either already holds
+            // the desired (a, s1'); return it verbatim. For eval/exec, rebuild the
+            // Right to hold just `a` / `s1'` (Left is propagated unchanged).
+            if which == "run" {
+                self.builder()
+                    .build_return(Some(&pair))
+                    .map_err(|e| CodegenError::Internal(format!("stes run return: {:?}", e)))?;
+            } else {
+                let right_bb = self.llvm_ctx.append_basic_block(func, "right");
+                let left_bb = self.llvm_ctx.append_basic_block(func, "left");
+                let either = self.extract_pair_fst(pair)?;
+                let s2p = self.extract_pair_snd(pair)?;
+                let tag = self.extract_adt_tag(either)?;
+                let is_right = self
+                    .builder()
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        tag,
+                        self.type_mapper().i64_type().const_int(1, false),
+                        "stes_run_isr",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("stes run cmp: {:?}", e)))?;
+                self.builder()
+                    .build_conditional_branch(is_right, right_bb, left_bb)
+                    .map_err(|e| CodegenError::Internal(format!("stes run br: {:?}", e)))?;
+                self.builder().position_at_end(left_bb);
+                let lpair = self.alloc_pair(either.into(), s2p.into())?;
+                self.builder()
+                    .build_return(Some(&lpair))
+                    .map_err(|e| CodegenError::Internal(format!("stes run left: {:?}", e)))?;
+                self.builder().position_at_end(right_bb);
+                let a_s1 = self.extract_adt_field(either, 1, 0)?;
+                let kept = if which == "eval" {
+                    self.extract_pair_fst(a_s1)?
+                } else {
+                    self.extract_pair_snd(a_s1)?
+                };
+                let right2 = self.alloc_adt(1, 1)?;
+                self.store_adt_field(right2, 1, 0, kept.into())?;
+                let rpair = self.alloc_pair(right2.into(), s2p.into())?;
+                self.builder()
+                    .build_return(Some(&rpair))
+                    .map_err(|e| CodegenError::Internal(format!("stes run right: {:?}", e)))?;
+            }
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let m_ptr = self.value_to_ptr(m_val)?;
+        let s_ptr = self.value_to_ptr(s_val)?;
+        let closure = self.alloc_closure(
+            fn_ptr,
+            &[
+                (VarId::new(900000), m_ptr.into()),
+                (VarId::new(900001), s_ptr.into()),
+            ],
+        )?;
+        Ok(Some(closure.into()))
+    }
+
     /// evalStateT m s = fst(m(s))
     ///
     /// For nested transformers like `StateT s (ReaderT r IO)`, this returns
@@ -19855,20 +20530,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let fst = self.extract_pair_fst(pair)?;
                 Ok(Some(fst.into()))
             }
-            Some(_other) => {
-                // Other nested transformers (incl. ExceptT-over-StateT, pandoc's
-                // PandocIO) are not yet supported. A partial `evalStateT` for that
-                // stack was tried and reverted: correct only when the StateT
-                // computation ends in `return`/`pure` (which lifts through ExceptT
-                // to `Right a`); `get`/`put`/`modify` yield a raw `(a, s')` with an
-                // UNBOXED state Int, so those compile then crash in `bhc_force`. A
-                // real fix must make the StateT ops over an ExceptT inner monad
-                // consistently Either-lift and box their state — a systemic
-                // 3-layer-representation change (see .claude/TODO-next.md).
-                Err(CodegenError::Internal(
-                    "evalStateT over non-IO/ReaderT inner monad not yet supported".to_string(),
-                ))
+            Some(TransformerLayer::ExceptT) => {
+                // StateT s1 (ExceptT e (StateT s2 IO)) — pandoc's PandocIO stack.
+                // The computation is a 3-arg `\(self,s1,s2)->(Either e (a,s1'),s2')`
+                // closure (its ops go through the `stes_*` handlers); re-present it
+                // as a 2-arg ExceptT-over-StateT closure keeping only `a`.
+                self.lower_stes_run_family(m_expr, s_expr, "eval")
             }
+            Some(_other) => Err(CodegenError::Internal(
+                "evalStateT over non-IO/ReaderT/ExceptT inner monad not yet supported".to_string(),
+            )),
         }
     }
 
@@ -20089,8 +20760,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let snd = self.extract_pair_snd(pair)?;
                 Ok(Some(snd.into()))
             }
+            Some(TransformerLayer::ExceptT) => self.lower_stes_run_family(m_expr, s_expr, "exec"),
             Some(_other) => Err(CodegenError::Internal(
-                "execStateT over non-IO/ReaderT inner monad not yet supported".to_string(),
+                "execStateT over non-IO/ReaderT/ExceptT inner monad not yet supported".to_string(),
             )),
         }
     }
@@ -20288,6 +20960,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         e_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // StateT over (ExceptT over StateT): \(env, s1, s2) -> (Left e, s2)
+        if self
+            .transformer_stack
+            .is_state_t_over_except_t_over_state_t()
+        {
+            let e_val = self
+                .lower_expr(e_expr)?
+                .ok_or_else(|| CodegenError::Internal("throwE/stes: e has no value".to_string()))?;
+            return self.lower_stes_throw(e_val);
+        }
         // ExceptT over StateT: \(env, s) -> (Left e, s)
         if self.transformer_stack.is_except_t_over_state_t() {
             return self.lower_builtin_throw_e_over_st(e_expr);

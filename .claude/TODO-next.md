@@ -442,6 +442,30 @@ past Builder `<>` and into the writer monad.**
   the ExceptT-over-StateT representation (bhc_except_t_bind_over_st, lower.rs
   ~21110; the pure side is `except_t_pure_*`). Probe: pandoc-harness/QWriter.hs.
 
+**2026-09-10 — the writer\'s real blocker is the 3-layer StateT-over-(ExceptT-
+over-StateT) transformer stack, NOT the bind.** `bhc_except_t_bind_over_st` (the
+bind) is fine; it aborts because its ACTION comes from `evalStateT (pandocToHtml
+opts d) st`, and `lower_builtin_eval_state_t` only implements StateT-over-IO and
+StateT-over-ReaderT — the ExceptT-over-StateT inner monad (pandoc\'s PandocIO =
+`ExceptT PandocError (StateT CommonState IO)`, with the writer\'s `StateT
+WriterState` on top) hits an explicit `evalStateT over non-IO/ReaderT inner monad
+not yet supported`. Fast pandoc-free repro: `pandoc-harness/big/ET.hs`
+(`evalStateT (…) :: StateT s1 (ExceptT e (StateT s2 IO)) a`).
+
+Tried three `evalStateT`-over-ExceptT-over-StateT calling conventions and ALL
+failed (reverted): (a) flattened 3-arg `m(m,s0,s2)` → segfault; (b) 2-step
+`m(m,s0)`→Inner-closure then `inner(inner,s2)` → "inner is not a closure"; (c)
+flattened `m(m,s0)`→`(a,s1\')` then wrap in `except_t_pure_over_st` → garbage
+`Right (Right 5)`. So the underlying StateT OPERATIONS (`return`/`modify`/`get`)
+over an ExceptT-over-StateT inner monad don\'t produce values in ANY consumable
+form — the 3-layer stack has no consistent representation across the StateT
+ops + run/eval/exec. This is a substantial transformer-codegen subsystem to
+design+build (mirror how StateT-over-ReaderT threads its inner context, but for
+ExceptT-over-StateT), not a localized bind fix. Start: dump the LLVM of a StateT
+computation over this stack (via `-c` to a module that type-annotates it, since
+the eval path errors) to learn the actual closure signature `return`/`get`
+produce, then make `evalStateT`/`runStateT` consume exactly that.
+
 ## 2. Native stdin read path segfaults
 
 **Detailed home:** `KNOWN_FAILURES` in `crates/bhc-e2e-tests/ghc_differential.py`;

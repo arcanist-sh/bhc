@@ -403,6 +403,22 @@ narrowed to an internal garbage `Left`.**
   use pandoc's own `renderError` to inspect, and it faults precisely because the
   value is garbage. Probes in pandoc-harness/ (QReader/QRun2/QRender/big/).
 
+**2026-09-10 (cont) — pandoc pipeline: TWO precise remaining blockers, both
+deep.**
+- **Writer blocker = Data.Sequence.** `writeHtml5String def <hand-built doc>`
+  crashes while BUILDING the doc: `str "Hello" <> str ", "` on `Inlines` goes to
+  `Data.List.append` (0x1). `Inlines`/`Blocks` are `Many (Seq a)`; a Seq-backed
+  newtype `<>` segfaults standalone AND `Seq.singleton` is a STUB. This is the
+  `Data.Sequence` set I EXCLUDED from the alias fix (fae20ad) because its real
+  builtins crash at runtime (regressed foldable_to_list). List-backed / synonym /
+  cross-module Semigroup newtypes all dispatch CORRECTLY (big/Many*.hs) — only the
+  Seq backing fails. FIX PATH: make Data.Sequence's real builtins work
+  (singleton/fromList/empty/`<>`/index/viewl…) at runtime, then add Data.Sequence
+  to the alias fix's curated set. This unblocks every Builder-based writer.
+- **Reader blocker = garbage Left inside readMarkdown** (see above): the
+  PandocError value is 0x1; runIO + renderError both proven fine, so it is inside
+  readWithM/parseMarkdown's ParsecT-in-PandocMonad execution.
+
 ## 2. Native stdin read path segfaults
 
 **Detailed home:** `KNOWN_FAILURES` in `crates/bhc-e2e-tests/ghc_differential.py`;

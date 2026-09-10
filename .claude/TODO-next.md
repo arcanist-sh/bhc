@@ -466,6 +466,30 @@ computation over this stack (via `-c` to a module that type-annotates it, since
 the eval path errors) to learn the actual closure signature `return`/`get`
 produce, then make `evalStateT`/`runStateT` consume exactly that.
 
+**2026-09-10 (cont) — evalStateT-over-ExceptT-over-StateT implemented for the
+CONCRETE case (58bd156); writer\'s real blockers are now pinned and are deeper.**
+`lower_eval_state_t_over_except_t_st` makes `evalStateT (m :: StateT s1 (ExceptT e
+(StateT s2 IO)) a) s0` work when the inner monad is CONCRETE at compile time:
+`evalStateT (return 5) 10` = Right 5, and bound `>>= \x -> return (x+100)` = Right
+105 (pandoc-free repros ET2/ET3). Two remaining writer blockers, both systemic:
+
+1. **Polymorphic transformer codegen.** `writeHtmlString' :: PandocMonad m => …`
+   is compiled ONCE with `m` a type variable, so its `evalStateT (pandocToHtml …)
+   st` takes the None/IO path (m isn\'t a known transformer at compile). At
+   runtime `runIO` makes m = ExceptT-over-StateT, so the IO-path result is not an
+   ExceptT-over-StateT closure → `bhc_except_t_bind_over_st: action is not a
+   closure`. Fix needs monomorphizing the writer at the concrete PandocIO stack
+   (so evalStateT sees concrete m and uses the new path) OR a runtime-uniform
+   transformer representation. My concrete-case fix does NOT fire for polymorphic
+   pandoc code.
+2. **StateT state-value boxing.** Even with a concrete stack, `evalStateT
+   (do{modify(+1); get}) 10` crashes in `bhc_force` on `0xb` (the unboxed post-
+   modify Int) — `modify`/`get` over this inner monad box/force their state value
+   inconsistently (ET4). `bhc_state_t_modify`/`bhc_state_t_get`.
+
+Repros: pandoc-harness/big/ET{2,3,4}.hs (fast, staticlib-only link) +
+/tmp/ett.sh. The ExceptT-over-StateT bind itself is correct.
+
 ## 2. Native stdin read path segfaults
 
 **Detailed home:** `KNOWN_FAILURES` in `crates/bhc-e2e-tests/ghc_differential.py`;

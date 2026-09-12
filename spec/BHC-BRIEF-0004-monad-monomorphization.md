@@ -95,16 +95,30 @@ fallback-created clone chain (`Main.pandocToHtml$$mono` / `writeHtmlString'$$mon
 `writeHtml5String$$mono` all exist), so it is exposed by the fallback (f2387fa); the polymorphic
 `HTML.o` `pandocToHtml` lowers `lift` through the dict (no concrete transformer op), so only the
 concrete-monad clone picks an op — and picks `bhc_reader_t_lift` instead of `stes_lift`.
-**Next: why does codegen lower the clone's `lift` as `bhc_reader_t_lift`?** The writer stack has
-no ReaderT, so `current_transformer_layer()` should be `StateT` (routing to the stes lift), not
-`ReaderT`. Likely the specialized clone's monad type (a newtype `PandocIO` over the stes stack, or
-the `StateT WriterState PandocIO` shape) is read by `extract_transformer_stack_*` as ReaderT-topped,
-or the stes stack has no dedicated `lift` route and falls through to the `match current_layer`
-arm wrongly. The `lift` route for a bare `m1` in a stes `>>` (as opposed to the `throwError`
-short-circuit that `lower_bind_with_auto_lift`/`lower_stes_inner_lifted` handle) needs auditing.
-Repro DB: `SNAP=snap-mono DB=pandoc-db-ret2 ./chain.sh {snapshot,deps,sweep}` then
-`./chain.sh link WriterProbe.hs` (or `WPMin.hs`); at the crash, `register read x9` in
-`bhc_stes_then` names the mis-lowered op.
+**Partial fix landed (649a65b): the stes stack had no dedicated bare-`lift` route.** A bare
+`lift m` at `current=StateT, is_stes=true` (confirmed via `BHC_DBG_LIFT` during the WriterProbe
+compile) fell through to `lower_builtin_state_t_lift` → a 2-arg `bhc_state_t_lift`, wrong arity for
+the 3-arg stes protocol. Now routed through `lower_stes_inner_lifted` → `stes_lift` (the
+value-position twin of the `throwError` short-circuit). Verified: ETZ/ETX/PolyW still pass; sweep
+221/221; cargo 2828/0; diff 219/0/2.
+
+**STILL crashes — a SECOND `lift`, lowered as `bhc_reader_t_lift` under `current=ReaderT`, remains.**
+Even after the fix + a full re-sweep, `register read x9` at the crashing `bhc_stes_then` blr still
+resolves to `bhc_reader_t_lift`. But the writer stack has NO ReaderT (`PandocIO = ExceptT (StateT
+IO)`), and the WriterProbe-compile `BHC_DBG_LIFT` trace shows the writer lift as `current=StateT`,
+never `ReaderT` — so this reader_t_lift is emitted while compiling a DIFFERENT module's clone (in
+the swept DB), under a stack codegen reads as ReaderT-topped. The lift closures live in thunks, not
+the clone's function body, so `llvm-objdump` of `Main.pandocToHtml$$mono` etc. shows no lift op
+directly. **Leading hypothesis: the erased-occurrence fallback (f2387fa, a known mis-firing
+heuristic per blocker 2) specialized a writer function at a monad whose type codegen's
+`extract_transformer_stack_*` reads as ReaderT-topped** (e.g. via `Text.Pandoc.App`, which IS
+ReaderT-based and whose writer clones — `App.pandocToHtml`/`writeHtmlString'$$mono` — are in the
+binary). NEXT: add `BHC_DBG_LIFT`-style logging to `lower_builtin_reader_t_lift` (prints the ambient
+stack whenever reader_t_lift is emitted), re-sweep capturing it, and find which module emits a
+reader_t_lift for a writer action under a no-ReaderT semantic stack. If it is a fallback mis-fire,
+either constrain the fallback's `cur_monad` or fix `extract_transformer_stack_*`'s reading of the
+specialized monad type. Repro DB: `SNAP=snap-mono DB=pandoc-db-fix ./chain.sh {snapshot,deps,sweep}`
+then `./chain.sh link WriterProbe.hs`; at the crash, `register read x9` in `bhc_stes_then`.
 
 ### One remaining blocker for the writer
 1. **The whole `ReaderT`-over-`ExceptT`-over-`StateT` stack** (codegen) — ✅ **DONE 2026-09-12.**

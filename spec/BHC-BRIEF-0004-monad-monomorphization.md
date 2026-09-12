@@ -109,7 +109,36 @@ IO)`), and the WriterProbe-compile `BHC_DBG_LIFT` trace shows the writer lift as
 never `ReaderT` — so this reader_t_lift is emitted while compiling a DIFFERENT module's clone (in
 the swept DB), under a stack codegen reads as ReaderT-topped. The lift closures live in thunks, not
 the clone's function body, so `llvm-objdump` of `Main.pandocToHtml$$mono` etc. shows no lift op
-directly. **PINNED (runtime lldb + BHC_DBG_LAYER): it is a WRONG CLONE, not Main's.** During WriterProbe's
+directly. **RESOLVED 2026-09-12 (two lift fixes, 649a65b + 7b3142e): the writer now runs PAST the lift into
+`setupTranslations`.** The mis-lowered `lift` was in TWO places: the applied-position dispatch
+(649a65b, stes bare-`lift` → `stes_lift`) and — the one that actually bit pandoc — the
+VALUE-position path `lower_builtin_direct` (7b3142e), which mapped `"lift"` unconditionally to
+`bhc_reader_t_lift`. pandoc materialises `lift $ setupTranslations meta` as a value closure
+(`builtin_wrapper_lift_stateT`), so it got reader_t_lift even in the pure-stes writer. Both now
+route to `stes_lift`/`ret_lift` by stack. Confirmed by disasm (`builtin_wrapper_lift_stateT` now
+embeds `bhc_stes_lift`) and lldb (m1 fn-ptr at `stes_then` is now `bhc_stes_lift`). Gates green.
+
+**NEW NEXT BLOCKER (2026-09-12): `except_t_bind_over_st+24` — a null `m` in `setupTranslations`'s
+own `>>=`.** Backtrace `bhc_eval_stes → bhc_stes_then → bhc_stes_lift → bhc_except_t_bind_over_st`.
+`stes_lift` correctly runs the inner PandocIO action (setupTranslations, via `Main.pandocToHtml
+$$mono → setupTranslations$$mono`, all confirmed reached by name-regex breakpoints), whose body is
+`(case lookupMetaString "lang" meta of "" -> pure defLang; …) >>= \lang -> setTranslations lang`.
+The outer `>>=` lowered to `except_t_bind_over_st`, and `+24` = `ldr x9,[x10]` where `x10 = env[0]
+= m` is NULL. For empty `meta`, `m = pure defLang`. **Leading cause: the monomorphizer's selector
+rewrite (`monad_sel_builtin`) rewrites only `$sel_1/$sel_2 $dMonad` (`>>=`/`>>`) — NOT `pure`/
+`return`** (pure comes through the Applicative superclass, `$sel_? ($sel_0 $dMonad)`, so it stays a
+selection through the null transformer dict → null). This is the known "pure/return via
+`$sel_0 $dApplicative` not rewritten" gap. NEXT: extend the rewrite in
+`specialize_body`/`monad_sel_builtin` to map the Applicative-superclass `pure`/`return` selection to
+the builtin `pure`/`return` (which codegen then routes to `except_t_pure_over_st`/stes pure by
+ambient), mirroring the `>>=`/`>>` rewrite; then re-check whether `getCommonState`/`putCommonState`
+(PandocMonad methods, still dict-selected) also need resolving (the broader real-dict work).
+Repro DB: `SNAP=snap-mono DB=pandoc-db-fix2 ./chain.sh {snapshot,deps,sweep}` then
+`./chain.sh link WriterProbe.hs`; break `-r 'setupTranslations..mono'` (name-regex; `-a` misses
+under PIE ASLR), the crash is `except_t_bind_over_st+24` with `x10`/`env[0]` null.
+
+---
+**(historical) PINNED (runtime lldb + BHC_DBG_LAYER): it is a WRONG CLONE, not Main's.** During WriterProbe's
 own compile, `BHC_DBG_LAYER` shows the writer's `lift` as `head=lift … current=StateT -> StateT`,
 so `lower_builtin_state_t_then` lowers m1 under the stes stack and (post-649a65b) emits `stes_lift`
 — `Main.pandocToHtml$$mono` is CORRECT. But at runtime `bhc_eval_stes` runs a `stes_then` closure

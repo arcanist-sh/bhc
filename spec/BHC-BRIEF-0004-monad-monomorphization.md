@@ -71,29 +71,40 @@ ALSO crashes identically — so the null Either is in the writer SETUP path. The
 action in `pandocToHtml` is `lift $ setupTranslations meta`, and it is `m1` in the crashing
 `stes_then`.
 
-**ROOT-CAUSED 2026-09-12 (disassembly): the `PandocMonad` dictionary's method slots are NULL.**
-`Text.Pandoc.Writers.HTML.o` calls the polymorphic `Shared.setupTranslations` (resolved from
-`Shared.o`, no `$$mono` clone), which calls the polymorphic `Translations.setTranslations`.
-`setTranslations lang = modifyCommonState (\st -> …)`, and `modifyCommonState` is a `PandocMonad`
-CLASS METHOD (default `getCommonState >>= putCommonState . f`; `PandocIO` overrides only
-`getCommonState = PandocIO $ lift get` / `putCommonState = PandocIO . lift . put`). Disassembling
-`_Text.Pandoc.Translations.setTranslations` in `Translations.o`: it loads the `modifyCommonState`
-method from the dict — `ldr x20, [x1, #0xa8]` (x1 = `$dPandocMonad`) — then `cbz x20, 0x184`;
-`0x184` is `mov x0, xzr; ret`, i.e. **the dict slot is NULL so it returns NULL**. That null is the
-malformed `Either` `stes_then` then dereferences. So this is NOT a transformer/`stes` bug and NOT
-in the `ret_*`/fallback code: it is the pre-existing gap that `PandocMonad` (a Monad-superclass
-class with ~17 methods) dispatches through a dictionary whose slots are the same null placeholders
-as the transformer Monad dict — they are never populated with `PandocIO`'s compiled instance
-methods. **Next major piece: resolve `PandocMonad` methods to `PandocIO`'s instance** — either
-build a real `PandocMonad PandocIO` dictionary (all ~17 slots, with the instance methods compiling
-as stes/ExceptT-over-StateT actions: `getCommonState`=`lift get`, `putCommonState`=`lift . put`,
-the get/put here being the BOTTOM StateT `CommonState`), or rewrite `$sel_N $dPandocMonad`
-selections to those instance methods when the monad is known to be `PandocIO` (mirrors the stes
-Monad `>>=`/`>>` selector rewrite, but for the PandocMonad method set + its defaults
-`modifyCommonState`/`getsCommonState`). This is its own effort of comparable size to the stack
-work. Repro DB: `SNAP=snap-mono DB=pandoc-db-ret2 ./chain.sh {snapshot,deps,sweep}` then
-`./chain.sh link WriterProbe.hs` (or `WPMin.hs`); inspect with
-`llvm-objdump -dr --disassemble-symbols=_Text.Pandoc.Translations.setTranslations Translations.o`.
+**~~ROOT-CAUSED 2026-09-12 (a): null `PandocMonad` dictionary slots~~ — SUPERSEDED, was a static
+red herring.** Static disassembly of `Translations.setTranslations` shows it read `modifyCommonState`
+from the dict at `[x1,#0xa8]` and return null on a null slot — but a runtime lldb trace proves
+`setTranslations` (and `setupTranslations`) are **NEVER REACHED** before the crash (breakpoints at
+`Main.setTranslations$$mono` / `setupTranslations$$mono` / the polymorphic `Translations`/`Shared`
+symbols never fire; `bhc_stes_then` fires first). The null dict slot is real but not on the crash
+path, so the dictionary-resolution fix is NOT what unblocks the writer.
+
+**ROOT-CAUSED 2026-09-12 (b, runtime lldb): a `lift` is mis-lowered as 2-arg `bhc_reader_t_lift`
+where a 3-arg stes action is required.** Backtrace at the crash: `builtin_wrapper_evalStateT →
+bhc_except_t_bind_over_st → bhc_eval_stes → bhc_stes_then`. That is `writeHtmlString'`'s
+`evalStateT (pandocToHtml opts d) st`; `pandocToHtml`'s first statement `lift $ setupTranslations
+meta` is `m1` of the opening `>>`. At the `blr` that calls `m1`, `x9 = bhc_reader_t_lift`
+(lldb `image lookup` resolves it by name) — the **generic 2-arg ReaderT lift**. But the writer
+stack is `StateT WriterState PandocIO` with `PandocIO = ExceptT PandocError (StateT CommonState
+IO)` (confirmed in `Class/PandocIO.hs`): pure stes, **no ReaderT anywhere**. Called with the stes
+3-arg convention `m1(m1, s1, s2)`, `bhc_reader_t_lift` (a `\(env,r) -> action` that just returns
+its captured inner action, ignoring `r`) hands back the unevaluated `setupTranslations` action;
+`stes_then` reads `[result+8]` as the `Either` field, gets a closure field ≈ null, and faults.
+So `setupTranslations` never runs — the crash is the `lift` itself. This lives in the
+fallback-created clone chain (`Main.pandocToHtml$$mono` / `writeHtmlString'$$mono` /
+`writeHtml5String$$mono` all exist), so it is exposed by the fallback (f2387fa); the polymorphic
+`HTML.o` `pandocToHtml` lowers `lift` through the dict (no concrete transformer op), so only the
+concrete-monad clone picks an op — and picks `bhc_reader_t_lift` instead of `stes_lift`.
+**Next: why does codegen lower the clone's `lift` as `bhc_reader_t_lift`?** The writer stack has
+no ReaderT, so `current_transformer_layer()` should be `StateT` (routing to the stes lift), not
+`ReaderT`. Likely the specialized clone's monad type (a newtype `PandocIO` over the stes stack, or
+the `StateT WriterState PandocIO` shape) is read by `extract_transformer_stack_*` as ReaderT-topped,
+or the stes stack has no dedicated `lift` route and falls through to the `match current_layer`
+arm wrongly. The `lift` route for a bare `m1` in a stes `>>` (as opposed to the `throwError`
+short-circuit that `lower_bind_with_auto_lift`/`lower_stes_inner_lifted` handle) needs auditing.
+Repro DB: `SNAP=snap-mono DB=pandoc-db-ret2 ./chain.sh {snapshot,deps,sweep}` then
+`./chain.sh link WriterProbe.hs` (or `WPMin.hs`); at the crash, `register read x9` in
+`bhc_stes_then` names the mis-lowered op.
 
 ### One remaining blocker for the writer
 1. **The whole `ReaderT`-over-`ExceptT`-over-`StateT` stack** (codegen) — ✅ **DONE 2026-09-12.**

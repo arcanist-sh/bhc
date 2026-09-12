@@ -308,6 +308,33 @@ impl TransformerStack {
         }
     }
 
+    /// Check if this is a nested `ReaderT` over (`ExceptT` over `StateT`) context
+    /// — pandoc's `App`/`PandocIO` reader stack (`ReaderT r (ExceptT e (StateT s
+    /// IO))`). The top layer is `ReaderT`, and the first layer below it that is
+    /// NOT `ReaderT` is an `ExceptT` immediately over a `StateT` (tolerating the
+    /// extra leading `ReaderT` layers auto-lift may prepend, mirroring
+    /// `is_state_t_over_except_t_over_state_t`).
+    ///
+    /// Such a computation is a 3-arg closure `\(self, r, s) -> (Either e a, s')`
+    /// (see the `ret_*` ops); `runReaderT` re-presents it as a 2-arg
+    /// ExceptT-over-StateT closure via `lower_run_reader_t_over_state_t`.
+    fn is_reader_t_over_except_t_over_state_t(&self) -> bool {
+        if self.layers.first() != Some(&TransformerLayer::ReaderT) {
+            return false;
+        }
+        match self
+            .layers
+            .iter()
+            .position(|&l| l != TransformerLayer::ReaderT)
+        {
+            Some(i) => {
+                self.layers.get(i) == Some(&TransformerLayer::ExceptT)
+                    && self.layers.get(i + 1) == Some(&TransformerLayer::StateT)
+            }
+            None => false,
+        }
+    }
+
     /// Check if this is a nested ExceptT over ReaderT context.
     ///
     /// Returns true if the top two layers are [ExceptT, ReaderT] with no additional
@@ -7028,6 +7055,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     Some(_) => return self.lower_value_monad_bind(args[0], args[1], true),
                     None => {}
                 }
+                // For ReaderT over (ExceptT over StateT) — pandoc's App stack —
+                // bypass the generic ReaderT machinery entirely and route to the
+                // flat 3-arg `ret_*` protocol (see `ret_bind`). The generic path
+                // would compose inconsistently-represented op closures.
+                if self
+                    .transformer_stack
+                    .is_reader_t_over_except_t_over_state_t()
+                {
+                    return self.lower_ret_bind_exprs(args[0], args[1]);
+                }
                 // For ReaderT-over-StateT, bypass auto-lift and route directly
                 // to nested ReaderT bind which threads state through 3-arg closures
                 if self.transformer_stack.is_reader_t_over_state_t() {
@@ -7159,6 +7196,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 ) {
                     return self.lower_value_monad_bind(args[0], args[1], false);
                 }
+                // For ReaderT over (ExceptT over StateT) — see the `>>=` arm.
+                if self
+                    .transformer_stack
+                    .is_reader_t_over_except_t_over_state_t()
+                {
+                    return self.lower_ret_then_exprs(args[0], args[1]);
+                }
                 // For ReaderT-over-StateT, bypass auto-lift and route directly
                 // to nested ReaderT then which threads state through 3-arg closures
                 if self.transformer_stack.is_reader_t_over_state_t() {
@@ -7220,6 +7264,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // `Right x`, `[x]` — not the identity the IO layer wants.
                 if let Some(m) = self.value_monad_of_ty(&self.current_builtin_ty) {
                     return self.lower_value_monad_pure(m, args[0]);
+                }
+                // For ReaderT over (ExceptT over StateT) — pandoc's App stack.
+                if self
+                    .transformer_stack
+                    .is_reader_t_over_except_t_over_state_t()
+                {
+                    let a = self.lower_expr(args[0])?.ok_or_else(|| {
+                        CodegenError::Internal("ret return: arg has no value".to_string())
+                    })?;
+                    return self.lower_ret_return(a);
                 }
                 // For ReaderT-over-StateT, route to nested ReaderT pure
                 if self.transformer_stack.is_reader_t_over_state_t() {
@@ -8525,6 +8579,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // Generic lift/liftIO — dispatched based on current transformer context
             "lift" | "liftIO" => {
+                // ReaderT over (ExceptT over StateT): lower the inner action
+                // under [ExceptT, StateT, IO] and wrap with `ret_lift`, rather
+                // than the generic ReaderT lift (which cannot thread the inner
+                // ExceptT/StateT state).
+                if self
+                    .transformer_stack
+                    .is_reader_t_over_except_t_over_state_t()
+                {
+                    return self.lower_ret_lift_expr(args[0]);
+                }
                 match self.current_transformer_layer() {
                     TransformerLayer::ExceptT => self.lower_builtin_except_t_lift(args[0]),
                     TransformerLayer::StateT => self.lower_builtin_state_t_lift(args[0]),
@@ -18004,12 +18068,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // ReaderT r (StateT s IO) - return a StateT closure
                 self.lower_run_reader_t_over_state_t(m_expr, r_expr)
             }
+            Some(TransformerLayer::ExceptT) => {
+                // ReaderT r (ExceptT e (StateT s IO)) — pandoc's App stack. `m`
+                // is a flat 3-arg `ret_*` closure `\(self, r, s) -> (Either e a,
+                // s')`; `runReaderT m r` partial-applies the reader env, yielding
+                // a 2-arg ExceptT-over-StateT closure `\(self, s) -> m(m, r, s)`.
+                // That is exactly what the StateT-inner runner builds (it calls
+                // `m` 3-arg with the captured reader env), so reuse it.
+                self.lower_run_reader_t_over_state_t(m_expr, r_expr)
+            }
             Some(TransformerLayer::IO) | None => {
                 // ReaderT r IO - direct execution (current behavior)
                 self.lower_run_reader_t_direct(m_expr, r_expr)
             }
             Some(_other) => Err(CodegenError::Internal(
-                "runReaderT over non-IO/StateT inner monad not yet supported".to_string(),
+                "runReaderT over non-IO/StateT/ExceptT inner monad not yet supported".to_string(),
             )),
         }
     }
@@ -18135,6 +18208,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// ask = closure \(env, reader_env, state) -> (reader_env, state)
     fn lower_builtin_ask(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let _ptr_type = self.type_mapper().ptr_type();
+        // ReaderT over (ExceptT over StateT) — pandoc's App stack.
+        if self
+            .transformer_stack
+            .is_reader_t_over_except_t_over_state_t()
+        {
+            return self.lower_ret_ask();
+        }
         // Check if we're in a ReaderT-over-StateT context
         if self.transformer_stack.is_reader_t_over_state_t() {
             // Nested: \(_env, reader_env, state) -> (reader_env, state)
@@ -19103,6 +19183,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             return self.lower_stes_get();
         }
 
+        // ReaderT over (ExceptT over StateT) — pandoc's App stack.
+        if self
+            .transformer_stack
+            .is_reader_t_over_except_t_over_state_t()
+        {
+            return self.lower_ret_get();
+        }
+
         // ReaderT-over-StateT: state is at param 2
         if self.transformer_stack.is_reader_t_over_state_t() {
             let fn_name = "bhc_state_t_get_rt_over_st";
@@ -19171,6 +19259,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .is_state_t_over_except_t_over_state_t()
         {
             return self.lower_stes_put(s_val);
+        }
+
+        // ReaderT over (ExceptT over StateT) — pandoc's App stack.
+        if self
+            .transformer_stack
+            .is_reader_t_over_except_t_over_state_t()
+        {
+            return self.lower_ret_put(s_val);
         }
 
         let ptr_type = self.type_mapper().ptr_type();
@@ -19243,6 +19339,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .is_state_t_over_except_t_over_state_t()
         {
             return self.lower_stes_modify(f_val);
+        }
+
+        // ReaderT over (ExceptT over StateT) — pandoc's App stack.
+        if self
+            .transformer_stack
+            .is_reader_t_over_except_t_over_state_t()
+        {
+            return self.lower_ret_modify(f_val);
         }
 
         let ptr_type = self.type_mapper().ptr_type();
@@ -20503,6 +20607,470 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(closure.into()))
     }
 
+    // ========================================================================
+    // ReaderT over (ExceptT over StateT) — pandoc's App/PandocIO reader stack
+    // (`ReaderT r (ExceptT e (StateT s IO))`).
+    //
+    // A computation is a 3-arg closure
+    //     c(self, r, s) -> (Either e a, s')
+    // threading the read-only reader env `r` (never modified, never paired into
+    // the `Right`) and the bottom StateT state `s`, with the ExceptT `Left`
+    // short-circuiting. This is a flatter cousin of the `stes_*` protocol: the
+    // outer layer here is ReaderT (read-only) rather than StateT, so the `Right`
+    // payload is just `a`, not `(a, s1')`, and `lift` needs no repackaging (the
+    // inner `ExceptT`-over-`StateT` action already returns `(Either e a, s')`).
+    // `runReaderT` re-presents it as a 2-arg ExceptT-over-StateT closure via
+    // `lower_run_reader_t_over_state_t` (which calls `c(c, r, s)`), consumed by
+    // the enclosing `runExceptT`/`runStateT`. Gated on
+    // `TransformerStack::is_reader_t_over_except_t_over_state_t`.
+    // ========================================================================
+
+    /// Wrap `value` as `(Right value, s)` and return it — the shared tail of
+    /// `ask`/`return`/`get`/`put`/`modify`.
+    fn ret_ok(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        s: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<()> {
+        let right = self.alloc_adt(1, 1)?;
+        self.store_adt_field(right, 1, 0, value)?;
+        let pair = self.alloc_pair(right.into(), s)?;
+        self.builder()
+            .build_return(Some(&pair))
+            .map_err(|e| CodegenError::Internal(format!("ret_ok return: {:?}", e)))?;
+        Ok(())
+    }
+
+    /// `ask` = `\(_env, r, s) -> (Right r, s)`.
+    fn lower_ret_ask(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self.get_or_create_nested_transformer_fn("bhc_ret_ask");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let r = func.get_nth_param(1).unwrap();
+            let s = func.get_nth_param(2).unwrap();
+            self.ret_ok(r, s)?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let closure = self.alloc_closure(fn_ptr, &[])?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `return a` = `\(env=[a], _r, s) -> (Right a, s)`.
+    fn lower_ret_return(
+        &mut self,
+        a_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self.get_or_create_nested_transformer_fn("bhc_ret_return");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(2).unwrap();
+            let a = self.extract_closure_env_elem(env, 1, 0)?;
+            self.ret_ok(a.into(), s)?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let a_ptr = self.value_to_ptr(a_val)?;
+        let closure = self.alloc_closure(fn_ptr, &[(VarId::new(900000), a_ptr.into())])?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `get` = `\(_env, _r, s) -> (Right s, s)`.
+    fn lower_ret_get(&mut self) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self.get_or_create_nested_transformer_fn("bhc_ret_get");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let s = func.get_nth_param(2).unwrap();
+            self.ret_ok(s, s)?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let closure = self.alloc_closure(fn_ptr, &[])?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `put s'` = `\(env=[s'], _r, _s) -> (Right (), s')`.
+    fn lower_ret_put(
+        &mut self,
+        s_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let func = self.get_or_create_nested_transformer_fn("bhc_ret_put");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s_new = self.extract_closure_env_elem(env, 1, 0)?;
+            let unit = ptr_type.const_null();
+            self.ret_ok(unit.into(), s_new.into())?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let s_ptr = self.value_to_ptr(s_val)?;
+        let closure = self.alloc_closure(fn_ptr, &[(VarId::new(900000), s_ptr.into())])?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `modify f` = `\(env=[f], _r, s) -> (Right (), f s)`.
+    fn lower_ret_modify(
+        &mut self,
+        f_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let func = self.get_or_create_nested_transformer_fn("bhc_ret_modify");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(2).unwrap();
+            let f = self.extract_closure_env_elem(env, 1, 0)?;
+            let fn2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            let f_fn = self.checked_closure_fn_ptr(f, "ret modify: f")?;
+            let s_new = self
+                .builder()
+                .build_indirect_call(fn2, f_fn, &[f.into(), s.into()], "ret_modify_s")
+                .map_err(|e| CodegenError::Internal(format!("ret modify f: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("ret modify f: void".to_string()))?;
+            let unit = ptr_type.const_null();
+            self.ret_ok(unit.into(), s_new)?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let f_ptr = self.value_to_ptr(f_val)?;
+        let closure = self.alloc_closure(fn_ptr, &[(VarId::new(900000), f_ptr.into())])?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `throwError e` = `\(env=[e], _r, s) -> (Left e, s)`.
+    fn lower_ret_throw(
+        &mut self,
+        e_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self.get_or_create_nested_transformer_fn("bhc_ret_throw");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(2).unwrap();
+            let e = self.extract_closure_env_elem(env, 1, 0)?;
+            let left = self.alloc_adt(0, 1)?;
+            self.store_adt_field(left, 1, 0, e.into())?;
+            let pair = self.alloc_pair(left.into(), s)?;
+            self.builder()
+                .build_return(Some(&pair))
+                .map_err(|e| CodegenError::Internal(format!("ret throw return: {:?}", e)))?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let e_ptr = self.value_to_ptr(e_val)?;
+        let closure = self.alloc_closure(fn_ptr, &[(VarId::new(900000), e_ptr.into())])?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `lift inner` (inner :: `ExceptT`-over-`StateT` 2-arg closure
+    /// `\(self, s) -> (Either e a, s')`) =
+    /// `\(env=[inner], _r, s) -> inner(inner, s)` — the reader env is ignored and
+    /// the inner result rides through unchanged (its representation already
+    /// matches this stack's `(Either e a, s')`).
+    fn lower_ret_lift(
+        &mut self,
+        inner_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let func = self.get_or_create_nested_transformer_fn("bhc_ret_lift");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(2).unwrap();
+            let inner = self.extract_closure_env_elem(env, 1, 0)?;
+            let fn2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            let inner_fn = self.checked_closure_fn_ptr(inner, "ret lift: inner")?;
+            let pair = self
+                .builder()
+                .build_indirect_call(fn2, inner_fn, &[inner.into(), s.into()], "ret_lift_i")
+                .map_err(|e| CodegenError::Internal(format!("ret lift inner: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("ret lift inner: void".to_string()))?;
+            self.builder()
+                .build_return(Some(&pair))
+                .map_err(|e| CodegenError::Internal(format!("ret lift return: {:?}", e)))?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let inner_ptr = self.value_to_ptr(inner_val)?;
+        let closure = self.alloc_closure(fn_ptr, &[(VarId::new(900000), inner_ptr.into())])?;
+        Ok(Some(closure.into()))
+    }
+
+    /// Lower `lift inner_expr` in a `ret` (ReaderT-over-ExceptT-over-StateT)
+    /// do-block: lower `inner_expr` under the *inner* `[ExceptT, StateT, IO]`
+    /// stack (so its own `lift`/`get`/`throwError` take the 2-arg `..._over_st`
+    /// path), then wrap the resulting closure with `ret_lift`.
+    fn lower_ret_lift_expr(
+        &mut self,
+        inner_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let inner_start = self
+            .transformer_stack
+            .layers
+            .iter()
+            .position(|&l| l != TransformerLayer::ReaderT)
+            .unwrap_or(0);
+        let saved = self.transformer_stack.layers.clone();
+        self.transformer_stack.layers = saved[inner_start..].to_vec();
+        let inner_res = self.lower_expr(inner_expr);
+        self.transformer_stack.layers = saved;
+        let inner_val = inner_res?
+            .ok_or_else(|| CodegenError::Internal("ret lift: inner has no value".to_string()))?;
+        self.lower_ret_lift(inner_val)
+    }
+
+    /// `(m >>= k)` = `\(env=[m,k], r, s) ->
+    ///   case m(m, r, s) of
+    ///     (Left e, s')   -> (Left e, s')
+    ///     (Right a, s')  -> (k a)(k a, r, s')`.
+    fn lower_ret_bind(
+        &mut self,
+        m_val: BasicValueEnum<'ctx>,
+        k_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let func = self.get_or_create_nested_transformer_fn("bhc_ret_bind");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let right_bb = self.llvm_ctx.append_basic_block(func, "right");
+            let left_bb = self.llvm_ctx.append_basic_block(func, "left");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let r = func.get_nth_param(1).unwrap();
+            let s = func.get_nth_param(2).unwrap();
+            let m = self.extract_closure_env_elem(env, 2, 0)?;
+            let k = self.extract_closure_env_elem(env, 2, 1)?;
+            let fn3 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+            let m_fn = self.checked_closure_fn_ptr(m, "ret bind: m")?;
+            let pair = self
+                .builder()
+                .build_indirect_call(fn3, m_fn, &[m.into(), r.into(), s.into()], "ret_bind_m")
+                .map_err(|e| CodegenError::Internal(format!("ret bind m: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("ret bind m: void".to_string()))?
+                .into_pointer_value();
+            let either = self.extract_pair_fst(pair)?;
+            let sp = self.extract_pair_snd(pair)?;
+            let tag = self.extract_adt_tag(either)?;
+            let is_right = self
+                .builder()
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    tag,
+                    self.type_mapper().i64_type().const_int(1, false),
+                    "ret_bind_isr",
+                )
+                .map_err(|e| CodegenError::Internal(format!("ret bind cmp: {:?}", e)))?;
+            self.builder()
+                .build_conditional_branch(is_right, right_bb, left_bb)
+                .map_err(|e| CodegenError::Internal(format!("ret bind br: {:?}", e)))?;
+            // Left: propagate (Left e, s').
+            self.builder().position_at_end(left_bb);
+            let lpair = self.alloc_pair(either.into(), sp.into())?;
+            self.builder()
+                .build_return(Some(&lpair))
+                .map_err(|e| CodegenError::Internal(format!("ret bind left: {:?}", e)))?;
+            // Right a: kr = k(k, a); result = kr(kr, r, s').
+            self.builder().position_at_end(right_bb);
+            let a = self.extract_adt_field(either, 1, 0)?;
+            let fn2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            let k_fn = self.checked_closure_fn_ptr(k, "ret bind: k")?;
+            let kr = self
+                .builder()
+                .build_indirect_call(fn2, k_fn, &[k.into(), a.into()], "ret_bind_kr")
+                .map_err(|e| CodegenError::Internal(format!("ret bind k: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("ret bind k: void".to_string()))?
+                .into_pointer_value();
+            let kr_fn = self.checked_closure_fn_ptr(kr, "ret bind: kr")?;
+            let result = self
+                .builder()
+                .build_indirect_call(
+                    fn3,
+                    kr_fn,
+                    &[kr.into(), r.into(), sp.into()],
+                    "ret_bind_res",
+                )
+                .map_err(|e| CodegenError::Internal(format!("ret bind kr call: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("ret bind kr: void".to_string()))?;
+            self.builder()
+                .build_return(Some(&result))
+                .map_err(|e| CodegenError::Internal(format!("ret bind res return: {:?}", e)))?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let m_ptr = self.value_to_ptr(m_val)?;
+        let k_ptr = self.value_to_ptr(k_val)?;
+        let closure = self.alloc_closure(
+            fn_ptr,
+            &[
+                (VarId::new(900000), m_ptr.into()),
+                (VarId::new(900001), k_ptr.into()),
+            ],
+        )?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `(m1 >> m2)` = `\(env=[m1,m2], r, s) ->
+    ///   case m1(m1, r, s) of
+    ///     (Left e, s')   -> (Left e, s')
+    ///     (Right _, s')  -> m2(m2, r, s')`.
+    fn lower_ret_then(
+        &mut self,
+        m1_val: BasicValueEnum<'ctx>,
+        m2_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let func = self.get_or_create_nested_transformer_fn("bhc_ret_then");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let right_bb = self.llvm_ctx.append_basic_block(func, "right");
+            let left_bb = self.llvm_ctx.append_basic_block(func, "left");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let r = func.get_nth_param(1).unwrap();
+            let s = func.get_nth_param(2).unwrap();
+            let m1 = self.extract_closure_env_elem(env, 2, 0)?;
+            let m2 = self.extract_closure_env_elem(env, 2, 1)?;
+            let fn3 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+            let m1_fn = self.checked_closure_fn_ptr(m1, "ret then: m1")?;
+            let pair = self
+                .builder()
+                .build_indirect_call(fn3, m1_fn, &[m1.into(), r.into(), s.into()], "ret_then_m1")
+                .map_err(|e| CodegenError::Internal(format!("ret then m1: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("ret then m1: void".to_string()))?
+                .into_pointer_value();
+            let either = self.extract_pair_fst(pair)?;
+            let sp = self.extract_pair_snd(pair)?;
+            let tag = self.extract_adt_tag(either)?;
+            let is_right = self
+                .builder()
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    tag,
+                    self.type_mapper().i64_type().const_int(1, false),
+                    "ret_then_isr",
+                )
+                .map_err(|e| CodegenError::Internal(format!("ret then cmp: {:?}", e)))?;
+            self.builder()
+                .build_conditional_branch(is_right, right_bb, left_bb)
+                .map_err(|e| CodegenError::Internal(format!("ret then br: {:?}", e)))?;
+            self.builder().position_at_end(left_bb);
+            let lpair = self.alloc_pair(either.into(), sp.into())?;
+            self.builder()
+                .build_return(Some(&lpair))
+                .map_err(|e| CodegenError::Internal(format!("ret then left: {:?}", e)))?;
+            self.builder().position_at_end(right_bb);
+            let m2_fn = self.checked_closure_fn_ptr(m2, "ret then: m2")?;
+            let result = self
+                .builder()
+                .build_indirect_call(
+                    fn3,
+                    m2_fn,
+                    &[m2.into(), r.into(), sp.into()],
+                    "ret_then_res",
+                )
+                .map_err(|e| CodegenError::Internal(format!("ret then m2: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("ret then m2: void".to_string()))?;
+            self.builder()
+                .build_return(Some(&result))
+                .map_err(|e| CodegenError::Internal(format!("ret then res return: {:?}", e)))?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let m1_ptr = self.value_to_ptr(m1_val)?;
+        let m2_ptr = self.value_to_ptr(m2_val)?;
+        let closure = self.alloc_closure(
+            fn_ptr,
+            &[
+                (VarId::new(900000), m1_ptr.into()),
+                (VarId::new(900001), m2_ptr.into()),
+            ],
+        )?;
+        Ok(Some(closure.into()))
+    }
+
+    /// Lower `m >>= k` in a `ret` do-block: lower both sides under the unchanged
+    /// ReaderT-over-ExceptT-over-StateT stack (so leaf ops route to the `ret_*`
+    /// 3-arg protocol) and combine with `ret_bind`.
+    fn lower_ret_bind_exprs(
+        &mut self,
+        m_expr: &Expr,
+        k_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let m_val = self
+            .lower_expr(m_expr)?
+            .ok_or_else(|| CodegenError::Internal("ret bind: m has no value".to_string()))?;
+        let k_val = self.lower_expr(k_expr)?.ok_or_else(|| {
+            CodegenError::Internal("ret bind: continuation has no value".to_string())
+        })?;
+        self.lower_ret_bind(m_val, k_val)
+    }
+
+    /// Lower `m1 >> m2` in a `ret` do-block (see `lower_ret_bind_exprs`).
+    fn lower_ret_then_exprs(
+        &mut self,
+        m1_expr: &Expr,
+        m2_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let m1_val = self
+            .lower_expr(m1_expr)?
+            .ok_or_else(|| CodegenError::Internal("ret then: m1 has no value".to_string()))?;
+        let m2_val = self
+            .lower_expr(m2_expr)?
+            .ok_or_else(|| CodegenError::Internal("ret then: m2 has no value".to_string()))?;
+        self.lower_ret_then(m1_val, m2_val)
+    }
+
     /// The type of a monadic action expression, robust to the dictionary
     /// argument that `Monad m =>` (and friends) insert in Core.
     ///
@@ -21000,6 +21568,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .lower_expr(e_expr)?
                 .ok_or_else(|| CodegenError::Internal("throwE/stes: e has no value".to_string()))?;
             return self.lower_stes_throw(e_val);
+        }
+        // ReaderT over (ExceptT over StateT): \(env, r, s) -> (Left e, s)
+        if self
+            .transformer_stack
+            .is_reader_t_over_except_t_over_state_t()
+        {
+            let e_val = self
+                .lower_expr(e_expr)?
+                .ok_or_else(|| CodegenError::Internal("throwE/ret: e has no value".to_string()))?;
+            return self.lower_ret_throw(e_val);
         }
         // ExceptT over StateT: \(env, s) -> (Left e, s)
         if self.transformer_stack.is_except_t_over_state_t() {

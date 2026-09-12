@@ -42,14 +42,30 @@ everything reachable, deduped by name (direct imports win). Gated on the module 
 `$$mono` specializations, and body-loading/mono is skipped unless `resolved` has a ground result
 headed by a type con — so the polymorphic library modules that make up a sweep pay nothing.
 
-### `setupTranslations` — REVERTED (was fixed, regressed pandoc App)
-The erased-occurrence-type fallback (specialize a `Ty::Error`-typed callee at the enclosing
-`cur_monad`) got the writer past `setupTranslations`, but it also specialized a `ReaderT`-using
-function in `Text.Pandoc.App` at a concrete ExceptT-over-StateT monad, and codegen cannot yet run
-`runReaderT` over a non-IO/StateT inner monad (`lower_builtin_run_reader_t`) — so App failed to
-compile (221→220). Guarding the fallback on the direct callee did not help (the `runReaderT` is
-reached transitively via the regular recursion). Reverted the fallback; App compiles again. Kept
-the `concrete_monad_of`/result-match refactor and the transitive-extern work.
+### `setupTranslations` erased-occurrence fallback — RE-ENABLED 2026-09-12 (App regression gone)
+The fallback (specialize a `Ty::Error`-typed callee at the enclosing `cur_monad`; `Ctx::cur_monad`,
+save/restored in `get_or_specialize`) gets the writer past `setupTranslations`. It was reverted in
+327e035 ONLY because it specialized a `ReaderT`-using function in `Text.Pandoc.App` at a concrete
+ExceptT-over-StateT monad and codegen could not run `runReaderT` over that inner monad (App
+221→220). With the whole `ReaderT`-over-`ExceptT`-over-`StateT` stack now implemented (64af425,
+blocker 1 below), that gap is closed, so the fallback is re-enabled and App compiles again.
+Gates with the fallback: cargo test 2828/0, ghc_differential 219/0/2 (no divergence on any general
+transformer program — the fallback fires conservatively, only inside an active specialization whose
+`cur_monad` mentions a transformer), pandoc sweep 221/221. **`WriterProbe` now runs PAST
+`setupTranslations`** (it is specialized, no longer a link stub) into the real writer machinery and
+hits a NEW crash — see next frontier.
+
+### NEXT FRONTIER — `bhc_stes_then` null-Either crash (writer runtime, 2026-09-12)
+`WriterProbe.hs` (`runIOorExplode (writeHtml5String def doc)`) now prints `WRITER_START` and
+SIGSEGVs in `bhc_stes_then + 52` (EXC_BAD_ACCESS at 0x0). Disassembly: `stes_then` calls `m1(m1,
+s1, s2)`, then `ldp x21,x19,[x0,#0x8]` loads the returned pair's `(Either, s2')`, and `ldr
+x8,[x21]` faults because the Either field is NULL — i.e. some upstream stes action returned a
+malformed `(null, s2')`. Not a regression (before the fallback, `WriterProbe` aborted earlier at
+the `setupTranslations` link stub) and not in the new `ret_*` code (this is the pre-existing stes
+= StateT-over-ExceptT-over-StateT machinery, reached only now that `setupTranslations` runs). The
+2 remaining link stubs (`RTF.indentIncrement`, `RTF.listIncrement`) are RTF-only, never called on
+the HTML path. Next: identify which stes action returns the null Either (a specialized clone vs a
+hand-written op), likely by narrowing `WriterProbe`/adding a smaller writer probe.
 
 ### One remaining blocker for the writer
 1. **The whole `ReaderT`-over-`ExceptT`-over-`StateT` stack** (codegen) — ✅ **DONE 2026-09-12.**

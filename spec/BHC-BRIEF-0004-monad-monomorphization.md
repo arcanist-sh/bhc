@@ -67,14 +67,33 @@ the `setupTranslations` link stub) and not in the new `ret_*` code (this is the 
 the HTML path. Next: identify which stes action returns the null Either (a specialized clone vs a
 hand-written op), likely by narrowing `WriterProbe`/adding a smaller writer probe.
 Narrowed 2026-09-12: `WPMin.hs` (same probe, EMPTY block list `Pandoc (Meta M.empty) []`)
-ALSO crashes identically — so the null Either is in the writer SETUP/run path
-(`setupTranslations` / state init / template / `evalStateT` extraction), not block
-rendering. A likely suspect is a `PandocMonad` method (`getCommonState`/`getsCommonState`/
-`logOutput`/…) dispatched through the PandocMonad dict that does not resolve to `PandocIO`'s
-instance and returns a bad value; instrumenting `bhc_stes_then`/`bhc_stes_lift` in the RTS to
-print when the Either is null, or narrowing to `writePlain` (minimal setup) vs `writeHtml5String`,
-should localize it. Repro DB: `SNAP=snap-mono DB=pandoc-db-ret2 ./chain.sh {snapshot,deps,sweep}`
-then `./chain.sh link WriterProbe.hs` (or `WPMin.hs`).
+ALSO crashes identically — so the null Either is in the writer SETUP path. The first stes
+action in `pandocToHtml` is `lift $ setupTranslations meta`, and it is `m1` in the crashing
+`stes_then`.
+
+**ROOT-CAUSED 2026-09-12 (disassembly): the `PandocMonad` dictionary's method slots are NULL.**
+`Text.Pandoc.Writers.HTML.o` calls the polymorphic `Shared.setupTranslations` (resolved from
+`Shared.o`, no `$$mono` clone), which calls the polymorphic `Translations.setTranslations`.
+`setTranslations lang = modifyCommonState (\st -> …)`, and `modifyCommonState` is a `PandocMonad`
+CLASS METHOD (default `getCommonState >>= putCommonState . f`; `PandocIO` overrides only
+`getCommonState = PandocIO $ lift get` / `putCommonState = PandocIO . lift . put`). Disassembling
+`_Text.Pandoc.Translations.setTranslations` in `Translations.o`: it loads the `modifyCommonState`
+method from the dict — `ldr x20, [x1, #0xa8]` (x1 = `$dPandocMonad`) — then `cbz x20, 0x184`;
+`0x184` is `mov x0, xzr; ret`, i.e. **the dict slot is NULL so it returns NULL**. That null is the
+malformed `Either` `stes_then` then dereferences. So this is NOT a transformer/`stes` bug and NOT
+in the `ret_*`/fallback code: it is the pre-existing gap that `PandocMonad` (a Monad-superclass
+class with ~17 methods) dispatches through a dictionary whose slots are the same null placeholders
+as the transformer Monad dict — they are never populated with `PandocIO`'s compiled instance
+methods. **Next major piece: resolve `PandocMonad` methods to `PandocIO`'s instance** — either
+build a real `PandocMonad PandocIO` dictionary (all ~17 slots, with the instance methods compiling
+as stes/ExceptT-over-StateT actions: `getCommonState`=`lift get`, `putCommonState`=`lift . put`,
+the get/put here being the BOTTOM StateT `CommonState`), or rewrite `$sel_N $dPandocMonad`
+selections to those instance methods when the monad is known to be `PandocIO` (mirrors the stes
+Monad `>>=`/`>>` selector rewrite, but for the PandocMonad method set + its defaults
+`modifyCommonState`/`getsCommonState`). This is its own effort of comparable size to the stack
+work. Repro DB: `SNAP=snap-mono DB=pandoc-db-ret2 ./chain.sh {snapshot,deps,sweep}` then
+`./chain.sh link WriterProbe.hs` (or `WPMin.hs`); inspect with
+`llvm-objdump -dr --disassemble-symbols=_Text.Pandoc.Translations.setTranslations Translations.o`.
 
 ### One remaining blocker for the writer
 1. **The whole `ReaderT`-over-`ExceptT`-over-`StateT` stack** (codegen) — ✅ **DONE 2026-09-12.**

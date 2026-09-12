@@ -118,8 +118,30 @@ VALUE-position path `lower_builtin_direct` (7b3142e), which mapped `"lift"` unco
 route to `stes_lift`/`ret_lift` by stack. Confirmed by disasm (`builtin_wrapper_lift_stateT` now
 embeds `bhc_stes_lift`) and lldb (m1 fn-ptr at `stes_then` is now `bhc_stes_lift`). Gates green.
 
-**NEW NEXT BLOCKER (2026-09-12): `except_t_bind_over_st+24` — a null `m` in `setupTranslations`'s
-own `>>=`.** Backtrace `bhc_eval_stes → bhc_stes_then → bhc_stes_lift → bhc_except_t_bind_over_st`.
+**UPDATE 2026-09-12 (runtime dict inspection): the PandocMonad dict is WELL-FORMED; the crash is a
+null monadic ACTION, not a null dict slot.** Symbolicated the `PandocMonad PandocIO` dict passed to
+`setupTranslations$$mono` (lldb `memory read --format A`): superclasses `[Functor, Applicative,
+Monad, MonadError]` at slots [1..4] with **only MonadError null** (matches `resolved=false`), and
+ALL 19 methods filled — `getCommonState = bhc_except_t_lift_auto_over_st`, `putCommonState`,
+`modifyCommonState`/`getsCommonState`/`trace` = `pap_*` defaults, every IO method a
+`$instance_*_PandocIO$$mono`. So the earlier "getCommonState null" idea is also wrong. The crashing
+bind is the 2nd `except_t_bind_over_st` (1st is `evalStateT(pandocToHtml)` in `writeHtmlString'`,
+fine): its env is `m = env[0] = NULL`, `k = env[1] = __closure_Main.24`. `m` is
+`setupTranslations`'s first action (`<case lookupMetaString "lang" meta> `, → `pure defLang` for
+empty meta). `setupTranslations$$mono` has a `mov x0, xzr; ret` (return-null) path and a
+`bhc_bad_action` site, and builds `k` (fnptr `__closure_Main.24`, which itself contains a
+`bad_action`) — so the specialized clone is emitting a NULL monadic action where `m` should be. This
+is a monadic-lowering failure in the fallback-specialized clone (the action is unresolved/null),
+NOT a dict-slot or pure-rewrite gap. `pure`/`return` are builtins applied to values (fine); the
+writer's `>>=`/`>>` select through `$dPandocMonad`/`$super` (Monad-superclass hop) and are NOT
+rewritten by `monad_sel_builtin` (only `$dMonad`), which is a related but separate issue. Resolving
+this needs understanding why `specialize_body` yields a null action for `setupTranslations`'s
+case/bind — likely the do-block `>>=` through the superclass-hop dict is neither rewritten NOR
+resolvable, so codegen emits null/bad_action. Its own dedicated effort; incremental probing has hit
+a design wall (fallback clones vs. a real, fully-threaded dict).
+
+**NEXT BLOCKER (2026-09-12): `except_t_bind_over_st+24` — a null `m` in `setupTranslations`'s
+own `>>=` (see UPDATE above for the corrected analysis).** Backtrace `bhc_eval_stes → bhc_stes_then → bhc_stes_lift → bhc_except_t_bind_over_st`.
 `stes_lift` correctly runs the inner PandocIO action (setupTranslations, via `Main.pandocToHtml
 $$mono → setupTranslations$$mono`, all confirmed reached by name-regex breakpoints), whose body is
 `(case lookupMetaString "lang" meta of "" -> pure defLang; …) >>= \lang -> setTranslations lang`.

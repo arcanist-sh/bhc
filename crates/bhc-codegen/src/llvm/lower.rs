@@ -8589,6 +8589,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 {
                     return self.lower_ret_lift_expr(args[0]);
                 }
+                // StateT over (ExceptT over StateT) — pandoc's writer stack. A
+                // bare `lift m` lifts an inner `ExceptT`-over-`StateT` action (a
+                // `PandocIO` action) into the outer `StateT`; it must become a
+                // 3-arg `stes_lift`, not the generic 2-arg `bhc_state_t_lift`
+                // (StateT-over-IO) the `StateT` arm below would build — which
+                // `stes_then`/`stes_bind` then call with the wrong arity, taking
+                // an unevaluated closure for the `(Either e a, s')` pair. This is
+                // the value-position twin of the `throwError` short-circuit in
+                // `lower_bind_with_auto_lift`. (`liftIO` lifts from the IO base
+                // rather than the inner monad, so it is left to the arm below.)
+                if name == "lift"
+                    && self
+                        .transformer_stack
+                        .is_state_t_over_except_t_over_state_t()
+                {
+                    return self.lower_stes_inner_lifted(args[0]);
+                }
                 match self.current_transformer_layer() {
                     TransformerLayer::ExceptT => self.lower_builtin_except_t_lift(args[0]),
                     TransformerLayer::StateT => self.lower_builtin_state_t_lift(args[0]),

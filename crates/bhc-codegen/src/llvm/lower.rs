@@ -50010,6 +50010,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // Generic lift/liftIO (delegate to ReaderT versions as default)
             "lift" => {
+                // Value-position `lift` (materialised as a builtin closure by
+                // `create_builtin_closure`) must respect the transformer stack,
+                // just like the applied-position `lift` in the main dispatch.
+                // The default below builds a 2-arg `bhc_reader_t_lift`, which is
+                // wrong for the pandoc writer stacks: in a `StateT`-over-
+                // (`ExceptT`-over-`StateT`) (stes) do-block a bare `lift` of an
+                // inner `ExceptT`-over-`StateT` action must be a 3-arg
+                // `stes_lift`, and in `ReaderT`-over-(`ExceptT`-over-`StateT`) a
+                // `ret_lift`. Without this, `stes_then`/`stes_bind` call the
+                // 2-arg reader-lift closure with 3 args and read the returned
+                // pair's `Either` off an unevaluated closure (pandoc's
+                // `lift $ setupTranslations meta`).
+                if self
+                    .transformer_stack
+                    .is_state_t_over_except_t_over_state_t()
+                {
+                    return self.lower_stes_lift(args[0]);
+                }
+                if self
+                    .transformer_stack
+                    .is_reader_t_over_except_t_over_state_t()
+                {
+                    return self.lower_ret_lift(args[0]);
+                }
                 let action_val = args[0];
                 let fn_name = "bhc_reader_t_lift";
                 let func = self.get_or_create_transformer_fn(fn_name);

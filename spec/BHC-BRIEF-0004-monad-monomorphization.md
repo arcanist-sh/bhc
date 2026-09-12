@@ -66,6 +66,15 @@ the `setupTranslations` link stub) and not in the new `ret_*` code (this is the 
 2 remaining link stubs (`RTF.indentIncrement`, `RTF.listIncrement`) are RTF-only, never called on
 the HTML path. Next: identify which stes action returns the null Either (a specialized clone vs a
 hand-written op), likely by narrowing `WriterProbe`/adding a smaller writer probe.
+Narrowed 2026-09-12: `WPMin.hs` (same probe, EMPTY block list `Pandoc (Meta M.empty) []`)
+ALSO crashes identically — so the null Either is in the writer SETUP/run path
+(`setupTranslations` / state init / template / `evalStateT` extraction), not block
+rendering. A likely suspect is a `PandocMonad` method (`getCommonState`/`getsCommonState`/
+`logOutput`/…) dispatched through the PandocMonad dict that does not resolve to `PandocIO`'s
+instance and returns a bad value; instrumenting `bhc_stes_then`/`bhc_stes_lift` in the RTS to
+print when the Either is null, or narrowing to `writePlain` (minimal setup) vs `writeHtml5String`,
+should localize it. Repro DB: `SNAP=snap-mono DB=pandoc-db-ret2 ./chain.sh {snapshot,deps,sweep}`
+then `./chain.sh link WriterProbe.hs` (or `WPMin.hs`).
 
 ### One remaining blocker for the writer
 1. **The whole `ReaderT`-over-`ExceptT`-over-`StateT` stack** (codegen) — ✅ **DONE 2026-09-12.**

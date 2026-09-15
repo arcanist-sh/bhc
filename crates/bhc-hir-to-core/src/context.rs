@@ -2487,7 +2487,7 @@ impl LowerContext {
         // IDENTITY — a do-block continuation then returns a raw value where
         // an action is expected.
         let (needed_class, method_name) = match method_name.as_str() {
-            "return" => (Symbol::intern("Applicative"), Symbol::intern("pure")),
+            "return" | "pure" => (Symbol::intern("Applicative"), Symbol::intern("pure")),
             "liftA" | "liftM" | "<$>" => (Symbol::intern("Functor"), Symbol::intern("fmap")),
             _ => (needed_class, method_name),
         };

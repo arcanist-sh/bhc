@@ -512,8 +512,8 @@ fn specialize_body(e: &Expr, subst: &Subst, ctx: &mut Ctx) -> Expr {
             // `specialize_body` runs under a concrete transformer monad (that is
             // the only thing `get_or_specialize` fires for), so this is sound.
             if let (Expr::Var(sel, _), Expr::Var(d, _)) = (f.as_ref(), x.as_ref()) {
-                if is_monad_dict_name(d.name.as_str()) {
-                    if let Some(op) = monad_sel_builtin(sel.name.as_str()) {
+                if let Some(class) = dict_class_name(d.name.as_str()) {
+                    if let Some(op) = class_sel_builtin(class, sel.name.as_str()) {
                         return Expr::Var(
                             Var::new(Symbol::intern(op), fresh_var_id(), Ty::Error),
                             *span,
@@ -619,30 +619,37 @@ fn match_ty(pat: &Ty, conc: &Ty, subst: &mut Subst) -> bool {
 /// Map a `Monad` dictionary field selector to its builtin operator. The `Monad`
 /// dictionary lays out `[Applicative superclass, (>>=), (>>)]`, so `$sel_1`
 /// selects `>>=` and `$sel_2` selects `>>`.
-fn monad_sel_builtin(sel: &str) -> Option<&'static str> {
-    match sel {
-        "$sel_1" => Some(">>="),
-        "$sel_2" => Some(">>"),
-        _ => None,
-    }
-}
-
-/// Whether a dictionary variable's name denotes a `Monad` dictionary — a direct
-/// `Monad m =>` parameter (`$dMonad_NNN`) or the `Monad` superclass dictionary
-/// extracted from another class's dictionary (`$superMonad_NNN`, named by
-/// `select_method_via_superclass`). Matches the class name EXACTLY: `$dMonadError`
-/// (whose `$sel_1` is not `>>=`) and `$dPandocMonad` (whose `$sel_1` is the
-/// `Applicative` superclass, not `>>=`) must NOT match — only a dict whose class
-/// is `Monad` itself lays out `[Applicative, (>>=), (>>)]`.
-fn is_monad_dict_name(name: &str) -> bool {
+/// The class a dictionary variable's name denotes — a direct `C =>` parameter
+/// (`$dC_NNN`) or a superclass dictionary extracted from another class's
+/// dictionary (`$superC_NNN`, named by `select_method_via_superclass`). Matched
+/// EXACTLY: `$dPandocMonad` is `PandocMonad` (whose `$sel_1` is the `Applicative`
+/// superclass, NOT `>>=`), not `Monad`; the constructed instance dicts named
+/// `$dict...` are not `$d`/`$super` params and never match.
+fn dict_class_name(name: &str) -> Option<&str> {
     let rest = name
         .strip_prefix("$super")
-        .or_else(|| name.strip_prefix("$d"));
-    match rest {
-        // The class name runs up to the fresh-id suffix `_NNN` (or the whole
-        // rest when there is none).
-        Some(rest) => rest.split('_').next() == Some("Monad"),
-        None => false,
+        .or_else(|| name.strip_prefix("$d"))?;
+    // The class name runs up to the fresh-id suffix `_NNN` (or the whole rest
+    // when there is none). Reject the empty match so `$d`/`$super` alone fail.
+    let cls = rest.split('_').next().filter(|s| !s.is_empty())?;
+    Some(cls)
+}
+
+/// Map a `(class, field selector)` on a null-placeholder superclass/param dict to
+/// the plain builtin operator, which codegen then routes by the concrete
+/// transformer stack. The field index is `superclasses.len() + method_index` of
+/// the class (see `select_method_via_superclass`): `Monad [Applicative,(>>=),(>>)]`,
+/// `Applicative [Functor,pure,(<*>)]`, `Functor [fmap,(<$)]`. Only the do-notation
+/// / `Applicative`/`Functor` operators a specialized clone actually needs are
+/// mapped; anything else is left as a genuine dictionary selection.
+fn class_sel_builtin(class: &str, sel: &str) -> Option<&'static str> {
+    match (class, sel) {
+        ("Monad", "$sel_1") => Some(">>="),
+        ("Monad", "$sel_2") => Some(">>"),
+        ("Applicative", "$sel_1") => Some("pure"),
+        ("Applicative", "$sel_2") => Some("<*>"),
+        ("Functor", "$sel_0") => Some("fmap"),
+        _ => None,
     }
 }
 
@@ -762,27 +769,32 @@ mod tests {
     }
 
     #[test]
-    fn monad_selectors_map_to_operators() {
-        assert_eq!(monad_sel_builtin("$sel_1"), Some(">>="));
-        assert_eq!(monad_sel_builtin("$sel_2"), Some(">>"));
-        assert_eq!(monad_sel_builtin("$sel_0"), None);
-        assert_eq!(monad_sel_builtin("modify"), None);
+    fn class_selectors_map_to_operators() {
+        assert_eq!(class_sel_builtin("Monad", "$sel_1"), Some(">>="));
+        assert_eq!(class_sel_builtin("Monad", "$sel_2"), Some(">>"));
+        assert_eq!(class_sel_builtin("Applicative", "$sel_1"), Some("pure"));
+        assert_eq!(class_sel_builtin("Applicative", "$sel_2"), Some("<*>"));
+        assert_eq!(class_sel_builtin("Functor", "$sel_0"), Some("fmap"));
+        // Not a mapped op / wrong class.
+        assert_eq!(class_sel_builtin("Monad", "$sel_0"), None);
+        assert_eq!(class_sel_builtin("PandocMonad", "$sel_1"), None);
+        assert_eq!(class_sel_builtin("MonadError", "$sel_1"), None);
     }
 
     #[test]
-    fn monad_dict_name_matches_class_exactly() {
-        // Direct `Monad m =>` param and the extracted `Monad` superclass dict.
-        assert!(is_monad_dict_name("$dMonad_1234"));
-        assert!(is_monad_dict_name("$dMonad"));
-        assert!(is_monad_dict_name("$superMonad_5678"));
-        // Other classes whose `$sel_1` is NOT `>>=` must not match: `MonadError`
-        // (a distinct class) and `PandocMonad` (whose `$sel_1` is the `Applicative`
-        // superclass), plus `Applicative`/`Functor` supers.
-        assert!(!is_monad_dict_name("$dMonadError_1"));
-        assert!(!is_monad_dict_name("$dPandocMonad_9"));
-        assert!(!is_monad_dict_name("$superApplicative_2"));
-        assert!(!is_monad_dict_name("$dApplicative"));
-        assert!(!is_monad_dict_name("$dictMonad_PandocIO_1")); // constructed dict, not a `$d`/`$super` param
+    fn dict_class_name_extracts_class_exactly() {
+        // Direct params and extracted superclass dicts.
+        assert_eq!(dict_class_name("$dMonad_1234"), Some("Monad"));
+        assert_eq!(dict_class_name("$dMonad"), Some("Monad"));
+        assert_eq!(dict_class_name("$superMonad_5678"), Some("Monad"));
+        assert_eq!(dict_class_name("$superApplicative_2"), Some("Applicative"));
+        assert_eq!(dict_class_name("$dPandocMonad_9"), Some("PandocMonad"));
+        assert_eq!(dict_class_name("$dMonadError_1"), Some("MonadError"));
+        // Constructed instance dicts are not `$d`/`$super` params.
+        assert_eq!(dict_class_name("$dictMonad_PandocIO_1"), Some("ictMonad"));
+        // Non-dict names.
+        assert_eq!(dict_class_name("modify"), None);
+        assert_eq!(dict_class_name("$super"), None);
     }
 
     #[test]

@@ -19454,6 +19454,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(f_expr)?
             .ok_or_else(|| CodegenError::Internal("gets: f has no value".to_string()))?;
 
+        // The nested writer stacks need the 3-arg `gets` (like get/put/modify);
+        // the plain `bhc_state_t_gets` below is StateT-over-IO.
+        if self
+            .transformer_stack
+            .is_state_t_over_except_t_over_state_t()
+        {
+            return self.lower_stes_gets(f_val);
+        }
+        if self
+            .transformer_stack
+            .is_reader_t_over_except_t_over_state_t()
+        {
+            return self.lower_ret_gets(f_val);
+        }
+
         let ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_state_t_gets";
 
@@ -20196,6 +20211,42 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(closure.into()))
     }
 
+    /// `gets f` = `\(env=[f], s1, s2) -> (Right (f s1, s1), s2)` — read the outer
+    /// StateT state, apply `f`, keep the state.
+    fn lower_stes_gets(
+        &mut self,
+        f_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let func = self.get_or_create_nested_transformer_fn("bhc_stes_gets");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s1 = func.get_nth_param(1).unwrap();
+            let s2 = func.get_nth_param(2).unwrap();
+            let f = self.extract_closure_env_elem(env, 1, 0)?;
+            let fn2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            let f_fn = self.checked_closure_fn_ptr(f, "stes gets: f")?;
+            let v = self
+                .builder()
+                .build_indirect_call(fn2, f_fn, &[f.into(), s1.into()], "stes_gets_v")
+                .map_err(|e| CodegenError::Internal(format!("stes gets f: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("stes gets f: void".to_string()))?;
+            self.stes_ok(v, s1, s2)?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let f_ptr = self.value_to_ptr(f_val)?;
+        let closure = self.alloc_closure(fn_ptr, &[(VarId::new(900000), f_ptr.into())])?;
+        Ok(Some(closure.into()))
+    }
+
     /// `throwError e` = `\(env=[e], _s1, s2) -> (Left e, s2)`.
     fn lower_stes_throw(
         &mut self,
@@ -20769,6 +20820,40 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .ok_or_else(|| CodegenError::Internal("ret modify f: void".to_string()))?;
             let unit = ptr_type.const_null();
             self.ret_ok(unit.into(), s_new)?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let f_ptr = self.value_to_ptr(f_val)?;
+        let closure = self.alloc_closure(fn_ptr, &[(VarId::new(900000), f_ptr.into())])?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `gets f` = `\(env=[f], _r, s) -> (Right (f s), s)`.
+    fn lower_ret_gets(
+        &mut self,
+        f_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let func = self.get_or_create_nested_transformer_fn("bhc_ret_gets");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(2).unwrap();
+            let f = self.extract_closure_env_elem(env, 1, 0)?;
+            let fn2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            let f_fn = self.checked_closure_fn_ptr(f, "ret gets: f")?;
+            let v = self
+                .builder()
+                .build_indirect_call(fn2, f_fn, &[f.into(), s.into()], "ret_gets_v")
+                .map_err(|e| CodegenError::Internal(format!("ret gets f: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("ret gets f: void".to_string()))?;
+            self.ret_ok(v, s)?;
             if let Some(bb) = saved {
                 self.builder().position_at_end(bb);
             }
@@ -49580,6 +49665,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // StateT operations with pre-lowered args
             "put" => {
+                // Value-position `put` — respect the nested writer stacks (see
+                // `modify`/`lift`).
+                if self
+                    .transformer_stack
+                    .is_state_t_over_except_t_over_state_t()
+                {
+                    return self.lower_stes_put(args[0]);
+                }
+                if self
+                    .transformer_stack
+                    .is_reader_t_over_except_t_over_state_t()
+                {
+                    return self.lower_ret_put(args[0]);
+                }
                 // put s' = closure \_ -> ((), s')
                 let s_val = args[0];
                 let fn_name = "bhc_state_t_put";
@@ -49607,6 +49706,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 Ok(Some(closure_ptr.into()))
             }
             "modify" => {
+                // A value-position `modify` must respect the transformer stack
+                // (like lift/>>=/pure): the plain 2-arg `bhc_state_t_modify`
+                // below is StateT-over-IO and is called with the wrong arity
+                // under the nested writer stacks (pandoc's `pandocToHtml` does
+                // `modify $ \st -> …` in `StateT WriterState PandocIO`).
+                if self
+                    .transformer_stack
+                    .is_state_t_over_except_t_over_state_t()
+                {
+                    return self.lower_stes_modify(args[0]);
+                }
+                if self
+                    .transformer_stack
+                    .is_reader_t_over_except_t_over_state_t()
+                {
+                    return self.lower_ret_modify(args[0]);
+                }
                 // modify f = closure \s -> ((), f(s))
                 let f_val = args[0];
                 let fn_name = "bhc_state_t_modify";
@@ -49649,6 +49765,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 Ok(Some(closure_ptr.into()))
             }
             "gets" => {
+                // Value-position `gets` — respect the nested writer stacks.
+                if self
+                    .transformer_stack
+                    .is_state_t_over_except_t_over_state_t()
+                {
+                    return self.lower_stes_gets(args[0]);
+                }
+                if self
+                    .transformer_stack
+                    .is_reader_t_over_except_t_over_state_t()
+                {
+                    return self.lower_ret_gets(args[0]);
+                }
                 // gets f = closure \s -> (f(s), s)
                 let f_val = args[0];
                 let fn_name = "bhc_state_t_gets";

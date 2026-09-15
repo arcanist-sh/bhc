@@ -102,7 +102,29 @@ the 3-arg stes protocol. Now routed through `lower_stes_inner_lifted` → `stes_
 value-position twin of the `throwError` short-circuit). Verified: ETZ/ETX/PolyW still pass; sweep
 221/221; cargo 2828/0; diff 219/0/2.
 
-**STILL crashes — a SECOND `lift`, lowered as `bhc_reader_t_lift` under `current=ReaderT`, remains.**
+**✅ APPROACH (B) COMPLETE 2026-09-15 — full monadic-selector resolution; writer runs deep; next
+blocker is a different domain (Text).** After the lift fixes, the remaining writer nulls were all
+monadic operators unresolved in specialized clones. (B) resolves them comprehensively:
+- **Superclass-hop `>>=`/`>>`** (16e64b0): `select_method_via_superclass` names the extracted
+  superclass dict `$super<Class>`; the monomorphizer rewrites `$sel_N` on a `$superMonad`/`$dMonad`
+  dict to the `>>=`/`>>` builtin (codegen routes by the concrete stack).
+- **Value-position `>>=`/`>>`** (c8060f8): `lower_builtin_direct` (the builtin-as-value path) was
+  layer-agnostic (IO bind); now routes to stes/ret/except_t-over-st binds by stack, like the earlier
+  value-position `lift` fix.
+- **Applicative/Functor** (a058d27): generalized to `pure`/`<*>`/`fmap` via `dict_class_name` +
+  `class_sel_builtin` (real class layouts), and `select_method_via_superclass` maps `pure`.
+
+The writer now executes the full chain (lldb-confirmed): `main → runIOorExplode → top evalStateT →
+writeHtmlString'$$mono → evalStateT(pandocToHtml$$mono) → pandocToHtml → setupTranslations → its
+bind`. **NEXT FRONTIER (separate, known-hard — the Text-literal representation issue, see
+`project_text_literal_repr`): `lookupMetaString "lang" meta` returns `""` at type `Text` for empty
+meta, but that literal is mis-represented; `bhc_string_eq_cstr(list_ptr="؂\xc0\xfe\b", pat="")` reads
+a pointer as a char list, so `setupTranslations`'s `case … of "" -> pure defLang; s -> …` takes the
+WRONG `s` branch and produces null.** This is no longer a monad/transformer/monomorphization bug.
+Gates green throughout: cargo 2828/0, ghc_differential 219/0/2, sweep 221/221. Repro DB `pandoc-db-B3`.
+
+---
+**(historical) STILL crashes — a SECOND `lift`, lowered as `bhc_reader_t_lift` under `current=ReaderT`, remains.**
 Even after the fix + a full re-sweep, `register read x9` at the crashing `bhc_stes_then` blr still
 resolves to `bhc_reader_t_lift`. But the writer stack has NO ReaderT (`PandocIO = ExceptT (StateT
 IO)`), and the WriterProbe-compile `BHC_DBG_LIFT` trace shows the writer lift as `current=StateT`,

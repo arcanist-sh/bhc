@@ -55559,6 +55559,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Get the scrutinee's type for determining binder types
         let scrut_ty = scrut.ty();
 
+        // A string-literal pattern over a `Text` scrutinee compares against a
+        // `BhcText` struct, not a `[Char]`/C string; `bhc_string_eq_cstr` would
+        // misread the struct header. Detect it here (where the scrutinee's type
+        // is available) so the string-case paths use `bhc_text_eq_cstr` instead.
+        let scrut_is_text = self.is_text_expr(scrut);
+
         if has_datacon {
             // A `String` case can mix both: `case takeExtension p of { ".md" ->
             // ..; ['.',d] -> ..; _ -> .. }` has string literals AND cons
@@ -55569,11 +55575,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 |alt| matches!(&alt.con, AltCon::Lit(Literal::String(s)) if !s.as_str().is_empty()),
             );
             if has_string_lit {
-                return self.lower_case_string_then_datacon(scrut_val, alts, &scrut_ty);
+                return self.lower_case_string_then_datacon(
+                    scrut_val,
+                    alts,
+                    &scrut_ty,
+                    scrut_is_text,
+                );
             }
             self.lower_case_datacon(scrut_val, alts, &scrut_ty)
         } else {
-            self.lower_case_literal(scrut_val, alts)
+            self.lower_case_literal(scrut_val, alts, scrut_is_text)
         }
     }
 
@@ -55586,6 +55597,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         scrut_val: BasicValueEnum<'ctx>,
         alts: &[Alt],
         scrut_ty: &Ty,
+        scrut_is_text: bool,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let scrut_ptr = self.value_to_ptr(scrut_val)?;
         let current_fn = self
@@ -55596,7 +55608,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let merge_block = self
             .llvm_context()
             .append_basic_block(current_fn, "mixed_case_merge");
-        let str_eq_fn = self.get_or_declare_string_eq_cstr()?;
+        let str_eq_fn = self.string_case_eq_fn(scrut_is_text)?;
 
         let mut lit_alts: Vec<&Alt> = Vec::new();
         let mut rest: Vec<Alt> = Vec::new();
@@ -55727,6 +55739,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         scrut_val: BasicValueEnum<'ctx>,
         alts: &[Alt],
+        scrut_is_text: bool,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // Determine the type of literals in the alternatives
         let has_int_lit = alts
@@ -55780,7 +55793,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     }
                 } else if has_string_lit {
                     // String pattern matching
-                    self.lower_case_literal_string(p, alts)
+                    self.lower_case_literal_string(p, alts, scrut_is_text)
                 } else {
                     // Default case or only Default alternatives - assume integer
                     let int_val = self
@@ -56071,6 +56084,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         scrut_ptr: PointerValue<'ctx>,
         alts: &[Alt],
+        scrut_is_text: bool,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let current_fn = self
             .builder()
@@ -56083,9 +56097,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .llvm_context()
             .append_basic_block(current_fn, "str_case_merge");
 
-        // Compare against the pattern with the RTS helper, which knows both
-        // representations a `String` can arrive in (cons list or C string).
-        let str_eq_fn = self.get_or_declare_string_eq_cstr()?;
+        // Compare against the pattern with the RTS helper. For a `String`
+        // scrutinee it knows both representations (cons list or C string); for a
+        // `Text` scrutinee it reads the `BhcText` bytes (`bhc_text_eq_cstr`).
+        let str_eq_fn = self.string_case_eq_fn(scrut_is_text)?;
 
         // Separate literal alts from default
         let mut literal_alts: Vec<(&Symbol, &Alt)> = Vec::new();
@@ -56271,6 +56286,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .i64_type()
             .fn_type(&[tm.ptr_type().into(), tm.ptr_type().into()], false);
         Ok(self.module.add_function(name, fn_type))
+    }
+
+    /// `bhc_string_eq_cstr`'s `Text`-scrutinee counterpart: compares a `BhcText`
+    /// against the pattern's C string. Used when the case scrutinee is a `Text`.
+    fn get_or_declare_text_eq_cstr(&self) -> CodegenResult<FunctionValue<'ctx>> {
+        let name = "bhc_text_eq_cstr";
+        if let Some(fn_val) = self.module.get_function(name) {
+            return Ok(fn_val);
+        }
+        let tm = self.type_mapper();
+        let fn_type = tm
+            .i64_type()
+            .fn_type(&[tm.ptr_type().into(), tm.ptr_type().into()], false);
+        Ok(self.module.add_function(name, fn_type))
+    }
+
+    /// The right `_eq_cstr` RTS helper for a string-literal case: the `Text`
+    /// variant when the scrutinee is a `Text`, the `String` (`[Char]`/C string)
+    /// variant otherwise.
+    fn string_case_eq_fn(&self, scrut_is_text: bool) -> CodegenResult<FunctionValue<'ctx>> {
+        if scrut_is_text {
+            self.get_or_declare_text_eq_cstr()
+        } else {
+            self.get_or_declare_string_eq_cstr()
+        }
     }
 
     /// Lower a case expression with constructor patterns.

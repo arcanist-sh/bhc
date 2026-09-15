@@ -172,6 +172,36 @@ pub extern "C" fn bhc_text_eq(a: *const u8, b: *const u8) -> i64 {
     }
 }
 
+/// Compare a `Text` against a NUL-terminated C string, returning 1 if equal.
+///
+/// Codegen keeps a `case (t :: Text) of "lit" -> …` as a string-literal pattern
+/// and emits the pattern as a C string constant, but the scrutinee is a `BhcText`
+/// struct — `bhc_string_eq_cstr` would read the struct header as a cons list / C
+/// string and mismatch (pandoc's `lookupMetaString … == ""` took the wrong case
+/// branch). This entry point reads the `BhcText`'s active bytes and compares them
+/// to the pattern directly.
+///
+/// # Safety
+///
+/// `text` must be null or a valid `BhcText` pointer, and `pat` must be null or a
+/// valid NUL-terminated C string — both as emitted by codegen for a string case.
+#[no_mangle]
+pub unsafe extern "C" fn bhc_text_eq_cstr(
+    text: *const u8,
+    pat: *const std::os::raw::c_char,
+) -> i64 {
+    if pat.is_null() {
+        return 0;
+    }
+    let want = unsafe { std::ffi::CStr::from_ptr(pat) }.to_bytes();
+    if text.is_null() {
+        // A null Text is the empty one (nil / forced-through null).
+        return i64::from(want.is_empty());
+    }
+    let got = unsafe { text_bytes(text) };
+    i64::from(got == want)
+}
+
 /// Lexicographic comparison of two Texts.
 ///
 /// Returns -1 (LT), 0 (EQ), or 1 (GT). Mapped to Haskell `Ordering`

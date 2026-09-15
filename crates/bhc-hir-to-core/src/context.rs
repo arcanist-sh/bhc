@@ -2538,7 +2538,8 @@ impl LowerContext {
         // method application entirely.
         let mut hops: Vec<(Var, core::Expr)> = Vec::new();
         let mut cur = core::Expr::Var(dict_var, span);
-        for idx in path {
+        let n_hops = path.len();
+        for (hi, idx) in path.into_iter().enumerate() {
             let sel = Var {
                 name: Symbol::intern(&format!("$sel_{idx}")),
                 id: VarId::new(idx),
@@ -2546,7 +2547,20 @@ impl LowerContext {
             };
             let super_expr =
                 core::Expr::App(Box::new(core::Expr::Var(sel, span)), Box::new(cur), span);
-            let temp = self.fresh_var("$super", Ty::Error, span);
+            // Name the FINAL extracted superclass dictionary by its class
+            // (`$super<needed_class>`, e.g. `$superMonad`). The monomorphizer
+            // resolves a do-block `>>=`/`>>` selected via a class's `Monad`
+            // superclass — `$sel_1/$sel_2 $superMonad` — to the plain builtin
+            // (which codegen routes by the concrete transformer stack), exactly
+            // as it already does for a direct `$dMonad` selection. Without the
+            // class in the name the selection stays a read through the (often
+            // null-placeholder) superclass slot and the specialized writer
+            // clone bails. Intermediate hops keep the bare `$super` name.
+            let temp = if hi + 1 == n_hops {
+                self.fresh_var(&format!("$super{}", needed_class.as_str()), Ty::Error, span)
+            } else {
+                self.fresh_var("$super", Ty::Error, span)
+            };
             cur = core::Expr::Var(temp.clone(), span);
             hops.push((temp, super_expr));
         }

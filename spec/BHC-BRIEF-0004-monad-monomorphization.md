@@ -1,7 +1,18 @@
 # BHC-BRIEF-0004 — Monomorphize polymorphic-monad functions at their concrete transformer stack
 
 **Document ID:** BHC-BRIEF-0004
-**Status:** The REAL pandoc writer's monad machinery runs, 2026-09-10. `pandoc-harness/
+**Status (2026-09-15): ★ THE PANDOC HTML WRITER RUNS END-TO-END.** `pandoc-harness/WriterProbe.hs`
+(`runIOorExplode (writeHtml5String def doc)`) completes — WRITER_START → WRITER_END, exit 0, no
+crash — with the whole `pandocToHtml` chain executing (setupTranslations, modify, …). The
+monad/transformer machinery for the writer is COMPLETE. The path from here: (B) monadic-selector
+resolution (16e64b0/c8060f8/a058d27) → Text-literal case patterns (f3ea1bc, `bhc_text_eq_cstr`) →
+value-position `modify`/`put`/`gets` respecting the stes stack (0b76c52, THE last transformer crash).
+The emitted HTML is still EMPTY only because pandoc's writer builds markup with blaze-html
+(`H.p`/`toHtml`/`renderHtml`) + doctemplates, which bhc STUBS — a stdlib library-coverage gap, not a
+compiler/monad issue. Gates green throughout: cargo 2828/0, ghc_differential 219/0/2, sweep 221/221.
+Repro DB `pandoc-db-final`. Full history below.
+
+**Prior status:** The REAL pandoc writer's monad machinery runs, 2026-09-10. `pandoc-harness/
 WriterProbe.hs` (`runIOorExplode (writeHtml5String def doc)` on a hand-built `Pandoc`) compiles,
 links, and executes `writeHtml5String @ PandocIO` fully through the specialized stes machinery
 (`bhc_eval_stes` runs) — no longer crashing in the transformer bind. It now stops at a

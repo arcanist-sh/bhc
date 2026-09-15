@@ -22541,7 +22541,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let m2_val = self
             .lower_expr(m2_expr)?
             .ok_or_else(|| CodegenError::Internal("ExceptT.>>/st: m2 has no value".to_string()))?;
+        self.except_t_then_over_st_from_values(m1_val, m2_val)
+    }
 
+    /// `>>` for ExceptT-over-StateT from already-lowered values (value-position
+    /// counterpart of `lower_builtin_except_t_then_over_st`, for the builtin
+    /// closure a value-position `>>` materialises).
+    fn except_t_then_over_st_from_values(
+        &mut self,
+        m1_val: BasicValueEnum<'ctx>,
+        m2_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_except_t_then_over_st";
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -48816,6 +48826,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         match name {
             ">>" | "IO.>>" => {
+                // A value-position `>>` (materialised as a builtin closure) must
+                // respect the transformer stack, like the applied-position `>>`
+                // in the main dispatch — the plain IO behaviour below (return the
+                // second action) is wrong under a transformer, where the first
+                // action's state/error has to be threaded. Route to the concrete
+                // builtin from the already-lowered values. (`IO.>>` stays IO.)
+                if name == ">>" {
+                    if self
+                        .transformer_stack
+                        .is_state_t_over_except_t_over_state_t()
+                    {
+                        return self.lower_stes_then(args[0], args[1]);
+                    }
+                    if self
+                        .transformer_stack
+                        .is_reader_t_over_except_t_over_state_t()
+                    {
+                        return self.lower_ret_then(args[0], args[1]);
+                    }
+                    if self.transformer_stack.is_except_t_over_state_t() {
+                        return self.except_t_then_over_st_from_values(args[0], args[1]);
+                    }
+                }
                 // (>>) :: m a -> m b -> m b
                 // Execute first action (arg1), ignore result, return second (arg2)
                 // For our simple model, arg1 and arg2 are thunks/values
@@ -48825,6 +48858,29 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 Ok(Some(args[1]))
             }
             ">>=" | "IO.>>=" => {
+                // A value-position `>>=` must respect the transformer stack too
+                // (see `>>` above): the IO bind below just applies the
+                // continuation to the first action taken as a value, which under
+                // ExceptT-over-StateT (pandoc's PandocIO) reads an unevaluated
+                // closure as the `(Either e a, s')` pair. Route to the concrete
+                // bind from the already-lowered values.
+                if name == ">>=" {
+                    if self
+                        .transformer_stack
+                        .is_state_t_over_except_t_over_state_t()
+                    {
+                        return self.lower_stes_bind(args[0], args[1]);
+                    }
+                    if self
+                        .transformer_stack
+                        .is_reader_t_over_except_t_over_state_t()
+                    {
+                        return self.lower_ret_bind(args[0], args[1]);
+                    }
+                    if self.transformer_stack.is_except_t_over_state_t() {
+                        return self.except_t_bind_over_st_from_values(args[0], args[1]);
+                    }
+                }
                 // (>>=) :: m a -> (a -> m b) -> m b
                 // Execute first action, pass result to function, return result of function
                 let action_result = args[0]; // Result of first action

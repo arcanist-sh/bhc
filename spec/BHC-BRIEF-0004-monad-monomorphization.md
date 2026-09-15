@@ -123,6 +123,25 @@ a pointer as a char list, so `setupTranslations`'s `case … of "" -> pure defLa
 WRONG `s` branch and produces null.** This is no longer a monad/transformer/monomorphization bug.
 Gates green throughout: cargo 2828/0, ghc_differential 219/0/2, sweep 221/221. Repro DB `pandoc-db-B3`.
 
+**✅ TEXT-LITERAL PATTERNS FIXED 2026-09-15 (f3ea1bc) — writer advances again; next layer is the
+PandocMonad DEFAULT method `modifyCommonState`.** A `case (t :: Text) of "" -> …` compared the
+`BhcText` scrutinee with `bhc_string_eq_cstr` (which reads it as a `[Char]`/C string) — always
+mismatched. Fixed type-directed: `lower_case` detects a Text scrutinee (`is_text_expr`) and the
+string-case paths use the new `bhc_text_eq_cstr` (reads the BhcText bytes). `setupTranslations`'s
+`case … of "" -> pure defLang` now takes the correct branch and `pure defLang` runs. **NEW crash
+(lldb-traced): `pure` → `getCommonState` (`bhc_except_t_lift_auto_over_st`) runs ×2 → SIGSEGV, in
+`setTranslations`'s `modifyCommonState` DEFAULT (`getCommonState >>= putCommonState . f`) — after
+getCommonState, the `>>=`/`putCommonState` part returns a null `Either`.** NOTE: the throw stub
+`__closure_Main.19` (`make_some_exception`/`bhc_throw`, referenced by `setTranslations$$mono` and
+the continuation) is a RED HERRING — the crash is a SIGSEGV (null deref at `bhc_stes_then+52`), not
+a thrown exception, so that branch is not taken. The `modifyCommonState` default is a POLYMORPHIC
+class default whose `>>=` is a superclass-hop selection through its dict param (the `partial_dict`
+`construct_dictionary` builds); it is NOT a specialized clone, so the (B) monomorphizer rewrite does
+not touch it — it reads the Monad-superclass `>>=` from `partial_dict` at runtime. Next: why that
+`>>=`/`putCommonState` yields null (partial_dict Monad-superclass slot, or `putCommonState`/the
+default's own compilation). Repro DB `pandoc-db-txt`; `SNAP=snap-mono DB=pandoc-db-txt ./chain.sh
+link WriterProbe.hs`, crash at `bhc_stes_then+52` under `stes_lift → except_t_bind_over_st`.
+
 ---
 **(historical) STILL crashes — a SECOND `lift`, lowered as `bhc_reader_t_lift` under `current=ReaderT`, remains.**
 Even after the fix + a full re-sweep, `register read x9` at the crashing `bhc_stes_then` blr still

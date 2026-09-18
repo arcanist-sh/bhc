@@ -52,8 +52,8 @@ pub use report::ComprehensiveKernelReport;
 use bhc_ast::Module as AstModule;
 use bhc_codegen::{
     llvm::{
-        lower_core_module, lower_core_module_multimodule_with_constructors, CompiledSymbol,
-        ConstructorMeta, LlvmBackend, LlvmModuleExt,
+        lower_core_module, lower_core_module_multimodule_with_constructors,
+        shadows_codegen_builtin, CompiledSymbol, ConstructorMeta, LlvmBackend, LlvmModuleExt,
     },
     CodegenConfig, CodegenOutputType,
 };
@@ -3638,11 +3638,27 @@ impl Compiler {
             // call — otherwise every use resolves to the first declaration and
             // calls a different function, with a different arity, whose leading
             // dictionary parameter the caller never passes.
+            // A bare name that is ALSO a codegen builtin gets a module-qualified
+            // Core name too, for the same reason a collision does: otherwise
+            // every use resolves to the builtin (`A.id` → Prelude `id`, `H.div`
+            // → integer `div`) instead of the import. Qualifying makes the name
+            // not-a-builtin everywhere — typeck won't hand it the builtin scheme,
+            // and codegen's extern table (keyed on this Core name) resolves the
+            // import. The qualified spelling matches the definition's mangled LLVM
+            // symbol, so the call still links. Harmless for a non-builtin name,
+            // but restricted to builtins to leave ordinary imports untouched.
+            let shadows_builtin = shadows_codegen_builtin(value.name.as_str());
             let core_name = match ctx.interface_value_modules.get(&name) {
                 Some(owner) if owner != module_name => {
                     Symbol::intern(&format!("{}.{}", module_name, value.name))
                 }
                 Some(_) => name,
+                None if shadows_builtin => {
+                    let qualified = Symbol::intern(&format!("{}.{}", module_name, value.name));
+                    ctx.interface_value_modules
+                        .insert(name, module_name.to_string());
+                    qualified
+                }
                 None => {
                     ctx.interface_value_modules
                         .insert(name, module_name.to_string());

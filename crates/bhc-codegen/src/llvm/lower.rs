@@ -5985,12 +5985,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Get the RTS function ID for a builtin name.
     fn rts_function_id(&self, name: &str) -> Option<VarId> {
-        match name {
-            "print" => Some(VarId::new(1000000)), // bhc_print_int_ln for Int
-            "putStrLn" => Some(VarId::new(1000002)), // bhc_print_string_ln
-            "putStr" => Some(VarId::new(1000004)), // bhc_print_string
-            _ => None,
-        }
+        rts_function_id_of(name)
     }
 
     // ========================================================================
@@ -6004,852 +5999,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Check if a name is a builtin function and return its arity.
     fn builtin_info(&self, name: &str) -> Option<u32> {
-        match name {
-            // List operations
-            "head" => Some(1),
-            "tail" => Some(1),
-            "null" => Some(1),
-            "length" => Some(1),
-            "take" => Some(2),
-            "drop" => Some(2),
-            "reverse" => Some(1),
-            "append" | "++" => Some(2),
-            "enumFromTo" => Some(2),
-            "replicate" => Some(2),
-            "sum" => Some(1),
-            "product" => Some(1),
-            "map" => Some(2),
-            "filter" => Some(2),
-            "foldr" => Some(3),
-            "foldl" => Some(3),
-            "foldl'" => Some(3),
-            "zipWith" => Some(3),
-            "zip" => Some(2),
-            "last" => Some(1),
-            "init" => Some(1),
-            "!!" => Some(2),
-            "concatMap" => Some(2),
-            "concat" => Some(1),
-
-            // Tuple operations
-            "fst" => Some(1),
-            "snd" => Some(1),
-            "swap" => Some(1),
-            "curry" => Some(3),
-            "uncurry" => Some(2),
-
-            // Maybe operations
-            "fromJust" => Some(1),
-            "isJust" => Some(1),
-            "isNothing" => Some(1),
-            "fromMaybe" => Some(2),
-            "maybe" => Some(3),
-            "listToMaybe" => Some(1),
-            "nonEmpty" => Some(1),
-            "first" => Some(2),
-            "maybeToList" => Some(1),
-            "catMaybes" => Some(1),
-            "mapMaybe" => Some(2),
-
-            // Either operations
-            "isLeft" => Some(1),
-            "isRight" => Some(1),
-            "either" => Some(3),
-            "fromLeft" => Some(2),
-            "fromRight" => Some(2),
-            "lefts" => Some(1),
-            "rights" => Some(1),
-            "partitionEithers" => Some(1),
-
-            // Control
-            "guard" => Some(1),
-
-            // Error / Exception handling
-            "error" => Some(1),
-            "undefined" => Some(0),
-            "throw" | "throwIO" => Some(1),
-            "catch" => Some(2),
-            "handle" => Some(2),
-            "try" => Some(1),
-            "bracket" => Some(3),
-            "finally" | "onException" => Some(2),
-            "mask" | "mask_" | "uninterruptibleMask" | "uninterruptibleMask_" => Some(1),
-            "getMaskingState" => Some(0),
-            "queryTerminal" => Some(1),
-            "stdInput" => Some(0),
-            "stdOutput" => Some(0),
-            "stdError" => Some(0),
-            "toException" => Some(1),
-            "fromException" => Some(1),
-            "displayException" => Some(1),
-            "userError" => Some(1),
-            "ioError" => Some(1),
-
-            // Misc
-            "seq" => Some(2),
-            "id" => Some(1),
-            "const" => Some(2),
-            "not" => Some(1),
-            "otherwise" => Some(0),
-            // E.63: DeepSeq stubs (no-ops in strict runtime)
-            "rnf" => Some(1),
-            "deepseq" => Some(2),
-            // GHC.Generics from/to
-            "from" => Some(1),
-            "to" => Some(1),
-            "force" => Some(1),
-
-            // IO operations
-            "putStrLn" => Some(1),
-            "putStr" => Some(1),
-            "putChar" => Some(1),
-            "print" => Some(1),
-            "getLine" => Some(0),
-
-            // Monadic operations
-            ">>=" => Some(2),
-            ">>" => Some(2),
-            // `a *> b` IS `a >> b`, and `a <* b` runs both and keeps the first.
-            "*>" | "<*" => Some(2),
-            "return" => Some(1),
-            "pure" => Some(1),
-
-            // Numeric / math operations
-            "negate" => Some(1),
-            "abs" => Some(1),
-            "signum" => Some(1),
-            "sqrt" => Some(1),
-            "exp" => Some(1),
-            "log" => Some(1),
-            "sin" => Some(1),
-            "cos" => Some(1),
-            "tan" => Some(1),
-            "asin" => Some(1),
-            "acos" => Some(1),
-            "atan" => Some(1),
-            "atan2" => Some(2),
-            "ceiling" => Some(1),
-            "floor" => Some(1),
-            "round" => Some(1),
-            "truncate" => Some(1),
-            "fromIntegral" => Some(1),
-            "toInteger" => Some(1),
-            "fromInteger" => Some(1),
-            "compare" => Some(2),
-            "even" => Some(1),
-            "odd" => Some(1),
-            "gcd" => Some(2),
-            "lcm" => Some(2),
-            "divMod" => Some(2),
-            "quotRem" => Some(2),
-            "%" => Some(2),
-            "numerator" => Some(1),
-            "denominator" => Some(1),
-            "toRational" => Some(1),
-            "fromRational" => Some(1),
-            "recip" => Some(1),
-            "newIORef" => Some(1),
-            "readIORef" => Some(1),
-            "writeIORef" => Some(2),
-            "modifyIORef" => Some(2),
-            "modifyIORef'" => Some(2),
-            "atomicModifyIORef" => Some(2),
-            "atomicModifyIORef'" => Some(2),
-
-            // Character operations
-            "ord" => Some(1),
-            "chr" => Some(1),
-            "isAlpha" => Some(1),
-            "isAlphaNum" => Some(1),
-            "isAscii" => Some(1),
-            "isControl" => Some(1),
-            "isDigit" => Some(1),
-            "isHexDigit" => Some(1),
-            "isLetter" => Some(1),
-            "isLower" => Some(1),
-            "isNumber" => Some(1),
-            "isPrint" => Some(1),
-            "isPunctuation" => Some(1),
-            "isSpace" => Some(1),
-            "isSymbol" => Some(1),
-            "isAsciiLower" => Some(1),
-            "isAsciiUpper" => Some(1),
-            "isOctDigit" => Some(1),
-            "isSeparator" => Some(1),
-            "isLatin1" => Some(1),
-            "isUpper" => Some(1),
-            "toLower" => Some(1),
-            "toUpper" => Some(1),
-            "digitToInt" => Some(1),
-            "intToDigit" => Some(1),
-
-            // Advanced list operations
-            "scanl" => Some(3),
-            "scanl'" => Some(3),
-            "scanl1" => Some(2),
-            "scanr" => Some(3),
-            "scanr1" => Some(2),
-            "find" => Some(2),
-            "elem" => Some(2),
-            "notElem" => Some(2),
-            "lookup" => Some(2),
-            "partition" => Some(2),
-            "span" => Some(2),
-            "lines" => Some(1),
-            "unlines" => Some(1),
-            "words" => Some(1),
-            "unwords" => Some(1),
-            "nub" => Some(1),
-            "delete" => Some(2),
-            "union" => Some(2),
-            "intersect" => Some(2),
-            "sort" => Some(1),
-            "sortBy" => Some(2),
-            "intercalate" => Some(2),
-            "intersperse" => Some(2),
-            "transpose" => Some(1),
-            "group" => Some(1),
-            "sortOn" => Some(2),
-            "nubBy" => Some(2),
-            "groupBy" => Some(2),
-            "deleteBy" => Some(3),
-            "unionBy" => Some(3),
-            "intersectBy" => Some(3),
-            "stripPrefix" => Some(2),
-            "insert" => Some(2),
-            "mapAccumL" => Some(3),
-            "mapAccumR" => Some(3),
-            "splitAt" => Some(2),
-            "break" => Some(2),
-            "any" => Some(2),
-            "all" => Some(2),
-            "and" => Some(1),
-            "or" => Some(1),
-            "maximum" => Some(1),
-            "minimum" => Some(1),
-            "maximumBy" => Some(2),
-            "minimumBy" => Some(2),
-            "elemIndex" => Some(2),
-            "findIndex" => Some(2),
-            "isPrefixOf" => Some(2),
-            "isSuffixOf" => Some(2),
-            "isInfixOf" => Some(2),
-            "tails" => Some(1),
-            "inits" => Some(1),
-            "foldMap" => Some(2),
-            "iterate" => Some(2),
-            "unfoldr" => Some(2),
-            "cycle" => Some(1),
-            "repeat" => Some(1),
-            "takeWhile" => Some(2),
-            "dropWhile" => Some(2),
-            "zipWith3" => Some(4),
-            "zip3" => Some(3),
-            "unzip" => Some(1),
-
-            // IO & System operations
-            "readFile" => Some(1),
-            "writeFile" => Some(2),
-            "appendFile" => Some(2),
-            "openFile" => Some(2),
-            "hClose" => Some(1),
-            "hGetChar" => Some(1),
-            "hGetLine" => Some(1),
-            "hPutStr" => Some(2),
-            "hPutStrLn" => Some(2),
-            "hFlush" => Some(1),
-            "hIsEOF" => Some(1),
-            "hSetBuffering" => Some(2),
-            // Handle configuration bhc has nothing to configure for: it always
-            // writes UTF-8 with LF newlines. Accepting them as no-ops is what
-            // lets a program that sets them up front (pandoc's `App`) run.
-            "hSetNewlineMode" => Some(2),
-            "hSetEncoding" => Some(2),
-            "hSetBinaryMode" => Some(2),
-            "stdin" => Some(0),
-            "stdout" => Some(0),
-            "stderr" => Some(0),
-            "doesFileExist" => Some(1),
-            "doesDirectoryExist" => Some(1),
-            "removeFile" => Some(1),
-            "getArgs" => Some(0),
-            "getProgName" => Some(0),
-            "getEnv" => Some(1),
-            "lookupEnv" => Some(1),
-            "newUnique" => Some(0),
-            "hashUnique" => Some(1),
-            "exitSuccess" => Some(0),
-            "exitFailure" => Some(0),
-            "exitWith" => Some(1),
-            "hGetContents" => Some(1),
-            "getCurrentDirectory" => Some(0),
-            "getXdgDirectory" => Some(2),
-            "getAppUserDataDirectory" => Some(1),
-            "createDirectory" => Some(1),
-            "listDirectory" => Some(1),
-
-            // E.19: FilePath + Directory operations
-            "</>" => Some(2),
-            "takeFileName" => Some(1),
-            "takeDirectory" => Some(1),
-            "takeExtension" => Some(1),
-            "dropExtension" => Some(1),
-            "takeBaseName" => Some(1),
-            "replaceExtension" => Some(2),
-            "isAbsolute" => Some(1),
-            "isRelative" => Some(1),
-            "hasExtension" => Some(1),
-            "splitExtension" => Some(1),
-            "setCurrentDirectory" => Some(1),
-            "removeDirectory" => Some(1),
-            "renameFile" => Some(2),
-            "copyFile" => Some(2),
-
-            // Monadic / higher-order operations
-            "fmap" => Some(2),
-            "<$>" => Some(2),
-            // `liftM`/`liftA` are the Monad/Applicative spellings of `fmap`.
-            "liftM" => Some(2),
-            "liftA" => Some(2),
-            "<*>" => Some(2),
-            "join" => Some(1),
-            "=<<" => Some(2),
-            "when" => Some(2),
-            "unless" => Some(2),
-            "void" => Some(1),
-            "mapM" => Some(2),
-            "mapM_" => Some(2),
-            "forM" => Some(2),
-            "forM_" => Some(2),
-            "sequence" => Some(1),
-            "sequence_" => Some(1),
-            "traverse" => Some(2),
-            "traverse_" => Some(2),
-            "for" => Some(2),
-            "for_" => Some(2),
-            "sequenceA" => Some(1),
-            "sequenceA_" => Some(1),
-            "forever" => Some(1),
-            "filterM" => Some(2),
-            "foldM" => Some(3),
-            "foldM_" => Some(3),
-            "replicateM" => Some(2),
-            "replicateM_" => Some(2),
-            "zipWithM" => Some(3),
-            "zipWithM_" => Some(3),
-
-            // Data.Function
-            "flip" => Some(3),
-            "on" => Some(4),
-            "fix" => Some(1),
-            "$" => Some(2),
-            "&" => Some(2),
-            "." => Some(3),
-            "succ" => Some(1),
-            "pred" => Some(1),
-            "fromEnum" => Some(1),
-            "toEnum" => Some(1),
-            "minBound" => Some(0),
-            "maxBound" => Some(0),
-
-            // E.28: Arithmetic, enum, folds, higher-order, IO input
-            "min" => Some(2),
-            "max" => Some(2),
-            "subtract" => Some(2),
-            "enumFrom" => Some(1),
-            "enumFromThen" => Some(2),
-            "enumFromThenTo" => Some(3),
-            "foldl1" => Some(2),
-            "foldr1" => Some(2),
-            "comparing" => Some(3),
-            "until" => Some(3),
-            "getChar" => Some(0),
-            "isEOF" => Some(0),
-            "getContents" => Some(0),
-            "interact" => Some(1),
-
-            // E.25: String type class methods
-            "fromString" => Some(1),
-            // E.64: OverloadedLists
-            "fromList" => Some(1),
-            "read" => Some(1),
-            "readMaybe" => Some(1),
-
-            // Show
-            "show" => Some(1),
-            "showInt" => Some(1),
-            "showDouble" => Some(1),
-            "showFloat" => Some(1),
-            "showBool" => Some(1),
-            "showChar" => Some(1),
-            "showString" => Some(1),
-            "showList" => Some(1),
-            "showMaybe" => Some(1),
-            "showEither" => Some(1),
-            "showTuple2" => Some(1),
-            "showUnit" => Some(1),
-
-            // Data.Map operations
-            "Data.Map.empty" => Some(0),
-            "Data.Map.singleton" => Some(2),
-            "Data.Map.null" => Some(1),
-            "Data.Map.size" => Some(1),
-            "Data.Map.member" => Some(2),
-            "Data.Map.notMember" => Some(2),
-            "Data.Map.lookup" => Some(2),
-            "Data.Map.findWithDefault" => Some(3),
-            "Data.Map.!" => Some(2),
-            "Data.Map.insert" => Some(3),
-            "Data.Map.insertWith" => Some(4),
-            "Data.Map.delete" => Some(2),
-            "Data.Map.adjust" => Some(3),
-            "Data.Map.update" => Some(3),
-            "Data.Map.alter" => Some(3),
-            "Data.Map.union" => Some(2),
-            "Data.Map.unionWith" => Some(3),
-            "Data.Map.unionWithKey" => Some(4),
-            "Data.Map.unions" => Some(1),
-            "Data.Map.intersection" => Some(2),
-            "Data.Map.intersectionWith" => Some(3),
-            "Data.Map.difference" => Some(2),
-            "Data.Map.differenceWith" => Some(3),
-            "Data.Map.map" => Some(2),
-            "Data.Map.mapWithKey" => Some(2),
-            "Data.Map.mapKeys" => Some(2),
-            "Data.Map.filter" => Some(2),
-            "Data.Map.filterWithKey" => Some(2),
-            "Data.Map.mapMaybe" => Some(2),
-            "Data.Map.mapMaybeWithKey" => Some(2),
-            "Data.Map.foldr" => Some(3),
-            "Data.Map.foldl" => Some(3),
-            "Data.Map.foldrWithKey" => Some(3),
-            "Data.Map.foldlWithKey" => Some(3),
-            "Data.Map.keys" => Some(1),
-            "Data.Map.elems" => Some(1),
-            "Data.Map.assocs" => Some(1),
-            "Data.Map.toList" => Some(1),
-            "Data.Map.toAscList" => Some(1),
-            "Data.Map.toDescList" => Some(1),
-            "Data.Map.fromList" => Some(1),
-            "Data.Map.fromListWith" => Some(2),
-            "Data.Map.keysSet" => Some(1),
-            "Data.Map.isSubmapOf" => Some(2),
-            // Data.Set operations
-            "Data.Set.empty" => Some(0),
-            "Data.Set.singleton" => Some(1),
-            "Data.Set.null" => Some(1),
-            "Data.Set.size" => Some(1),
-            "Data.Set.member" => Some(2),
-            "Data.Set.notMember" => Some(2),
-            "Data.Set.insert" => Some(2),
-            "Data.Set.delete" => Some(2),
-            "Data.Set.union" => Some(2),
-            "Data.Set.unions" => Some(1),
-            "Data.Set.intersection" => Some(2),
-            "Data.Set.difference" => Some(2),
-            "Data.Set.isSubsetOf" => Some(2),
-            "Data.Set.isProperSubsetOf" => Some(2),
-            "Data.Set.map" => Some(2),
-            "Data.Set.filter" => Some(2),
-            "Data.Set.partition" => Some(2),
-            "Data.Set.foldr" => Some(3),
-            "Data.Set.foldl" => Some(3),
-            "Data.Set.toList" => Some(1),
-            "Data.Set.toAscList" => Some(1),
-            "Data.Set.toDescList" => Some(1),
-            "Data.Set.fromList" => Some(1),
-            "Data.Set.findMin" => Some(1),
-            "Data.Set.findMax" => Some(1),
-            "Data.Set.deleteMin" => Some(1),
-            "Data.Set.deleteMax" => Some(1),
-            "Data.Set.elems" => Some(1),
-            "Data.Set.lookupMin" => Some(1),
-            "Data.Set.lookupMax" => Some(1),
-            // Data.IntMap operations
-            "Data.IntMap.empty" => Some(0),
-            "Data.IntMap.singleton" => Some(2),
-            "Data.IntMap.null" => Some(1),
-            "Data.IntMap.size" => Some(1),
-            "Data.IntMap.member" => Some(2),
-            "Data.IntMap.lookup" => Some(2),
-            "Data.IntMap.findWithDefault" => Some(3),
-            "Data.IntMap.insert" => Some(3),
-            "Data.IntMap.insertWith" => Some(4),
-            "Data.IntMap.delete" => Some(2),
-            "Data.IntMap.adjust" => Some(3),
-            "Data.IntMap.union" => Some(2),
-            "Data.IntMap.unionWith" => Some(3),
-            "Data.IntMap.intersection" => Some(2),
-            "Data.IntMap.difference" => Some(2),
-            "Data.IntMap.map" => Some(2),
-            "Data.IntMap.mapWithKey" => Some(2),
-            "Data.IntMap.filter" => Some(2),
-            "Data.IntMap.foldr" => Some(3),
-            "Data.IntMap.foldlWithKey" => Some(3),
-            "Data.IntMap.keys" => Some(1),
-            "Data.IntMap.elems" => Some(1),
-            "Data.IntMap.toList" => Some(1),
-            "Data.IntMap.toAscList" => Some(1),
-            "Data.IntMap.fromList" => Some(1),
-            // Data.IntSet operations
-            "Data.IntSet.empty" => Some(0),
-            "Data.IntSet.singleton" => Some(1),
-            "Data.IntSet.null" => Some(1),
-            "Data.IntSet.size" => Some(1),
-            "Data.IntSet.member" => Some(2),
-            "Data.IntSet.insert" => Some(2),
-            "Data.IntSet.delete" => Some(2),
-            "Data.IntSet.union" => Some(2),
-            "Data.IntSet.intersection" => Some(2),
-            "Data.IntSet.difference" => Some(2),
-            "Data.IntSet.isSubsetOf" => Some(2),
-            "Data.IntSet.filter" => Some(2),
-            "Data.IntSet.foldr" => Some(3),
-            "Data.IntSet.toList" => Some(1),
-            "Data.IntSet.fromList" => Some(1),
-            // Data.Sequence operations
-            "Data.Sequence.empty" => Some(0),
-            "Data.Sequence.singleton" => Some(1),
-            "Data.Sequence.null" => Some(1),
-            "Data.Sequence.length" => Some(1),
-            "Data.Sequence.index" => Some(2),
-            "Data.Sequence.lookup" => Some(2),
-            "Data.Sequence.<|" => Some(2),
-            "Data.Sequence.|>" => Some(2),
-            "Data.Sequence.><" => Some(2),
-            "Data.Sequence.take" => Some(2),
-            "Data.Sequence.drop" => Some(2),
-            "Data.Sequence.reverse" => Some(1),
-            "Data.Sequence.update" => Some(3),
-            "Data.Sequence.insertAt" => Some(3),
-            "Data.Sequence.deleteAt" => Some(2),
-            "Data.Sequence.fromList" => Some(1),
-            "Data.Sequence.toList" => Some(1),
-            "Data.Foldable.toList" | "toList" => Some(1),
-            "Data.Sequence.replicate" => Some(2),
-            "Data.Sequence.viewl" => Some(1),
-            "Data.Sequence.viewr" => Some(1),
-            "Data.Sequence.filter" => Some(2),
-            // Data.Text operations
-            "Data.Text.empty" => Some(0),
-            "Data.List.empty" => Some(0),
-            "Data.List.append" => Some(2),
-            "Data.Maybe.append" => Some(2),
-            "Data.List.concat" => Some(1),
-            "Data.Text.singleton" => Some(1),
-            "Data.Text.pack" => Some(1),
-            "Data.Text.unpack" => Some(1),
-            "Data.Text.null" => Some(1),
-            "Data.Text.length" => Some(1),
-            "Data.Text.head" => Some(1),
-            "Data.Text.last" => Some(1),
-            "Data.Text.tail" => Some(1),
-            "Data.Text.init" => Some(1),
-            "Data.Text.append" | "Data.Text.<>" => Some(2),
-            "Data.Text.reverse" => Some(1),
-            "Data.Text.take" => Some(2),
-            "Data.Text.takeEnd" => Some(2),
-            "Data.Text.drop" => Some(2),
-            "Data.Text.dropEnd" => Some(2),
-            "Data.Text.isPrefixOf" => Some(2),
-            "Data.Text.isSuffixOf" => Some(2),
-            "Data.Text.isInfixOf" => Some(2),
-            "Data.Text.toLower" => Some(1),
-            "Data.Text.toUpper" => Some(1),
-            "Data.Text.toCaseFold" => Some(1),
-            "Data.Text.toTitle" => Some(1),
-            "Data.Text.map" => Some(2),
-            "Data.Text.eq" | "Data.Text.==" => Some(2),
-            "Data.Text.compare" => Some(2),
-            // Additional Data.Text operations
-            "Data.Text.filter" => Some(2),
-            "Data.Text.foldl'" => Some(3),
-            "Data.Text.concat" => Some(1),
-            "Data.Text.intercalate" => Some(2),
-            "Data.Text.strip" => Some(1),
-            "Data.Text.words" => Some(1),
-            "Data.Text.lines" => Some(1),
-            "Data.Text.splitOn" => Some(2),
-            "Data.Text.replace" => Some(3),
-            "Data.Text.unlines" => Some(1),
-            "Data.Text.unwords" => Some(1),
-            "Data.Text.replicate" => Some(2),
-            "Data.Text.cons" => Some(2),
-            "Data.Text.snoc" => Some(2),
-            "Data.Text.uncons" => Some(1),
-            "Data.Text.unsnoc" => Some(1),
-            "Data.Text.stripPrefix" => Some(2),
-            "Data.Text.stripSuffix" => Some(2),
-            "Data.Text.stripStart" => Some(1),
-            "Data.Text.stripEnd" => Some(1),
-            "Data.Text.intersperse" => Some(2),
-            "Data.Text.any" => Some(2),
-            "Data.Text.all" => Some(2),
-            "Data.Text.break" => Some(2),
-            "Data.Text.span" => Some(2),
-            "Data.Text.split" => Some(2),
-            "Data.Text.takeWhile" => Some(2),
-            "Data.Text.dropWhile" => Some(2),
-            "Data.Text.dropWhileEnd" => Some(2),
-            "Data.Text.takeWhileEnd" => Some(2),
-            "Data.Text.count" => Some(2),
-            // Data.Text.Encoding operations
-            "Data.Text.Encoding.encodeUtf8" => Some(1),
-            "Data.Text.Encoding.decodeUtf8" => Some(1),
-            // Data.Text.IO operations
-            "Data.Text.IO.readFile" => Some(1),
-            "Data.Text.IO.writeFile" => Some(2),
-            "Data.Text.IO.appendFile" => Some(2),
-            "Data.Text.IO.hGetContents" => Some(1),
-            "Data.Text.IO.hGetLine" => Some(1),
-            "Data.Text.IO.hPutStr" => Some(2),
-            "Data.Text.IO.hPutStrLn" => Some(2),
-            "Data.Text.IO.putStr" => Some(1),
-            "Data.Text.IO.putStrLn" => Some(1),
-            "Data.Text.IO.getLine" => Some(0),
-            "Data.Text.IO.getContents" => Some(0),
-            // Data.ByteString operations
-            "Data.ByteString.empty" => Some(0),
-            "Data.ByteString.singleton" => Some(1),
-            "Data.ByteString.pack" => Some(1),
-            "Data.ByteString.unpack" => Some(1),
-            "Data.ByteString.null" => Some(1),
-            "Data.ByteString.length" => Some(1),
-            "Data.ByteString.head" => Some(1),
-            "Data.ByteString.last" => Some(1),
-            "Data.ByteString.tail" => Some(1),
-            "Data.ByteString.init" => Some(1),
-            "Data.ByteString.append" => Some(2),
-            "Data.ByteString.cons" => Some(2),
-            "Data.ByteString.snoc" => Some(2),
-            "Data.ByteString.take" => Some(2),
-            "Data.ByteString.drop" => Some(2),
-            "Data.ByteString.reverse" => Some(1),
-            "Data.ByteString.elem" => Some(2),
-            "Data.ByteString.index" => Some(2),
-            "Data.ByteString.eq" => Some(2),
-            "Data.ByteString.compare" => Some(2),
-            "Data.ByteString.isPrefixOf" => Some(2),
-            "Data.ByteString.isSuffixOf" => Some(2),
-            "Data.ByteString.readFile" => Some(1),
-            "Data.ByteString.writeFile" => Some(2),
-
-            // Data.Text.Lazy operations
-            "Data.Text.Lazy.empty" => Some(0),
-            "Data.Text.Lazy.fromStrict" => Some(1),
-            "Data.Text.Lazy.toStrict" => Some(1),
-            "Data.Text.Lazy.pack" => Some(1),
-            "Data.Text.Lazy.unpack" => Some(1),
-            "Data.Text.Lazy.null" => Some(1),
-            "Data.Text.Lazy.length" => Some(1),
-            "Data.Text.Lazy.append" | "Data.Text.Lazy.<>" => Some(2),
-            "Data.Text.Lazy.fromChunks" => Some(1),
-            "Data.Text.Lazy.toChunks" => Some(1),
-            "Data.Text.Lazy.head" => Some(1),
-            "Data.Text.Lazy.tail" => Some(1),
-            "Data.Text.Lazy.take" => Some(2),
-            "Data.Text.Lazy.drop" => Some(2),
-
-            // Data.ByteString.Lazy operations
-            "Data.ByteString.Lazy.empty" => Some(0),
-            "Data.ByteString.Lazy.fromStrict" => Some(1),
-            "Data.ByteString.Lazy.toStrict" => Some(1),
-            "Data.ByteString.Lazy.fromChunks" => Some(1),
-            "Data.ByteString.Lazy.toChunks" => Some(1),
-            "Data.ByteString.Lazy.null" => Some(1),
-            "Data.ByteString.Lazy.length" => Some(1),
-            "Data.ByteString.Lazy.pack" => Some(1),
-            "Data.ByteString.Lazy.append" | "Data.ByteString.Lazy.<>" => Some(2),
-            "Data.ByteString.Lazy.head" => Some(1),
-            "Data.ByteString.Lazy.tail" => Some(1),
-            "Data.ByteString.Lazy.take" => Some(2),
-            "Data.ByteString.Lazy.drop" => Some(2),
-            "Data.ByteString.Lazy.filter" => Some(2),
-            "Data.ByteString.Lazy.isPrefixOf" => Some(2),
-            "Data.ByteString.Lazy.readFile" => Some(1),
-            "Data.ByteString.Lazy.writeFile" => Some(2),
-            "Data.ByteString.Lazy.putStr" => Some(1),
-            "Data.ByteString.Lazy.hPut" | "Data.ByteString.Lazy.hPutStr" => Some(2),
-            "Data.ByteString.Lazy.hGetContents" => Some(1),
-
-            // Data.ByteString.Lazy.Char8 operations
-            "Data.ByteString.Lazy.Char8.unpack" => Some(1),
-            "Data.ByteString.Lazy.Char8.lines" => Some(1),
-            "Data.ByteString.Lazy.Char8.unlines" => Some(1),
-            "Data.ByteString.Lazy.Char8.take" => Some(2),
-            "Data.ByteString.Lazy.Char8.dropWhile" => Some(2),
-            "Data.ByteString.Lazy.Char8.cons" => Some(2),
-
-            // Data.Text.Lazy.Encoding operations
-            "Data.Text.Lazy.Encoding.encodeUtf8" => Some(1),
-            "Data.Text.Lazy.Encoding.decodeUtf8" => Some(1),
-
-            // Data.ByteString.Builder operations
-            "Data.ByteString.Builder.empty" => Some(0),
-            "Data.ByteString.Builder.singleton" | "Data.ByteString.Builder.word8" => Some(1),
-            "Data.ByteString.Builder.byteString" | "Data.ByteString.Builder.shortByteString" => {
-                Some(1)
-            }
-            "Data.ByteString.Builder.lazyByteString"
-            | "Data.ByteString.Builder.toLazyByteString" => Some(1),
-            "Data.ByteString.Builder.append" | "Data.ByteString.Builder.<>" => Some(2),
-            "Data.ByteString.Builder.toStrictByteString" => Some(1),
-            "Data.ByteString.Builder.hPutBuilder" => Some(2),
-            "Data.ByteString.Builder.charUtf8" => Some(1),
-            "Data.ByteString.Builder.stringUtf8" => Some(1),
-            "Data.ByteString.Builder.intDec"
-            | "Data.ByteString.Builder.int8Dec"
-            | "Data.ByteString.Builder.int16Dec"
-            | "Data.ByteString.Builder.int32Dec"
-            | "Data.ByteString.Builder.int64Dec"
-            | "Data.ByteString.Builder.integerDec"
-            | "Data.ByteString.Builder.wordDec"
-            | "Data.ByteString.Builder.word8Dec"
-            | "Data.ByteString.Builder.word16Dec"
-            | "Data.ByteString.Builder.word32Dec"
-            | "Data.ByteString.Builder.word64Dec" => Some(1),
-            "Data.ByteString.Builder.char7" => Some(1),
-            "Data.ByteString.Builder.char8" => Some(1),
-            "Data.ByteString.Builder.string7" | "Data.ByteString.Builder.string8" => Some(1),
-            "Data.ByteString.Builder.word16BE"
-            | "Data.ByteString.Builder.int16BE"
-            | "Data.ByteString.Builder.word32BE"
-            | "Data.ByteString.Builder.int32BE"
-            | "Data.ByteString.Builder.word64BE"
-            | "Data.ByteString.Builder.int64BE" => Some(1),
-            "Data.ByteString.Builder.word16LE"
-            | "Data.ByteString.Builder.int16LE"
-            | "Data.ByteString.Builder.word32LE"
-            | "Data.ByteString.Builder.int32LE"
-            | "Data.ByteString.Builder.word64LE"
-            | "Data.ByteString.Builder.int64LE"
-            | "Data.ByteString.Builder.word16Host"
-            | "Data.ByteString.Builder.int16Host"
-            | "Data.ByteString.Builder.word32Host"
-            | "Data.ByteString.Builder.int32Host"
-            | "Data.ByteString.Builder.word64Host"
-            | "Data.ByteString.Builder.int64Host" => Some(1),
-            "Data.ByteString.Builder.wordHex"
-            | "Data.ByteString.Builder.word8Hex"
-            | "Data.ByteString.Builder.word16Hex"
-            | "Data.ByteString.Builder.word32Hex"
-            | "Data.ByteString.Builder.word64Hex" => Some(1),
-            "Data.ByteString.Builder.word8HexFixed" => Some(1),
-            "Data.ByteString.Builder.word16HexFixed"
-            | "Data.ByteString.Builder.word32HexFixed"
-            | "Data.ByteString.Builder.word64HexFixed" => Some(1),
-            "Data.ByteString.Builder.floatBE"
-            | "Data.ByteString.Builder.doubleBE"
-            | "Data.ByteString.Builder.floatLE"
-            | "Data.ByteString.Builder.doubleLE"
-            | "Data.ByteString.Builder.floatHost"
-            | "Data.ByteString.Builder.doubleHost" => Some(1),
-
-            // Identity operations
-            "Identity" => Some(1),
-            "runIdentity" => Some(1),
-            "Identity.fmap" => Some(2),
-            "Identity.pure" => Some(1),
-            "Identity.<*>" => Some(2),
-            "Identity.>>=" => Some(2),
-            "Identity.>>" => Some(2),
-
-            // IO instance methods, reached as dictionary slots (see
-            // `transformer_method_name`). Same semantics as the unqualified
-            // forms below — bhc's IO model makes a value its own action — but
-            // under distinct names so each layer gets its own wrapper.
-            "IO.fmap" => Some(2),
-            "IO.pure" => Some(1),
-            "IO.<*>" => Some(2),
-            "IO.>>=" => Some(2),
-            "IO.>>" => Some(2),
-
-            // ReaderT operations
-            "ReaderT" => Some(1),
-            "runReaderT" => Some(2),
-            // mtl aliases: `Reader r = ReaderT r Identity`, and Identity is
-            // erased here, so each alias runner IS its transformer runner.
-            "runReader" => Some(2),
-            "ReaderT.fmap" => Some(2),
-            "ReaderT.pure" => Some(1),
-            "ReaderT.<*>" => Some(2),
-            "ReaderT.>>=" => Some(2),
-            "ReaderT.>>" => Some(2),
-            "ReaderT.lift" => Some(1),
-            "ReaderT.liftIO" => Some(1),
-            "ask" => Some(0),
-            "asks" => Some(1),
-            "local" => Some(2),
-
-            // StateT operations
-            "StateT" => Some(1),
-            "runStateT" => Some(2),
-            "StateT.fmap" => Some(2),
-            "StateT.pure" => Some(1),
-            "StateT.<*>" => Some(2),
-            "StateT.>>=" => Some(2),
-            "StateT.>>" => Some(2),
-            "StateT.lift" => Some(1),
-            "StateT.liftIO" => Some(1),
-            "get" => Some(0),
-            "put" => Some(1),
-            "modify" => Some(1),
-            "gets" => Some(1),
-            "evalStateT" => Some(2),
-            "execStateT" => Some(2),
-            "runState" => Some(2),
-            "evalState" => Some(2),
-            "execState" => Some(2),
-
-            // ExceptT operations
-            "ExceptT" => Some(1),
-            "runExceptT" => Some(1),
-            "ExceptT.fmap" => Some(2),
-            "ExceptT.pure" => Some(1),
-            "ExceptT.<*>" => Some(2),
-            "ExceptT.>>=" => Some(2),
-            "ExceptT.>>" => Some(2),
-            // ExceptT-over-StateT dictionary slots. ExceptT's representation
-            // depends on the layer beneath it, and a dictionary slot cannot
-            // consult the ambient stack, so the variant is part of the name.
-            "ExceptT_st.pure" => Some(1),
-            "ExceptT_st.>>=" => Some(2),
-            "ExceptT_st.fmap" => Some(2),
-            "ExceptT.lift" => Some(1),
-            "ExceptT.liftIO" => Some(1),
-            "throwE" => Some(1),
-            "catchE" => Some(2),
-            // MonadError standard names (mtl-style aliases)
-            "throwError" => Some(1),
-            "catchError" => Some(2),
-
-            // WriterT operations
-            "WriterT" => Some(1),
-            "runWriterT" => Some(1),
-            "runWriter" => Some(1),
-            "WriterT.fmap" => Some(2),
-            "WriterT.pure" => Some(1),
-            "WriterT.<*>" => Some(2),
-            "WriterT.>>=" => Some(2),
-            "WriterT.>>" => Some(2),
-            "WriterT.lift" => Some(1),
-            "WriterT.liftIO" => Some(1),
-            "tell" => Some(1),
-            "execWriterT" => Some(1),
-            "execWriter" => Some(1),
-
-            // Generic lift/liftIO (dispatched based on transformer context)
-            "lift" => Some(1),
-            "liftIO" => Some(1),
-
-            _ => {
-                // Check for field selector pattern: $sel_N where N is a digit
-                if name.starts_with("$sel_") && name[5..].parse::<usize>().is_ok() {
-                    return Some(1); // Field selectors take one argument (the tuple/dict)
-                }
-                None
-            }
-        }
+        builtin_arity(name)
     }
 
     /// Check if an expression is a saturated builtin function application.
@@ -48329,47 +47479,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Check if a name is a primitive operation and return its arity.
     fn primitive_op_info(&self, name: &str) -> Option<(PrimOp, u32)> {
-        match name {
-            // Arithmetic (binary)
-            "+" | "GHC.Num.+" => Some((PrimOp::Add, 2)),
-            "-" | "GHC.Num.-" => Some((PrimOp::Sub, 2)),
-            "*" | "GHC.Num.*" => Some((PrimOp::Mul, 2)),
-            "/" | "GHC.Real./" => Some((PrimOp::FDiv, 2)),
-            "div" | "GHC.Real.div" => Some((PrimOp::Div, 2)),
-            "mod" | "GHC.Real.mod" => Some((PrimOp::Mod, 2)),
-            "rem" | "GHC.Real.rem" => Some((PrimOp::Rem, 2)),
-            "quot" | "GHC.Real.quot" => Some((PrimOp::Quot, 2)),
-
-            // Comparison (binary)
-            "==" | "GHC.Classes.==" => Some((PrimOp::Eq, 2)),
-            "/=" | "GHC.Classes./=" => Some((PrimOp::Ne, 2)),
-            "<" | "GHC.Classes.<" => Some((PrimOp::Lt, 2)),
-            "<=" | "GHC.Classes.<=" => Some((PrimOp::Le, 2)),
-            ">" | "GHC.Classes.>" => Some((PrimOp::Gt, 2)),
-            ">=" | "GHC.Classes.>=" => Some((PrimOp::Ge, 2)),
-
-            // Boolean (binary)
-            "&&" | "GHC.Classes.&&" => Some((PrimOp::And, 2)),
-            "||" | "GHC.Classes.||" => Some((PrimOp::Or, 2)),
-
-            // Unary
-            "negate" | "GHC.Num.negate" => Some((PrimOp::Negate, 1)),
-            "abs" | "GHC.Num.abs" => Some((PrimOp::Abs, 1)),
-            "signum" | "GHC.Num.signum" => Some((PrimOp::Signum, 1)),
-            "not" | "GHC.Classes.not" => Some((PrimOp::Not, 1)),
-
-            // Bitwise (binary)
-            ".&." => Some((PrimOp::BitAnd, 2)),
-            ".|." => Some((PrimOp::BitOr, 2)),
-            "xor" => Some((PrimOp::BitXor, 2)),
-            "shiftL" => Some((PrimOp::ShiftL, 2)),
-            "shiftR" => Some((PrimOp::ShiftR, 2)),
-
-            // Bitwise (unary)
-            "complement" => Some((PrimOp::Complement, 1)),
-
-            _ => None,
-        }
+        primop_info(name)
     }
 
     /// Create a closure wrapping a primitive operation.
@@ -58755,6 +57865,921 @@ fn identity_based_monad_layer(name: &str) -> Option<TransformerLayer> {
         "Except" => Some(TransformerLayer::ExceptT),
         _ => None,
     }
+}
+
+/// The physical arity of a codegen builtin by name, or `None` if `name`
+/// is not a codegen builtin. Free function so name resolution (the driver)
+/// can tell whether an imported name would be intercepted as a builtin.
+pub fn builtin_arity(name: &str) -> Option<u32> {
+    match name {
+        // List operations
+        "head" => Some(1),
+        "tail" => Some(1),
+        "null" => Some(1),
+        "length" => Some(1),
+        "take" => Some(2),
+        "drop" => Some(2),
+        "reverse" => Some(1),
+        "append" | "++" => Some(2),
+        "enumFromTo" => Some(2),
+        "replicate" => Some(2),
+        "sum" => Some(1),
+        "product" => Some(1),
+        "map" => Some(2),
+        "filter" => Some(2),
+        "foldr" => Some(3),
+        "foldl" => Some(3),
+        "foldl'" => Some(3),
+        "zipWith" => Some(3),
+        "zip" => Some(2),
+        "last" => Some(1),
+        "init" => Some(1),
+        "!!" => Some(2),
+        "concatMap" => Some(2),
+        "concat" => Some(1),
+
+        // Tuple operations
+        "fst" => Some(1),
+        "snd" => Some(1),
+        "swap" => Some(1),
+        "curry" => Some(3),
+        "uncurry" => Some(2),
+
+        // Maybe operations
+        "fromJust" => Some(1),
+        "isJust" => Some(1),
+        "isNothing" => Some(1),
+        "fromMaybe" => Some(2),
+        "maybe" => Some(3),
+        "listToMaybe" => Some(1),
+        "nonEmpty" => Some(1),
+        "first" => Some(2),
+        "maybeToList" => Some(1),
+        "catMaybes" => Some(1),
+        "mapMaybe" => Some(2),
+
+        // Either operations
+        "isLeft" => Some(1),
+        "isRight" => Some(1),
+        "either" => Some(3),
+        "fromLeft" => Some(2),
+        "fromRight" => Some(2),
+        "lefts" => Some(1),
+        "rights" => Some(1),
+        "partitionEithers" => Some(1),
+
+        // Control
+        "guard" => Some(1),
+
+        // Error / Exception handling
+        "error" => Some(1),
+        "undefined" => Some(0),
+        "throw" | "throwIO" => Some(1),
+        "catch" => Some(2),
+        "handle" => Some(2),
+        "try" => Some(1),
+        "bracket" => Some(3),
+        "finally" | "onException" => Some(2),
+        "mask" | "mask_" | "uninterruptibleMask" | "uninterruptibleMask_" => Some(1),
+        "getMaskingState" => Some(0),
+        "queryTerminal" => Some(1),
+        "stdInput" => Some(0),
+        "stdOutput" => Some(0),
+        "stdError" => Some(0),
+        "toException" => Some(1),
+        "fromException" => Some(1),
+        "displayException" => Some(1),
+        "userError" => Some(1),
+        "ioError" => Some(1),
+
+        // Misc
+        "seq" => Some(2),
+        "id" => Some(1),
+        "const" => Some(2),
+        "not" => Some(1),
+        "otherwise" => Some(0),
+        // E.63: DeepSeq stubs (no-ops in strict runtime)
+        "rnf" => Some(1),
+        "deepseq" => Some(2),
+        // GHC.Generics from/to
+        "from" => Some(1),
+        "to" => Some(1),
+        "force" => Some(1),
+
+        // IO operations
+        "putStrLn" => Some(1),
+        "putStr" => Some(1),
+        "putChar" => Some(1),
+        "print" => Some(1),
+        "getLine" => Some(0),
+
+        // Monadic operations
+        ">>=" => Some(2),
+        ">>" => Some(2),
+        // `a *> b` IS `a >> b`, and `a <* b` runs both and keeps the first.
+        "*>" | "<*" => Some(2),
+        "return" => Some(1),
+        "pure" => Some(1),
+
+        // Numeric / math operations
+        "negate" => Some(1),
+        "abs" => Some(1),
+        "signum" => Some(1),
+        "sqrt" => Some(1),
+        "exp" => Some(1),
+        "log" => Some(1),
+        "sin" => Some(1),
+        "cos" => Some(1),
+        "tan" => Some(1),
+        "asin" => Some(1),
+        "acos" => Some(1),
+        "atan" => Some(1),
+        "atan2" => Some(2),
+        "ceiling" => Some(1),
+        "floor" => Some(1),
+        "round" => Some(1),
+        "truncate" => Some(1),
+        "fromIntegral" => Some(1),
+        "toInteger" => Some(1),
+        "fromInteger" => Some(1),
+        "compare" => Some(2),
+        "even" => Some(1),
+        "odd" => Some(1),
+        "gcd" => Some(2),
+        "lcm" => Some(2),
+        "divMod" => Some(2),
+        "quotRem" => Some(2),
+        "%" => Some(2),
+        "numerator" => Some(1),
+        "denominator" => Some(1),
+        "toRational" => Some(1),
+        "fromRational" => Some(1),
+        "recip" => Some(1),
+        "newIORef" => Some(1),
+        "readIORef" => Some(1),
+        "writeIORef" => Some(2),
+        "modifyIORef" => Some(2),
+        "modifyIORef'" => Some(2),
+        "atomicModifyIORef" => Some(2),
+        "atomicModifyIORef'" => Some(2),
+
+        // Character operations
+        "ord" => Some(1),
+        "chr" => Some(1),
+        "isAlpha" => Some(1),
+        "isAlphaNum" => Some(1),
+        "isAscii" => Some(1),
+        "isControl" => Some(1),
+        "isDigit" => Some(1),
+        "isHexDigit" => Some(1),
+        "isLetter" => Some(1),
+        "isLower" => Some(1),
+        "isNumber" => Some(1),
+        "isPrint" => Some(1),
+        "isPunctuation" => Some(1),
+        "isSpace" => Some(1),
+        "isSymbol" => Some(1),
+        "isAsciiLower" => Some(1),
+        "isAsciiUpper" => Some(1),
+        "isOctDigit" => Some(1),
+        "isSeparator" => Some(1),
+        "isLatin1" => Some(1),
+        "isUpper" => Some(1),
+        "toLower" => Some(1),
+        "toUpper" => Some(1),
+        "digitToInt" => Some(1),
+        "intToDigit" => Some(1),
+
+        // Advanced list operations
+        "scanl" => Some(3),
+        "scanl'" => Some(3),
+        "scanl1" => Some(2),
+        "scanr" => Some(3),
+        "scanr1" => Some(2),
+        "find" => Some(2),
+        "elem" => Some(2),
+        "notElem" => Some(2),
+        "lookup" => Some(2),
+        "partition" => Some(2),
+        "span" => Some(2),
+        "lines" => Some(1),
+        "unlines" => Some(1),
+        "words" => Some(1),
+        "unwords" => Some(1),
+        "nub" => Some(1),
+        "delete" => Some(2),
+        "union" => Some(2),
+        "intersect" => Some(2),
+        "sort" => Some(1),
+        "sortBy" => Some(2),
+        "intercalate" => Some(2),
+        "intersperse" => Some(2),
+        "transpose" => Some(1),
+        "group" => Some(1),
+        "sortOn" => Some(2),
+        "nubBy" => Some(2),
+        "groupBy" => Some(2),
+        "deleteBy" => Some(3),
+        "unionBy" => Some(3),
+        "intersectBy" => Some(3),
+        "stripPrefix" => Some(2),
+        "insert" => Some(2),
+        "mapAccumL" => Some(3),
+        "mapAccumR" => Some(3),
+        "splitAt" => Some(2),
+        "break" => Some(2),
+        "any" => Some(2),
+        "all" => Some(2),
+        "and" => Some(1),
+        "or" => Some(1),
+        "maximum" => Some(1),
+        "minimum" => Some(1),
+        "maximumBy" => Some(2),
+        "minimumBy" => Some(2),
+        "elemIndex" => Some(2),
+        "findIndex" => Some(2),
+        "isPrefixOf" => Some(2),
+        "isSuffixOf" => Some(2),
+        "isInfixOf" => Some(2),
+        "tails" => Some(1),
+        "inits" => Some(1),
+        "foldMap" => Some(2),
+        "iterate" => Some(2),
+        "unfoldr" => Some(2),
+        "cycle" => Some(1),
+        "repeat" => Some(1),
+        "takeWhile" => Some(2),
+        "dropWhile" => Some(2),
+        "zipWith3" => Some(4),
+        "zip3" => Some(3),
+        "unzip" => Some(1),
+
+        // IO & System operations
+        "readFile" => Some(1),
+        "writeFile" => Some(2),
+        "appendFile" => Some(2),
+        "openFile" => Some(2),
+        "hClose" => Some(1),
+        "hGetChar" => Some(1),
+        "hGetLine" => Some(1),
+        "hPutStr" => Some(2),
+        "hPutStrLn" => Some(2),
+        "hFlush" => Some(1),
+        "hIsEOF" => Some(1),
+        "hSetBuffering" => Some(2),
+        // Handle configuration bhc has nothing to configure for: it always
+        // writes UTF-8 with LF newlines. Accepting them as no-ops is what
+        // lets a program that sets them up front (pandoc's `App`) run.
+        "hSetNewlineMode" => Some(2),
+        "hSetEncoding" => Some(2),
+        "hSetBinaryMode" => Some(2),
+        "stdin" => Some(0),
+        "stdout" => Some(0),
+        "stderr" => Some(0),
+        "doesFileExist" => Some(1),
+        "doesDirectoryExist" => Some(1),
+        "removeFile" => Some(1),
+        "getArgs" => Some(0),
+        "getProgName" => Some(0),
+        "getEnv" => Some(1),
+        "lookupEnv" => Some(1),
+        "newUnique" => Some(0),
+        "hashUnique" => Some(1),
+        "exitSuccess" => Some(0),
+        "exitFailure" => Some(0),
+        "exitWith" => Some(1),
+        "hGetContents" => Some(1),
+        "getCurrentDirectory" => Some(0),
+        "getXdgDirectory" => Some(2),
+        "getAppUserDataDirectory" => Some(1),
+        "createDirectory" => Some(1),
+        "listDirectory" => Some(1),
+
+        // E.19: FilePath + Directory operations
+        "</>" => Some(2),
+        "takeFileName" => Some(1),
+        "takeDirectory" => Some(1),
+        "takeExtension" => Some(1),
+        "dropExtension" => Some(1),
+        "takeBaseName" => Some(1),
+        "replaceExtension" => Some(2),
+        "isAbsolute" => Some(1),
+        "isRelative" => Some(1),
+        "hasExtension" => Some(1),
+        "splitExtension" => Some(1),
+        "setCurrentDirectory" => Some(1),
+        "removeDirectory" => Some(1),
+        "renameFile" => Some(2),
+        "copyFile" => Some(2),
+
+        // Monadic / higher-order operations
+        "fmap" => Some(2),
+        "<$>" => Some(2),
+        // `liftM`/`liftA` are the Monad/Applicative spellings of `fmap`.
+        "liftM" => Some(2),
+        "liftA" => Some(2),
+        "<*>" => Some(2),
+        "join" => Some(1),
+        "=<<" => Some(2),
+        "when" => Some(2),
+        "unless" => Some(2),
+        "void" => Some(1),
+        "mapM" => Some(2),
+        "mapM_" => Some(2),
+        "forM" => Some(2),
+        "forM_" => Some(2),
+        "sequence" => Some(1),
+        "sequence_" => Some(1),
+        "traverse" => Some(2),
+        "traverse_" => Some(2),
+        "for" => Some(2),
+        "for_" => Some(2),
+        "sequenceA" => Some(1),
+        "sequenceA_" => Some(1),
+        "forever" => Some(1),
+        "filterM" => Some(2),
+        "foldM" => Some(3),
+        "foldM_" => Some(3),
+        "replicateM" => Some(2),
+        "replicateM_" => Some(2),
+        "zipWithM" => Some(3),
+        "zipWithM_" => Some(3),
+
+        // Data.Function
+        "flip" => Some(3),
+        "on" => Some(4),
+        "fix" => Some(1),
+        "$" => Some(2),
+        "&" => Some(2),
+        "." => Some(3),
+        "succ" => Some(1),
+        "pred" => Some(1),
+        "fromEnum" => Some(1),
+        "toEnum" => Some(1),
+        "minBound" => Some(0),
+        "maxBound" => Some(0),
+
+        // E.28: Arithmetic, enum, folds, higher-order, IO input
+        "min" => Some(2),
+        "max" => Some(2),
+        "subtract" => Some(2),
+        "enumFrom" => Some(1),
+        "enumFromThen" => Some(2),
+        "enumFromThenTo" => Some(3),
+        "foldl1" => Some(2),
+        "foldr1" => Some(2),
+        "comparing" => Some(3),
+        "until" => Some(3),
+        "getChar" => Some(0),
+        "isEOF" => Some(0),
+        "getContents" => Some(0),
+        "interact" => Some(1),
+
+        // E.25: String type class methods
+        "fromString" => Some(1),
+        // E.64: OverloadedLists
+        "fromList" => Some(1),
+        "read" => Some(1),
+        "readMaybe" => Some(1),
+
+        // Show
+        "show" => Some(1),
+        "showInt" => Some(1),
+        "showDouble" => Some(1),
+        "showFloat" => Some(1),
+        "showBool" => Some(1),
+        "showChar" => Some(1),
+        "showString" => Some(1),
+        "showList" => Some(1),
+        "showMaybe" => Some(1),
+        "showEither" => Some(1),
+        "showTuple2" => Some(1),
+        "showUnit" => Some(1),
+
+        // Data.Map operations
+        "Data.Map.empty" => Some(0),
+        "Data.Map.singleton" => Some(2),
+        "Data.Map.null" => Some(1),
+        "Data.Map.size" => Some(1),
+        "Data.Map.member" => Some(2),
+        "Data.Map.notMember" => Some(2),
+        "Data.Map.lookup" => Some(2),
+        "Data.Map.findWithDefault" => Some(3),
+        "Data.Map.!" => Some(2),
+        "Data.Map.insert" => Some(3),
+        "Data.Map.insertWith" => Some(4),
+        "Data.Map.delete" => Some(2),
+        "Data.Map.adjust" => Some(3),
+        "Data.Map.update" => Some(3),
+        "Data.Map.alter" => Some(3),
+        "Data.Map.union" => Some(2),
+        "Data.Map.unionWith" => Some(3),
+        "Data.Map.unionWithKey" => Some(4),
+        "Data.Map.unions" => Some(1),
+        "Data.Map.intersection" => Some(2),
+        "Data.Map.intersectionWith" => Some(3),
+        "Data.Map.difference" => Some(2),
+        "Data.Map.differenceWith" => Some(3),
+        "Data.Map.map" => Some(2),
+        "Data.Map.mapWithKey" => Some(2),
+        "Data.Map.mapKeys" => Some(2),
+        "Data.Map.filter" => Some(2),
+        "Data.Map.filterWithKey" => Some(2),
+        "Data.Map.mapMaybe" => Some(2),
+        "Data.Map.mapMaybeWithKey" => Some(2),
+        "Data.Map.foldr" => Some(3),
+        "Data.Map.foldl" => Some(3),
+        "Data.Map.foldrWithKey" => Some(3),
+        "Data.Map.foldlWithKey" => Some(3),
+        "Data.Map.keys" => Some(1),
+        "Data.Map.elems" => Some(1),
+        "Data.Map.assocs" => Some(1),
+        "Data.Map.toList" => Some(1),
+        "Data.Map.toAscList" => Some(1),
+        "Data.Map.toDescList" => Some(1),
+        "Data.Map.fromList" => Some(1),
+        "Data.Map.fromListWith" => Some(2),
+        "Data.Map.keysSet" => Some(1),
+        "Data.Map.isSubmapOf" => Some(2),
+        // Data.Set operations
+        "Data.Set.empty" => Some(0),
+        "Data.Set.singleton" => Some(1),
+        "Data.Set.null" => Some(1),
+        "Data.Set.size" => Some(1),
+        "Data.Set.member" => Some(2),
+        "Data.Set.notMember" => Some(2),
+        "Data.Set.insert" => Some(2),
+        "Data.Set.delete" => Some(2),
+        "Data.Set.union" => Some(2),
+        "Data.Set.unions" => Some(1),
+        "Data.Set.intersection" => Some(2),
+        "Data.Set.difference" => Some(2),
+        "Data.Set.isSubsetOf" => Some(2),
+        "Data.Set.isProperSubsetOf" => Some(2),
+        "Data.Set.map" => Some(2),
+        "Data.Set.filter" => Some(2),
+        "Data.Set.partition" => Some(2),
+        "Data.Set.foldr" => Some(3),
+        "Data.Set.foldl" => Some(3),
+        "Data.Set.toList" => Some(1),
+        "Data.Set.toAscList" => Some(1),
+        "Data.Set.toDescList" => Some(1),
+        "Data.Set.fromList" => Some(1),
+        "Data.Set.findMin" => Some(1),
+        "Data.Set.findMax" => Some(1),
+        "Data.Set.deleteMin" => Some(1),
+        "Data.Set.deleteMax" => Some(1),
+        "Data.Set.elems" => Some(1),
+        "Data.Set.lookupMin" => Some(1),
+        "Data.Set.lookupMax" => Some(1),
+        // Data.IntMap operations
+        "Data.IntMap.empty" => Some(0),
+        "Data.IntMap.singleton" => Some(2),
+        "Data.IntMap.null" => Some(1),
+        "Data.IntMap.size" => Some(1),
+        "Data.IntMap.member" => Some(2),
+        "Data.IntMap.lookup" => Some(2),
+        "Data.IntMap.findWithDefault" => Some(3),
+        "Data.IntMap.insert" => Some(3),
+        "Data.IntMap.insertWith" => Some(4),
+        "Data.IntMap.delete" => Some(2),
+        "Data.IntMap.adjust" => Some(3),
+        "Data.IntMap.union" => Some(2),
+        "Data.IntMap.unionWith" => Some(3),
+        "Data.IntMap.intersection" => Some(2),
+        "Data.IntMap.difference" => Some(2),
+        "Data.IntMap.map" => Some(2),
+        "Data.IntMap.mapWithKey" => Some(2),
+        "Data.IntMap.filter" => Some(2),
+        "Data.IntMap.foldr" => Some(3),
+        "Data.IntMap.foldlWithKey" => Some(3),
+        "Data.IntMap.keys" => Some(1),
+        "Data.IntMap.elems" => Some(1),
+        "Data.IntMap.toList" => Some(1),
+        "Data.IntMap.toAscList" => Some(1),
+        "Data.IntMap.fromList" => Some(1),
+        // Data.IntSet operations
+        "Data.IntSet.empty" => Some(0),
+        "Data.IntSet.singleton" => Some(1),
+        "Data.IntSet.null" => Some(1),
+        "Data.IntSet.size" => Some(1),
+        "Data.IntSet.member" => Some(2),
+        "Data.IntSet.insert" => Some(2),
+        "Data.IntSet.delete" => Some(2),
+        "Data.IntSet.union" => Some(2),
+        "Data.IntSet.intersection" => Some(2),
+        "Data.IntSet.difference" => Some(2),
+        "Data.IntSet.isSubsetOf" => Some(2),
+        "Data.IntSet.filter" => Some(2),
+        "Data.IntSet.foldr" => Some(3),
+        "Data.IntSet.toList" => Some(1),
+        "Data.IntSet.fromList" => Some(1),
+        // Data.Sequence operations
+        "Data.Sequence.empty" => Some(0),
+        "Data.Sequence.singleton" => Some(1),
+        "Data.Sequence.null" => Some(1),
+        "Data.Sequence.length" => Some(1),
+        "Data.Sequence.index" => Some(2),
+        "Data.Sequence.lookup" => Some(2),
+        "Data.Sequence.<|" => Some(2),
+        "Data.Sequence.|>" => Some(2),
+        "Data.Sequence.><" => Some(2),
+        "Data.Sequence.take" => Some(2),
+        "Data.Sequence.drop" => Some(2),
+        "Data.Sequence.reverse" => Some(1),
+        "Data.Sequence.update" => Some(3),
+        "Data.Sequence.insertAt" => Some(3),
+        "Data.Sequence.deleteAt" => Some(2),
+        "Data.Sequence.fromList" => Some(1),
+        "Data.Sequence.toList" => Some(1),
+        "Data.Foldable.toList" | "toList" => Some(1),
+        "Data.Sequence.replicate" => Some(2),
+        "Data.Sequence.viewl" => Some(1),
+        "Data.Sequence.viewr" => Some(1),
+        "Data.Sequence.filter" => Some(2),
+        // Data.Text operations
+        "Data.Text.empty" => Some(0),
+        "Data.List.empty" => Some(0),
+        "Data.List.append" => Some(2),
+        "Data.Maybe.append" => Some(2),
+        "Data.List.concat" => Some(1),
+        "Data.Text.singleton" => Some(1),
+        "Data.Text.pack" => Some(1),
+        "Data.Text.unpack" => Some(1),
+        "Data.Text.null" => Some(1),
+        "Data.Text.length" => Some(1),
+        "Data.Text.head" => Some(1),
+        "Data.Text.last" => Some(1),
+        "Data.Text.tail" => Some(1),
+        "Data.Text.init" => Some(1),
+        "Data.Text.append" | "Data.Text.<>" => Some(2),
+        "Data.Text.reverse" => Some(1),
+        "Data.Text.take" => Some(2),
+        "Data.Text.takeEnd" => Some(2),
+        "Data.Text.drop" => Some(2),
+        "Data.Text.dropEnd" => Some(2),
+        "Data.Text.isPrefixOf" => Some(2),
+        "Data.Text.isSuffixOf" => Some(2),
+        "Data.Text.isInfixOf" => Some(2),
+        "Data.Text.toLower" => Some(1),
+        "Data.Text.toUpper" => Some(1),
+        "Data.Text.toCaseFold" => Some(1),
+        "Data.Text.toTitle" => Some(1),
+        "Data.Text.map" => Some(2),
+        "Data.Text.eq" | "Data.Text.==" => Some(2),
+        "Data.Text.compare" => Some(2),
+        // Additional Data.Text operations
+        "Data.Text.filter" => Some(2),
+        "Data.Text.foldl'" => Some(3),
+        "Data.Text.concat" => Some(1),
+        "Data.Text.intercalate" => Some(2),
+        "Data.Text.strip" => Some(1),
+        "Data.Text.words" => Some(1),
+        "Data.Text.lines" => Some(1),
+        "Data.Text.splitOn" => Some(2),
+        "Data.Text.replace" => Some(3),
+        "Data.Text.unlines" => Some(1),
+        "Data.Text.unwords" => Some(1),
+        "Data.Text.replicate" => Some(2),
+        "Data.Text.cons" => Some(2),
+        "Data.Text.snoc" => Some(2),
+        "Data.Text.uncons" => Some(1),
+        "Data.Text.unsnoc" => Some(1),
+        "Data.Text.stripPrefix" => Some(2),
+        "Data.Text.stripSuffix" => Some(2),
+        "Data.Text.stripStart" => Some(1),
+        "Data.Text.stripEnd" => Some(1),
+        "Data.Text.intersperse" => Some(2),
+        "Data.Text.any" => Some(2),
+        "Data.Text.all" => Some(2),
+        "Data.Text.break" => Some(2),
+        "Data.Text.span" => Some(2),
+        "Data.Text.split" => Some(2),
+        "Data.Text.takeWhile" => Some(2),
+        "Data.Text.dropWhile" => Some(2),
+        "Data.Text.dropWhileEnd" => Some(2),
+        "Data.Text.takeWhileEnd" => Some(2),
+        "Data.Text.count" => Some(2),
+        // Data.Text.Encoding operations
+        "Data.Text.Encoding.encodeUtf8" => Some(1),
+        "Data.Text.Encoding.decodeUtf8" => Some(1),
+        // Data.Text.IO operations
+        "Data.Text.IO.readFile" => Some(1),
+        "Data.Text.IO.writeFile" => Some(2),
+        "Data.Text.IO.appendFile" => Some(2),
+        "Data.Text.IO.hGetContents" => Some(1),
+        "Data.Text.IO.hGetLine" => Some(1),
+        "Data.Text.IO.hPutStr" => Some(2),
+        "Data.Text.IO.hPutStrLn" => Some(2),
+        "Data.Text.IO.putStr" => Some(1),
+        "Data.Text.IO.putStrLn" => Some(1),
+        "Data.Text.IO.getLine" => Some(0),
+        "Data.Text.IO.getContents" => Some(0),
+        // Data.ByteString operations
+        "Data.ByteString.empty" => Some(0),
+        "Data.ByteString.singleton" => Some(1),
+        "Data.ByteString.pack" => Some(1),
+        "Data.ByteString.unpack" => Some(1),
+        "Data.ByteString.null" => Some(1),
+        "Data.ByteString.length" => Some(1),
+        "Data.ByteString.head" => Some(1),
+        "Data.ByteString.last" => Some(1),
+        "Data.ByteString.tail" => Some(1),
+        "Data.ByteString.init" => Some(1),
+        "Data.ByteString.append" => Some(2),
+        "Data.ByteString.cons" => Some(2),
+        "Data.ByteString.snoc" => Some(2),
+        "Data.ByteString.take" => Some(2),
+        "Data.ByteString.drop" => Some(2),
+        "Data.ByteString.reverse" => Some(1),
+        "Data.ByteString.elem" => Some(2),
+        "Data.ByteString.index" => Some(2),
+        "Data.ByteString.eq" => Some(2),
+        "Data.ByteString.compare" => Some(2),
+        "Data.ByteString.isPrefixOf" => Some(2),
+        "Data.ByteString.isSuffixOf" => Some(2),
+        "Data.ByteString.readFile" => Some(1),
+        "Data.ByteString.writeFile" => Some(2),
+
+        // Data.Text.Lazy operations
+        "Data.Text.Lazy.empty" => Some(0),
+        "Data.Text.Lazy.fromStrict" => Some(1),
+        "Data.Text.Lazy.toStrict" => Some(1),
+        "Data.Text.Lazy.pack" => Some(1),
+        "Data.Text.Lazy.unpack" => Some(1),
+        "Data.Text.Lazy.null" => Some(1),
+        "Data.Text.Lazy.length" => Some(1),
+        "Data.Text.Lazy.append" | "Data.Text.Lazy.<>" => Some(2),
+        "Data.Text.Lazy.fromChunks" => Some(1),
+        "Data.Text.Lazy.toChunks" => Some(1),
+        "Data.Text.Lazy.head" => Some(1),
+        "Data.Text.Lazy.tail" => Some(1),
+        "Data.Text.Lazy.take" => Some(2),
+        "Data.Text.Lazy.drop" => Some(2),
+
+        // Data.ByteString.Lazy operations
+        "Data.ByteString.Lazy.empty" => Some(0),
+        "Data.ByteString.Lazy.fromStrict" => Some(1),
+        "Data.ByteString.Lazy.toStrict" => Some(1),
+        "Data.ByteString.Lazy.fromChunks" => Some(1),
+        "Data.ByteString.Lazy.toChunks" => Some(1),
+        "Data.ByteString.Lazy.null" => Some(1),
+        "Data.ByteString.Lazy.length" => Some(1),
+        "Data.ByteString.Lazy.pack" => Some(1),
+        "Data.ByteString.Lazy.append" | "Data.ByteString.Lazy.<>" => Some(2),
+        "Data.ByteString.Lazy.head" => Some(1),
+        "Data.ByteString.Lazy.tail" => Some(1),
+        "Data.ByteString.Lazy.take" => Some(2),
+        "Data.ByteString.Lazy.drop" => Some(2),
+        "Data.ByteString.Lazy.filter" => Some(2),
+        "Data.ByteString.Lazy.isPrefixOf" => Some(2),
+        "Data.ByteString.Lazy.readFile" => Some(1),
+        "Data.ByteString.Lazy.writeFile" => Some(2),
+        "Data.ByteString.Lazy.putStr" => Some(1),
+        "Data.ByteString.Lazy.hPut" | "Data.ByteString.Lazy.hPutStr" => Some(2),
+        "Data.ByteString.Lazy.hGetContents" => Some(1),
+
+        // Data.ByteString.Lazy.Char8 operations
+        "Data.ByteString.Lazy.Char8.unpack" => Some(1),
+        "Data.ByteString.Lazy.Char8.lines" => Some(1),
+        "Data.ByteString.Lazy.Char8.unlines" => Some(1),
+        "Data.ByteString.Lazy.Char8.take" => Some(2),
+        "Data.ByteString.Lazy.Char8.dropWhile" => Some(2),
+        "Data.ByteString.Lazy.Char8.cons" => Some(2),
+
+        // Data.Text.Lazy.Encoding operations
+        "Data.Text.Lazy.Encoding.encodeUtf8" => Some(1),
+        "Data.Text.Lazy.Encoding.decodeUtf8" => Some(1),
+
+        // Data.ByteString.Builder operations
+        "Data.ByteString.Builder.empty" => Some(0),
+        "Data.ByteString.Builder.singleton" | "Data.ByteString.Builder.word8" => Some(1),
+        "Data.ByteString.Builder.byteString" | "Data.ByteString.Builder.shortByteString" => Some(1),
+        "Data.ByteString.Builder.lazyByteString" | "Data.ByteString.Builder.toLazyByteString" => {
+            Some(1)
+        }
+        "Data.ByteString.Builder.append" | "Data.ByteString.Builder.<>" => Some(2),
+        "Data.ByteString.Builder.toStrictByteString" => Some(1),
+        "Data.ByteString.Builder.hPutBuilder" => Some(2),
+        "Data.ByteString.Builder.charUtf8" => Some(1),
+        "Data.ByteString.Builder.stringUtf8" => Some(1),
+        "Data.ByteString.Builder.intDec"
+        | "Data.ByteString.Builder.int8Dec"
+        | "Data.ByteString.Builder.int16Dec"
+        | "Data.ByteString.Builder.int32Dec"
+        | "Data.ByteString.Builder.int64Dec"
+        | "Data.ByteString.Builder.integerDec"
+        | "Data.ByteString.Builder.wordDec"
+        | "Data.ByteString.Builder.word8Dec"
+        | "Data.ByteString.Builder.word16Dec"
+        | "Data.ByteString.Builder.word32Dec"
+        | "Data.ByteString.Builder.word64Dec" => Some(1),
+        "Data.ByteString.Builder.char7" => Some(1),
+        "Data.ByteString.Builder.char8" => Some(1),
+        "Data.ByteString.Builder.string7" | "Data.ByteString.Builder.string8" => Some(1),
+        "Data.ByteString.Builder.word16BE"
+        | "Data.ByteString.Builder.int16BE"
+        | "Data.ByteString.Builder.word32BE"
+        | "Data.ByteString.Builder.int32BE"
+        | "Data.ByteString.Builder.word64BE"
+        | "Data.ByteString.Builder.int64BE" => Some(1),
+        "Data.ByteString.Builder.word16LE"
+        | "Data.ByteString.Builder.int16LE"
+        | "Data.ByteString.Builder.word32LE"
+        | "Data.ByteString.Builder.int32LE"
+        | "Data.ByteString.Builder.word64LE"
+        | "Data.ByteString.Builder.int64LE"
+        | "Data.ByteString.Builder.word16Host"
+        | "Data.ByteString.Builder.int16Host"
+        | "Data.ByteString.Builder.word32Host"
+        | "Data.ByteString.Builder.int32Host"
+        | "Data.ByteString.Builder.word64Host"
+        | "Data.ByteString.Builder.int64Host" => Some(1),
+        "Data.ByteString.Builder.wordHex"
+        | "Data.ByteString.Builder.word8Hex"
+        | "Data.ByteString.Builder.word16Hex"
+        | "Data.ByteString.Builder.word32Hex"
+        | "Data.ByteString.Builder.word64Hex" => Some(1),
+        "Data.ByteString.Builder.word8HexFixed" => Some(1),
+        "Data.ByteString.Builder.word16HexFixed"
+        | "Data.ByteString.Builder.word32HexFixed"
+        | "Data.ByteString.Builder.word64HexFixed" => Some(1),
+        "Data.ByteString.Builder.floatBE"
+        | "Data.ByteString.Builder.doubleBE"
+        | "Data.ByteString.Builder.floatLE"
+        | "Data.ByteString.Builder.doubleLE"
+        | "Data.ByteString.Builder.floatHost"
+        | "Data.ByteString.Builder.doubleHost" => Some(1),
+
+        // Identity operations
+        "Identity" => Some(1),
+        "runIdentity" => Some(1),
+        "Identity.fmap" => Some(2),
+        "Identity.pure" => Some(1),
+        "Identity.<*>" => Some(2),
+        "Identity.>>=" => Some(2),
+        "Identity.>>" => Some(2),
+
+        // IO instance methods, reached as dictionary slots (see
+        // `transformer_method_name`). Same semantics as the unqualified
+        // forms below — bhc's IO model makes a value its own action — but
+        // under distinct names so each layer gets its own wrapper.
+        "IO.fmap" => Some(2),
+        "IO.pure" => Some(1),
+        "IO.<*>" => Some(2),
+        "IO.>>=" => Some(2),
+        "IO.>>" => Some(2),
+
+        // ReaderT operations
+        "ReaderT" => Some(1),
+        "runReaderT" => Some(2),
+        // mtl aliases: `Reader r = ReaderT r Identity`, and Identity is
+        // erased here, so each alias runner IS its transformer runner.
+        "runReader" => Some(2),
+        "ReaderT.fmap" => Some(2),
+        "ReaderT.pure" => Some(1),
+        "ReaderT.<*>" => Some(2),
+        "ReaderT.>>=" => Some(2),
+        "ReaderT.>>" => Some(2),
+        "ReaderT.lift" => Some(1),
+        "ReaderT.liftIO" => Some(1),
+        "ask" => Some(0),
+        "asks" => Some(1),
+        "local" => Some(2),
+
+        // StateT operations
+        "StateT" => Some(1),
+        "runStateT" => Some(2),
+        "StateT.fmap" => Some(2),
+        "StateT.pure" => Some(1),
+        "StateT.<*>" => Some(2),
+        "StateT.>>=" => Some(2),
+        "StateT.>>" => Some(2),
+        "StateT.lift" => Some(1),
+        "StateT.liftIO" => Some(1),
+        "get" => Some(0),
+        "put" => Some(1),
+        "modify" => Some(1),
+        "gets" => Some(1),
+        "evalStateT" => Some(2),
+        "execStateT" => Some(2),
+        "runState" => Some(2),
+        "evalState" => Some(2),
+        "execState" => Some(2),
+
+        // ExceptT operations
+        "ExceptT" => Some(1),
+        "runExceptT" => Some(1),
+        "ExceptT.fmap" => Some(2),
+        "ExceptT.pure" => Some(1),
+        "ExceptT.<*>" => Some(2),
+        "ExceptT.>>=" => Some(2),
+        "ExceptT.>>" => Some(2),
+        // ExceptT-over-StateT dictionary slots. ExceptT's representation
+        // depends on the layer beneath it, and a dictionary slot cannot
+        // consult the ambient stack, so the variant is part of the name.
+        "ExceptT_st.pure" => Some(1),
+        "ExceptT_st.>>=" => Some(2),
+        "ExceptT_st.fmap" => Some(2),
+        "ExceptT.lift" => Some(1),
+        "ExceptT.liftIO" => Some(1),
+        "throwE" => Some(1),
+        "catchE" => Some(2),
+        // MonadError standard names (mtl-style aliases)
+        "throwError" => Some(1),
+        "catchError" => Some(2),
+
+        // WriterT operations
+        "WriterT" => Some(1),
+        "runWriterT" => Some(1),
+        "runWriter" => Some(1),
+        "WriterT.fmap" => Some(2),
+        "WriterT.pure" => Some(1),
+        "WriterT.<*>" => Some(2),
+        "WriterT.>>=" => Some(2),
+        "WriterT.>>" => Some(2),
+        "WriterT.lift" => Some(1),
+        "WriterT.liftIO" => Some(1),
+        "tell" => Some(1),
+        "execWriterT" => Some(1),
+        "execWriter" => Some(1),
+
+        // Generic lift/liftIO (dispatched based on transformer context)
+        "lift" => Some(1),
+        "liftIO" => Some(1),
+
+        _ => {
+            // Check for field selector pattern: $sel_N where N is a digit
+            if name.starts_with("$sel_") && name[5..].parse::<usize>().is_ok() {
+                return Some(1); // Field selectors take one argument (the tuple/dict)
+            }
+            None
+        }
+    }
+}
+
+/// Name-based lookup of a codegen primitive operation (free fn; see `builtin_arity`).
+fn primop_info(name: &str) -> Option<(PrimOp, u32)> {
+    match name {
+        // Arithmetic (binary)
+        "+" | "GHC.Num.+" => Some((PrimOp::Add, 2)),
+        "-" | "GHC.Num.-" => Some((PrimOp::Sub, 2)),
+        "*" | "GHC.Num.*" => Some((PrimOp::Mul, 2)),
+        "/" | "GHC.Real./" => Some((PrimOp::FDiv, 2)),
+        "div" | "GHC.Real.div" => Some((PrimOp::Div, 2)),
+        "mod" | "GHC.Real.mod" => Some((PrimOp::Mod, 2)),
+        "rem" | "GHC.Real.rem" => Some((PrimOp::Rem, 2)),
+        "quot" | "GHC.Real.quot" => Some((PrimOp::Quot, 2)),
+
+        // Comparison (binary)
+        "==" | "GHC.Classes.==" => Some((PrimOp::Eq, 2)),
+        "/=" | "GHC.Classes./=" => Some((PrimOp::Ne, 2)),
+        "<" | "GHC.Classes.<" => Some((PrimOp::Lt, 2)),
+        "<=" | "GHC.Classes.<=" => Some((PrimOp::Le, 2)),
+        ">" | "GHC.Classes.>" => Some((PrimOp::Gt, 2)),
+        ">=" | "GHC.Classes.>=" => Some((PrimOp::Ge, 2)),
+
+        // Boolean (binary)
+        "&&" | "GHC.Classes.&&" => Some((PrimOp::And, 2)),
+        "||" | "GHC.Classes.||" => Some((PrimOp::Or, 2)),
+
+        // Unary
+        "negate" | "GHC.Num.negate" => Some((PrimOp::Negate, 1)),
+        "abs" | "GHC.Num.abs" => Some((PrimOp::Abs, 1)),
+        "signum" | "GHC.Num.signum" => Some((PrimOp::Signum, 1)),
+        "not" | "GHC.Classes.not" => Some((PrimOp::Not, 1)),
+
+        // Bitwise (binary)
+        ".&." => Some((PrimOp::BitAnd, 2)),
+        ".|." => Some((PrimOp::BitOr, 2)),
+        "xor" => Some((PrimOp::BitXor, 2)),
+        "shiftL" => Some((PrimOp::ShiftL, 2)),
+        "shiftR" => Some((PrimOp::ShiftR, 2)),
+
+        // Bitwise (unary)
+        "complement" => Some((PrimOp::Complement, 1)),
+
+        _ => None,
+    }
+}
+
+/// Name-based lookup of an RTS function id (free fn; see `builtin_arity`).
+fn rts_function_id_of(name: &str) -> Option<VarId> {
+    match name {
+        "print" => Some(VarId::new(1000000)), // bhc_print_int_ln for Int
+        "putStrLn" => Some(VarId::new(1000002)), // bhc_print_string_ln
+        "putStr" => Some(VarId::new(1000004)), // bhc_print_string
+        _ => None,
+    }
+}
+
+/// Whether `name` is a name codegen would intercept as a builtin, primop, or
+/// RTS function (rather than resolve as an ordinary/imported symbol). Used by
+/// name resolution to qualify a builtin-named import so it is not shadowed.
+pub fn shadows_codegen_builtin(name: &str) -> bool {
+    builtin_arity(name).is_some()
+        || primop_info(name).is_some()
+        || rts_function_id_of(name).is_some()
 }
 
 #[cfg(test)]

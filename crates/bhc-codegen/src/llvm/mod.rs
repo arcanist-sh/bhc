@@ -20,7 +20,8 @@ pub use context::LlvmContext;
 pub use loop_lower::{lower_loop_ir, lower_loop_irs, LoopLowering};
 pub use lower::{
     lower_core_module, lower_core_module_multimodule,
-    lower_core_module_multimodule_with_constructors, CompiledSymbol, ConstructorMeta, Lowering,
+    lower_core_module_multimodule_with_constructors, shadows_codegen_builtin, CompiledSymbol,
+    ConstructorMeta, Lowering,
 };
 pub use module::{LlvmModule, LlvmModuleExt};
 pub use types::TypeMapper;

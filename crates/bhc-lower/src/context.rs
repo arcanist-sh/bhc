@@ -1082,6 +1082,19 @@ impl LowerContext {
             "Data.Text.lines",
             "Data.Text.splitOn",
             "Data.Text.replace",
+            // Predicate/scan/build functions whose codegen (bhc_text_*) and RTS
+            // ids are already wired; only the builtin registration was missing,
+            // so an aliased use (`T.any`, `T.takeWhile`, …) fell through to a
+            // stub. Needed by pandoc's HTML writer.
+            "Data.Text.any",
+            "Data.Text.all",
+            "Data.Text.takeWhile",
+            "Data.Text.uncons",
+            "Data.Text.span",
+            "Data.Text.break",
+            "Data.Text.unwords",
+            "Data.Text.unlines",
+            "Data.Text.stripSuffix",
             // Data.Text.Encoding
             "Data.Text.Encoding.encodeUtf8",
             "Data.Text.Encoding.decodeUtf8",
@@ -1556,6 +1569,17 @@ impl LowerContext {
             // Data.Text.Encoding
             (11238, "Data.Text.Encoding.encodeUtf8"),
             (11239, "Data.Text.Encoding.decodeUtf8"),
+            // Predicate/scan/build primops (codegen + RTS already wired; see the
+            // name list above). Free DefId block 11240-11249.
+            (11240, "Data.Text.any"),
+            (11241, "Data.Text.all"),
+            (11242, "Data.Text.takeWhile"),
+            (11243, "Data.Text.uncons"),
+            (11244, "Data.Text.span"),
+            (11245, "Data.Text.break"),
+            (11246, "Data.Text.unwords"),
+            (11247, "Data.Text.unlines"),
+            (11248, "Data.Text.stripSuffix"),
         ];
 
         for &(id, name) in e20_text_builtins {

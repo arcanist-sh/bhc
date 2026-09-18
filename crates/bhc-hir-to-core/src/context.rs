@@ -42,6 +42,11 @@ pub struct ConstructorInfo {
     pub existential_dict_count: u32,
     /// Class names for existential dictionary fields (in order).
     pub existential_classes: Vec<Symbol>,
+    /// Declared field types, in positional order. Populated for imported
+    /// constructors from their interface so a call site can recover a field's
+    /// expected type (e.g. to pack an OverloadedStrings literal in a `Text`
+    /// field). Empty when unknown; builtin/synthetic constructors leave it so.
+    pub field_types: Vec<Ty>,
 }
 
 /// Metadata about a record field selector function.
@@ -329,6 +334,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         self.constructor_map.insert(
@@ -342,6 +348,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
 
@@ -358,6 +365,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         self.constructor_map.insert(
@@ -371,6 +379,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
 
@@ -387,6 +396,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         self.constructor_map.insert(
@@ -400,6 +410,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
 
@@ -416,6 +427,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         self.constructor_map.insert(
@@ -429,6 +441,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
 
@@ -445,6 +458,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
 
@@ -461,6 +475,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         self.constructor_map.insert(
@@ -474,6 +489,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         self.constructor_map.insert(
@@ -487,6 +503,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         self.constructor_map.insert(
@@ -500,6 +517,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         self.constructor_map.insert(
@@ -513,6 +531,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         self.constructor_map.insert(
@@ -526,6 +545,7 @@ impl LowerContext {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
     }
@@ -1639,6 +1659,19 @@ impl LowerContext {
         self.constructor_map.insert(def_id, info);
     }
 
+    /// Record an imported constructor's declared field types, keyed by name, so
+    /// a call site can recover the expected type of each argument. Local data
+    /// and newtype declarations populate the same map as they are lowered.
+    pub fn register_constructor_field_types(&mut self, name: Symbol, tys: Vec<Ty>) {
+        self.constructor_field_types.insert(name, tys);
+    }
+
+    /// The declared field types of a constructor, by name, if known.
+    #[must_use]
+    pub(crate) fn constructor_field_types(&self, name: Symbol) -> Option<&Vec<Ty>> {
+        self.constructor_field_types.get(&name)
+    }
+
     /// Look up constructor metadata for a given `DefId`.
     #[must_use]
     pub fn lookup_constructor(&self, def_id: DefId) -> Option<&ConstructorInfo> {
@@ -2702,6 +2735,18 @@ impl LowerContext {
         self.imported_instance_heads.contains(&(class, head))
     }
 
+    /// Whether `class_name` has an instance whose head matches `ty` — accepting
+    /// a FUNCTION-typed `ty`, unlike `head_is_concrete_with_instance` which
+    /// requires a `Ty::Con` head. Used to gate the function-instance-head
+    /// dispatch fallback: only override the primary dispatch type with the
+    /// receiver's type when the receiver actually names an instance (e.g.
+    /// `Attributable (Markup -> Markup)`).
+    pub(crate) fn has_instance_for(&self, class_name: Symbol, ty: &Ty) -> bool {
+        self.class_registry
+            .resolve_instance(class_name, ty)
+            .is_some()
+    }
+
     /// Narrow the binding signature to a local (`let`/`where`) binding while
     /// its right-hand side is lowered, returning the previous value to hand
     /// back to [`Self::restore_current_binding_sig`]. A `None` argument leaves
@@ -3628,7 +3673,8 @@ impl LowerContext {
                                 fs.iter().map(|f| f.ty.clone()).collect()
                             }
                         };
-                        self.constructor_field_types.insert(con.name, field_tys);
+                        self.constructor_field_types
+                            .insert(con.name, field_tys.clone());
 
                         // Register constructor metadata
                         // Only count user-defined class constraints for dict fields.
@@ -3654,6 +3700,7 @@ impl LowerContext {
                                 is_newtype: false,
                                 existential_dict_count,
                                 existential_classes,
+                                field_types: field_tys.clone(),
                             },
                         );
                     }
@@ -3753,6 +3800,7 @@ impl LowerContext {
                             is_newtype: true,
                             existential_dict_count: 0,
                             existential_classes: vec![],
+                            field_types: Vec::new(),
                         },
                     );
 

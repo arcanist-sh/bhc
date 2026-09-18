@@ -320,33 +320,98 @@ fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<cor
 /// `T.length` on it segfaulted. `fromString` is gone by Core (it lowers to
 /// identity, which is right for `String`), so the conversion has to key off the
 /// literal's own occurrence type.
-fn lower_lit_at(ctx: &LowerContext, lit: &Lit, span: Span) -> LowerResult<core::Expr> {
+fn lower_lit_at(ctx: &mut LowerContext, lit: &Lit, span: Span) -> LowerResult<core::Expr> {
     let core_lit = lower_lit(lit, span)?;
     if !matches!(lit, Lit::String(_)) {
         return Ok(core_lit);
     }
-    match refined_occurrence_ty(ctx, span) {
-        Some(ty) if ty_head_is(&ty, "Text") => {
-            let pack = Var {
-                name: Symbol::intern("Data.Text.pack"),
-                id: VarId::new(0),
-                ty: Ty::Error,
-            };
-            Ok(core::Expr::App(
-                Box::new(core::Expr::Var(pack, span)),
-                Box::new(core_lit),
+    // The literal's type at this occurrence: what typeck recorded, else the
+    // caller's expected type. An OverloadedStrings literal in an imported
+    // constructor's `Text` field is recorded by typeck as its default `[Char]`,
+    // so the expected type (the field type, pushed in by
+    // `propagate_constructor_field_tys`) is the authority there and must win.
+    let occ = refined_occurrence_ty(ctx, span).or_else(|| ctx.expected_ty_opt(span));
+
+    // `Text` is packed directly (its RTS entry points read a `{len, bytes}`
+    // header, not a char list).
+    if occ.as_ref().is_some_and(ty_head_is_text) {
+        let pack = Var {
+            name: Symbol::intern("Data.Text.pack"),
+            id: VarId::new(0),
+            ty: Ty::Error,
+        };
+        return Ok(core::Expr::App(
+            Box::new(core::Expr::Var(pack, span)),
+            Box::new(core_lit),
+            span,
+        ));
+    }
+
+    // OverloadedStrings at a user type: dispatch its `IsString` instance's
+    // `fromString`. BHC otherwise lowers every string literal to a `[Char]`
+    // (identity `fromString`, right only for `String` itself), so a literal at
+    // a user newtype like blaze's `AttributeValue`/`StaticString` kept the raw
+    // char list and the type's accessor read it as the wrapped value — garbage.
+    // Only concrete user types are dispatched; the string-shaped builtins keep
+    // their existing lowering.
+    if let Some(ty) = occ {
+        if dispatchable_isstring_ty(&ty) {
+            if let Some(from_string) = ctx.resolve_method_at_concrete_type(
+                Symbol::intern("fromString"),
+                Symbol::intern("IsString"),
+                &ty,
                 span,
-            ))
+            ) {
+                return Ok(core::Expr::App(
+                    Box::new(from_string),
+                    Box::new(core_lit),
+                    span,
+                ));
+            }
         }
-        _ => Ok(core_lit),
+    }
+
+    Ok(core_lit)
+}
+
+/// Whether an OverloadedStrings literal at this type should dispatch a user
+/// `IsString` instance's `fromString` (rather than stay a `[Char]`).
+///
+/// The string-shaped builtins are excluded: `String`/`[Char]` IS the literal's
+/// native form, and `Text`/`ByteString` have dedicated lowering. Everything
+/// else with a concrete head constructor is a candidate — if no instance is in
+/// scope, `resolve_method_at_concrete_type` returns `None` and the caller falls
+/// back to the char list unchanged.
+fn dispatchable_isstring_ty(ty: &Ty) -> bool {
+    match ty {
+        Ty::Con(c) => {
+            !matches!(
+                c.name.as_str(),
+                "String" | "Char" | "Text" | "LazyText" | "ByteString"
+            ) && !c.name.as_str().ends_with(".Text")
+                && !c.name.as_str().ends_with(".ByteString")
+        }
+        // A saturated head like `Doc Text` — dispatch on the head constructor.
+        Ty::App(f, _) => dispatchable_isstring_ty(f),
+        // `[Char]` and bare lists are the native string form.
+        _ => false,
     }
 }
 
-/// Whether a type's head constructor is named `name`.
-fn ty_head_is(ty: &Ty, name: &str) -> bool {
+/// Whether a type's head is the strict `Data.Text.Text`, spelled bare or
+/// qualified. A field type recovered from an imported constructor's signature
+/// (e.g. `ChoiceString`'s `Text :: Data.Text.Text -> ChoiceString`) keeps its
+/// qualifier, so the exact-name check would miss it and leave an
+/// OverloadedStrings literal in that field an unpacked char list — read later
+/// as a `{len, bytes}` Text header, it segfaults. Mirrors codegen's
+/// `is_text_type`, minus the lazy variant (packing targets strict Text).
+fn ty_head_is_text(ty: &Ty) -> bool {
     match ty {
-        Ty::Con(c) => c.name.as_str() == name,
-        Ty::App(f, _) => ty_head_is(f, name),
+        Ty::Con(c) => {
+            let n = c.name.as_str();
+            n == "Text" || n.ends_with(".Text")
+        }
+        Ty::App(f, _) => ty_head_is_text(f),
         _ => false,
     }
 }
@@ -1654,6 +1719,16 @@ pub(crate) fn propagate_expected_ty(
     match expr {
         Expr::Var(def_ref) => {
             ctx.record_expected_ty(def_ref.span, expected.clone());
+        }
+        // A literal's own type is erased by Core (`lower_lit` records
+        // `Ty::Error`), so an OverloadedStrings string literal used where a
+        // `Text` is expected — a constructor field, a function argument —
+        // needs the caller's expected type to know it must pack. Only
+        // `lower_lit_at` reads this back (via `refined_occurrence_ty`), and it
+        // acts on string literals alone, so recording it for every literal is
+        // inert everywhere else.
+        Expr::Lit(_, span) => {
+            ctx.record_expected_ty(*span, expected.clone());
         }
         Expr::Ann(inner, _, _) | Expr::TypeApp(inner, _, _) => {
             propagate_expected_ty(ctx, inner, expected, depth + 1);
@@ -3305,6 +3380,62 @@ fn try_lower_monadic_traversal(
     }))
 }
 
+/// Record each argument of a data-constructor application against the
+/// constructor's declared field type, so a literal argument can consult its
+/// expected type when it lowers (see the `Expr::Lit` arm of
+/// [`propagate_expected_ty`] and [`lower_lit_at`]).
+///
+/// typeck already records a locally-defined constructor's argument types on
+/// their spans, but an IMPORTED constructor's field types live in its interface;
+/// nothing pushes them onto the call site. `Text "hi" :: ChoiceString` (blaze's
+/// `ChoiceString` has a `Text Data.Text.Text` field) left `"hi"` an unpacked
+/// char list, which segfaulted when a `Data.Text` entry point read it as a Text
+/// header. Keying off the constructor's own signature fixes both cases.
+fn propagate_constructor_field_tys(ctx: &mut LowerContext, f: &hir::Expr, x: &hir::Expr) {
+    // Peel the whole application spine: App(App(Con, a), b) → (Con, [a, b]).
+    let mut head: &hir::Expr = f;
+    let mut args: Vec<&hir::Expr> = vec![x];
+    while let Expr::App(inner_f, inner_x, _) = head {
+        args.push(inner_x.as_ref());
+        head = inner_f.as_ref();
+    }
+    args.reverse();
+    while let Expr::TypeApp(inner, _, _) | Expr::Ann(inner, _, _) = head {
+        head = inner.as_ref();
+    }
+    let Expr::Con(def_ref) = head else {
+        return;
+    };
+    // Prefer the constructor's recorded field types (populated for imported
+    // constructors from their interface, and for local declarations as they
+    // lower). Fall back to peeling the constructor's function type, which is
+    // `Ty::Error` for an imported constructor whose signature is not in the
+    // local type table.
+    let con_name = ctx.lookup_constructor(def_ref.def_id).map(|c| c.name);
+    let param_tys: Vec<Ty> = con_name
+        .and_then(|n| ctx.constructor_field_types(n).cloned())
+        .unwrap_or_else(|| {
+            let con_ty = ctx.lookup_type(def_ref.def_id);
+            let mut tys = Vec::new();
+            let mut cur = &con_ty;
+            while let Ty::Fun(a, r) = cur {
+                tys.push(a.as_ref().clone());
+                cur = r.as_ref();
+            }
+            tys
+        });
+    // Only `Text` fields are pushed inward. That is the sole case this exists
+    // for (packing an OverloadedStrings literal), and restricting it keeps the
+    // recorded expected type from reaching a constrained value/method argument,
+    // where it would alter dictionary resolution (see `refined_occurrence_ty`'s
+    // other callers).
+    for (pty, a) in param_tys.iter().zip(args.iter()) {
+        if ty_head_is_text(pty) {
+            propagate_expected_ty(ctx, a, pty, 0);
+        }
+    }
+}
+
 /// Lower a function application, handling dictionary-passing for class methods
 /// and constrained functions when the argument type is known.
 ///
@@ -3318,6 +3449,14 @@ fn lower_app(
     x: &hir::Expr,
     span: Span,
 ) -> LowerResult<core::Expr> {
+    // A constructor's declared field types are the expected types of its
+    // arguments. Push them inward before anything lowers an argument, so an
+    // OverloadedStrings literal in a `Text` field packs (see `lower_lit_at`).
+    // This is the one hint typeck does not already leave on the argument's own
+    // span for an IMPORTED constructor, whose field types come from its
+    // interface rather than local inference.
+    propagate_constructor_field_tys(ctx, f, x);
+
     // `mapM_`/`mapM`/`sequence_`/… at a monad codegen does not run eagerly.
     if let Some(result) = try_lower_monadic_traversal(ctx, f, x, span)? {
         return Ok(result);
@@ -4040,6 +4179,35 @@ fn lower_app(
                                 _ => ty,
                             }
                         });
+                        // Function-instance-head fallback. When the primary
+                        // dispatch type names NO instance of this user class, but
+                        // the receiver (first collected arg) has a solved FUNCTION
+                        // type that DOES, dispatch on the receiver instead. This is
+                        // the chained function-instance case `x ! a ! b`: the outer
+                        // `!`'s receiver is `x ! a` (a method application), whose
+                        // arguments infer to `Attribute`, which has no `Attributable`
+                        // instance — while the receiver's own type `Markup -> Markup`
+                        // does. The gate (primary resolves to nothing, receiver
+                        // resolves to something) leaves every currently-dispatching
+                        // call — `myMap`, whose class parameter is an APPLIED arg —
+                        // untouched, since its primary type already resolves.
+                        let inferred = if is_user
+                            && inferred
+                                .as_ref()
+                                .is_none_or(|ty| !ctx.has_instance_for(class_name, ty))
+                        {
+                            let receiver_fn = collected_args.first().and_then(|arg| {
+                                let ty =
+                                    ctx.expand_type_aliases(&ctx.resolved_expr_ty_opt(arg.span())?);
+                                (matches!(ty, Ty::Fun(_, _))
+                                    && is_fully_concrete_ty(&ty)
+                                    && ctx.has_instance_for(class_name, &ty))
+                                .then_some(ty)
+                            });
+                            receiver_fn.or(inferred)
+                        } else {
+                            inferred
+                        };
                         if let Some(concrete_ty) = inferred {
                             // `mconcat :: [a] -> a` — the class parameter is the
                             // list's ELEMENT type, but the argument-driven

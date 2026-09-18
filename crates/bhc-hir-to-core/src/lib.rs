@@ -244,6 +244,11 @@ pub fn lower_module_with_imports(
                     );
                 }
             }
+            // Imported field types let a call site recover a field's expected
+            // type (e.g. to pack an OverloadedStrings literal in a `Text` field).
+            if !info.field_types.is_empty() {
+                ctx.register_constructor_field_types(info.name, info.field_types.clone());
+            }
             ctx.register_constructor(*def_id, info.clone());
         }
     }

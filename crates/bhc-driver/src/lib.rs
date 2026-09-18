@@ -532,7 +532,7 @@ impl Compiler {
                 .interface_constructors
                 .iter()
                 .filter(|(name, _, _, _, _, _)| !builtins.contains(name.as_str()))
-                .filter_map(|(name, tag, arity, type_name, is_newtype, _)| {
+                .filter_map(|(name, tag, arity, type_name, is_newtype, field_types)| {
                     let sym = Symbol::intern(name);
                     let def_id = lower_ctx.lookup_constructor(sym)?;
                     let field_names = lower_ctx
@@ -549,6 +549,7 @@ impl Compiler {
                             is_newtype: *is_newtype,
                             existential_dict_count: 0,
                             existential_classes: vec![],
+                            field_types: field_types.clone(),
                         },
                     ))
                 })
@@ -2866,6 +2867,16 @@ impl Compiler {
         .into_iter()
         .collect();
 
+        // Field types, keyed by constructor name, come from the interface loader
+        // (populated for every constructor, monomorphic ones included, where the
+        // export scheme may be absent). Used to fill `field_types` so a call site
+        // can pack an OverloadedStrings literal in an imported `Text` field.
+        let field_types_by_name: rustc_hash::FxHashMap<&str, &Vec<bhc_types::Ty>> = lower_ctx
+            .interface_constructors
+            .iter()
+            .map(|(name, _, _, _, _, tys)| (name.as_str(), tys))
+            .collect();
+
         for info in registry.modules.values() {
             for (&con_name, con_info) in &info.exports.constructors {
                 // Skip builtins and constructors with broken metadata
@@ -2896,6 +2907,10 @@ impl Compiler {
                             is_newtype: con_info.is_newtype,
                             existential_dict_count: 0,
                             existential_classes: vec![],
+                            field_types: field_types_by_name
+                                .get(con_name.as_str())
+                                .map(|tys| (*tys).clone())
+                                .unwrap_or_default(),
                         },
                     );
                 }

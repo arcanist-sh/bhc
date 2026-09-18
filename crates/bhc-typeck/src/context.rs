@@ -513,19 +513,39 @@ impl TyCtxt {
             // If so, it's an unsolvable error, not a deferred constraint.
             let has_type_vars = args.iter().any(|t| !t.free_vars().is_empty());
             if !has_type_vars {
-                // Concrete constraint that can't be solved — this is a type error
-                // (e.g., Num Bool from `if 42 then ...`)
-                let args_str = args
-                    .iter()
-                    .map(|t| format!("{:?}", t))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                self.diag.emit(Diagnostic::error(format!(
-                    "No instance for `{} {}`",
-                    constraint.class.as_str(),
-                    args_str
-                )));
-                continue;
+                // A concrete constraint typeck couldn't solve. Before reporting
+                // it, check whether typeck is even the authority on this class.
+                // Imported classes (e.g. blaze's `ToValue`, loaded from a
+                // `.bhi`) register NO ClassInfo and NO instances in the typeck
+                // env — their dictionaries are resolved later, in hir-to-core.
+                // A variable-typed constraint for such a class is already
+                // deferred (pushed to `unsolved`); a CONCRETE one — as produced
+                // by `toValue @Text` — must be deferred the same way, or typeck
+                // wrongly reports "No instance" for a class it cannot see. Only
+                // classes typeck genuinely tracks (builtin classes, or a class
+                // with a registered ClassInfo/instances) stay hard errors here,
+                // so `Num Bool` and unsatisfiable same-module user-class
+                // constraints are still caught.
+                let class_untracked = !is_typeck_builtin_class(constraint.class.as_str())
+                    && self.env.lookup_class(constraint.class).is_none()
+                    && self.env.lookup_instances(constraint.class).is_none();
+                if !class_untracked {
+                    // Concrete constraint that can't be solved — this is a type
+                    // error (e.g., Num Bool from `if 42 then ...`)
+                    let args_str = args
+                        .iter()
+                        .map(|t| format!("{:?}", t))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    self.diag.emit(Diagnostic::error(format!(
+                        "No instance for `{} {}`",
+                        constraint.class.as_str(),
+                        args_str
+                    )));
+                    continue;
+                }
+                // Untracked (imported) class: fall through and defer to
+                // hir-to-core, which owns dictionary resolution for it.
             }
 
             // Constraint involves type variables and can't be resolved yet —
@@ -8610,6 +8630,45 @@ impl TyCtxt {
     pub fn check_binding(&mut self, binding: &Binding) {
         crate::infer::check_binding(self, binding);
     }
+}
+
+/// Class names for which typeck is the authority on instance resolution,
+/// i.e. the classes handled by [`TyCtxt::is_builtin_instance`] and
+/// [`TyCtxt::is_builtin_instance_multi`]. A concrete, unsolvable constraint for
+/// one of these is a genuine type error (`Num Bool`). Any OTHER class is either
+/// a user class typeck tracks via a registered `ClassInfo`/instances, or an
+/// imported class typeck knows nothing about (whose dictionaries hir-to-core
+/// resolves) — the caller decides which by consulting the env before erroring.
+fn is_typeck_builtin_class(name: &str) -> bool {
+    matches!(
+        name,
+        // Numeric / comparison / show hierarchy (see is_builtin_instance)
+        "Num" | "Eq"
+            | "Ord"
+            | "Show"
+            | "Read"
+            | "Fractional"
+            | "Enum"
+            | "Bounded"
+            | "Integral"
+            | "IsList"
+            // Structural / literal classes
+            | "IsString"
+            | "Semigroup"
+            | "Monoid"
+            | "Hashable"
+            | "Generic"
+            | "NFData"
+            // Functor / monad family (is_builtin_instance + _multi)
+            | "Functor"
+            | "Foldable"
+            | "Traversable"
+            | "Applicative"
+            | "Monad"
+            | "Alternative"
+            | "MonadPlus"
+            | "MonadFail"
+    )
 }
 
 #[cfg(test)]

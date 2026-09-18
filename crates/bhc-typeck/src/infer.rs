@@ -541,15 +541,25 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
             });
 
             if let Some(scheme) = scheme {
-                // Instantiate the scheme, substituting the provided type args
-                // for the first N forall-bound vars, and fresh vars for the rest
+                // Instantiate the scheme with a FRESH type var for every
+                // forall-bound var, then unify the first N fresh vars with the
+                // explicitly-applied type arguments. Routing the type args
+                // through unification (rather than substituting them straight
+                // into the scheme's constraints) canonicalizes them exactly as
+                // a type annotation does, so the class constraints they produce
+                // (e.g. `ToValue Text` from `toValue @Text`) match instances
+                // loaded from a `.bhi`. Substituting the raw lowered con
+                // directly left `method @ConcreteType` unable to resolve an
+                // imported instance, even though `toValue (x :: Text)` did.
                 let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
-                for (i, var) in scheme.vars.iter().enumerate() {
-                    if i < type_args.len() {
-                        subst.insert(var.id, type_args[i].clone());
-                    } else {
-                        let fresh = ctx.fresh_ty_var_with_kind(var.kind.clone());
-                        subst.insert(var.id, Ty::Var(fresh));
+                for var in scheme.vars.iter() {
+                    let fresh = ctx.fresh_ty_var_with_kind(var.kind.clone());
+                    subst.insert(var.id, Ty::Var(fresh));
+                }
+                for (i, ty_arg) in type_args.iter().enumerate() {
+                    if let Some(fresh_ty) = scheme.vars.get(i).and_then(|v| subst.get(&v.id)) {
+                        let fresh_ty = fresh_ty.clone();
+                        ctx.unify(&fresh_ty, ty_arg, *_span);
                     }
                 }
 

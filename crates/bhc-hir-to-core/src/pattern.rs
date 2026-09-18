@@ -2328,6 +2328,7 @@ mod tests {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         ctx.register_constructor(
@@ -2341,6 +2342,7 @@ mod tests {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
 
@@ -2395,6 +2397,7 @@ mod tests {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         ctx.register_constructor(
@@ -2408,6 +2411,7 @@ mod tests {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
 
@@ -2459,6 +2463,7 @@ mod tests {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
         ctx.register_constructor(
@@ -2472,6 +2477,7 @@ mod tests {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
 
@@ -2612,6 +2618,7 @@ mod tests {
                 is_newtype: false,
                 existential_dict_count: 0,
                 existential_classes: vec![],
+                field_types: Vec::new(),
             },
         );
 

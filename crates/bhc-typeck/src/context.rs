@@ -7852,6 +7852,27 @@ impl TyCtxt {
             self.env
                 .insert_global_by_name(method.name, method_scheme.clone());
 
+            // Bind the method's own DefId in globals to its declared type SHAPE.
+            // Uses of a class method resolve to this DefId, and
+            // `register_lowered_builtins` (run before classes are registered)
+            // seeded it with a `forall v. v` placeholder. Left that way, a use
+            // is typed purely by unification with its arguments, which drops the
+            // method's declared shape — in particular that `(!) :: h -> Attribute
+            // -> h` returns the same `h` it takes. A single application is still
+            // pinned by context, but a nested one (`x ! a ! b`) leaves the
+            // intermediate type unsolved, so Core lowering can't recover the
+            // instance for the outer call. Instantiating the real shape per use
+            // keeps the shared type variable, so the intermediate solves.
+            //
+            // The class CONSTRAINT is cleared from this copy: instance selection
+            // happens in Core lowering by type, and emitting the `C h` constraint
+            // here would route it through the constraint solver (whose handling of
+            // these placeholder-seeded method uses is incomplete) and reject
+            // programs that otherwise check.
+            let mut shape_scheme = method_scheme.clone();
+            shape_scheme.constraints.clear();
+            self.env.insert_global(method.id, shape_scheme);
+
             // Also store by DefId so hir-to-core can look it up
             self.def_schemes.insert(method.id, method_scheme);
         }

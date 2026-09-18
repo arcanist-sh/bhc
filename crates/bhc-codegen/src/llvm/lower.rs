@@ -47841,9 +47841,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             Ok(None)
                         }
                     } else {
-                        // Function with parameters - wrap in closure for uniform calling convention
+                        // Function with parameters - wrap in closure for uniform calling convention.
+                        // Record the physical arity (LLVM param count minus the leading env
+                        // pointer) so `apply_closure_values` can build a PAP when this value is
+                        // UNDER-applied. Without it the arity reads 0 ("unknown"), and an
+                        // under-applied call runs the lifted body with missing parameters read
+                        // from garbage registers — how a dictionary-stored instance method that
+                        // returns a function (`make _ n = \x -> …`, applied `make T n` then used
+                        // as a value) corrupted its result and crashed on the next apply.
                         let fn_ptr = fn_val.as_global_value().as_pointer_value();
-                        let closure_ptr = self.alloc_closure(fn_ptr, &[])?;
+                        let arity = fn_val.get_type().count_param_types().saturating_sub(1);
+                        let closure_ptr = self.alloc_closure_with_arity(fn_ptr, &[], arity)?;
                         Ok(Some(closure_ptr.into()))
                     }
                 } else if let Some((primop, arity)) = self.primitive_op_info(name) {
@@ -47909,9 +47917,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                             Ok(None)
                         }
                     } else {
-                        // Function with parameters - wrap in closure
+                        // Function with parameters - wrap in closure. Record the physical
+                        // arity (LLVM param count minus the env pointer) so under-application
+                        // builds a PAP rather than calling with missing args — same fix as the
+                        // local-function branch above, for a cross-module imported function.
                         let fn_ptr = fn_val.as_global_value().as_pointer_value();
-                        let closure_ptr = self.alloc_closure(fn_ptr, &[])?;
+                        let arity = fn_type.count_param_types().saturating_sub(1);
+                        let closure_ptr = self.alloc_closure_with_arity(fn_ptr, &[], arity)?;
                         Ok(Some(closure_ptr.into()))
                     }
                 } else if let Some((_tag, arity)) = self.constructor_info(name) {

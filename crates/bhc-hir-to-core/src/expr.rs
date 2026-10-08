@@ -228,11 +228,14 @@ fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<cor
     match expr {
         Expr::Lit(lit, span) => lower_lit_at(ctx, lit, *span),
 
-        Expr::Var(def_ref) => lower_var(ctx, def_ref),
+        Expr::Var(def_ref) => {
+            let e = lower_var(ctx, def_ref)?;
+            Ok(apply_method_level_dicts_to_value(ctx, def_ref, e))
+        }
 
         Expr::Con(def_ref) => lower_con(ctx, def_ref),
 
-        Expr::App(f, x, span) => lower_app(ctx, f, x, *span),
+        Expr::App(f, x, span) => lower_app_with_method_level(ctx, f, x, *span),
 
         Expr::Lam(pats, body, span) => lower_lambda(ctx, pats, body, *span),
 
@@ -437,7 +440,7 @@ fn lower_lit(lit: &Lit, span: Span) -> LowerResult<core::Expr> {
 /// at a bare type VARIABLE would unify with any instance (the first match),
 /// turning a constraint-dict method like `Future`'s `mempty = return mempty`
 /// into a self-referential loop.
-fn has_concrete_head(ty: &Ty) -> bool {
+pub(crate) fn has_concrete_head(ty: &Ty) -> bool {
     match ty {
         Ty::Con(_) | Ty::List(_) | Ty::Tuple(_) | Ty::Prim(_) => true,
         Ty::App(f, _) => has_concrete_head(f),
@@ -491,6 +494,24 @@ fn in_scope_dict_matches(ctx: &LowerContext, class_name: Symbol, span: Span) -> 
         // existential pattern match, say), so keep the old behaviour.
         return true;
     };
+    // A VALUE class is parameterized by the value type itself, which every
+    // method returns (`mempty :: c`, `(<>) :: c -> c -> c`, `mconcat :: [c]
+    // -> c`, `def :: a`). Reading a monad head off `c` found nothing, so a bare
+    // `mempty` inside `Monoid c =>` ignored the dictionary in scope and fell to
+    // the list builtin. Compare the result type's head instead; an unrecorded
+    // occurrence takes the dictionary in scope.
+    if matches!(class_name.as_str(), "Semigroup" | "Monoid" | "Default") {
+        fn result_of(ty: &Ty) -> &Ty {
+            match ty {
+                Ty::Fun(_, r) => result_of(r),
+                t => t,
+            }
+        }
+        return match refined_occurrence_ty(ctx, span) {
+            Some(occ) => same_type_head(&dict_ty, result_of(&occ)),
+            None => true,
+        };
+    }
     let occ_head = refined_occurrence_ty(ctx, span)
         .as_ref()
         .and_then(monad_head_of_method_occurrence);
@@ -561,9 +582,200 @@ pub(crate) fn monad_head_of_method_occurrence(ty: &Ty) -> Option<Ty> {
 ///    resolve instances for concrete types.
 ///
 /// 3. **Regular variables**: Just return a variable reference.
+/// The class and method of a use of a class method whose own constraints are
+/// dictionary-passed (`query :: Monoid c => …`), if `def_ref` is one.
+fn method_level_target(ctx: &LowerContext, def_ref: &DefRef) -> Option<(Symbol, Symbol)> {
+    let name = ctx.lookup_var(def_ref.def_id)?.name;
+    // An imported method may carry its module qualifier (`Text.Pandoc.Walk.
+    // query`); class method tables are keyed by the bare name.
+    let bare = match name.as_str().rsplit_once('.') {
+        Some((module, bare))
+            if !bare.is_empty()
+                && module.chars().next().is_some_and(char::is_uppercase)
+                && bare
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_lowercase() || c == '_') =>
+        {
+            Symbol::intern(bare)
+        }
+        _ => name,
+    };
+    let class = ctx.is_class_method(bare)?;
+    ctx.method_level_dict_constraints(class, bare)?;
+    Some((class, bare))
+}
+
+/// A class method with method-level dictionaries used as a VALUE (not the
+/// head of an application): apply them to the selected method.
+fn apply_method_level_dicts_to_value(
+    ctx: &mut LowerContext,
+    def_ref: &DefRef,
+    e: core::Expr,
+) -> core::Expr {
+    if ctx.method_level_active.contains(&def_ref.span) {
+        return e;
+    }
+    let Some((class, method)) = method_level_target(ctx, def_ref) else {
+        return e;
+    };
+    let Some(dicts) = ctx.method_level_dicts_at(class, method, def_ref.span) else {
+        return e;
+    };
+    dicts.into_iter().fold(e, |acc, d| {
+        core::Expr::App(Box::new(acc), Box::new(d), def_ref.span)
+    })
+}
+
+/// `lower_app`, supplying the method-level dictionaries of a class method at
+/// the head of the spine. Every instance's implementation of such a method
+/// takes them right after its instance dictionaries, so they go immediately
+/// before the spine's value arguments, whichever path resolved the method.
+fn lower_app_with_method_level(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<core::Expr> {
+    let mut head = f;
+    let mut n_args = 1usize;
+    while let Expr::App(g, _, _) = head {
+        head = g.as_ref();
+        n_args += 1;
+    }
+    let target = match head {
+        Expr::Var(dr) if !ctx.method_level_active.contains(&dr.span) => {
+            method_level_target(ctx, dr).map(|t| (t, dr.span))
+        }
+        _ => None,
+    };
+    let Some(((class, method), head_span)) = target else {
+        return lower_app(ctx, f, x, span);
+    };
+    ctx.method_level_active.insert(head_span);
+    let lowered = lower_app(ctx, f, x, span);
+    ctx.method_level_active.remove(&head_span);
+    let e = lowered?;
+    let Some(dicts) = ctx.method_level_dicts_at(class, method, head_span) else {
+        return Ok(e);
+    };
+    #[allow(clippy::result_large_err)]
+    fn insert(
+        e: core::Expr,
+        n: usize,
+        dicts: &[core::Expr],
+        span: Span,
+    ) -> Result<core::Expr, core::Expr> {
+        if n == 0 {
+            return Ok(dicts.iter().fold(e, |acc, d| {
+                core::Expr::App(Box::new(acc), Box::new(d.clone()), span)
+            }));
+        }
+        match e {
+            core::Expr::App(g, a, sp) => match insert(*g, n - 1, dicts, span) {
+                Ok(g) => Ok(core::Expr::App(Box::new(g), a, sp)),
+                Err(g) => Err(core::Expr::App(Box::new(g), a, sp)),
+            },
+            core::Expr::Let(b, body, sp) => match insert(*body, n, dicts, span) {
+                Ok(body) => Ok(core::Expr::Let(b, Box::new(body), sp)),
+                Err(body) => Err(core::Expr::Let(b, Box::new(body), sp)),
+            },
+            other => Err(other),
+        }
+    }
+    match insert(e, n_args, &dicts, span) {
+        Ok(e) => Ok(e),
+        Err(e) => {
+            if crate::context::ml_dbg() {
+                eprintln!("[ml] {class}.{method}: could not place method-level dicts at {span:?}");
+            }
+            Ok(e)
+        }
+    }
+}
+
+/// `foldMap f xs` whose Monoid is NOT a list, as
+/// `foldr (\x acc -> mappend (f x) acc) mempty xs` over that Monoid's
+/// dictionary.
+///
+/// codegen implements the `foldMap` builtin as `concatMap`, i.e. at the list
+/// Monoid only. pandoc's `Walkable` reaches every `query` through
+/// `F.foldMap (query f)` — at `Min Int` for section levels, at `Text` for
+/// `stringify` — and those results were walked as cons cells. The Monoid comes
+/// from the occurrence type `(a -> m) -> t a -> m`: a concrete `m` builds its
+/// instance dictionary, a variable `m` takes the Monoid dictionary in scope
+/// (the enclosing binding's own `Monoid m =>`). A list `m`, or an `m` that
+/// neither resolves, keeps the builtin.
+fn lower_fold_map_via_monoid(ctx: &mut LowerContext, span: Span) -> Option<core::Expr> {
+    let occ = ctx.resolved_expr_ty_opt(span)?;
+    let Ty::Fun(f_ty, _) = &occ else {
+        return None;
+    };
+    let Ty::Fun(_, m_ty) = f_ty.as_ref() else {
+        return None;
+    };
+    let m_ty = ctx.expand_type_aliases(m_ty);
+    let monoid = Symbol::intern("Monoid");
+    let dict_expr = match &m_ty {
+        Ty::List(_) => return None,
+        Ty::Var(_) => core::Expr::Var(ctx.lookup_dict(monoid)?.clone(), span),
+        t if has_concrete_head(t) => {
+            ctx.resolve_dictionary(&Constraint::new(monoid, t.clone(), span), span)?
+        }
+        _ => return None,
+    };
+    let dict_var = ctx.fresh_var("$dFoldMap", Ty::Error, span);
+    let mappend =
+        ctx.select_method_from_dict(&dict_var, monoid, Symbol::intern("mappend"), span)?;
+    let mempty = ctx.select_method_from_dict(&dict_var, monoid, Symbol::intern("mempty"), span)?;
+    let f = ctx.fresh_var("$fm_f", Ty::Error, span);
+    let xs = ctx.fresh_var("$fm_xs", Ty::Error, span);
+    let x = ctx.fresh_var("$fm_x", Ty::Error, span);
+    let acc = ctx.fresh_var("$fm_acc", Ty::Error, span);
+    let app = |a: core::Expr, b: core::Expr| core::Expr::App(Box::new(a), Box::new(b), span);
+    let var = |v: &Var| core::Expr::Var(v.clone(), span);
+    // \x acc -> mappend (f x) acc
+    let step = core::Expr::Lam(
+        x.clone(),
+        Box::new(core::Expr::Lam(
+            acc.clone(),
+            Box::new(app(app(mappend, app(var(&f), var(&x))), var(&acc))),
+            span,
+        )),
+        span,
+    );
+    let foldr_var = Var {
+        name: Symbol::intern("foldr"),
+        id: VarId::new(0),
+        ty: Ty::Error,
+    };
+    let body = app(
+        app(app(core::Expr::Var(foldr_var, span), step), mempty),
+        var(&xs),
+    );
+    let lam = core::Expr::Lam(f, Box::new(core::Expr::Lam(xs, Box::new(body), span)), span);
+    Some(core::Expr::Let(
+        Box::new(Bind::NonRec(dict_var, Box::new(dict_expr))),
+        Box::new(lam),
+        span,
+    ))
+}
+
 fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr> {
     // First, check if this is a class method reference
     let var_name = ctx.lookup_var(def_ref.def_id).map(|v| v.name);
+    if let (Some(want), Some(n)) = (occ_dbg_name(), var_name) {
+        if n.as_str() == want {
+            eprintln!(
+                "[occ] {n} def={:?} span={:?} resolved={:?} raw={:?} scheme={:?}",
+                def_ref.def_id,
+                def_ref.span,
+                ctx.resolved_expr_ty_opt(def_ref.span).map(|t| dbg_ty(&t)),
+                ctx.expr_ty_opt(def_ref.span).map(|t| dbg_ty(&t)),
+                ctx.lookup_scheme(def_ref.def_id).map(|s| dbg_ty(&s.ty)),
+            );
+        }
+    }
 
     if std::env::var_os("BHC_DBG_MONOP").is_some() {
         if let Some(n) = var_name {
@@ -612,6 +824,14 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                         return Ok(lam);
                     }
                 }
+            }
+        }
+        if matches!(
+            name.as_str(),
+            "foldMap" | "F.foldMap" | "Data.Foldable.foldMap"
+        ) {
+            if let Some(lam) = lower_fold_map_via_monoid(ctx, def_ref.span) {
+                return Ok(lam);
             }
         }
         if name.as_str() == "guard" {
@@ -1680,6 +1900,19 @@ fn arrow_count(ty: &Ty) -> usize {
 /// head (`maybe`, `id`, `either`) carries the type inward just as a declared
 /// one does; this is why pandoc's `orderedListStart` (`try (maybe
 /// anyOrderedListMarker … mbstydelim)`) is reached at all.
+/// The variable name `BHC_DBG_OCC` asks to trace, read once.
+fn occ_dbg_name() -> Option<&'static str> {
+    static F: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    F.get_or_init(|| std::env::var("BHC_DBG_OCC").ok())
+        .as_deref()
+}
+
+/// Whether `BHC_DBG_DISPATCH` tracing is on, read once.
+pub(crate) fn dispatch_dbg() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("BHC_DBG_DISPATCH").is_some())
+}
+
 fn prop_dbg() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| std::env::var_os("BHC_DBG_PROP").is_some())
@@ -1826,14 +2059,21 @@ fn monadic_operand_tys(name: &str, expected: &Ty, nargs: usize) -> Option<Vec<Op
     let in_monad = Ty::App(monad.clone(), Box::new(unknown));
     let whole = Some(expected.clone());
     let operand = Some(in_monad);
+    let continuation = Some(Ty::Fun(
+        Box::new(Ty::Var(bhc_types::TyVar::new_star(0xFFE0_0001))),
+        Box::new(expected.clone()),
+    ));
     match name {
         // Both operands are actions; the result is the second one's.
         ">>" | "*>" => Some(vec![operand, whole]),
         // The first operand's action IS the result; the second is discarded.
         "<*" => Some(vec![whole, operand]),
-        // `p >>= k`: `p` is an action, `k` returns the result.
-        ">>=" => Some(vec![operand, None]),
-        "=<<" => Some(vec![None, operand]),
+        // `p >>= k`: `p` is an action, `k` returns the result. Without a type
+        // for `k`, the rest of every `do` block after its first bind — a
+        // lambda — lost the stream type, and a parser there (`many anyChar`
+        // after `_ <- lift …`) ran with null `Stream` dictionaries.
+        ">>=" => Some(vec![operand, continuation]),
+        "=<<" => Some(vec![continuation, operand]),
         // Both branches have the whole type.
         "<|>" | "mplus" => Some(vec![whole.clone(), whole]),
         // `f <$> p` / `mf <*> p`: only the right operand is an action here.
@@ -3628,6 +3868,15 @@ fn lower_app(
                             })
                         };
                         if let Some(concrete_ty) = inferred {
+                            // `mconcat :: [a] -> a` — the class parameter is the
+                            // list's ELEMENT type, and the argument is the list.
+                            // Dispatching on the argument itself picked the LIST
+                            // Monoid for `mconcat [Wrap 5, Wrap 3]` and ran
+                            // `Data.List.concat` over the newtypes.
+                            let concrete_ty = match (method_name.as_str(), concrete_ty) {
+                                ("mconcat", Ty::List(elem)) => *elem,
+                                (_, t) => t,
+                            };
                             // For monad-family builtin classes, skip if the concrete type
                             // is a builtin monad — let codegen handle the fast path
                             if is_monad_family
@@ -3845,6 +4094,47 @@ fn lower_app(
                 let is_user = ctx.is_user_class(class_name);
                 let is_monad_family = ctx.is_monad_family_class(class_name);
 
+                // A MULTI-parameter user class: which dictionary the use needs
+                // is decided by ALL its parameters, read off the occurrence.
+                // Several dictionaries of the class may be in scope
+                // (pandoc's `queryBlock` has nine `Walkable a X`); take the one
+                // whose arguments fit, or build it from an instance when none
+                // does — never just the last one registered.
+                if is_user && ctx.class_param_count(class_name) > 1 {
+                    if let Some(want) = ctx.class_params_from_occurrence_any(
+                        class_name,
+                        head_def_ref.def_id,
+                        head_def_ref.span,
+                    ) {
+                        let method_expr = match ctx.lookup_dict_for(class_name, &want) {
+                            Ok(Some(dict_var)) => ctx.select_method_from_dict(
+                                &dict_var,
+                                class_name,
+                                method_name,
+                                span,
+                            ),
+                            Ok(None) | Err(()) if want.iter().any(has_concrete_head) => ctx
+                                .resolve_method_at_concrete_types(
+                                    method_name,
+                                    class_name,
+                                    &want,
+                                    span,
+                                ),
+                            _ => None,
+                        };
+                        if let Some(method_expr) = method_expr {
+                            let mut result = method_expr;
+                            for arg in &collected_args {
+                                let arg_core = lower_expr(ctx, arg)?;
+                                result =
+                                    core::Expr::App(Box::new(result), Box::new(arg_core), span);
+                            }
+                            let x_core = lower_expr(ctx, x)?;
+                            return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
+                        }
+                    }
+                }
+
                 // Dict in scope (from existential pattern): select method from dict,
                 // then apply all collected args + final arg
                 if is_user {
@@ -3896,7 +4186,57 @@ fn lower_app(
                 {
                     let param_count = ctx.class_param_count(class_name);
 
+                    // A single-parameter USER class: match the method's declared
+                    // scheme against the head's recorded occurrence type — that
+                    // says which argument carries the class parameter. The
+                    // argument guess below assumes it is the FIRST argument, so
+                    // `qry :: Monoid c => (Item -> c) -> b -> c` dispatched on
+                    // the function `Item -> MinI` instead of `b`, found no
+                    // instance, and fell through to calling the bare method.
+                    if is_user && param_count == 1 {
+                        if let Some(method_expr) = ctx.select_method_by_result_type(
+                            class_name,
+                            method_name,
+                            head_def_ref.def_id,
+                            head_def_ref.span,
+                        ) {
+                            let mut result = method_expr;
+                            for arg in &collected_args {
+                                let arg_core = lower_expr(ctx, arg)?;
+                                result =
+                                    core::Expr::App(Box::new(result), Box::new(arg_core), span);
+                            }
+                            let x_core = lower_expr(ctx, x)?;
+                            return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
+                        }
+                    }
+
                     if param_count > 1 && is_user {
+                        if let Some(types) = ctx.class_params_from_occurrence(
+                            class_name,
+                            head_def_ref.def_id,
+                            head_def_ref.span,
+                        ) {
+                            if let Some(method_expr) = ctx.resolve_method_at_concrete_types(
+                                method_name,
+                                class_name,
+                                &types,
+                                span,
+                            ) {
+                                let mut result = method_expr;
+                                for arg in &collected_args {
+                                    let arg_core = lower_expr(ctx, arg)?;
+                                    result =
+                                        core::Expr::App(Box::new(result), Box::new(arg_core), span);
+                                }
+                                let x_core = lower_expr(ctx, x)?;
+                                return Ok(core::Expr::App(
+                                    Box::new(result),
+                                    Box::new(x_core),
+                                    span,
+                                ));
+                            }
+                        }
                         // Multi-param class: collect types from all arguments (user classes only)
                         // For `combine Red Circle`, collected_args=[Red], x=Circle
                         // We need types from each arg: [Color, Shape]
@@ -4208,6 +4548,12 @@ fn lower_app(
                         } else {
                             inferred
                         };
+                        if dispatch_dbg() {
+                            eprintln!(
+                                "[dispatch-app] {method_name} ({class_name}): value_class={is_value_class} span_ty={:?} inferred={inferred:?}",
+                                ctx.resolved_expr_ty_opt(span)
+                            );
+                        }
                         if let Some(concrete_ty) = inferred {
                             // `mconcat :: [a] -> a` — the class parameter is the
                             // list's ELEMENT type, but the argument-driven

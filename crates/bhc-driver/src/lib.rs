@@ -311,6 +311,18 @@ pub struct Compiler {
     callbacks: Arc<dyn CompileCallbacks>,
 }
 
+/// A class method's declared scheme restricted to its OWN constraints (the
+/// method-level context, e.g. `Monoid c` in `query`), or `None` when it has
+/// only the class's. The interface records the class constraint first.
+fn method_level_scheme(scheme: &bhc_types::Scheme, class: Symbol) -> Option<bhc_types::Scheme> {
+    if !scheme.constraints.iter().any(|c| c.class != class) {
+        return None;
+    }
+    let mut own = scheme.clone();
+    own.constraints.retain(|c| c.class != class);
+    Some(own)
+}
+
 /// Which of a class's parameters each superclass constrains, by index.
 ///
 /// The interface already carries each superclass as a full constraint, so
@@ -1446,7 +1458,9 @@ impl Compiler {
             !Self::ty_has_free_var(t)
                 && matches!(Self::ultimate_result_ty(t), bhc_types::Ty::App(..))
         });
-        let mono = if maybe_concrete_monad {
+        // `BHC_NO_MONO=1` skips the pass (diagnosis: does a wrong answer come
+        // from a specialized clone?).
+        let mono = if maybe_concrete_monad && std::env::var_os("BHC_NO_MONO").is_none() {
             // Load the transported bodies and type expansions of imported modules,
             // so the pass can specialize an imported writer at an imported newtype.
             let (imported_bodies, imported_newtypes) = self.load_imported_core_bodies(hir);
@@ -3254,7 +3268,7 @@ impl Compiler {
         let known_classes: FxHashSet<Symbol> = ctx
             .interface_classes
             .iter()
-            .map(|(name, _, _, _, _, _, _)| *name)
+            .map(|(name, _, _, _, _, _, _, _)| *name)
             .collect();
         let known_symbols: FxHashSet<(Symbol, String)> = ctx
             .interface_symbols
@@ -3293,9 +3307,13 @@ impl Compiler {
                 let mut method_arities: Vec<(Symbol, usize)> =
                     Vec::with_capacity(class.methods.len());
                 let mut defaulted_names = Vec::new();
+                let mut method_level: Vec<(Symbol, bhc_types::Scheme)> = Vec::new();
                 for method in &class.methods {
                     let name = Symbol::intern(&method.name);
                     let scheme = converter.convert_type_signature(&method.signature);
+                    if let Some(own) = method_level_scheme(&scheme, class_name) {
+                        method_level.push((name, own));
+                    }
                     let mut arrows = 0;
                     let mut t = &scheme.ty;
                     while let bhc_types::Ty::Fun(_, r) = t {
@@ -3328,6 +3346,7 @@ impl Compiler {
                     method_arities,
                     class.params.len().max(1),
                     superclass_param_indices(class),
+                    method_level,
                 ));
             }
 
@@ -3665,6 +3684,12 @@ impl Compiler {
                     name
                 }
             };
+            if std::env::var("BHC_DBG_IFACE").is_ok_and(|w| w == value.name) {
+                eprintln!(
+                    "[iface] {module_name} exports {} as core `{core_name}` arity={:?}",
+                    value.name, value.arity
+                );
+            }
             ctx.define_with_type(
                 fresh_id,
                 core_name,
@@ -3889,10 +3914,14 @@ impl Compiler {
             let class_name = Symbol::intern(&class.name);
             let mut method_names = Vec::with_capacity(class.methods.len());
             let mut method_arities: Vec<(Symbol, usize)> = Vec::with_capacity(class.methods.len());
+            let mut method_level: Vec<(Symbol, bhc_types::Scheme)> = Vec::new();
             for method in &class.methods {
                 let name = Symbol::intern(&method.name);
                 let fresh_id = ctx.fresh_def_id();
                 let scheme = converter.convert_type_signature(&method.signature);
+                if let Some(own) = method_level_scheme(&scheme, class_name) {
+                    method_level.push((name, own));
+                }
                 // Arrow count of the declared method type — the arity an
                 // instance's point-free method binding must be eta-expanded
                 // to (see `eta_expand_point_free_method`).
@@ -3953,6 +3982,7 @@ impl Compiler {
                 method_arities,
                 class.params.len().max(1),
                 superclass_param_indices(class),
+                method_level,
             ));
         }
 

@@ -36,7 +36,7 @@ use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
 use bhc_types::{Subst, Ty, TyVar};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Specialize polymorphic-monad functions at their concrete transformer stacks.
 ///
@@ -73,6 +73,7 @@ pub fn monomorphize_module(
         newtypes,
         memo: FxHashMap::default(),
         cur_monad: Ty::Error,
+        monad_dicts: FxHashSet::default(),
         new_bindings: Vec::new(),
         resolved,
     };
@@ -177,6 +178,15 @@ struct Ctx<'a> {
     /// polymorphic-monad call inside a clone runs in this monad. `Ty::Error` at the
     /// top level (no active specialization).
     cur_monad: Ty,
+    /// Dictionary variables of the clone being built that denote ITS monad:
+    /// the binding's own lambda-bound dictionary parameters and superclass
+    /// dictionaries selected out of them. Only a selection from one of these
+    /// may be rewritten to a builtin operator — a Monad dictionary the body
+    /// CONSTRUCTED for some other monad (a parser's `ParsecT` instance inside
+    /// `myRead :: PandocMonad m => …`) is named `$dMonad_NNN` just the same,
+    /// and routing its `>>` through the specialized stack ran the parser as a
+    /// PandocIO action.
+    monad_dicts: FxHashSet<VarId>,
     /// Specialized bindings produced by this pass.
     new_bindings: Vec<Bind>,
     /// Typeck's span-keyed occurrence types (final substitution). Occurrence
@@ -393,11 +403,79 @@ fn get_or_specialize(
     // same specialization instead of looping.
     ctx.memo.insert(key, spec_var.clone());
     let saved_monad = std::mem::replace(&mut ctx.cur_monad, concrete_monad.clone());
+    let saved_dicts = std::mem::replace(&mut ctx.monad_dicts, own_monad_dicts(orig_body));
     let spec_body = specialize_body(orig_body, &subst, ctx);
     ctx.cur_monad = saved_monad;
+    ctx.monad_dicts = saved_dicts;
     ctx.new_bindings
         .push(Bind::NonRec(spec_var.clone(), Box::new(spec_body)));
     Some(spec_var)
+}
+
+/// The dictionary variables of a binding body that denote the binding's OWN
+/// constrained monad: its leading lambda-bound dictionary parameters, and — to
+/// a fixpoint — `let`-bound dictionaries selected out of those
+/// (`$superMonad = $sel_k $dPandocMonad`). See `Ctx::monad_dicts`.
+fn own_monad_dicts(body: &Expr) -> FxHashSet<VarId> {
+    fn derived(rhs: &Expr, set: &FxHashSet<VarId>) -> bool {
+        match rhs {
+            Expr::Var(v, _) => set.contains(&v.id),
+            Expr::App(f, inner, _) => {
+                matches!(f.as_ref(), Expr::Var(sel, _) if sel.name.as_str().starts_with("$sel_"))
+                    && derived(inner, set)
+            }
+            _ => false,
+        }
+    }
+    fn walk(e: &Expr, set: &mut FxHashSet<VarId>) {
+        match e {
+            Expr::Let(bind, body, _) => {
+                match bind.as_ref() {
+                    Bind::NonRec(x, rhs) => {
+                        if dict_class_name(x.name.as_str()).is_some() && derived(rhs, set) {
+                            set.insert(x.id);
+                        }
+                        walk(rhs, set);
+                    }
+                    Bind::Rec(bs) => {
+                        for (_, rhs) in bs {
+                            walk(rhs, set);
+                        }
+                    }
+                }
+                walk(body, set);
+            }
+            Expr::App(f, x, _) => {
+                walk(f, set);
+                walk(x, set);
+            }
+            Expr::TyApp(f, _, _) | Expr::Lam(_, f, _) | Expr::TyLam(_, f, _) => walk(f, set),
+            Expr::Lazy(b, _) | Expr::Cast(b, _, _) | Expr::Tick(_, b, _) => walk(b, set),
+            Expr::Case(scrut, alts, _, _) => {
+                walk(scrut, set);
+                for alt in alts {
+                    walk(&alt.rhs, set);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut set = FxHashSet::default();
+    let mut e = body;
+    while let Expr::Lam(v, b, _) = e {
+        if dict_class_name(v.name.as_str()).is_some() {
+            set.insert(v.id);
+        }
+        e = b;
+    }
+    loop {
+        let before = set.len();
+        walk(body, &mut set);
+        if set.len() == before {
+            break;
+        }
+    }
+    set
 }
 
 /// Collect every free type variable that appears in the body's occurrence types,
@@ -512,7 +590,9 @@ fn specialize_body(e: &Expr, subst: &Subst, ctx: &mut Ctx) -> Expr {
             // `specialize_body` runs under a concrete transformer monad (that is
             // the only thing `get_or_specialize` fires for), so this is sound.
             if let (Expr::Var(sel, _), Expr::Var(d, _)) = (f.as_ref(), x.as_ref()) {
-                if let Some(class) = dict_class_name(d.name.as_str()) {
+                if let Some(class) =
+                    dict_class_name(d.name.as_str()).filter(|_| ctx.monad_dicts.contains(&d.id))
+                {
                     if let Some(op) = class_sel_builtin(class, sel.name.as_str()) {
                         return Expr::Var(
                             Var::new(Symbol::intern(op), fresh_var_id(), Ty::Error),

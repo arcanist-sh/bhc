@@ -171,6 +171,7 @@ pub fn lower_module_with_imports(
             Vec<(bhc_intern::Symbol, usize)>,
             usize,
             Vec<Vec<usize>>,
+            Vec<(bhc_intern::Symbol, bhc_types::Scheme)>,
         )],
         &[(
             bhc_intern::Symbol,

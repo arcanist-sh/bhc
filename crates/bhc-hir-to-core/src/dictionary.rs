@@ -167,6 +167,16 @@ pub struct ClassRegistry {
     /// Instances indexed by (class name, instance type hash).
     /// Since we can't use Ty as a key directly, we use a list and linear search.
     pub instances: FxHashMap<Symbol, Vec<InstanceInfo>>,
+    /// Declared schemes of class methods that carry constraints of their
+    /// OWN, beyond the class's (`query :: Monoid c => (a -> c) -> b -> c` in
+    /// pandoc's `Walkable a b`), keyed by (class, method). The scheme's
+    /// constraints are exactly those method-level ones; its type shares their
+    /// variables, so matching it against an occurrence instantiates them.
+    pub method_level: FxHashMap<(Symbol, Symbol), Scheme>,
+    /// Type parameters of LOCALLY declared classes, the variables their
+    /// `method_types` are written in. Instantiating a method's declared type
+    /// at an instance head needs them.
+    pub class_params: FxHashMap<Symbol, Vec<TyVar>>,
 }
 
 /// Give `Monad`/`Applicative` constraints a runtime witness, so a
@@ -989,6 +999,8 @@ impl<'a> DictContext<'a> {
                     );
                     final_fields.push(missing_method_field(
                         self,
+                        class.name,
+                        &final_fields[..class.superclasses.len()],
                         &instance.methods,
                         &constraint_dicts,
                         *method_name,
@@ -1020,6 +1032,8 @@ impl<'a> DictContext<'a> {
                     );
                     missing_method_field(
                         self,
+                        class.name,
+                        &fields[..class.superclasses.len()],
                         &instance.methods,
                         &constraint_dicts,
                         *method_name,
@@ -1331,12 +1345,82 @@ fn make_error_expr(msg: &str, span: Span) -> core::Expr {
 #[allow(clippy::too_many_arguments)]
 fn missing_method_field(
     ctx: &mut DictContext,
+    class_name: Symbol,
+    super_fields: &[core::Expr],
     class_methods: &FxHashMap<Symbol, bhc_hir::DefId>,
     constraint_dicts: &[core::Expr],
     method_name: Symbol,
     error_msg: &str,
     span: Span,
 ) -> core::Expr {
+    // The builtin Monoid class carries no default bodies, so an instance that
+    // defines only `mempty` (the usual modern shape — `<>` lives in the
+    // Semigroup instance) got error closures in its `mappend`/`mconcat`
+    // slots. `foldr mappend mempty` and `mconcat` over any user Monoid then
+    // ran them, which is how pandoc's `query`/`foldMap` over `Min Int`
+    // crashed. Fill them with the class defaults: `mappend = (<>)` via the
+    // Semigroup superclass slot, `mconcat = foldr mappend mempty`.
+    if class_name.as_str() == "Monoid" {
+        let semigroup_append = || -> Option<core::Expr> {
+            let sg = super_fields.first()?;
+            if matches!(sg, core::Expr::Lit(..)) {
+                return None; // unresolved superclass placeholder
+            }
+            let sel = Var {
+                name: Symbol::intern("$sel_0"),
+                id: VarId::new(0),
+                ty: Ty::Error,
+            };
+            Some(core::Expr::App(
+                Box::new(core::Expr::Var(sel, span)),
+                Box::new(sg.clone()),
+                span,
+            ))
+        };
+        match method_name.as_str() {
+            "mappend" => {
+                if let Some(append) = semigroup_append() {
+                    return append;
+                }
+            }
+            "mconcat" => {
+                let mappend = match class_methods.get(&Symbol::intern("mappend")) {
+                    Some(&id) => {
+                        let r = ctx.method_reference(id, span);
+                        Some(apply_constraint_dicts(r, constraint_dicts, span))
+                    }
+                    None => semigroup_append(),
+                };
+                let mempty = class_methods.get(&Symbol::intern("mempty")).map(|&id| {
+                    let r = ctx.method_reference(id, span);
+                    apply_constraint_dicts(r, constraint_dicts, span)
+                });
+                if let (Some(mappend), Some(mempty)) = (mappend, mempty) {
+                    let foldr_var = Var {
+                        name: Symbol::intern("foldr"),
+                        id: VarId::new(0),
+                        ty: Ty::Error,
+                    };
+                    let xs = ctx.fresh_var("$mconcat_xs", Ty::Error, span);
+                    let body = core::Expr::App(
+                        Box::new(core::Expr::App(
+                            Box::new(core::Expr::App(
+                                Box::new(core::Expr::Var(foldr_var, span)),
+                                Box::new(mappend),
+                                span,
+                            )),
+                            Box::new(mempty),
+                            span,
+                        )),
+                        Box::new(core::Expr::Var(xs.clone(), span)),
+                        span,
+                    );
+                    return core::Expr::Lam(xs, Box::new(body), span);
+                }
+            }
+            _ => {}
+        }
+    }
     if method_name.as_str() == "<$" {
         if let Some(&fmap_id) = class_methods.get(&Symbol::intern("fmap")) {
             let fmap_ref = ctx.method_reference(fmap_id, span);

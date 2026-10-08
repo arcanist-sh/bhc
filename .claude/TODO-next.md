@@ -19,6 +19,83 @@ reverting anything non-trivial.
 
 ---
 
+## 0. STATE AS OF 2026-09-19 — read this first
+
+A session of dictionary-correctness work landed on
+`integration/pandoc-html-writer` (see the two commits whose subjects start
+`fix(lower): an import whose bare name shadows a codegen builtin` and
+`feat(hir-to-core): dictionary-pass a class method's own constraints`). Gates at
+those commits: `cargo test --all-targets --no-fail-fast` **2829/0**, clippy
+clean on every touched crate, pandoc sweep **221/221 on four from-scratch DBs**,
+parser ladder **30/31** (was 24/31 that morning, 31/31 on 2026-09-02 before the
+monomorphizer regressed it).
+
+What it fixed, in order of how much pandoc it unblocks:
+
+1. **`try` was `Control.Exception.try`.** An unqualified import never shadowed a
+   same-named codegen builtin, so every backtracking parser in pandoc ran its
+   argument as an IO action and `readMarkdown` returned a garbage `Left` for any
+   input. `register_imported_names` now lets a genuine import win over a
+   non-Prelude builtin.
+2. **A class method's OWN constraints are dictionary-passed** (`query :: Monoid c
+   => …`, `getOption :: Stream s m t => …`): interface → registry → instance
+   methods and class defaults take the dict lambdas → every use applies them.
+3. **Semigroup/Monoid are dict-passed constraints** on ordinary bindings, plus
+   Monoid class defaults, `foldMap` over a non-list Monoid, applied `mconcat`
+   dispatch, and value-class in-scope dictionary matching.
+4. **Several dictionaries of one class in scope** no longer collapse to the last
+   one (pandoc's `queryBlock` has nine `Walkable a X`).
+5. **The monomorphizer** no longer rewrites a dictionary selection on a Monad
+   dictionary the body CONSTRUCTED for another monad (it was routing the
+   reader's `ParsecT` binds through the writer's PandocIO stack);
+   **`>>=`'s continuation** now gets an expected type, so a `do` block's tail
+   keeps its stream type; **`T(..)` import wildcards** no longer rebind bare
+   names like `zipWith` to an unimplemented module export.
+
+Full write-up: memory `project_method_level_dicts.md`.
+
+### ⚠️ The pandoc harness is GONE
+
+`~/Development/pandoc-harness`, `pandoc-3.6.4`, `pandoc-types-1.23.1.2` and
+`pandoc-vendor` were deleted on 2026-10-08, so the sweep, ladder, battery and
+every probe binary must be rebuilt before any of the pandoc-facing tasks below
+can be measured again. Rebuild notes (all learned 2026-09-19) are in
+`project_pandoc_link.md`: compile the vendored OVERRIDE modules last (a DB
+module overrides bhc's stub list for its whole export surface, and the vendored
+`Data.Semigroup` lacks `sconcat`/`stimes` that parsec's `Prim` imports); vendored
+`Paths_pandoc` must export `getDataFileName`; and localize `_show_desc_*` once
+per DB build rather than per probe link — that alone takes a probe link from
+~4 minutes to 3 seconds (`flink.sh`), which is what makes bisecting
+`parseMarkdown` practical (~15 s per iteration).
+
+## 0a. NEXT pandoc blocker: typeck loses a local multi-equation function's argument type
+
+`makeSectionsWithOffsets` does `getMin $ query getLevel bs` where `getLevel` is a
+multi-equation `where`-binding. typeck records that occurrence as
+`t -> Min t'` — the constructor patterns (`getLevel (Header l _) = …`) do not pin
+the argument — so `Walkable ?a [Block]` and `Monoid (Min ?t)` both resolve to
+null placeholders and the HTML writer crashes inside `Walk`'s `query`.
+
+Established by experiment: a **single** equation written with an explicit `case`
+infers correctly; the same function at **top level** infers correctly; an
+explicit **signature** on the where-binding does NOT help. So the defect is in
+how the occurrence type is recorded for a local multi-equation binding, not in
+generalization. bhc-lower desugars those to `\_arg0 -> case _arg0 of {…}` with
+the scrutinee referring to the lambda's own DefId, so start by dumping what
+typeck infers for that lambda (`BHC_DBG_OCC=<name>` prints a Var occurrence's
+recorded, raw and scheme types).
+
+**Done when:** a 12-line repro (local `getLevel` over an imported ADT, used as
+`query getLevel bs`) resolves both dictionaries, and `makeSectionsWithOffsets`
+returns sections instead of crashing.
+
+## 0b. A named parser CAF at concrete `Identity` returns a wrong value
+
+`named :: Parser Int; named = return 7` makes `parse named "" "ab"` give **1**,
+while the same parser written polymorphically (`Monad m =>`, run with
+`runParserT` at IO) and the inline `parse (return 7)` both give 7. Pre-existing;
+affects any `Parsec`-at-Identity code path (`runPure`, `Text.Pandoc.Format`).
+
 ## 1. `parserBind` continuation captures a `Text` in the `k` slot — the pandoc blocker
 
 **Detailed home:** `spec/BHC-BRIEF-0003-lazy-arguments.md` (§ "readMarkdown's crash,

@@ -106,6 +106,11 @@ pub struct LowerContext {
     /// typeck recorded. Read via `expected_ty_opt`; a hint never replaces a
     /// recorded type, it only substitutes that type's variables.
     expected_arg_tys: crate::ExprTypeMap,
+    /// Head spans of applications of a method with method-level dictionaries
+    /// that are being lowered right now: the outermost application supplies
+    /// those dictionaries once, so the nested lowering of the same spine (and
+    /// of its head `Var`) must not.
+    pub(crate) method_level_active: FxHashSet<Span>,
 
     /// Constructor metadata (`DefId` -> `ConstructorInfo`).
     /// This maps constructor `DefIds` to their metadata including tag and type.
@@ -137,6 +142,13 @@ pub struct LowerContext {
     /// do-block's `>>=` out of that dictionary instead of ParsecT's, and every
     /// parser started from a garbage state. Kept in lockstep with `dict_scope`.
     dict_scope_ty: Vec<FxHashMap<Symbol, Vec<Ty>>>,
+    /// EVERY dictionary registered in each scope, with the constraint
+    /// arguments it is for (empty when unknown). `dict_scope` keeps one
+    /// dictionary per CLASS, so a binding constrained by several instances of
+    /// one class — pandoc's `queryBlock :: (Walkable a Citation, Walkable a
+    /// [Block], …, Walkable a [Inline], Monoid c) => …` — saw only the last.
+    /// Kept in lockstep with `dict_scope`.
+    dict_scope_all: Vec<Vec<(Symbol, Vec<Ty>, Var)>>,
 
     /// Registry of type classes and instances for dictionary construction.
     class_registry: ClassRegistry,
@@ -174,6 +186,9 @@ pub struct LowerContext {
     /// this signature's result pins them (`s := [Char]`, `u := ()`), so the
     /// Stream dictionary resolves instead of being silently omitted.
     current_binding_sig: Option<Ty>,
+    /// The instantiated declared type of the instance method about to be
+    /// lowered (see `instance_method_sig`); consumed by the lowering entry.
+    instance_method_sig_override: Option<Ty>,
 
     /// Head type constructors of instances that arrived through a module
     /// interface, keyed by class — `(Monad, ParsecT)` when compiling a module
@@ -220,11 +235,13 @@ impl LowerContext {
             expr_types: FxHashMap::default(),
             resolved_expr_types: FxHashMap::default(),
             expected_arg_tys: FxHashMap::default(),
+            method_level_active: FxHashSet::default(),
             constructor_map: FxHashMap::default(),
             constructor_field_types: FxHashMap::default(),
             field_selector_map: FxHashMap::default(),
             dict_scope: vec![FxHashMap::default()], // Start with empty root scope
             dict_scope_ty: vec![FxHashMap::default()],
+            dict_scope_all: vec![Vec::new()],
             class_registry: ClassRegistry::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
@@ -233,6 +250,7 @@ impl LowerContext {
             monad_type_stack: Vec::new(),
             current_instance_type: None,
             current_binding_sig: None,
+            instance_method_sig_override: None,
             imported_instance_heads: FxHashSet::default(),
             type_aliases: FxHashMap::default(),
             current_instance_class: None,
@@ -1713,6 +1731,7 @@ impl LowerContext {
     pub fn push_dict_scope(&mut self) {
         self.dict_scope.push(FxHashMap::default());
         self.dict_scope_ty.push(FxHashMap::default());
+        self.dict_scope_all.push(Vec::new());
     }
 
     /// Pop the current dictionary scope.
@@ -1720,13 +1739,17 @@ impl LowerContext {
         if self.dict_scope.len() > 1 {
             self.dict_scope.pop();
             self.dict_scope_ty.pop();
+            self.dict_scope_all.pop();
         }
     }
 
     /// Register a dictionary variable for a constraint in the current scope.
     pub fn register_dict(&mut self, class_name: Symbol, dict_var: Var) {
         if let Some(scope) = self.dict_scope.last_mut() {
-            scope.insert(class_name, dict_var);
+            scope.insert(class_name, dict_var.clone());
+        }
+        if let Some(all) = self.dict_scope_all.last_mut() {
+            all.push((class_name, Vec::new(), dict_var));
         }
     }
 
@@ -1909,6 +1932,17 @@ impl LowerContext {
                 }
                 let args = self.lookup_dict_args(*class).unwrap_or(&[]).to_vec();
                 out.push((*class, args, var.clone()));
+            }
+        }
+        // Every OTHER dictionary of an already-listed class, after the ones
+        // above so a lookup by class alone is unchanged: an instance's own
+        // constraint matched by argument can then find `Walkable a Blk` even
+        // when `Walkable a [Inl]` was registered after it.
+        for scope in self.dict_scope_all.iter().rev() {
+            for (class, args, var) in scope.iter().rev() {
+                if !out.iter().any(|(_, _, v)| v.id == var.id) {
+                    out.push((*class, args.clone(), var.clone()));
+                }
             }
         }
         out
@@ -2143,9 +2177,72 @@ impl LowerContext {
     /// superclass hop applies needs the argument at that index.
     pub fn register_dict_at(&mut self, class_name: Symbol, args: Vec<Ty>, dict_var: Var) {
         self.register_dict(class_name, dict_var);
+        if let Some(entry) = self
+            .dict_scope_all
+            .last_mut()
+            .and_then(|all| all.last_mut())
+        {
+            entry.1.clone_from(&args);
+        }
         if let Some(scope) = self.dict_scope_ty.last_mut() {
             scope.insert(class_name, args);
         }
+    }
+
+    /// The in-scope dictionary for `class` whose recorded arguments fit
+    /// `want`. Arguments are compared structurally with type variables
+    /// matching anything, and a dictionary registered without arguments fits
+    /// anything; the candidate with the most concrete agreement wins,
+    /// innermost first on ties. A candidate that DISAGREES somewhere is never
+    /// returned.
+    ///
+    /// `Ok(None)`: dictionaries of the class are in scope but none fits — the
+    /// dictionary must be built from an instance instead. `Err(())`: none of
+    /// the class is in scope at all.
+    pub(crate) fn lookup_dict_for(&self, class: Symbol, want: &[Ty]) -> Result<Option<Var>, ()> {
+        fn fits(a: &Ty, b: &Ty, score: &mut usize) -> bool {
+            match (a, b) {
+                (Ty::Var(_), _) | (_, Ty::Var(_)) | (Ty::Error, _) | (_, Ty::Error) => true,
+                (Ty::Con(x), Ty::Con(y)) => {
+                    *score += 1;
+                    x.name == y.name
+                }
+                (Ty::App(f1, a1), Ty::App(f2, a2)) | (Ty::Fun(f1, a1), Ty::Fun(f2, a2)) => {
+                    fits(f1, f2, score) && fits(a1, a2, score)
+                }
+                (Ty::List(x), Ty::List(y)) => {
+                    *score += 1;
+                    fits(x, y, score)
+                }
+                (Ty::Tuple(xs), Ty::Tuple(ys)) => {
+                    xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| fits(x, y, score))
+                }
+                (Ty::Prim(x), Ty::Prim(y)) => x == y,
+                _ => false,
+            }
+        }
+        let candidates: Vec<&(Symbol, Vec<Ty>, Var)> = self
+            .dict_scope_all
+            .iter()
+            .rev()
+            .flat_map(|scope| scope.iter().rev())
+            .filter(|(c, _, _)| *c == class)
+            .collect();
+        if candidates.is_empty() {
+            return Err(());
+        }
+        let mut best: Option<(usize, &Var)> = None;
+        for (_, args, var) in candidates {
+            let mut score = 0;
+            let ok = args.is_empty()
+                || want.is_empty()
+                || (args.len() == want.len()
+                    && args.iter().zip(want).all(|(a, w)| fits(a, w, &mut score)));
+            if ok && best.is_none_or(|(b, _)| score > b) {
+                best = Some((score, var));
+            }
+        }
+        Ok(best.map(|(_, v)| v.clone()))
     }
 
     /// The constraint arguments an in-scope dictionary for `class_name` is
@@ -2327,9 +2424,16 @@ impl LowerContext {
             }
         }
 
-        // 1. Next, try to find an in-scope dictionary variable directly
-        if let Some(dict_var) = self.lookup_dict(constraint.class) {
-            return Some(core::Expr::Var(dict_var.clone(), span));
+        // 1. Next, try to find an in-scope dictionary variable directly. With
+        // several of the class in scope, only one whose arguments fit.
+        match self.lookup_dict_for(constraint.class, &constraint.args) {
+            Ok(Some(dict_var)) => return Some(core::Expr::Var(dict_var, span)),
+            Ok(None) => {}
+            Err(()) => {
+                if let Some(dict_var) = self.lookup_dict(constraint.class) {
+                    return Some(core::Expr::Var(dict_var.clone(), span));
+                }
+            }
         }
 
         // 2. Try superclass extraction: if we have Ord but need Eq, extract Eq from Ord
@@ -2873,10 +2977,151 @@ impl LowerContext {
     /// transformer layer, which for such a binding is `IO`, whose `return` is
     /// identity. Only when the class parameter really is a variable — a
     /// concrete `Monad IO` constraint has nothing to dispatch.
+    /// Whether a class method's OWN constraint (`Monoid c` in `query ::
+    /// Monoid c => …`) becomes a dictionary parameter of every instance's
+    /// implementation of that method — and therefore an argument at every
+    /// use. Definition and use sites both go through this predicate.
+    ///
+    /// User classes and the value classes (at a type variable) count; the
+    /// monad family does not, so `walkM`'s `Monad m` keeps the codegen path it
+    /// has always had.
+    pub(crate) fn method_level_is_dict_passed(&self, c: &Constraint) -> bool {
+        if !method_level_dicts_enabled() {
+            return false;
+        }
+        self.is_user_class(c.class)
+            || (value_class_dicts_enabled()
+                && matches!(c.class.as_str(), "Semigroup" | "Monoid")
+                && matches!(c.args.first(), Some(Ty::Var(_))))
+    }
+
+    /// The dictionary-passed method-level constraints of `class.method`, in
+    /// declaration order, with the method's declared scheme. `None` when it
+    /// has none.
+    pub(crate) fn method_level_dict_constraints(
+        &self,
+        class: Symbol,
+        method: Symbol,
+    ) -> Option<(bhc_types::Scheme, Vec<Constraint>)> {
+        let scheme = self.class_registry.method_level.get(&(class, method))?;
+        let cs: Vec<Constraint> = scheme
+            .constraints
+            .iter()
+            .filter(|c| self.method_level_is_dict_passed(c))
+            .cloned()
+            .collect();
+        (!cs.is_empty()).then(|| (scheme.clone(), cs))
+    }
+
+    /// Fill in a constraint's VARIABLE argument positions from the instances
+    /// of the class, when every candidate agrees.
+    ///
+    /// A method-level constraint can mention a variable the method's type does
+    /// not: `getOption :: Stream s m t => (ReaderOptions -> b) -> ParsecT s st
+    /// m b` says nothing about `t`, so a use site instantiates `Stream Sources
+    /// ?m ?t` — which matches no instance head, because one-way matching
+    /// rejects the instance's concrete `Char` against a variable. Completing
+    /// `?t := Char` from the only `Stream Sources` instance makes the
+    /// dictionary constructible. Agreement is required, for the same reason
+    /// fundep completion requires it: several candidates mean the position is
+    /// genuinely undetermined here.
+    pub(crate) fn complete_constraint_args(&self, class: Symbol, args: &[Ty]) -> Option<Vec<Ty>> {
+        if !args.iter().any(has_type_variables) || args.iter().all(has_type_variables) {
+            return None;
+        }
+        let instances = self.class_registry.instances.get(&class)?;
+        let mut proposal: Option<Vec<Ty>> = None;
+        for inst in instances {
+            if inst.instance_types.len() != args.len() {
+                continue;
+            }
+            // Every position we DO know must agree with this instance.
+            let concrete_ok = args.iter().zip(&inst.instance_types).all(|(a, i)| {
+                has_type_variables(a)
+                    || has_type_variables(i)
+                    || bhc_types::types_match(i, a).is_some()
+            });
+            if !concrete_ok {
+                continue;
+            }
+            let filled: Vec<Ty> = args
+                .iter()
+                .zip(&inst.instance_types)
+                .map(|(a, i)| {
+                    if has_type_variables(a) && !has_type_variables(i) {
+                        i.clone()
+                    } else {
+                        a.clone()
+                    }
+                })
+                .collect();
+            match &proposal {
+                Some(prev) if *prev != filled => return None, // candidates disagree
+                _ => proposal = Some(filled),
+            }
+        }
+        proposal.filter(|p| p != args)
+    }
+
+    /// The dictionaries a USE of `class.method` must pass for its method-level
+    /// constraints, instantiated by matching the declared type against the
+    /// occurrence type recorded at `occ_span`. A constraint left at a
+    /// variable takes the dictionary in scope; one that resolves to nothing
+    /// gets a null placeholder so the argument count still lines up.
+    pub(crate) fn method_level_dicts_at(
+        &mut self,
+        class: Symbol,
+        method: Symbol,
+        occ_span: Span,
+    ) -> Option<Vec<core::Expr>> {
+        let (scheme, cs) = self.method_level_dict_constraints(class, method)?;
+        let subst = match self.resolved_expr_ty_opt(occ_span) {
+            Some(occ) => {
+                let occ = self.expand_type_aliases(&occ);
+                bhc_types::types_match(&scheme.ty, &occ).unwrap_or_else(|| {
+                    let mut s = bhc_types::Subst::new();
+                    crate::expr::match_ty(&scheme.ty, &occ, &mut s);
+                    s
+                })
+            }
+            None => bhc_types::Subst::new(),
+        };
+        let dbg = ml_dbg();
+        let mut dicts = Vec::with_capacity(cs.len());
+        for c in cs {
+            let args: Vec<Ty> = c.args.iter().map(|a| subst.apply(a)).collect();
+            let inst = Constraint::new_multi(c.class, args, occ_span);
+            let dict = self.resolve_dictionary(&inst, occ_span).or_else(|| {
+                let filled = self.complete_constraint_args(inst.class, &inst.args)?;
+                self.resolve_dictionary(
+                    &Constraint::new_multi(inst.class, filled, occ_span),
+                    occ_span,
+                )
+            });
+            if dbg {
+                eprintln!(
+                    "[ml] {class}.{method}: {} {:?} -> {}",
+                    inst.class,
+                    inst.args,
+                    if dict.is_some() {
+                        "dict"
+                    } else {
+                        "NULL placeholder"
+                    }
+                );
+            }
+            dicts.push(dict.unwrap_or(core::Expr::Lit(core::Literal::Int(0), Ty::Error, occ_span)));
+        }
+        Some(dicts)
+    }
+
     pub(crate) fn constraint_is_dict_passed(&self, c: &Constraint) -> bool {
         self.is_user_class(c.class)
             || (crate::dictionary::monad_witness_enabled()
                 && matches!(c.class.as_str(), "Monad" | "Applicative")
+                && matches!(c.args.first(), Some(Ty::Var(_))))
+            || (value_class_dicts_enabled()
+                && matches!(c.class.as_str(), "Semigroup" | "Monoid")
                 && matches!(c.args.first(), Some(Ty::Var(_))))
     }
 
@@ -2932,6 +3177,20 @@ impl LowerContext {
         for method_sig in &class_def.methods {
             method_names.push(method_sig.name);
             method_types.insert(method_sig.name, method_sig.ty.clone());
+            // The HIR signature's constraints are the method's OWN (the class
+            // constraint is implicit), sharing variables with its type.
+            if method_sig
+                .ty
+                .constraints
+                .iter()
+                .any(|c| c.class != class_def.name)
+            {
+                let mut scheme = method_sig.ty.clone();
+                scheme.constraints.retain(|c| c.class != class_def.name);
+                self.class_registry
+                    .method_level
+                    .insert((class_def.name, method_sig.name), scheme);
+            }
         }
 
         // Collect default method DefIds
@@ -2951,6 +3210,10 @@ impl LowerContext {
                 default: assoc.default.clone(),
             })
             .collect();
+
+        self.class_registry
+            .class_params
+            .insert(class_def.name, class_def.params.clone());
 
         let class_info = ClassInfo {
             name: class_def.name,
@@ -3180,7 +3443,7 @@ impl LowerContext {
                 _ => false,
             }
         }
-        let dbg = std::env::var("BHC_DBG_DISPATCH").is_ok();
+        let dbg = crate::expr::dispatch_dbg();
         // Prefer the fully-substituted resolved channel: the single-pass
         // `expr_types` map can leave nested variables unsubstituted
         // (`getB`'s occurrence read as `(t -> t') -> t''`), and dispatch on
@@ -3270,6 +3533,56 @@ impl LowerContext {
         self.method_at_instance_type(class_name, method, &inst_ty, span)
     }
 
+    /// Every class parameter of a MULTI-parameter class at one use of its
+    /// method, read by matching the method's declared scheme against the
+    /// occurrence type typeck recorded at `span`. `query getLevel bs` in
+    /// pandoc (`Walkable a b`, `query :: Monoid c => (a -> c) -> b -> c`) pins
+    /// `a := Block` from INSIDE the first argument's type and `b := [Block]`
+    /// from the second — the argument types themselves (`Block -> Min Int`,
+    /// `[Block]`) are not the class parameters. `None` unless every parameter
+    /// has a concrete head.
+    pub(crate) fn class_params_from_occurrence(
+        &self,
+        class_name: Symbol,
+        method_def_id: DefId,
+        span: Span,
+    ) -> Option<Vec<Ty>> {
+        self.class_params_from_occurrence_any(class_name, method_def_id, span)
+            .filter(|tys| tys.iter().all(crate::expr::has_concrete_head))
+    }
+
+    /// [`class_params_from_occurrence`](Self::class_params_from_occurrence)
+    /// without the concreteness requirement: parameters may still be
+    /// variables (the enclosing binding's own `a`).
+    pub(crate) fn class_params_from_occurrence_any(
+        &self,
+        class_name: Symbol,
+        method_def_id: DefId,
+        span: Span,
+    ) -> Option<Vec<Ty>> {
+        let scheme = self.lookup_scheme(method_def_id)?;
+        let params = scheme
+            .constraints
+            .iter()
+            .find(|c| c.class == class_name)?
+            .args
+            .clone();
+        let occ = self.expand_type_aliases(&self.resolved_expr_ty_opt(span)?);
+        let subst = bhc_types::types_match(&scheme.ty, &occ).unwrap_or_else(|| {
+            let mut s = bhc_types::Subst::new();
+            crate::expr::match_ty(&scheme.ty, &occ, &mut s);
+            s
+        });
+        let tys: Vec<Ty> = params
+            .iter()
+            .map(|p| self.expand_type_aliases(&subst.apply(p)))
+            .collect();
+        if crate::expr::dispatch_dbg() {
+            eprintln!("[dispatch-multi] {class_name}: occ={occ:?} params={tys:?}");
+        }
+        Some(tys)
+    }
+
     /// Resolve `method` of `class_name` at a concrete instance type: prefer
     /// the instance's own implementation var; otherwise construct the
     /// dictionary (which applies class DEFAULTS to a partial dict) and
@@ -3348,6 +3661,7 @@ impl LowerContext {
             Vec<(Symbol, usize)>,
             usize,
             Vec<Vec<usize>>,
+            Vec<(Symbol, Scheme)>,
         )],
         instances: &[(Symbol, Vec<Ty>, Vec<Symbol>, Vec<Constraint>)],
     ) {
@@ -3360,10 +3674,16 @@ impl LowerContext {
             method_arities,
             param_count,
             superclass_param_indices,
+            method_level,
         ) in classes
         {
             if self.class_registry.lookup_class(*class_name).is_some() {
                 continue; // local declaration wins
+            }
+            for (method, scheme) in method_level {
+                self.class_registry
+                    .method_level
+                    .insert((*class_name, *method), scheme.clone());
             }
             // Class-body defaults: the defining module exports the default
             // as a top-level dict-taking fn named after the method; register
@@ -3927,7 +4247,20 @@ impl LowerContext {
                     let prev_instance_class = self.current_instance_class.take();
                     self.current_instance_class = Some(instance_def.class);
                     for method_def in &instance_def.methods {
-                        let lowered = if inst_constraints.is_empty() {
+                        // The method's OWN constraints (`query :: Monoid c =>
+                        // …`) follow the instance's: dictionary construction
+                        // applies only the instance's, and each USE of the
+                        // method supplies these (`method_level_dicts_at`).
+                        let method_level: Vec<Constraint> = self
+                            .method_level_dict_constraints(instance_def.class, method_def.name)
+                            .map(|(_, cs)| cs)
+                            .unwrap_or_default();
+                        self.instance_method_sig_override = self.instance_method_sig(
+                            instance_def.class,
+                            method_def.name,
+                            &instance_def.types,
+                        );
+                        let lowered = if inst_constraints.is_empty() && method_level.is_empty() {
                             // No instance constraints — lower normally
                             // (`lower_value_def` eta-expands point-free
                             // bodies to the declared arity).
@@ -3935,11 +4268,14 @@ impl LowerContext {
                         } else {
                             // Instance has user-class constraints — wrap method body
                             // with dict lambdas so dictionary construction can apply them.
-                            self.lower_instance_method_with_constraints(
-                                method_def,
-                                &inst_constraints,
-                            )?
+                            let all: Vec<Constraint> = inst_constraints
+                                .iter()
+                                .cloned()
+                                .chain(method_level)
+                                .collect();
+                            self.lower_instance_method_with_constraints(method_def, &all)?
                         };
+                        self.instance_method_sig_override = None;
                         if let Some(mut bind) = lowered {
                             if let Some(inst_ty) = self.current_instance_type.clone() {
                                 annotate_monad_head_tys(&mut bind, &inst_ty);
@@ -4138,7 +4474,11 @@ impl LowerContext {
         // Expand type synonyms ONCE here, not per occurrence: the fallback in
         // dictionary resolution reads this on a hot path.
         let declared = self.lookup_scheme(value_def.id).map(|s| s.ty.clone());
-        self.current_binding_sig = declared.map(|t| self.expand_type_aliases(&t));
+        let override_sig = self.instance_method_sig_override.take();
+        self.current_binding_sig = declared
+            .filter(|t| !matches!(t, Ty::Error))
+            .or(override_sig)
+            .map(|t| self.expand_type_aliases(&t));
 
         // Check if the definition has user-defined class constraints.
         // Only user-defined classes use dictionary-passing; builtin classes
@@ -4183,19 +4523,7 @@ impl LowerContext {
         // without the hint `anyOrderedListMarker`'s `Stream` dictionary
         // resolves to a null placeholder and the parser is run through it.
         if let Some(sig) = self.current_binding_sig.clone() {
-            for eq in &value_def.equations {
-                let mut result = &sig;
-                let mut peeled = 0;
-                while peeled < eq.pats.len() {
-                    let Ty::Fun(_, ret) = result else { break };
-                    result = ret.as_ref();
-                    peeled += 1;
-                }
-                if peeled == eq.pats.len() {
-                    let result = result.clone();
-                    crate::expr::propagate_expected_ty(self, &eq.rhs, &result, 0);
-                }
-            }
+            self.push_sig_into_equations(value_def, &sig);
         }
 
         // Compile equations to a single expression (now with dictionaries in scope)
@@ -4240,6 +4568,48 @@ impl LowerContext {
     /// The `describe` method needs a `Describable a` dictionary to call `describe x`.
     /// We wrap the method body: `\$dDescribable -> \(Box x) -> "Box(" ++ describe x ++ ")"`
     /// so that dictionary construction can apply the constraint dict.
+    /// Push a binding's declared type into each equation's right-hand side
+    /// as the expected type (after peeling one arrow per pattern).
+    fn push_sig_into_equations(&mut self, value_def: &ValueDef, sig: &Ty) {
+        for eq in &value_def.equations {
+            let mut result = sig;
+            let mut peeled = 0;
+            while peeled < eq.pats.len() {
+                let Ty::Fun(_, ret) = result else { break };
+                result = ret.as_ref();
+                peeled += 1;
+            }
+            if peeled == eq.pats.len() {
+                let result = result.clone();
+                crate::expr::propagate_expected_ty(self, &eq.rhs, &result, 0);
+            }
+        }
+    }
+
+    /// The declared type of `class.method` at an instance head: the class's
+    /// parameters replaced by the instance's types. Inside `instance Walkable
+    /// Inl Blk where query = queryBlk`, this says `queryBlk` is used at
+    /// `(Inl -> c) -> Blk -> c` — the only thing that pins `queryBlk`'s
+    /// `Walkable a Blk` to `a := Inl`, since typeck records the occurrence
+    /// with `a` free. Local classes only (an imported class's method types are
+    /// arrow skeletons).
+    fn instance_method_sig(&self, class: Symbol, method: Symbol, inst_types: &[Ty]) -> Option<Ty> {
+        let params = self.class_registry.class_params.get(&class)?;
+        let scheme = self
+            .class_registry
+            .lookup_class(class)?
+            .method_types
+            .get(&method)?;
+        if params.len() != inst_types.len() {
+            return None;
+        }
+        let mut subst = bhc_types::Subst::new();
+        for (p, t) in params.iter().zip(inst_types) {
+            subst.insert(p, t.clone());
+        }
+        Some(subst.apply(&scheme.ty))
+    }
+
     fn lower_instance_method_with_constraints(
         &mut self,
         method_def: &ValueDef,
@@ -4261,12 +4631,29 @@ impl LowerContext {
 
         // Push dict scope so the method body can reference constraint dicts
         self.push_dict_scope();
+        // Registered WITHOUT their argument types, as always: a recorded type
+        // makes `in_scope_dict_matches` compare monad heads, and an instance's
+        // `Monad m` would stop answering for the instance's own `ParsecT`.
         for (class_name, dict_var) in &dict_vars {
             self.register_dict(*class_name, dict_var.clone());
         }
 
+        // The instance head pins the class parameters inside the body — the
+        // same signature push `lower_value_def` does (typeck records none for
+        // an instance method).
+        let saved_binding_sig = self.current_binding_sig.take();
+        self.current_binding_sig = self
+            .instance_method_sig_override
+            .take()
+            .map(|t| self.expand_type_aliases(&t));
+        if let Some(sig) = self.current_binding_sig.clone() {
+            self.push_sig_into_equations(method_def, &sig);
+        }
+
         // Compile the method body (now with constraint dicts in scope)
-        let mut body = self.compile_equations(method_def)?;
+        let body = self.compile_equations(method_def);
+        self.current_binding_sig = saved_binding_sig;
+        let mut body = body?;
 
         self.pop_dict_scope();
 
@@ -4750,9 +5137,22 @@ impl LowerContext {
         // Create dictionary variable for the class constraint
         let dict_var = self.make_dict_var(&class_constraint);
 
+        // The method's own constraints come after the class dictionary, the
+        // same order an instance's implementation takes them in.
+        let method_level: Vec<(Symbol, Var)> = self
+            .method_level_dict_constraints(class_def.name, default_def.name)
+            .map(|(_, cs)| cs)
+            .unwrap_or_default()
+            .iter()
+            .map(|c| (c.class, self.make_dict_var(c)))
+            .collect();
+
         // Push dictionary scope and register the class dictionary
         self.push_dict_scope();
         self.register_dict(class_def.name, dict_var.clone());
+        for (class, var) in &method_level {
+            self.register_dict(*class, var.clone());
+        }
 
         // Compile the default method body (now with class dictionary in scope)
         let mut body = self.compile_equations(default_def)?;
@@ -4760,7 +5160,10 @@ impl LowerContext {
         // Pop the dictionary scope
         self.pop_dict_scope();
 
-        // Wrap body in dictionary lambda
+        // Wrap body in dictionary lambdas: class dictionary outermost.
+        for (_, var) in method_level.into_iter().rev() {
+            body = core::Expr::Lam(var, Box::new(body), default_def.span);
+        }
         body = core::Expr::Lam(dict_var, Box::new(body), default_def.span);
 
         Ok(Some(Bind::NonRec(var, Box::new(body))))
@@ -5237,4 +5640,29 @@ mod tests {
         let v2 = ctx.fresh_var("x", Ty::Error, Span::default());
         assert_ne!(v1.id, v2.id);
     }
+}
+
+/// Whether a binding polymorphic in a `Semigroup`/`Monoid` VALUE type takes
+/// that class's dictionary. Without one, `<>`/`mempty`/`mconcat` inside
+/// `qsum :: Monoid c => …` fell back to the codegen builtins, which assume a
+/// list — so pandoc's `query` over `Min Int` (section levels) or `Text`
+/// (`stringify`) walked the values as cons cells. `BHC_VALUE_CLASS_DICTS=0`
+/// opts out.
+pub(crate) fn value_class_dicts_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("BHC_VALUE_CLASS_DICTS").as_deref(), Ok("0")))
+}
+
+/// Whether class methods' own constraints are dictionary-passed (see
+/// `LowerContext::method_level_is_dict_passed`). `BHC_METHOD_LEVEL_DICTS=0`
+/// opts out.
+pub(crate) fn method_level_dicts_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("BHC_METHOD_LEVEL_DICTS").as_deref(), Ok("0")))
+}
+
+/// Whether `BHC_DBG_ML` tracing is on, read once.
+pub(crate) fn ml_dbg() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BHC_DBG_ML").is_some())
 }

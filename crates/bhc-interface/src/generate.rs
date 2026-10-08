@@ -198,27 +198,36 @@ pub fn generate_interface(
                             let default_names = &default_names;
                             let class_params = &params;
                             let class_name = cls.name.name.as_str();
-                            Some(sig.names.iter().map(move |name| ClassMethod {
-                                name: name.name.as_str().to_string(),
-                                signature: TypeSignature {
-                                    type_vars: Vec::new(),
-                                    // The method's implicit class constraint
-                                    // (`HasReaderOptions st => ...`), sharing
-                                    // the class param var with the sig type.
-                                    // Consumers use it to extract the class
-                                    // param's instantiation from a recorded
-                                    // occurrence type when the param appears
-                                    // in neither argument nor result head.
-                                    constraints: vec![Constraint {
-                                        class: class_name.to_string(),
-                                        args: class_params
-                                            .iter()
-                                            .map(|p| Type::Var(p.clone()))
-                                            .collect(),
-                                    }],
-                                    ty: expand_synonyms(convert_ast_type(&sig.ty), aliases, 0),
-                                },
-                                has_default: default_names.contains(name.name.as_str()),
+                            Some(sig.names.iter().map(move |name| {
+                                ClassMethod {
+                                    name: name.name.as_str().to_string(),
+                                    signature: TypeSignature {
+                                        type_vars: Vec::new(),
+                                        // The method's implicit class constraint
+                                        // (`HasReaderOptions st => ...`), sharing
+                                        // the class param var with the sig type.
+                                        // Consumers use it to extract the class
+                                        // param's instantiation from a recorded
+                                        // occurrence type when the param appears
+                                        // in neither argument nor result head.
+                                        //
+                                        // Followed by the method's OWN context
+                                        // (`query :: Monoid c => …`): an
+                                        // importer passes those constraints'
+                                        // dictionaries at every use.
+                                        constraints: std::iter::once(Constraint {
+                                            class: class_name.to_string(),
+                                            args: class_params
+                                                .iter()
+                                                .map(|p| Type::Var(p.clone()))
+                                                .collect(),
+                                        })
+                                        .chain(method_own_context(&sig.ty))
+                                        .collect(),
+                                        ty: expand_synonyms(convert_ast_type(&sig.ty), aliases, 0),
+                                    },
+                                    has_default: default_names.contains(name.name.as_str()),
+                                }
                             }))
                         } else {
                             None
@@ -699,6 +708,22 @@ fn convert_ast_type(ty: &bhc_ast::Type) -> Type {
         bhc_ast::Type::PromotedList(_, _) | bhc_ast::Type::NatLit(_, _) => {
             Type::Con("Unknown".to_string())
         }
+    }
+}
+
+/// The context written on a class method's own signature (`Monoid c` in
+/// `query :: Monoid c => (a -> c) -> b -> c`), under any `forall`/parens.
+fn method_own_context(ty: &bhc_ast::Type) -> Vec<Constraint> {
+    match ty {
+        bhc_ast::Type::Forall(_, inner, _) | bhc_ast::Type::Paren(inner, _) => {
+            method_own_context(inner)
+        }
+        bhc_ast::Type::Constrained(ctx, inner, _) => ctx
+            .iter()
+            .map(convert_ast_constraint)
+            .chain(method_own_context(inner))
+            .collect(),
+        _ => Vec::new(),
     }
 }
 

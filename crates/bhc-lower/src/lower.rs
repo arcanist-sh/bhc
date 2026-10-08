@@ -371,6 +371,219 @@ fn process_imports(
     }
 }
 
+/// What `Prelude` exports, as far as bhc models it. An unqualified import
+/// never displaces one of these builtins (see `is_prelude_export`).
+pub(crate) const PRELUDE_EXPORTS: &[&str] = &[
+    // Numeric
+    "+",
+    "-",
+    "*",
+    "negate",
+    "abs",
+    "signum",
+    "fromInteger",
+    "fromIntegral",
+    "div",
+    "mod",
+    "even",
+    "odd",
+    "sum",
+    "product",
+    // Comparison
+    "==",
+    "/=",
+    "<",
+    "<=",
+    ">",
+    ">=",
+    "compare",
+    "min",
+    "max",
+    // Boolean
+    "&&",
+    "||",
+    "not",
+    "otherwise",
+    // List operations
+    "map",
+    "filter",
+    "head",
+    "tail",
+    "last",
+    "init",
+    "null",
+    "length",
+    "reverse",
+    "foldl",
+    "foldl'",
+    "foldr",
+    "concat",
+    "concatMap",
+    "zip",
+    "zipWith",
+    "unzip",
+    "take",
+    "drop",
+    "splitAt",
+    "takeWhile",
+    "dropWhile",
+    "span",
+    "break",
+    "elem",
+    "notElem",
+    "lookup",
+    "replicate",
+    "iterate",
+    "repeat",
+    "cycle",
+    "any",
+    "all",
+    "and",
+    "or",
+    "lines",
+    "unlines",
+    "words",
+    "unwords",
+    "++",
+    // Tuple
+    "fst",
+    "snd",
+    "curry",
+    "uncurry",
+    "swap",
+    // Function
+    "id",
+    "const",
+    "flip",
+    "$",
+    ".",
+    "seq",
+    "error",
+    "undefined",
+    // Maybe
+    "maybe",
+    "fromMaybe",
+    "isJust",
+    "isNothing",
+    // Either
+    "either",
+    // IO
+    "putStrLn",
+    "putStr",
+    "print",
+    "getLine",
+    "readLn",
+    ">>",
+    ">>=",
+    "return",
+    // Show
+    "show",
+    "showString",
+    "showChar",
+    "showParen",
+    // Enum
+    "enumFromTo",
+    "succ",
+    "pred",
+    "toEnum",
+    "fromEnum",
+    // Integral
+    "gcd",
+    "lcm",
+    "quot",
+    "rem",
+    "quotRem",
+    "divMod",
+    "subtract",
+    "realToFrac",
+    // List extras
+    "maximum",
+    "minimum",
+    "scanl",
+    "scanr",
+    "scanl1",
+    "scanr1",
+    "zip3",
+    "zipWith3",
+    "unzip3",
+    // Function
+    "until",
+    "asTypeOf",
+    // IO
+    "getChar",
+    "getContents",
+    "readFile",
+    "writeFile",
+    "appendFile",
+    "interact",
+    // Read/lex
+    "lex",
+    "read",
+    "reads",
+    "readParen",
+    // MonadFail
+    "fail",
+    // Error
+    "userError",
+    "ioError",
+];
+
+/// Whether `name` is exported by Haskell's `Prelude`: bhc's own list plus the
+/// class methods and combinators it models elsewhere.
+pub(crate) fn is_prelude_export(name: &str) -> bool {
+    const MORE: &[&str] = &[
+        "fmap",
+        "<$>",
+        "<$",
+        "<*>",
+        "pure",
+        "*>",
+        "<*",
+        "mapM",
+        "mapM_",
+        "sequence",
+        "sequence_",
+        "=<<",
+        "<>",
+        "mempty",
+        "mappend",
+        "mconcat",
+        "traverse",
+        "sequenceA",
+        "foldMap",
+        "foldl1",
+        "foldr1",
+        "!!",
+        "^",
+        "^^",
+        "**",
+        "sqrt",
+        "exp",
+        "log",
+        "sin",
+        "cos",
+        "tan",
+        "pi",
+        "truncate",
+        "round",
+        "ceiling",
+        "floor",
+        "toInteger",
+        "fromRational",
+        "toRational",
+        "minBound",
+        "maxBound",
+        "showsPrec",
+        "showList",
+        "readsPrec",
+        "readIO",
+        "shows",
+        "words",
+        "unwords",
+    ];
+    PRELUDE_EXPORTS.contains(&name) || MORE.contains(&name)
+}
+
 /// Register standard module exports.
 ///
 /// This is a temporary solution until we have proper module loading.
@@ -383,160 +596,7 @@ fn register_standard_module_exports(
     import_decl: Option<&ast::ImportDecl>,
 ) {
     let exports: &[&str] = match module_name {
-        "Prelude" => &[
-            // Numeric
-            "+",
-            "-",
-            "*",
-            "negate",
-            "abs",
-            "signum",
-            "fromInteger",
-            "fromIntegral",
-            "div",
-            "mod",
-            "even",
-            "odd",
-            "sum",
-            "product",
-            // Comparison
-            "==",
-            "/=",
-            "<",
-            "<=",
-            ">",
-            ">=",
-            "compare",
-            "min",
-            "max",
-            // Boolean
-            "&&",
-            "||",
-            "not",
-            "otherwise",
-            // List operations
-            "map",
-            "filter",
-            "head",
-            "tail",
-            "last",
-            "init",
-            "null",
-            "length",
-            "reverse",
-            "foldl",
-            "foldl'",
-            "foldr",
-            "concat",
-            "concatMap",
-            "zip",
-            "zipWith",
-            "unzip",
-            "take",
-            "drop",
-            "splitAt",
-            "takeWhile",
-            "dropWhile",
-            "span",
-            "break",
-            "elem",
-            "notElem",
-            "lookup",
-            "replicate",
-            "iterate",
-            "repeat",
-            "cycle",
-            "any",
-            "all",
-            "and",
-            "or",
-            "lines",
-            "unlines",
-            "words",
-            "unwords",
-            "++",
-            // Tuple
-            "fst",
-            "snd",
-            "curry",
-            "uncurry",
-            "swap",
-            // Function
-            "id",
-            "const",
-            "flip",
-            "$",
-            ".",
-            "seq",
-            "error",
-            "undefined",
-            // Maybe
-            "maybe",
-            "fromMaybe",
-            "isJust",
-            "isNothing",
-            // Either
-            "either",
-            // IO
-            "putStrLn",
-            "putStr",
-            "print",
-            "getLine",
-            "readLn",
-            ">>",
-            ">>=",
-            "return",
-            // Show
-            "show",
-            "showString",
-            "showChar",
-            "showParen",
-            // Enum
-            "enumFromTo",
-            "succ",
-            "pred",
-            "toEnum",
-            "fromEnum",
-            // Integral
-            "gcd",
-            "lcm",
-            "quot",
-            "rem",
-            "quotRem",
-            "divMod",
-            "subtract",
-            "realToFrac",
-            // List extras
-            "maximum",
-            "minimum",
-            "scanl",
-            "scanr",
-            "scanl1",
-            "scanr1",
-            "zip3",
-            "zipWith3",
-            "unzip3",
-            // Function
-            "until",
-            "asTypeOf",
-            // IO
-            "getChar",
-            "getContents",
-            "readFile",
-            "writeFile",
-            "appendFile",
-            "interact",
-            // Read/lex
-            "lex",
-            "read",
-            "reads",
-            "readParen",
-            // MonadFail
-            "fail",
-            // Error
-            "userError",
-            "ioError",
-        ],
+        "Prelude" => PRELUDE_EXPORTS,
         "Data.Map"
         | "Data.Map.Strict"
         | "Data.Map.Lazy"
@@ -5960,6 +6020,12 @@ fn register_standard_module_exports(
 
     // Build a set of explicitly imported names, if the import has an explicit list.
     // This prevents `import Data.Text (Text)` from overriding Prelude's `foldr` etc.
+    // Names admitted ONLY by a `T(..)` wildcard, not listed by name. The
+    // wildcard admits every export of a stubbed module, so without this
+    // `import Data.Sequence (ViewL (..), viewl)` — pandoc's Shared.hs — rebound
+    // bare `zipWith` to the unimplemented `Data.Sequence.zipWith`, and
+    // `makeSectionsWithOffsets` aborted on a stub.
+    let mut wildcard_only: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
     let explicit_imports: Option<rustc_hash::FxHashSet<&str>> = import_decl.and_then(|imp| {
         if let Some(ast::ImportSpec::Only(items)) = &imp.spec {
             let mut names = rustc_hash::FxHashSet::default();
@@ -6000,7 +6066,9 @@ fn register_standard_module_exports(
             // `walkM`, `query`), so we must allow all names, not just uppercase.
             if has_dotdot_import {
                 for export in exports {
-                    names.insert(export);
+                    if names.insert(export) {
+                        wildcard_only.insert(*export);
+                    }
                 }
             }
             Some(names)
@@ -6267,6 +6335,14 @@ fn register_standard_module_exports(
         let is_explicitly_imported = explicit_imports
             .as_ref()
             .is_none_or(|names| names.contains(export));
+        // A lowercase name only the wildcard let through must not displace a
+        // name that is already bound (a Prelude builtin): it cannot be a
+        // constructor of the `T(..)` type, and a class method of the same
+        // name would be the builtin anyway.
+        let is_explicitly_imported = is_explicitly_imported
+            && !(!is_constructor
+                && (wildcard_only.contains(raw_export) || wildcard_only.contains(export))
+                && ctx.lookup_value(unqualified).is_some());
         // A `qualified` import must not leak the module's *typed* scheme into the
         // unqualified namespace. Historically the bare stub was registered even
         // for `import qualified Data.Text as T`, and with `has_typed_sigs` it got

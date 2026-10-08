@@ -70,6 +70,10 @@ impl DefKind {
     }
 }
 
+/// Every builtin definition has a DefId below this; the first user or
+/// imported definition is allocated at it (see `define_builtins`).
+pub const BUILTIN_DEF_LIMIT: usize = 12321;
+
 /// Information about a definition.
 #[derive(Clone, Debug)]
 pub struct DefInfo {
@@ -185,6 +189,9 @@ pub type InterfaceClassEntry = (
     Vec<(Symbol, usize)>,
     usize,
     Vec<Vec<usize>>,
+    // Methods with constraints of their own (`query :: Monoid c => …`): the
+    // declared scheme, its constraints being exactly the method-level ones.
+    Vec<(Symbol, bhc_types::Scheme)>,
 );
 
 /// An imported instance as threaded from module interfaces:
@@ -1952,8 +1959,8 @@ impl LowerContext {
         }
 
         // Ensure next_def_id is past the fixed DefId ranges
-        if self.next_def_id <= 12321 {
-            self.next_def_id = 12321;
+        if self.next_def_id <= BUILTIN_DEF_LIMIT as u32 {
+            self.next_def_id = BUILTIN_DEF_LIMIT as u32;
         }
     }
 

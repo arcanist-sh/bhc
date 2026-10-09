@@ -861,6 +861,55 @@ mod tests {
         assert_eq!(class_sel_builtin("MonadError", "$sel_1"), None);
     }
 
+    fn v(name: &str, id: usize) -> Var {
+        Var::new(Symbol::intern(name), VarId::new(id), Ty::Error)
+    }
+    fn sel(n: usize, d: Expr) -> Expr {
+        Expr::App(
+            Box::new(Expr::Var(v(&format!("$sel_{n}"), 0), Span::DUMMY)),
+            Box::new(d),
+            Span::DUMMY,
+        )
+    }
+
+    #[test]
+    fn own_monad_dicts_takes_params_and_superclass_selections() {
+        // \$dPandocMonad -> let $superMonad = $sel_0 $dPandocMonad in
+        //                     let $dMonad_c = <constructed> in $sel_1 $superMonad
+        let param = v("$dPandocMonad_1", 1);
+        let supr = v("$superMonad_2", 2);
+        let constructed = v("$dMonad_3", 3);
+        let body = Expr::Lam(
+            param.clone(),
+            Box::new(Expr::Let(
+                Box::new(Bind::NonRec(
+                    supr.clone(),
+                    Box::new(sel(0, Expr::Var(param.clone(), Span::DUMMY))),
+                )),
+                Box::new(Expr::Let(
+                    Box::new(Bind::NonRec(
+                        constructed.clone(),
+                        // A dictionary the body BUILDS: not derived from the param.
+                        Box::new(Expr::Lit(crate::Literal::Int(0), Ty::Error, Span::DUMMY)),
+                    )),
+                    Box::new(sel(1, Expr::Var(supr.clone(), Span::DUMMY))),
+                    Span::DUMMY,
+                )),
+                Span::DUMMY,
+            )),
+            Span::DUMMY,
+        );
+        let dicts = own_monad_dicts(&body);
+        assert!(dicts.contains(&param.id), "the dictionary parameter");
+        assert!(dicts.contains(&supr.id), "a superclass selection from it");
+        assert!(
+            !dicts.contains(&constructed.id),
+            "a dictionary the body constructed for another monad must NOT count — \
+             rewriting its selections to builtins ran pandoc's parser through the \
+             writer's transformer stack"
+        );
+    }
+
     #[test]
     fn dict_class_name_extracts_class_exactly() {
         // Direct params and extracted superclass dicts.

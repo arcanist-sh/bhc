@@ -9853,6 +9853,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn prelude_exports_cover_the_names_an_import_must_not_displace() {
+        // An unqualified import may shadow a codegen builtin whose name is not
+        // a Prelude export (`try` from parsec); using an imported Prelude name
+        // bare would be ambiguous in Haskell, so those stay with the builtin.
+        for name in ["map", "foldr", "show", "fmap", "<>", "mapM", "mempty"] {
+            assert!(is_prelude_export(name), "{name} is a Prelude export");
+        }
+        for name in ["try", "catch", "when", "unless", "viewl", "manyTill"] {
+            assert!(
+                !is_prelude_export(name),
+                "{name} is not exported by Prelude, so an import of it must win"
+            );
+        }
+    }
+
+    #[test]
     fn test_lower_simple_var() {
         let mut ctx = LowerContext::with_builtins();
 

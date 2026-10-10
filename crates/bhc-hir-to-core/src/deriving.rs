@@ -2271,9 +2271,7 @@ impl DerivingContext {
         // `liftA2 (<>)` in its `Semigroup` instance found no monad to build
         // from and `inlines1` aborted on the `liftA2` runtime stub. The class
         // parameter is the LAST one; only a nullary newtype has nothing.
-        let Some(type_param) = newtype_def.params.last().cloned() else {
-            return None;
-        };
+        let type_param = newtype_def.params.last().cloned()?;
 
         let span = newtype_def.span;
 
@@ -2435,9 +2433,7 @@ impl DerivingContext {
         // `liftA2 (<>)` in its `Semigroup` instance found no monad to build
         // from and `inlines1` aborted on the `liftA2` runtime stub. The class
         // parameter is the LAST one; only a nullary newtype has nothing.
-        let Some(type_param) = newtype_def.params.last().cloned() else {
-            return None;
-        };
+        let type_param = newtype_def.params.last().cloned()?;
         let span = newtype_def.span;
         let field_ty = self.get_newtype_field_ty(newtype_def)?;
         // Only derive when the field actually wraps the type parameter (`T .. a`);
@@ -2551,9 +2547,7 @@ impl DerivingContext {
         // `liftA2 (<>)` in its `Semigroup` instance found no monad to build
         // from and `inlines1` aborted on the `liftA2` runtime stub. The class
         // parameter is the LAST one; only a nullary newtype has nothing.
-        let Some(type_param) = newtype_def.params.last().cloned() else {
-            return None;
-        };
+        let type_param = newtype_def.params.last().cloned()?;
         let span = newtype_def.span;
         let field_ty = self.get_newtype_field_ty(newtype_def)?;
         if !self.type_contains_param(&field_ty, &type_param) {
@@ -2807,7 +2801,7 @@ impl DerivingContext {
         let type_param = &newtype_def.params[0];
 
         let field_ty = self.get_newtype_field_ty(newtype_def)?;
-        if !self.type_contains_param(&field_ty, &type_param) {
+        if !self.type_contains_param(&field_ty, type_param) {
             return None;
         }
 
@@ -3078,7 +3072,7 @@ impl DerivingContext {
         let type_param = &newtype_def.params[0];
 
         let field_ty = self.get_newtype_field_ty(newtype_def)?;
-        if !self.type_contains_param(&field_ty, &type_param) {
+        if !self.type_contains_param(&field_ty, type_param) {
             return None;
         }
 

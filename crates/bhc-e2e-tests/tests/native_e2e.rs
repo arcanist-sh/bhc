@@ -855,6 +855,40 @@ fn test_tier2_derive_eq() {
     run_native_test("tier2_functions/derive_eq", Profile::Default);
 }
 
+/// `f <$> x <*> y` must reach the user `Functor`/`Applicative` instance: the
+/// functor value is `<$>`'s LAST operand, and dispatching on the first one
+/// resolved `Functor` at a function type and fell back to the builtin fmap.
+#[test]
+fn test_tier2_applicative_user_instance() {
+    run_native_test(
+        "tier2_functions/applicative_user_instance",
+        Profile::Default,
+    );
+}
+
+/// `return $ return x` spans two monads, and `$` must not hide the head of
+/// either `return`.
+#[test]
+fn test_tier2_nested_return_user_monads() {
+    run_native_test(
+        "tier2_functions/nested_return_user_monads",
+        Profile::Default,
+    );
+}
+
+/// `f =<< m` must reach the same instance as `m >>= f`.
+#[test]
+fn test_tier2_flipped_bind_user_monad() {
+    run_native_test("tier2_functions/flipped_bind_user_monad", Profile::Default);
+}
+
+/// `deriving (Functor, Applicative, Monad)` on a newtype that carries a
+/// parameter before the monad's own, and `liftA2` over it.
+#[test]
+fn test_tier2_gnd_newtype_extra_param() {
+    run_native_test("tier2_functions/gnd_newtype_extra_param", Profile::Default);
+}
+
 #[test]
 fn test_tier3_derive_ord() {
     run_native_test("tier3_io/derive_ord", Profile::Default);

@@ -2264,27 +2264,105 @@ impl DerivingContext {
 
     /// Derive Functor for a newtype.
     fn derive_functor_newtype(&mut self, newtype_def: &NewtypeDef) -> Option<DerivedInstance> {
-        // Functor requires exactly one type parameter
-        if newtype_def.params.len() != 1 {
+        // A newtype may carry parameters BEFORE the one the class abstracts
+        // over: pandoc's `Future s a` wraps `Reader s a`, and `deriving
+        // (Functor, Applicative, Monad)` on it means `Future s`. Declining
+        // those left the derived instance EMPTY — no `>>=`, no `pure` — so
+        // `liftA2 (<>)` in its `Semigroup` instance found no monad to build
+        // from and `inlines1` aborted on the `liftA2` runtime stub. The class
+        // parameter is the LAST one; only a nullary newtype has nothing.
+        let Some(type_param) = newtype_def.params.last().cloned() else {
             return None;
-        }
+        };
 
         let span = newtype_def.span;
-        let type_param = &newtype_def.params[0];
 
         // Check if the wrapped type contains the type parameter
         let field_ty = self.get_newtype_field_ty(newtype_def)?;
-        if !self.type_contains_param(&field_ty, type_param) {
+        if !self.type_contains_param(&field_ty, &type_param) {
             return None;
         }
 
-        let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
+        // `Monad (Future s)`: the head is the newtype applied to every
+        // parameter but the class's own, so the registry keys the instance at
+        // the arity the use site resolves at (`Future_v`, not `Future` — which
+        // is why the derived methods were invisible to `resolve_method_at_
+        // concrete_type` and `liftA2` stayed a stub).
+        let instance_type = newtype_def.params[..newtype_def.params.len() - 1]
+            .iter()
+            .fold(
+                Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star())),
+                |acc, p| Ty::App(Box::new(acc), Box::new(Ty::Var(p.clone()))),
+            );
+        // …and the method symbols carry that head's encoding, because an
+        // importing module reconstructs the name from the instance TYPE
+        // (`$instance_>>=_Future_v`). Naming them after the bare type left the
+        // consumer calling a symbol the producer never defined.
+        let inst_enc = crate::context::type_name_for_instance(&instance_type);
+
+        // When the field is itself a functor IN the parameter — `F s a`
+        // wrapping `Reader s a`, pandoc's `Future` — `fmap` delegates to the
+        // inner one, exactly as the Applicative and Monad derivers do. A
+        // newtype is representationally identity, so the body needs no
+        // wrap/unwrap and the method var's field type is what makes codegen
+        // choose the inner implementation. Applying `f` to the field instead
+        // (the body below, right for `newtype Id a = Id a`) handed the
+        // function the whole Reader action: `fmap (* 2) prog` segfaulted.
+        let field_is_functor = match &field_ty {
+            Ty::App(_, last) => matches!(last.as_ref(), Ty::Var(v) if *v == type_param),
+            Ty::List(elem) => matches!(elem.as_ref(), Ty::Var(v) if *v == type_param),
+            _ => false,
+        };
+        if field_is_functor {
+            let fmap_var = self.named_instance_var(
+                &format!("$instance_fmap_{inst_enc}"),
+                Ty::Fun(
+                    Box::new(Ty::Fun(
+                        Box::new(Ty::Var(type_param.clone())),
+                        Box::new(Ty::Var(type_param.clone())),
+                    )),
+                    Box::new(Ty::Fun(
+                        Box::new(field_ty.clone()),
+                        Box::new(field_ty.clone()),
+                    )),
+                ),
+            );
+            let f = self.fresh_var("f", Ty::Error);
+            let m = self.fresh_var("m", Ty::Error);
+            let body = core::Expr::Lam(
+                f.clone(),
+                Box::new(core::Expr::Lam(
+                    m.clone(),
+                    Box::new(self.make_fmap(
+                        core::Expr::Var(f, span),
+                        core::Expr::Var(m, span),
+                        span,
+                    )),
+                    span,
+                )),
+                span,
+            );
+            let mut methods = FxHashMap::default();
+            methods.insert(
+                Symbol::intern("fmap"),
+                bhc_hir::DefId::new(fmap_var.id.index()),
+            );
+            let instance = InstanceInfo {
+                class: Symbol::intern("Functor"),
+                instance_types: vec![instance_type],
+                methods,
+                superclass_instances: Vec::new(),
+                assoc_type_impls: FxHashMap::default(),
+                instance_constraints: Vec::new(),
+            };
+            return Some(DerivedInstance {
+                instance,
+                bindings: vec![Bind::NonRec(fmap_var, Box::new(body))],
+            });
+        }
 
         // fmap f (Con x) = Con (f x)
-        let fmap_var = self.named_instance_var(
-            &format!("$instance_fmap_{}", newtype_def.name.as_str()),
-            Ty::Error,
-        );
+        let fmap_var = self.named_instance_var(&format!("$instance_fmap_{inst_enc}"), Ty::Error);
 
         let f_var = self.fresh_var("f", Ty::Error);
         let x_var = self.fresh_var("x", Ty::Error);
@@ -2350,24 +2428,44 @@ impl DerivingContext {
     /// transformer builtins instead of re-dispatching to this same instance
     /// (which would loop).
     fn derive_applicative_newtype(&mut self, newtype_def: &NewtypeDef) -> Option<DerivedInstance> {
-        // Applicative is `f :: * -> *`, so the newtype needs exactly one param.
-        if newtype_def.params.len() != 1 {
+        // A newtype may carry parameters BEFORE the one the class abstracts
+        // over: pandoc's `Future s a` wraps `Reader s a`, and `deriving
+        // (Functor, Applicative, Monad)` on it means `Future s`. Declining
+        // those left the derived instance EMPTY — no `>>=`, no `pure` — so
+        // `liftA2 (<>)` in its `Semigroup` instance found no monad to build
+        // from and `inlines1` aborted on the `liftA2` runtime stub. The class
+        // parameter is the LAST one; only a nullary newtype has nothing.
+        let Some(type_param) = newtype_def.params.last().cloned() else {
             return None;
-        }
+        };
         let span = newtype_def.span;
-        let type_param = &newtype_def.params[0];
         let field_ty = self.get_newtype_field_ty(newtype_def)?;
         // Only derive when the field actually wraps the type parameter (`T .. a`);
         // otherwise the field isn't an applicative in `a`.
-        if !self.type_contains_param(&field_ty, type_param) {
+        if !self.type_contains_param(&field_ty, &type_param) {
             return None;
         }
 
-        let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
+        // `Monad (Future s)`: the head is the newtype applied to every
+        // parameter but the class's own, so the registry keys the instance at
+        // the arity the use site resolves at (`Future_v`, not `Future` — which
+        // is why the derived methods were invisible to `resolve_method_at_
+        // concrete_type` and `liftA2` stayed a stub).
+        let instance_type = newtype_def.params[..newtype_def.params.len() - 1]
+            .iter()
+            .fold(
+                Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star())),
+                |acc, p| Ty::App(Box::new(acc), Box::new(Ty::Var(p.clone()))),
+            );
+        // …and the method symbols carry that head's encoding, because an
+        // importing module reconstructs the name from the instance TYPE
+        // (`$instance_>>=_Future_v`). Naming them after the bare type left the
+        // consumer calling a symbol the producer never defined.
+        let inst_enc = crate::context::type_name_for_instance(&instance_type);
 
         // pure x = pure x  (inner `pure` resolved at the underlying field type)
         let pure_var = self.named_instance_var(
-            &format!("$instance_pure_{}", newtype_def.name.as_str()),
+            &format!("$instance_pure_{inst_enc}"),
             Ty::Fun(
                 Box::new(Ty::Var(type_param.clone())),
                 Box::new(field_ty.clone()),
@@ -2382,7 +2480,7 @@ impl DerivingContext {
 
         // f <*> x = f <*> x  (inner `<*>` at the underlying field type)
         let ap_var = self.named_instance_var(
-            &format!("$instance_<*>_{}", newtype_def.name.as_str()),
+            &format!("$instance_<*>_{inst_enc}"),
             Ty::Fun(
                 Box::new(field_ty.clone()),
                 Box::new(Ty::Fun(
@@ -2446,21 +2544,42 @@ impl DerivingContext {
     /// vars carry the underlying field type so codegen lowers the inner
     /// `return`/`>>=` via the transformer builtins.
     fn derive_monad_newtype(&mut self, newtype_def: &NewtypeDef) -> Option<DerivedInstance> {
-        if newtype_def.params.len() != 1 {
+        // A newtype may carry parameters BEFORE the one the class abstracts
+        // over: pandoc's `Future s a` wraps `Reader s a`, and `deriving
+        // (Functor, Applicative, Monad)` on it means `Future s`. Declining
+        // those left the derived instance EMPTY — no `>>=`, no `pure` — so
+        // `liftA2 (<>)` in its `Semigroup` instance found no monad to build
+        // from and `inlines1` aborted on the `liftA2` runtime stub. The class
+        // parameter is the LAST one; only a nullary newtype has nothing.
+        let Some(type_param) = newtype_def.params.last().cloned() else {
             return None;
-        }
+        };
         let span = newtype_def.span;
-        let type_param = &newtype_def.params[0];
         let field_ty = self.get_newtype_field_ty(newtype_def)?;
-        if !self.type_contains_param(&field_ty, type_param) {
+        if !self.type_contains_param(&field_ty, &type_param) {
             return None;
         }
 
-        let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
+        // `Monad (Future s)`: the head is the newtype applied to every
+        // parameter but the class's own, so the registry keys the instance at
+        // the arity the use site resolves at (`Future_v`, not `Future` — which
+        // is why the derived methods were invisible to `resolve_method_at_
+        // concrete_type` and `liftA2` stayed a stub).
+        let instance_type = newtype_def.params[..newtype_def.params.len() - 1]
+            .iter()
+            .fold(
+                Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star())),
+                |acc, p| Ty::App(Box::new(acc), Box::new(Ty::Var(p.clone()))),
+            );
+        // …and the method symbols carry that head's encoding, because an
+        // importing module reconstructs the name from the instance TYPE
+        // (`$instance_>>=_Future_v`). Naming them after the bare type left the
+        // consumer calling a symbol the producer never defined.
+        let inst_enc = crate::context::type_name_for_instance(&instance_type);
 
         // return x = return x  (inner `return` at the underlying field type)
         let return_var = self.named_instance_var(
-            &format!("$instance_return_{}", newtype_def.name.as_str()),
+            &format!("$instance_return_{inst_enc}"),
             Ty::Fun(
                 Box::new(Ty::Var(type_param.clone())),
                 Box::new(field_ty.clone()),
@@ -2476,7 +2595,7 @@ impl DerivingContext {
         // m >>= f = m >>= f  (inner `>>=` at the underlying field type; the
         // continuation's `N b` is representationally the field's `T b`).
         let bind_var = self.named_instance_var(
-            &format!("$instance_>>=_{}", newtype_def.name.as_str()),
+            &format!("$instance_>>=_{inst_enc}"),
             Ty::Fun(
                 Box::new(field_ty.clone()),
                 Box::new(Ty::Fun(
@@ -2506,7 +2625,7 @@ impl DerivingContext {
         // real code using `>>` (statement without binding) otherwise fails to
         // dispatch. Delegate through the same `>>=` the derived `>>=` uses.
         let seq_var = self.named_instance_var(
-            &format!("$instance_>>_{}", newtype_def.name.as_str()),
+            &format!("$instance_>>_{inst_enc}"),
             Ty::Fun(
                 Box::new(field_ty.clone()),
                 Box::new(Ty::Fun(
@@ -2688,11 +2807,21 @@ impl DerivingContext {
         let type_param = &newtype_def.params[0];
 
         let field_ty = self.get_newtype_field_ty(newtype_def)?;
-        if !self.type_contains_param(&field_ty, type_param) {
+        if !self.type_contains_param(&field_ty, &type_param) {
             return None;
         }
 
-        let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
+        // `Monad (Future s)`: the head is the newtype applied to every
+        // parameter but the class's own, so the registry keys the instance at
+        // the arity the use site resolves at (`Future_v`, not `Future` — which
+        // is why the derived methods were invisible to `resolve_method_at_
+        // concrete_type` and `liftA2` stayed a stub).
+        let instance_type = newtype_def.params[..newtype_def.params.len() - 1]
+            .iter()
+            .fold(
+                Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star())),
+                |acc, p| Ty::App(Box::new(acc), Box::new(Ty::Var(p.clone()))),
+            );
 
         // foldr f z (Con x) = f x z
         let foldr_var = self.fresh_var(
@@ -2949,11 +3078,21 @@ impl DerivingContext {
         let type_param = &newtype_def.params[0];
 
         let field_ty = self.get_newtype_field_ty(newtype_def)?;
-        if !self.type_contains_param(&field_ty, type_param) {
+        if !self.type_contains_param(&field_ty, &type_param) {
             return None;
         }
 
-        let instance_type = Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star()));
+        // `Monad (Future s)`: the head is the newtype applied to every
+        // parameter but the class's own, so the registry keys the instance at
+        // the arity the use site resolves at (`Future_v`, not `Future` — which
+        // is why the derived methods were invisible to `resolve_method_at_
+        // concrete_type` and `liftA2` stayed a stub).
+        let instance_type = newtype_def.params[..newtype_def.params.len() - 1]
+            .iter()
+            .fold(
+                Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star())),
+                |acc, p| Ty::App(Box::new(acc), Box::new(Ty::Var(p.clone()))),
+            );
 
         // traverse f (Con x) = Con <$> f x
         let traverse_var = self.fresh_var(

@@ -127,9 +127,13 @@ pub fn generate_interface(
                 // emits the impls as external `$instance_{method}_{Name}`
                 // symbols (matching the consumer's reconstruction), harvested as
                 // interface instance methods. Only these classes take part in
-                // transformer-newtype deriving, and only with a single type
-                // parameter (the deriver's own precondition).
-                if nt.params.len() == 1 {
+                // transformer-newtype deriving. A newtype may carry parameters
+                // BEFORE the one the class abstracts over (`Future s a` wraps
+                // `Reader s a`), and the instance head is then the newtype
+                // applied to the rest — pandoc's `Future` was invisible to
+                // importing modules, so `liftA2 (<>)` in its `Semigroup`
+                // instance had no `>>=` to build from.
+                if !nt.params.is_empty() {
                     for clause in &nt.deriving {
                         let methods: Vec<String> = match clause.class.name.as_str() {
                             "Functor" => vec!["fmap".to_string()],
@@ -141,9 +145,18 @@ pub fn generate_interface(
                             }
                             _ => continue,
                         };
+                        let head = nt.params[..nt.params.len() - 1].iter().fold(
+                            Type::Con(nt.name.name.as_str().to_string()),
+                            |acc, p| {
+                                Type::App(
+                                    Box::new(acc),
+                                    Box::new(Type::Var(p.name.name.as_str().to_string())),
+                                )
+                            },
+                        );
                         iface.add_instance(ExportedInstance {
                             class: clause.class.name.as_str().to_string(),
-                            types: vec![Type::Con(nt.name.name.as_str().to_string())],
+                            types: vec![head],
                             constraints: Vec::new(),
                             methods,
                         });

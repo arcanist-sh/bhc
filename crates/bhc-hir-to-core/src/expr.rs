@@ -852,7 +852,10 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 cands.push(inst);
             }
             for m_ty in cands {
-                if monad_runs_eagerly(&m_ty) || applied_head_name(&m_ty).is_none() {
+                // An eager monad is NOT skipped: `ma >>= \a -> mb >>= \b ->
+                // pure (f a b)` is what a do-block at IO compiles to, and the
+                // alternative is the `liftA2` runtime stub.
+                if applied_head_name(&m_ty).is_none() {
                     continue;
                 }
                 if let Some(lam) = lower_lift_a2_lambda(ctx, &m_ty, def_ref.span) {
@@ -1112,7 +1115,11 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 // the named instance method at that head; builtin monads and
                 // unresolved heads fall through to the codegen fast path as
                 // before.
-                if let Some(occ_ty) = ctx.resolved_expr_ty_opt(def_ref.span) {
+                // The REFINED type, so an expected type pushed in from the call
+                // site counts: `liftA2 (<>) one two` leaves nothing on the `<>`
+                // itself, and `hint_lift_a2_function_ty` supplies the element
+                // types that pin the class parameter.
+                if let Some(occ_ty) = refined_occurrence_ty(ctx, def_ref.span) {
                     // Semigroup/Monoid parameterize over the VALUE type itself:
                     // take the first parameter (or result) directly, unwrapping
                     // one list for `mconcat :: [a] -> a`.
@@ -1939,6 +1946,48 @@ fn occ_dbg_name() -> Option<&'static str> {
     static F: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     F.get_or_init(|| std::env::var("BHC_DBG_OCC").ok())
         .as_deref()
+}
+
+/// For a saturated `liftA2 f ma mb` (or `liftM2`), record `f`'s type from the
+/// element types of the two actions and of the result.
+///
+/// `liftA2 :: (a -> b -> c) -> m a -> m b -> m c`, so `a`, `b` and `c` are
+/// exactly what the operands and this application carry. Without the hint a
+/// class method passed as `f` has only a type variable and is emitted as the
+/// builtin — `stub: <> not implemented` the moment the element type is a user
+/// type.
+fn hint_lift_a2_function_ty(ctx: &mut LowerContext, f: &hir::Expr, x: &hir::Expr, span: Span) {
+    // Spine: `((liftA2 fn) ma) x`.
+    let hir::Expr::App(inner, mb, _) = f else {
+        return;
+    };
+    let hir::Expr::App(head, fn_arg, _) = inner.as_ref() else {
+        return;
+    };
+    let hir::Expr::Var(dr) = head.as_ref() else {
+        return;
+    };
+    let Some(name) = ctx.lookup_var(dr.def_id).map(|v| v.name) else {
+        return;
+    };
+    if !matches!(name.as_str(), "liftA2" | "liftM2") {
+        return;
+    }
+    let elem = |t: Option<Ty>| match t {
+        Some(Ty::App(_, e)) => Some(*e),
+        _ => None,
+    };
+    let a = elem(ctx.resolved_expr_ty_opt(mb.span()));
+    let b = elem(ctx.resolved_expr_ty_opt(x.span()));
+    let c = elem(ctx.resolved_expr_ty_opt(span));
+    let (Some(a), Some(b), Some(c)) = (a, b, c) else {
+        return;
+    };
+    if has_type_variables(&a) || has_type_variables(&b) || has_type_variables(&c) {
+        return;
+    }
+    let want = Ty::Fun(Box::new(a), Box::new(Ty::Fun(Box::new(b), Box::new(c))));
+    propagate_expected_ty(ctx, fn_arg, &want, 0);
 }
 
 /// Whether `BHC_DBG_DISPATCH` tracing is on, read once.
@@ -3471,18 +3520,56 @@ fn lower_ap_lambda(ctx: &mut LowerContext, monad_ty: &Ty, span: Span) -> Option<
 /// implemented") the moment `inlines1` — `mconcat <$> many1 inline` — folded
 /// two `Future`s together.
 fn lower_lift_a2_lambda(ctx: &mut LowerContext, monad_ty: &Ty, span: Span) -> Option<core::Expr> {
-    let bind_e = ctx.resolve_method_at_concrete_type(
-        Symbol::intern(">>="),
-        Symbol::intern("Monad"),
-        monad_ty,
-        span,
-    )?;
-    let pure_e = ctx.resolve_method_at_concrete_type(
-        Symbol::intern("pure"),
-        Symbol::intern("Applicative"),
-        monad_ty,
-        span,
-    )?;
+    // `m a`, `a -> m b`, … stand-ins: a builtin `>>=`/`pure` is chosen by the
+    // TYPE on its Var (`value_monad_of_ty`, the transformer stack), so the
+    // fallback has to carry one.
+    let unknown = Ty::Var(bhc_types::TyVar::new_star(0xFFE1_0000));
+    let in_monad = Ty::App(Box::new(monad_ty.clone()), Box::new(unknown.clone()));
+    let builtin = |name: &str, ty: Ty| {
+        core::Expr::Var(
+            Var {
+                name: Symbol::intern(name),
+                id: VarId::new(0),
+                ty,
+            },
+            span,
+        )
+    };
+    let bind_e = ctx
+        .resolve_method_at_concrete_type(
+            Symbol::intern(">>="),
+            Symbol::intern("Monad"),
+            monad_ty,
+            span,
+        )
+        .unwrap_or_else(|| {
+            builtin(
+                ">>=",
+                Ty::Fun(
+                    Box::new(in_monad.clone()),
+                    Box::new(Ty::Fun(
+                        Box::new(Ty::Fun(
+                            Box::new(unknown.clone()),
+                            Box::new(in_monad.clone()),
+                        )),
+                        Box::new(in_monad.clone()),
+                    )),
+                ),
+            )
+        });
+    let pure_e = ctx
+        .resolve_method_at_concrete_type(
+            Symbol::intern("pure"),
+            Symbol::intern("Applicative"),
+            monad_ty,
+            span,
+        )
+        .unwrap_or_else(|| {
+            builtin(
+                "pure",
+                Ty::Fun(Box::new(unknown.clone()), Box::new(in_monad.clone())),
+            )
+        });
     let f = ctx.fresh_var("$l2_f", Ty::Error, span);
     let ma = ctx.fresh_var("$l2_ma", Ty::Error, span);
     let mb = ctx.fresh_var("$l2_mb", Ty::Error, span);
@@ -3893,6 +3980,14 @@ fn lower_app(
     // span for an IMPORTED constructor, whose field types come from its
     // interface rather than local inference.
     propagate_constructor_field_tys(ctx, f, x);
+
+    // `liftA2 f ma mb`: typeck leaves nothing on `f`, so a CLASS METHOD there
+    // (`liftA2 (<>) one two` — pandoc's `Semigroup (Future s a)`) has no type to
+    // dispatch on and reaches codegen as the builtin, which for a user type is a
+    // stub. `liftA2`'s own type says exactly what `f` is: the element types of
+    // the two actions and of the result. Push that in; `refined_occurrence_ty`
+    // reads it back when the method is lowered.
+    hint_lift_a2_function_ty(ctx, f, x, span);
 
     // `mapM_`/`mapM`/`sequence_`/… at a monad codegen does not run eagerly.
     if let Some(result) = try_lower_monadic_traversal(ctx, f, x, span)? {
@@ -4826,6 +4921,24 @@ fn lower_app(
                                 }
                             } else {
                                 concrete_ty
+                            };
+                            // A monad-family class abstracts over a type
+                            // CONSTRUCTOR, and an operand's own type is the
+                            // applied `m a`: `a <> b = liftA2 (<>) a b` in
+                            // `instance Semigroup (F s a)` infers `F s a` from
+                            // its parameter, while the instance to find is at
+                            // `F s`. Strip the last argument only when that is
+                            // what makes an instance resolve, so nothing that
+                            // already dispatched moves.
+                            let concrete_ty = match &concrete_ty {
+                                Ty::App(head, _)
+                                    if is_monad_family
+                                        && !ctx.has_instance_for(class_name, &concrete_ty)
+                                        && ctx.has_instance_for(class_name, head) =>
+                                {
+                                    head.as_ref().clone()
+                                }
+                                _ => concrete_ty,
                             };
                             // For monad-family builtin classes, skip if the concrete type
                             // is a builtin monad — let codegen handle the fast path

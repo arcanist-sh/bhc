@@ -7646,17 +7646,6 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
     match expr {
         ast::Expr::Var(ident, span) => {
             let name = ident.name;
-            // `liftA2 f a b` IS `f <$> a <*> b`, and `liftA3` one `<*>` more.
-            // bhc has no implementation of its own — the RTS aborts with
-            // "stub: liftA2 not implemented" — while `<$>` and `<*>` dispatch
-            // through the Functor/Applicative instances like any other method.
-            // Desugaring the NAME (not the call) covers the partial
-            // applications too, which is the shape that matters: pandoc writes
-            // `instance Semigroup a => Semigroup (Future s a) where (<>) =
-            // liftA2 (<>)`, and `inlines1` folds two `Future`s with it.
-            if let Some(lam) = desugar_lift_a(name, *span, ctx) {
-                return lower_expr(ctx, &lam);
-            }
             if let Some(def_id) = resolve_var(ctx, name, *span) {
                 hir::Expr::Var(ctx.def_ref(def_id, *span))
             } else {
@@ -7764,12 +7753,6 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
         }
 
         ast::Expr::App(fun, arg, span) => {
-            // A SATURATED `liftA2 f a b` is rewritten here, where the operands
-            // still have their own spans — and therefore their types, which is
-            // what the bind dispatch reads.
-            if let Some(rewritten) = desugar_saturated_lift_a(expr, *span, ctx) {
-                return lower_expr(ctx, &rewritten);
-            }
             // MagicHash: a boxing constructor application `I# e` is the identity
             // `e` (boxed approximation of unboxed values) — lower the argument
             // directly so the `#` constructor never needs to resolve.
@@ -7813,6 +7796,37 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
             // forcing one of those is exactly what must not happen — so direct
             // application already gives `$!` its strictness. (The `$!` builtin
             // stays for the non-infix spellings, `($!) f x` and sections.)
+            // `m $> x` IS `fmap (const x) m`, and `$>` has no implementation at
+            // all — the RTS aborts with `stub: $> not implemented`, which is
+            // where `readMarkdown` stops on a one-line document. `fmap` is
+            // implemented for every functor, builtin and user-defined, and its
+            // dispatch reads the LAST operand — the action, which keeps its own
+            // span here. pandoc writes `$>` 33 times.
+            // Only `$>`: `<$` has a dispatch path of its own for user instances
+            // (`is_fmap_like_method`, rewritten through the instance's `fmap`),
+            // and routing its 407 pandoc call sites through synthesized nodes
+            // would lose the element type that `show`/`==` need.
+            if op.name.as_str() == "$>" && operator_is_builtin(ctx, op.name) {
+                let (value, action) = (rhs, lhs);
+                if let (Some(fmap_id), Some(const_id)) = (
+                    ctx.lookup_value(Symbol::intern("fmap")),
+                    ctx.lookup_value(Symbol::intern("const")),
+                ) {
+                    let value_core = lower_expr(ctx, value);
+                    let action_core = lower_expr(ctx, action);
+                    let const_fn = hir::Expr::App(
+                        Box::new(hir::Expr::Var(ctx.def_ref(const_id, *span))),
+                        Box::new(value_core),
+                        *span,
+                    );
+                    let fmapped = hir::Expr::App(
+                        Box::new(hir::Expr::Var(ctx.def_ref(fmap_id, *span))),
+                        Box::new(const_fn),
+                        *span,
+                    );
+                    return hir::Expr::App(Box::new(fmapped), Box::new(action_core), *span);
+                }
+            }
             if matches!(op.name.as_str(), "$" | "$!") && operator_is_builtin(ctx, op.name) {
                 let f = lower_expr(ctx, lhs);
                 let a = lower_expr(ctx, rhs);
@@ -8652,97 +8666,6 @@ fn desugar_list_pat(ctx: &mut LowerContext, pats: &[ast::Pat], span: Span) -> hi
             let hir_p = lower_pat(ctx, p);
             hir::Pat::Con(cons_ref, vec![hir_p, acc], span)
         })
-}
-
-/// A saturated `liftA2 f a b` (or `liftA3 f a b c`) as a BIND chain:
-/// `a >>= \x -> b >>= \y -> return (f x y)`.
-///
-/// Through `<$>`/`<*>` would be the shorter rewrite, but the dispatch reads the
-/// FIRST operand's type and `<*>`'s first operand is the synthesized `f <$> a`,
-/// which has no span of its own and so no type. `>>=` takes the action first,
-/// and that action is the caller's own node — `one`, with its own span and
-/// type — so the chain dispatches at the right monad and the trailing `return`
-/// picks it up from the monad context the bind pushes.
-fn desugar_saturated_lift_a(expr: &ast::Expr, span: Span, ctx: &LowerContext) -> Option<ast::Expr> {
-    let mut args: Vec<&ast::Expr> = Vec::new();
-    let mut head = expr;
-    while let ast::Expr::App(f, a, _) = head {
-        args.push(a.as_ref());
-        head = f.as_ref();
-    }
-    args.reverse();
-    let ast::Expr::Var(ident, _) = head else {
-        return None;
-    };
-    let wanted = match ident.name.as_str() {
-        "liftA2" => 3,
-        "liftA3" => 4,
-        _ => return None,
-    };
-    if args.len() != wanted || !operator_is_builtin(ctx, ident.name) {
-        return None;
-    }
-    let var = |n: &str| ast::Expr::Var(bhc_intern::Ident::new(Symbol::intern(n)), span);
-    let names: Vec<String> = (1..args.len()).map(|i| format!("$liftA_x{i}")).collect();
-    // `f x1 .. xn`
-    let mut applied = args[0].clone();
-    for n in &names {
-        applied = ast::Expr::App(Box::new(applied), Box::new(var(n)), span);
-    }
-    // `return (f x1 .. xn)`, then one bind per action, innermost last.
-    let mut body = ast::Expr::App(Box::new(var("return")), Box::new(applied), span);
-    for (action, n) in args[1..].iter().zip(&names).rev() {
-        body = ast::Expr::Infix(
-            Box::new((*action).clone()),
-            bhc_intern::Ident::new(Symbol::intern(">>=")),
-            Box::new(ast::Expr::Lam(
-                vec![ast::Pat::Var(
-                    bhc_intern::Ident::new(Symbol::intern(n)),
-                    span,
-                )],
-                Box::new(body),
-                span,
-            )),
-            span,
-        );
-    }
-    Some(body)
-}
-
-/// `liftA2`/`liftA3` as `\f a b -> f <$> a <*> b`, built as AST so typeck sees
-/// the ordinary `<$>`/`<*>` and infers every operand's type. Returns `None` for
-/// any other name, and for a module that defines one of these itself.
-fn desugar_lift_a(name: Symbol, span: Span, ctx: &LowerContext) -> Option<ast::Expr> {
-    let extra = match name.as_str() {
-        "liftA2" => 1,
-        "liftA3" => 2,
-        _ => return None,
-    };
-    if !operator_is_builtin(ctx, name) {
-        return None;
-    }
-    let var = |n: &str| ast::Expr::Var(bhc_intern::Ident::new(Symbol::intern(n)), span);
-    let pat = |n: &str| ast::Pat::Var(bhc_intern::Ident::new(Symbol::intern(n)), span);
-    // `liftA2` takes two actions, `liftA3` three.
-    let names: Vec<String> = (0..=extra).map(|i| format!("$liftA_{i}")).collect();
-    // `f <$> a`, then one `<*> x` per remaining action.
-    let mut body = ast::Expr::Infix(
-        Box::new(var("$liftA_f")),
-        bhc_intern::Ident::new(Symbol::intern("<$>")),
-        Box::new(var(&names[0])),
-        span,
-    );
-    for n in &names[1..] {
-        body = ast::Expr::Infix(
-            Box::new(body),
-            bhc_intern::Ident::new(Symbol::intern("<*>")),
-            Box::new(var(n)),
-            span,
-        );
-    }
-    let mut params = vec![pat("$liftA_f")];
-    params.extend(names.iter().map(|n| pat(n)));
-    Some(ast::Expr::Lam(params, Box::new(body), span))
 }
 
 /// Whether an operator name still resolves to bhc's own builtin, rather than to

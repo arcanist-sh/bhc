@@ -52,7 +52,7 @@ vendor_parsec() {
 
 deps() {
   vendor_parsec
-  local round f pass
+  local round f pass rel
   # parsec core (the facade needs Pos/Error/Prim/Char/Combinator; String and
   # Token for the Parser synonym)
   local PFILES=""
@@ -72,17 +72,30 @@ deps() {
   LATE="$LATE $BZ/Text/Blaze/Html5.hs $BZ/Text/Blaze/Html5/Attributes.hs $BZ/Text/Blaze/XHtml5.hs $BZ/Text/Blaze/XHtml5/Attributes.hs"
   LATE="$LATE $BZ/Text/Blaze/XHtml1/Transitional.hs $BZ/Text/Blaze/XHtml1/Transitional/Attributes.hs $BZ/Text/Blaze/Html/Renderer/Text.hs"
 
+  # …and on a RE-build the DB already holds them, which puts parsec back in
+  # front of the same wall: `unbound variable: Semigroup.sconcat`, Prim and
+  # Token left at their previous objects while every pandoc module recompiles.
+  # So take the overrides out of the DB first; the LATE pass below puts them
+  # back. (Without this, `deps` is only correct on an empty DB.)
+  for f in $LATE; do
+    rel=$(echo "$f" | sed 's|.*/blaze-vendored/||; s|.*/pandoc-vendor/||; s|\.hs$||')
+    rm -f "$DB/$rel.o" "$DB/$rel.bhi"
+  done
+
   for round in 1 2; do
     pass=0
     for f in $XFILES $PFILES $TFILES; do
+      [ -f "$f" ] || continue
       compile1 "$f" && pass=$((pass + 1))
     done
     echo "deps round $round: $pass/$(echo $XFILES $PFILES $TFILES | wc -w | tr -d ' ')"
   done
   for f in $XFILES $PFILES $TFILES; do
+    [ -f "$f" ] || { echo "  MISSING: $f"; continue; }
     compile1 "$f" || echo "  DEP-FAIL: $(logname "$f")"
   done
   for f in $LATE; do
+    [ -f "$f" ] || continue
     compile1 "$f" || echo "  LATE-FAIL: $(logname "$f")"
   done
 }

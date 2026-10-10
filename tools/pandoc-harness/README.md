@@ -27,7 +27,10 @@ linked against a half-written `target/debug`.
    surface.** That is the escape hatch for a stubbed external — and the trap:
    the vendored `Data.Semigroup` exports `Min`/`Max` but not `Semigroup(..)`'s
    `sconcat`/`stimes`, which parsec's `Prim` imports, so compiling it before
-   parsec fails parsec. `deps` therefore compiles the override modules LAST.
+   parsec fails parsec. `deps` therefore compiles the override modules LAST —
+   and, because a RE-build starts with them already in the DB, deletes their
+   objects first (otherwise `deps` only works on an empty DB, and a rebuild
+   silently leaves `Prim`/`Token` at the objects of the previous compiler).
    Same shape of bug: vendored `Paths_pandoc` must export `getDataFileName`
    (Class.IO reads `abbreviations`, templates and translations through it), or
    Class.IO, PandocIO, PDF and the three App modules all fail to lower.
@@ -40,9 +43,37 @@ linked against a half-written `target/debug`.
 3. **Gate on values, not counts.** `ladder.sh`/`battery.sh` compare each probe's
    output against its expected string, because this campaign has twice been
    fooled by output that looked green (`OK ` passing for `OK a`).
-4. **A probe that hangs for ~40s before running is macOS Gatekeeper**, not a
+4. **Never run cargo and a sweep at the same time.** This machine has 16 GB:
+   `cargo build` with its ~17 parallel rustc processes plus a sweep's `bhc`
+   compiles gets both SIGKILLed, and a killed sweep looks exactly like a
+   compiler regression (`Killed: 9` against every module).
+5. **`pgrep -f 'chain.sh sweep'` matches the waiting shell itself.** An
+   `until ! pgrep -qf …` loop around the sweep never exits; use a bracket
+   (`chain[.]sh`) or wait on the task instead.
+6. **A probe that hangs for ~40s before running is macOS Gatekeeper**, not a
    compiler bug; static linking (no custom dylibs) avoids the wedged
    `syspolicyd` path entirely.
+
+## The scripts
+
+| Script | What it does |
+| --- | --- |
+| `chain.sh` | builds the package DB: `snapshot`, `deps`, `sweep` |
+| `flink.sh` | compiles + links + runs one probe against the DB (~3 s) |
+| `ladder.sh` | runs the value-checked probe ladder |
+| `mdbis.sh` | patches pandoc's `parseMarkdown` body, recompiles that one module and relinks `QR4` (~15 s) — the bisection tool |
+| `mdladder.sh` | walks `mdbis.sh` up the reader, one rung per level (`symbol`, `inline`, `many1 inline`, `inlines1`, `plain`, `block`, `parseBlocks`, full) |
+| `resweep.sh` | re-runs only the modules that failed |
+| `sexp_core.py` | turns a `BHC_DUMP_BIND` Rust-Debug dump into one-line sexps |
+| `topo.py` | pandoc's modules in dependency order |
+
+Useful switches while bisecting: `BHC_DUMP_BIND=<name>` (Core for one bind),
+`BHC_DBG_DISPATCH=1` (which instance each class method resolved to, and why a
+monadic rewrite declined), `BHC_DBG_NULLDICT=1` (every dictionary that resolved
+to NOTHING — its placeholder is a zero literal, which reaches the runtime as
+the tagged small int `0x1`, the signature of most crashes here), and
+`RUST_BACKTRACE=1` on the probe binary, which works whenever the crash lands in
+an RTS function rather than in generated code.
 
 ## Usage
 

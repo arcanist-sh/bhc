@@ -67,15 +67,28 @@ had no implementation at all (an RTS stub) and a typeck scheme of `forall a b.
 a`, which left their operands unconstrained. They now desugar to a bind chain in
 bhc-lower, at the application so the operands keep their own spans.
 
-**The frontier, with repros in `~/Development/pandoc-harness`:**
+Later the same day: `$>` turned out to have no implementation at all, and that
+is where `readMarkdown` stops on a one-line document. `m $> x` now lowers to
+`fmap (const x) m`. `<$` was deliberately left alone — it has a dispatch path
+for user instances, and routing its 407 pandoc call sites through synthesized
+nodes loses the element type `show`/`==` need. `liftA2` moved out of bhc-lower
+into hir-to-core for the same reason (synthesized nodes share one span, so a
+class method passed as `f` never gets its dictionary).
+
+**The frontier, with repros in `tools/pandoc-harness/repros/`:**
 - `GND2.hs`/`GND3.hs`: `instance Semigroup a => Semigroup (F s a) where (<>) =
   liftA2 (<>)` still segfaults — inside an instance method the eta-expanded
   parameters carry no type, so the desugared binds stay the generic builtins.
   Dispatching them at the ENCLOSING instance type was tried and reverted (it
   did not fix the target and is unverifiable without it). This is what
   `inlines1` — and therefore `readMarkdown` — is waiting on.
-- `GND5.hs` passes, so the desugaring itself is right: a handwritten bind chain
-  and `liftA2 (++)` both print `ab`.
+- `GND5.hs` passes, so the lambda itself is right: a handwritten bind chain and
+  `liftA2 (++)` both print `ab`. `GND3` now reaches a segfault rather than the
+  `<>` stub, so the method dispatches and something downstream of it does not.
+- `POINTFREE_CON.hs`: a class method defined point-free as a partially applied
+  CONSTRUCTOR (`pure = Outer "o"`) is lowered as a call to a stub named after
+  the constructor. Eta-expanding the method fixes the same program, which is
+  what the `nested_return_user_monads` fixture now does.
 - The `<>` BUILTIN on two Strings with no Core type prepends a NUL (`\0ab`),
   which is how the `liftA2 (<>)` path reads at the top level.
 - An explicitly imported Prelude name (`import Control.Applicative (liftA2)`)

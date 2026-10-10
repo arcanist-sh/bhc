@@ -3029,19 +3029,40 @@ impl LowerContext {
         if !args.iter().any(has_type_variables) || args.iter().all(has_type_variables) {
             return None;
         }
-        let instances = self.class_registry.instances.get(&class)?;
+        let instances = match self.class_registry.instances.get(&class) {
+            Some(is) => is,
+            None => {
+                if ml_dbg() {
+                    eprintln!("[ml] complete {class}: NO instances registered");
+                }
+                return None;
+            }
+        };
+        if ml_dbg() {
+            eprintln!(
+                "[ml] complete {class} {args:?}: candidates {:?}",
+                instances
+                    .iter()
+                    .map(|i| i.instance_types.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
         let mut proposal: Option<Vec<Ty>> = None;
         for inst in instances {
             if inst.instance_types.len() != args.len() {
                 continue;
             }
-            // Every position we DO know must agree with this instance.
-            let concrete_ok = args.iter().zip(&inst.instance_types).all(|(a, i)| {
-                has_type_variables(a)
-                    || has_type_variables(i)
-                    || bhc_types::types_match(i, a).is_some()
-            });
-            if !concrete_ok {
+            // Every position we DO know must agree with this instance. A bare
+            // variable on either side is a wildcard, but a STRUCTURE that
+            // merely contains variables is not: parsec's `Stream [tok] m tok`
+            // must not qualify as a candidate for `Stream Sources ?m ?t`, or
+            // it disagrees with the Sources instance about `?t` and the
+            // completion is abandoned.
+            if !args
+                .iter()
+                .zip(&inst.instance_types)
+                .all(|(a, i)| ty_compatible(i, a))
+            {
                 continue;
             }
             let filled: Vec<Ty> = args
@@ -3110,7 +3131,9 @@ impl LowerContext {
                     }
                 );
             }
-            dicts.push(dict.unwrap_or(core::Expr::Lit(core::Literal::Int(0), Ty::Error, occ_span)));
+            dicts.push(
+                dict.unwrap_or_else(|| null_dict_placeholder(inst.class, &inst.args, occ_span)),
+            );
         }
         Some(dicts)
     }
@@ -3632,7 +3655,7 @@ impl LowerContext {
                 );
                 let dict = self
                     .resolve_dictionary(&c, span)
-                    .unwrap_or(bhc_core::Expr::Lit(core::Literal::Int(0), Ty::Error, span));
+                    .unwrap_or_else(|| null_dict_placeholder(c.class, &c.args, span));
                 result = bhc_core::Expr::App(Box::new(result), Box::new(dict), span);
             }
             return Some(result);
@@ -5305,7 +5328,7 @@ fn head_type_con_name(ty: &Ty) -> Option<Symbol> {
     }
 }
 
-fn type_name_for_instance(ty: &Ty) -> String {
+pub(crate) fn type_name_for_instance(ty: &Ty) -> String {
     match ty {
         Ty::Con(con) => con.name.as_str().to_string(),
         Ty::App(f, a) => {
@@ -5629,17 +5652,26 @@ fn annotate_monad_head_tys(bind: &mut Bind, inst_ty: &Ty) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_fresh_var() {
-        let mut ctx = LowerContext::new();
-        let v1 = ctx.fresh_var("x", Ty::Error, Span::default());
-        let v2 = ctx.fresh_var("x", Ty::Error, Span::default());
-        assert_ne!(v1.id, v2.id);
+/// The stand-in for a dictionary that did not resolve.
+///
+/// It reaches the runtime as the tagged small integer `0x1`, which is why so
+/// many crashes in this campaign read `word0=0x1` or "misaligned pointer …
+/// is 0x1" — a class method selected out of it, or a constrained parser run
+/// through it. Nothing warns by default (dead code resolves nothing, and
+/// warning on it would bury the pandoc sweep); `BHC_DBG_NULLDICT=1` prints the
+/// class, the types it was wanted at, and the span instead.
+pub(crate) fn null_dict_placeholder(class: Symbol, args: &[Ty], span: Span) -> core::Expr {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("BHC_DBG_NULLDICT").is_some()) {
+        let tys: Vec<String> = args.iter().map(crate::expr::dbg_ty).collect();
+        eprintln!(
+            "[null-dict] {} [{}] at {:?}",
+            class.as_str(),
+            tys.join(", "),
+            span
+        );
     }
+    core::Expr::Lit(core::Literal::Int(0), Ty::Error, span)
 }
 
 /// Whether a binding polymorphic in a `Semigroup`/`Monoid` VALUE type takes
@@ -5665,4 +5697,36 @@ pub(crate) fn method_level_dicts_enabled() -> bool {
 pub(crate) fn ml_dbg() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("BHC_DBG_ML").is_some())
+}
+
+/// Whether an instance head position can match what a constraint wants, with a
+/// bare type variable on either side matching anything. Structural: `[tok]`
+/// does not match `Sources`, even though it contains a variable.
+fn ty_compatible(inst: &Ty, want: &Ty) -> bool {
+    match (inst, want) {
+        (Ty::Var(_), _) | (_, Ty::Var(_)) | (Ty::Error, _) | (_, Ty::Error) => true,
+        (Ty::Con(a), Ty::Con(b)) => a.name == b.name,
+        (Ty::Prim(a), Ty::Prim(b)) => a == b,
+        (Ty::App(f1, a1), Ty::App(f2, a2)) | (Ty::Fun(f1, a1), Ty::Fun(f2, a2)) => {
+            ty_compatible(f1, f2) && ty_compatible(a1, a2)
+        }
+        (Ty::List(a), Ty::List(b)) => ty_compatible(a, b),
+        (Ty::Tuple(xs), Ty::Tuple(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| ty_compatible(x, y))
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fresh_var() {
+        let mut ctx = LowerContext::new();
+        let v1 = ctx.fresh_var("x", Ty::Error, Span::default());
+        let v2 = ctx.fresh_var("x", Ty::Error, Span::default());
+        assert_ne!(v1.id, v2.id);
+    }
 }

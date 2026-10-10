@@ -905,7 +905,7 @@ impl<'a> DictContext<'a> {
                             Some(cur)
                         })
                 })
-                .unwrap_or(core::Expr::Lit(core::Literal::Int(0), Ty::Error, span));
+                .unwrap_or_else(|| crate::context::null_dict_placeholder(*superclass, &[], span));
             super_fields.push(super_dict);
         }
 
@@ -931,7 +931,9 @@ impl<'a> DictContext<'a> {
                 };
                 self.get_dictionary(&concrete, span)
                     .or_else(|| self.dict_in_scope_by_head(&concrete, span))
-                    .unwrap_or(core::Expr::Lit(core::Literal::Int(0), Ty::Error, span))
+                    .unwrap_or_else(|| {
+                        crate::context::null_dict_placeholder(concrete.class, &concrete.args, span)
+                    })
             })
             .collect();
 

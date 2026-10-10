@@ -569,19 +569,6 @@ pub(crate) fn monad_head_of_method_occurrence(ty: &Ty) -> Option<Ty> {
     from_first_arg.or_else(|| applied_to(result_of(ty)))
 }
 
-/// Lower a variable reference to Core.
-///
-/// This handles several cases:
-///
-/// 1. **Class methods**: If the variable is a class method (like `==` from `Eq`),
-///    and we're inside a constrained function, select the method from the
-///    appropriate dictionary.
-///
-/// 2. **Constrained functions**: If the referenced function has type class
-///    constraints, apply dictionary arguments from the current scope or
-///    resolve instances for concrete types.
-///
-/// 3. **Regular variables**: Just return a variable reference.
 /// The class and method of a use of a class method whose own constraints are
 /// dictionary-passed (`query :: Monoid c => …`), if `def_ref` is one.
 fn method_level_target(ctx: &LowerContext, def_ref: &DefRef) -> Option<(Symbol, Symbol)> {
@@ -761,6 +748,19 @@ fn lower_fold_map_via_monoid(ctx: &mut LowerContext, span: Span) -> Option<core:
     ))
 }
 
+/// Lower a variable reference to Core.
+///
+/// This handles several cases:
+///
+/// 1. **Class methods**: If the variable is a class method (like `==` from `Eq`),
+///    and we're inside a constrained function, select the method from the
+///    appropriate dictionary.
+///
+/// 2. **Constrained functions**: If the referenced function has type class
+///    constraints, apply dictionary arguments from the current scope or
+///    resolve instances for concrete types.
+///
+/// 3. **Regular variables**: Just return a variable reference.
 fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr> {
     // First, check if this is a class method reference
     let var_name = ctx.lookup_var(def_ref.def_id).map(|v| v.name);
@@ -823,6 +823,40 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                     if let Some(lam) = lower_ap_lambda(ctx, &m_ty, def_ref.span) {
                         return Ok(lam);
                     }
+                }
+            }
+        }
+        // `liftA2`/`liftM2` in VALUE position. Its monad comes from the
+        // occurrence type (three arguments, then `m c`), else from the instance
+        // being defined — `(<>) = liftA2 (<>)` is a bare partial application
+        // with no type of its own, and it is exactly the case that matters.
+        if matches!(name.as_str(), "liftA2" | "liftM2") {
+            let mut cands: Vec<Ty> = Vec::new();
+            cands.extend(ctx.resolved_expr_ty_opt(def_ref.span).and_then(|t| {
+                let mut cur = t;
+                for _ in 0..3 {
+                    let Ty::Fun(_, r) = cur else { return None };
+                    cur = *r;
+                }
+                match cur {
+                    Ty::App(m, _) => Some(*m),
+                    _ => None,
+                }
+            }));
+            if let Some(inst) = ctx.current_instance_type().cloned() {
+                // The class parameter of `Semigroup (Future s a)` is FULLY
+                // applied, while `liftA2` works one layer up, at `Future s`.
+                if let Ty::App(ref head, _) = inst {
+                    cands.push(head.as_ref().clone());
+                }
+                cands.push(inst);
+            }
+            for m_ty in cands {
+                if monad_runs_eagerly(&m_ty) || applied_head_name(&m_ty).is_none() {
+                    continue;
+                }
+                if let Some(lam) = lower_lift_a2_lambda(ctx, &m_ty, def_ref.span) {
+                    return Ok(lam);
                 }
             }
         }
@@ -2286,12 +2320,55 @@ fn canonical_functor_method(name: Symbol) -> Symbol {
     }
 }
 
+/// Monads codegen implements itself: the IO and transformer fast paths, plus
+/// the value monads whose `pure` is a constructor (`Just`, `Right`, `[x]`).
+/// No instance is registered for these, so dispatch must not look for one —
+/// and must not fall through to some other monad either.
+fn monad_handled_by_codegen(ty: &Ty) -> bool {
+    if LowerContext::is_builtin_monad_type(ty) || matches!(ty, Ty::List(_)) {
+        return true;
+    }
+    let head = match ty {
+        Ty::App(f, _) => f.as_ref(),
+        other => other,
+    };
+    matches!(head, Ty::Con(c) if matches!(c.name.as_str(), "Maybe" | "Either" | "[]" | "List"))
+}
+
 /// `<$>`/`fmap` and their monad/applicative spellings (`liftM`/`liftA`, already
 /// canonicalized to `fmap`) take a plain function as the first operand and a
 /// monadic value as the *last* operand. Only the last operand needs its
 /// dictionary forced — see `lower_monad_operand`.
 fn is_fmap_like_method(name: Symbol) -> bool {
     matches!(name.as_str(), "<$>" | "fmap" | "<$")
+}
+
+/// Class methods whose FIRST operand is a plain function or value, with the
+/// class parameter carried by every operand after it.
+///
+/// Dispatch infers the instance type from the operands, first one that answers
+/// wins — which is right for `runEval e s` and wrong for exactly this family:
+/// `two <$> letter` would resolve `Functor` at `Char -> Char -> String`.
+/// Names here are the canonical spellings (`<$>`/`liftM`/`liftA` arrive as
+/// `fmap`; see [`canonical_functor_method`]).
+fn method_first_operand_is_plain(name: Symbol) -> bool {
+    if std::env::var("BHC_NO_PLAINFIRST").is_ok() {
+        return false;
+    }
+    is_fmap_like_method(name)
+        || matches!(
+            name.as_str(),
+            "return"
+                | "pure"
+                | "=<<"
+                | "liftA2"
+                | "liftM2"
+                | "traverse"
+                | "traverse_"
+                | "mapM"
+                | "mapM_"
+                | "foldMap"
+        )
 }
 
 /// Lower an operand of a monadic bind (`>>=`/`>>`) whose monad `m` is the
@@ -2961,8 +3038,18 @@ fn is_constrained_fn_value(ctx: &LowerContext, expr: &hir::Expr) -> bool {
             return false;
         }
     }
-    ctx.lookup_scheme(dr.def_id)
-        .is_some_and(|s| s.constraints.iter().any(|c| ctx.is_user_class(c.class)))
+    // Whatever the CALLEE takes as a dictionary parameter must be supplied
+    // here, so this asks the shared predicate rather than "is it a user
+    // class": a continuation constrained only by `Monad m` (dictionary-passed
+    // under the monad witness) was handed over BARE, and the callee's
+    // `cok c st` then put `c` in the dictionary slot. That is what made
+    // parsec's `tokenPrim` call the wrong continuation, so every `many`
+    // reported "a parser that accepts an empty string".
+    ctx.lookup_scheme(dr.def_id).is_some_and(|s| {
+        s.constraints
+            .iter()
+            .any(|c| ctx.constraint_is_dict_passed(c))
+    })
 }
 
 /// Whether `expr` is a bare constrained function value OR an *application* of one
@@ -2990,8 +3077,11 @@ fn references_constrained_fn(ctx: &LowerContext, expr: &hir::Expr) -> bool {
             return false;
         }
     }
-    ctx.lookup_scheme(dr.def_id)
-        .is_some_and(|s| s.constraints.iter().any(|c| ctx.is_user_class(c.class)))
+    ctx.lookup_scheme(dr.def_id).is_some_and(|s| {
+        s.constraints
+            .iter()
+            .any(|c| ctx.constraint_is_dict_passed(c))
+    })
 }
 
 /// Handle a call that passes a constrained function as a *value* argument, when
@@ -3046,15 +3136,16 @@ fn try_lower_spine_with_dicts(
         return Ok(None);
     }
 
-    // Callee parameter types. A user-constrained callee is left to the
-    // constrained-function call paths (Case 2/3).
+    // Callee parameter types. A callee that takes dictionaries of its OWN is
+    // left to the constrained-function call paths (Case 2/3), which apply them
+    // — this path only supplies the ARGUMENTS' dictionaries.
     let Some(scheme) = ctx.lookup_scheme(callee_ref.def_id) else {
         return Ok(None);
     };
     if scheme
         .constraints
         .iter()
-        .any(|c| ctx.is_user_class(c.class))
+        .any(|c| ctx.constraint_is_dict_passed(c))
     {
         return Ok(None);
     }
@@ -3072,6 +3163,25 @@ fn try_lower_spine_with_dicts(
             match_ty(pty, &at, &mut subst);
         }
     }
+    // The callee's own occurrence type is often already instantiated where the
+    // arguments pin nothing: `unP item s cok eerr` records `unP` at `P IO ->
+    // St -> (Char -> St -> IO String) -> …`, while `item :: Monad m => P m`
+    // infers to nothing. Without it the continuation's expected type keeps a
+    // variable monad, its `Monad` dictionary cannot resolve, and the whole
+    // path gives up — handing the callee a dictionary-less continuation.
+    let occ_param_tys: Vec<Ty> = ctx
+        .resolved_expr_ty_opt(callee_ref.span)
+        .map(|t| ctx.expand_type_aliases(&t))
+        .map(|t| {
+            let mut v = Vec::new();
+            let mut cur = &t;
+            while let Ty::Fun(p, r) = cur {
+                v.push(p.as_ref().clone());
+                cur = r.as_ref();
+            }
+            v
+        })
+        .unwrap_or_default();
 
     let Some(callee_var) = ctx.lookup_var(callee_ref.def_id).cloned() else {
         return Ok(None);
@@ -3079,7 +3189,13 @@ fn try_lower_spine_with_dicts(
     let mut result = core::Expr::Var(callee_var, callee_ref.span);
     for (i, a) in args.iter().enumerate() {
         if is_constrained_fn_value(ctx, a) {
-            let Some(expected) = callee_param_tys.get(i).map(|p| subst.apply(p)) else {
+            let from_scheme = callee_param_tys.get(i).map(|p| subst.apply(p));
+            let expected = occ_param_tys
+                .get(i)
+                .filter(|t| !has_type_variables(t))
+                .cloned()
+                .or(from_scheme);
+            let Some(expected) = expected else {
                 return Ok(None);
             };
             let Some(arg_core) = lower_constrained_fn_value(ctx, a, &expected) else {
@@ -3218,10 +3334,17 @@ fn lower_monadic_lift(
     head_span: Span,
     span: Span,
 ) -> LowerResult<Option<core::Expr>> {
+    let m_dbg = dispatch_dbg();
     let Some(monad_ty) = traversal_monad_ty(ctx, span, head_span, args.len()) else {
+        if m_dbg {
+            eprintln!("[lift] no monad type for {} args", args.len());
+        }
         return Ok(None);
     };
     if monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none() {
+        if m_dbg {
+            eprintln!("[lift] declined at {}", dbg_ty(&monad_ty));
+        }
         return Ok(None);
     }
     let Some(bind_e) = ctx.resolve_method_at_concrete_type(
@@ -3230,6 +3353,9 @@ fn lower_monadic_lift(
         &monad_ty,
         span,
     ) else {
+        if m_dbg {
+            eprintln!("[lift] no >>= at {}", dbg_ty(&monad_ty));
+        }
         return Ok(None);
     };
     let Some(pure_e) = ctx.resolve_method_at_concrete_type(
@@ -3335,6 +3461,70 @@ fn lower_ap_lambda(ctx: &mut LowerContext, monad_ty: &Ty, span: Span) -> Option<
     ))
 }
 
+/// `liftA2` = `\f ma mb -> ma >>= \a -> mb >>= \b -> pure (f a b)`, at a monad
+/// codegen does not run eagerly.
+///
+/// Built as a VALUE — a three-parameter lambda — so a PARTIAL application works
+/// as well as a saturated call. That is the shape that matters: pandoc writes
+/// `instance Semigroup a => Semigroup (Future s a) where (<>) = liftA2 (<>)`,
+/// and codegen has no `liftA2`, so the RTS stub aborted ("stub: liftA2 not
+/// implemented") the moment `inlines1` — `mconcat <$> many1 inline` — folded
+/// two `Future`s together.
+fn lower_lift_a2_lambda(ctx: &mut LowerContext, monad_ty: &Ty, span: Span) -> Option<core::Expr> {
+    let bind_e = ctx.resolve_method_at_concrete_type(
+        Symbol::intern(">>="),
+        Symbol::intern("Monad"),
+        monad_ty,
+        span,
+    )?;
+    let pure_e = ctx.resolve_method_at_concrete_type(
+        Symbol::intern("pure"),
+        Symbol::intern("Applicative"),
+        monad_ty,
+        span,
+    )?;
+    let f = ctx.fresh_var("$l2_f", Ty::Error, span);
+    let ma = ctx.fresh_var("$l2_ma", Ty::Error, span);
+    let mb = ctx.fresh_var("$l2_mb", Ty::Error, span);
+    let a = ctx.fresh_var("$l2_a", Ty::Error, span);
+    let b = ctx.fresh_var("$l2_b", Ty::Error, span);
+    let app2 = |h: core::Expr, x: core::Expr, y: core::Expr| {
+        core::Expr::App(
+            Box::new(core::Expr::App(Box::new(h), Box::new(x), span)),
+            Box::new(y),
+            span,
+        )
+    };
+    let applied = app2(
+        core::Expr::Var(f.clone(), span),
+        core::Expr::Var(a.clone(), span),
+        core::Expr::Var(b.clone(), span),
+    );
+    let inner = app2(
+        bind_e.clone(),
+        core::Expr::Var(mb.clone(), span),
+        core::Expr::Lam(
+            b,
+            Box::new(core::Expr::App(Box::new(pure_e), Box::new(applied), span)),
+            span,
+        ),
+    );
+    let body = app2(
+        bind_e,
+        core::Expr::Var(ma.clone(), span),
+        core::Expr::Lam(a, Box::new(inner), span),
+    );
+    Some(core::Expr::Lam(
+        f,
+        Box::new(core::Expr::Lam(
+            ma,
+            Box::new(core::Expr::Lam(mb, Box::new(body), span)),
+            span,
+        )),
+        span,
+    ))
+}
+
 /// `ap mf mx` = `mf >>= \g -> mx >>= \v -> pure (g v)`, at a monad codegen
 /// does not run eagerly.
 fn lower_monadic_ap(
@@ -3404,11 +3594,16 @@ fn try_lower_monadic_traversal(
     x: &hir::Expr,
     span: Span,
 ) -> LowerResult<Option<core::Expr>> {
-    // Spine: either `Var name a1 a2` (two arguments) or `Var name a1` (one).
+    // Spine of up to THREE arguments: `liftM2`/`liftA2` take a function and two
+    // actions, and stopping at two left their table entries unreachable.
     let (head_ref, args): (&DefRef, Vec<&hir::Expr>) = match f {
         hir::Expr::Var(dr) => (dr, vec![x]),
         hir::Expr::App(inner, a1, _) => match inner.as_ref() {
             hir::Expr::Var(dr) => (dr, vec![a1.as_ref(), x]),
+            hir::Expr::App(inner2, a0, _) => match inner2.as_ref() {
+                hir::Expr::Var(dr) => (dr, vec![a0.as_ref(), a1.as_ref(), x]),
+                _ => return Ok(None),
+            },
             _ => return Ok(None),
         },
         _ => return Ok(None),
@@ -3452,8 +3647,10 @@ fn try_lower_monadic_traversal(
     }
     if let Some((n_actions, build)) = match (name.as_str(), args.len()) {
         ("void", 1) => Some((1usize, MonadicShape::Unit)),
-        ("liftM" | "fmapM", 2) => Some((1, MonadicShape::ApplyFn)),
-        ("liftM2", 3) => Some((2, MonadicShape::ApplyFn)),
+        ("liftM" | "liftA" | "fmapM", 2) => Some((1, MonadicShape::ApplyFn)),
+        // `liftA2` is `liftM2` for every monad; its own builtin is an RTS stub,
+        // and pandoc reaches it through `instance Semigroup (Future s a)`.
+        ("liftM2" | "liftA2", 3) => Some((2, MonadicShape::ApplyFn)),
         _ => None,
     } {
         return lower_monadic_lift(ctx, &args, n_actions, build, head_ref.span, span);
@@ -3938,21 +4135,42 @@ fn lower_app(
                     method_name.as_str() == "return" || method_name.as_str() == "pure";
                 if is_return_or_pure {
                     // Candidate monad types, in priority order:
-                    //  1. the enclosing do-block monad, if `>>=`/`>>` pushed one;
-                    //  2. the monad constructor read off this `return`/`pure`
+                    //  1. the monad constructor read off this `return`/`pure`
                     //     application's OWN resolved type `M a` (strip the value
-                    //     arg `a`). (2) is what lets a bare `return x :: M a` with
-                    //     no surrounding do-block dispatch — e.g. the argument in
-                    //     `runIOorExplode (return 42)`, whose single-pass expr
+                    //     arg `a`). This is also what lets a bare `return x :: M
+                    //     a` with no surrounding do-block dispatch — the argument
+                    //     in `runIOorExplode (return 42)`, whose single-pass expr
                     //     type leaves the monad a variable (`App(Var, Int)`) but
                     //     whose fixpoint-resolved type is `App(PandocIO, Int)`.
+                    //  2. the enclosing do-block monad, if `>>=`/`>>` pushed one.
+                    //
+                    // (1) goes first because `return (return x)` has a DIFFERENT
+                    // monad at each level — pandoc's `symbol` ends `return (return
+                    // (B.str t))`, a `Future` inside a parser — and the monad the
+                    // surrounding `>>=` pushed answered for both, so the parser's
+                    // action became the inner value.
+                    //
+                    // A monad codegen implements itself stops the search rather
+                    // than falling through to that ambient monad: no instance is
+                    // registered for `Maybe`, so the loop below would skip it and
+                    // pick the parser again. Falling out leaves the builtin
+                    // `return`, which `annotate_ty` types from this same
+                    // occurrence so codegen reads `Just` off it.
+                    let own_monad = match ctx.resolved_expr_ty_opt(span) {
+                        Some(Ty::App(head, _)) => Some(*head),
+                        _ => None,
+                    }
+                    .filter(has_concrete_head);
+                    let own_is_codegen_monad =
+                        own_monad.as_ref().is_some_and(monad_handled_by_codegen);
                     let mut candidates: Vec<Ty> = Vec::new();
+                    if !own_is_codegen_monad {
+                        candidates.extend(own_monad.clone());
+                    }
                     if let Some(m) = ctx.current_monad_type().cloned() {
                         candidates.push(m);
                     }
-                    if let Some(Ty::App(head, _arg)) = ctx.resolved_expr_ty_opt(span) {
-                        candidates.push(*head);
-                    }
+                    candidates.extend(own_monad);
                     let pure_sym = Symbol::intern("pure");
                     let applicative_sym = Symbol::intern("Applicative");
                     //  3. the enclosing binding's signature. Inside a constrained
@@ -3991,6 +4209,9 @@ fn lower_app(
                         candidates.push(inst_ty);
                     }
                     for monad_ty in candidates {
+                        if own_is_codegen_monad {
+                            break;
+                        }
                         // Builtin monads (IO/StateT/…) take codegen's fast path.
                         if LowerContext::is_builtin_monad_type(&monad_ty) {
                             continue;
@@ -4304,10 +4525,28 @@ fn lower_app(
                         // For multi-arg methods like `runEval :: e -> String -> String`,
                         // the first collected arg carries the instance type, not the
                         // final argument. Prefer collected args over the final arg.
+                        //
+                        // `fmap`/`<$>`/`<$` and friends are the exception: their FIRST
+                        // operand is a plain function (or, for `<$`, a plain value)
+                        // whose type says nothing about the class parameter, which
+                        // every later operand carries. Letting it win dispatched `two
+                        // <$> letter` at `Functor (Char -> Char -> String)`, which
+                        // names no instance, so the method stayed a BUILTIN fmap that
+                        // walked the parser closure as a list — `two <$> letter <*>
+                        // letter` then handed `<*>` a non-closure and the CPS apply
+                        // crashed.
+                        let plain_first = method_first_operand_is_plain(method_name);
                         let inferred_args = collected_args
                             .iter()
+                            .skip(usize::from(plain_first))
                             .find_map(|arg| try_infer_arg_type(ctx, arg));
-                        let inferred_x = try_infer_arg_type(ctx, x);
+                        // An unsaturated `fmap f` has no functor operand at all; its
+                        // only argument is the function, so infer nothing from it.
+                        let inferred_x = if plain_first && collected_args.is_empty() {
+                            None
+                        } else {
+                            try_infer_arg_type(ctx, x)
+                        };
                         // Semigroup/Monoid parameterize over the VALUE type
                         // itself (Inlines), not a type constructor — the
                         // span-recorded result type IS the class parameter.
@@ -4328,163 +4567,185 @@ fn lower_app(
                         } else {
                             None
                         };
-                        let inferred =
-                            value_class_result
-                                .or(inferred_args)
-                                .or(inferred_x)
-                                .or_else(|| {
-                                    // Fallback: use monad context stack for nested >>=/>>/return
-                                    if is_value_class {
-                                        ctx.resolved_expr_ty_opt(span).filter(has_concrete_head)
-                                    } else if is_monad_family {
-                                        ctx.current_monad_type()
-                                            .cloned()
-                                            .or_else(|| {
-                                                if std::env::var("BHC_NO_CART").is_ok() {
-                                                    return None;
-                                                }
-                                                // A FULLY-CONCRETE applied operand type
-                                                // (`manyTill p $eta` with sig-typed
-                                                // params) carries the complete monad
-                                                // instantiation — dispatch AND operand
-                                                // dicting both work from it. Bare
-                                                // operands (`digit` in `digit <|>
-                                                // letter`) pin nothing and stay on the
-                                                // codegen fast paths.
-                                                collected_args
-                                                    .iter()
-                                                    .copied()
-                                                    .chain(std::iter::once(x))
-                                                    .find_map(|arg| {
-                                                        let full =
-                                                            concrete_applied_result_ty(ctx, arg)?;
-                                                        (!LowerContext::is_builtin_monad_type(
-                                                            &full,
-                                                        ))
+                        // `return`/`pure`/`fmap`/`<$`/`=<<` name their class
+                        // parameter only in the RESULT type. The enclosing bind
+                        // pushes its own monad on the context stack, which is the
+                        // wrong answer for a NESTED return — pandoc's `symbol` ends
+                        // `return (return (B.str t))`, the outer at the parser and
+                        // the inner at `Future`; taking the parser's for both made
+                        // the parser's action the `Text` itself ("not a closure").
+                        // Stripping the leading arrows also covers a partially
+                        // applied `fmap f` (`fmap B.plain . trimInlinesF`), whose
+                        // own type is still `f a -> f b`. An unresolved or variable
+                        // head falls through to the operand-driven paths as before.
+                        let result_head = matches!(
+                            method_name.as_str(),
+                            "return" | "pure" | "fmap" | "<$" | "=<<"
+                        )
+                        .then(|| ctx.resolved_expr_ty_opt(span))
+                        .flatten()
+                        .and_then(|t| {
+                            let t = ctx.expand_type_aliases(&t);
+                            let mut cur = &t;
+                            while let Ty::Fun(_, r) = cur {
+                                cur = r.as_ref();
+                            }
+                            match cur {
+                                Ty::App(head, _) => Some(head.as_ref().clone()),
+                                _ => None,
+                            }
+                        })
+                        .filter(has_concrete_head);
+                        let inferred = value_class_result
+                            .or(result_head)
+                            .or(inferred_args)
+                            .or(inferred_x)
+                            .or_else(|| {
+                                // Fallback: use monad context stack for nested >>=/>>/return
+                                if is_value_class {
+                                    ctx.resolved_expr_ty_opt(span).filter(has_concrete_head)
+                                } else if is_monad_family {
+                                    ctx.current_monad_type()
+                                        .cloned()
+                                        .or_else(|| {
+                                            if std::env::var("BHC_NO_CART").is_ok() {
+                                                return None;
+                                            }
+                                            // A FULLY-CONCRETE applied operand type
+                                            // (`manyTill p $eta` with sig-typed
+                                            // params) carries the complete monad
+                                            // instantiation — dispatch AND operand
+                                            // dicting both work from it. Bare
+                                            // operands (`digit` in `digit <|>
+                                            // letter`) pin nothing and stay on the
+                                            // codegen fast paths.
+                                            collected_args
+                                                .iter()
+                                                .copied()
+                                                .chain(std::iter::once(x))
+                                                .find_map(|arg| {
+                                                    let full =
+                                                        concrete_applied_result_ty(ctx, arg)?;
+                                                    (!LowerContext::is_builtin_monad_type(&full))
                                                         .then_some(full)
-                                                    })
-                                            })
-                                            .or_else(|| {
-                                                if std::env::var("BHC_NO_PRONGB").is_ok() {
-                                                    return None;
-                                                }
-                                                // Inside a CONSTRAINED function whose own
-                                                // dict params satisfy an operand's
-                                                // constraints (`many1TillChar p = fmap
-                                                // T.pack . many1Till p` — `many1Till`
-                                                // needs the same `Stream` dict the
-                                                // enclosing fn received), dispatch by the
-                                                // operand's scheme-result HEAD; operand
-                                                // dicting then resolves from those
-                                                // in-scope dicts. Unconstrained contexts
-                                                // (Main-level `digit <|> letter`) have no
-                                                // dicts in scope and keep the codegen
-                                                // fast paths; a VAR result head (runPT's
-                                                // bind at generic m) also skips.
-                                                collected_args
-                                                    .iter()
-                                                    .copied()
-                                                    .chain(std::iter::once(x))
-                                                    .find_map(|arg| {
-                                                        let mut head = arg;
-                                                        let mut nargs = 0usize;
-                                                        while let hir::Expr::App(f2, _, _) = head {
-                                                            nargs += 1;
-                                                            head = f2.as_ref();
-                                                        }
-                                                        if nargs == 0 {
-                                                            return None;
-                                                        }
-                                                        let hir::Expr::Var(dr) = head else {
+                                                })
+                                        })
+                                        .or_else(|| {
+                                            if std::env::var("BHC_NO_PRONGB").is_ok() {
+                                                return None;
+                                            }
+                                            // Inside a CONSTRAINED function whose own
+                                            // dict params satisfy an operand's
+                                            // constraints (`many1TillChar p = fmap
+                                            // T.pack . many1Till p` — `many1Till`
+                                            // needs the same `Stream` dict the
+                                            // enclosing fn received), dispatch by the
+                                            // operand's scheme-result HEAD; operand
+                                            // dicting then resolves from those
+                                            // in-scope dicts. Unconstrained contexts
+                                            // (Main-level `digit <|> letter`) have no
+                                            // dicts in scope and keep the codegen
+                                            // fast paths; a VAR result head (runPT's
+                                            // bind at generic m) also skips.
+                                            collected_args
+                                                .iter()
+                                                .copied()
+                                                .chain(std::iter::once(x))
+                                                .find_map(|arg| {
+                                                    let mut head = arg;
+                                                    let mut nargs = 0usize;
+                                                    while let hir::Expr::App(f2, _, _) = head {
+                                                        nargs += 1;
+                                                        head = f2.as_ref();
+                                                    }
+                                                    if nargs == 0 {
+                                                        return None;
+                                                    }
+                                                    let hir::Expr::Var(dr) = head else {
+                                                        return None;
+                                                    };
+                                                    let scheme = ctx.lookup_scheme(dr.def_id)?;
+                                                    let dict_scoped =
+                                                        scheme.constraints.iter().any(|c| {
+                                                            ctx.lookup_dict(c.class).is_some()
+                                                        });
+                                                    if !dict_scoped {
+                                                        return None;
+                                                    }
+                                                    let mut t = scheme.ty.clone();
+                                                    for _ in 0..nargs {
+                                                        let Ty::Fun(_, r) = t else {
                                                             return None;
                                                         };
-                                                        let scheme =
-                                                            ctx.lookup_scheme(dr.def_id)?;
-                                                        let dict_scoped =
-                                                            scheme.constraints.iter().any(|c| {
-                                                                ctx.lookup_dict(c.class).is_some()
-                                                            });
-                                                        if !dict_scoped {
-                                                            return None;
-                                                        }
-                                                        let mut t = scheme.ty.clone();
-                                                        for _ in 0..nargs {
-                                                            let Ty::Fun(_, r) = t else {
-                                                                return None;
-                                                            };
-                                                            t = *r;
-                                                        }
-                                                        let mut h = &t;
-                                                        while let Ty::App(f2, _) = h {
-                                                            h = f2.as_ref();
-                                                        }
-                                                        (matches!(h, Ty::Con(_))
-                                                            && !LowerContext::is_builtin_monad_type(
-                                                                h,
-                                                            ))
-                                                        .then(|| h.clone())
-                                                    })
-                                            })
-                                            .or_else(|| {
-                                                // Last resort: recover the monad constructor from
-                                                // this method application's own fixpoint-resolved
-                                                // type `N b` (strip the value arg). Lets a
-                                                // user/derived monad's `>>=` dispatch when the
-                                                // operands' types are themselves unresolved — e.g.
-                                                // `return 5 >>= \x -> ...` in a top-level do-block
-                                                // over a GND newtype, where both operands are
-                                                // as-yet-undispatched `return`s.
-                                                match ctx.resolved_expr_ty_opt(span) {
-                                                    Some(Ty::App(head, _)) => Some(*head),
-                                                    _ => None,
-                                                }
-                                            })
-                                            .or_else(|| {
-                                                // Nothing above pinned the monad: inside a
-                                                // constrained binding the operands can be bare
-                                                // parameters (`manyTill p end = scan where scan
-                                                // = do { x <- p; … }`), which carry no
-                                                // instantiated type of their own. Left
-                                                // undispatched, `>>=` stays a builtin whose
-                                                // generic bind ignores parser failure.
-                                                //
-                                                // The binding's signature names the monad
-                                                // applied to its (still variable) arguments,
-                                                // which is what the parametric instance
-                                                // matches. Only a CONSUMER of the instance may
-                                                // use it: inside the module implementing the
-                                                // instance, this would rewrite the generic
-                                                // implementation — parsec's own `parserBind` —
-                                                // into a call to itself, miscompiling the
-                                                // library. An imported instance means we are a
-                                                // consumer. A variable result head, as in
-                                                // `runPT`'s bind at a generic `m`, has no head
-                                                // constructor and skips.
-                                                let sig = ctx.current_binding_sig()?;
-                                                let mut result = sig;
-                                                while let Ty::Fun(_, ret) = result {
-                                                    result = ret.as_ref();
-                                                }
-                                                let Ty::App(monad, _) = result else {
-                                                    return None;
-                                                };
-                                                let mut head = monad.as_ref();
-                                                while let Ty::App(f2, _) = head {
-                                                    head = f2.as_ref();
-                                                }
-                                                let Ty::Con(con) = head else {
-                                                    return None;
-                                                };
-                                                (!LowerContext::is_builtin_monad_type(head)
-                                                    && ctx.has_imported_instance(
-                                                        class_name, con.name,
-                                                    ))
-                                                .then(|| monad.as_ref().clone())
-                                            })
-                                    } else {
-                                        None
-                                    }
-                                });
+                                                        t = *r;
+                                                    }
+                                                    let mut h = &t;
+                                                    while let Ty::App(f2, _) = h {
+                                                        h = f2.as_ref();
+                                                    }
+                                                    (matches!(h, Ty::Con(_))
+                                                        && !LowerContext::is_builtin_monad_type(h))
+                                                    .then(|| h.clone())
+                                                })
+                                        })
+                                        .or_else(|| {
+                                            // Last resort: recover the monad constructor from
+                                            // this method application's own fixpoint-resolved
+                                            // type `N b` (strip the value arg). Lets a
+                                            // user/derived monad's `>>=` dispatch when the
+                                            // operands' types are themselves unresolved — e.g.
+                                            // `return 5 >>= \x -> ...` in a top-level do-block
+                                            // over a GND newtype, where both operands are
+                                            // as-yet-undispatched `return`s.
+                                            match ctx.resolved_expr_ty_opt(span) {
+                                                Some(Ty::App(head, _)) => Some(*head),
+                                                _ => None,
+                                            }
+                                        })
+                                        .or_else(|| {
+                                            // Nothing above pinned the monad: inside a
+                                            // constrained binding the operands can be bare
+                                            // parameters (`manyTill p end = scan where scan
+                                            // = do { x <- p; … }`), which carry no
+                                            // instantiated type of their own. Left
+                                            // undispatched, `>>=` stays a builtin whose
+                                            // generic bind ignores parser failure.
+                                            //
+                                            // The binding's signature names the monad
+                                            // applied to its (still variable) arguments,
+                                            // which is what the parametric instance
+                                            // matches. Only a CONSUMER of the instance may
+                                            // use it: inside the module implementing the
+                                            // instance, this would rewrite the generic
+                                            // implementation — parsec's own `parserBind` —
+                                            // into a call to itself, miscompiling the
+                                            // library. An imported instance means we are a
+                                            // consumer. A variable result head, as in
+                                            // `runPT`'s bind at a generic `m`, has no head
+                                            // constructor and skips.
+                                            let sig = ctx.current_binding_sig()?;
+                                            let mut result = sig;
+                                            while let Ty::Fun(_, ret) = result {
+                                                result = ret.as_ref();
+                                            }
+                                            let Ty::App(monad, _) = result else {
+                                                return None;
+                                            };
+                                            let mut head = monad.as_ref();
+                                            while let Ty::App(f2, _) = head {
+                                                head = f2.as_ref();
+                                            }
+                                            let Ty::Con(con) = head else {
+                                                return None;
+                                            };
+                                            (!LowerContext::is_builtin_monad_type(head)
+                                                && ctx.has_imported_instance(class_name, con.name))
+                                            .then(|| monad.as_ref().clone())
+                                        })
+                                } else {
+                                    None
+                                }
+                            });
 
                         // A dispatch type recovered from an operand's scheme is the
                         // bare head constructor (`ParsecT`), which names the monad but
@@ -4815,10 +5076,13 @@ fn lower_app(
 
             // Case 3b: Head is a constrained function with unresolved type-variable constraints
             if let Some(scheme) = ctx.lookup_scheme(head_def_ref.def_id) {
-                let has_unresolved = scheme
-                    .constraints
-                    .iter()
-                    .any(|c| ctx.is_user_class(c.class) && c.args.iter().any(has_type_variables));
+                // Any constraint the callee takes as a dictionary, not just a
+                // user class: a `Monad m =>` callee's arguments were otherwise
+                // lowered plainly, so a continuation that needs its OWN monad
+                // dictionary reached it bare (see `is_constrained_fn_value`).
+                let has_unresolved = scheme.constraints.iter().any(|c| {
+                    ctx.constraint_is_dict_passed(c) && c.args.iter().any(has_type_variables)
+                });
                 if has_unresolved {
                     // Clone the constraint list before any mutable ctx call so the
                     // immutable `scheme` borrow is released (its last use is here).

@@ -19,7 +19,76 @@ reverting anything non-trivial.
 
 ---
 
-## 0. STATE AS OF 2026-09-19 — read this first
+## 0. STATE AS OF 2026-10-10 — read this first
+
+The operator SPELLINGS were hiding the dispatch head. Four fixes, each with a
+minimal repro and an e2e fixture (see `tier2_functions/`
+`applicative_user_instance`, `nested_return_user_monads`,
+`flipped_bind_user_monad`):
+
+1. **`<$>`/`fmap` dispatched on their FIRST operand**, which is the plain
+   function — `two <$> letter` resolved `Functor (Char -> Char -> String)`,
+   named no instance, and stayed a BUILTIN fmap that walked the parser closure
+   as a list. `<*>` then received a non-closure and the CPS apply died ("PAP:
+   applied 5 args … word0=0x1"). 7-line repro. `<$>` appears all over pandoc's
+   readers, so this one was load-bearing.
+2. **`f =<< m` never reached the monad dispatch at all** (`=<<` is not a
+   registered class method), so a ParsecT bind written that way fell to the
+   generic builtin and `(\c -> return [c,c]) =<< letter` returned `""` instead
+   of `"aa"`. Rewritten in bhc-lower to `m >>= f`, ahead of typeck.
+3. **`f $ x` hides the head the same way** — and pandoc writes `$` 7755 times.
+   `return $ return $ B.str t` in `symbol` left both `return`s as the builtin's
+   identity, so the parser's action WAS the `Text` ("closure call: the action …
+   is not a closure", words = the BhcText header). `$` and `$!` now lower to
+   direct application in bhc-lower.
+4. **A nested `return` took the enclosing do-block's monad.** `return (return
+   x)` has a different monad at each level (pandoc's `symbol`: a `Future`
+   inside a parser); the monad the surrounding `>>=` pushed answered for both.
+   `return`/`pure` now prefer the type recorded for their OWN application, and
+   a monad codegen implements itself (IO, the transformers, `Maybe`/`Either`/
+   list) stops the search instead of falling through to the ambient one.
+
+Fixing (3) made three modules fail to COMPILE, each a latent codegen bug the
+`$` builtin had been hiding: `exitWith` and `undefined` left a terminated basic
+block as the insertion point (pandoc's `handleError` ends `exitWith (ExitFailure
+c); return undefined`), and `bhc_except_t_then` was only DECLARED on the
+pre-lowered-values path, which LLVM rejects for an internal-linkage global.
+
+Then the reader climbed as far as `inlines1` = `mconcat <$> many1 inline`,
+which needs `Monoid (Future s Inlines)` — and pandoc writes that instance as
+`(<>) = liftA2 (<>)` over a GND newtype. That took four more fixes:
+`deriving (Functor, Applicative, Monad)` was declined for any newtype with a
+parameter before the monad's own (`Future s a` over `Reader s a`), so the
+instance came out EMPTY; the derived methods were keyed and named at the bare
+type rather than the applied head `F s`, so an importing module called a symbol
+the producer never defined; the derived `fmap` applied the function to the whole
+wrapped action instead of delegating to the inner functor; and `liftA2`/`liftA3`
+had no implementation at all (an RTS stub) and a typeck scheme of `forall a b.
+a`, which left their operands unconstrained. They now desugar to a bind chain in
+bhc-lower, at the application so the operands keep their own spans.
+
+**The frontier, with repros in `~/Development/pandoc-harness`:**
+- `GND2.hs`/`GND3.hs`: `instance Semigroup a => Semigroup (F s a) where (<>) =
+  liftA2 (<>)` still segfaults — inside an instance method the eta-expanded
+  parameters carry no type, so the desugared binds stay the generic builtins.
+  Dispatching them at the ENCLOSING instance type was tried and reverted (it
+  did not fix the target and is unverifiable without it). This is what
+  `inlines1` — and therefore `readMarkdown` — is waiting on.
+- `GND5.hs` passes, so the desugaring itself is right: a handwritten bind chain
+  and `liftA2 (++)` both print `ab`.
+- The `<>` BUILTIN on two Strings with no Core type prepends a NUL (`\0ab`),
+  which is how the `liftA2 (<>)` path reads at the top level.
+- An explicitly imported Prelude name (`import Control.Applicative (liftA2)`)
+  gets a def with NO scheme, so typeck cannot type its operands; the same name
+  from the Prelude works.
+- `mapM char "ab"` at ParsecT crashes in `bhc_force` on `0x1` (pre-existing —
+  identical with the dispatch fixes off), and `trace`'s argument is evaluated
+  eagerly where GHC never evaluates it at all.
+- `BHC_DBG_NULLDICT=1` now names every dictionary that resolved to nothing.
+  That placeholder is a zero literal, which reaches the runtime as the tagged
+  small int `0x1` — the signature of most crashes in this campaign.
+
+## 0-old. STATE AS OF 2026-09-19
 
 A session of dictionary-correctness work landed on
 `integration/pandoc-html-writer` (see the two commits whose subjects start

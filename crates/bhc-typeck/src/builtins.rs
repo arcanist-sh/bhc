@@ -702,6 +702,16 @@ impl Builtins {
                     ),
                 )
             }),
+            // ($!) has ($)'s type; it forces its argument first.
+            ("$!", {
+                Scheme::poly(
+                    vec![a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                    ),
+                )
+            }),
             // Monadic operators (polymorphic - works with any monad)
             // m has kind * -> * (type constructor)
             (">>=", {
@@ -5810,18 +5820,64 @@ impl Builtins {
                 "<=<",
                 Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone())),
             ),
-            (
-                "liftA",
-                Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone())),
-            ),
-            (
-                "liftA2",
-                Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone())),
-            ),
-            (
-                "liftA3",
-                Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone())),
-            ),
+            // `liftA`/`liftA2`/`liftA3` had `forall a b. a` — a type that says
+            // nothing, so their OPERANDS stayed unconstrained: in `liftA2 (<>)
+            // one two` the `(<>)` had a variable type, no Semigroup dictionary
+            // could be chosen for it, and it reached the runtime as a stub.
+            ("liftA", {
+                let f_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let f = TyVar::new(BUILTIN_TYVAR_F, f_kind);
+                let f_a = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(a.clone())));
+                let f_b = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(b.clone())));
+                Scheme::poly(
+                    vec![f.clone(), a.clone(), b.clone()],
+                    Ty::fun(
+                        Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
+                        Ty::fun(f_a, f_b),
+                    ),
+                )
+            }),
+            ("liftA2", {
+                let f_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let f = TyVar::new(BUILTIN_TYVAR_F, f_kind);
+                let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
+                let f_a = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(a.clone())));
+                let f_b = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(b.clone())));
+                let f_c = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(c.clone())));
+                Scheme::poly(
+                    vec![f.clone(), a.clone(), b.clone(), c.clone()],
+                    Ty::fun(
+                        Ty::fun(
+                            Ty::Var(a.clone()),
+                            Ty::fun(Ty::Var(b.clone()), Ty::Var(c.clone())),
+                        ),
+                        Ty::fun(f_a, Ty::fun(f_b, f_c)),
+                    ),
+                )
+            }),
+            ("liftA3", {
+                let f_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));
+                let f = TyVar::new(BUILTIN_TYVAR_F, f_kind);
+                let c = TyVar::new_star(BUILTIN_TYVAR_B + 1);
+                let d = TyVar::new_star(BUILTIN_TYVAR_B + 2);
+                let f_a = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(a.clone())));
+                let f_b = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(b.clone())));
+                let f_c = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(c.clone())));
+                let f_d = Ty::App(Box::new(Ty::Var(f.clone())), Box::new(Ty::Var(d.clone())));
+                Scheme::poly(
+                    vec![f.clone(), a.clone(), b.clone(), c.clone(), d.clone()],
+                    Ty::fun(
+                        Ty::fun(
+                            Ty::Var(a.clone()),
+                            Ty::fun(
+                                Ty::Var(b.clone()),
+                                Ty::fun(Ty::Var(c.clone()), Ty::Var(d.clone())),
+                            ),
+                        ),
+                        Ty::fun(f_a, Ty::fun(f_b, Ty::fun(f_c, f_d))),
+                    ),
+                )
+            }),
             (
                 "myThreadId",
                 Scheme::poly(vec![a.clone(), b.clone()], Ty::Var(a.clone())),

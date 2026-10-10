@@ -6681,6 +6681,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "on" => self.lower_builtin_on(args[0], args[1], args[2], args[3]),
             "fix" => self.lower_builtin_fix(args[0]),
             "$" => self.lower_builtin_apply(args[0], args[1]),
+            "$!" => self.lower_builtin_apply_strict(args[0], args[1]),
             "&" => self.lower_builtin_reverse_apply(args[0], args[1]),
             "." => self.lower_builtin_compose(args[0], args[1], args[2]),
             "curry" => self.lower_builtin_curry(args[0], args[1], args[2]),
@@ -14324,6 +14325,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder()
             .build_unreachable()
             .map_err(|e| CodegenError::Internal(format!("failed to build unreachable: {:?}", e)))?;
+        self.start_unreachable_block("after_undefined")?;
 
         Ok(Some(self.type_mapper().ptr_type().const_null().into()))
     }
@@ -21026,83 +21028,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(m2_expr)?
             .ok_or_else(|| CodegenError::Internal("ExceptT.>>: m2 has no value".to_string()))?;
 
-        let ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_except_t_then";
 
         let func = self.get_or_create_transformer_fn(fn_name);
-        if func.count_basic_blocks() == 0 {
-            let entry = self.llvm_ctx.append_basic_block(func, "entry");
-            let right_bb = self.llvm_ctx.append_basic_block(func, "right");
-            let left_bb = self.llvm_ctx.append_basic_block(func, "left");
-            let saved_bb = self.builder().get_insert_block();
-            self.builder().position_at_end(entry);
-            let env = func.get_nth_param(0).unwrap().into_pointer_value();
-            let m1 = self.extract_closure_env_elem(env, 2, 0)?;
-            let m2 = self.extract_closure_env_elem(env, 2, 1)?;
-
-            let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
-            let null_arg = ptr_type.const_null();
-
-            // either = m1(_)
-            let m1_fn = self.extract_closure_fn_ptr(m1)?;
-            let either = self
-                .builder()
-                .build_indirect_call(
-                    fn_type,
-                    m1_fn,
-                    &[m1.into(), null_arg.into()],
-                    "except_then_either",
-                )
-                .map_err(|e| CodegenError::Internal(format!("ExceptT then m1: {:?}", e)))?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| CodegenError::Internal("ExceptT then m1: void".to_string()))?
-                .into_pointer_value();
-
-            let tag = self.extract_adt_tag(either)?;
-            let tm = self.type_mapper();
-            let is_right = self
-                .builder()
-                .build_int_compare(
-                    inkwell::IntPredicate::EQ,
-                    tag,
-                    tm.i64_type().const_int(1, false),
-                    "is_right",
-                )
-                .map_err(|e| CodegenError::Internal(format!("ExceptT then cmp: {:?}", e)))?;
-            self.builder()
-                .build_conditional_branch(is_right, right_bb, left_bb)
-                .map_err(|e| CodegenError::Internal(format!("ExceptT then branch: {:?}", e)))?;
-
-            // Left case: return either
-            self.builder().position_at_end(left_bb);
-            self.builder().build_return(Some(&either)).map_err(|e| {
-                CodegenError::Internal(format!("except_t_then left return: {:?}", e))
-            })?;
-
-            // Right case: call m2(_)
-            self.builder().position_at_end(right_bb);
-            let m2_fn = self.extract_closure_fn_ptr(m2)?;
-            let result = self
-                .builder()
-                .build_indirect_call(
-                    fn_type,
-                    m2_fn,
-                    &[m2.into(), null_arg.into()],
-                    "except_then_result",
-                )
-                .map_err(|e| CodegenError::Internal(format!("ExceptT then m2: {:?}", e)))?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| CodegenError::Internal("ExceptT then m2: void".to_string()))?;
-            self.builder().build_return(Some(&result)).map_err(|e| {
-                CodegenError::Internal(format!("except_t_then right return: {:?}", e))
-            })?;
-
-            if let Some(bb) = saved_bb {
-                self.builder().position_at_end(bb);
-            }
-        }
+        self.ensure_except_t_then_body(func)?;
 
         let fn_ptr = func.as_global_value().as_pointer_value();
         let m1_ptr = self.value_to_ptr(m1_val)?;
@@ -21115,6 +21044,94 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             ],
         )?;
         Ok(Some(closure_ptr.into()))
+    }
+
+    /// Emit `bhc_except_t_then`'s body, once per module.
+    ///
+    /// Both callers — the expression form and the pre-lowered-values form —
+    /// must do this: the function has Internal linkage, so a module that only
+    /// DECLARED it failed LLVM verification ("Global is external, but doesn't
+    /// have external or weak linkage"), which is what `Text.Pandoc.Readers.
+    /// Docx.Parse` hit as soon as it reached the pre-lowered path.
+    fn ensure_except_t_then_body(&mut self, func: FunctionValue<'ctx>) -> CodegenResult<()> {
+        if func.count_basic_blocks() > 0 {
+            return Ok(());
+        }
+        let ptr_type = self.type_mapper().ptr_type();
+
+        let entry = self.llvm_ctx.append_basic_block(func, "entry");
+        let right_bb = self.llvm_ctx.append_basic_block(func, "right");
+        let left_bb = self.llvm_ctx.append_basic_block(func, "left");
+        let saved_bb = self.builder().get_insert_block();
+        self.builder().position_at_end(entry);
+        let env = func.get_nth_param(0).unwrap().into_pointer_value();
+        let m1 = self.extract_closure_env_elem(env, 2, 0)?;
+        let m2 = self.extract_closure_env_elem(env, 2, 1)?;
+
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        let null_arg = ptr_type.const_null();
+
+        // either = m1(_)
+        let m1_fn = self.extract_closure_fn_ptr(m1)?;
+        let either = self
+            .builder()
+            .build_indirect_call(
+                fn_type,
+                m1_fn,
+                &[m1.into(), null_arg.into()],
+                "except_then_either",
+            )
+            .map_err(|e| CodegenError::Internal(format!("ExceptT then m1: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("ExceptT then m1: void".to_string()))?
+            .into_pointer_value();
+
+        let tag = self.extract_adt_tag(either)?;
+        let tm = self.type_mapper();
+        let is_right = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                tm.i64_type().const_int(1, false),
+                "is_right",
+            )
+            .map_err(|e| CodegenError::Internal(format!("ExceptT then cmp: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(is_right, right_bb, left_bb)
+            .map_err(|e| CodegenError::Internal(format!("ExceptT then branch: {:?}", e)))?;
+
+        // Left case: return either
+        self.builder().position_at_end(left_bb);
+        self.builder()
+            .build_return(Some(&either))
+            .map_err(|e| CodegenError::Internal(format!("except_t_then left return: {:?}", e)))?;
+
+        // Right case: call m2(_)
+        self.builder().position_at_end(right_bb);
+        let m2_fn = self.extract_closure_fn_ptr(m2)?;
+        let result = self
+            .builder()
+            .build_indirect_call(
+                fn_type,
+                m2_fn,
+                &[m2.into(), null_arg.into()],
+                "except_then_result",
+            )
+            .map_err(|e| CodegenError::Internal(format!("ExceptT then m2: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("ExceptT then m2: void".to_string()))?;
+        self.builder()
+            .build_return(Some(&result))
+            .map_err(|e| CodegenError::Internal(format!("except_t_then right return: {:?}", e)))?;
+
+        if let Some(bb) = saved_bb {
+            self.builder().position_at_end(bb);
+        }
+
+        Ok(())
     }
 
     /// catchE m handler = closure \_ -> let either = m(_) in case tag of
@@ -22450,7 +22467,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let fn_name = "bhc_except_t_then";
 
         let func = self.get_or_create_transformer_fn(fn_name);
-        // Function body is generated by lower_builtin_except_t_then if not already present
+        self.ensure_except_t_then_body(func)?;
 
         let fn_ptr = func.as_global_value().as_pointer_value();
         let m1_ptr = self.value_to_ptr(m1_val)?;
@@ -25714,6 +25731,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.builder()
             .build_unreachable()
             .map_err(|e| CodegenError::Internal(format!("unreachable failed: {:?}", e)))?;
+        // Whatever follows a call that never returns is still lowered, and it
+        // cannot go into this now-terminated block: pandoc's `handleError` ends
+        // `exitWith (ExitFailure c); return undefined`, which LLVM rejected as
+        // "Terminator found in the middle of a basic block". `exitSuccess` and
+        // `exitFailure` do the same.
+        self.start_unreachable_block("after_exit_with")?;
         Ok(Some(self.type_mapper().ptr_type().const_null().into()))
     }
 
@@ -28793,6 +28816,36 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         func_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         self.lower_expr(func_expr)
+    }
+
+    /// `f $! x` — like `$`, but the argument is forced to WHNF before the
+    /// call. pandoc's markdown reader builds every inline with `return $! …`,
+    /// and without this `$!` was an unimplemented stub that aborted the parse.
+    fn lower_builtin_apply_strict(
+        &mut self,
+        func_expr: &Expr,
+        arg_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let arg = self
+            .lower_expr(arg_expr)?
+            .ok_or_else(|| CodegenError::Internal("$!: argument has no value".to_string()))?;
+        let forced = self.build_force(arg)?;
+        let func = self
+            .lower_expr(func_expr)?
+            .ok_or_else(|| CodegenError::Internal("$!: function has no value".to_string()))?;
+        let func_ptr = match func {
+            BasicValueEnum::PointerValue(p) => p,
+            _ => {
+                return Err(CodegenError::TypeError(
+                    "$!: function must be a closure".to_string(),
+                ))
+            }
+        };
+        let arg_ptr = self.value_to_ptr(forced)?;
+        let result = self
+            .apply_closure_values(func_ptr, &[arg_ptr], false)?
+            .ok_or_else(|| CodegenError::Internal("$!: returned void".to_string()))?;
+        Ok(Some(result))
     }
 
     /// Lower `$` - function application.
@@ -48189,6 +48242,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // seq :: a -> b -> b (evaluate first, return second)
                 Ok(Some(args[1]))
             }
+            "$!" if args.len() >= 2 => {
+                // ($!) :: (a -> b) -> a -> b, forcing the argument to WHNF
+                // first. pandoc's markdown reader writes `return $! …`.
+                let func = args[0].into_pointer_value();
+                let forced = self.build_force(args[1])?;
+                let arg_ptr = self.value_to_ptr(forced)?;
+                let result = self
+                    .apply_closure_values(func, &[arg_ptr], false)?
+                    .ok_or_else(|| CodegenError::Internal("$!: returned void".to_string()))?;
+                Ok(Some(result))
+            }
             "$" if args.len() >= 2 => {
                 // ($) :: (a -> b) -> a -> b
                 let func = args[0].into_pointer_value();
@@ -53613,6 +53677,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.in_tail_position = false;
         let mut arg_vals: Vec<PointerValue<'ctx>> = Vec::new();
         for arg_expr in args {
+            // An argument whose evaluation can DIVERGE is passed as a thunk,
+            // exactly as on the direct-call path (`arg_should_thunk`). Calling
+            // through a closure VALUE is where parsec lives: `unParser p s cok
+            // cerr manyErr eerr` hands `many`'s empty-ok continuation — which
+            // is a bottom (`error "…applied to a parser that accepts an empty
+            // string"`) — to a parser that never calls it. Evaluating it here
+            // made every `many` in pandoc report that error, whatever the
+            // parser consumed.
+            if self.arg_should_thunk(arg_expr) {
+                if let Some(thunk) = self.lower_lazy(arg_expr)? {
+                    arg_vals.push(self.value_to_ptr(thunk)?);
+                    continue;
+                }
+            }
             if let Some(val) = self.lower_expr(arg_expr)? {
                 arg_vals.push(self.value_to_ptr(val)?);
             }
@@ -58210,6 +58288,7 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "on" => Some(4),
         "fix" => Some(1),
         "$" => Some(2),
+        "$!" => Some(2),
         "&" => Some(2),
         "." => Some(3),
         "succ" => Some(1),

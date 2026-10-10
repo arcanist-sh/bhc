@@ -14,7 +14,12 @@ instance Functor Outer where
   fmap f (Outer s a) = Outer s (f a)
 
 instance Applicative Outer where
-  pure = Outer "o"
+  -- Eta-expanded on purpose: `pure = Outer "o"`, a point-free method whose
+  -- body is a partially applied CONSTRUCTOR, is lowered as a call to a stub
+  -- named after the constructor ("stub: Outer not implemented"). That is a
+  -- separate bug — see tools/pandoc-harness/repros — and this fixture is about
+  -- the two nested `return`s.
+  pure a = Outer "o" a
   Outer s f <*> Outer t a = Outer (s ++ t) (f a)
 
 instance Monad Outer where
@@ -25,7 +30,7 @@ instance Functor Inner where
   fmap f (Inner s a) = Inner s (f a)
 
 instance Applicative Inner where
-  pure = Inner "i"
+  pure a = Inner "i" a
   Inner s f <*> Inner t a = Inner (s ++ t) (f a)
 
 instance Monad Inner where

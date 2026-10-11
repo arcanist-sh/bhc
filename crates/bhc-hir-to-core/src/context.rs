@@ -1662,6 +1662,39 @@ impl LowerContext {
     }
 
     /// Register a HIR definition with a Core variable.
+    /// Register a derived instance AND make its method variables resolvable
+    /// right away.
+    ///
+    /// The instance's method table holds the deriving context's own ids, and a
+    /// dictionary built from it resolves each one through `var_map`. Until
+    /// something registered those variables, the lookup missed and
+    /// `method_reference` fell back to the bare method NAME — `fmap`, `pure` —
+    /// which codegen takes for the builtin. In a library module that is
+    /// exactly what happened: `liftA2 (<>)` in pandoc's `Semigroup (Future s
+    /// a)` built its `Applicative Future` dictionary from the builtin `pure`
+    /// and `<*>`, and the parser's inlines came back as `0x1`. The same source
+    /// compiled as `Main` worked, which is what pinned it to registration
+    /// order. A slot already taken is left alone.
+    fn register_derived_instance(
+        &mut self,
+        derived: crate::deriving::DerivedInstance,
+        bindings: &mut Vec<Bind>,
+    ) {
+        for b in &derived.bindings {
+            let vars: Vec<&Var> = match b {
+                Bind::NonRec(v, _) => vec![v],
+                Bind::Rec(bs) => bs.iter().map(|(v, _)| v).collect(),
+            };
+            for v in vars {
+                self.var_map
+                    .entry(DefId::new(v.id.index()))
+                    .or_insert_with(|| v.clone());
+            }
+        }
+        self.class_registry.register_instance(derived.instance);
+        bindings.extend(derived.bindings);
+    }
+
     pub fn register_var(&mut self, def_id: DefId, var: Var) {
         self.var_map.insert(def_id, var);
     }
@@ -3487,8 +3520,16 @@ impl LowerContext {
             eprintln!("[dispatch] {method}: occ ty = {ty:?}");
         }
         // Direct: for nullary/def-like methods the recorded type IS the
-        // class parameter's instantiation.
-        if ty_is_concrete(&ty) {
+        // class parameter's instantiation. Not for a builtin-class method that
+        // TAKES arguments: there the recorded type is the method's own function
+        // type, and `<>` used as a value (`app2 (<>) x y`, `foldr (<>)`,
+        // `liftA2 (<>)`) resolved `Semigroup ([Inline] -> [Inline] -> [Inline])`
+        // — which the permissive pass answered with a method-less instance, so
+        // the value passed around was `error "No implementation for method"`.
+        // User classes keep the rule: a function-headed instance is legitimate
+        // there (`instance Attributable (Html -> Html)`).
+        let takes_args = builtin_class_method_arity(method).is_some_and(|n| n > 0);
+        if ty_is_concrete(&ty) && !(takes_args && matches!(ty, Ty::Fun(..))) {
             if let Some(expr) = self.method_at_instance_type(class_name, method, &ty, span) {
                 return Some(expr);
             }
@@ -4099,8 +4140,7 @@ impl LowerContext {
                             })
                             .collect();
                         for derived in derived_instances {
-                            self.class_registry.register_instance(derived.instance);
-                            bindings.extend(derived.bindings);
+                            self.register_derived_instance(derived, &mut bindings);
                         }
                     }
                 }
@@ -4218,8 +4258,7 @@ impl LowerContext {
                             })
                             .collect();
                         for derived in derived_instances {
-                            self.class_registry.register_instance(derived.instance);
-                            bindings.extend(derived.bindings);
+                            self.register_derived_instance(derived, &mut bindings);
                         }
                     }
                 }
@@ -4363,8 +4402,7 @@ impl LowerContext {
                                         )
                                     })
                                 {
-                                    self.class_registry.register_instance(derived.instance);
-                                    bindings.extend(derived.bindings);
+                                    self.register_derived_instance(derived, &mut bindings);
                                 }
                                 found = true;
                                 break;
@@ -4381,8 +4419,7 @@ impl LowerContext {
                                         )
                                     })
                                 {
-                                    self.class_registry.register_instance(derived.instance);
-                                    bindings.extend(derived.bindings);
+                                    self.register_derived_instance(derived, &mut bindings);
                                 }
                                 found = true;
                                 break;

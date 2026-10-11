@@ -1131,7 +1131,13 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                             t => t,
                         };
                         Some(match target {
-                            Ty::List(t) => t.as_ref().clone(),
+                            // Only `mconcat :: [a] -> a` takes a LIST of the
+                            // class parameter. For `<>`/`mappend`/`mempty` the
+                            // value type IS the class parameter, and unwrapping
+                            // it resolved `"a" <> "b"` at `Semigroup Char` —
+                            // which does not exist, so the dictionary came back
+                            // with an `error "No implementation"` in its slot.
+                            Ty::List(t) if name.as_str() == "mconcat" => t.as_ref().clone(),
                             // Alias-qualified container cons (`Set.Set
                             // Extension` under `import qualified Data.Set as
                             // Set`) must match the builtin instance heads,
@@ -1973,13 +1979,17 @@ fn hint_lift_a2_function_ty(ctx: &mut LowerContext, f: &hir::Expr, x: &hir::Expr
     if !matches!(name.as_str(), "liftA2" | "liftM2") {
         return;
     }
-    let elem = |t: Option<Ty>| match t {
-        Some(Ty::App(_, e)) => Some(*e),
+    // Expanded: the element type reaches instance lookup as whatever synonym
+    // the source wrote, and `String` matches no instance — the dictionary came
+    // back with an `error "No implementation for method"` in its `<>` slot,
+    // while `[Char]` resolves to the list instance.
+    let elem = |ctx: &LowerContext, t: Option<Ty>| match t {
+        Some(Ty::App(_, e)) => Some(ctx.expand_type_aliases(e.as_ref())),
         _ => None,
     };
-    let a = elem(ctx.resolved_expr_ty_opt(mb.span()));
-    let b = elem(ctx.resolved_expr_ty_opt(x.span()));
-    let c = elem(ctx.resolved_expr_ty_opt(span));
+    let a = elem(ctx, ctx.resolved_expr_ty_opt(mb.span()));
+    let b = elem(ctx, ctx.resolved_expr_ty_opt(x.span()));
+    let c = elem(ctx, ctx.resolved_expr_ty_opt(span));
     let (Some(a), Some(b), Some(c)) = (a, b, c) else {
         return;
     };

@@ -85,10 +85,10 @@ class method passed as `f` never gets its dictionary).
 - `GND5.hs` passes, so the lambda itself is right: a handwritten bind chain and
   `liftA2 (++)` both print `ab`. `GND3` now reaches a segfault rather than the
   `<>` stub, so the method dispatches and something downstream of it does not.
-- `POINTFREE_CON.hs`: a class method defined point-free as a partially applied
-  CONSTRUCTOR (`pure = Outer "o"`) is lowered as a call to a stub named after
-  the constructor. Eta-expanding the method fixes the same program, which is
-  what the `nested_return_user_monads` fixture now does.
+- `POINTFREE_CON.hs`: FIXED — a point-free method of a BUILTIN class looked
+  nullary, because nothing declares a builtin class's method arities, so
+  `pure = Outer "o"` stayed a partial application of the constructor (which
+  codegen resolves by name). The arities are stated now.
 - The `<>` BUILTIN on two Strings with no Core type prepends a NUL (`\0ab`),
   which is how the `liftA2 (<>)` path reads at the top level.
 - An explicitly imported Prelude name (`import Control.Applicative (liftA2)`)

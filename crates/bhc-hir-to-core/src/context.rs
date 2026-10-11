@@ -5044,6 +5044,16 @@ impl LowerContext {
                     .map(|s| arrows(&s.ty))
                     .filter(|n| *n > 0)
             })
+            .or_else(|| {
+                // A BUILTIN class declares no method types anywhere, so a
+                // point-free method of one looks NULLARY: `instance Applicative
+                // Box where pure = Box "p"` stayed a partial application of the
+                // constructor, and codegen resolves a constructor reference by
+                // name — "stub: Box not implemented". These arities are fixed by
+                // the class definitions, so they can simply be stated.
+                self.is_class_method(method_def.name)
+                    .and(builtin_class_method_arity(method_def.name))
+            })
             .unwrap_or(0);
         if arrow_count <= existing {
             return body;
@@ -5659,6 +5669,19 @@ fn annotate_monad_head_tys(bind: &mut Bind, inst_ty: &Ty) {
 /// is 0x1" — a class method selected out of it, or a constrained parser run
 /// through it. Nothing warns by default (dead code resolves nothing, and
 /// warning on it would bury the pandoc sweep); `BHC_DBG_NULLDICT=1` prints the
+/// The arity of a method of a BUILTIN class, which no interface declares and no
+/// local `class` statement either. Only the methods whose arity is fixed by the
+/// class definition and unambiguous; `mempty` and the like are deliberately
+/// absent, being nullary.
+fn builtin_class_method_arity(name: Symbol) -> Option<usize> {
+    Some(match name.as_str() {
+        "pure" | "return" | "mconcat" => 1,
+        "fmap" | "<$>" | "<$" | "<*>" | "*>" | "<*" | ">>=" | ">>" | "=<<" | "<|>" | "mplus"
+        | "mappend" | "<>" => 2,
+        _ => return None,
+    })
+}
+
 /// class, the types it was wanted at, and the span instead.
 pub(crate) fn null_dict_placeholder(class: Symbol, args: &[Ty], span: Span) -> core::Expr {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

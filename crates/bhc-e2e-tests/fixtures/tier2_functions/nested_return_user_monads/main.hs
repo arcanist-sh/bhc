@@ -14,12 +14,11 @@ instance Functor Outer where
   fmap f (Outer s a) = Outer s (f a)
 
 instance Applicative Outer where
-  -- Eta-expanded on purpose: `pure = Outer "o"`, a point-free method whose
-  -- body is a partially applied CONSTRUCTOR, is lowered as a call to a stub
-  -- named after the constructor ("stub: Outer not implemented"). That is a
-  -- separate bug — see tools/pandoc-harness/repros — and this fixture is about
-  -- the two nested `return`s.
-  pure a = Outer "o" a
+  -- Point-free on purpose: the body is a partially applied CONSTRUCTOR, and a
+  -- builtin class declares no method arities anywhere, so this method looked
+  -- NULLARY and was left as that partial application — which codegen resolves
+  -- by name and cannot find ("stub: Outer not implemented").
+  pure = Outer "o"
   Outer s f <*> Outer t a = Outer (s ++ t) (f a)
 
 instance Monad Outer where
@@ -30,7 +29,7 @@ instance Functor Inner where
   fmap f (Inner s a) = Inner s (f a)
 
 instance Applicative Inner where
-  pure a = Inner "i" a
+  pure = Inner "i"
   Inner s f <*> Inner t a = Inner (s ++ t) (f a)
 
 instance Monad Inner where

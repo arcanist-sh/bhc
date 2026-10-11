@@ -35,7 +35,7 @@ use bhc_hir::DefId;
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;
-use bhc_types::{Constraint, Kind, Scheme, Subst, Ty, TyVar};
+use bhc_types::{Constraint, Kind, Scheme, Subst, Ty, TyCon, TyVar};
 use rustc_hash::FxHashMap;
 
 /// Information about an associated type in a class.
@@ -405,13 +405,31 @@ impl ClassRegistry {
         // instance that is not ParsecT's, and the parser ran an action
         // belonging to another monad. Require the head constructors to
         // agree first, then fall back to the permissive match.
+        //
+        // `String` is tried a second time as `[Char]` before any permissive
+        // match. It is the language's own synonym, so an occurrence carries
+        // whichever spelling the source used, while the instance is declared at
+        // the list: `Semigroup String` agreed with no head, fell through to the
+        // permissive pass, and matched a variable-headed instance with no
+        // methods — a dictionary whose `<>` was `error "No implementation for
+        // method"`. Only `String`, and only as a second try: other synonyms
+        // carry instances of their own (`instance Semigroup Inlines` is keyed at
+        // `Inlines`), which an unconditional expansion would miss.
+        let normalized: Vec<Ty> = types.iter().map(string_as_char_list).collect();
+        let spellings: &[&[Ty]] = if normalized.as_slice() == types {
+            &[types]
+        } else {
+            &[types, &normalized]
+        };
         for require_head in [true, false] {
-            for inst in instances {
-                if require_head && !instance_heads_agree(&inst.instance_types, types) {
-                    continue;
-                }
-                if let Some(subst) = types_match_multi(&inst.instance_types, types) {
-                    return Some((inst, subst));
+            for tys in spellings {
+                for inst in instances {
+                    if require_head && !instance_heads_agree(&inst.instance_types, tys) {
+                        continue;
+                    }
+                    if let Some(subst) = types_match_multi(&inst.instance_types, tys) {
+                        return Some((inst, subst));
+                    }
                 }
             }
         }
@@ -1311,6 +1329,27 @@ fn apply_constraint_dicts(
 /// (tag + fields). When a class has only 1 method and no superclasses, the
 /// standard `make_tuple` would optimize away the tuple wrapper, causing
 /// `$sel_0` to fail. This function pads 1-element dictionaries with a
+/// `String` replaced by `[Char]` throughout a type.
+fn string_as_char_list(ty: &Ty) -> Ty {
+    match ty {
+        Ty::Con(tc) if tc.name.as_str() == "String" => Ty::List(Box::new(Ty::Con(TyCon::new(
+            Symbol::intern("Char"),
+            bhc_types::Kind::Star,
+        )))),
+        Ty::App(f, a) => Ty::App(
+            Box::new(string_as_char_list(f)),
+            Box::new(string_as_char_list(a)),
+        ),
+        Ty::Fun(a, b) => Ty::Fun(
+            Box::new(string_as_char_list(a)),
+            Box::new(string_as_char_list(b)),
+        ),
+        Ty::List(e) => Ty::List(Box::new(string_as_char_list(e))),
+        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(string_as_char_list).collect()),
+        other => other.clone(),
+    }
+}
+
 /// dummy field to ensure a valid 2-tuple is always created.
 fn make_dict(fields: Vec<core::Expr>, span: Span) -> core::Expr {
     if fields.len() == 1 {

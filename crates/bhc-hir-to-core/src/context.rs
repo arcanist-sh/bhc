@@ -118,6 +118,12 @@ pub struct LowerContext {
     /// Declared field types per constructor name, from user data declarations.
     /// Threaded into `CoreConstructor::field_types` for codegen `show` dispatch.
     constructor_field_types: FxHashMap<Symbol, Vec<Ty>>,
+    /// Concrete field types of variables bound by constructor patterns
+    /// (`Str t1` binds `t1 :: Text`). Dispatch-only: typeck records no
+    /// occurrence types inside instance method bodies, so this is the only
+    /// way `t1 <> t2` there learns it is at `Text`. Never copied onto the
+    /// Core `Var`, whose type codegen reads for widths.
+    pattern_binder_tys: FxHashMap<DefId, Ty>,
 
     /// Field selector metadata (field name -> `FieldSelectorInfo`).
     /// This maps field names to their selector information for generating field access code.
@@ -178,6 +184,11 @@ pub struct LowerContext {
     /// The class of the instance whose method bodies are being lowered
     /// (paired with `current_instance_type`).
     current_instance_class: Option<Symbol>,
+    /// Span of the class-method reference that IS an instance method's whole
+    /// body — the alias in `mappend = (<>)` or `(<*>) = ap`. That reference
+    /// means the method at the instance's own type, never the element
+    /// dictionary an instance constraint (`Semigroup a`) puts in scope.
+    instance_alias_span: Option<Span>,
     /// The declared scheme TYPE of the top-level binding currently being
     /// lowered. An occurrence's typeck-recorded type inside a signed binding
     /// can keep the signature's instantiation VARIABLES (`optional (char 'z')`
@@ -238,6 +249,7 @@ impl LowerContext {
             method_level_active: FxHashSet::default(),
             constructor_map: FxHashMap::default(),
             constructor_field_types: FxHashMap::default(),
+            pattern_binder_tys: FxHashMap::default(),
             field_selector_map: FxHashMap::default(),
             dict_scope: vec![FxHashMap::default()], // Start with empty root scope
             dict_scope_ty: vec![FxHashMap::default()],
@@ -254,6 +266,7 @@ impl LowerContext {
             imported_instance_heads: FxHashSet::default(),
             type_aliases: FxHashMap::default(),
             current_instance_class: None,
+            instance_alias_span: None,
             superclass_bind_depth: 0,
             existential_dict_binders: Vec::new(),
         };
@@ -1661,7 +1674,6 @@ impl LowerContext {
         cons
     }
 
-    /// Register a HIR definition with a Core variable.
     /// Register a derived instance AND make its method variables resolvable
     /// right away.
     ///
@@ -1695,6 +1707,7 @@ impl LowerContext {
         bindings.extend(derived.bindings);
     }
 
+    /// Register a HIR definition with a Core variable.
     pub fn register_var(&mut self, def_id: DefId, var: Var) {
         self.var_map.insert(def_id, var);
     }
@@ -1721,6 +1734,17 @@ impl LowerContext {
     #[must_use]
     pub(crate) fn constructor_field_types(&self, name: Symbol) -> Option<&Vec<Ty>> {
         self.constructor_field_types.get(&name)
+    }
+
+    /// Record the field type a constructor pattern gives a binder.
+    pub(crate) fn record_pattern_binder_ty(&mut self, def_id: DefId, ty: Ty) {
+        self.pattern_binder_tys.insert(def_id, ty);
+    }
+
+    /// The field type a constructor pattern gave this binder, if recorded.
+    #[must_use]
+    pub(crate) fn pattern_binder_ty(&self, def_id: DefId) -> Option<&Ty> {
+        self.pattern_binder_tys.get(&def_id)
     }
 
     /// Look up constructor metadata for a given `DefId`.
@@ -2966,6 +2990,11 @@ impl LowerContext {
             }
         }
         go(&self.type_aliases, ty, 0)
+    }
+
+    /// Whether the reference at `span` is a whole-body instance method alias.
+    pub(crate) fn is_instance_alias(&self, span: Span) -> bool {
+        self.instance_alias_span == Some(span)
     }
 
     pub(crate) fn current_instance_class(&self) -> Option<Symbol> {
@@ -4317,6 +4346,13 @@ impl LowerContext {
                             .method_level_dict_constraints(instance_def.class, method_def.name)
                             .map(|(_, cs)| cs)
                             .unwrap_or_default();
+                        self.instance_alias_span = match method_def.equations.as_slice() {
+                            [eq] if eq.pats.is_empty() && eq.guards.is_empty() => match &eq.rhs {
+                                bhc_hir::Expr::Var(r) => Some(r.span),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
                         self.instance_method_sig_override = self.instance_method_sig(
                             instance_def.class,
                             method_def.name,
@@ -4338,6 +4374,7 @@ impl LowerContext {
                             self.lower_instance_method_with_constraints(method_def, &all)?
                         };
                         self.instance_method_sig_override = None;
+                        self.instance_alias_span = None;
                         if let Some(mut bind) = lowered {
                             if let Some(inst_ty) = self.current_instance_type.clone() {
                                 annotate_monad_head_tys(&mut bind, &inst_ty);

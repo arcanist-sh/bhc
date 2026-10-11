@@ -889,6 +889,13 @@ fn test_tier2_gnd_newtype_extra_param() {
     run_native_test("tier2_functions/gnd_newtype_extra_param", Profile::Default);
 }
 
+/// Dispatch inside instance bodies: `mappend = (<>)` under a `Semigroup a`
+/// constraint, and constructor-bound `Text` fields combined with `<>`.
+#[test]
+fn test_tier2_instance_method_alias() {
+    run_native_test("tier2_functions/instance_method_alias", Profile::Default);
+}
+
 #[test]
 fn test_tier3_derive_ord() {
     run_native_test("tier3_io/derive_ord", Profile::Default);

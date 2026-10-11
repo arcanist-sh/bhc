@@ -988,6 +988,22 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
             }
         }
         if let Some(class_name) = is_method {
+            // `mappend = (<>)` inside `instance (Semigroup a, Monoid a) =>
+            // Monoid (Future s a)`: the alias is `<>` at `Future s a`. The
+            // in-scope `Semigroup` dictionary is the ELEMENT's, and taking it
+            // ran Inlines' `<>` on two Futures.
+            if ctx.is_instance_alias(def_ref.span) {
+                if let Some(inst_ty) = ctx.current_instance_type().cloned() {
+                    if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
+                        name,
+                        class_name,
+                        &inst_ty,
+                        def_ref.span,
+                    ) {
+                        return Ok(method_expr);
+                    }
+                }
+            }
             // This is a class method - we need to select it from a dictionary
             // Look for an in-scope dictionary for this class
             let dict_matches = in_scope_dict_matches(ctx, class_name, def_ref.span);
@@ -1387,7 +1403,7 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
 /// Every leaf of the type is a concrete constructor/primitive — no type
 /// variables, no `Ty::Error`. Downstream dictionary resolution can act on
 /// such a type without guessing.
-fn is_fully_concrete_ty(ty: &Ty) -> bool {
+pub(crate) fn is_fully_concrete_ty(ty: &Ty) -> bool {
     match ty {
         Ty::Con(_) | Ty::Prim(_) => true,
         Ty::App(f, a) => is_fully_concrete_ty(f) && is_fully_concrete_ty(a),
@@ -1443,7 +1459,7 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
                     // Core IR params often have ty: Error in type_schemes.
                     // Check the Core Var's type as a fallback (populated from
                     // the function's type signature in compile_equations).
-                    if let Some(var) = ctx.lookup_var(def_ref.def_id) {
+                    let from_var = if let Some(var) = ctx.lookup_var(def_ref.def_id) {
                         let vty = ctx.expand_type_aliases(&var.ty);
                         match &vty {
                             Ty::Con(_) => Some(vty),
@@ -1452,7 +1468,11 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
                         }
                     } else {
                         None
-                    }
+                    };
+                    from_var.or_else(|| {
+                        ctx.pattern_binder_ty(def_ref.def_id)
+                            .map(|t| ctx.expand_type_aliases(t))
+                    })
                 }
                 _ => None,
             }

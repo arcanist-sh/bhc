@@ -937,6 +937,7 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                             // the binder is silently dropped and the RHS
                             // reference stubs at runtime.
                             register_as_outer_bindings(ctx, &row.pats[col], &scrutinee);
+                            record_con_binder_tys(ctx, &row.pats[col]);
                         }
                     }
                 }
@@ -1133,6 +1134,35 @@ fn register_as_outer_bindings(ctx: &mut LowerContext, pat: &hir::Pat, scrutinee:
         }
         Pat::Ann(inner, _, _) => register_as_outer_bindings(ctx, inner, scrutinee),
         _ => {}
+    }
+}
+
+/// Record, for each variable directly under a constructor pattern, the
+/// constructor's declared field type when it is concrete (`Str t` binds
+/// `t :: Text`). Dispatch-only — see `LowerContext::record_pattern_binder_ty`:
+/// inside an instance method body typeck records no occurrence types, so this
+/// is how `t1 <> t2` there learns it is at `Text`.
+fn record_con_binder_tys(ctx: &mut LowerContext, pat: &hir::Pat) {
+    let (def_ref, sub_pats) = match pat {
+        Pat::Con(def_ref, sub_pats, _) => (def_ref, sub_pats),
+        Pat::As(_, _, inner, _) | Pat::Ann(inner, _, _) => {
+            return record_con_binder_tys(ctx, inner);
+        }
+        _ => return,
+    };
+    let Some(field_tys) = ctx
+        .lookup_constructor_or_by_name(def_ref.def_id)
+        .map(|info| info.name)
+        .and_then(|name| ctx.constructor_field_types(name).cloned())
+    else {
+        return;
+    };
+    for (sub_pat, fty) in sub_pats.iter().zip(field_tys) {
+        if let Pat::Var(_, def_id, _) = sub_pat {
+            if matches!(fty, Ty::Con(_)) || crate::expr::is_fully_concrete_ty(&fty) {
+                ctx.record_pattern_binder_ty(*def_id, fty);
+            }
+        }
     }
 }
 
@@ -1657,6 +1687,7 @@ pub fn bind_pattern_vars(ctx: &mut LowerContext, pat: &hir::Pat, arg_var: Option
             // Literals don't bind any variables
         }
         Pat::Con(_, sub_pats, _) => {
+            record_con_binder_tys(ctx, pat);
             // Recursively bind sub-pattern variables
             // Each sub-pattern will need its own fresh variable
             for sub_pat in sub_pats {

@@ -947,7 +947,31 @@ impl<'a> DictContext<'a> {
                     args: c.args.iter().map(|a| subst.apply(a)).collect(),
                     span,
                 };
-                self.get_dictionary(&concrete, span)
+                // A constraint that stays a bare variable (`Semigroup a` for
+                // `Semigroup (Future s a)` built inside that instance's own
+                // body) is the dictionary in scope; no instance can know it.
+                // Instance-body dictionaries are registered without argument
+                // types, so an empty argument list matches too.
+                let var_only = !concrete.args.is_empty()
+                    && concrete.args.iter().all(|a| matches!(a, Ty::Var(_)));
+                let scoped = var_only
+                    .then(|| {
+                        self.scope_dicts
+                            .iter()
+                            .find(|(class, args, _)| {
+                                *class == concrete.class
+                                    && (args.is_empty()
+                                        || (args.len() == concrete.args.len()
+                                            && args
+                                                .iter()
+                                                .zip(&concrete.args)
+                                                .all(|(a, b)| same_head(a, b))))
+                            })
+                            .map(|(_, _, var)| core::Expr::Var(var.clone(), span))
+                    })
+                    .flatten();
+                scoped
+                    .or_else(|| self.get_dictionary(&concrete, span))
                     .or_else(|| self.dict_in_scope_by_head(&concrete, span))
                     .unwrap_or_else(|| {
                         crate::context::null_dict_placeholder(concrete.class, &concrete.args, span)

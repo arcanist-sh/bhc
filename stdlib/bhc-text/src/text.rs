@@ -977,7 +977,7 @@ pub extern "C" fn bhc_text_split(
         let mut pieces: Vec<&[u8]> = Vec::new();
         let mut start = 0usize;
         for (i, c) in s.char_indices() {
-            if fn_ptr(env_ptr, c as i64) != 0 {
+            if pred_holds(fn_ptr(env_ptr, c as i64)) {
                 pieces.push(&bytes[start..i]);
                 start = i + c.len_utf8();
             }
@@ -1251,6 +1251,20 @@ pub extern "C" fn bhc_text_intersperse(c: i64, text: *const u8) -> *mut u8 {
     }
 }
 
+/// Whether a compiled predicate's result is `True`. A predicate returns either
+/// an immediate Bool (0/1) or a boxed `Bool` constructor whose first word is
+/// its tag; reading every non-zero word as True made `T.any isSpecial "hi"`
+/// hold for pandoc's `strToHtml`, whose `isSpecial` falls back to a boxed
+/// `False`.
+fn pred_holds(v: i64) -> bool {
+    if (0..=1).contains(&v) {
+        return v != 0;
+    }
+    // SAFETY: values above 1 are heap pointers to an evaluated Bool
+    // constructor; its tag (0 = False, 1 = True) is the first word.
+    unsafe { *(v as *const i64) != 0 }
+}
+
 /// `T.any p t`.
 #[no_mangle]
 pub extern "C" fn bhc_text_any(
@@ -1264,7 +1278,7 @@ pub extern "C" fn bhc_text_any(
     unsafe {
         text_as_str(text)
             .chars()
-            .any(|c| fn_ptr(env_ptr, c as i64) != 0) as i64
+            .any(|c| pred_holds(fn_ptr(env_ptr, c as i64))) as i64
     }
 }
 
@@ -1281,7 +1295,7 @@ pub extern "C" fn bhc_text_all(
     unsafe {
         text_as_str(text)
             .chars()
-            .all(|c| fn_ptr(env_ptr, c as i64) != 0) as i64
+            .all(|c| pred_holds(fn_ptr(env_ptr, c as i64))) as i64
     }
 }
 
@@ -1294,7 +1308,7 @@ unsafe fn split_at_pred(
     let s = text_as_str(text);
     let mut idx = s.len();
     for (i, c) in s.char_indices() {
-        let hit = fn_ptr(env_ptr, c as i64) != 0;
+        let hit = pred_holds(fn_ptr(env_ptr, c as i64));
         if hit == negate {
             idx = i;
             break;
@@ -1318,7 +1332,7 @@ pub extern "C" fn bhc_text_break(
         let s = text_as_str(text);
         let mut idx = s.len();
         for (i, c) in s.char_indices() {
-            if fn_ptr(env_ptr, c as i64) != 0 {
+            if pred_holds(fn_ptr(env_ptr, c as i64)) {
                 idx = i;
                 break;
             }

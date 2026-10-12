@@ -1708,11 +1708,27 @@ impl Compiler {
                     Bind::Rec(bs) => bs.iter().map(|(v, e)| (v, e.as_ref())).collect(),
                 };
                 for (v, body) in pairs {
-                    if seen.insert(v.name) {
+                    // Keyed by the QUALIFIED name: a bare `p`/`a`/`div` defined
+                    // by an earlier module in the walk must not hide blaze's.
+                    let llvm_name = format!("{}.{}", module, v.name.as_str());
+                    if seen.insert(bhc_intern::Symbol::intern(&llvm_name)) {
+                        let param_count = lambda_arity(body);
+                        // Also under the module-qualified name: a specialized
+                        // clone keeps the defining module's references, which
+                        // the lowerer spells qualified when the bare name is
+                        // ambiguous (`Text.Blaze.XHtml1.Transitional.p`). Only
+                        // the bare key was declared, so pandoc's HTML writer
+                        // specialized into a caller lowered every blaze element
+                        // to a local "not implemented" stub.
+                        out.push(CompiledSymbol {
+                            name: bhc_intern::Symbol::intern(&llvm_name),
+                            llvm_name: llvm_name.clone(),
+                            param_count,
+                        });
                         out.push(CompiledSymbol {
                             name: v.name,
-                            llvm_name: format!("{}.{}", module, v.name.as_str()),
-                            param_count: lambda_arity(body),
+                            llvm_name,
+                            param_count,
                         });
                     }
                 }

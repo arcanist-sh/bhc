@@ -6868,8 +6868,9 @@ fn lower_fun_bind(ctx: &mut LowerContext, fun_bind: &ast::FunBind) -> LowerResul
         .expect("function should be pre-bound");
 
     let mut equations = Vec::new();
+    let sole = fun_bind.clauses.len() == 1;
     for clause in &fun_bind.clauses {
-        let eq = lower_clause(ctx, clause)?;
+        let eq = lower_clause_in(ctx, clause, sole)?;
         equations.push(eq);
     }
 
@@ -6901,8 +6902,9 @@ fn lower_instance_method(
     let name = fun_bind.name.name;
 
     let mut equations = Vec::new();
+    let sole = fun_bind.clauses.len() == 1;
     for clause in &fun_bind.clauses {
-        let eq = lower_clause(ctx, clause)?;
+        let eq = lower_clause_in(ctx, clause, sole)?;
         equations.push(eq);
     }
 
@@ -6922,7 +6924,12 @@ fn lower_instance_method(
 }
 
 /// Lower a function clause.
-fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir::Equation> {
+/// [`lower_clause`] for a clause that may be its function's only one (`sole`).
+fn lower_clause_in(
+    ctx: &mut LowerContext,
+    clause: &ast::Clause,
+    sole: bool,
+) -> LowerResult<hir::Equation> {
     ctx.in_scope(|ctx| {
         // Bind pattern variables
         let mut pats = Vec::new();
@@ -6980,7 +6987,14 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                 // failure into those crashed the program —
                 // `lookup' k ((k', v) : rest) | k == k' = v` segfaulted where
                 // desugaring the guards here works.
-                let single_scrutinee = clause.pats.len() == 1;
+                // A SOLE clause with `where` bindings has nothing to fall
+                // through to, and the HIR guard below is tested OUTSIDE the
+                // `where` (only the RHS is wrapped), so a guard calling a
+                // where-bound helper hit a "not implemented" stub — pandoc's
+                // `strToHtml` (`| T.any isSpecial t = … where isSpecial …`)
+                // aborted the HTML writer. Desugar into the RHS instead.
+                let sole_with_wheres = sole && !clause.wheres.is_empty();
+                let single_scrutinee = clause.pats.len() == 1 && !sole_with_wheres;
                 let single_boolean = guarded_rhss.len() == 1
                     && guarded_rhss[0]
                         .guards

@@ -957,6 +957,24 @@ fn test_tier2_instance_body_own_class_dispatch() {
     );
 }
 
+/// A `where`-bound helper called from a guard of a sole clause.
+#[test]
+fn test_tier2_where_helper_in_guard() {
+    run_native_test("tier2_functions/where_helper_in_guard", Profile::Default);
+}
+
+/// `Data.Text.any`/`all` with a predicate that returns a boxed `False`.
+#[test]
+fn test_tier2_text_pred_boxed_bool() {
+    run_native_test("tier2_functions/text_pred_boxed_bool", Profile::Default);
+}
+
+/// `mapM` over `StateT s IO` runs each action in order.
+#[test]
+fn test_tier2_statet_mapm() {
+    run_native_test("tier2_functions/statet_mapm", Profile::Default);
+}
+
 /// `deriving instance Monoid Blocks` where `Blocks` is a synonym of a newtype.
 #[test]
 fn test_tier2_standalone_derived_monoid_synonym() {

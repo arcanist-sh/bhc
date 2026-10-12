@@ -3430,7 +3430,11 @@ fn monad_runs_eagerly(ty: &Ty) -> bool {
         applied_head_name(ty)
             .map(|n| n.as_str().to_string())
             .as_deref(),
-        Some("IO" | "StateT" | "ReaderT" | "ExceptT" | "WriterT" | "Identity" | "Maybe" | "Either")
+        // Not the transformers: codegen's builtin `mapM` is a plain `map`
+        // (it never sequences), so `mapM step xs` at `StateT s IO` built a
+        // list of unrun actions and the caller ran a list as a state
+        // function. Their `>>=`/`pure` resolve like any instance's.
+        Some("IO" | "Identity" | "Maybe" | "Either")
     )
 }
 
@@ -3877,20 +3881,46 @@ fn try_lower_monadic_traversal(
     if monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none() {
         return Ok(None);
     }
-    let Some(bind_e) = ctx.resolve_method_at_concrete_type(
-        Symbol::intern(">>="),
-        Symbol::intern("Monad"),
-        &monad_ty,
-        span,
-    ) else {
+    // A builtin transformer (`StateT s IO`) has no instance a dictionary can be
+    // built from, but codegen lowers the builtin `>>=`/`return` at the layer
+    // their Var's type names (see `annotate_monad_head_tys`). Codegen's own
+    // `mapM` is a plain `map` that never runs the actions.
+    let builtin_layer = matches!(
+        applied_head_name(&monad_ty)
+            .map(|n| n.as_str().to_string())
+            .as_deref(),
+        Some("StateT" | "ReaderT" | "ExceptT" | "WriterT")
+    );
+    let typed_builtin = |name: &str| {
+        core::Expr::Var(
+            Var {
+                name: Symbol::intern(name),
+                id: VarId::new(0),
+                ty: Ty::Fun(Box::new(Ty::Error), Box::new(monad_ty.clone())),
+            },
+            span,
+        )
+    };
+    let Some(bind_e) = ctx
+        .resolve_method_at_concrete_type(
+            Symbol::intern(">>="),
+            Symbol::intern("Monad"),
+            &monad_ty,
+            span,
+        )
+        .or_else(|| builtin_layer.then(|| typed_builtin(">>=")))
+    else {
         return Ok(None);
     };
-    let Some(pure_e) = ctx.resolve_method_at_concrete_type(
-        Symbol::intern("pure"),
-        Symbol::intern("Applicative"),
-        &monad_ty,
-        span,
-    ) else {
+    let Some(pure_e) = ctx
+        .resolve_method_at_concrete_type(
+            Symbol::intern("pure"),
+            Symbol::intern("Applicative"),
+            &monad_ty,
+            span,
+        )
+        .or_else(|| builtin_layer.then(|| typed_builtin("return")))
+    else {
         return Ok(None);
     };
 
@@ -5715,6 +5745,70 @@ fn pattern_binders(pat: &hir::Pat, out: &mut Vec<(Symbol, DefId, Span)>) {
     }
 }
 
+/// Copy `pat` with every binder given a fresh DefId (and Core var), recording
+/// old -> new in `renamed`.
+fn freshen_pat_binders(
+    ctx: &mut LowerContext,
+    pat: &hir::Pat,
+    renamed: &mut rustc_hash::FxHashMap<DefId, DefId>,
+) -> hir::Pat {
+    let mut fresh = |ctx: &mut LowerContext, name: Symbol, old: DefId| {
+        let v = ctx.named_var(name, Ty::Error);
+        let new = DefId::new(1_600_000 + v.id.index());
+        ctx.register_var(new, v);
+        renamed.insert(old, new);
+        new
+    };
+    match pat {
+        hir::Pat::Var(name, def_id, span) => {
+            hir::Pat::Var(*name, fresh(ctx, *name, *def_id), *span)
+        }
+        hir::Pat::As(name, def_id, inner, span) => {
+            let new = fresh(ctx, *name, *def_id);
+            hir::Pat::As(
+                *name,
+                new,
+                Box::new(freshen_pat_binders(ctx, inner, renamed)),
+                *span,
+            )
+        }
+        hir::Pat::Con(r, pats, span) => hir::Pat::Con(
+            *r,
+            pats.iter()
+                .map(|p| freshen_pat_binders(ctx, p, renamed))
+                .collect(),
+            *span,
+        ),
+        hir::Pat::RecordCon(r, fps, span) => hir::Pat::RecordCon(
+            *r,
+            fps.iter()
+                .map(|fp| {
+                    let mut fp = fp.clone();
+                    fp.pat = freshen_pat_binders(ctx, &fp.pat, renamed);
+                    fp
+                })
+                .collect(),
+            *span,
+        ),
+        hir::Pat::Or(l, r, span) => hir::Pat::Or(
+            Box::new(freshen_pat_binders(ctx, l, renamed)),
+            Box::new(freshen_pat_binders(ctx, r, renamed)),
+            *span,
+        ),
+        hir::Pat::Ann(inner, ty, span) => hir::Pat::Ann(
+            Box::new(freshen_pat_binders(ctx, inner, renamed)),
+            ty.clone(),
+            *span,
+        ),
+        hir::Pat::View(e, inner, span) => hir::Pat::View(
+            e.clone(),
+            Box::new(freshen_pat_binders(ctx, inner, renamed)),
+            *span,
+        ),
+        other => other.clone(),
+    }
+}
+
 /// Desugar a mixed let/where group: every non-Var pattern binding becomes a
 /// fresh whole-value Var binding plus one Var binding per pattern binder that
 /// cases on the whole value (see `lower_let_bindings`).
@@ -5742,16 +5836,26 @@ fn desugar_pattern_bindings(
         let mut binders = Vec::new();
         pattern_binders(&b.pat, &mut binders);
         for (name, def_id, bspan) in binders {
+            // Each selector's case pattern gets FRESH binder ids. Reusing the
+            // pattern as written bound `ident` twice under one VarId (`let
+            // ident = case pb of (ident, cls, kvs) -> ident`); the defining
+            // module tolerated the shadowing, but the monomorphizer renames
+            // binders by id when it clones a body into a caller, the two
+            // renames collided, and the outer `ident` came out unbound — a
+            // "not implemented" stub in every specialized pandoc HTML writer.
+            let mut renamed: rustc_hash::FxHashMap<DefId, DefId> = rustc_hash::FxHashMap::default();
+            let sel_pat = freshen_pat_binders(ctx, &b.pat, &mut renamed);
+            let sel_def = renamed.get(&def_id).copied().unwrap_or(def_id);
             let selector = hir::Expr::Case(
                 Box::new(hir::Expr::Var(hir::DefRef {
                     def_id: pb_def,
                     span: b.span,
                 })),
                 vec![hir::CaseAlt {
-                    pat: b.pat.clone(),
+                    pat: sel_pat,
                     guards: Vec::new(),
                     rhs: hir::Expr::Var(hir::DefRef {
-                        def_id,
+                        def_id: sel_def,
                         span: bspan,
                     }),
                     span: b.span,

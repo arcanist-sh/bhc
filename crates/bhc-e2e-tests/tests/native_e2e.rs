@@ -896,6 +896,83 @@ fn test_tier2_instance_method_alias() {
     run_native_test("tier2_functions/instance_method_alias", Profile::Default);
 }
 
+/// Point-free `fmap f . g` under only a base-monad `Monad m` constraint uses
+/// the parser type's Functor, not `fmap` via the `Monad m` dictionary.
+#[test]
+fn test_tier2_point_free_fmap_transformer() {
+    run_native_test(
+        "tier2_functions/point_free_fmap_transformer",
+        Profile::Default,
+    );
+}
+
+/// A failing guard in a `case` alternative falls through to the next one.
+#[test]
+fn test_tier2_case_guard_fallthrough() {
+    run_native_test("tier2_functions/case_guard_fallthrough", Profile::Default);
+}
+
+/// An explicitly recursive parser (`go n = p >> go n`) over a user monad that
+/// defines only `>>=`: lazy self-calls, default `>>`, literal-pattern binders.
+#[test]
+fn test_tier2_recursive_parser_loop() {
+    run_native_test("tier2_functions/recursive_parser_loop", Profile::Default);
+}
+
+/// Semigroup/Monoid instances written at a synonym over a user newtype named
+/// `Many` (pandoc-types' `Inlines`): no list reading, superclass `(<>)` as a
+/// value, and the instance bodies' own `mempty`/`(<>)` dispatch.
+#[test]
+fn test_tier2_newtype_monoid_synonym_instance() {
+    run_native_test(
+        "tier2_functions/newtype_monoid_synonym_instance",
+        Profile::Default,
+    );
+}
+
+/// `Data.Sequence.filter`/`dropWhileL`/`dropWhileR` with a named predicate
+/// (closure code pointer, Bool result, PHI predecessor after the Bool test).
+#[test]
+fn test_tier2_seq_filter_drop_while() {
+    run_native_test("tier2_functions/seq_filter_drop_while", Profile::Default);
+}
+
+/// A constrained `(Semigroup a, Monoid a) => Monoid (F s a)` instance over a
+/// function newtype (pandoc's `Future`), used directly and via `Monoid m =>`.
+#[test]
+fn test_tier2_constrained_newtype_monoid() {
+    run_native_test(
+        "tier2_functions/constrained_newtype_monoid",
+        Profile::Default,
+    );
+}
+
+/// Inside `instance C m => C (T m)`, class methods used at `T m` come from the
+/// instance being defined, not from the constraint dictionary for `m`.
+#[test]
+fn test_tier2_instance_body_own_class_dispatch() {
+    run_native_test(
+        "tier2_functions/instance_body_own_class_dispatch",
+        Profile::Default,
+    );
+}
+
+/// `deriving instance Monoid Blocks` where `Blocks` is a synonym of a newtype.
+#[test]
+fn test_tier2_standalone_derived_monoid_synonym() {
+    run_native_test(
+        "tier2_functions/standalone_derived_monoid_synonym",
+        Profile::Default,
+    );
+}
+
+/// A constrained function whose signature uses a parameter-dropping type
+/// synonym resolves its dictionary at the synonym-expanded type.
+#[test]
+fn test_tier2_synonym_dict_resolution() {
+    run_native_test("tier2_functions/synonym_dict_resolution", Profile::Default);
+}
+
 #[test]
 fn test_tier3_derive_ord() {
     run_native_test("tier3_io/derive_ord", Profile::Default);

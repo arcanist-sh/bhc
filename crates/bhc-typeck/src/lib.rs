@@ -512,6 +512,28 @@ pub fn type_check_module_full(
         }
     }
 
+    // The built-in `Many a = [a]` (with `Inlines`/`Blocks` as lists) only
+    // stands in for a STUBBED pandoc-types Builder. With the real `Many` in
+    // scope — declared here, or `Inlines` imported from the compiled Builder —
+    // it is a newtype over `Seq`, and the list reading resolved its `<>` and
+    // `mempty` to `Data.List.append`/`[]` applied to a Seq.
+    let declares_many = hir
+        .items
+        .iter()
+        .any(|item| matches!(item, bhc_hir::Item::Newtype(nt) if nt.name.as_str() == "Many"));
+    let imports_many = imported_aliases
+        .iter()
+        .any(|(name, _, ty)| name.as_str() == "Inlines" && !matches!(ty, Ty::List(_)));
+    if declares_many || imports_many {
+        ctx.type_aliases.remove(&Symbol::intern("Many"));
+        for name in ["Inlines", "Blocks"] {
+            let sym = Symbol::intern(name);
+            if matches!(ctx.type_aliases.get(&sym), Some((_, Ty::List(_)))) {
+                ctx.type_aliases.remove(&sym);
+            }
+        }
+    }
+
     // Register derived instances so the type checker knows about them.
     // Derived instances come from `deriving (Eq, Ord, Show, ...)` clauses
     // on data type and newtype declarations.

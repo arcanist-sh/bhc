@@ -7058,6 +7058,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "Data.Sequence.viewl" => self.lower_builtin_seq_viewl(args[0]),
             "Data.Sequence.viewr" => self.lower_builtin_seq_viewr(args[0]),
             "Data.Sequence.filter" => self.lower_builtin_seq_filter(args[0], args[1]),
+            "Data.Sequence.dropWhileL" => {
+                self.lower_builtin_seq_drop_while(args[0], args[1], false)
+            }
+            "Data.Sequence.dropWhileR" => self.lower_builtin_seq_drop_while(args[0], args[1], true),
 
             // Data.Text operations (VarIds 1000200-1000226)
             "Data.Text.empty" => self.lower_builtin_text_nullary(1000200, "text_empty"),
@@ -54844,22 +54848,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         })?;
                     let raw_bool_end = self.builder().get_insert_block().unwrap();
 
-                    // ADT bool case: load the tag from the ADT structure
+                    // ADT bool case: load the tag from the ADT structure. The
+                    // scrutinee may still be a THUNK (`tracing <- f <$>
+                    // getCommonState` binds an unevaluated `f x`), whose tag
+                    // word is -1 and read as True; force it first.
                     self.builder().position_at_end(adt_bool_block);
-                    let adt_ty = self.adt_type(0);
-                    let tag_ptr = self
-                        .builder()
-                        .build_struct_gep(adt_ty, p, 0, "bool_tag_ptr")
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("failed to get bool tag ptr: {:?}", e))
-                        })?;
-                    let adt_val = self
-                        .builder()
-                        .build_load(self.type_mapper().i64_type(), tag_ptr, "bool_tag")
-                        .map_err(|e| {
-                            CodegenError::Internal(format!("failed to load bool tag: {:?}", e))
-                        })?
-                        .into_int_value();
+                    // The forced value may itself be an immediate 0/1, so read
+                    // it with the representation-agnostic accessor.
+                    let p = self.build_force(p.into())?.into_pointer_value();
+                    let adt_val = self.extract_bool_tag(p)?;
                     self.builder()
                         .build_unconditional_branch(merge_block)
                         .map_err(|e| {
@@ -55221,8 +55218,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             })?;
         }
 
+        // A `Default` alternative's binder IS the scrutinee (`go 0 = …; go n =
+        // …` lowers to `case _arg0 of { 0 -> …; n -> … }`). It was never
+        // bound here, so `n` lowered as an unknown-variable stub — invisible
+        // while `n` was only passed along, wrong as soon as it was computed
+        // with (`go (n - 1)` subtracted from the stub's address).
+        let mut bound = Vec::new();
+        for alt in alts {
+            if matches!(alt.con, AltCon::Default) {
+                for binder in &alt.binders {
+                    if let std::collections::hash_map::Entry::Vacant(e) = self.env.entry(binder.id)
+                    {
+                        e.insert(scrut_int.into());
+                        bound.push(binder.id);
+                    }
+                }
+            }
+        }
+
         // Generate code for each alternative
-        self.lower_case_alternatives(alts, &blocks, merge_block)
+        let result = self.lower_case_alternatives(alts, &blocks, merge_block);
+        for id in bound {
+            self.env.remove(&id);
+        }
+        result
     }
 
     /// Lower a case expression with float/double literal patterns.
@@ -56098,6 +56117,24 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // Pass 2: Coerce values and build branches
         let mut phi_values: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
             Vec::new();
+
+        // A side with NO alternative (`case b of { False -> 3 }`, or a guard
+        // fall-through resume point) cannot be reached. Branching it to the
+        // merge block anyway gave the phi a predecessor with no incoming
+        // value, which LLVM's verifier rejects.
+        let true_reachable = true_alt.is_some() || default_alt.is_some();
+        let false_reachable = false_alt.is_some() || default_alt.is_some();
+        for (reachable, end_block) in [
+            (true_reachable, true_end_block),
+            (false_reachable, false_end_block),
+        ] {
+            if !reachable && end_block.get_terminator().is_none() {
+                self.builder().position_at_end(end_block);
+                self.builder().build_unreachable().map_err(|e| {
+                    CodegenError::Internal(format!("failed to build unreachable: {:?}", e))
+                })?;
+            }
+        }
 
         // True branch: coerce and terminate (only if block reaches merge)
         self.builder().position_at_end(true_end_block);
@@ -57776,8 +57813,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("sf elem: void".to_string()))?;
 
-        // Call predicate closure: fn_ptr(closure_ptr, elem) -> Bool ADT
-        let fn_ptr_ptr = self.extract_adt_field(pred_ptr, 2, 1)?;
+        // Call predicate closure: fn_ptr(closure_ptr, elem) -> Bool. The code
+        // pointer is the closure's first word, not ADT field 1 (reading that
+        // jumped through the closure's first captured value).
+        let fn_ptr_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
         let fn_ty = tm
             .ptr_type()
             .fn_type(&[tm.ptr_type().into(), tm.ptr_type().into()], false);
@@ -57790,8 +57829,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .basic()
             .ok_or_else(|| CodegenError::Internal("sf pred: void".to_string()))?;
 
-        // Check Bool ADT tag
-        let bool_tag = self.extract_adt_tag(pred_result.into_pointer_value())?;
+        // Check the Bool (tagged int or Bool ADT)
+        let bool_tag = self.extract_bool_tag(pred_result.into_pointer_value())?;
         let is_true = self
             .builder()
             .build_int_compare(
@@ -57801,6 +57840,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 "sf_is_true",
             )
             .map_err(|e| CodegenError::Internal(format!("sf bool cmp: {:?}", e)))?;
+        // `extract_bool_tag` may split the block; the PHI below must name the
+        // block the branch actually leaves from.
+        let test_block = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("seq_filter: no block".to_string()))?;
         self.builder()
             .build_conditional_branch(is_true, loop_keep, loop_next)
             .map_err(|e| CodegenError::Internal(format!("sf pred cbr: {:?}", e)))?;
@@ -57826,7 +57871,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_phi(tm.ptr_type(), "sf_acc_next")
             .map_err(|e| CodegenError::Internal(format!("sf acc_next phi: {:?}", e)))?;
         acc_next.add_incoming(&[
-            (&acc_phi.as_basic_value(), loop_body),
+            (&acc_phi.as_basic_value(), test_block),
             (&new_acc, loop_keep),
         ]);
         let one = tm.i64_type().const_int(1, false);
@@ -57849,6 +57894,158 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         self.builder().position_at_end(loop_exit);
         Ok(Some(acc_phi.as_basic_value()))
+    }
+
+    /// `Data.Sequence.dropWhileL` / `dropWhileR`: count the elements from the
+    /// left (or right) end that satisfy the predicate, then `drop` (or `take`
+    /// the rest of) the sequence. pandoc's `trimInlines` is built on these.
+    fn lower_builtin_seq_drop_while(
+        &mut self,
+        pred_expr: &Expr,
+        seq_expr: &Expr,
+        from_right: bool,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let pred = self
+            .lower_expr(pred_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_drop_while: no pred".to_string()))?;
+        let seq = self
+            .lower_expr(seq_expr)?
+            .ok_or_else(|| CodegenError::Internal("seq_drop_while: no seq".to_string()))?;
+        let pred_ptr = self.value_to_ptr(pred)?;
+        let seq_ptr = self.value_to_ptr(seq)?;
+        let tm = self.type_mapper();
+        let get_fn = |this: &Self, id: usize, name: &str| {
+            this.functions
+                .get(&VarId::new(id))
+                .copied()
+                .ok_or_else(|| CodegenError::Internal(format!("{name} not declared")))
+        };
+        let count_fn = get_fn(self, 1000815, "bhc_seq_elem_count")?;
+        let elem_fn = get_fn(self, 1000816, "bhc_seq_elem_at")?;
+        let slice_fn = if from_right {
+            get_fn(self, 1000809, "bhc_seq_take")?
+        } else {
+            get_fn(self, 1000810, "bhc_seq_drop")?
+        };
+        let count = self
+            .builder()
+            .build_call(count_fn, &[seq_ptr.into()], "sdw_count")
+            .map_err(|e| CodegenError::Internal(format!("sdw count: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("sdw count: void".to_string()))?
+            .into_int_value();
+
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("seq_drop_while: no function".to_string()))?;
+        let ctx = self.llvm_context();
+        let header = ctx.append_basic_block(current_fn, "sdw_header");
+        let body = ctx.append_basic_block(current_fn, "sdw_body");
+        let next = ctx.append_basic_block(current_fn, "sdw_next");
+        let exit = ctx.append_basic_block(current_fn, "sdw_exit");
+        let entry_block = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("seq_drop_while: no block".to_string()))?;
+        self.builder()
+            .build_unconditional_branch(header)
+            .map_err(|e| CodegenError::Internal(format!("sdw br: {:?}", e)))?;
+
+        // Header: `i` counts the satisfying elements seen so far.
+        self.builder().position_at_end(header);
+        let i_phi = self
+            .builder()
+            .build_phi(tm.i64_type(), "sdw_i")
+            .map_err(|e| CodegenError::Internal(format!("sdw phi: {:?}", e)))?;
+        let i = i_phi.as_basic_value().into_int_value();
+        let done = self
+            .builder()
+            .build_int_compare(inkwell::IntPredicate::SGE, i, count, "sdw_done")
+            .map_err(|e| CodegenError::Internal(format!("sdw cmp: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(done, exit, body)
+            .map_err(|e| CodegenError::Internal(format!("sdw cbr: {:?}", e)))?;
+
+        // Body: test the element at `i` (or `count - 1 - i`).
+        self.builder().position_at_end(body);
+        let one = tm.i64_type().const_int(1, false);
+        let index = if from_right {
+            let last = self
+                .builder()
+                .build_int_sub(count, one, "sdw_last")
+                .map_err(|e| CodegenError::Internal(format!("sdw last: {:?}", e)))?;
+            self.builder()
+                .build_int_sub(last, i, "sdw_ridx")
+                .map_err(|e| CodegenError::Internal(format!("sdw ridx: {:?}", e)))?
+        } else {
+            i
+        };
+        let elem = self
+            .builder()
+            .build_call(elem_fn, &[seq_ptr.into(), index.into()], "sdw_elem")
+            .map_err(|e| CodegenError::Internal(format!("sdw elem: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("sdw elem: void".to_string()))?;
+        let fn_ptr = self.extract_closure_fn_ptr(pred_ptr)?;
+        let fn_ty = tm
+            .ptr_type()
+            .fn_type(&[tm.ptr_type().into(), tm.ptr_type().into()], false);
+        let pred_result = self
+            .builder()
+            .build_indirect_call(fn_ty, fn_ptr, &[pred_ptr.into(), elem.into()], "sdw_pred")
+            .map_err(|e| CodegenError::Internal(format!("sdw pred call: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("sdw pred: void".to_string()))?;
+        let bool_tag = self.extract_bool_tag(pred_result.into_pointer_value())?;
+        let holds = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                bool_tag,
+                tm.i64_type().const_zero(),
+                "sdw_holds",
+            )
+            .map_err(|e| CodegenError::Internal(format!("sdw bool cmp: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(holds, next, exit)
+            .map_err(|e| CodegenError::Internal(format!("sdw pred cbr: {:?}", e)))?;
+
+        self.builder().position_at_end(next);
+        let i_next = self
+            .builder()
+            .build_int_add(i, one, "sdw_i_next")
+            .map_err(|e| CodegenError::Internal(format!("sdw inc: {:?}", e)))?;
+        self.builder()
+            .build_unconditional_branch(header)
+            .map_err(|e| CodegenError::Internal(format!("sdw next br: {:?}", e)))?;
+
+        let zero_bv: BasicValueEnum = tm.i64_type().const_zero().into();
+        let i_next_bv: BasicValueEnum = i_next.into();
+        i_phi.add_incoming(&[(&zero_bv, entry_block), (&i_next_bv, next)]);
+
+        // Exit: `i` satisfying elements; drop them from the left, or keep the
+        // first `count - i` when trimming from the right.
+        self.builder().position_at_end(exit);
+        let n = if from_right {
+            self.builder()
+                .build_int_sub(count, i, "sdw_keep")
+                .map_err(|e| CodegenError::Internal(format!("sdw keep: {:?}", e)))?
+        } else {
+            i
+        };
+        let result = self
+            .builder()
+            .build_call(slice_fn, &[n.into(), seq_ptr.into()], "sdw_result")
+            .map_err(|e| CodegenError::Internal(format!("sdw slice: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("sdw slice: void".to_string()))?;
+        Ok(Some(result))
     }
 
     // Helper accessors
@@ -58476,6 +58673,7 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "Data.Sequence.viewl" => Some(1),
         "Data.Sequence.viewr" => Some(1),
         "Data.Sequence.filter" => Some(2),
+        "Data.Sequence.dropWhileL" | "Data.Sequence.dropWhileR" => Some(2),
         // Data.Text operations
         "Data.Text.empty" => Some(0),
         "Data.List.empty" => Some(0),

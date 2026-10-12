@@ -1510,6 +1510,65 @@ fn missing_method_field(
             );
         }
     }
+    // Class defaults for sequencing. An instance that defines only `>>=`
+    // (or only `<*>`) is the ordinary shape, and its `>>` / `*>` / `<*`
+    // slots held the error closure below — so `p >> q` on any such user
+    // monad crashed. `m >> k = m >>= \_ -> k`; `a *> b = (id <$ a) <*> b`
+    // and `a <* b = fmap const a <*> b`, with `fmap` from the Functor
+    // superclass slot.
+    let lam2 = |ctx: &mut DictContext, body: &dyn Fn(&Var, &Var) -> core::Expr| {
+        let a = ctx.fresh_var("a", Ty::Error, span);
+        let b = ctx.fresh_var("b", Ty::Error, span);
+        let inner = body(&a, &b);
+        core::Expr::Lam(a, Box::new(core::Expr::Lam(b, Box::new(inner), span)), span)
+    };
+    let app = |f: core::Expr, x: core::Expr| core::Expr::App(Box::new(f), Box::new(x), span);
+    let var = |v: &Var| core::Expr::Var(v.clone(), span);
+    if class_name.as_str() == "Monad" && method_name.as_str() == ">>" {
+        if let Some(&bind_id) = class_methods.get(&Symbol::intern(">>=")) {
+            let bind_ref = ctx.method_reference(bind_id, span);
+            let bind = apply_constraint_dicts(bind_ref, constraint_dicts, span);
+            let ignored = ctx.fresh_var("_", Ty::Error, span);
+            return lam2(ctx, &|m, k| {
+                let cont = core::Expr::Lam(ignored.clone(), Box::new(var(k)), span);
+                app(app(bind.clone(), var(m)), cont)
+            });
+        }
+    }
+    if class_name.as_str() == "Applicative" && matches!(method_name.as_str(), "*>" | "<*") {
+        let functor_fmap = super_fields
+            .first()
+            .filter(|f| !matches!(f, core::Expr::Lit(..)))
+            .map(|functor| {
+                let sel0 = Var {
+                    name: Symbol::intern("$sel_0"),
+                    id: VarId::new(0),
+                    ty: Ty::Error,
+                };
+                app(core::Expr::Var(sel0, span), functor.clone())
+            });
+        if let (Some(fmap), Some(&ap_id)) =
+            (functor_fmap, class_methods.get(&Symbol::intern("<*>")))
+        {
+            let ap_ref = ctx.method_reference(ap_id, span);
+            let ap = apply_constraint_dicts(ap_ref, constraint_dicts, span);
+            let x = ctx.fresh_var("x", Ty::Error, span);
+            let y = ctx.fresh_var("y", Ty::Error, span);
+            // `*>` keeps the second result, `<*` the first.
+            let keep = if method_name.as_str() == "*>" { &y } else { &x };
+            let pick = core::Expr::Lam(
+                x.clone(),
+                Box::new(core::Expr::Lam(y.clone(), Box::new(var(keep)), span)),
+                span,
+            );
+            return lam2(ctx, &|a, b| {
+                app(
+                    app(ap.clone(), app(app(fmap.clone(), pick.clone()), var(a))),
+                    var(b),
+                )
+            });
+        }
+    }
     // Defer the error to call time: a raw error field would throw while the
     // dictionary itself is being BUILT.
     let dummy = ctx.fresh_var("_missing", Ty::Error, span);

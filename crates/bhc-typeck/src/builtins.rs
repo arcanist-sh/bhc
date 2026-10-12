@@ -5065,7 +5065,7 @@ impl Builtins {
                     Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
                 ),
             ),
-            // Container PrimOps: Data.Sequence — registered via fixed DefIds 12300-12320 below
+            // Container PrimOps: Data.Sequence — registered via fixed DefIds 12300-12322 below
             // Data.Text PrimOps: packed UTF-8 text
             ("Data.Text.empty", Scheme::mono(self.text_ty.clone())),
             (
@@ -8130,7 +8130,10 @@ impl Builtins {
             );
         }
 
-        // Data.Sequence at fixed DefIds 12300-12320
+        // Data.Sequence at fixed DefIds 12300-12322. typeck models `Seq a`
+        // as `[a]` (see the alias in lib.rs), so element and container
+        // positions must differ: `singleton :: a -> a` made `a -> Seq a`
+        // an infinite type.
         {
             let a = TyVar::new(BUILTIN_TYVAR_A, Kind::Star);
             let b = TyVar::new(BUILTIN_TYVAR_B, Kind::Star);
@@ -8147,7 +8150,7 @@ impl Builtins {
                 Symbol::intern("Data.Sequence.singleton"),
                 Scheme::poly(
                     vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                    Ty::fun(Ty::Var(a.clone()), Ty::List(Box::new(Ty::Var(a.clone())))),
                 ),
             );
             // null :: Seq a -> Bool
@@ -8173,10 +8176,10 @@ impl Builtins {
                 DefId::new(12304),
                 Symbol::intern("Data.Sequence.index"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![a.clone()],
                     Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(self.int_ty.clone(), Ty::Var(b.clone())),
+                        Ty::List(Box::new(Ty::Var(a.clone()))),
+                        Ty::fun(self.int_ty.clone(), Ty::Var(a.clone())),
                     ),
                 ),
             );
@@ -8197,10 +8200,13 @@ impl Builtins {
                 DefId::new(12306),
                 Symbol::intern("Data.Sequence.<|"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![a.clone()],
                     Ty::fun(
                         Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
+                        Ty::fun(
+                            Ty::List(Box::new(Ty::Var(a.clone()))),
+                            Ty::List(Box::new(Ty::Var(a.clone()))),
+                        ),
                     ),
                 ),
             );
@@ -8209,10 +8215,10 @@ impl Builtins {
                 DefId::new(12307),
                 Symbol::intern("Data.Sequence.|>"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![a.clone()],
                     Ty::fun(
-                        Ty::Var(a.clone()),
-                        Ty::fun(Ty::Var(b.clone()), Ty::Var(a.clone())),
+                        Ty::List(Box::new(Ty::Var(a.clone()))),
+                        Ty::fun(Ty::Var(a.clone()), Ty::List(Box::new(Ty::Var(a.clone())))),
                     ),
                 ),
             );
@@ -8266,12 +8272,15 @@ impl Builtins {
                 DefId::new(12312),
                 Symbol::intern("Data.Sequence.update"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![a.clone()],
                     Ty::fun(
                         self.int_ty.clone(),
                         Ty::fun(
                             Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
+                            Ty::fun(
+                                Ty::List(Box::new(Ty::Var(a.clone()))),
+                                Ty::List(Box::new(Ty::Var(a.clone()))),
+                            ),
                         ),
                     ),
                 ),
@@ -8281,12 +8290,15 @@ impl Builtins {
                 DefId::new(12313),
                 Symbol::intern("Data.Sequence.insertAt"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![a.clone()],
                     Ty::fun(
                         self.int_ty.clone(),
                         Ty::fun(
                             Ty::Var(a.clone()),
-                            Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
+                            Ty::fun(
+                                Ty::List(Box::new(Ty::Var(a.clone()))),
+                                Ty::List(Box::new(Ty::Var(a.clone()))),
+                            ),
                         ),
                     ),
                 ),
@@ -8309,7 +8321,10 @@ impl Builtins {
                 Symbol::intern("Data.Sequence.fromList"),
                 Scheme::poly(
                     vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                    Ty::fun(
+                        Ty::List(Box::new(Ty::Var(a.clone()))),
+                        Ty::List(Box::new(Ty::Var(a.clone()))),
+                    ),
                 ),
             );
             // toList :: Seq a -> [a]
@@ -8318,7 +8333,10 @@ impl Builtins {
                 Symbol::intern("Data.Sequence.toList"),
                 Scheme::poly(
                     vec![a.clone()],
-                    Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                    Ty::fun(
+                        Ty::List(Box::new(Ty::Var(a.clone()))),
+                        Ty::List(Box::new(Ty::Var(a.clone()))),
+                    ),
                 ),
             );
             // replicate :: Int -> a -> Seq a
@@ -8329,7 +8347,7 @@ impl Builtins {
                     vec![a.clone()],
                     Ty::fun(
                         self.int_ty.clone(),
-                        Ty::fun(Ty::Var(a.clone()), Ty::Var(a.clone())),
+                        Ty::fun(Ty::Var(a.clone()), Ty::List(Box::new(Ty::Var(a.clone())))),
                     ),
                 ),
             );
@@ -8356,13 +8374,34 @@ impl Builtins {
                 DefId::new(12320),
                 Symbol::intern("Data.Sequence.filter"),
                 Scheme::poly(
-                    vec![a.clone(), b.clone()],
+                    vec![a.clone()],
                     Ty::fun(
                         Ty::fun(Ty::Var(a.clone()), self.bool_ty.clone()),
-                        Ty::fun(Ty::Var(b.clone()), Ty::Var(b.clone())),
+                        Ty::fun(
+                            Ty::List(Box::new(Ty::Var(a.clone()))),
+                            Ty::List(Box::new(Ty::Var(a.clone()))),
+                        ),
                     ),
                 ),
             );
+            // dropWhileL, dropWhileR :: (a -> Bool) -> Seq a -> Seq a
+            for (id, name) in [
+                (12321, "Data.Sequence.dropWhileL"),
+                (12322, "Data.Sequence.dropWhileR"),
+            ] {
+                let list_a = Ty::List(Box::new(Ty::Var(a.clone())));
+                env.register_value(
+                    DefId::new(id),
+                    Symbol::intern(name),
+                    Scheme::poly(
+                        vec![a.clone()],
+                        Ty::fun(
+                            Ty::fun(Ty::Var(a.clone()), self.bool_ty.clone()),
+                            Ty::fun(list_a.clone(), list_a),
+                        ),
+                    ),
+                );
+            }
         }
 
         // Register transformer types and operations at fixed DefIds (10000+)

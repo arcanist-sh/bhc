@@ -216,6 +216,11 @@ fn same_type_name(name1: &str, name2: &str) -> bool {
     normalize_qualified_tyname(name1) == normalize_qualified_tyname(name2)
 }
 
+/// Whether `ty` is the `Many` type constructor (pandoc-types' Builder).
+fn is_many_con(ty: &Ty) -> bool {
+    matches!(ty, Ty::Con(c) if normalize_qualified_tyname(c.name.as_str()) == "Many")
+}
+
 /// Get the element type of a list, if this is a list type.
 fn get_list_elem(ty: &Ty) -> Option<&Ty> {
     match ty {
@@ -593,6 +598,20 @@ fn unify_inner(ctx: &mut TyCtxt, t1: &Ty, t2: &Ty, span: Span) {
         // List types: unify element types
         (Ty::List(elem1), Ty::List(elem2)) => {
             unify_inner(ctx, elem1, elem2, span);
+        }
+
+        // pandoc-types' `Many a` (a newtype over `Seq a`) against `[a]`.
+        // `Many` stays a distinct type so occurrence types — and with them
+        // instance selection for `Inlines`/`Blocks` — see `Many Inline`, not
+        // a list (whose `<>` is list append, applied to a Seq at runtime).
+        // But the Foldable/Traversable builtins are list-specialized, so
+        // `toList = F.toList :: Many a -> [a]` must still check: unify the
+        // elements.
+        (Ty::App(f, a), Ty::List(elem)) if is_many_con(f) => {
+            unify_inner(ctx, a, elem, span);
+        }
+        (Ty::List(elem), Ty::App(f, a)) if is_many_con(f) => {
+            unify_inner(ctx, elem, a, span);
         }
 
         // Cross-type: App(f, a) vs List(elem) — treat List(elem) as App([], elem)

@@ -7508,6 +7508,8 @@ fn lower_clause(ctx: &mut LowerContext, clause: &ast::Clause) -> LowerResult<hir
                     None
                 })
                 .collect();
+            let mut bindings = bindings;
+            attach_local_sigs(ctx, &clause.wheres, &mut bindings);
 
             ctx.exit_scope();
 
@@ -7612,8 +7614,40 @@ fn lower_body_with_wheres(
             None
         })
         .collect();
+    let mut nested_bindings = nested_bindings;
+    attach_local_sigs(ctx, wheres, &mut nested_bindings);
     ctx.exit_scope();
     hir::Expr::Let(nested_bindings, Box::new(rhs_expr), span)
+}
+
+/// Attach each local (`where`/`let`) type signature to its binding.
+///
+/// Local signatures were dropped, so typeck generalised a local function
+/// from its body alone — `where go :: Int -> Parsec String () String` came
+/// out as `a -> ParsecT s u m [Char]`, and every `Stream` dictionary inside
+/// it went unresolved (silently shifting arguments).
+///
+/// Signature type variables are keyed by NAME and typeck unifies a local
+/// signature without instantiating it, so a local `m` is the enclosing
+/// signature's `m` — ScopedTypeVariables behaviour, which is what pandoc's
+/// `go :: PandocMonad m => Int -> MarkdownParser m ()` helpers rely on. The
+/// full pandoc sweep type-checks with them attached.
+fn attach_local_sigs(ctx: &mut LowerContext, decls: &[ast::Decl], bindings: &mut [hir::Binding]) {
+    for decl in decls {
+        let ast::Decl::TypeSig(sig) = decl else {
+            continue;
+        };
+        let scheme = lower_type_to_scheme(ctx, &sig.ty);
+        for name in &sig.names {
+            for binding in bindings.iter_mut() {
+                if let hir::Pat::Var(bound, _, _) = &binding.pat {
+                    if *bound == name.name && binding.sig.is_none() {
+                        binding.sig = Some(scheme.clone());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Lower a clause's RHS, threading its own `where` clause (if any). This keeps
@@ -8096,6 +8130,8 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                     None
                 })
                 .collect();
+            let mut bindings = bindings;
+            attach_local_sigs(ctx, decls, &mut bindings);
 
             let e = lower_expr(ctx, body);
             hir::Expr::Let(bindings, Box::new(e), *span)
@@ -8110,7 +8146,15 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
 
         ast::Expr::Case(scrutinee, alts, span) => {
             let s = lower_expr(ctx, scrutinee);
-            let hir_alts: Vec<hir::CaseAlt> = alts.iter().map(|alt| lower_alt(ctx, alt)).collect();
+            let guarded_before_last = alts.len() > 1
+                && alts[..alts.len() - 1]
+                    .iter()
+                    .any(|alt| matches!(alt.rhs, ast::Rhs::Guarded(..)));
+            if guarded_before_last {
+                return lower_case_with_guard_fallthrough(ctx, s, alts, *span);
+            }
+            let hir_alts: Vec<hir::CaseAlt> =
+                alts.iter().map(|alt| lower_alt(ctx, alt, None)).collect();
             hir::Expr::Case(Box::new(s), hir_alts, *span)
         }
 
@@ -8277,7 +8321,90 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
 }
 
 /// Lower a case alternative.
-fn lower_alt(ctx: &mut LowerContext, alt: &ast::Alt) -> hir::CaseAlt {
+/// Lower a `case` in which a guarded alternative is not the last one.
+///
+/// When every guard of an alternative fails, matching continues with the
+/// NEXT alternative: `case s of { (x:_) | x == c -> Just x; _ -> Nothing }`
+/// is `Nothing` for a non-matching `x`. Guards are desugared to `if`
+/// chains here, so each alternative becomes its own case whose guard
+/// failure — and whose pattern failure — resumes at the next one:
+///
+/// ```text
+/// let s = e
+///     f2 = case s of { p2 … ; _ -> error }
+///     f1 = case s of { p1 | g -> e1 | otherwise-fail -> f2 ; _ -> f2 }
+/// in case s of { p0 … -> … f1 … ; _ -> f1 }
+/// ```
+///
+/// Each resume point is a `let`, so later alternatives are shared rather
+/// than copied into every failure branch.
+fn lower_case_with_guard_fallthrough(
+    ctx: &mut LowerContext,
+    scrutinee: hir::Expr,
+    alts: &[ast::Alt],
+    span: Span,
+) -> hir::Expr {
+    let scrut_name = Symbol::intern("$cscrut");
+    let scrut_id = ctx.fresh_def_id();
+    ctx.define(scrut_id, scrut_name, DefKind::Value, span);
+    let scrut_ref = || {
+        hir::Expr::Var(hir::DefRef {
+            def_id: scrut_id,
+            span,
+        })
+    };
+
+    let mut resume: Option<hir::Expr> = None;
+    let mut resume_binds: Vec<hir::Binding> = Vec::new(); // f_{n-1} first
+    let mut body = None;
+    for (i, alt) in alts.iter().enumerate().rev() {
+        let mut case_alts = vec![lower_alt(ctx, alt, resume.clone())];
+        if let Some(next) = &resume {
+            case_alts.push(hir::CaseAlt {
+                pat: hir::Pat::Wild(span),
+                guards: vec![],
+                rhs: next.clone(),
+                span,
+            });
+        }
+        let case_i = hir::Expr::Case(Box::new(scrut_ref()), case_alts, span);
+        if i == 0 {
+            body = Some(case_i);
+        } else {
+            let name = Symbol::intern(&format!("$caseresume{i}"));
+            let id = ctx.fresh_def_id();
+            ctx.define(id, name, DefKind::Value, span);
+            resume_binds.push(hir::Binding {
+                pat: hir::Pat::Var(name, id, span),
+                sig: None,
+                rhs: case_i,
+                span,
+            });
+            resume = Some(hir::Expr::Var(hir::DefRef { def_id: id, span }));
+        }
+    }
+    let mut result = body.unwrap_or_else(|| hir::Expr::Case(Box::new(scrut_ref()), vec![], span));
+    // f_1 innermost, f_{n-1} outermost: each f_i sees f_{i+1}. The vector
+    // holds f_{n-1} first, so wrap from its far end.
+    for bind in resume_binds.into_iter().rev() {
+        result = hir::Expr::Let(vec![bind], Box::new(result), span);
+    }
+    let scrut_bind = hir::Binding {
+        pat: hir::Pat::Var(scrut_name, scrut_id, span),
+        sig: None,
+        rhs: scrutinee,
+        span,
+    };
+    hir::Expr::Let(vec![scrut_bind], Box::new(result), span)
+}
+
+/// Lower one `case` alternative. `guard_fallback` is the result when every
+/// guard fails (the next alternative); `None` keeps the pattern-match error.
+fn lower_alt(
+    ctx: &mut LowerContext,
+    alt: &ast::Alt,
+    guard_fallback: Option<hir::Expr>,
+) -> hir::CaseAlt {
     ctx.in_scope(|ctx| {
         // Bind pattern variables first
         bind_pattern(ctx, &alt.pat);
@@ -8306,7 +8433,17 @@ fn lower_alt(ctx: &mut LowerContext, alt: &ast::Alt) -> hir::CaseAlt {
         }
 
         // Lower the RHS (where clause bindings are now in scope)
-        let rhs_expr = lower_rhs(ctx, &alt.rhs);
+        let rhs_expr = match (&alt.rhs, guard_fallback) {
+            (ast::Rhs::Guarded(guards, gspan), Some(fallback)) => desugar::desugar_guarded_rhs_or(
+                ctx,
+                guards,
+                fallback,
+                *gspan,
+                &|ctx, e| lower_expr(ctx, e),
+                &|ctx, p| lower_pat(ctx, p),
+            ),
+            (rhs, _) => lower_rhs(ctx, rhs),
+        };
 
         // Wrap in let if there are where bindings
         let final_rhs = if alt.wheres.is_empty() {

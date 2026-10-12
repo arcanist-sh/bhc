@@ -539,10 +539,24 @@ pub fn desugar_guarded_rhs(
     lower_expr: &impl Fn(&mut LowerContext, &ast::Expr) -> hir::Expr,
     lower_pat: &impl Fn(&mut LowerContext, &ast::Pat) -> hir::Pat,
 ) -> hir::Expr {
-    guarded_rhss.iter().rev().fold(
-        // Default: error "Non-exhaustive guards"
-        make_pattern_match_error(ctx, span),
-        |else_branch, grhs| {
+    let fallback = make_pattern_match_error(ctx, span);
+    desugar_guarded_rhs_or(ctx, guarded_rhss, fallback, span, lower_expr, lower_pat)
+}
+
+/// [`desugar_guarded_rhs`] with an explicit result for when every guard
+/// fails — the next `case` alternative, rather than a pattern-match error.
+pub fn desugar_guarded_rhs_or(
+    ctx: &mut LowerContext,
+    guarded_rhss: &[ast::GuardedRhs],
+    fallback: hir::Expr,
+    span: Span,
+    lower_expr: &impl Fn(&mut LowerContext, &ast::Expr) -> hir::Expr,
+    lower_pat: &impl Fn(&mut LowerContext, &ast::Pat) -> hir::Pat,
+) -> hir::Expr {
+    guarded_rhss
+        .iter()
+        .rev()
+        .fold(fallback, |else_branch, grhs| {
             // Pass the AST body to desugar_guards - it will be lowered inside
             // the pattern guard scopes so that pattern variables are visible.
             desugar_guards_with_body(
@@ -554,8 +568,7 @@ pub fn desugar_guarded_rhs(
                 lower_expr,
                 lower_pat,
             )
-        },
-    )
+        })
 }
 
 /// Desugar a sequence of guards with an AST body, properly scoping pattern variables.

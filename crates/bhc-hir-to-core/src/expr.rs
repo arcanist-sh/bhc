@@ -515,6 +515,12 @@ fn in_scope_dict_matches(ctx: &LowerContext, class_name: Symbol, span: Span) -> 
     let occ_head = refined_occurrence_ty(ctx, span)
         .as_ref()
         .and_then(monad_head_of_method_occurrence);
+    if dispatch_dbg() {
+        eprintln!(
+            "[dict-match] {class_name}: dict_ty={dict_ty:?} occ={:?} head={occ_head:?}",
+            refined_occurrence_ty(ctx, span)
+        );
+    }
     match occ_head {
         // A dictionary for one monad must not answer for another, whatever
         // the class. `readWithM p` runs `p` at `ParsecT Sources st m` inside a
@@ -1023,7 +1029,18 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 // `mempty :: [Int]` never reached instance resolution at all
                 // and stayed a bare `mempty` Var in Core, which `length` then
                 // walked as garbage. Only the result-type channel is opened
-                // here; superclass extraction stays user-classes-only.
+                // here, plus the one superclass edge between these classes: a
+                // VALUE `(<>)` under only `Monoid m =>` (`foldr (<>) mempty`)
+                // must come out of the Monoid dictionary's Semigroup slot.
+                // Applied `a <> b` already took that hop in `lower_app`; the
+                // bare operator stayed the builtin and hit its stub.
+                if ctx.lookup_dict(class_name).is_none() {
+                    if let Some(method_expr) =
+                        ctx.select_method_via_superclass(class_name, name, def_ref.span)
+                    {
+                        return Ok(method_expr);
+                    }
+                }
                 if let Some(method_expr) =
                     ctx.select_method_by_result_type(class_name, name, def_ref.def_id, def_ref.span)
                 {
@@ -1493,7 +1510,7 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
             let elem_ty = try_infer_arg_type(ctx, elems.first()?)?;
             Some(Ty::List(Box::new(elem_ty)))
         }
-        Expr::App(f, x, _) => {
+        Expr::App(f, x, app_span) => {
             // Peel off App layers to find head constructor and collect args:
             // App(App(Con(Pair), x), y) → (Con(Pair), [x, y])
             let mut head = f.as_ref();
@@ -1513,6 +1530,24 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
                         extract_constructor_result_type(&con_ty, &con_args, ctx)
                     {
                         return Some(result_ty);
+                    }
+                    // Typeck's recorded type for this application, when it
+                    // is fully concrete.
+                    if let Some(ty) = ctx.resolved_expr_ty_opt(*app_span) {
+                        if !has_type_variables(&ty) && !matches!(ty, Ty::Error) {
+                            return Some(ty);
+                        }
+                    }
+                    // A bare head is only the type of a constructor whose type
+                    // takes no arguments. For `Many [1] :: Many Int` it bound
+                    // `Monoid m` to a kind-mismatched `Many`, which outranked
+                    // the occurrence type and dropped the dictionary.
+                    let mut res = &con_ty;
+                    while let Ty::Fun(_, r) = res {
+                        res = r.as_ref();
+                    }
+                    if matches!(res, Ty::App(..)) {
+                        return None;
                     }
                     // Return bare type name. The caller (lower_app) will try
                     // applied-type resolution as a second attempt if this fails.
@@ -2509,7 +2544,13 @@ fn resolve_constrained_fn_dicts(
         if uc.is_empty() {
             return None;
         }
-        (uc, scheme.ty.clone())
+        // Synonym-expanded, like the argument types it is matched against:
+        // `parse :: Stream s Identity t => Parsec s () a -> …` keeps the
+        // 3-argument `Parsec` synonym, and matching that spine against an
+        // argument's expanded 4-argument `ParsecT [Char] () Identity [Char]`
+        // misaligned it (`s := ()`), so the Stream dictionary went missing
+        // and every argument shifted.
+        (uc, ctx.expand_type_aliases(&scheme.ty))
     };
 
     // Declared parameter types (the scheme type carries no dictionaries).
@@ -2541,6 +2582,7 @@ fn resolve_constrained_fn_dicts(
         if std::env::var("BHC_DBG_DICT4").is_ok() {
             eprintln!("DICT4: occ_ty at head span = {occ_ty:?}");
         }
+        let occ_ty = ctx.expand_type_aliases(&occ_ty);
         match_ty(&scheme_ty, &occ_ty, &mut subst);
 
         // The occurrence's recorded type can keep the ENCLOSING SIGNATURE'S
@@ -2563,22 +2605,44 @@ fn resolve_constrained_fn_dicts(
         // resolving `Monad m` to the IO dictionary for a ReaderT computation.
         // `return` then compiled to IO's identity and `runReaderT` was handed a
         // bare value to call.
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        fn con_head(t: &Ty) -> Option<Symbol> {
+            match t {
+                Ty::App(f, _) => con_head(f),
+                Ty::Con(tc) => Some(tc.name),
+                _ => None,
+            }
+        }
+        // A MONOMORPHIC signature is also safe when the occurrence's result
+        // already has the signature result's concrete head: `char ']'`
+        // inside `where go :: Int -> Parsec String () String` records
+        // `ParsecT ?s ?u ?m Char`, and only the signature pins `?s`. The
+        // hazard above needs a VARIABLE head (`?573 Int` against `IO ()`).
+        let same_concrete_head = |sig: &Ty| {
+            let occ_head = con_head(result_of(&occ_ty));
+            occ_head.is_some() && occ_head == con_head(&ctx.expand_type_aliases(result_of(sig)))
+        };
+        if std::env::var("BHC_DBG_DICT4").is_ok() {
+            eprintln!("DICT4: binding sig = {:?}", ctx.current_binding_sig());
+        }
         if let Some(sig_ty) = ctx
             .current_binding_sig()
             .cloned()
-            .filter(has_type_variables)
+            .filter(|sig| has_type_variables(sig) || same_concrete_head(sig))
         {
-            fn result_of(t: &Ty) -> &Ty {
-                match t {
-                    Ty::Fun(_, r) => result_of(r),
-                    other => other,
-                }
-            }
             // The stored signature is already synonym-expanded (pandoc's
             // `MarkdownParser m a` = `ParsecT Sources ParserState m a`) —
             // see `lower_value_def`, which expands once per binding.
+            // A LOCAL signature (`where go :: Int -> Parsec String () String`)
+            // is not expanded on the way in; expand here, or the 3-argument
+            // `Parsec` spine misaligns against the 4-argument `ParsecT` one.
             let occ_result = result_of(&occ_ty).clone();
-            let sig_result = result_of(&sig_ty).clone();
+            let sig_result = ctx.expand_type_aliases(result_of(&sig_ty));
             match_ty(&occ_result, &sig_result, &mut subst);
         }
     } else if std::env::var("BHC_DBG_DICT4").is_ok() {

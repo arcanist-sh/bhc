@@ -764,6 +764,24 @@ impl TyCtxt {
             }
         }
 
+        // `Ratio a` (= `Rational` at `Integer`) is a base numeric type with
+        // the full numeric tower. It surfaced once local signatures reached
+        // typeck: pandoc's `getOffset :: Ratio Integer -> Text` does
+        // `(proportion - 1) * (-100 % 2)` and `round`.
+        if matches!(
+            class_name,
+            "Num" | "Fractional" | "Real" | "RealFrac" | "Eq" | "Ord" | "Show"
+        ) {
+            let is_ratio = match ty {
+                Ty::App(f, _) => matches!(f.as_ref(), Ty::Con(tc) if tc.name.as_str() == "Ratio"),
+                Ty::Con(tc) => tc.name.as_str() == "Rational",
+                _ => false,
+            };
+            if is_ratio {
+                return true;
+            }
+        }
+
         match ty {
             Ty::Con(tycon) => {
                 let type_name = tycon.name.as_str();
@@ -7937,6 +7955,16 @@ impl TyCtxt {
         for method in &instance.methods {
             if class_known {
                 self.check_value_def(method);
+                self.guide_instance_method_type(instance, method);
+            } else if let Some(shape) = builtin_value_method_shape(instance, method.name) {
+                // Semigroup/Monoid are builtin (no ClassDef), but every method
+                // shape is fixed by the instance type, so the body CAN be
+                // checked. Skipping it left nothing inside with a recorded
+                // type: the inner `mempty` of `mempty = Many mempty` (at
+                // `[a]`) had no type to dispatch on and stayed a bare builtin.
+                let mut typed = method.clone();
+                typed.sig = Some(Scheme::mono(shape));
+                self.check_value_def(&typed);
             } else {
                 // Still register the method's scheme so it can be looked up,
                 // but use a fresh type variable to avoid constraining other code.
@@ -7945,6 +7973,50 @@ impl TyCtxt {
                 self.def_schemes.insert(method.id, scheme.clone());
                 self.env.insert_global(method.id, scheme);
             }
+        }
+    }
+
+    /// Unify an instance method's inferred type with the class method's type
+    /// at the instance head, keeping no errors from it.
+    ///
+    /// Instance method bodies are inferred without an expected type, so
+    /// inside `instance PandocMonad m => PandocMonad (ParsecT s st m)` the
+    /// `do` block of `trace` had a fresh monad variable. Core lowering then
+    /// matched that variable against the constraint dictionary for `m`,
+    /// selected `getsCommonState` and `>>=` from it, and ran a ParsecT action
+    /// through ExceptT-over-StateT's bind. Pinning the type here makes the
+    /// recorded occurrence types say `ParsecT s st m`. Any mismatch is
+    /// dropped: this only refines types, it must not reject a module that
+    /// checked before.
+    fn guide_instance_method_type(&mut self, instance: &InstanceDef, method: &ValueDef) {
+        let Some(class) = self.env.lookup_class(instance.class).cloned() else {
+            return;
+        };
+        let Some(method_scheme) = class.methods.get(&method.name).cloned() else {
+            return;
+        };
+        if class.params.len() != instance.types.len() {
+            return;
+        }
+        let Some(inferred) = self.def_schemes.get(&method.id).map(|s| s.ty.clone()) else {
+            return;
+        };
+        let mut subst = Subst::new();
+        for (p, t) in class.params.iter().zip(&instance.types) {
+            subst.insert(p, t.clone());
+        }
+        for v in &method_scheme.vars {
+            if !class.params.iter().any(|p| p.id == v.id) {
+                let fresh = self.fresh_ty();
+                subst.insert(v, fresh);
+            }
+        }
+        let expected = subst.apply(&method_scheme.ty);
+        let saved = self.diag.take_diagnostics();
+        self.unify(&expected, &inferred, method.span);
+        let _speculative = self.diag.take_diagnostics();
+        for d in saved {
+            self.diag.emit(d);
         }
     }
 
@@ -8692,6 +8764,21 @@ fn is_typeck_builtin_class(name: &str) -> bool {
     )
 }
 
+/// The declared type of a builtin `Semigroup`/`Monoid` method at a
+/// single-parameter instance's type, or `None` for any other method or class.
+fn builtin_value_method_shape(instance: &InstanceDef, method: Symbol) -> Option<Ty> {
+    if !matches!(instance.class.as_str(), "Semigroup" | "Monoid") || instance.types.len() != 1 {
+        return None;
+    }
+    let t = instance.types[0].clone();
+    let fun = |a: Ty, b: Ty| Ty::Fun(Box::new(a), Box::new(b));
+    match method.as_str() {
+        "mempty" => Some(t),
+        "<>" | "mappend" => Some(fun(t.clone(), fun(t.clone(), t))),
+        "mconcat" => Some(fun(Ty::List(Box::new(t.clone())), t)),
+        _ => None,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

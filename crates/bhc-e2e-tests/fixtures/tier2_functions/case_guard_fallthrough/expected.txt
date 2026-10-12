@@ -1,0 +1,12 @@
+Just a
+Nothing
+zero
+negative
+large
+even
+odd
+5
+20
+300
+-1
+[1,2,3]

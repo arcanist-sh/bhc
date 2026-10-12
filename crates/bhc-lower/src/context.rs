@@ -72,7 +72,7 @@ impl DefKind {
 
 /// Every builtin definition has a DefId below this; the first user or
 /// imported definition is allocated at it (see `define_builtins`).
-pub const BUILTIN_DEF_LIMIT: usize = 12321;
+pub const BUILTIN_DEF_LIMIT: usize = 12323;
 
 /// Information about a definition.
 #[derive(Clone, Debug)]
@@ -1049,7 +1049,7 @@ impl LowerContext {
             "Data.IntSet.foldr",
             "Data.IntSet.toList",
             "Data.IntSet.fromList",
-            // Container PrimOps: Data.Sequence — registered via fixed DefIds 12300-12320 below
+            // Container PrimOps: Data.Sequence — registered via fixed DefIds 12300-12322 below
             // Container PrimOps: Data.Text (packed UTF-8)
             "Data.Text.empty",
             "Data.Text.singleton",
@@ -1927,7 +1927,7 @@ impl LowerContext {
             self.bind_value(sym, def_id);
         }
 
-        // Data.Sequence at fixed DefIds 12300-12320
+        // Data.Sequence at fixed DefIds 12300-12322
         let seq_fns: &[(usize, &str)] = &[
             (12300, "Data.Sequence.empty"),
             (12301, "Data.Sequence.singleton"),
@@ -1950,6 +1950,8 @@ impl LowerContext {
             (12318, "Data.Sequence.viewl"),
             (12319, "Data.Sequence.viewr"),
             (12320, "Data.Sequence.filter"),
+            (12321, "Data.Sequence.dropWhileL"),
+            (12322, "Data.Sequence.dropWhileR"),
         ];
         for &(id, name) in seq_fns {
             let sym = Symbol::intern(name);

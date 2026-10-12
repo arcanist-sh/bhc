@@ -2577,8 +2577,10 @@ impl LowerContext {
         concrete_type: &Ty,
         span: Span,
     ) -> Option<core::Expr> {
-        // Create a constraint for the concrete type
-        let constraint = Constraint::new(class_name, concrete_type.clone(), span);
+        // Instance heads are registered synonym-expanded; an enclosing
+        // instance written at `Inlines` must look up `Many Inline`, or the
+        // lookup falls to a permissive candidate (`Max a`) with no methods.
+        let constraint = Constraint::new(class_name, self.expand_type_aliases(concrete_type), span);
 
         // Construct the dictionary with var_map for correct method names
         let mut dict_ctx =
@@ -2625,7 +2627,11 @@ impl LowerContext {
         concrete_types: &[Ty],
         span: Span,
     ) -> Option<core::Expr> {
-        let constraint = Constraint::new_multi(class_name, concrete_types.to_vec(), span);
+        let expanded: Vec<Ty> = concrete_types
+            .iter()
+            .map(|t| self.expand_type_aliases(t))
+            .collect();
+        let constraint = Constraint::new_multi(class_name, expanded, span);
 
         let mut dict_ctx =
             DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
@@ -3363,8 +3369,16 @@ impl LowerContext {
             assoc_type_impls.insert(assoc_impl.name, assoc_impl.rhs.clone());
         }
 
-        // Use all instance types (supports multi-param type classes)
-        let instance_types = instance_def.types.clone();
+        // Use all instance types (supports multi-param type classes).
+        // Synonym-expanded: `instance Monoid Inlines` (Inlines = Many Inline)
+        // must match an occurrence at `Many Inline`; left as written, lookup
+        // missed it and the dictionary was silently dropped or fell back to
+        // the list instance.
+        let instance_types: Vec<Ty> = instance_def
+            .types
+            .iter()
+            .map(|t| self.expand_type_aliases(t))
+            .collect();
         let first_type = instance_types.first().cloned().unwrap_or(Ty::Error);
 
         // For superclass instances, use the CLASS's superclass list (not the
@@ -3436,7 +3450,7 @@ impl LowerContext {
     /// The builtin transformers are deliberately left alone — their `lift` has
     /// a codegen fast path that knows each layer's representation.
     pub(crate) fn select_monad_trans_method(
-        &self,
+        &mut self,
         method: Symbol,
         span: Span,
     ) -> Option<core::Expr> {
@@ -3496,11 +3510,40 @@ impl LowerContext {
         })?;
         let def_id = inst.methods.get(&method).copied()?;
         let var = self.lookup_var(def_id).cloned()?;
-        // Referenced bare. `lift :: Monad m => m a -> t m a` carries its own
-        // `Monad m`, but the compiled instance method does not take that
-        // dictionary as a leading argument — applying one made parsec's
-        // `lift` a partial application of a non-closure.
-        Some(core::Expr::Var(var, span))
+        let lifted = core::Expr::Var(var, span);
+        if method.as_str() != "lift" {
+            return Some(lifted);
+        }
+        // `lift :: Monad m => m a -> t m a` carries its own `Monad m`, and a
+        // user instance's `lift` is compiled taking it first (see the
+        // instance lowering): parsec's `lift amb = ParsecT $ \s … -> do a <-
+        // amb; …` binds in the INNER monad, and with no dictionary that bind
+        // was the builtin, which guessed a layer and ran a PandocIO action
+        // as something else. The inner monad is the transformer's last
+        // argument in the occurrence's result type `t m a`.
+        fn inner_monad(t: &Ty) -> Option<Ty> {
+            match t {
+                Ty::App(tm, _) => match tm.as_ref() {
+                    Ty::App(_, m) => Some(m.as_ref().clone()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        let m = occ
+            .as_ref()
+            .and_then(|t| inner_monad(result_of(t)))
+            .unwrap_or_else(|| Ty::Var(bhc_types::TyVar::new_star(u32::MAX - 7)));
+        let monad = Symbol::intern("Monad");
+        let constraint = Constraint::new(monad, m.clone(), span);
+        let dict = self
+            .resolve_dictionary(&constraint, span)
+            .or_else(|| {
+                self.lookup_dict(monad)
+                    .map(|v| core::Expr::Var(v.clone(), span))
+            })
+            .unwrap_or_else(|| null_dict_placeholder(monad, &[m], span));
+        Some(core::Expr::App(Box::new(lifted), Box::new(dict), span))
     }
 
     /// Resolve a class-method reference by the RESULT type recorded for its
@@ -3558,7 +3601,24 @@ impl LowerContext {
         // User classes keep the rule: a function-headed instance is legitimate
         // there (`instance Attributable (Html -> Html)`).
         let takes_args = builtin_class_method_arity(method).is_some_and(|n| n > 0);
-        if ty_is_concrete(&ty) && !(takes_args && matches!(ty, Ty::Fun(..))) {
+        // Nor when the class parameter is a type CONSTRUCTOR applied in the
+        // method's type (`getCommonState :: m CommonState`): the recorded
+        // `PandocIO CommonState` is then not the parameter, and the generic
+        // `instance … => PandocMonad (t m)` matched it as `t := PandocIO, m :=
+        // CommonState`. The scheme match below reads `m := PandocIO`.
+        let param_applied = self.class_param_applied_in_method(class_name, method);
+        // An imported class carries only arrow skeletons, so also try the
+        // application's HEAD first: for a monad-like class that is the
+        // parameter, and for a value class (`Monoid (Map k v)`) the bare head
+        // has no instance and the full type below still answers.
+        if let Ty::App(head, _) = &ty {
+            if ty_is_concrete(head) && !matches!(ty, Ty::Fun(..)) && !takes_args {
+                if let Some(expr) = self.method_at_instance_type(class_name, method, head, span) {
+                    return Some(expr);
+                }
+            }
+        }
+        if ty_is_concrete(&ty) && !param_applied && !(takes_args && matches!(ty, Ty::Fun(..))) {
             if let Some(expr) = self.method_at_instance_type(class_name, method, &ty, span) {
                 return Some(expr);
             }
@@ -3584,12 +3644,35 @@ impl LowerContext {
                 scheme.ty, scheme.constraints
             );
         }
-        let constraint_arg = scheme
+        // A method's scheme as typeck stores it for its DefId has the class
+        // constraint cleared (`register_class` keeps only the shape) and its
+        // variables renamed, so nothing in it marks the class parameter. The
+        // class registry's own method type is written in the class's
+        // parameter variables; match that instead.
+        let (scheme, constraint_arg) = match scheme
             .constraints
             .iter()
             .find(|c| c.class == class_name)
             .and_then(|c| c.args.first())
-            .cloned()?;
+            .cloned()
+        {
+            Some(arg) => (scheme, arg),
+            None => {
+                let param = self
+                    .class_registry
+                    .class_params
+                    .get(&class_name)
+                    .and_then(|ps| ps.first())
+                    .cloned()?;
+                let declared = self
+                    .class_registry
+                    .lookup_class(class_name)?
+                    .method_types
+                    .get(&method)?
+                    .clone();
+                (declared, Ty::Var(param))
+            }
+        };
         // `types_match` is all-or-nothing, and typeck routinely records an
         // occurrence only partially resolved: the nullary `tag :: m Int` used
         // at `MyM` comes back as `MyM ?594`, whose element position defeats the
@@ -3624,6 +3707,36 @@ impl LowerContext {
             return None;
         }
         self.method_at_instance_type(class_name, method, &inst_ty, span)
+    }
+
+    /// Whether `class_name`'s first parameter occurs APPLIED to an argument in
+    /// the declared type of `method` (`m a` in a monad-like class).
+    fn class_param_applied_in_method(&self, class_name: Symbol, method: Symbol) -> bool {
+        fn applied(ty: &Ty, id: u32) -> bool {
+            match ty {
+                Ty::App(f, a) => {
+                    matches!(f.as_ref(), Ty::Var(v) if v.id == id)
+                        || applied(f, id)
+                        || applied(a, id)
+                }
+                Ty::Fun(a, b) => applied(a, id) || applied(b, id),
+                Ty::List(t) => applied(t, id),
+                Ty::Tuple(ts) => ts.iter().any(|t| applied(t, id)),
+                _ => false,
+            }
+        }
+        let Some(param) = self
+            .class_registry
+            .class_params
+            .get(&class_name)
+            .and_then(|ps| ps.first())
+        else {
+            return false;
+        };
+        self.class_registry
+            .lookup_class(class_name)
+            .and_then(|c| c.method_types.get(&method))
+            .is_some_and(|scheme| applied(&scheme.ty, param.id))
     }
 
     /// Every class parameter of a MULTI-parameter class at one use of its
@@ -3878,6 +3991,10 @@ impl LowerContext {
             // `superclass_instances.get(i)?`) and `pure`/`>>=` never dispatch —
             // the cross-module analogue of the same-type superclass wiring the
             // derivers set locally.
+            // Matching uses synonym-expanded heads (see register_instance_def);
+            // the method symbols above keep the spelling the defining module
+            // used.
+            let types: Vec<Ty> = types.iter().map(|t| self.expand_type_aliases(t)).collect();
             let superclass_instances: Vec<Ty> =
                 match (types.first(), self.class_registry.lookup_class(*class)) {
                     (Some(ty), Some(cls)) => vec![ty.clone(); cls.superclasses.len()],
@@ -4342,10 +4459,23 @@ impl LowerContext {
                         // …`) follow the instance's: dictionary construction
                         // applies only the instance's, and each USE of the
                         // method supplies these (`method_level_dicts_at`).
-                        let method_level: Vec<Constraint> = self
+                        let mut method_level: Vec<Constraint> = self
                             .method_level_dict_constraints(instance_def.class, method_def.name)
                             .map(|(_, cs)| cs)
                             .unwrap_or_default();
+                        // `lift :: Monad m => m a -> t m a`: the body binds in
+                        // the inner monad, so a user transformer's `lift`
+                        // takes that `Monad m` first. `select_monad_trans_method`
+                        // supplies it at every use.
+                        if instance_def.class.as_str() == "MonadTrans"
+                            && method_def.name.as_str() == "lift"
+                        {
+                            method_level.push(Constraint::new(
+                                Symbol::intern("Monad"),
+                                Ty::Var(bhc_types::TyVar::new_star(u32::MAX - 7)),
+                                method_def.span,
+                            ));
+                        }
                         self.instance_alias_span = match method_def.equations.as_slice() {
                             [eq] if eq.pats.is_empty() && eq.guards.is_empty() => match &eq.rhs {
                                 bhc_hir::Expr::Var(r) => Some(r.span),
@@ -4465,7 +4595,9 @@ impl LowerContext {
                         }
                     }
                     if !found {
-                        // Type not found — silently ignore (may be imported)
+                        // `deriving instance Monoid Blocks` names a SYNONYM of
+                        // a newtype (`type Blocks = Many Block`).
+                        self.derive_value_class_via_synonym(module, sd, &mut bindings);
                     }
                 }
                 Item::PatternSynonym(_) => {
@@ -4515,6 +4647,7 @@ impl LowerContext {
         let foreign_imports = std::mem::take(&mut self.foreign_imports);
 
         lazify_recursive_parser_calls(&mut bindings);
+        lazify_self_recursive_monadic_args(&mut bindings);
 
         Ok(CoreModule {
             name: module.name,
@@ -4524,6 +4657,95 @@ impl LowerContext {
             overloaded_strings: module.overloaded_strings,
             constructors,
         })
+    }
+
+    /// Standalone-derive `Semigroup`/`Monoid` for a synonym of a local newtype
+    /// (pandoc-types' `deriving instance Monoid Blocks`, `Blocks = Many
+    /// Block`). The newtype is erased at runtime, so each method is the field
+    /// type's own instance method at the instantiated field type. The method
+    /// symbols are `$instance_{method}_{Synonym}`, the name an importing
+    /// module reconstructs from the interface's instance head. Previously the
+    /// declaration was dropped (no data/newtype is named `Blocks`), and
+    /// importers fell onto the `Inlines` instance.
+    fn derive_value_class_via_synonym(
+        &mut self,
+        module: &HirModule,
+        sd: &bhc_hir::StandaloneDeriving,
+        bindings: &mut Vec<Bind>,
+    ) {
+        let methods: &[&str] = match sd.class.as_str() {
+            "Semigroup" => &["<>"],
+            "Monoid" => &["mempty", "mappend"],
+            _ => return,
+        };
+        let Some((alias_params, rhs)) = self.type_aliases.get(&sd.type_name).cloned() else {
+            return;
+        };
+        if !alias_params.is_empty() {
+            return;
+        }
+        let mut head = &rhs;
+        let mut args: Vec<Ty> = Vec::new();
+        while let Ty::App(f, a) = head {
+            args.push(a.as_ref().clone());
+            head = f.as_ref();
+        }
+        args.reverse();
+        let Ty::Con(head_con) = head else {
+            return;
+        };
+        let Some(nt) = module.items.iter().find_map(|item| match item {
+            Item::Newtype(nt) if nt.name == head_con.name => Some(nt),
+            _ => None,
+        }) else {
+            return;
+        };
+        if nt.params.len() != args.len() {
+            return;
+        }
+        let field_ty = match &nt.con.fields {
+            bhc_hir::ConFields::Positional(tys) if tys.len() == 1 => tys[0].clone(),
+            bhc_hir::ConFields::Named(fs) if fs.len() == 1 => fs[0].ty.clone(),
+            _ => return,
+        };
+        let mut subst = bhc_types::Subst::new();
+        for (p, a) in nt.params.iter().zip(&args) {
+            subst.insert(p, a.clone());
+        }
+        let field_ty = subst.apply(&field_ty);
+
+        let span = sd.span;
+        let mut method_ids = FxHashMap::default();
+        let mut new_binds = Vec::new();
+        for m in methods {
+            let method = Symbol::intern(m);
+            let Some(body) =
+                self.resolve_method_at_concrete_type(method, sd.class, &field_ty, span)
+            else {
+                return;
+            };
+            let name = format!("$instance_{}_{}", m, sd.type_name.as_str());
+            let var = self.named_var(Symbol::intern(&name), Ty::Error);
+            method_ids.insert(method, DefId::new(var.id.index()));
+            new_binds.push(Bind::NonRec(var, Box::new(body)));
+        }
+        let superclass_instances = self
+            .class_registry
+            .lookup_class(sd.class)
+            .map(|cls| vec![rhs.clone(); cls.superclasses.len()])
+            .unwrap_or_default();
+        let derived = crate::deriving::DerivedInstance {
+            instance: crate::dictionary::InstanceInfo {
+                class: sd.class,
+                instance_types: vec![self.expand_type_aliases(&rhs)],
+                methods: method_ids,
+                superclass_instances,
+                assoc_type_impls: FxHashMap::default(),
+                instance_constraints: Vec::new(),
+            },
+            bindings: new_binds,
+        };
+        self.register_derived_instance(derived, bindings);
     }
 
     /// Lower a value definition to a Core binding.
@@ -4731,8 +4953,27 @@ impl LowerContext {
         // Registered WITHOUT their argument types, as always: a recorded type
         // makes `in_scope_dict_matches` compare monad heads, and an instance's
         // `Monad m` would stop answering for the instance's own `ParsecT`.
-        for (class_name, dict_var) in &dict_vars {
-            self.register_dict(*class_name, dict_var.clone());
+        //
+        // Except a constraint on the instance's OWN class: in `instance
+        // PandocMonad m => PandocMonad (ParsecT s st m)` that dictionary is for
+        // `m`, and with no recorded type it answered every `getsCommonState`
+        // and do-block `>>=` in the body — `trace` ran ParsecT actions through
+        // ExceptT-over-StateT's bind. Typed, an occurrence at the instance
+        // head falls through to the enclosing instance.
+        let own_class = self.current_instance_class;
+        for ((class_name, dict_var), c) in dict_vars.iter().zip(inst_constraints) {
+            // Not the Functor/Applicative/Monad family: their instance bodies
+            // (`fmap f (R g) = R (fmap f . g)`) use the inner dictionary at
+            // occurrences typeck leaves unrecorded, which a typed entry would
+            // refuse.
+            if Some(*class_name) == own_class
+                && !c.args.is_empty()
+                && !self.is_monad_family_class(*class_name)
+            {
+                self.register_dict_at(*class_name, c.args.clone(), dict_var.clone());
+            } else {
+                self.register_dict(*class_name, dict_var.clone());
+            }
         }
 
         // The instance head pins the class parameters inside the body — the
@@ -5003,20 +5244,25 @@ impl LowerContext {
             });
             rhs = if i == 0 {
                 // Unroll the composition chain: `(f . g) x` → `f (g x)`.
+                // Each new App takes the span of the composition node it
+                // replaces, which typeck typed (`f . g :: a -> c`): with the
+                // equation's span instead, a method in `f` (`fmap T.pack .
+                // count n`) had no occurrence type, and its dispatch hopped
+                // through the BASE monad's `Monad m` dictionary.
                 fn unroll(
                     ctx: &LowerContext,
                     e: bhc_hir::Expr,
                     arg: bhc_hir::Expr,
                     span: bhc_span::Span,
                 ) -> bhc_hir::Expr {
-                    if let bhc_hir::Expr::App(f, g, _) = &e {
+                    if let bhc_hir::Expr::App(f, g, comp_span) = &e {
                         if let bhc_hir::Expr::App(dot, lhs, _) = f.as_ref() {
                             if is_dot_var(ctx, dot) {
                                 let inner = unroll(ctx, g.as_ref().clone(), arg, span);
                                 return bhc_hir::Expr::App(
                                     Box::new(lhs.as_ref().clone()),
                                     Box::new(inner),
-                                    span,
+                                    *comp_span,
                                 );
                             }
                         }
@@ -5448,6 +5694,159 @@ pub(crate) fn type_name_for_instance(ty: &Ty) -> String {
     }
 }
 
+/// Make a function's saturated SELF-call lazy where it is an argument of a
+/// Monad/Applicative/Alternative method: `go n = p >> go n`.
+///
+/// Arguments are evaluated eagerly, so building `go 1`'s parser value called
+/// `go 1` again before `>>` ever ran, and the recursion never bottomed out —
+/// pandoc's `inBalancedBrackets` (reached from `referenceKey` on every
+/// paragraph) and any explicitly recursive parser loop overflowed the stack.
+/// A method of these classes takes monadic VALUES (heap closures for a user
+/// monad), and the apply/force paths evaluate a thunk on first use, so the
+/// wrapped call is safe there. `lazify_recursive_parser_calls` covers only
+/// dictionary-arity parser CAFs; this covers functions with value
+/// parameters, top-level and `let rec`-bound (`where go …`).
+///
+/// Only method selections from a dictionary (`$sel_N $dMonad…`) and
+/// `$instance_<method>_…` heads count: a BUILTIN `>>` may be an effectful
+/// monad (IO) whose actions run when evaluated, and deferring one there
+/// would reorder or drop effects.
+fn lazify_self_recursive_monadic_args(bindings: &mut [Bind]) {
+    use rustc_hash::FxHashMap;
+
+    if std::env::var("BHC_NO_LAZIFY").is_ok() {
+        return;
+    }
+
+    const METHODS: &[&str] = &[">>", ">>=", "*>", "<*", "<|>", "<*>", "mplus"];
+
+    fn lam_arity(mut e: &core::Expr) -> usize {
+        let mut n = 0;
+        while let core::Expr::Lam(_, body, _) = e {
+            n += 1;
+            e = body;
+        }
+        n
+    }
+    fn has_value_param(mut e: &core::Expr) -> bool {
+        while let core::Expr::Lam(v, body, _) = e {
+            if !v.name.as_str().starts_with("$d") {
+                return true;
+            }
+            e = body;
+        }
+        false
+    }
+    fn is_monadic_method(head: &core::Expr) -> bool {
+        match head {
+            core::Expr::Var(v, _) => v
+                .name
+                .as_str()
+                .strip_prefix("$instance_")
+                .and_then(|rest| rest.split('_').next())
+                .is_some_and(|m| METHODS.contains(&m)),
+            core::Expr::App(f, d, _) => {
+                matches!(f.as_ref(), core::Expr::Var(s, _) if s.name.as_str().starts_with("$sel_"))
+                    && matches!(d.as_ref(), core::Expr::Var(dv, _) if {
+                        let n = dv.name.as_str();
+                        n.contains("Monad") || n.contains("Applicative") || n.contains("Alternative")
+                    })
+            }
+            // A dictionary built in place: `let $dictMonad_… = … in $sel_N …`.
+            core::Expr::Let(_, body, _) => is_monadic_method(body),
+            _ => false,
+        }
+    }
+    // Keyed by VarId, never by name: pandoc's Markdown reader defines its own
+    // `str` and also calls the imported `B.str`, and a name key wrapped
+    // `B.str result` as a "self-call" — the Future then held an unforced
+    // thunk where `B.toList` read a Seq.
+    fn wrap_if_self_call(e: &mut core::Expr, selfs: &FxHashMap<VarId, usize>) {
+        let mut head = &*e;
+        let mut len = 0;
+        while let core::Expr::App(f, _, _) = head {
+            head = f;
+            len += 1;
+        }
+        let saturated_self = matches!(head, core::Expr::Var(v, _)
+            if len > 0 && selfs.get(&v.id) == Some(&len));
+        if saturated_self {
+            let span = e.span();
+            let inner =
+                std::mem::replace(e, core::Expr::Lit(core::Literal::Int(0), Ty::Error, span));
+            *e = core::Expr::Lazy(Box::new(inner), span);
+        }
+    }
+    fn rw_spine(e: &mut core::Expr, monadic: bool, selfs: &FxHashMap<VarId, usize>) {
+        if let core::Expr::App(f, a, _) = e {
+            if monadic {
+                wrap_if_self_call(a, selfs);
+            }
+            rw(a, selfs);
+            rw_spine(f, monadic, selfs);
+        } else {
+            rw(e, selfs);
+        }
+    }
+    fn rw(e: &mut core::Expr, selfs: &FxHashMap<VarId, usize>) {
+        match e {
+            core::Expr::App(..) => {
+                let monadic = {
+                    let mut h = &*e;
+                    while let core::Expr::App(f, _, _) = h {
+                        h = f;
+                    }
+                    is_monadic_method(h)
+                };
+                rw_spine(e, monadic, selfs);
+            }
+            core::Expr::Lam(_, b, _) | core::Expr::TyLam(_, b, _) => rw(b, selfs),
+            core::Expr::Let(bind, body, _) => match bind.as_mut() {
+                Bind::NonRec(_, r) => {
+                    rw(r, selfs);
+                    rw(body, selfs);
+                }
+                Bind::Rec(ps) => {
+                    let mut inner = selfs.clone();
+                    for (v, r) in ps.iter() {
+                        if has_value_param(r) {
+                            inner.insert(v.id, lam_arity(r));
+                        }
+                    }
+                    for (_, r) in ps.iter_mut() {
+                        rw(r, &inner);
+                    }
+                    rw(body, &inner);
+                }
+            },
+            core::Expr::Case(scrut, alts, _, _) => {
+                rw(scrut, selfs);
+                for alt in alts {
+                    rw(&mut alt.rhs, selfs);
+                }
+            }
+            core::Expr::Lazy(b, _) | core::Expr::Cast(b, _, _) | core::Expr::Tick(_, b, _) => {
+                rw(b, selfs)
+            }
+            _ => {}
+        }
+    }
+
+    for bind in bindings.iter_mut() {
+        let pairs: Vec<(&Var, &mut Box<core::Expr>)> = match bind {
+            Bind::NonRec(v, e) => vec![(&*v, e)],
+            Bind::Rec(ps) => ps.iter_mut().map(|(v, e)| (&*v, e)).collect(),
+        };
+        for (v, e) in pairs {
+            let mut selfs = FxHashMap::default();
+            if has_value_param(e) {
+                selfs.insert(v.id, lam_arity(e));
+            }
+            rw(e.as_mut(), &selfs);
+        }
+    }
+}
+
 /// Break mutual-recursion cycles among top-level PARSER-SHAPED bindings by
 /// making cycle-internal calls lazy.
 ///
@@ -5483,10 +5882,14 @@ fn lazify_recursive_parser_calls(bindings: &mut [Bind]) {
         Some(n)
     }
 
-    // Collect candidate nodes.
-    let mut node_names: FxHashSet<Symbol> = FxHashSet::default();
-    let mut arities: FxHashMap<Symbol, usize> = FxHashMap::default();
-    let mut exprs: Vec<(Symbol, &core::Expr)> = Vec::new();
+    // Collect candidate nodes. Keyed by VarId, never by name: pandoc's
+    // Markdown reader defines its own `str` and also calls the imported
+    // `B.str`, and a name key made `str` look self-recursive and wrapped the
+    // `B.str` call in a thunk nobody forced.
+    let mut node_ids: FxHashSet<VarId> = FxHashSet::default();
+    let mut arities: FxHashMap<VarId, usize> = FxHashMap::default();
+    let mut exprs: Vec<(VarId, &core::Expr)> = Vec::new();
+    let mut names: FxHashMap<VarId, Symbol> = FxHashMap::default();
     for bind in bindings.iter() {
         let pairs: Vec<(&Var, &core::Expr)> = match bind {
             Bind::NonRec(v, e) => vec![(v, e.as_ref())],
@@ -5494,22 +5897,60 @@ fn lazify_recursive_parser_calls(bindings: &mut [Bind]) {
         };
         for (v, e) in pairs {
             if let Some(n) = dict_param_count(e) {
-                node_names.insert(v.name);
-                arities.insert(v.name, n);
-                exprs.push((v.name, e));
+                node_ids.insert(v.id);
+                arities.insert(v.id, n);
+                exprs.push((v.id, e));
+                names.insert(v.id, v.name);
             }
         }
     }
-    if node_names.len() < 2 {
+    if node_ids.len() < 2 {
         return;
     }
 
-    // Edges among candidates via free-variable names.
-    let names_vec: Vec<Symbol> = exprs.iter().map(|(n, _)| *n).collect();
+    // Edges among candidates via referenced VarIds. Top-level ids are unique,
+    // so no local binder can shadow one and scoping can be ignored.
+    fn referenced_ids(e: &core::Expr, out: &mut FxHashSet<VarId>) {
+        match e {
+            core::Expr::Var(v, _) => {
+                out.insert(v.id);
+            }
+            core::Expr::App(f, a, _) => {
+                referenced_ids(f, out);
+                referenced_ids(a, out);
+            }
+            core::Expr::Lam(_, b, _)
+            | core::Expr::TyLam(_, b, _)
+            | core::Expr::TyApp(b, _, _)
+            | core::Expr::Lazy(b, _)
+            | core::Expr::Cast(b, _, _)
+            | core::Expr::Tick(_, b, _) => referenced_ids(b, out),
+            core::Expr::Let(bind, body, _) => {
+                match bind.as_ref() {
+                    Bind::NonRec(_, r) => referenced_ids(r, out),
+                    Bind::Rec(ps) => {
+                        for (_, r) in ps {
+                            referenced_ids(r, out);
+                        }
+                    }
+                }
+                referenced_ids(body, out);
+            }
+            core::Expr::Case(scrut, alts, _, _) => {
+                referenced_ids(scrut, out);
+                for alt in alts {
+                    referenced_ids(&alt.rhs, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let ids_vec: Vec<VarId> = exprs.iter().map(|(n, _)| *n).collect();
     let mut deps: Vec<Vec<usize>> = Vec::with_capacity(exprs.len());
     for (_, e) in &exprs {
-        let fvs = crate::binding::collect_free_vars(e);
-        let d: Vec<usize> = names_vec
+        let mut fvs = FxHashSet::default();
+        referenced_ids(e, &mut fvs);
+        let d: Vec<usize> = ids_vec
             .iter()
             .enumerate()
             .filter(|(_, n)| fvs.contains(n))
@@ -5525,7 +5966,7 @@ fn lazify_recursive_parser_calls(bindings: &mut [Bind]) {
     let mut on_stack = vec![false; n];
     let mut stack: Vec<usize> = Vec::new();
     let mut counter = 0usize;
-    let mut cycle_members: FxHashSet<Symbol> = FxHashSet::default();
+    let mut cycle_members: FxHashSet<VarId> = FxHashSet::default();
     let mut call_stack: Vec<(usize, usize)> = Vec::new();
     for start in 0..n {
         if index[start] != usize::MAX {
@@ -5570,7 +6011,7 @@ fn lazify_recursive_parser_calls(bindings: &mut [Bind]) {
                     let self_loop = comp.len() == 1 && deps[comp[0]].contains(&comp[0]);
                     if comp.len() > 1 || self_loop {
                         for m in comp {
-                            cycle_members.insert(names_vec[m]);
+                            cycle_members.insert(ids_vec[m]);
                         }
                     }
                 }
@@ -5581,34 +6022,31 @@ fn lazify_recursive_parser_calls(bindings: &mut [Bind]) {
         return;
     }
     if std::env::var("BHC_DBG_CAFS").is_ok() {
-        let mut names: Vec<&str> = cycle_members.iter().map(|s| s.as_str()).collect();
-        names.sort_unstable();
-        eprintln!("[lazify] parser cycle members: {:?}", names);
+        let mut member_names: Vec<&str> =
+            cycle_members.iter().map(|id| names[id].as_str()).collect();
+        member_names.sort_unstable();
+        eprintln!("[lazify] parser cycle members: {:?}", member_names);
     }
 
     // Rewrite applied references to cycle members inside cycle members.
-    fn spine_head_name(e: &core::Expr) -> Option<(Symbol, usize)> {
-        fn go(e: &core::Expr, len: usize) -> Option<(Symbol, usize)> {
+    fn spine_head_id(e: &core::Expr) -> Option<(VarId, usize)> {
+        fn go(e: &core::Expr, len: usize) -> Option<(VarId, usize)> {
             match e {
                 core::Expr::App(f, _, _) => go(f, len + 1),
-                core::Expr::Var(v, _) => Some((v.name, len)),
+                core::Expr::Var(v, _) => Some((v.id, len)),
                 _ => None,
             }
         }
         go(e, 0)
     }
-    fn rewrite(
-        e: &mut core::Expr,
-        members: &FxHashSet<Symbol>,
-        arities: &FxHashMap<Symbol, usize>,
-    ) {
+    fn rewrite(e: &mut core::Expr, members: &FxHashSet<VarId>, arities: &FxHashMap<VarId, usize>) {
         // Wrap an EXACT dict-arity cycle-member call — the "construct the
         // parser value" form. Over-applications (the CPS parser value applied
         // to state/continuations) must stay eager: wrapping them captures raw
         // char/int arguments in a thunk env, which the eval path derefs as
         // pointers (crashed forcing 0xd = '\r').
         if let core::Expr::App(..) = e {
-            if let Some((h, len)) = spine_head_name(e) {
+            if let Some((h, len)) = spine_head_id(e) {
                 if members.contains(&h) && arities.get(&h) == Some(&len) {
                     let span = match e {
                         core::Expr::App(_, _, s) => *s,
@@ -5658,7 +6096,7 @@ fn lazify_recursive_parser_calls(bindings: &mut [Bind]) {
             Bind::Rec(ps) => ps.iter_mut().map(|(v, e)| (&*v, e)).collect(),
         };
         for (v, e) in pairs {
-            if cycle_members.contains(&v.name) {
+            if cycle_members.contains(&v.id) {
                 rewrite(e.as_mut(), &cycle_members, &arities);
             }
         }

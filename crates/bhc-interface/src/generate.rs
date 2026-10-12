@@ -284,6 +284,32 @@ pub fn generate_interface(
                     methods,
                 });
             }
+            // `deriving instance Monoid Blocks`: HIR->Core emits the methods
+            // as `$instance_{method}_{Type}` (see
+            // `derive_value_class_via_synonym`), so importers must see the
+            // instance or they fall onto another `Many` instance.
+            bhc_ast::Decl::StandaloneDeriving(sd) => {
+                // Only a synonym declared here: that is the case HIR->Core
+                // derives (an unsupported direct newtype target emits nothing,
+                // and advertising it would leave importers unlinked).
+                let is_local_synonym = matches!(&sd.ty, bhc_ast::Type::Con(c, _)
+                    if ast.decls.iter().any(|d| matches!(d,
+                        bhc_ast::Decl::TypeAlias(ta) if ta.name.name == c.name)));
+                if !is_local_synonym {
+                    continue;
+                }
+                let methods: Vec<String> = match sd.class.name.as_str() {
+                    "Semigroup" => vec!["<>".to_string()],
+                    "Monoid" => vec!["mempty".to_string(), "mappend".to_string()],
+                    _ => continue,
+                };
+                iface.add_instance(ExportedInstance {
+                    class: sd.class.name.as_str().to_string(),
+                    types: vec![convert_ast_type(&sd.ty)],
+                    constraints: Vec::new(),
+                    methods,
+                });
+            }
             // Other declarations (FunBind without sig, fixity, foreign, etc.) — skip for MVP
             _ => {}
         }

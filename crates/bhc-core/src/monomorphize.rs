@@ -318,78 +318,200 @@ fn unfold_newtypes(
 }
 
 fn try_seed(v: &Var, span: Span, resolved: &FxHashMap<Span, Ty>, ctx: &mut Ctx) -> Option<Var> {
-    let cty = unfold_newtypes(resolved.get(&span)?, ctx.newtypes, 0);
-    if has_free_tyvar(&cty) || !mentions_transformer(&cty) {
+    // `BHC_DBG_MONO=<substring>` traces why an occurrence was or was not seeded.
+    let dbg = std::env::var("BHC_DBG_MONO")
+        .ok()
+        .filter(|f| v.name.as_str().contains(f.as_str()));
+    let trace = |what: &str| {
+        if dbg.is_some() {
+            eprintln!("MONO seed {}: {what}", v.name.as_str());
+        }
+    };
+    let Some(rty) = resolved.get(&span) else {
+        trace("no resolved type at span");
+        return None;
+    };
+    let cty = unfold_newtypes(rty, ctx.newtypes, 0);
+    // Only the MONAD's image must be ground (`instantiation_of` checks it): a
+    // value type typeck left open (`getsCommonState stVerbosity`'s `a`) does
+    // not affect the transformer stack the clone is compiled for.
+    if !mentions_transformer(&cty) {
+        trace(&format!("no transformer in type: {cty:?}"));
         return None;
     }
-    let (orig_var, orig_body) = ctx.source_binding(v)?;
-    let cm = concrete_monad_of(&orig_var.ty, &cty)?;
-    get_or_specialize(&orig_var, &orig_body, &cm, ctx)
+    let Some((orig_var, orig_body)) = ctx.source_binding(v) else {
+        trace("no source binding");
+        return None;
+    };
+    let Some(inst) = instantiation_of(&orig_var.ty, &cty) else {
+        trace(&format!("no instantiation of {:?}", orig_var.ty));
+        return None;
+    };
+    let r = get_or_specialize(&orig_var, &orig_body, &inst, ctx);
+    trace(if r.is_some() {
+        "specialized"
+    } else {
+        "get_or_specialize refused"
+    });
+    r
 }
 
-/// The concrete monad a call is at: the image of the callee's single quantified
-/// variable when the callee's RESULT type is matched against the concrete
+/// The images of a binding's quantified variables at one concrete occurrence:
+/// the monad variable's (which decides the clone's transformer stack), and any
+/// other variable's that the occurrence fixes to a ground type.
+struct Instantiation {
+    monad: Ty,
+    others: Vec<(TyVar, Ty)>,
+}
+
+impl Instantiation {
+    fn at_monad(monad: Ty) -> Self {
+        Self {
+            monad,
+            others: Vec::new(),
+        }
+    }
+}
+
+/// The variable that plays the MONAD in a binding's type. With one quantified
+/// variable it is that variable (every free variable of such a body denotes
+/// it). With several, exactly one may sit in monad position — heading an
+/// application (`m a`) or as the argument just before a constructor's final
+/// one (`m` in `StateT s m a` and parsec's `ParsecT s u m a`); the final
+/// argument is a value type (`a` in `Doc a`, `MarkupM a`). Anything else is
+/// not specialized.
+fn monad_var_of(binder_ty: &Ty, binder_vars: &[TyVar]) -> Option<TyVar> {
+    if binder_vars.len() == 1 {
+        return Some(binder_vars[0].clone());
+    }
+    let mut monadic = binder_vars.iter().filter(|v| var_is_monadic(binder_ty, v));
+    let first = monadic.next()?.clone();
+    monadic.next().is_none().then_some(first)
+}
+
+/// Whether `v` is in monad position in `ty` (see `monad_var_of`).
+fn var_is_monadic(ty: &Ty, v: &TyVar) -> bool {
+    match ty {
+        Ty::App(..) => {
+            let mut head = ty;
+            let mut args: Vec<&Ty> = Vec::new();
+            while let Ty::App(f, x) = head {
+                args.push(x);
+                head = f;
+            }
+            // `args` is last-first: `args[0]` is the final argument.
+            let heads_it = matches!(head, Ty::Var(h) if h == v);
+            // The monad sits just before the final (value) argument:
+            // `StateT s m a`, `ParsecT s u m a` — not `s` or `u`.
+            let monad_slot =
+                matches!(head, Ty::Con(_)) && matches!(args.get(1), Some(Ty::Var(x)) if x == v);
+            heads_it || monad_slot || args.iter().any(|a| var_is_monadic(a, v))
+        }
+        Ty::Fun(a, b) => var_is_monadic(a, v) || var_is_monadic(b, v),
+        Ty::List(a) => var_is_monadic(a, v),
+        Ty::Tuple(ts) => ts.iter().any(|t| var_is_monadic(t, v)),
+        Ty::Forall(_, b) => var_is_monadic(b, v),
+        _ => false,
+    }
+}
+
+/// The instantiation a call is at: the images of the callee's quantified
+/// variables when the callee's RESULT type is matched against the concrete
 /// occurrence's result. Only the result is matched, not the whole function type —
 /// cross-module occurrence types can carry a wrong ARGUMENT type (pandoc's
 /// `writeHtmlString'` records `Text` where its first parameter is `WriterState`),
 /// which is harmless: the monad variable lives in the result (`… -> m a` or
 /// `… -> StateT s m a`), and matching results extracts it for both shapes.
-fn concrete_monad_of(binder_ty: &Ty, conc_ty: &Ty) -> Option<Ty> {
+fn instantiation_of(binder_ty: &Ty, conc_ty: &Ty) -> Option<Instantiation> {
     let mut binder_vars = Vec::new();
     collect_tyvars(binder_ty, &mut binder_vars);
-    if binder_vars.len() != 1 {
-        return None;
-    }
+    let mv = monad_var_of(binder_ty, &binder_vars)?;
     let mut m = Subst::new();
-    if !match_ty(ultimate_result(binder_ty), ultimate_result(conc_ty), &mut m) {
-        return None;
+    let (mut b, mut c) = (ultimate_result(binder_ty), ultimate_result(conc_ty));
+    // A dictionary slot shares its use site's span, so the recorded type can
+    // be the USE's (`getsCommonState f :: StateT Int PandocIO a`) rather than
+    // the slot's (`getCommonState :: t m CommonState`). Their monads agree;
+    // only the final value arguments differ — so match with those stripped.
+    while !match_ty(b, c, &mut m) {
+        m = Subst::new();
+        match (b, c) {
+            (Ty::App(bf, _), Ty::App(cf, _)) => {
+                b = bf;
+                c = cf;
+            }
+            _ => return None,
+        }
     }
-    m.get(&binder_vars[0])
-        .cloned()
-        .filter(|c| !has_free_tyvar(c))
+    let monad = m.get(&mv).cloned().filter(|c| !has_free_tyvar(c))?;
+    let others = binder_vars
+        .iter()
+        .filter(|v| **v != mv)
+        .filter_map(|v| {
+            m.get(v)
+                .filter(|t| !has_free_tyvar(t))
+                .map(|t| (v.clone(), t.clone()))
+        })
+        .collect();
+    Some(Instantiation { monad, others })
 }
 
 /// Get or create the specialization of a top-level binding (local or imported) at
-/// `concrete_monad` — the monad its single quantified variable maps to.
+/// an instantiation — chiefly the concrete monad its monad variable maps to.
 ///
-/// Only single-monad bindings are specialized: the binder type must have EXACTLY
-/// ONE free type variable (the monad `m`; everything else already concrete). Every
-/// free type variable in the body then denotes that same `m` (regardless of the
-/// per-occurrence fresh ids Core assigns), so all map to `concrete_monad`. A
-/// binding with more than one free variable is left untouched — mapping its
-/// non-monad variables would be unsound.
+/// A binding is specialized when its type has a monad variable (see
+/// `monad_var_of`): its only variable, or the single one in monad position
+/// among several (`metaToContext :: Monad m => … -> m (Context a)`, or an
+/// instance method of `PandocMonad (StateT st m)`, both reached with `m` at a
+/// transformer stack whose builtin Monad dictionary cannot run them).
 fn get_or_specialize(
     orig_var: &Var,
     orig_body: &Expr,
-    concrete_monad: &Ty,
+    inst: &Instantiation,
     ctx: &mut Ctx,
 ) -> Option<Var> {
     let mut binder_vars = Vec::new();
     collect_tyvars(&orig_var.ty, &mut binder_vars);
-    if binder_vars.len() != 1 {
+    let mb = monad_var_of(&orig_var.ty, &binder_vars)?;
+    let concrete_monad = inst.monad.clone();
+    if has_free_tyvar(&concrete_monad) || !mentions_transformer(&concrete_monad) {
         return None;
     }
-    let mb = binder_vars[0].clone();
-    if has_free_tyvar(concrete_monad) || !mentions_transformer(concrete_monad) {
-        return None;
-    }
-    let concrete_monad = concrete_monad.clone();
 
-    let key = (orig_var.name.to_string(), format!("{concrete_monad:?}"));
+    let others_key: Vec<String> = inst
+        .others
+        .iter()
+        .map(|(v, t)| format!("{}={t:?}", v.id))
+        .collect();
+    let key = (
+        orig_var.name.to_string(),
+        format!("{concrete_monad:?}|{}", others_key.join(",")),
+    );
     if let Some(spec) = ctx.memo.get(&key) {
         return Some(spec.clone());
     }
 
-    // Map the binder variable AND every free variable that appears in the body's
+    // Map the monad variable AND every free variable that appears in the body's
     // occurrence types (Core `Var.ty` and typeck's `resolved`) to the concrete
-    // monad. For a single-monad binding these are all the same `m`.
+    // monad: Core's per-occurrence fresh variables cannot be traced back to the
+    // binder's, and for a single-variable binding they all ARE `m`. The other
+    // binder variables an occurrence fixed get their own images; their body
+    // occurrences fall under the monad mapping, which only steers codegen's
+    // transformer-stack decisions (a value type never names a transformer).
     let mut subst = Subst::new();
-    subst.insert(&mb, concrete_monad.clone());
     let mut body_vars = Vec::new();
     collect_body_tyvars(orig_body, ctx.resolved, &mut body_vars);
     for tv in body_vars {
         subst.insert(&tv, concrete_monad.clone());
     }
+    for v in &binder_vars {
+        if *v != mb {
+            subst.insert(v, concrete_monad.clone());
+        }
+    }
+    for (v, t) in &inst.others {
+        subst.insert(v, t.clone());
+    }
+    subst.insert(&mb, concrete_monad.clone());
 
     let new_ty = subst.apply(&orig_var.ty);
     let new_id = fresh_var_id();
@@ -552,8 +674,8 @@ fn specialize_body(e: &Expr, subst: &Subst, ctx: &mut Ctx) -> Expr {
             if !has_free_tyvar(&new_ty) && mentions_transformer(&new_ty) {
                 if let Some((ov, ob)) = ctx.source_binding(v) {
                     if has_free_tyvar(&ov.ty) {
-                        if let Some(cm) = concrete_monad_of(&ov.ty, &new_ty) {
-                            if let Some(spec) = get_or_specialize(&ov, &ob, &cm, ctx) {
+                        if let Some(inst) = instantiation_of(&ov.ty, &new_ty) {
+                            if let Some(spec) = get_or_specialize(&ov, &ob, &inst, ctx) {
                                 return Expr::Var(spec, *span);
                             }
                         }
@@ -570,7 +692,8 @@ fn specialize_body(e: &Expr, subst: &Subst, ctx: &mut Ctx) -> Expr {
                 let cur = ctx.cur_monad.clone();
                 if let Some((ov, ob)) = ctx.source_binding(v) {
                     if has_free_tyvar(&ov.ty) {
-                        if let Some(spec) = get_or_specialize(&ov, &ob, &cur, ctx) {
+                        let inst = Instantiation::at_monad(cur);
+                        if let Some(spec) = get_or_specialize(&ov, &ob, &inst, ctx) {
                             return Expr::Var(spec, *span);
                         }
                     }

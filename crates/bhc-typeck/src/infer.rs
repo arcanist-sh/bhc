@@ -248,7 +248,19 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                             .lookup_def_id(*def_id)
                             .map(|s| ctx.apply_subst(&s.ty))
                             .unwrap_or_else(|| ctx.fresh_ty());
-                        let scheme = ctx.generalize(&var_ty);
+                        // A guard-fallthrough join point (`$caseresumeN`, and
+                        // the shared scrutinee `$cscrut`) is used exactly once,
+                        // at the enclosing case's own type. Generalizing it made
+                        // `return x` inside a `StateT s m` alternative a
+                        // `forall n. Monad n => n a`, whose `return` then
+                        // resolved through the only dictionary in scope — the
+                        // inner `m`'s — returning an `m` action where a StateT
+                        // computation belonged.
+                        let scheme = if is_join_point_name(name.as_str()) {
+                            Scheme::mono(var_ty)
+                        } else {
+                            ctx.generalize(&var_ty)
+                        };
                         ctx.env.insert_local(*name, scheme.clone());
                         ctx.env.insert_global(*def_id, scheme);
                     }
@@ -623,6 +635,12 @@ fn infer_lit(ctx: &mut TyCtxt, lit: &Lit, span: bhc_span::Span) -> Ty {
             }
         }
     }
+}
+
+/// Names `bhc-lower` gives the bindings of a desugared guard-fallthrough
+/// `case` (see `lower_case_with_guard_fallthrough`).
+fn is_join_point_name(name: &str) -> bool {
+    name.starts_with("$caseresume") || name == "$cscrut"
 }
 
 /// Check a binding (pattern = expression).

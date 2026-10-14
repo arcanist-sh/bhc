@@ -263,7 +263,12 @@ pub fn lower_module_with_imports(
             };
             for (v, e) in pairs {
                 if v.name.as_str().contains(&filter) {
-                    eprintln!("=== CORE BIND {} ===\n{:#?}", v.name.as_str(), e);
+                    eprintln!(
+                        "=== CORE BIND {} :: {:?} ===\n{:#?}",
+                        v.name.as_str(),
+                        v.ty,
+                        e
+                    );
                 }
             }
         }

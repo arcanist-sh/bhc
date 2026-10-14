@@ -296,6 +296,11 @@ pub struct CompiledModuleInfo {
     /// Inferred type schemes for exported values, keyed by symbol name.
     /// Propagated from type checking so downstream modules get correct types.
     pub value_schemes: FxHashMap<bhc_intern::Symbol, bhc_types::Scheme>,
+    /// Declared field types of this module's constructors, by constructor
+    /// name — the whole-program counterpart of an interface's constructor
+    /// fields, so an importer can pack an OverloadedStrings literal in an
+    /// imported `Text` field.
+    pub con_field_types: FxHashMap<bhc_intern::Symbol, Vec<bhc_types::Ty>>,
 }
 
 /// Accumulates compilation artifacts across modules during multi-module compilation.
@@ -2041,14 +2046,27 @@ impl Compiler {
             .values()
             .flat_map(|info| {
                 info.exports.constructors.iter().map(|(name, con_info)| {
+                    // The field types are the constructor's argument types. An
+                    // imported NEWTYPE needs them: a monad written as one
+                    // (`newtype App a = App (ExceptT e (StateT s IO) a)`) has
+                    // its transformer layer in what it wraps, and without
+                    // them `StateT s App` compiled as `StateT s IO`.
+                    let mut field_types = Vec::new();
+                    if let Some(scheme) = &con_info.type_scheme {
+                        let mut ty = &scheme.ty;
+                        while let bhc_types::Ty::Fun(arg, rest) = ty {
+                            field_types.push(arg.as_ref().clone());
+                            ty = rest;
+                        }
+                    }
                     (
                         name.as_str().to_string(),
                         ConstructorMeta {
                             tag: con_info.tag,
                             arity: con_info.arity as u32,
-                            type_name: None,
+                            type_name: Some(con_info.type_con_name.as_str().to_string()),
                             is_newtype: con_info.is_newtype,
-                            field_types: Vec::new(),
+                            field_types,
                         },
                     )
                 })
@@ -2110,6 +2128,7 @@ impl Compiler {
             exports,
             type_aliases: Vec::new(),
             value_schemes: FxHashMap::default(),
+            con_field_types: hir_con_field_types(&hir),
         };
 
         Ok((object_path, compiled_info))
@@ -2407,13 +2426,11 @@ impl Compiler {
                                 }
                             })
                         });
-                    let is_newtype = hir.items.iter().any(|item| {
-                        if let bhc_hir::Item::Newtype(nt) = item {
-                            nt.con.id == def_info.id
-                        } else {
-                            false
-                        }
+                    let newtype_def = hir.items.iter().find_map(|item| match item {
+                        bhc_hir::Item::Newtype(nt) if nt.con.id == def_info.id => Some(nt),
+                        _ => None,
                     });
+                    let is_newtype = newtype_def.is_some();
                     let con_info = bhc_lower::loader::ConstructorInfo {
                         def_id: def_info.id,
                         arity,
@@ -2422,7 +2439,7 @@ impl Compiler {
                         tag,
                         field_names,
                         is_newtype,
-                        type_scheme: None,
+                        type_scheme: newtype_def.and_then(newtype_con_scheme),
                     };
                     exports.constructors.insert(export_con_name, con_info);
                     // Also export constructor as a value (constructors are
@@ -2854,6 +2871,7 @@ impl Compiler {
 
         // If there were type errors, return both the compiled info and the error.
         // The caller can still register exports while reporting the failure.
+        let con_field_types = hir_con_field_types(&hir);
         if let Some(count) = type_errors {
             return Err(CompileError::TypeErrorWithInfo {
                 count,
@@ -2863,6 +2881,7 @@ impl Compiler {
                     exports,
                     type_aliases,
                     value_schemes: FxHashMap::default(),
+                    con_field_types,
                 },
             });
         }
@@ -2873,6 +2892,7 @@ impl Compiler {
             exports,
             type_aliases,
             value_schemes,
+            con_field_types,
         })
     }
 
@@ -2940,6 +2960,7 @@ impl Compiler {
                             field_types: field_types_by_name
                                 .get(con_name.as_str())
                                 .map(|tys| (*tys).clone())
+                                .or_else(|| info.con_field_types.get(&con_name).cloned())
                                 .unwrap_or_default(),
                         },
                     );
@@ -4774,6 +4795,7 @@ impl Compiler {
                         exports: stub_exports,
                         type_aliases: Vec::new(),
                         value_schemes: FxHashMap::default(),
+                        con_field_types: FxHashMap::default(),
                     },
                 );
             }
@@ -4970,6 +4992,7 @@ impl Compiler {
                     exports,
                     type_aliases: Vec::new(),
                     value_schemes: FxHashMap::default(),
+                    con_field_types: FxHashMap::default(),
                 },
             );
 
@@ -5861,6 +5884,7 @@ impl Compiler {
                                     exports,
                                     type_aliases: Vec::new(),
                                     value_schemes: FxHashMap::default(),
+                                    con_field_types: FxHashMap::default(),
                                 },
                             );
                         }
@@ -6351,6 +6375,60 @@ impl CompilerBuilder {
     pub fn build(self) -> CompileResult<Compiler> {
         Compiler::new(self.options)
     }
+}
+
+/// The type of a local newtype's constructor, `field -> T a…`, for a module
+/// that imports it in a whole-program build. Mirrors what the `.bhi` path
+/// builds (only when the field mentions a type parameter): codegen reads the
+/// field off it to see what an imported monad newtype wraps — without it,
+/// `StateT s App` over an imported `newtype App a = App (ExceptT e (StateT s
+/// IO) a)` compiled as `StateT s IO`.
+fn newtype_con_scheme(nt: &bhc_hir::NewtypeDef) -> Option<bhc_types::Scheme> {
+    let field = match &nt.con.fields {
+        bhc_hir::ConFields::Positional(tys) if tys.len() == 1 => tys[0].clone(),
+        bhc_hir::ConFields::Named(fields) if fields.len() == 1 => fields[0].ty.clone(),
+        _ => return None,
+    };
+    if nt.params.is_empty() || !ty_mentions_any(&field, &nt.params) {
+        return None;
+    }
+    let kind = nt.params.iter().fold(bhc_types::Kind::Star, |k, _| {
+        bhc_types::Kind::Arrow(Box::new(bhc_types::Kind::Star), Box::new(k))
+    });
+    let head = nt.params.iter().fold(
+        bhc_types::Ty::Con(bhc_types::TyCon::new(nt.name, kind)),
+        |acc, p| bhc_types::Ty::App(Box::new(acc), Box::new(bhc_types::Ty::Var(p.clone()))),
+    );
+    Some(bhc_types::Scheme::poly(
+        nt.params.clone(),
+        bhc_types::Ty::fun(field, head),
+    ))
+}
+
+/// Each constructor's declared field types, by constructor name, from a
+/// module's data and newtype declarations.
+fn hir_con_field_types(hir: &HirModule) -> FxHashMap<bhc_intern::Symbol, Vec<bhc_types::Ty>> {
+    fn field_tys(fields: &bhc_hir::ConFields) -> Vec<bhc_types::Ty> {
+        match fields {
+            bhc_hir::ConFields::Positional(tys) => tys.clone(),
+            bhc_hir::ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
+        }
+    }
+    let mut out = FxHashMap::default();
+    for item in &hir.items {
+        match item {
+            bhc_hir::Item::Data(d) => {
+                for c in &d.cons {
+                    out.insert(c.name, field_tys(&c.fields));
+                }
+            }
+            bhc_hir::Item::Newtype(nt) => {
+                out.insert(nt.con.name, field_tys(&nt.con.fields));
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Whether `ty` mentions any of `vars`.

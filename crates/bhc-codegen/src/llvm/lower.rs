@@ -711,8 +711,41 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         stack
     }
 
+    /// The representation of a monad written as a NEWTYPE over a transformer
+    /// stack — pandoc's `newtype PandocIO a = PandocIO (ExceptT PandocError
+    /// (StateT CommonState IO) a)` — or `None` when `ty`'s head is not such a
+    /// newtype.
+    ///
+    /// A newtype is identity at runtime, so an action at the newtype IS an
+    /// action at the stack it wraps. Layer detection that stopped at the
+    /// newtype's own name read `StateT s PandocIO` as `StateT s IO`, ran the
+    /// builtin IO path, and dereferenced the action's result as a pointer.
+    /// Only the head is inspected (the wrapped type keeps its own parameters
+    /// as variables), which is all layer detection reads. Bounded: newtypes
+    /// over newtypes are a few deep, and a cycle must not hang.
+    fn see_through_monad_newtype(&self, ty: &Ty) -> Option<Ty> {
+        fn head(t: &Ty) -> &Ty {
+            match t {
+                Ty::App(f, _) => head(f),
+                other => other,
+            }
+        }
+        let mut cur: Option<Ty> = None;
+        for _ in 0..4 {
+            let probe = cur.as_ref().unwrap_or(ty);
+            let Ty::Con(c) = head(probe) else { break };
+            match self.newtype_underlying.get(c.name.as_str()) {
+                Some(under) => cur = Some(under.clone()),
+                None => break,
+            }
+        }
+        cur
+    }
+
     /// Helper for recursively building the transformer stack from a type.
     fn extract_transformer_stack_recursive(&self, ty: &Ty, stack: &mut Vec<TransformerLayer>) {
+        let unwrapped = self.see_through_monad_newtype(ty);
+        let ty = unwrapped.as_ref().unwrap_or(ty);
         match ty {
             // Check for IO at the base
             Ty::Con(tycon) if tycon.name.as_str() == "IO" => {
@@ -7724,7 +7757,15 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // a Functor dictionary's synthesised `<$` field APPLIES its `fmap`.
             "ExceptT_st.pure" => self.lower_builtin_except_t_pure_over_st(args[0]),
             "ExceptT_st.>>=" => self.lower_builtin_except_t_bind_over_st(args[0], args[1]),
-            "ExceptT_st.fmap" => self.lower_builtin_except_t_fmap(args[0], args[1]),
+            "ExceptT_st.fmap" => {
+                let f_val = self.lower_expr(args[0])?.ok_or_else(|| {
+                    CodegenError::Internal("ExceptT_st.fmap: f has no value".to_string())
+                })?;
+                let m_val = self.lower_expr(args[1])?.ok_or_else(|| {
+                    CodegenError::Internal("ExceptT_st.fmap: m has no value".to_string())
+                })?;
+                self.except_t_fmap_over_st_from_values(f_val, m_val)
+            }
             "ExceptT.lift" | "ExceptT.liftIO" => self.lower_builtin_except_t_lift(args[0]),
             "throwE" => self.lower_builtin_throw_e(args[0]),
             "catchE" => self.lower_builtin_catch_e(args[0], args[1]),
@@ -18168,8 +18209,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         s_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // Check if this is a nested transformer
-        let m_ty = m_expr.ty();
-        let inner_monad = self.extract_inner_monad_from_state_t(&m_ty);
+        let inner_monad = self.state_t_run_inner_monad(m_expr);
 
         match inner_monad {
             Some(TransformerLayer::ReaderT) => {
@@ -18992,6 +19032,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(m_expr)?
             .ok_or_else(|| CodegenError::Internal("StateT.fmap: m has no value".to_string()))?;
 
+        if self
+            .transformer_stack
+            .is_state_t_over_except_t_over_state_t()
+        {
+            return self.lower_stes_fmap(f_val, m_val);
+        }
+
         let ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_state_t_fmap";
 
@@ -19020,14 +19067,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let a = self.extract_pair_fst(pair)?;
             let s_prime = self.extract_pair_snd(pair)?;
 
-            let f_fn = self.extract_closure_fn_ptr(f)?;
-            let b = self
-                .builder()
-                .build_indirect_call(fn_type, f_fn, &[f.into(), a.into()], "st_fmap_b")
-                .map_err(|e| CodegenError::Internal(format!("StateT fmap f: {:?}", e)))?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| CodegenError::Internal("StateT fmap f: void".to_string()))?;
+            let b = self.call_closure1(f, a.into(), "StateT fmap f")?;
 
             let result_pair = self.alloc_pair(b, s_prime.into())?;
             self.builder()
@@ -19065,6 +19105,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let mx_val = self
             .lower_expr(mx_expr)?
             .ok_or_else(|| CodegenError::Internal("StateT.<*>: mx has no value".to_string()))?;
+
+        if self
+            .transformer_stack
+            .is_state_t_over_except_t_over_state_t()
+        {
+            return self.lower_stes_ap(mf_val, mx_val);
+        }
 
         let ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_state_t_ap";
@@ -19108,14 +19155,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let s_double_prime = self.extract_pair_snd(pair2)?;
 
             // result = f(x)
-            let f_fn = self.extract_closure_fn_ptr(f)?;
-            let b = self
-                .builder()
-                .build_indirect_call(fn_type, f_fn, &[f.into(), x.into()], "st_ap_result")
-                .map_err(|e| CodegenError::Internal(format!("StateT ap f: {:?}", e)))?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| CodegenError::Internal("StateT ap f: void".to_string()))?;
+            let b = self.call_closure1(f, x.into(), "StateT ap f")?;
 
             let result_pair = self.alloc_pair(b, s_double_prime.into())?;
             self.builder()
@@ -19628,6 +19668,147 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(closure.into()))
     }
 
+    /// Inside a stes op's body: run the computation `c(c, s1, s2)`; on `Left`
+    /// return `(Left e, s2')` from the op, on `Right (a, s1')` continue in a fresh
+    /// block and hand back `(a, s1', s2')`. `func` is the op being emitted.
+    fn stes_run_or_propagate(
+        &mut self,
+        func: FunctionValue<'ctx>,
+        c: PointerValue<'ctx>,
+        s1: BasicValueEnum<'ctx>,
+        s2: BasicValueEnum<'ctx>,
+        what: &str,
+    ) -> CodegenResult<(PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>)> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn3 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let c_fn = self.checked_closure_fn_ptr(c, what)?;
+        let pair = self
+            .builder()
+            .build_indirect_call(fn3, c_fn, &[c.into(), s1.into(), s2.into()], "stes_run")
+            .map_err(|e| CodegenError::Internal(format!("{what}: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{what}: void")))?
+            .into_pointer_value();
+        let either = self.extract_pair_fst(pair)?;
+        let s2p = self.extract_pair_snd(pair)?;
+        let tag = self.extract_adt_tag(either)?;
+        let is_right = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                self.type_mapper().i64_type().const_int(1, false),
+                "stes_isr",
+            )
+            .map_err(|e| CodegenError::Internal(format!("{what} cmp: {e:?}")))?;
+        let right_bb = self.llvm_ctx.append_basic_block(func, "stes_right");
+        let left_bb = self.llvm_ctx.append_basic_block(func, "stes_left");
+        self.builder()
+            .build_conditional_branch(is_right, right_bb, left_bb)
+            .map_err(|e| CodegenError::Internal(format!("{what} br: {e:?}")))?;
+        self.builder().position_at_end(left_bb);
+        let lpair = self.alloc_pair(either.into(), s2p.into())?;
+        self.builder()
+            .build_return(Some(&lpair))
+            .map_err(|e| CodegenError::Internal(format!("{what} left: {e:?}")))?;
+        self.builder().position_at_end(right_bb);
+        let a_s1 = self.extract_adt_field(either, 1, 0)?;
+        let a = self.extract_pair_fst(a_s1)?;
+        let s1p = self.extract_pair_snd(a_s1)?;
+        Ok((a, s1p, s2p))
+    }
+
+    /// Apply a closure to one argument. Goes through `apply_closure_values` so
+    /// a multi-argument function (`(++) <$> m`) under-applies to a PAP instead
+    /// of running its body with the missing arguments read from garbage.
+    fn call_closure1(
+        &mut self,
+        f: PointerValue<'ctx>,
+        x: BasicValueEnum<'ctx>,
+        what: &str,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let x_ptr = self.value_to_ptr(x)?;
+        self.apply_closure_values(f, &[x_ptr], false)?
+            .ok_or_else(|| CodegenError::Internal(format!("{what}: void")))
+    }
+
+    /// `fmap f m` = `\(env=[f,m], s1, s2) -> case m(m, s1, s2) of
+    ///   (Left e, s2') -> (Left e, s2'); (Right (a, s1'), s2') -> (Right (f a, s1'), s2')`.
+    fn lower_stes_fmap(
+        &mut self,
+        f_val: BasicValueEnum<'ctx>,
+        m_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self.get_or_create_nested_transformer_fn("bhc_stes_fmap");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s1 = func.get_nth_param(1).unwrap();
+            let s2 = func.get_nth_param(2).unwrap();
+            let f = self.extract_closure_env_elem(env, 2, 0)?;
+            let m = self.extract_closure_env_elem(env, 2, 1)?;
+            let (a, s1p, s2p) = self.stes_run_or_propagate(func, m, s1, s2, "stes fmap: m")?;
+            let b = self.call_closure1(f, a.into(), "stes fmap: f")?;
+            self.stes_ok(b, s1p.into(), s2p.into())?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let f_ptr = self.value_to_ptr(f_val)?;
+        let m_ptr = self.value_to_ptr(m_val)?;
+        let closure = self.alloc_closure(
+            fn_ptr,
+            &[
+                (VarId::new(900000), f_ptr.into()),
+                (VarId::new(900001), m_ptr.into()),
+            ],
+        )?;
+        Ok(Some(closure.into()))
+    }
+
+    /// `mf <*> mx` = run `mf` then `mx` (each short-circuiting on `Left`), and
+    /// return `(Right (f x, s1''), s2'')`.
+    fn lower_stes_ap(
+        &mut self,
+        mf_val: BasicValueEnum<'ctx>,
+        mx_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self.get_or_create_nested_transformer_fn("bhc_stes_ap");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s1 = func.get_nth_param(1).unwrap();
+            let s2 = func.get_nth_param(2).unwrap();
+            let mf = self.extract_closure_env_elem(env, 2, 0)?;
+            let mx = self.extract_closure_env_elem(env, 2, 1)?;
+            let (f, s1p, s2p) = self.stes_run_or_propagate(func, mf, s1, s2, "stes ap: mf")?;
+            let (x, s1pp, s2pp) =
+                self.stes_run_or_propagate(func, mx, s1p.into(), s2p.into(), "stes ap: mx")?;
+            let b = self.call_closure1(f, x.into(), "stes ap: f")?;
+            self.stes_ok(b, s1pp.into(), s2pp.into())?;
+            if let Some(bb) = saved {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let mf_ptr = self.value_to_ptr(mf_val)?;
+        let mx_ptr = self.value_to_ptr(mx_val)?;
+        let closure = self.alloc_closure(
+            fn_ptr,
+            &[
+                (VarId::new(900000), mf_ptr.into()),
+                (VarId::new(900001), mx_ptr.into()),
+            ],
+        )?;
+        Ok(Some(closure.into()))
+    }
+
     /// `(m1 >> m2)` = `\(env=[m1,m2], s1, s2) ->
     ///   case m1(m1, s1, s2) of
     ///     (Left e, s2')          -> (Left e, s2')
@@ -19725,6 +19906,33 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// 2-arg ExceptT-over-StateT closure `\(self, s2) -> …` that runs
     /// `c(c, s1, s2)` and keeps, respectively, the value `a`, the pair `(a, s1')`,
     /// or the final state `s1'` (each still under the ExceptT `Either`).
+    /// The full transformer stack a stes runner's action runs in, read from
+    /// its type (the action's own, else the runner's parameter), when that is
+    /// `StateT s (ExceptT e (StateT s2 …))`.
+    fn stes_run_stack(&self, m_expr: &Expr) -> Option<Vec<TransformerLayer>> {
+        let is_stes = |st: &[TransformerLayer]| {
+            st.len() >= 3
+                && st[0] == TransformerLayer::StateT
+                && st[1] == TransformerLayer::ExceptT
+                && st[2] == TransformerLayer::StateT
+        };
+        let mut own = Vec::new();
+        self.extract_transformer_stack_recursive(&self.monadic_action_ty(m_expr), &mut own);
+        if is_stes(&own) {
+            return Some(own);
+        }
+        let mut callee = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = callee {
+            callee = body;
+        }
+        let Ty::Fun(param, _) = callee else {
+            return None;
+        };
+        let mut from_runner = Vec::new();
+        self.extract_transformer_stack_recursive(param, &mut from_runner);
+        is_stes(&from_runner).then_some(from_runner)
+    }
+
     fn lower_stes_run_family(
         &mut self,
         m_expr: &Expr,
@@ -19737,9 +19945,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // (an inline `do` block here would otherwise be lowered under the bare
         // `[ExceptT, StateT]` context and take the 2-arg StateT-over-IO path,
         // which this run-family then calls with the wrong arity).
-        self.push_transformer_layer(TransformerLayer::StateT);
+        //
+        // Pushing onto the ambient stack is only right when the ambient stack
+        // IS the ExceptT-over-StateT one (inside a `PandocIO` function). Run
+        // from anywhere else — `runIO (evalStateT … s)` inside `main` — the
+        // ambient is IO, so the action's own type names the stack instead.
+        let typed = self.stes_run_stack(m_expr);
+        let saved = typed.map(|st| std::mem::replace(&mut self.transformer_stack.layers, st));
+        if saved.is_none() {
+            self.push_transformer_layer(TransformerLayer::StateT);
+        }
         let m_res = self.lower_expr(m_expr);
-        self.pop_transformer_layer();
+        match saved {
+            Some(old) => self.transformer_stack.layers = old,
+            None => self.pop_transformer_layer(),
+        }
         let m_val = m_res?
             .ok_or_else(|| CodegenError::Internal(format!("{which}StateT/stes: m no value")))?;
         let s_val = self
@@ -20359,6 +20579,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         ty
     }
 
+    /// The layer beneath the StateT that `evalStateT`/`runStateT`/`execStateT`
+    /// runs. The action's own type decides first; when it leaves the inner
+    /// monad undecided (a bare `get` or `gets f` keeps its instantiation's
+    /// type variable, `StateT s m a`), the runner's own parameter type does —
+    /// its Var carries the concrete `StateT s (ExceptT e (StateT s2 IO)) a`.
+    fn state_t_run_inner_monad(&self, m_expr: &Expr) -> Option<TransformerLayer> {
+        let own = self.extract_inner_monad_from_state_t(&self.monadic_action_ty(m_expr));
+        if own.is_some() {
+            return own;
+        }
+        let mut callee = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = callee {
+            callee = body;
+        }
+        match callee {
+            Ty::Fun(param, _) => self.extract_inner_monad_from_state_t(param),
+            _ => None,
+        }
+    }
+
     /// `evalStateT m s = fst (m s)`.
     ///
     /// For nested transformers (`StateT s (ReaderT r IO)`, the stes stack, …)
@@ -20370,8 +20610,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         s_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // Check if this is a nested transformer by examining the type
-        let m_ty = self.monadic_action_ty(m_expr);
-        let inner_monad = self.extract_inner_monad_from_state_t(&m_ty);
+        let inner_monad = self.state_t_run_inner_monad(m_expr);
 
         match inner_monad {
             Some(TransformerLayer::ReaderT) => {
@@ -20457,6 +20696,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ///
     /// Returns IO for `IO`, StateT for `StateT s m`, ReaderT for `ReaderT r m`, etc.
     fn get_transformer_layer_from_type(&self, ty: &Ty) -> Option<TransformerLayer> {
+        let unwrapped = self.see_through_monad_newtype(ty);
+        let ty = unwrapped.as_ref().unwrap_or(ty);
         // Detect transformer types. The structure depends on whether it's:
         // - IO: Con(IO)
         // - IO a: App(Con(IO), a)
@@ -20600,8 +20841,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         s_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // Check if this is a nested transformer
-        let m_ty = m_expr.ty();
-        let inner_monad = self.extract_inner_monad_from_state_t(&m_ty);
+        let inner_monad = self.state_t_run_inner_monad(m_expr);
 
         match inner_monad {
             Some(TransformerLayer::ReaderT) => {
@@ -21325,6 +21565,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let m_val = self
             .lower_expr(m_expr)?
             .ok_or_else(|| CodegenError::Internal("ExceptT.fmap: m has no value".to_string()))?;
+        if self.except_t_actions_over_st(&[m_expr]) {
+            return self.except_t_fmap_over_st_from_values(f_val, m_val);
+        }
         self.except_t_fmap_from_values(f_val, m_val)
     }
 
@@ -21430,6 +21673,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let ma_val = self
             .lower_expr(ma_expr)?
             .ok_or_else(|| CodegenError::Internal("ExceptT.<*>: ma has no value".to_string()))?;
+        if self.except_t_actions_over_st(&[ma_expr, mf_expr]) {
+            return self.except_t_ap_over_st_from_values(mf_val, ma_val);
+        }
 
         let ptr_type = self.type_mapper().ptr_type();
         let fn_name = "bhc_except_t_ap";
@@ -21660,6 +21906,196 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     ///   pair = m(m, s);  either = fst(pair), s' = snd(pair)
     ///   Left:  return (either, s')
     ///   Right: a = field0(either); kr = k(k, a); result_pair = kr(kr, s'); return result_pair
+    /// Whether ExceptT actions use the ExceptT-over-StateT representation: the
+    /// first action whose own type names its stack decides; the ambient stack
+    /// only when none does.
+    fn except_t_actions_over_st(&self, actions: &[&Expr]) -> bool {
+        for e in actions {
+            let mut stack = Vec::new();
+            self.extract_transformer_stack_recursive(&e.ty(), &mut stack);
+            if stack.first() == Some(&TransformerLayer::ExceptT) {
+                return stack.get(1) == Some(&TransformerLayer::StateT);
+            }
+        }
+        self.transformer_stack.is_except_t_over_state_t()
+    }
+
+    /// Inside an ExceptT-over-StateT op's body: run `m(m, s)`; on `Left` return
+    /// `(Left e, s')` from the op, on `Right a` continue in a fresh block and
+    /// hand back `(a, s')`.
+    fn except_t_st_run_or_propagate(
+        &mut self,
+        func: FunctionValue<'ctx>,
+        m: PointerValue<'ctx>,
+        s: BasicValueEnum<'ctx>,
+        what: &str,
+    ) -> CodegenResult<(PointerValue<'ctx>, PointerValue<'ctx>)> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_type2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        let m_fn = self.checked_closure_fn_ptr(m, what)?;
+        let pair = self
+            .builder()
+            .build_indirect_call(fn_type2, m_fn, &[m.into(), s.into()], "et_st_run")
+            .map_err(|e| CodegenError::Internal(format!("{what}: {e:?}")))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{what}: void")))?
+            .into_pointer_value();
+        let either = self.extract_pair_fst(pair)?;
+        let s_prime = self.extract_pair_snd(pair)?;
+        let tag = self.extract_adt_tag(either)?;
+        let is_right = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                self.type_mapper().i64_type().const_int(1, false),
+                "et_st_isr",
+            )
+            .map_err(|e| CodegenError::Internal(format!("{what} cmp: {e:?}")))?;
+        let right_bb = self.llvm_ctx.append_basic_block(func, "et_st_right");
+        let left_bb = self.llvm_ctx.append_basic_block(func, "et_st_left");
+        self.builder()
+            .build_conditional_branch(is_right, right_bb, left_bb)
+            .map_err(|e| CodegenError::Internal(format!("{what} br: {e:?}")))?;
+        self.builder().position_at_end(left_bb);
+        let lpair = self.alloc_pair(either.into(), s_prime.into())?;
+        self.builder()
+            .build_return(Some(&lpair))
+            .map_err(|e| CodegenError::Internal(format!("{what} left: {e:?}")))?;
+        self.builder().position_at_end(right_bb);
+        let a = self.extract_adt_field(either, 1, 0)?;
+        Ok((a, s_prime))
+    }
+
+    /// `mf <*> mx` for ExceptT-over-StateT: run `mf` then `mx`, threading the
+    /// state and short-circuiting on `Left`, and return `(Right (f x), s'')`.
+    fn except_t_ap_over_st_from_values(
+        &mut self,
+        mf_val: BasicValueEnum<'ctx>,
+        mx_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let func = self.get_or_create_transformer_fn("bhc_except_t_ap_over_st");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap();
+            let mf = self.extract_closure_env_elem(env, 2, 0)?;
+            let mx = self.extract_closure_env_elem(env, 2, 1)?;
+            let (f, s1) =
+                self.except_t_st_run_or_propagate(func, mf, s, "ExceptT-over-StateT <*>: mf")?;
+            let (x, s2) = self.except_t_st_run_or_propagate(
+                func,
+                mx,
+                s1.into(),
+                "ExceptT-over-StateT <*>: mx",
+            )?;
+            let b = self.call_closure1(f, x.into(), "ExceptT-over-StateT <*>: f")?;
+            let right = self.alloc_adt(1, 1)?;
+            self.store_adt_field(right, 1, 0, b)?;
+            let result = self.alloc_pair(right.into(), s2.into())?;
+            self.builder()
+                .build_return(Some(&result))
+                .map_err(|e| CodegenError::Internal(format!("ap/st return: {e:?}")))?;
+            if let Some(bb) = saved_bb {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let mf_ptr = self.value_to_ptr(mf_val)?;
+        let mx_ptr = self.value_to_ptr(mx_val)?;
+        let closure_ptr = self.alloc_closure(
+            fn_ptr,
+            &[
+                (VarId::new(900000), mf_ptr.into()),
+                (VarId::new(900001), mx_ptr.into()),
+            ],
+        )?;
+        Ok(Some(closure_ptr.into()))
+    }
+
+    /// `fmap` for ExceptT-over-StateT from already-lowered values:
+    /// `\(self, s) -> case m(m, s) of
+    ///     (Left e, s')  -> (Left e, s')
+    ///     (Right a, s') -> (Right (f a), s')`.
+    /// The plain `except_t_fmap_from_values` calls the action as
+    /// ExceptT-over-IO (`m(m, null)` -> `Either`), which over StateT read the
+    /// result PAIR as the `Either` and handed back the action unmapped.
+    fn except_t_fmap_over_st_from_values(
+        &mut self,
+        f_val: BasicValueEnum<'ctx>,
+        m_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let func = self.get_or_create_transformer_fn("bhc_except_t_fmap_over_st");
+        if func.count_basic_blocks() == 0 {
+            let entry = self.llvm_ctx.append_basic_block(func, "entry");
+            let right_bb = self.llvm_ctx.append_basic_block(func, "right");
+            let left_bb = self.llvm_ctx.append_basic_block(func, "left");
+            let saved_bb = self.builder().get_insert_block();
+            self.builder().position_at_end(entry);
+            let env = func.get_nth_param(0).unwrap().into_pointer_value();
+            let s = func.get_nth_param(1).unwrap().into_pointer_value();
+            let f = self.extract_closure_env_elem(env, 2, 0)?;
+            let m = self.extract_closure_env_elem(env, 2, 1)?;
+            let fn_type2 = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            let m_fn = self.checked_closure_fn_ptr(m, "ExceptT-over-StateT fmap: action")?;
+            let pair = self
+                .builder()
+                .build_indirect_call(fn_type2, m_fn, &[m.into(), s.into()], "fmap_st_pair")
+                .map_err(|e| CodegenError::Internal(format!("ExceptT fmap/st m: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("ExceptT fmap/st m: void".to_string()))?
+                .into_pointer_value();
+            let either = self.extract_pair_fst(pair)?;
+            let s_prime = self.extract_pair_snd(pair)?;
+            let tag = self.extract_adt_tag(either)?;
+            let is_right = self
+                .builder()
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    tag,
+                    self.type_mapper().i64_type().const_int(1, false),
+                    "is_right",
+                )
+                .map_err(|e| CodegenError::Internal(format!("fmap/st tag cmp: {:?}", e)))?;
+            self.builder()
+                .build_conditional_branch(is_right, right_bb, left_bb)
+                .map_err(|e| CodegenError::Internal(format!("fmap/st branch: {:?}", e)))?;
+            self.builder().position_at_end(left_bb);
+            let left_pair = self.alloc_pair(either.into(), s_prime.into())?;
+            self.builder()
+                .build_return(Some(&left_pair))
+                .map_err(|e| CodegenError::Internal(format!("fmap/st left return: {:?}", e)))?;
+            self.builder().position_at_end(right_bb);
+            let a = self.extract_adt_field(either, 1, 0)?;
+            let b = self.call_closure1(f, a.into(), "ExceptT-over-StateT fmap: f")?;
+            let right = self.alloc_adt(1, 1)?;
+            self.store_adt_field(right, 1, 0, b)?;
+            let result = self.alloc_pair(right.into(), s_prime.into())?;
+            self.builder()
+                .build_return(Some(&result))
+                .map_err(|e| CodegenError::Internal(format!("fmap/st right return: {:?}", e)))?;
+            if let Some(bb) = saved_bb {
+                self.builder().position_at_end(bb);
+            }
+        }
+        let fn_ptr = func.as_global_value().as_pointer_value();
+        let f_ptr = self.value_to_ptr(f_val)?;
+        let m_ptr = self.value_to_ptr(m_val)?;
+        let closure_ptr = self.alloc_closure(
+            fn_ptr,
+            &[
+                (VarId::new(900000), f_ptr.into()),
+                (VarId::new(900001), m_ptr.into()),
+            ],
+        )?;
+        Ok(Some(closure_ptr.into()))
+    }
+
     fn lower_builtin_except_t_bind_over_st(
         &mut self,
         m_expr: &Expr,
@@ -26826,36 +27262,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // call, not a `Just` — so take it from the type when there is one.
         if let Some(inner) = self.is_maybe_type(&maybe_expr.ty()) {
             let inner = inner.clone();
-            if let Some(desc) = self.descriptor_for_ty(&inner) {
+            if let Some(desc) = self.descriptor_from_ty(&inner) {
                 return desc;
             }
         }
         self.get_primitive_show_desc(0) // Nothing defaults to Int
     }
 
-    /// A show descriptor built from a type alone, for the leaf shapes whose
-    /// tag needs nothing else. `None` when the type says nothing useful.
-    fn descriptor_for_ty(&mut self, ty: &Ty) -> Option<PointerValue<'ctx>> {
-        let tag = if self.is_bool_type(ty) {
-            3
-        } else if self.is_char_type(ty) {
-            4
-        } else if self.is_double_type(ty) {
-            1
-        } else if self.is_float_type(ty) {
-            2
-        } else if self.is_text_type(ty) {
-            8
-        } else if self.is_string_type(ty) {
-            5
-        } else if self.is_unit_type(ty) {
-            6
-        } else if self.is_int_type(ty) {
-            0
-        } else {
-            return None;
-        };
-        Some(self.get_primitive_show_desc(tag))
+    /// A show descriptor built from a type alone, compound types included
+    /// (`[Int]`, `Maybe (Int, Bool)`). `None` when the type is unknown — a
+    /// type variable or an error — so the caller can keep its own default.
+    fn descriptor_from_ty(&mut self, ty: &Ty) -> Option<PointerValue<'ctx>> {
+        match ty {
+            Ty::Var(_) | Ty::Error => None,
+            _ => Some(self.build_show_descriptor(&Self::ty_only_expr(ty.clone()))),
+        }
     }
 
     /// Build descriptors for the fst/snd types of a tuple expression.
@@ -26875,6 +27296,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         return (fst_d, snd_d);
                     }
                 }
+            }
+        }
+        // No `(,)` to read the components off — the tuple came from a variable
+        // or a call (`pair :: ([Int], Int)`). Its TYPE still names them;
+        // defaulting both to Int printed the list component's ADDRESS.
+        if let Some((a, b)) = self.is_tuple_type(&tuple_expr.ty()) {
+            let (a, b) = (a.clone(), b.clone());
+            if let (Some(fst_d), Some(snd_d)) =
+                (self.descriptor_from_ty(&a), self.descriptor_from_ty(&b))
+            {
+                return (fst_d, snd_d);
             }
         }
         // span/break/partition/splitAt return a 2-tuple of lists ([a],[a]); the
@@ -26906,11 +27338,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 match var.name.as_str() {
                     "Left" => {
                         let l_d = self.build_show_descriptor(&arg_cloned);
-                        let r_d = self.get_primitive_show_desc(0);
+                        let r_d = self.either_side_descriptor(either_expr, false);
                         return (l_d, r_d);
                     }
                     "Right" => {
-                        let l_d = self.get_primitive_show_desc(0);
+                        let l_d = self.either_side_descriptor(either_expr, true);
                         let r_d = self.build_show_descriptor(&arg_cloned);
                         return (l_d, r_d);
                     }
@@ -26918,9 +27350,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
             }
         }
-        let d0 = self.get_primitive_show_desc(0);
-        let d0b = self.get_primitive_show_desc(0);
-        (d0, d0b)
+        let l_d = self.either_side_descriptor(either_expr, true);
+        let r_d = self.either_side_descriptor(either_expr, false);
+        (l_d, r_d)
+    }
+
+    /// The descriptor for one side of an `Either`, read off its type; Int
+    /// when the type says nothing.
+    fn either_side_descriptor(&mut self, either_expr: &Expr, left: bool) -> PointerValue<'ctx> {
+        let side =
+            self.is_either_type(&either_expr.ty())
+                .map(|(l, r)| if left { l.clone() } else { r.clone() });
+        side.and_then(|ty| self.descriptor_from_ty(&ty))
+            .unwrap_or_else(|| self.get_primitive_show_desc(0))
     }
 
     /// Lower type-specialized show functions.
@@ -27419,21 +27861,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 ))
             }
         };
-        let fn_ptr = self.extract_closure_fn_ptr(func_ptr_val)?;
-        let payload_ptr = self.value_to_ptr(payload)?;
-        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
-        let mapped = self
-            .builder()
-            .build_indirect_call(
-                fn_type,
-                fn_ptr,
-                &[func_ptr_val.into(), payload_ptr.into()],
-                "fmap_applied",
-            )
-            .map_err(|e| CodegenError::Internal(format!("fmap Maybe apply: {:?}", e)))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal("fmap Maybe: apply returned void".to_string()))?;
+        let mapped = self.call_closure1(func_ptr_val, payload, "fmap Maybe")?;
 
         // Allocate new Just(mapped): tag=1, arity=1
         let alloc_fn = self
@@ -27518,22 +27946,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 ))
             }
         };
-        let ptr_type = self.type_mapper().ptr_type();
-        let action_ptr = self.value_to_ptr(action_result)?;
-        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
-        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
-        let result = self
-            .builder()
-            .build_indirect_call(
-                fn_type,
-                fn_ptr,
-                &[func_ptr.into(), action_ptr.into()],
-                "fmap_result",
-            )
-            .map_err(|e| CodegenError::Internal(format!("fmap call failed: {:?}", e)))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal("fmap: returned void".to_string()))?;
+        let result = self.call_closure1(func_ptr, action_result, "fmap")?;
         Ok(Some(result))
     }
 
@@ -27570,6 +27983,36 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         func_expr: &Expr,
         val_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // A transformer action applies through its layer's `<*>`, not by
+        // calling the left operand as a function. Only the operands' OWN types
+        // decide (as for `fmap`): the ambient layer would capture a `Maybe` or
+        // list `<*>` built inside a transformer computation.
+        // When neither operand carries a type at all — a GND instance method
+        // `$instance_<*>_App = \f x -> f <*> x` over untyped lambda parameters
+        // — the ambient layer is the instance's own, so it decides.
+        let untyped = matches!(val_expr.ty(), Ty::Error) && matches!(func_expr.ty(), Ty::Error);
+        let layer = self
+            .transformer_layer_of_ty(&val_expr.ty())
+            .or_else(|| self.transformer_layer_of_ty(&func_expr.ty()))
+            .or_else(|| {
+                (untyped && self.current_transformer_layer() != TransformerLayer::IO)
+                    .then(|| self.current_transformer_layer())
+            });
+        match layer {
+            Some(TransformerLayer::StateT) => {
+                return self.lower_builtin_state_t_ap(func_expr, val_expr)
+            }
+            Some(TransformerLayer::ReaderT) => {
+                return self.lower_builtin_reader_t_ap(func_expr, val_expr)
+            }
+            Some(TransformerLayer::ExceptT) => {
+                return self.lower_builtin_except_t_ap(func_expr, val_expr)
+            }
+            Some(TransformerLayer::WriterT) => {
+                return self.lower_builtin_writer_t_ap(func_expr, val_expr)
+            }
+            Some(TransformerLayer::IO) | None => {}
+        }
         let func_result = self
             .lower_expr(func_expr)?
             .ok_or_else(|| CodegenError::Internal("<*>: no func".to_string()))?;
@@ -27584,22 +28027,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 ))
             }
         };
-        let ptr_type = self.type_mapper().ptr_type();
-        let val_ptr = self.value_to_ptr(val_result)?;
-        let fn_ptr = self.extract_closure_fn_ptr(func_ptr)?;
-        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
-        let result = self
-            .builder()
-            .build_indirect_call(
-                fn_type,
-                fn_ptr,
-                &[func_ptr.into(), val_ptr.into()],
-                "ap_result",
-            )
-            .map_err(|e| CodegenError::Internal(format!("<*> call failed: {:?}", e)))?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CodegenError::Internal("<*>: returned void".to_string()))?;
+        let result = self.call_closure1(func_ptr, val_result, "<*>")?;
         Ok(Some(result))
     }
 
@@ -27618,11 +28046,121 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower `when`.
+    /// `when`/`unless` whose action is a TRANSFORMER computation:
+    /// `if c then act else return ()`, as a value. The IO lowering runs the
+    /// action in place and yields null, which a transformer `>>` then calls as
+    /// an action (`when increaseLevel $ modify …` in pandoc's `blockToHtml`).
+    /// Returns `None` when the action is not a transformer computation.
+    fn lower_when_transformer(
+        &mut self,
+        run_when: bool,
+        cond_expr: &Expr,
+        action_expr: &Expr,
+    ) -> CodegenResult<Option<Option<BasicValueEnum<'ctx>>>> {
+        let act_ty = action_expr.ty();
+        let has_own_layer = self.transformer_layer_of_ty(&act_ty).is_some();
+        if !has_own_layer && self.current_transformer_layer() == TransformerLayer::IO {
+            return Ok(None);
+        }
+        let span = action_expr.span();
+        let unit_ty = Ty::Con(bhc_types::TyCon::new(
+            bhc_intern::Symbol::intern("()"),
+            bhc_types::Kind::Star,
+        ));
+        let ret_ty = if has_own_layer {
+            Ty::Fun(Box::new(unit_ty.clone()), Box::new(act_ty))
+        } else {
+            Ty::Error
+        };
+        let pure_unit = Expr::App(
+            Box::new(Expr::Var(
+                Var::new(bhc_intern::Symbol::intern("return"), VarId::new(0), ret_ty),
+                span,
+            )),
+            Box::new(Expr::Var(
+                Var::new(bhc_intern::Symbol::intern("()"), VarId::new(0), unit_ty),
+                span,
+            )),
+            span,
+        );
+
+        let cond_val = self
+            .lower_expr(cond_expr)?
+            .ok_or_else(|| CodegenError::Internal("when: no cond".to_string()))?;
+        let bool_int = match cond_val {
+            BasicValueEnum::PointerValue(p) => self.extract_bool_tag(p)?,
+            BasicValueEnum::IntValue(i) => i,
+            _ => return Err(CodegenError::TypeError("when expects Bool".to_string())),
+        };
+        let pred = if run_when {
+            inkwell::IntPredicate::NE
+        } else {
+            inkwell::IntPredicate::EQ
+        };
+        let runs = self
+            .builder()
+            .build_int_compare(
+                pred,
+                bool_int,
+                self.type_mapper().i64_type().const_zero(),
+                "when_t",
+            )
+            .map_err(|e| CodegenError::Internal(format!("when: cmp failed: {e:?}")))?;
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+        let act_bb = self
+            .llvm_context()
+            .append_basic_block(current_fn, "when_t_act");
+        let skip_bb = self
+            .llvm_context()
+            .append_basic_block(current_fn, "when_t_skip");
+        let merge_bb = self
+            .llvm_context()
+            .append_basic_block(current_fn, "when_t_merge");
+        self.builder()
+            .build_conditional_branch(runs, act_bb, skip_bb)
+            .map_err(|e| CodegenError::Internal(format!("when: branch failed: {e:?}")))?;
+
+        self.builder().position_at_end(act_bb);
+        let act_val = self
+            .lower_expr(action_expr)?
+            .ok_or_else(|| CodegenError::Internal("when: action has no value".to_string()))?;
+        let act_ptr = self.value_to_ptr(act_val)?;
+        let act_end = self.builder().get_insert_block().unwrap();
+        self.builder()
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Internal(format!("when: branch failed: {e:?}")))?;
+
+        self.builder().position_at_end(skip_bb);
+        let skip_val = self
+            .lower_expr(&pure_unit)?
+            .ok_or_else(|| CodegenError::Internal("when: return () has no value".to_string()))?;
+        let skip_ptr = self.value_to_ptr(skip_val)?;
+        let skip_end = self.builder().get_insert_block().unwrap();
+        self.builder()
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Internal(format!("when: branch failed: {e:?}")))?;
+
+        self.builder().position_at_end(merge_bb);
+        let phi = self
+            .builder()
+            .build_phi(self.type_mapper().ptr_type(), "when_t_result")
+            .map_err(|e| CodegenError::Internal(format!("when: phi failed: {e:?}")))?;
+        phi.add_incoming(&[(&act_ptr, act_end), (&skip_ptr, skip_end)]);
+        Ok(Some(Some(phi.as_basic_value())))
+    }
+
     fn lower_builtin_when(
         &mut self,
         cond_expr: &Expr,
         action_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(v) = self.lower_when_transformer(true, cond_expr, action_expr)? {
+            return Ok(v);
+        }
         let cond_val = self
             .lower_expr(cond_expr)?
             .ok_or_else(|| CodegenError::Internal("when: no cond".to_string()))?;
@@ -27670,6 +28208,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         cond_expr: &Expr,
         action_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if let Some(v) = self.lower_when_transformer(false, cond_expr, action_expr)? {
+            return Ok(v);
+        }
         let cond_val = self
             .lower_expr(cond_expr)?
             .ok_or_else(|| CodegenError::Internal("unless: no cond".to_string()))?;
@@ -46211,6 +46752,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         for bind in bindings {
             match bind {
                 Bind::NonRec(var, expr) => {
+                    if Self::declared_io_result(&var.ty) {
+                        continue;
+                    }
                     if let Some(layer) = self.detect_transformer_for_body(expr) {
                         let name = var.name.as_str().to_string();
                         match layer {
@@ -46232,6 +46776,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
                 Bind::Rec(pairs) => {
                     for (var, expr) in pairs {
+                        if Self::declared_io_result(&var.ty) {
+                            continue;
+                        }
                         if let Some(layer) = self.detect_transformer_for_body(expr) {
                             let name = var.name.as_str().to_string();
                             match layer {
@@ -46263,7 +46810,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 match bind {
                     Bind::NonRec(var, expr) => {
                         let name = var.name.as_str().to_string();
-                        if !self.state_t_functions.contains(&name)
+                        if !Self::declared_io_result(&var.ty)
+                            && !self.state_t_functions.contains(&name)
                             && !self.reader_t_functions.contains(&name)
                             && !self.except_t_functions.contains(&name)
                             && !self.writer_t_functions.contains(&name)
@@ -46294,7 +46842,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     Bind::Rec(pairs) => {
                         for (var, expr) in pairs {
                             let name = var.name.as_str().to_string();
-                            if !self.state_t_functions.contains(&name)
+                            if !Self::declared_io_result(&var.ty)
+                                && !self.state_t_functions.contains(&name)
                                 && !self.reader_t_functions.contains(&name)
                                 && !self.except_t_functions.contains(&name)
                                 && !self.writer_t_functions.contains(&name)
@@ -46326,6 +46875,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
             }
         }
+    }
+
+    /// Whether a binder's declared type ends in `IO` — `act :: Int -> IO Int`.
+    ///
+    /// Such a binding is never a transformer function, whatever its body
+    /// mentions: `act n = evalStateT (step n) 10` CALLS a StateT function but
+    /// runs it. The syntactic scan in [`Self::detect_transformer_functions`]
+    /// classified it StateT anyway, so `xs <- act 1` in `main` lowered as a
+    /// StateT bind, `main` returned an unrun closure, and the program exited
+    /// silently after its first line.
+    fn declared_io_result(ty: &Ty) -> bool {
+        let mut result = ty;
+        loop {
+            match result {
+                Ty::Fun(_, r) => result = r,
+                Ty::Forall(_, body) => result = body,
+                _ => break,
+            }
+        }
+        let mut head = result;
+        while let Ty::App(f, _) = head {
+            head = f;
+        }
+        matches!(head, Ty::Con(c) if c.name.as_str() == "IO")
     }
 
     /// Detect if an expression calls any known transformer function.
@@ -46913,8 +47486,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             self.push_transformer_layer(*layer);
         }
 
-        // If type didn't indicate transformers, fall back to body detection
-        let extra_layer = if pushed_count == 0 {
+        // If type didn't indicate transformers, fall back to body detection —
+        // unless the type says IO: a `get` under `runIO (evalStateT …)` inside
+        // `main` is the inner computation's, not `main`'s (see
+        // `declared_io_result`), and pushing StateT made `main` a state
+        // function that silently stopped after its first statement.
+        let extra_layer = if pushed_count == 0 && !Self::declared_io_result(&var.ty) {
             self.detect_transformer_for_body(expr)
         } else {
             None
@@ -47611,7 +48188,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Create a closure wrapping the primop function
         let fn_ptr = wrapper_fn.as_global_value().as_pointer_value();
-        let closure_ptr = self.alloc_closure(fn_ptr, &[])?;
+        // Arity recorded so an under-application (`(+) <$> m`) builds a PAP;
+        // see `create_builtin_closure`.
+        let closure_ptr = self.alloc_closure_with_arity(fn_ptr, &[], arity)?;
         Ok(Some(closure_ptr.into()))
     }
 
@@ -47699,10 +48278,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // the identity at IO and a state-threading closure under `ExceptT`.
         // Without the layer in the name, whichever layer reached the builtin
         // first would define it for every other.
+        // The representation BENEATH a layer matters too: an ExceptT action
+        // over StateT is a state-threading closure, over IO it is not.
         let layer_tag = match self.current_transformer_layer() {
             TransformerLayer::IO => "",
+            TransformerLayer::StateT
+                if self
+                    .transformer_stack
+                    .is_state_t_over_except_t_over_state_t() =>
+            {
+                "_stateT_stes"
+            }
             TransformerLayer::StateT => "_stateT",
             TransformerLayer::ReaderT => "_readerT",
+            TransformerLayer::ExceptT if self.transformer_stack.is_except_t_over_state_t() => {
+                "_exceptT_st"
+            }
             TransformerLayer::ExceptT => "_exceptT",
             TransformerLayer::WriterT => "_writerT",
         };
@@ -47790,9 +48381,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 wrapper_fn
             };
 
-        // Create a closure wrapping the builtin function
+        // Create a closure wrapping the builtin function. Record its arity:
+        // with "unknown" (0), applying `(++)` to ONE argument (`(++) <$> m`)
+        // ran the 2-parameter wrapper with its second argument read from a
+        // stale register instead of building a PAP.
         let fn_ptr = wrapper_fn.as_global_value().as_pointer_value();
-        let closure_ptr = self.alloc_closure(fn_ptr, &[])?;
+        let closure_ptr = self.alloc_closure_with_arity(fn_ptr, &[], arity)?;
         Ok(Some(closure_ptr.into()))
     }
 
@@ -47885,7 +48479,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             };
 
         let fn_ptr = wrapper_fn.as_global_value().as_pointer_value();
-        let closure_ptr = self.alloc_closure(fn_ptr, &[])?;
+        let closure_ptr = self.alloc_closure_with_arity(fn_ptr, &[], arity)?;
         Ok(Some(closure_ptr.into()))
     }
 
@@ -48212,6 +48806,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     let over_st = self.transformer_stack.is_except_t_over_state_t();
                     return self.except_t_pure_from_value(args[0], over_st);
                 }
+                // Likewise a StateT over pandoc's ExceptT-over-StateT: a
+                // superclass-selected `pure` in a specialized clone arrives
+                // under `let` hops, so it is applied as a value, not a builtin.
+                if name != "IO.pure"
+                    && self
+                        .transformer_stack
+                        .is_state_t_over_except_t_over_state_t()
+                {
+                    return self.lower_stes_return(args[0]);
+                }
                 Ok(Some(args[0]))
             }
             "id" => {
@@ -48291,7 +48895,23 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 self.apply_closure_values(f, &[g_ptr], false)
             }
             "fmap" | "<$>" => {
-                // fmap :: (a -> b) -> f a -> f b
+                // fmap :: (a -> b) -> f a -> f b — at the representation of the
+                // layer this wrapper is built for (see `create_builtin_closure`'s
+                // layer tag). `fst <$> evalStateT …` in pandoc's `writeHtml'`
+                // reaches here as a value at ExceptT-over-StateT.
+                if self.current_transformer_layer() == TransformerLayer::ExceptT {
+                    return if self.transformer_stack.is_except_t_over_state_t() {
+                        self.except_t_fmap_over_st_from_values(args[0], args[1])
+                    } else {
+                        self.except_t_fmap_from_values(args[0], args[1])
+                    };
+                }
+                if self
+                    .transformer_stack
+                    .is_state_t_over_except_t_over_state_t()
+                {
+                    return self.lower_stes_fmap(args[0], args[1]);
+                }
                 // For IO: apply function to action result
                 let func = args[0].into_pointer_value();
                 let action_result = args[1];
@@ -48317,6 +48937,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // first argument to the value in the second.
             "<*>" | "IO.<*>" | "IO.fmap" => {
                 // (<*>) :: f (a -> b) -> f a -> f b
+                if name == "<*>" {
+                    if self.current_transformer_layer() == TransformerLayer::ExceptT
+                        && self.transformer_stack.is_except_t_over_state_t()
+                    {
+                        return self.except_t_ap_over_st_from_values(args[0], args[1]);
+                    }
+                    if self
+                        .transformer_stack
+                        .is_state_t_over_except_t_over_state_t()
+                    {
+                        return self.lower_stes_ap(args[0], args[1]);
+                    }
+                }
                 // For IO: extract function from first action, apply to second
                 let func_closure = args[0].into_pointer_value();
                 let val = args[1];
@@ -48422,13 +49055,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // `create_builtin_closure`. The `_st` names carry the
             // ExceptT-over-StateT representation; see
             // `except_t_pure_from_value` for why the variant is in the name
-            // rather than read from the ambient transformer stack. `fmap` has
-            // no over-StateT implementation, so both names share the plain one.
+            // rather than read from the ambient transformer stack.
             "ExceptT.pure" => self.except_t_pure_from_value(args[0], false),
             "ExceptT_st.pure" => self.except_t_pure_from_value(args[0], true),
             "ExceptT.>>=" => self.except_t_bind_from_values(args[0], args[1]),
             "ExceptT_st.>>=" => self.except_t_bind_over_st_from_values(args[0], args[1]),
-            "ExceptT.fmap" | "ExceptT_st.fmap" => self.except_t_fmap_from_values(args[0], args[1]),
+            "ExceptT.fmap" => self.except_t_fmap_from_values(args[0], args[1]),
+            "ExceptT_st.fmap" => self.except_t_fmap_over_st_from_values(args[0], args[1]),
 
             // ReaderT/StateT constructors (newtype = pass through)
             "ReaderT" | "StateT" => Ok(Some(args[0])),
@@ -49062,6 +49695,26 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
 
             // StateT instance methods with pre-lowered args
+            // A StateT dictionary slot reached as a value under pandoc's writer
+            // stack (`StateT s (ExceptT e (StateT s2 IO))`): the computations it
+            // builds and consumes are the 3-arg stes closures, as for the
+            // applied forms. The wrapper is cached per representation (see
+            // `create_builtin_closure`'s layer tag).
+            "StateT.pure" | "StateT.>>=" | "StateT.>>" | "StateT.fmap" | "StateT.<*>"
+            | "StateT.lift" | "StateT.liftIO"
+                if self
+                    .transformer_stack
+                    .is_state_t_over_except_t_over_state_t() =>
+            {
+                match name {
+                    "StateT.pure" => self.lower_stes_return(args[0]),
+                    "StateT.>>=" => self.lower_stes_bind(args[0], args[1]),
+                    "StateT.>>" => self.lower_stes_then(args[0], args[1]),
+                    "StateT.fmap" => self.lower_stes_fmap(args[0], args[1]),
+                    "StateT.<*>" => self.lower_stes_ap(args[0], args[1]),
+                    _ => self.lower_stes_lift(args[0]),
+                }
+            }
             "StateT.pure" => {
                 // \s -> (x, s) where x = args[0]
                 let x_val = args[0];

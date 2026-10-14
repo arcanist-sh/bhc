@@ -223,6 +223,20 @@ fn test_tier2_multimodule_basic_native() {
     run_native_test("tier2_functions/multimodule_basic", Profile::Default);
 }
 
+/// `StateT` over a GND newtype monad imported from another module.
+#[test]
+fn test_tier2_multimodule_newtype_monad_native() {
+    run_native_test(
+        "tier2_functions/multimodule_newtype_monad",
+        Profile::Default,
+    );
+}
+
+#[test]
+fn test_tier2_multimodule_text_field_native() {
+    run_native_test("tier2_functions/multimodule_text_field", Profile::Default);
+}
+
 #[test]
 fn test_tier2_multimodule_chain_native() {
     run_native_test("tier2_functions/multimodule_chain", Profile::Default);
@@ -967,6 +981,62 @@ fn test_tier2_where_helper_in_guard() {
 #[test]
 fn test_tier2_text_pred_boxed_bool() {
     run_native_test("tier2_functions/text_pred_boxed_bool", Profile::Default);
+}
+
+/// `show` of a tuple/`Either`/`Maybe` whose components are only known from
+/// the TYPE (a variable or call, not a constructor application).
+#[test]
+fn test_tier2_show_compound_from_type() {
+    run_native_test("tier2_functions/show_compound_from_type", Profile::Default);
+}
+
+/// `StateT` over a GND newtype monad whose representation is a transformer
+/// stack (pandoc's `PandocIO` shape).
+#[test]
+fn test_tier2_statet_poly_dict() {
+    run_native_test("tier2_functions/statet_poly_dict", Profile::Default);
+}
+
+#[test]
+fn test_tier2_statet_guard_fallthrough() {
+    run_native_test("tier2_functions/statet_guard_fallthrough", Profile::Default);
+}
+
+#[test]
+fn test_tier2_statet_stes_when() {
+    run_native_test("tier2_functions/statet_stes_when", Profile::Default);
+}
+
+#[test]
+fn test_tier2_statet_stes_runners() {
+    run_native_test("tier2_functions/statet_stes_runners", Profile::Default);
+}
+
+#[test]
+fn test_tier2_statet_stes_applicative() {
+    run_native_test("tier2_functions/statet_stes_applicative", Profile::Default);
+}
+
+#[test]
+fn test_tier2_applicative_partial_builtin() {
+    run_native_test(
+        "tier2_functions/applicative_partial_builtin",
+        Profile::Default,
+    );
+}
+
+#[test]
+fn test_tier2_statet_over_newtype_monad() {
+    run_native_test(
+        "tier2_functions/statet_over_newtype_monad",
+        Profile::Default,
+    );
+}
+
+/// `print` of a case-alternative binder shows it at its solved type.
+#[test]
+fn test_tier2_show_case_binder() {
+    run_native_test("tier2_functions/show_case_binder", Profile::Default);
 }
 
 /// `mapM` over `StateT s IO` runs each action in order.

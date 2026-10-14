@@ -2850,12 +2850,18 @@ impl LowerContext {
     /// monads that need dictionary dispatch.
     #[must_use]
     pub fn is_builtin_monad_type(ty: &Ty) -> bool {
-        let type_name = match ty {
+        // Walk to the HEAD constructor: a transformer takes its parameters
+        // before the inner monad, so `StateT Int App` is `(StateT Int) App`
+        // and stopping one application deep never saw `StateT`. `return` at
+        // that type then fell back to the enclosing signature's monad and
+        // dispatched to the INNER monad's `pure` (an `App` action where a
+        // `StateT` action was needed).
+        let mut head = ty;
+        while let Ty::App(f, _) = head {
+            head = f.as_ref();
+        }
+        let type_name = match head {
             Ty::Con(tc) => Some(tc.name.as_str()),
-            Ty::App(f, _) => match f.as_ref() {
-                Ty::Con(tc) => Some(tc.name.as_str()),
-                _ => None,
-            },
             _ => None,
         };
         matches!(
@@ -2940,62 +2946,7 @@ impl LowerContext {
     /// an application spine naming a registered alias with enough arguments
     /// is replaced by the alias body with its parameters substituted.
     pub(crate) fn expand_type_aliases(&self, ty: &Ty) -> Ty {
-        fn go(aliases: &FxHashMap<Symbol, (Vec<bhc_types::TyVar>, Ty)>, ty: &Ty, depth: u32) -> Ty {
-            if depth > 16 {
-                return ty.clone();
-            }
-            // Collect the application spine.
-            let mut head = ty;
-            let mut args: Vec<&Ty> = Vec::new();
-            while let Ty::App(f, a) = head {
-                args.push(a.as_ref());
-                head = f.as_ref();
-            }
-            args.reverse();
-            if let Ty::Con(tc) = head {
-                // `String` is a synonym of the language itself, declared in no
-                // module, so it never reaches the alias map. Left unexpanded it
-                // matches neither `[Char]` in an occurrence type nor the
-                // `Stream [tok] m tok` instance head, and a parser declared
-                // `ParsecT String () m Char` ends up passed with NO dictionaries.
-                if tc.name.as_str() == "String"
-                    && args.is_empty()
-                    && !aliases.contains_key(&tc.name)
-                {
-                    return Ty::List(Box::new(Ty::Con(bhc_types::TyCon::new(
-                        Symbol::intern("Char"),
-                        bhc_types::Kind::Star,
-                    ))));
-                }
-                if let Some((params, rhs)) = aliases.get(&tc.name) {
-                    if params.len() <= args.len() {
-                        let mut s = bhc_types::Subst::new();
-                        for (p, a) in params.iter().zip(&args) {
-                            s.insert(p, (*a).clone());
-                        }
-                        let expanded = s.apply(rhs);
-                        let rebuilt = args[params.len()..].iter().fold(expanded, |acc, a| {
-                            Ty::App(Box::new(acc), Box::new((*a).clone()))
-                        });
-                        return go(aliases, &rebuilt, depth + 1);
-                    }
-                }
-            }
-            match ty {
-                Ty::App(f, a) => Ty::App(
-                    Box::new(go(aliases, f, depth + 1)),
-                    Box::new(go(aliases, a, depth + 1)),
-                ),
-                Ty::Fun(a, b) => Ty::Fun(
-                    Box::new(go(aliases, a, depth + 1)),
-                    Box::new(go(aliases, b, depth + 1)),
-                ),
-                Ty::List(t) => Ty::List(Box::new(go(aliases, t, depth + 1))),
-                Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| go(aliases, t, depth + 1)).collect()),
-                other => other.clone(),
-            }
-        }
-        go(&self.type_aliases, ty, 0)
+        expand_aliases_in(&self.type_aliases, ty, 0, true)
     }
 
     /// Whether the reference at `span` is a whole-body instance method alias.
@@ -4648,6 +4599,7 @@ impl LowerContext {
 
         lazify_recursive_parser_calls(&mut bindings);
         lazify_self_recursive_monadic_args(&mut bindings);
+        expand_transformer_synonyms(&mut bindings, &self.type_aliases);
 
         Ok(CoreModule {
             name: module.name,
@@ -6250,6 +6202,175 @@ fn ty_compatible(inst: &Ty, want: &Ty) -> bool {
             xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| ty_compatible(x, y))
         }
         _ => false,
+    }
+}
+
+/// Expand the synonyms of `aliases` in `ty` (recursively, depth-capped): the
+/// head of an application spine naming an alias with enough arguments is
+/// replaced by the alias body with its parameters substituted. With
+/// `expand_string`, the language's own `String` becomes `[Char]` too.
+fn expand_aliases_in(
+    aliases: &FxHashMap<Symbol, (Vec<bhc_types::TyVar>, Ty)>,
+    ty: &Ty,
+    depth: u32,
+    expand_string: bool,
+) -> Ty {
+    if depth > 16 {
+        return ty.clone();
+    }
+    // Collect the application spine.
+    let mut head = ty;
+    let mut args: Vec<&Ty> = Vec::new();
+    while let Ty::App(f, a) = head {
+        args.push(a.as_ref());
+        head = f.as_ref();
+    }
+    args.reverse();
+    if let Ty::Con(tc) = head {
+        // `String` is a synonym of the language itself, declared in no
+        // module, so it never reaches the alias map. Left unexpanded it
+        // matches neither `[Char]` in an occurrence type nor the
+        // `Stream [tok] m tok` instance head, and a parser declared
+        // `ParsecT String () m Char` ends up passed with NO dictionaries.
+        if expand_string
+            && tc.name.as_str() == "String"
+            && args.is_empty()
+            && !aliases.contains_key(&tc.name)
+        {
+            return Ty::List(Box::new(Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("Char"),
+                bhc_types::Kind::Star,
+            ))));
+        }
+        if let Some((params, rhs)) = aliases.get(&tc.name) {
+            if params.len() <= args.len() {
+                let mut s = bhc_types::Subst::new();
+                for (p, a) in params.iter().zip(&args) {
+                    s.insert(p, (*a).clone());
+                }
+                let expanded = s.apply(rhs);
+                let rebuilt = args[params.len()..].iter().fold(expanded, |acc, a| {
+                    Ty::App(Box::new(acc), Box::new((*a).clone()))
+                });
+                return expand_aliases_in(aliases, &rebuilt, depth + 1, expand_string);
+            }
+        }
+    }
+    match ty {
+        Ty::App(f, a) => Ty::App(
+            Box::new(expand_aliases_in(aliases, f, depth + 1, expand_string)),
+            Box::new(expand_aliases_in(aliases, a, depth + 1, expand_string)),
+        ),
+        Ty::Fun(a, b) => Ty::Fun(
+            Box::new(expand_aliases_in(aliases, a, depth + 1, expand_string)),
+            Box::new(expand_aliases_in(aliases, b, depth + 1, expand_string)),
+        ),
+        Ty::List(t) => Ty::List(Box::new(expand_aliases_in(
+            aliases,
+            t,
+            depth + 1,
+            expand_string,
+        ))),
+        Ty::Tuple(ts) => Ty::Tuple(
+            ts.iter()
+                .map(|t| expand_aliases_in(aliases, t, depth + 1, expand_string))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Expand, in every type a Core module carries for codegen, the synonyms whose
+/// body is a builtin monad transformer — `type Inner = ExceptT String (StateT
+/// Int IO)`.
+///
+/// Codegen picks a transformer's implementation from the TYPE of the action
+/// (`evalStateT m s` reads `m`'s inner monad), and a synonym's own name tells
+/// it nothing: `StateT Int Inner Int` ran as `StateT Int IO`, applying the
+/// computation to one state where the ExceptT-over-StateT stack expects two.
+/// Only these synonyms are expanded: expanding every synonym (`String` among
+/// them) changes the representation codegen infers for unrelated values.
+pub(crate) fn expand_transformer_synonyms(
+    bindings: &mut [Bind],
+    aliases: &FxHashMap<Symbol, (Vec<bhc_types::TyVar>, Ty)>,
+) {
+    fn head_name(ty: &Ty) -> Option<&str> {
+        let mut head = ty;
+        while let Ty::App(f, _) = head {
+            head = f.as_ref();
+        }
+        match head {
+            Ty::Con(c) => Some(c.name.as_str()),
+            _ => None,
+        }
+    }
+    let transformer: FxHashMap<Symbol, (Vec<bhc_types::TyVar>, Ty)> = aliases
+        .iter()
+        .filter(|(_, (_, rhs))| {
+            let body = expand_aliases_in(aliases, rhs, 0, false);
+            matches!(
+                head_name(&body),
+                Some("StateT" | "ReaderT" | "ExceptT" | "WriterT")
+            )
+        })
+        .map(|(k, v)| (*k, v.clone()))
+        .collect();
+    if transformer.is_empty() {
+        return;
+    }
+    let fix = |ty: &mut Ty| *ty = expand_aliases_in(&transformer, ty, 0, false);
+    fn walk_bind(b: &mut Bind, fix: &dyn Fn(&mut Ty)) {
+        match b {
+            Bind::NonRec(v, e) => {
+                fix(&mut v.ty);
+                walk_expr(e, fix);
+            }
+            Bind::Rec(pairs) => {
+                for (v, e) in pairs {
+                    fix(&mut v.ty);
+                    walk_expr(e, fix);
+                }
+            }
+        }
+    }
+    fn walk_expr(e: &mut core::Expr, fix: &dyn Fn(&mut Ty)) {
+        use core::Expr as E;
+        match e {
+            E::Var(v, _) => fix(&mut v.ty),
+            E::Lit(..) | E::Type(..) | E::Coercion(..) => {}
+            E::App(f, a, _) => {
+                walk_expr(f, fix);
+                walk_expr(a, fix);
+            }
+            E::TyApp(f, t, _) => {
+                walk_expr(f, fix);
+                fix(t);
+            }
+            E::Lam(v, body, _) => {
+                fix(&mut v.ty);
+                walk_expr(body, fix);
+            }
+            E::TyLam(_, body, _) | E::Lazy(body, _) | E::Cast(body, _, _) | E::Tick(_, body, _) => {
+                walk_expr(body, fix);
+            }
+            E::Let(b, body, _) => {
+                walk_bind(b, fix);
+                walk_expr(body, fix);
+            }
+            E::Case(scrut, alts, ty, _) => {
+                walk_expr(scrut, fix);
+                fix(ty);
+                for alt in alts {
+                    for v in &mut alt.binders {
+                        fix(&mut v.ty);
+                    }
+                    walk_expr(&mut alt.rhs, fix);
+                }
+            }
+        }
+    }
+    for b in bindings {
+        walk_bind(b, &fix);
     }
 }
 

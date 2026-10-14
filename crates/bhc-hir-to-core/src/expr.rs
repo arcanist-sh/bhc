@@ -235,7 +235,10 @@ fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<cor
 
         Expr::Con(def_ref) => lower_con(ctx, def_ref),
 
-        Expr::App(f, x, span) => lower_app_with_method_level(ctx, f, x, *span),
+        Expr::App(f, x, span) => {
+            let e = lower_app_with_method_level(ctx, f, x, *span)?;
+            Ok(type_state_runner(ctx, type_shown_variable(ctx, x, e)))
+        }
 
         Expr::Lam(pats, body, span) => lower_lambda(ctx, pats, body, *span),
 
@@ -333,7 +336,14 @@ fn lower_lit_at(ctx: &mut LowerContext, lit: &Lit, span: Span) -> LowerResult<co
     // constructor's `Text` field is recorded by typeck as its default `[Char]`,
     // so the expected type (the field type, pushed in by
     // `propagate_constructor_field_tys`) is the authority there and must win.
-    let occ = refined_occurrence_ty(ctx, span).or_else(|| ctx.expected_ty_opt(span));
+    // `refined_occurrence_ty` keeps a CONCRETE recorded type over the hint,
+    // and the recorded `[Char]` is concrete — so an expected `Text` is checked
+    // first, explicitly (`Str "hi"` with pandoc-types' imported `Str`).
+    let occ = ctx
+        .expected_ty_opt(span)
+        .filter(ty_head_is_text)
+        .or_else(|| refined_occurrence_ty(ctx, span))
+        .or_else(|| ctx.expected_ty_opt(span));
 
     // `Text` is packed directly (its RTS entry points read a `{len, bytes}`
     // header, not a char list).
@@ -1415,6 +1425,97 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
     }
 
     Ok(base_expr)
+}
+
+/// `print v` / `show v` where `v` is a local the Core carries untyped — a
+/// case-alternative or do-bound binder (`Right ns -> print ns`). Codegen picks
+/// the show from the argument's TYPE and, finding `Error`, printed a list's
+/// address as an Int. Give that one occurrence the type typeck recorded for
+/// it, when the type is fully concrete. Only the occurrence is typed, never
+/// the binder, so nothing else's representation changes.
+fn type_shown_variable(ctx: &LowerContext, x: &hir::Expr, e: core::Expr) -> core::Expr {
+    let core::Expr::App(func, arg, app_span) = e else {
+        return e;
+    };
+    let is_show = matches!(
+        func.as_ref(),
+        core::Expr::Var(v, _) if matches!(v.name.as_str(), "print" | "show")
+    );
+    let arg = match *arg {
+        core::Expr::Var(mut v, vspan) if is_show && matches!(v.ty, Ty::Error) => {
+            // The single-pass type first; the fixpoint one when that left a
+            // variable (a binder typed only by the scrutinee's later solve).
+            if let Some(ty) = ctx
+                .expr_ty_opt(x.span())
+                .filter(is_fully_concrete_ty)
+                .or_else(|| {
+                    ctx.resolved_expr_ty_opt(x.span())
+                        .filter(is_fully_concrete_ty)
+                })
+            {
+                v.ty = ty;
+            }
+            core::Expr::Var(v, vspan)
+        }
+        other => other,
+    };
+    core::Expr::App(func, Box::new(arg), app_span)
+}
+
+/// `runStateT m s` / `evalStateT` / `execStateT` whose occurrence type left
+/// the StateT's inner monad a type variable. Codegen picks the run's
+/// representation from that inner monad, and an operand of a dictionary-passed
+/// `>>=` (`runStateT (gets f) s0 >>= k` at a newtype over ExceptT-over-StateT)
+/// keeps its instantiation variable in Core, so the run took the StateT-over-IO
+/// path and handed the bind an executed pair instead of an action. Give the
+/// runner occurrence typeck's resolved type when that names the inner monad.
+/// Only this occurrence is retyped.
+fn type_state_runner(ctx: &LowerContext, e: core::Expr) -> core::Expr {
+    fn inner_monad(ty: &Ty) -> Option<&Ty> {
+        let mut t = ty;
+        while let Ty::Forall(_, b) = t {
+            t = b;
+        }
+        // `StateT s m a -> …`: the runner's first parameter.
+        let Ty::Fun(param, _) = t else { return None };
+        let Ty::App(sm, _) = param.as_ref() else {
+            return None;
+        };
+        let Ty::App(st_s, m) = sm.as_ref() else {
+            return None;
+        };
+        let Ty::App(st, _) = st_s.as_ref() else {
+            return None;
+        };
+        matches!(st.as_ref(), Ty::Con(c) if c.name.as_str() == "StateT").then_some(m.as_ref())
+    }
+    fn monad_is_known(m: &Ty) -> bool {
+        match m {
+            Ty::Con(_) => true,
+            Ty::App(f, a) => monad_is_known(f) && !matches!(a.as_ref(), Ty::Error),
+            _ => false,
+        }
+    }
+    fn retype(e: &mut core::Expr, ctx: &LowerContext) {
+        match e {
+            core::Expr::App(f, _, _) | core::Expr::TyApp(f, _, _) => retype(f, ctx),
+            core::Expr::Var(v, span)
+                if matches!(v.name.as_str(), "runStateT" | "evalStateT" | "execStateT")
+                    && !inner_monad(&v.ty).is_some_and(monad_is_known) =>
+            {
+                if let Some(ty) = ctx
+                    .resolved_expr_ty_opt(*span)
+                    .filter(|t| inner_monad(t).is_some_and(monad_is_known))
+                {
+                    v.ty = ty;
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut e = e;
+    retype(&mut e, ctx);
+    e
 }
 
 /// Every leaf of the type is a concrete constructor/primitive — no type
@@ -4017,8 +4118,28 @@ fn try_lower_monadic_traversal(
         }),
         span,
     );
+    // `foldr` carries the ACTION type `m _` as its result. A consumer that
+    // picks its implementation from the action's type — `evalStateT (mapM f
+    // xs) s` reads `m`'s inner monad — otherwise found `Error` here and ran a
+    // `StateT s (ExceptT e (StateT s' IO))` traversal as `StateT s IO`.
+    let action_ty = Ty::App(Box::new(monad_ty.clone()), Box::new(Ty::Error));
+    let foldr_ty = Ty::Fun(
+        Box::new(Ty::Error),
+        Box::new(Ty::Fun(
+            Box::new(Ty::Error),
+            Box::new(Ty::Fun(Box::new(Ty::Error), Box::new(action_ty))),
+        )),
+    );
+    let foldr_var = core::Expr::Var(
+        Var {
+            name: Symbol::intern("foldr"),
+            id: VarId::new(0),
+            ty: foldr_ty,
+        },
+        span,
+    );
     let folded = core::Expr::App(
-        Box::new(app2(nullary_var("foldr", span), step, seed)),
+        Box::new(app2(foldr_var, step, seed)),
         Box::new(list_core),
         span,
     );
@@ -6552,6 +6673,20 @@ fn lower_record(
     // Record construction becomes constructor application
     // The fields must be in the correct order for the constructor
     let con_core = lower_con(ctx, con_ref)?;
+
+    // A `Text` field's declared type is its value's expected type, exactly as
+    // for positional construction (`propagate_constructor_field_tys`), so an
+    // OverloadedStrings literal there packs.
+    let field_tys = ctx
+        .lookup_constructor(con_ref.def_id)
+        .map(|c| c.name)
+        .and_then(|n| ctx.constructor_field_types(n).cloned())
+        .unwrap_or_default();
+    for (fty, field) in field_tys.iter().zip(fields) {
+        if ty_head_is_text(fty) {
+            propagate_expected_ty(ctx, &field.value, fty, 0);
+        }
+    }
 
     let mut result = con_core;
     for field in fields {

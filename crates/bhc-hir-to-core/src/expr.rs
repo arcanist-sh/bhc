@@ -1056,6 +1056,11 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 {
                     return Ok(method_expr);
                 }
+                if let Some(method_expr) =
+                    ctx.value_method_at_newtype_rep(class_name, name, def_ref.span)
+                {
+                    return Ok(method_expr);
+                }
             } else if class_name.as_str() == "MonadTrans" {
                 // `lift` into a USER transformer. Without this it falls through
                 // to the ambient-layer builtin, which for anything that is not
@@ -1246,7 +1251,17 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
 
     // Regular variable handling
     let base_expr = if let Some(var) = ctx.lookup_var(def_ref.def_id) {
-        core::Expr::Var(var.clone(), def_ref.span)
+        // The MonadError builtins compile by the monad they run in. Inside a
+        // function codegen reads that from the ambient stack, but at a use
+        // site with no such stack (`runIO (throwError e)` in `main`) only the
+        // occurrence type says it is PandocIO's ExceptT-over-StateT; carry it.
+        let mut var = var.clone();
+        if matches!(var.ty, Ty::Error) && matches!(var.name.as_str(), "throwError" | "catchError") {
+            if let Some(occ) = refined_occurrence_ty(ctx, def_ref.span) {
+                var.ty = occ;
+            }
+        }
+        core::Expr::Var(var, def_ref.span)
     } else {
         // Variable not found - this could be a builtin or external reference
         // Create a placeholder variable
@@ -1955,6 +1970,22 @@ fn occurrence_or_scheme_ty(ctx: &LowerContext, def_ref: &DefRef, scheme_ty: &Ty)
         .unwrap_or_else(|| scheme_ty.clone())
 }
 
+/// `var` (a reference to a constrained binding) carrying the type it is USED
+/// at here, not its binder's scheme type.
+///
+/// `fooM :: Monad n => n Int` used inside `evalStateT` at `StateT WriterState
+/// m` kept `n Int`. A clone of the enclosing writer at `m = PandocIO` then
+/// substituted `n` with PandocIO's own monad and specialized `fooM` there, so
+/// it returned an action of the wrong layer and the writer's state was read
+/// out of it.
+fn at_occurrence_ty(ctx: &LowerContext, var: &Var, span: Span) -> Var {
+    let mut var = var.clone();
+    if let Some(occ) = refined_occurrence_ty(ctx, span).filter(|t| !matches!(t, Ty::Error)) {
+        var.ty = occ;
+    }
+    var
+}
+
 /// Every dictionary a constrained VALUE needs, from whichever source has it.
 ///
 /// Resolving the whole set at once, and only when the occurrence pins EVERY
@@ -1984,6 +2015,7 @@ fn lower_constrained_value_all_dicts(
         return None;
     }
     let var = ctx.lookup_var(def_ref.def_id).cloned()?;
+    let var = at_occurrence_ty(ctx, &var, def_ref.span);
     let mut dicts = Vec::with_capacity(constraints.len());
     let mut any_real = false;
     for c in constraints {
@@ -4622,7 +4654,8 @@ fn lower_app(
             // method-selection path, not passed as an ordinary argument.
             if ctx.is_class_method(method_name).is_none() {
                 if let Some(dicts) = resolve_constrained_fn_dicts(ctx, def_ref, &[x], span) {
-                    let mut result = core::Expr::Var(var.clone(), def_ref.span);
+                    let head = at_occurrence_ty(ctx, &var, def_ref.span);
+                    let mut result = core::Expr::Var(head, def_ref.span);
                     for dict in dicts {
                         result = core::Expr::App(Box::new(result), Box::new(dict), span);
                     }
@@ -5472,7 +5505,8 @@ fn lower_app(
                             // applied at the concrete type — not just the callee.
                             let param_info =
                                 callee_param_tys_and_subst(ctx, head_def_ref, &all_args);
-                            let mut result = core::Expr::Var(var.clone(), head_def_ref.span);
+                            let head = at_occurrence_ty(ctx, &var, head_def_ref.span);
+                            let mut result = core::Expr::Var(head, head_def_ref.span);
                             for dict in dicts {
                                 result = core::Expr::App(Box::new(result), Box::new(dict), span);
                             }

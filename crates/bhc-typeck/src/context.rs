@@ -145,6 +145,12 @@ pub struct TyCtxt {
     /// Used to enable save/restore of substitution in case expressions.
     pub(crate) gadt_types: rustc_hash::FxHashSet<Symbol>,
 
+    /// Interface schemes of imported constrained values, by name. An
+    /// imported class's methods arrive here (with the class constraint),
+    /// which is the only record of their types: imported user classes are
+    /// not registered as `ClassInfo`s.
+    pub(crate) imported_constrained_schemes: FxHashMap<Symbol, Vec<Scheme>>,
+
     /// Maps field name → Vec<(constructor DefId, accessor DefId)>.
     /// Used for FieldAccess to find which constructor a field belongs to
     /// and look up the accessor function's type scheme.
@@ -184,6 +190,7 @@ impl TyCtxt {
             scoped_type_vars: FxHashMap::default(),
             user_defined_classes: rustc_hash::FxHashSet::default(),
             gadt_types: rustc_hash::FxHashSet::default(),
+            imported_constrained_schemes: FxHashMap::default(),
             field_name_to_con: FxHashMap::default(),
             type_to_data_cons: FxHashMap::default(),
             type_aliases: FxHashMap::default(),
@@ -7666,7 +7673,34 @@ impl TyCtxt {
             }
             // Use the type scheme from the interface file if available,
             // otherwise fall back to a fresh type variable
+            // An untyped import of a MonadError method (`import
+            // Control.Monad.Except (catchError)` bound to a stub or a
+            // scheme-less imported value)
+            // takes the class method's scheme. With a fresh variable instead,
+            // `runIO (catchError act h)` never tied `act`'s monad to PandocIO,
+            // so `act`'s binds and `return`s compiled for no monad at all.
+            let monad_error_method = (matches!(def_info.kind, DefKind::StubValue)
+                || (matches!(def_info.kind, DefKind::Value)
+                    && def_info.type_scheme.is_none()
+                    && !local_value_ids.contains(&def_info.id)))
+            .then(|| def_info.name.as_str().rsplit('.').next().unwrap_or(""))
+            .and_then(|base| match base {
+                "throwError" => Some(<DefId as bhc_index::Idx>::new(10071)),
+                "catchError" => Some(<DefId as bhc_index::Idx>::new(10072)),
+                _ => None,
+            })
+            .and_then(|id| self.env.lookup_global(id).cloned());
+            if let Some(scheme) = monad_error_method {
+                self.env.insert_global(def_info.id, scheme);
+                continue;
+            }
             let scheme = if let Some(ref iface_scheme) = def_info.type_scheme {
+                if !iface_scheme.constraints.is_empty() {
+                    self.imported_constrained_schemes
+                        .entry(def_info.name)
+                        .or_default()
+                        .push(iface_scheme.clone());
+                }
                 iface_scheme.clone()
             } else {
                 let fresh_var = self.fresh_ty_var();
@@ -7965,6 +7999,15 @@ impl TyCtxt {
                 let mut typed = method.clone();
                 typed.sig = Some(Scheme::mono(shape));
                 self.check_value_def(&typed);
+            } else if let Some(scheme) = self.imported_class_method_scheme(instance, method) {
+                // The class is imported (not a known `ClassInfo`), but its
+                // method's interface scheme is. Record the method's type at
+                // the instance head; the body stays unchecked as below.
+                // A bare fresh variable here left `getCommonState` in
+                // `instance PandocMonad PandocIO` typed `forall v. v`, so its
+                // compiled original could not see the PandocIO stack.
+                self.def_schemes.insert(method.id, scheme.clone());
+                self.env.insert_global(method.id, scheme);
             } else {
                 // Still register the method's scheme so it can be looked up,
                 // but use a fresh type variable to avoid constraining other code.
@@ -7974,6 +8017,67 @@ impl TyCtxt {
                 self.env.insert_global(method.id, scheme);
             }
         }
+    }
+
+    /// The type of an instance method of an IMPORTED class, at the instance
+    /// head: the method's interface scheme with the class constraint's
+    /// parameters replaced by the instance types and the class constraint
+    /// dropped. `None` unless exactly one imported scheme of that name
+    /// carries the class constraint with variable arguments.
+    fn imported_class_method_scheme(
+        &mut self,
+        instance: &InstanceDef,
+        method: &ValueDef,
+    ) -> Option<Scheme> {
+        let candidates = self.imported_constrained_schemes.get(&method.name)?;
+        let mut found = candidates.iter().filter(|s| {
+            s.constraints.iter().any(|c| {
+                c.class == instance.class
+                    && c.args.len() == instance.types.len()
+                    && c.args.iter().all(|a| matches!(a, Ty::Var(_)))
+            })
+        });
+        let scheme = found.next()?.clone();
+        if found.next().is_some() {
+            return None;
+        }
+        let class_c = scheme
+            .constraints
+            .iter()
+            .find(|c| c.class == instance.class)?
+            .clone();
+        let mut subst = Subst::new();
+        for (arg, t) in class_c.args.iter().zip(&instance.types) {
+            if let Ty::Var(v) = arg {
+                subst.insert(v, t.clone());
+            }
+        }
+        let vars: Vec<TyVar> = scheme
+            .vars
+            .iter()
+            .filter(|v| {
+                !class_c
+                    .args
+                    .iter()
+                    .any(|a| matches!(a, Ty::Var(p) if p.id == v.id))
+            })
+            .cloned()
+            .collect();
+        let constraints = scheme
+            .constraints
+            .iter()
+            .filter(|c| c.class != instance.class)
+            .map(|c| Constraint {
+                class: c.class,
+                args: c.args.iter().map(|a| subst.apply(a)).collect(),
+                span: c.span,
+            })
+            .collect();
+        Some(Scheme {
+            vars,
+            constraints,
+            ty: subst.apply(&scheme.ty),
+        })
     }
 
     /// Unify an instance method's inferred type with the class method's type
@@ -8813,6 +8917,83 @@ mod tests {
 
     fn con(name: &str, kind: Kind) -> Ty {
         Ty::Con(TyCon::new(Symbol::intern(name), kind))
+    }
+
+    /// An instance of an IMPORTED class (no `ClassInfo`) takes its method's
+    /// type from the method's interface scheme at the instance head — the
+    /// class constraint discharged, other constraints and variables kept.
+    #[test]
+    fn test_imported_class_method_scheme_at_instance_head() {
+        let mut ctx = TyCtxt::new(FileId::new(0));
+        let class = Symbol::intern("PandocMonadT");
+        let m = TyVar::new(9001, Kind::star_to_star());
+        let a = TyVar::new_star(9002);
+        let state = con("CommonStateT", Kind::Star);
+        // getCommonStateT :: forall m. PandocMonadT m => m CommonStateT
+        let get_scheme = Scheme {
+            vars: vec![m.clone()],
+            constraints: vec![Constraint::new(class, Ty::Var(m.clone()), Span::default())],
+            ty: Ty::App(Box::new(Ty::Var(m.clone())), Box::new(state.clone())),
+        };
+        // pokeT :: forall m a. (PandocMonadT m, Show a) => a -> m ()
+        let poke_scheme = Scheme {
+            vars: vec![m.clone(), a.clone()],
+            constraints: vec![
+                Constraint::new(class, Ty::Var(m.clone()), Span::default()),
+                Constraint::new(Symbol::intern("Show"), Ty::Var(a.clone()), Span::default()),
+            ],
+            ty: Ty::fun(
+                Ty::Var(a.clone()),
+                Ty::App(Box::new(Ty::Var(m.clone())), Box::new(Ty::Tuple(vec![]))),
+            ),
+        };
+        ctx.imported_constrained_schemes
+            .insert(Symbol::intern("getCommonStateT"), vec![get_scheme]);
+        ctx.imported_constrained_schemes
+            .insert(Symbol::intern("pokeT"), vec![poke_scheme]);
+
+        let pio = con("PandocIOT", Kind::star_to_star());
+        let method = |name: &str| ValueDef {
+            id: <DefId as bhc_index::Idx>::new(1),
+            name: Symbol::intern(name),
+            sig: None,
+            equations: vec![],
+            span: Span::default(),
+        };
+        let instance = InstanceDef {
+            class,
+            types: vec![pio.clone()],
+            constraints: vec![],
+            assoc_type_impls: vec![],
+            methods: vec![],
+            span: Span::default(),
+        };
+
+        let get = ctx
+            .imported_class_method_scheme(&instance, &method("getCommonStateT"))
+            .expect("scheme for getCommonStateT");
+        assert!(get.vars.is_empty());
+        assert!(get.constraints.is_empty());
+        assert_eq!(get.ty, Ty::App(Box::new(pio.clone()), Box::new(state)));
+
+        let poke = ctx
+            .imported_class_method_scheme(&instance, &method("pokeT"))
+            .expect("scheme for pokeT");
+        assert_eq!(poke.vars, vec![a.clone()]);
+        assert_eq!(poke.constraints.len(), 1);
+        assert_eq!(poke.constraints[0].class, Symbol::intern("Show"));
+        assert_eq!(
+            poke.ty,
+            Ty::fun(
+                Ty::Var(a),
+                Ty::App(Box::new(pio), Box::new(Ty::Tuple(vec![])))
+            )
+        );
+
+        // A method no imported scheme constrains by this class: no guess.
+        assert!(ctx
+            .imported_class_method_scheme(&instance, &method("unrelatedT"))
+            .is_none());
     }
 
     #[test]

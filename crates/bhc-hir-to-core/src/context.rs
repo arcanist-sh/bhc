@@ -226,6 +226,18 @@ pub struct LowerContext {
     pub(crate) existential_dict_binders: Vec<Var>,
 }
 
+/// A monad transformer applied to its arguments (`StateT s m`, `ReaderT r m`).
+pub(crate) fn transformer_headed(t: &Ty) -> bool {
+    let mut head = t;
+    while let Ty::App(f, _) = head {
+        head = f;
+    }
+    matches!(head, Ty::Con(c) if matches!(
+        c.name.as_str(),
+        "StateT" | "ReaderT" | "ExceptT" | "WriterT" | "RWST" | "MaybeT"
+    ))
+}
+
 impl LowerContext {
     /// Create a new lowering context.
     #[must_use]
@@ -1962,7 +1974,15 @@ impl LowerContext {
             return false;
         };
         let occ_head = head(result_of(&occ)).clone();
-        let constrained = self.superclass_constrained_ty(holder, needed);
+        // No hop at all (the dictionary in scope IS of the needed class): it
+        // is for its own recorded type. `w :: Monad m => m Int; w =
+        // evalStateT (do …) 7` has only `Monad m` in scope, and the do-block's
+        // `>>=` at `StateT Int m` must not be taken from it.
+        let constrained = if holder == needed {
+            self.lookup_dict_ty(holder).cloned()
+        } else {
+            self.superclass_constrained_ty(holder, needed)
+        };
         if dbg {
             eprintln!(
                 "[hop] {holder} -> {needed} @ {span:?}: occ_head={occ_head:?} constrained={constrained:?}"
@@ -2259,6 +2279,13 @@ impl LowerContext {
     pub(crate) fn lookup_dict_for(&self, class: Symbol, want: &[Ty]) -> Result<Option<Var>, ()> {
         fn fits(a: &Ty, b: &Ty, score: &mut usize) -> bool {
             match (a, b) {
+                // An in-scope dictionary is for a RIGID variable of the
+                // enclosing signature, which a transformer type never equals:
+                // inside `w :: PandocMonad m => …` the `PandocMonad (StateT Int
+                // m)` that `translateTerm` needs under `evalStateT` is NOT the
+                // `PandocMonad m` parameter. Taking it ran the StateT-level
+                // helper on PandocIO's methods.
+                (Ty::Var(_), t) if transformer_headed(t) => false,
                 (Ty::Var(_), _) | (_, Ty::Var(_)) | (Ty::Error, _) | (_, Ty::Error) => true,
                 (Ty::Con(x), Ty::Con(y)) => {
                     *score += 1;
@@ -2544,7 +2571,15 @@ impl LowerContext {
         // polymorphic type. Ordering matters: this runs AFTER the in-scope
         // lookup, so constrained functions that carry their own dictionary
         // keep passing it along (the validated fast path).
-        if constraint.args.len() > 1 && constraint.args.iter().any(|ty| !has_type_variables(ty)) {
+        // The same applies to a single-parameter constraint at a transformer
+        // over the caller's variable (`PandocMonad (StateT Int m)`): build the
+        // transformer's instance, its own `PandocMonad m` context coming from
+        // the in-scope dictionary.
+        let partially_concrete = constraint.args.iter().any(|ty| !has_type_variables(ty))
+            || constraint.args.first().is_some_and(transformer_headed);
+        if (constraint.args.len() > 1 || constraint.args.first().is_some_and(transformer_headed))
+            && partially_concrete
+        {
             let mut dict_ctx =
                 DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
             dict_ctx.set_scope_dicts(self.scope_dicts_for_construction());
@@ -3744,6 +3779,46 @@ impl LowerContext {
     /// the instance's own implementation var; otherwise construct the
     /// dictionary (which applies class DEFAULTS to a partial dict) and
     /// select the method from it.
+    /// A value-class method (`mempty`, `<>`, …) at a NEWTYPE, taken from the
+    /// newtype's representation: newtypes are erased, so `deriving (Semigroup,
+    /// Monoid)` on `newtype Translations = Translations (Map Term Text)` IS
+    /// `Map`'s instance. Without this, `mempty :: Translations` found no
+    /// method and stayed the bare builtin, which `Map.lookup` then walked as a
+    /// map — pandoc's `translateTerm` crashed on its first lookup.
+    pub(crate) fn value_method_at_newtype_rep(
+        &mut self,
+        class_name: Symbol,
+        method: Symbol,
+        span: Span,
+    ) -> Option<bhc_core::Expr> {
+        fn result_of(t: &Ty) -> &Ty {
+            match t {
+                Ty::Fun(_, r) => result_of(r),
+                other => other,
+            }
+        }
+        let occ = self
+            .resolved_expr_ty_opt(span)
+            .or_else(|| self.expr_ty_opt(span))?;
+        let mut head = result_of(&occ);
+        while let Ty::App(f, _) = head {
+            head = f;
+        }
+        let Ty::Con(tc) = head else {
+            return None;
+        };
+        let con_name = self
+            .constructor_map
+            .values()
+            .find(|c| c.is_newtype && c.type_name == tc.name)
+            .map(|c| c.name)?;
+        let rep = match self.constructor_field_types(con_name)?.as_slice() {
+            [rep] => rep.clone(),
+            _ => return None,
+        };
+        self.method_at_instance_type(class_name, method, &rep, span)
+    }
+
     fn method_at_instance_type(
         &mut self,
         class_name: Symbol,

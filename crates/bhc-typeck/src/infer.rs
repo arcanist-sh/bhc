@@ -258,6 +258,21 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                         // computation belonged.
                         let scheme = if is_join_point_name(name.as_str()) {
                             Scheme::mono(var_ty)
+                        } else if binding.sig.is_none() && !matches!(binding.rhs, Expr::Lam(..)) {
+                            // The monomorphism restriction, for the variables
+                            // it matters for here: a local VALUE binding with no
+                            // signature does not generalize its monad. `where
+                            // go = do { a <- one; s <- get; … }` run as
+                            // `evalStateT go s` must stay at THAT StateT; made
+                            // `forall n. n String`, its binds resolved through
+                            // the enclosing `Monad m` dictionary instead.
+                            let mut scheme = ctx.generalize(&var_ty);
+                            let mut applied = Vec::new();
+                            applied_head_vars(&var_ty, &mut applied);
+                            scheme
+                                .vars
+                                .retain(|v| !applied.iter().any(|a| a.id == v.id));
+                            scheme
                         } else {
                             ctx.generalize(&var_ty)
                         };
@@ -639,6 +654,31 @@ fn infer_lit(ctx: &mut TyCtxt, lit: &Lit, span: bhc_span::Span) -> Ty {
 
 /// Names `bhc-lower` gives the bindings of a desugared guard-fallthrough
 /// `case` (see `lower_case_with_guard_fallthrough`).
+/// Type variables in the HEAD of a type application (`m` in `m a`): the
+/// monad (or other constructor) variables of a type.
+fn applied_head_vars(ty: &Ty, out: &mut Vec<bhc_types::TyVar>) {
+    match ty {
+        Ty::App(f, a) => {
+            let mut head = f.as_ref();
+            while let Ty::App(g, _) = head {
+                head = g.as_ref();
+            }
+            if let Ty::Var(v) = head {
+                out.push(v.clone());
+            }
+            applied_head_vars(f, out);
+            applied_head_vars(a, out);
+        }
+        Ty::Fun(a, b) => {
+            applied_head_vars(a, out);
+            applied_head_vars(b, out);
+        }
+        Ty::List(a) => applied_head_vars(a, out),
+        Ty::Tuple(ts) => ts.iter().for_each(|t| applied_head_vars(t, out)),
+        _ => {}
+    }
+}
+
 fn is_join_point_name(name: &str) -> bool {
     name.starts_with("$caseresume") || name == "$cscrut"
 }

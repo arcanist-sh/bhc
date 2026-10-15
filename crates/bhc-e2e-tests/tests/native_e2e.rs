@@ -1008,6 +1008,34 @@ fn test_tier2_statet_stes_when() {
 }
 
 #[test]
+fn test_tier2_statet_poly_monad_helper() {
+    run_native_test("tier2_functions/statet_poly_monad_helper", Profile::Default);
+}
+
+#[test]
+fn test_tier2_poly_monad_evalstatet() {
+    run_native_test("tier2_functions/poly_monad_evalstatet", Profile::Default);
+}
+
+#[test]
+fn test_tier2_newtype_monoid_map() {
+    run_native_test("tier2_functions/newtype_monoid_map", Profile::Default);
+}
+
+#[test]
+fn test_tier2_newtype_monad_error() {
+    run_native_test("tier2_functions/newtype_monad_error", Profile::Default);
+}
+
+#[test]
+fn test_tier2_multimodule_poly_helper_in_statet() {
+    run_native_test(
+        "tier2_functions/multimodule_poly_helper_in_statet",
+        Profile::Default,
+    );
+}
+
+#[test]
 fn test_tier2_statet_stes_runners() {
     run_native_test("tier2_functions/statet_stes_runners", Profile::Default);
 }

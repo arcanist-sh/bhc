@@ -996,7 +996,13 @@ impl<'a> DictContext<'a> {
             let mut partial_fields = super_fields.clone();
             for method_name in &class.methods {
                 if let Some(&method_def_id) = instance.methods.get(method_name) {
-                    let method_ref = self.method_reference(method_def_id, span);
+                    let method_ref = Self::at_instance_ty(
+                        self.method_reference(method_def_id, span),
+                        class,
+                        instance,
+                        *method_name,
+                        subst,
+                    );
                     partial_fields.push(apply_constraint_dicts(
                         method_ref,
                         &constraint_dicts,
@@ -1017,13 +1023,25 @@ impl<'a> DictContext<'a> {
             let mut final_fields = super_fields;
             for method_name in &class.methods {
                 if let Some(&method_def_id) = instance.methods.get(method_name) {
-                    let method_ref = self.method_reference(method_def_id, span);
+                    let method_ref = Self::at_instance_ty(
+                        self.method_reference(method_def_id, span),
+                        class,
+                        instance,
+                        *method_name,
+                        subst,
+                    );
                     final_fields.push(apply_constraint_dicts(method_ref, &constraint_dicts, span));
                 } else if let Some(&default_def_id) = class.defaults.get(method_name) {
                     // Apply the default function to the partial dict.
                     // Default is `\$dClass -> body`, so `default partial_dict`
                     // produces the method implementation.
-                    let default_ref = self.method_reference(default_def_id, span);
+                    let default_ref = Self::at_instance_ty(
+                        self.method_reference(default_def_id, span),
+                        class,
+                        instance,
+                        *method_name,
+                        subst,
+                    );
                     final_fields.push(core::Expr::App(
                         Box::new(default_ref),
                         Box::new(core::Expr::Var(partial_dict_var.clone(), span)),
@@ -1060,7 +1078,13 @@ impl<'a> DictContext<'a> {
             let mut fields = super_fields;
             for method_name in &class.methods {
                 let method_expr = if let Some(&method_def_id) = instance.methods.get(method_name) {
-                    let method_ref = self.method_reference(method_def_id, span);
+                    let method_ref = Self::at_instance_ty(
+                        self.method_reference(method_def_id, span),
+                        class,
+                        instance,
+                        *method_name,
+                        subst,
+                    );
                     apply_constraint_dicts(method_ref, &constraint_dicts, span)
                 } else {
                     let error_msg = format!(
@@ -1092,6 +1116,66 @@ impl<'a> DictContext<'a> {
     }
 
     /// Create a reference to a method implementation.
+    /// An instance method reference carrying its type AT THIS INSTANCE: the
+    /// class method's signature with the class parameter replaced by the
+    /// (matched) instance head.
+    ///
+    /// The reference otherwise keeps its binder's scheme type. For pandoc's
+    /// `instance … => PandocMonad (t m)` that is `t m CommonState`; in a clone
+    /// of an imported caller (no span-keyed types to consult) monomorphization
+    /// mapped only the head `t` to the concrete monad and specialized the
+    /// method at an ill-kinded type, so the generic method ran instead of one
+    /// built for `StateT s PandocIO`. Single-parameter classes only.
+    fn at_instance_ty(
+        method_ref: core::Expr,
+        class: &ClassInfo,
+        instance: &InstanceInfo,
+        method: Symbol,
+        subst: &Subst,
+    ) -> core::Expr {
+        let core::Expr::Var(mut var, span) = method_ref else {
+            return method_ref;
+        };
+        if class.param_count != 1 || instance.instance_types.len() != 1 {
+            return core::Expr::Var(var, span);
+        }
+        let Some(scheme) = class.method_types.get(&method) else {
+            return core::Expr::Var(var, span);
+        };
+        let param = scheme
+            .constraints
+            .iter()
+            .find(|c| c.class == class.name)
+            .and_then(|c| match c.args.first() {
+                Some(Ty::Var(v)) => Some(v.clone()),
+                _ => None,
+            });
+        let head = subst.apply(&instance.instance_types[0]);
+        if let Some(param) = param {
+            let mut at = Subst::new();
+            at.insert(&param, head);
+            var.ty = at.apply(&scheme.ty);
+        } else if crate::context::transformer_headed(&head) {
+            // An IMPORTED class records only each method's arrow count
+            // (`Fun(Error, … Error)`). For a monad-like class at a transformer
+            // instance the method's result is an action in that transformer,
+            // which is all monomorphization reads: `n` erased arguments to
+            // `head <erased>`.
+            let mut arrows = 0;
+            let mut t = &scheme.ty;
+            while let Ty::Fun(_, r) = t {
+                arrows += 1;
+                t = r;
+            }
+            let mut ty = Ty::App(Box::new(head), Box::new(Ty::Error));
+            for _ in 0..arrows {
+                ty = Ty::Fun(Box::new(Ty::Error), Box::new(ty));
+            }
+            var.ty = ty;
+        }
+        core::Expr::Var(var, span)
+    }
+
     fn method_reference(&self, def_id: DefId, span: Span) -> core::Expr {
         // Builtin monad instance methods are SYNTHETIC: their DefIds are
         // hardcoded at registration and name nothing the program declared. They

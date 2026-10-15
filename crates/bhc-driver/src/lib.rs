@@ -349,6 +349,55 @@ fn superclass_param_indices(class: &bhc_interface::ExportedClass) -> Vec<Vec<usi
         .collect()
 }
 
+/// First of the reserved `DefId`s under which out-of-scope newtype
+/// representations are recorded for Core lowering (see
+/// `build_imported_constructor_map`). Far above any id a module allocates.
+const NEWTYPE_REP_DEF_ID_BASE: usize = 0x7000_0000;
+
+/// Record the representation of every known newtype whose constructor is NOT
+/// in scope, for Core lowering.
+///
+/// `import Text.Pandoc.Translations.Types (Translations)` brings only the
+/// type (the module exports it abstractly), yet `mempty :: Translations` must
+/// resolve to the wrapped `Map`'s instance — newtypes are erased. These
+/// entries sit under reserved ids no expression refers to, with no field names
+/// (so no selectors are registered for them).
+fn add_newtype_reps(
+    result: &mut bhc_hir_to_core::ConstructorInfoMap,
+    interface_constructors: &[bhc_lower::InterfaceConstructorEntry],
+    extra: Vec<(Symbol, Symbol, Vec<bhc_types::Ty>)>,
+) {
+    let mut covered: FxHashSet<Symbol> = result.values().map(|c| c.type_name).collect();
+    let from_interfaces =
+        interface_constructors
+            .iter()
+            .filter_map(|(name, _, _, type_name, is_newtype, tys)| {
+                let type_name = type_name.as_ref().filter(|_| *is_newtype)?;
+                Some((Symbol::intern(name), Symbol::intern(type_name), tys.clone()))
+            });
+    let mut next = NEWTYPE_REP_DEF_ID_BASE;
+    for (name, type_name, field_types) in from_interfaces.chain(extra) {
+        if field_types.len() != 1 || !covered.insert(type_name) {
+            continue;
+        }
+        result.insert(
+            <bhc_hir::DefId as bhc_index::Idx>::new(next),
+            bhc_hir_to_core::ConstructorInfo {
+                name,
+                type_name,
+                tag: 0,
+                arity: 1,
+                field_names: Vec::new(),
+                is_newtype: true,
+                existential_dict_count: 0,
+                existential_classes: vec![],
+                field_types,
+            },
+        );
+        next += 1;
+    }
+}
+
 impl Compiler {
     /// Create a new compiler with the given options.
     ///
@@ -570,8 +619,14 @@ impl Compiler {
                         },
                     ))
                 })
-                .collect()
+                .collect::<bhc_hir_to_core::ConstructorInfoMap>()
         };
+        let mut imported_ctors = imported_ctors;
+        add_newtype_reps(
+            &mut imported_ctors,
+            &lower_ctx.interface_constructors,
+            Vec::new(),
+        );
         let core =
             self.core_lower_with_constructors(&hir, &lower_ctx, &typed, Some(&imported_ctors))?;
         self.callbacks
@@ -2967,6 +3022,28 @@ impl Compiler {
                 }
             }
         }
+
+        let registry_reps: Vec<(bhc_intern::Symbol, bhc_intern::Symbol, Vec<bhc_types::Ty>)> =
+            registry
+                .modules
+                .values()
+                .flat_map(|info| {
+                    info.exports
+                        .constructors
+                        .iter()
+                        .filter(|(_, c)| c.is_newtype)
+                        .filter_map(|(&name, c)| {
+                            info.con_field_types
+                                .get(&name)
+                                .map(|tys| (name, c.type_con_name, tys.clone()))
+                        })
+                })
+                .collect();
+        add_newtype_reps(
+            &mut result,
+            &lower_ctx.interface_constructors,
+            registry_reps,
+        );
 
         result
     }

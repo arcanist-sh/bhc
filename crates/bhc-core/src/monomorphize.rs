@@ -72,6 +72,9 @@ pub fn monomorphize_module(
         imported,
         newtypes,
         memo: FxHashMap::default(),
+        spec_counts: FxHashMap::default(),
+        in_imported: false,
+        local_binders: FxHashSet::default(),
         cur_monad: Ty::Error,
         monad_dicts: FxHashSet::default(),
         new_bindings: Vec::new(),
@@ -93,6 +96,20 @@ pub fn monomorphize_module(
         }
     }
     let created = ctx.new_bindings.len();
+    if let Ok(filter) = std::env::var("BHC_DUMP_MONO") {
+        for b in ctx.new_bindings.iter().chain(bindings.iter()) {
+            if let Bind::NonRec(v, e) = b {
+                if v.name.as_str().contains(filter.as_str()) {
+                    eprintln!(
+                        "=== MONO BIND {} :: {:?} ===\n{:#?}",
+                        v.name.as_str(),
+                        v.ty,
+                        e
+                    );
+                }
+            }
+        }
+    }
     bindings.append(&mut ctx.new_bindings);
     module.bindings = bindings;
     created
@@ -173,6 +190,19 @@ struct Ctx<'a> {
     newtypes: &'a FxHashMap<bhc_intern::Symbol, (Vec<TyVar>, Ty)>,
     /// Memo of specializations, keyed by (binder name, concrete-type string).
     memo: FxHashMap<(String, String), Var>,
+    /// Specializations made per binder name — bounds polymorphic recursion
+    /// (see `MAX_SPECS_PER_BINDING`).
+    spec_counts: FxHashMap<String, usize>,
+    /// Whether the body being specialized is IMPORTED. Its spans belong to
+    /// another file, so this module's span-keyed `resolved` types must not be
+    /// read for it — a coincidental span match handed an imported body's
+    /// occurrences types from unrelated local expressions.
+    in_imported: bool,
+    /// Variables BOUND inside the body being specialized (lambda, let and case
+    /// binders). Imported bindings are found by NAME, so a local `\w -> …`
+    /// in an imported body was taken for a call to an imported top-level `w`
+    /// and specialized — recursively, at an ever deeper monad.
+    local_binders: FxHashSet<VarId>,
     /// The concrete monad of the specialization currently being cloned. Used to
     /// specialize a callee whose occurrence type was erased (`Ty::Error`): every
     /// polymorphic-monad call inside a clone runs in this monad. `Ty::Error` at the
@@ -255,6 +285,21 @@ impl Ctx<'_> {
             }
         }
         self.imported.get(v.name.as_str()).cloned()
+    }
+
+    /// Whether `v`'s source binding is module-local (else imported).
+    fn is_local(&self, v: &Var) -> bool {
+        self.top.get(&v.id).is_some_and(|b| b.0.name == v.name)
+    }
+
+    /// The span-keyed occurrence type, when the body being specialized is
+    /// this module's own.
+    fn occ_ty(&self, span: &Span) -> Option<&Ty> {
+        if self.in_imported {
+            None
+        } else {
+            self.resolved.get(span)
+        }
     }
 }
 
@@ -455,14 +500,50 @@ fn instantiation_of(binder_ty: &Ty, conc_ty: &Ty) -> Option<Instantiation> {
     Some(Instantiation { monad, others })
 }
 
-/// Get or create the specialization of a top-level binding (local or imported) at
-/// an instantiation — chiefly the concrete monad its monad variable maps to.
-///
-/// A binding is specialized when its type has a monad variable (see
-/// `monad_var_of`): its only variable, or the single one in monad position
-/// among several (`metaToContext :: Monad m => … -> m (Context a)`, or an
-/// instance method of `PandocMonad (StateT st m)`, both reached with `m` at a
-/// transformer stack whose builtin Monad dictionary cannot run them).
+/// Deepest transformer nesting a specialization is made at.
+const MAX_TRANSFORMER_DEPTH: usize = 4;
+
+/// Most specializations made of any one binding.
+const MAX_SPECS_PER_BINDING: usize = 16;
+
+/// How many transformer constructors are nested in `ty`
+/// (`StateT s (ExceptT e (StateT c IO))` is 3).
+fn transformer_depth(ty: &Ty) -> usize {
+    let mut head = ty;
+    let mut args = Vec::new();
+    while let Ty::App(f, x) = head {
+        args.push(x.as_ref());
+        head = f.as_ref();
+    }
+    let own = usize::from(matches!(head, Ty::Con(c) if is_transformer_name(c.name.as_str())));
+    own + args.into_iter().map(transformer_depth).max().unwrap_or(0)
+}
+
+/// A transformer constructor applied to MORE than its three arguments
+/// (`ExceptT e (StateT s IO) v CommonState`): an ill-kinded type, produced
+/// when a binder's `t m a` (both `t` and `m` variables) has only its head `t`
+/// mapped to a concrete monad. Specializing at such a type cloned PandocMonad's
+/// generic `(t m)` instance methods at nonsense instantiations.
+fn over_applied(ty: &Ty) -> bool {
+    let mut head = ty;
+    let mut n = 0usize;
+    while let Ty::App(f, _) = head {
+        n += 1;
+        head = f;
+    }
+    let own = matches!(head, Ty::Con(c) if is_transformer_name(c.name.as_str())) && n > 3;
+    own || match ty {
+        Ty::App(f, x) | Ty::Fun(f, x) => over_applied(f) || over_applied(x),
+        Ty::List(a) => over_applied(a),
+        Ty::Tuple(ts) => ts.iter().any(over_applied),
+        _ => false,
+    }
+}
+
+fn is_transformer_name(name: &str) -> bool {
+    matches!(name, "StateT" | "ExceptT" | "ReaderT" | "WriterT")
+}
+
 fn get_or_specialize(
     orig_var: &Var,
     orig_body: &Expr,
@@ -497,13 +578,29 @@ fn get_or_specialize(
     // binder variables an occurrence fixed get their own images; their body
     // occurrences fall under the monad mapping, which only steers codegen's
     // transformer-stack decisions (a value type never names a transformer).
+    //
+    // Only variables in MONAD position (the head of an application, or a
+    // transformer's inner-monad argument) are mapped. A value-position one
+    // made a record accessor `CommonState -> v` into `CommonState -> <monad>`
+    // and `mempty`'s `v` into the monad, and cloned both as monadic code — the
+    // clone of a `PandocMonad m =>` helper then called those and crashed.
+    let imported_body = !ctx.is_local(orig_var);
+    let saved_imported = std::mem::replace(&mut ctx.in_imported, imported_body);
     let mut subst = Subst::new();
     let mut body_vars = Vec::new();
-    collect_body_tyvars(orig_body, ctx.resolved, &mut body_vars);
+    let no_resolved = FxHashMap::default();
+    let body_resolved = if ctx.in_imported {
+        &no_resolved
+    } else {
+        ctx.resolved
+    };
+    collect_body_tyvars(orig_body, body_resolved, &mut body_vars);
     for tv in body_vars {
         subst.insert(&tv, concrete_monad.clone());
     }
-    for v in &binder_vars {
+    let mut binder_monad_vars = Vec::new();
+    collect_monad_tyvars(&orig_var.ty, &mut binder_monad_vars);
+    for v in &binder_monad_vars {
         if *v != mb {
             subst.insert(v, concrete_monad.clone());
         }
@@ -514,6 +611,10 @@ fn get_or_specialize(
     subst.insert(&mb, concrete_monad.clone());
 
     let new_ty = subst.apply(&orig_var.ty);
+    if over_applied(&new_ty) {
+        ctx.in_imported = saved_imported;
+        return None;
+    }
     let new_id = fresh_var_id();
     let new_name = Symbol::intern(&format!(
         "{}$$mono{}",
@@ -521,14 +622,36 @@ fn get_or_specialize(
         new_id.index()
     ));
     let spec_var = Var::new(new_name, new_id, new_ty);
+    // Polymorphic recursion (pandoc's `toJiraBlocks` recurses at a deeper
+    // transformer stack each round) would specialize without end — thousands
+    // of ever-larger clones until the compiler was killed. Beyond these bounds
+    // the generic, dictionary-passing original is used.
+    if transformer_depth(&concrete_monad) > MAX_TRANSFORMER_DEPTH {
+        ctx.in_imported = saved_imported;
+        return None;
+    }
+    let count = ctx.spec_counts.entry(key.0.clone()).or_insert(0);
+    if *count >= MAX_SPECS_PER_BINDING {
+        ctx.in_imported = saved_imported;
+        return None;
+    }
+    *count += 1;
+    if std::env::var_os("BHC_DBG_MONO_SPEC").is_some() {
+        eprintln!("MONOSPEC {} #{} {}", key.0, count, key.1);
+    }
     // Memoize BEFORE recursing so a (mutually) recursive body resolves to this
     // same specialization instead of looping.
     ctx.memo.insert(key, spec_var.clone());
     let saved_monad = std::mem::replace(&mut ctx.cur_monad, concrete_monad.clone());
     let saved_dicts = std::mem::replace(&mut ctx.monad_dicts, own_monad_dicts(orig_body));
+    let mut binders = FxHashSet::default();
+    collect_binders(orig_body, &mut binders);
+    let saved_binders = std::mem::replace(&mut ctx.local_binders, binders);
     let spec_body = specialize_body(orig_body, &subst, ctx);
+    ctx.local_binders = saved_binders;
     ctx.cur_monad = saved_monad;
     ctx.monad_dicts = saved_dicts;
+    ctx.in_imported = saved_imported;
     ctx.new_bindings
         .push(Bind::NonRec(spec_var.clone(), Box::new(spec_body)));
     Some(spec_var)
@@ -604,22 +727,66 @@ fn own_monad_dicts(body: &Expr) -> FxHashSet<VarId> {
 /// preferring typeck's span-keyed `resolved` type over the Core `Var.ty` (the
 /// former is internally consistent; the latter can use a different fresh id for
 /// the same variable). Also covers types embedded in `Lit`/`Case`/binders.
+/// Every variable bound inside `e` (lambda, let and case-alternative binders).
+fn collect_binders(e: &Expr, out: &mut FxHashSet<VarId>) {
+    match e {
+        Expr::Lam(v, b, _) => {
+            out.insert(v.id);
+            collect_binders(b, out);
+        }
+        Expr::Let(bind, body, _) => {
+            match bind.as_ref() {
+                Bind::NonRec(v, r) => {
+                    out.insert(v.id);
+                    collect_binders(r, out);
+                }
+                Bind::Rec(bs) => {
+                    for (v, r) in bs {
+                        out.insert(v.id);
+                        collect_binders(r, out);
+                    }
+                }
+            }
+            collect_binders(body, out);
+        }
+        Expr::Case(scrut, alts, _, _) => {
+            collect_binders(scrut, out);
+            for alt in alts {
+                for b in &alt.binders {
+                    out.insert(b.id);
+                }
+                collect_binders(&alt.rhs, out);
+            }
+        }
+        Expr::App(f, x, _) => {
+            collect_binders(f, out);
+            collect_binders(x, out);
+        }
+        Expr::TyApp(b, _, _)
+        | Expr::TyLam(_, b, _)
+        | Expr::Lazy(b, _)
+        | Expr::Cast(b, _, _)
+        | Expr::Tick(_, b, _) => collect_binders(b, out),
+        _ => {}
+    }
+}
+
 fn collect_body_tyvars(e: &Expr, resolved: &FxHashMap<Span, Ty>, out: &mut Vec<TyVar>) {
     match e {
         Expr::Var(v, span) => {
-            collect_tyvars(resolved.get(span).unwrap_or(&v.ty), out);
+            collect_monad_tyvars(resolved.get(span).unwrap_or(&v.ty), out);
         }
-        Expr::Lit(_, ty, _) | Expr::Type(ty, _) => collect_tyvars(ty, out),
+        Expr::Lit(_, ty, _) | Expr::Type(ty, _) => collect_monad_tyvars(ty, out),
         Expr::App(f, x, _) => {
             collect_body_tyvars(f, resolved, out);
             collect_body_tyvars(x, resolved, out);
         }
         Expr::TyApp(f, ty, _) => {
             collect_body_tyvars(f, resolved, out);
-            collect_tyvars(ty, out);
+            collect_monad_tyvars(ty, out);
         }
         Expr::Lam(v, b, _) => {
-            collect_tyvars(&v.ty, out);
+            collect_monad_tyvars(&v.ty, out);
             collect_body_tyvars(b, resolved, out);
         }
         Expr::TyLam(_, b, _) | Expr::Lazy(b, _) | Expr::Cast(b, _, _) | Expr::Tick(_, b, _) => {
@@ -628,12 +795,12 @@ fn collect_body_tyvars(e: &Expr, resolved: &FxHashMap<Span, Ty>, out: &mut Vec<T
         Expr::Let(bind, body, _) => {
             match bind.as_ref() {
                 Bind::NonRec(v, r) => {
-                    collect_tyvars(&v.ty, out);
+                    collect_monad_tyvars(&v.ty, out);
                     collect_body_tyvars(r, resolved, out);
                 }
                 Bind::Rec(bs) => {
                     for (v, r) in bs {
-                        collect_tyvars(&v.ty, out);
+                        collect_monad_tyvars(&v.ty, out);
                         collect_body_tyvars(r, resolved, out);
                     }
                 }
@@ -642,10 +809,10 @@ fn collect_body_tyvars(e: &Expr, resolved: &FxHashMap<Span, Ty>, out: &mut Vec<T
         }
         Expr::Case(s, alts, ty, _) => {
             collect_body_tyvars(s, resolved, out);
-            collect_tyvars(ty, out);
+            collect_monad_tyvars(ty, out);
             for a in alts {
                 for b in &a.binders {
-                    collect_tyvars(&b.ty, out);
+                    collect_monad_tyvars(&b.ty, out);
                 }
                 collect_body_tyvars(&a.rhs, resolved, out);
             }
@@ -666,13 +833,16 @@ fn specialize_body(e: &Expr, subst: &Subst, ctx: &mut Ctx) -> Expr {
             // substitute into; fall back to the Core `Var.ty` (the only source for
             // an imported clone body, whose spans are not in this module's map).
             let new_ty = {
-                let base_ty = ctx.resolved.get(span).unwrap_or(&v.ty);
+                let base_ty = ctx.occ_ty(span).unwrap_or(&v.ty);
                 unfold_newtypes(&subst.apply(base_ty), ctx.newtypes, 0)
             };
             // A usable occurrence type that is a ground transformer stack: specialize
             // the callee at the monad that type names.
-            if !has_free_tyvar(&new_ty) && mentions_transformer(&new_ty) {
-                if let Some((ov, ob)) = ctx.source_binding(v) {
+            if !has_free_tyvar(&new_ty) && mentions_transformer(&new_ty) && !over_applied(&new_ty) {
+                if let Some((ov, ob)) = ctx
+                    .source_binding(v)
+                    .filter(|_| !ctx.local_binders.contains(&v.id))
+                {
                     if has_free_tyvar(&ov.ty) {
                         if let Some(inst) = instantiation_of(&ov.ty, &new_ty) {
                             if let Some(spec) = get_or_specialize(&ov, &ob, &inst, ctx) {
@@ -681,7 +851,7 @@ fn specialize_body(e: &Expr, subst: &Subst, ctx: &mut Ctx) -> Expr {
                         }
                     }
                 }
-            } else if matches!(ctx.resolved.get(span).unwrap_or(&v.ty), Ty::Error)
+            } else if matches!(ctx.occ_ty(span).unwrap_or(&v.ty), Ty::Error)
                 && mentions_transformer(&ctx.cur_monad)
             {
                 // The occurrence type was ERASED (pandoc's `lift $ setupTranslations
@@ -690,7 +860,10 @@ fn specialize_body(e: &Expr, subst: &Subst, ctx: &mut Ctx) -> Expr {
                 // `cur_monad` runs in that same monad (the writer's inner monad IS it,
                 // even under `lift`), so specialize the callee at `cur_monad`.
                 let cur = ctx.cur_monad.clone();
-                if let Some((ov, ob)) = ctx.source_binding(v) {
+                if let Some((ov, ob)) = ctx
+                    .source_binding(v)
+                    .filter(|_| !ctx.local_binders.contains(&v.id))
+                {
                     if has_free_tyvar(&ov.ty) {
                         let inst = Instantiation::at_monad(cur);
                         if let Some(spec) = get_or_specialize(&ov, &ob, &inst, ctx) {
@@ -743,11 +916,28 @@ fn specialize_body(e: &Expr, subst: &Subst, ctx: &mut Ctx) -> Expr {
         Expr::TyLam(tv, b, span) => {
             Expr::TyLam(tv.clone(), Box::new(specialize_body(b, subst, ctx)), *span)
         }
-        Expr::Let(bind, body, span) => Expr::Let(
-            Box::new(specialize_bind(bind, subst, ctx)),
-            Box::new(specialize_body(body, subst, ctx)),
-            *span,
-        ),
+        Expr::Let(bind, body, span) => {
+            let new_body = specialize_body(body, subst, ctx);
+            // A dictionary `let` the selection rewrite above emptied out
+            // (`let $superApplicative = $sel_0 $dMonad in pure`) is dropped, so
+            // the builtin operator is applied DIRECTLY: codegen routes `pure 1`
+            // by the clone's transformer stack, but a `pure` reached as a let
+            // body is lowered as a value — IO's `pure`, whose result (the bare
+            // `1`) the StateT caller then ran as a closure.
+            if let Bind::NonRec(x, _) = bind.as_ref() {
+                if dict_class_name(x.name.as_str()).is_some()
+                    && ctx.monad_dicts.contains(&x.id)
+                    && !new_body.free_vars().iter().any(|v| v.id == x.id)
+                {
+                    return new_body;
+                }
+            }
+            Expr::Let(
+                Box::new(specialize_bind(bind, subst, ctx)),
+                Box::new(new_body),
+                *span,
+            )
+        }
         Expr::Case(s, alts, ty, span) => Expr::Case(
             Box::new(specialize_body(s, subst, ctx)),
             alts.iter()
@@ -878,15 +1068,54 @@ fn has_free_tyvar(ty: &Ty) -> bool {
 
 fn mentions_transformer(ty: &Ty) -> bool {
     match ty {
-        Ty::Con(c) => matches!(
-            c.name.as_str(),
-            "StateT" | "ExceptT" | "ReaderT" | "WriterT"
-        ),
+        Ty::Con(c) => is_transformer_name(c.name.as_str()),
         Ty::App(a, b) | Ty::Fun(a, b) => mentions_transformer(a) || mentions_transformer(b),
         Ty::List(a) => mentions_transformer(a),
         Ty::Tuple(ts) => ts.iter().any(mentions_transformer),
         Ty::Forall(_, b) => mentions_transformer(b),
         _ => false,
+    }
+}
+
+/// The type variables of `ty` in MONAD position: the head of an application
+/// (`m` in `m a`) or the inner-monad argument of a transformer (`m` in
+/// `StateT s m a`).
+fn collect_monad_tyvars(ty: &Ty, out: &mut Vec<TyVar>) {
+    let push = |v: &TyVar, out: &mut Vec<TyVar>| {
+        if !out.contains(v) {
+            out.push(v.clone());
+        }
+    };
+    match ty {
+        Ty::App(..) => {
+            let mut head = ty;
+            let mut args = Vec::new();
+            while let Ty::App(f, x) = head {
+                args.push(x.as_ref());
+                head = f.as_ref();
+            }
+            args.reverse();
+            match head {
+                Ty::Var(v) => push(v, out),
+                Ty::Con(c) if is_transformer_name(c.name.as_str()) => {
+                    if let Some(Ty::Var(v)) = args.get(1) {
+                        push(v, out);
+                    }
+                }
+                _ => {}
+            }
+            for a in args {
+                collect_monad_tyvars(a, out);
+            }
+        }
+        Ty::Fun(a, b) => {
+            collect_monad_tyvars(a, out);
+            collect_monad_tyvars(b, out);
+        }
+        Ty::List(a) => collect_monad_tyvars(a, out),
+        Ty::Tuple(ts) => ts.iter().for_each(|t| collect_monad_tyvars(t, out)),
+        Ty::Forall(_, b) => collect_monad_tyvars(b, out),
+        _ => {}
     }
 }
 

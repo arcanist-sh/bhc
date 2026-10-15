@@ -837,7 +837,80 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Check whether an expression tree contains StateT/ReaderT/ExceptT/WriterT operations.
     /// Used to determine the transformer layer for top-level function definitions
     /// that are used as transformer computations.
+    /// Functions that RUN a transformer computation passed as their first
+    /// argument, producing a computation in the layer below.
+    fn is_transformer_runner(name: &str) -> bool {
+        matches!(
+            name,
+            "evalStateT"
+                | "runStateT"
+                | "execStateT"
+                | "evalState"
+                | "runState"
+                | "execState"
+                | "runReaderT"
+                | "runReader"
+                | "runExceptT"
+                | "runWriterT"
+                | "execWriterT"
+                | "runWriter"
+                | "execWriter"
+        )
+    }
+
     fn detect_transformer_for_body(&self, expr: &Expr) -> Option<TransformerLayer> {
+        let mut skip = FxHashSet::default();
+        Self::collect_runner_action_vars(expr, &mut skip);
+        self.detect_transformer_for_body_in(expr, &skip)
+    }
+
+    /// Local bindings passed BY NAME as a runner's action (`evalStateT go s`
+    /// with `go` bound in a `where`). Their operations belong to the
+    /// computation being run, like an inline action's.
+    fn collect_runner_action_vars(expr: &Expr, out: &mut FxHashSet<VarId>) {
+        match expr {
+            Expr::App(f, a, _) => {
+                let mut head = expr;
+                let mut args = Vec::new();
+                while let Expr::App(f2, a2, _) = head {
+                    args.push(a2.as_ref());
+                    head = f2.as_ref();
+                }
+                if let (Expr::Var(v, _), Some(Expr::Var(action, _))) = (head, args.last()) {
+                    if Self::is_transformer_runner(v.name.as_str()) {
+                        out.insert(action.id);
+                    }
+                }
+                Self::collect_runner_action_vars(f, out);
+                Self::collect_runner_action_vars(a, out);
+            }
+            Expr::Lam(_, b, _) | Expr::TyApp(b, _, _) => Self::collect_runner_action_vars(b, out),
+            Expr::Let(bind, b, _) => {
+                match bind.as_ref() {
+                    Bind::NonRec(_, e) => Self::collect_runner_action_vars(e, out),
+                    Bind::Rec(bs) => {
+                        for (_, e) in bs {
+                            Self::collect_runner_action_vars(e, out);
+                        }
+                    }
+                }
+                Self::collect_runner_action_vars(b, out);
+            }
+            Expr::Case(scrut, alts, _, _) => {
+                Self::collect_runner_action_vars(scrut, out);
+                for alt in alts {
+                    Self::collect_runner_action_vars(&alt.rhs, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn detect_transformer_for_body_in(
+        &self,
+        expr: &Expr,
+        skip: &FxHashSet<VarId>,
+    ) -> Option<TransformerLayer> {
         match expr {
             Expr::Var(v, _) => {
                 let name = v.name.as_str();
@@ -855,10 +928,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     _ => None,
                 }
             }
-            Expr::App(func, arg, _) => self
-                .detect_transformer_for_body(func)
-                .or_else(|| self.detect_transformer_for_body(arg)),
-            Expr::Lam(_, body, _) => self.detect_transformer_for_body(body),
+            Expr::App(func, arg, _) => {
+                // A runner's ACTION is the computation it runs, not one this
+                // binding performs: `w = evalStateT get 7` at `w :: m Int` is
+                // not a StateT function. Classifying it as one made callers
+                // bind its result as StateT, so `main`'s `b <- w; print b`
+                // returned a suspended state closure and printed nothing.
+                let mut head = expr;
+                let mut args = Vec::new();
+                while let Expr::App(f, a, _) = head {
+                    args.push(a.as_ref());
+                    head = f.as_ref();
+                }
+                args.reverse();
+                if let Expr::Var(v, _) = head {
+                    if Self::is_transformer_runner(v.name.as_str()) {
+                        return args
+                            .iter()
+                            .skip(1)
+                            .find_map(|a| self.detect_transformer_for_body_in(a, skip));
+                    }
+                }
+                self.detect_transformer_for_body_in(func, skip)
+                    .or_else(|| self.detect_transformer_for_body_in(arg, skip))
+            }
+            Expr::Lam(_, body, _) => self.detect_transformer_for_body_in(body, skip),
             Expr::Let(bind, body, _) => {
                 // A DICTIONARY's contents are the methods that are AVAILABLE,
                 // not operations this binding performs. `main :: IO ()` whose
@@ -868,34 +962,33 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // as a StateT computation, so its IO binds were lowered as
                 // StateT binds and main returned a suspended `\s -> …` closure
                 // that nothing ever ran.
-                fn is_dict_binder(v: &Var) -> bool {
-                    v.name.as_str().starts_with("$dict")
-                }
+                let is_dict_binder =
+                    |v: &Var| v.name.as_str().starts_with("$dict") || skip.contains(&v.id);
                 let in_bind = match bind.as_ref() {
                     Bind::NonRec(v, e) => {
                         if is_dict_binder(v) {
                             None
                         } else {
-                            self.detect_transformer_for_body(e)
+                            self.detect_transformer_for_body_in(e, skip)
                         }
                     }
                     Bind::Rec(bindings) => bindings.iter().find_map(|(v, e)| {
                         if is_dict_binder(v) {
                             None
                         } else {
-                            self.detect_transformer_for_body(e)
+                            self.detect_transformer_for_body_in(e, skip)
                         }
                     }),
                 };
-                in_bind.or_else(|| self.detect_transformer_for_body(body))
+                in_bind.or_else(|| self.detect_transformer_for_body_in(body, skip))
             }
-            Expr::Case(scrut, alts, _, _) => {
-                self.detect_transformer_for_body(scrut).or_else(|| {
+            Expr::Case(scrut, alts, _, _) => self
+                .detect_transformer_for_body_in(scrut, skip)
+                .or_else(|| {
                     alts.iter()
-                        .find_map(|alt| self.detect_transformer_for_body(&alt.rhs))
-                })
-            }
-            Expr::TyApp(e, _, _) => self.detect_transformer_for_body(e),
+                        .find_map(|alt| self.detect_transformer_for_body_in(&alt.rhs, skip))
+                }),
+            Expr::TyApp(e, _, _) => self.detect_transformer_for_body_in(e, skip),
             _ => None,
         }
     }
@@ -20633,9 +20726,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // as a 2-arg ExceptT-over-StateT closure keeping only `a`.
                 self.lower_stes_run_family(m_expr, s_expr, "eval")
             }
-            Some(_other) => Err(CodegenError::Internal(
-                "evalStateT over non-IO/ReaderT/ExceptT inner monad not yet supported".to_string(),
-            )),
+            Some(_other) => Err(CodegenError::Internal(format!(
+                "evalStateT over non-IO/ReaderT/ExceptT inner monad not yet supported \
+                 (action type {:?}, in {})",
+                self.monadic_action_ty(m_expr),
+                self.dbg_enclosing_bind
+            ))),
         }
     }
 
@@ -21053,6 +21149,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// throwE e = closure \_ -> Left e
+    /// The ExceptT-over-StateT stack a MonadError builtin's OWN occurrence
+    /// type names, when no transformer surrounds the use (`runIO (throwError
+    /// e)` or `runIO (catchError act h)` in `main`, where the ambient stack is
+    /// IO). Seen through a monad newtype: PandocIO is ExceptT over StateT.
+    fn occurrence_except_over_state_stack(&self) -> Option<Vec<TransformerLayer>> {
+        if !self
+            .transformer_stack
+            .layers
+            .iter()
+            .all(|l| *l == TransformerLayer::IO)
+        {
+            return None;
+        }
+        let mut result = &self.current_builtin_ty;
+        while let Ty::Fun(_, r) = result {
+            result = r;
+        }
+        let stack = self.extract_transformer_stack_from_type(result);
+        (stack.len() >= 2
+            && stack[0] == TransformerLayer::ExceptT
+            && stack[1] == TransformerLayer::StateT)
+            .then_some(stack)
+    }
+
     fn lower_builtin_throw_e(
         &mut self,
         e_expr: &Expr,
@@ -21080,6 +21200,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // ExceptT over StateT: \(env, s) -> (Left e, s)
         if self.transformer_stack.is_except_t_over_state_t() {
             return self.lower_builtin_throw_e_over_st(e_expr);
+        }
+        if let Some(stack) = self.occurrence_except_over_state_stack() {
+            let saved = std::mem::replace(&mut self.transformer_stack.layers, stack);
+            let result = self.lower_builtin_throw_e_over_st(e_expr);
+            self.transformer_stack.layers = saved;
+            return result;
         }
         // ExceptT over ReaderT: same as plain ExceptT (r is ignored in throwE)
 
@@ -21393,6 +21519,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // ExceptT over ReaderT: \(env, r) -> ...threads reader-env...
         if self.transformer_stack.is_except_t_over_reader_t() {
             return self.lower_builtin_catch_e_over_rt(m_expr, handler_expr);
+        }
+        if let Some(stack) = self.occurrence_except_over_state_stack() {
+            let saved = std::mem::replace(&mut self.transformer_stack.layers, stack);
+            let result = self.lower_builtin_catch_e_over_st(m_expr, handler_expr);
+            self.transformer_stack.layers = saved;
+            return result;
         }
 
         let m_val = self
@@ -46747,6 +46879,24 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Pre-pass: scan all bindings to detect which functions use StateT/ReaderT/ExceptT/WriterT.
     /// This populates the function sets so that `detect_operation_layer` can recognize
     /// calls to user-defined monadic functions.
+    /// The outermost transformer layer a binding's DECLARED result type names
+    /// (seeing through monad newtypes), when it names one.
+    ///
+    /// The body/callee scan below guesses; a clone made by monomorphization
+    /// (`tt$$mono :: Term -> StateT Int PandocIO Text`) has an exact type, and
+    /// the scan, reaching PandocIO's ExceptT-level instance methods through
+    /// its callees, classed it an ExceptT function — its callers then LIFTED
+    /// its StateT action as if it were an inner one and ran it with the wrong
+    /// arity.
+    fn declared_transformer_layer(&self, ty: &Ty) -> Option<TransformerLayer> {
+        let result = self.get_return_type_from_function_type(ty);
+        let stack = self.extract_transformer_stack_from_type(result);
+        stack
+            .first()
+            .copied()
+            .filter(|l| *l != TransformerLayer::IO)
+    }
+
     fn detect_transformer_functions(&mut self, bindings: &[Bind]) {
         // First pass: detect direct users of get/put/ask/throwE/tell/etc.
         for bind in bindings {
@@ -46755,7 +46905,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     if Self::declared_io_result(&var.ty) {
                         continue;
                     }
-                    if let Some(layer) = self.detect_transformer_for_body(expr) {
+                    if let Some(layer) = self
+                        .declared_transformer_layer(&var.ty)
+                        .or_else(|| self.detect_transformer_for_body(expr))
+                    {
                         let name = var.name.as_str().to_string();
                         match layer {
                             TransformerLayer::StateT => {
@@ -46779,7 +46932,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         if Self::declared_io_result(&var.ty) {
                             continue;
                         }
-                        if let Some(layer) = self.detect_transformer_for_body(expr) {
+                        if let Some(layer) = self
+                            .declared_transformer_layer(&var.ty)
+                            .or_else(|| self.detect_transformer_for_body(expr))
+                        {
                             let name = var.name.as_str().to_string();
                             match layer {
                                 TransformerLayer::StateT => {
@@ -54752,8 +54908,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         self.integer_vars.insert(var.id);
                     }
 
+                    // A let-bound transformer COMPUTATION runs in the stack its
+                    // type names, not the enclosing function's: `where go = do
+                    // …` passed to `evalStateT go s` inside `render :: Monad m
+                    // => m String` lowered its binds under render's (empty)
+                    // stack, as IO binds, and returned garbage.
+                    let own_stack = {
+                        let mut st = self.extract_transformer_stack_from_type(&var.ty);
+                        if st.last() == Some(&TransformerLayer::IO) {
+                            st.pop();
+                        }
+                        st
+                    };
+                    let switch = own_stack.first().is_some_and(|top| {
+                        *top != TransformerLayer::IO
+                            && self.transformer_stack.layers.first() != Some(top)
+                    });
+                    let saved = switch
+                        .then(|| std::mem::replace(&mut self.transformer_stack.layers, own_stack));
+
                     // Create a thunk for lazy evaluation
-                    let thunk_result = self.lower_lazy(rhs.as_ref())?;
+                    let thunk_result = self.lower_lazy(rhs.as_ref());
+                    if let Some(old) = saved {
+                        self.transformer_stack.layers = old;
+                    }
+                    let thunk_result = thunk_result?;
                     if let Some(val) = thunk_result {
                         self.env.insert(var.id, val);
                         self.thunked_vars.insert(var.id);

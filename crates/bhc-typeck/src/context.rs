@@ -7675,7 +7675,7 @@ impl TyCtxt {
             // otherwise fall back to a fresh type variable
             // An untyped import of a MonadError method (`import
             // Control.Monad.Except (catchError)` bound to a stub or a
-            // scheme-less imported value)
+            // scheme-less imported value), or of `liftIO`,
             // takes the class method's scheme. With a fresh variable instead,
             // `runIO (catchError act h)` never tied `act`'s monad to PandocIO,
             // so `act`'s binds and `return`s compiled for no monad at all.
@@ -7687,6 +7687,11 @@ impl TyCtxt {
             .and_then(|base| match base {
                 "throwError" => Some(<DefId as bhc_index::Idx>::new(10071)),
                 "catchError" => Some(<DefId as bhc_index::Idx>::new(10072)),
+                // `import Control.Monad.IO.Class (liftIO)` binds a scheme-less
+                // value; typed fresh, its argument unified with the RESULT
+                // monad, so the IO action inside (`liftIO (return x)`) was
+                // compiled at the caller's transformer stack.
+                "liftIO" => Some(<DefId as bhc_index::Idx>::new(10011)),
                 _ => None,
             })
             .and_then(|id| self.env.lookup_global(id).cloned());

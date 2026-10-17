@@ -3483,6 +3483,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             None,
         );
         self.functions.insert(VarId::new(1000179), string_unwords);
+        // System.FilePath.Posix splitPath / splitDirectories (C string ->
+        // cons list of C strings) and joinPath (cons list of C strings -> C
+        // string), same calling shape as lines/unlines.
+        for (id, name) in [
+            (1000535, "bhc_cstr_split_path"),
+            (1000536, "bhc_cstr_split_directories"),
+            (1000537, "bhc_cstr_join_path"),
+        ] {
+            let f = self.module.llvm_module().add_function(
+                name,
+                ptr_type.fn_type(&[ptr_type.into()], false),
+                None,
+            );
+            self.functions.insert(VarId::new(id), f);
+        }
         // bhc_string_length(str_ptr) -> i64  (strlen wrapper for C strings)
         let string_length = self.module.llvm_module().add_function(
             "bhc_string_length",
@@ -4828,6 +4843,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .llvm_module()
                 .add_function("bhc_catch_typed", catch_typed_type, None);
         self.functions.insert(VarId::new(1000703), catch_typed_fn);
+        // bhc_try_typed(action_fn, action_env, type_tag: i64) -> Either
+        let try_typed_fn = self.module.llvm_module().add_function(
+            "bhc_try_typed",
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), i64_type.into()], false),
+            None,
+        );
+        self.functions.insert(VarId::new(1000538), try_typed_fn);
         // bhc_show_exception(ptr) -> ptr
         let show_exc_fn = self.module.llvm_module().add_function(
             "bhc_show_exception",
@@ -6247,6 +6269,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Left) $ …` — aborted on a stub.
             "handle" => self.lower_builtin_catch(args[1], args[0]),
             "try" => self.lower_builtin_try(args[0]),
+            // System.IO.Error: IOException-only try/catch (exception tag 1).
+            "tryIOError" => self.lower_builtin_try_typed(args[0], 1),
+            "catchIOError" => self.lower_builtin_catch_tagged(args[0], args[1], Some(1)),
             "bracket" => self.lower_builtin_bracket(args[0], args[1], args[2]),
             "finally" => self.lower_builtin_finally(args[0], args[1]),
             "onException" => self.lower_builtin_on_exception(args[0], args[1]),
@@ -6756,6 +6781,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "isRelative" => self.lower_builtin_file_pred(args[0], 1000527, "is_relative"),
             "hasExtension" => self.lower_builtin_file_pred(args[0], 1000528, "has_extension"),
             "splitExtension" => self.lower_builtin_split_extension(args[0]),
+            "splitPath" => self.lower_builtin_cstr_to_cstr_list(args[0], 1000535, "splitPath"),
+            "splitDirectories" => {
+                self.lower_builtin_cstr_to_cstr_list(args[0], 1000536, "splitDirectories")
+            }
+            "joinPath" => self.lower_builtin_cstr_list_to_cstr(args[0], 1000537, "joinPath"),
 
             // E.19: Directory operations
             "setCurrentDirectory" => {
@@ -7859,6 +7889,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 })?;
                 self.except_t_fmap_over_st_from_values(f_val, m_val)
             }
+            "ExceptT.liftIO" if self.transformer_stack.is_except_t_over_state_t() => {
+                self.lower_liftio_except_t_over_st(args[0])
+            }
             "ExceptT.lift" | "ExceptT.liftIO" => self.lower_builtin_except_t_lift(args[0]),
             "throwE" => self.lower_builtin_throw_e(args[0]),
             "catchE" => self.lower_builtin_catch_e(args[0], args[1]),
@@ -7894,6 +7927,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         .is_state_t_over_except_t_over_state_t()
                 {
                     return self.lower_stes_inner_lifted(args[0]);
+                }
+                if name == "liftIO"
+                    && self.current_transformer_layer() == TransformerLayer::ExceptT
+                    && self.transformer_stack.is_except_t_over_state_t()
+                {
+                    return self.lower_liftio_except_t_over_st(args[0]);
                 }
                 match self.current_transformer_layer() {
                     TransformerLayer::ExceptT => self.lower_builtin_except_t_lift(args[0]),
@@ -14607,6 +14646,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         action_expr: &Expr,
         handler_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        self.lower_builtin_catch_tagged(action_expr, handler_expr, None)
+    }
+
+    /// `catch` with an explicit exception tag (`catchIOError` passes 1), or
+    /// the tag inferred from the handler's parameter type when `None`.
+    fn lower_builtin_catch_tagged(
+        &mut self,
+        action_expr: &Expr,
+        handler_expr: &Expr,
+        tag: Option<u64>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         // Wrap the action as a thunk so it's deferred (not eagerly evaluated)
         let action_closure = self.wrap_io_as_thunk(action_expr)?;
         let handler_val = self
@@ -14618,7 +14668,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let handler_fn = self.extract_closure_fn_ptr(handler_closure)?;
 
         // Infer exception type tag from handler expression
-        let type_tag = self.infer_exception_tag_from_handler(handler_expr);
+        let type_tag = tag.unwrap_or_else(|| self.infer_exception_tag_from_handler(handler_expr));
         let i64_type = self.llvm_context().i64_type();
         let tag_val = i64_type.const_int(type_tag, false);
 
@@ -14805,6 +14855,37 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // ADT allocation infrastructure that's not yet available here.
         let result = self.lower_expr(action_expr)?;
         Ok(result)
+    }
+
+    /// Lower a `try` that really reifies exceptions: `tryIOError` (tag 1).
+    ///
+    /// The action runs deferred under `bhc_try_typed`, which returns
+    /// `Right result`, or `Left payload` for an exception with a matching tag.
+    /// (Plain `try` stays the identity above: it also names Parsec's `try`.)
+    fn lower_builtin_try_typed(
+        &mut self,
+        action_expr: &Expr,
+        type_tag: u64,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let action_closure = self.wrap_io_as_thunk(action_expr)?;
+        let action_fn = self.extract_closure_fn_ptr(action_closure)?;
+        let tag_val = self.llvm_context().i64_type().const_int(type_tag, false);
+        let try_rts = self
+            .functions
+            .get(&VarId::new(1000538))
+            .ok_or_else(|| CodegenError::Internal("bhc_try_typed not declared".to_string()))?;
+        let result = self
+            .builder()
+            .build_call(
+                *try_rts,
+                &[action_fn.into(), action_closure.into(), tag_val.into()],
+                "try_result",
+            )
+            .map_err(|e| CodegenError::Internal(format!("try call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("try: returned void".to_string()))?;
+        Ok(Some(result))
     }
 
     /// Lower `bracket` - acquire/use/release with exception safety.
@@ -19334,8 +19415,45 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let action_val = self.lower_lifted_arg(action_expr)?.ok_or_else(|| {
             CodegenError::Internal("StateT.lift: action has no value".to_string())
         })?;
+        self.state_t_lift_from_value(action_val)
+    }
 
-        let _ptr_type = self.type_mapper().ptr_type();
+    /// `liftIO io` under ExceptT over StateT (`PandocIO`'s representation).
+    ///
+    /// `liftIO` lifts from the IO BASE, so its argument must be lowered with
+    /// every transformer layer popped. The generic `lift`/`liftIO` arm crossed
+    /// only the ExceptT layer and lowered `putStrLn "x" >> return 7` as a StateT
+    /// computation, which `bhc_except_t_lift_auto_over_st` then ran as if it
+    /// were the lifted action's result: the program printed "x" and crashed on
+    /// the bogus value. This lowers it as `lift (lift io)`: IO → StateT → ExceptT.
+    fn lower_liftio_except_t_over_st(
+        &mut self,
+        io_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let mut popped = Vec::new();
+        while self.current_transformer_layer() != TransformerLayer::IO {
+            match self.transformer_stack.pop() {
+                Some(layer) => popped.push(layer),
+                None => break,
+            }
+        }
+        let io_val = self.lower_expr(io_expr);
+        while let Some(layer) = popped.pop() {
+            self.transformer_stack.push(layer);
+        }
+        let io_val = io_val?
+            .ok_or_else(|| CodegenError::Internal("liftIO/et-st: io has no value".to_string()))?;
+        let st_val = self.state_t_lift_from_value(io_val)?.ok_or_else(|| {
+            CodegenError::Internal("liftIO/et-st: StateT lift has no value".to_string())
+        })?;
+        Ok(Some(self.apply_except_t_lift_to_value_over_st(st_val)?))
+    }
+
+    /// `StateT.lift` of an already-lowered base action: `\(env, s) -> (a, s)`.
+    fn state_t_lift_from_value(
+        &mut self,
+        action_val: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let fn_name = "bhc_state_t_lift";
 
         let func = self.get_or_create_transformer_fn(fn_name);
@@ -36800,6 +36918,62 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower `lines` — call RTS bhc_string_lines.
+    /// Lower a `String -> [String]` builtin backed by an RTS function that
+    /// takes a C string and returns a cons list of C strings.
+    fn lower_builtin_cstr_to_cstr_list(
+        &mut self,
+        str_expr: &Expr,
+        rts_id: usize,
+        name: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let str_val = self
+            .lower_expr(str_expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no string", name)))?;
+        let str_ptr = self.value_to_ptr(str_val)?;
+        let str_cstr = self.char_list_to_cstring(str_ptr)?;
+        let rts_fn = self
+            .functions
+            .get(&VarId::new(rts_id))
+            .ok_or_else(|| CodegenError::Internal(format!("{} RTS function not declared", name)))?;
+        let cstr_list = self
+            .builder()
+            .build_call(*rts_fn, &[str_cstr.into()], name)
+            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", name, e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", name)))?;
+        let result = self.cstring_list_to_char_list_list(cstr_list.into_pointer_value())?;
+        Ok(Some(result.into()))
+    }
+
+    /// Lower a `[String] -> String` builtin backed by an RTS function that
+    /// takes a cons list of C strings and returns a C string.
+    fn lower_builtin_cstr_list_to_cstr(
+        &mut self,
+        list_expr: &Expr,
+        rts_id: usize,
+        name: &str,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let list_val = self
+            .lower_expr(list_expr)?
+            .ok_or_else(|| CodegenError::Internal(format!("{}: no list", name)))?;
+        let list_ptr = self.value_to_ptr(list_val)?;
+        let cstr_list = self.char_list_list_to_cstring_list(list_ptr)?;
+        let rts_fn = self
+            .functions
+            .get(&VarId::new(rts_id))
+            .ok_or_else(|| CodegenError::Internal(format!("{} RTS function not declared", name)))?;
+        let cstr_result = self
+            .builder()
+            .build_call(*rts_fn, &[cstr_list.into()], name)
+            .map_err(|e| CodegenError::Internal(format!("{} call failed: {:?}", name, e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal(format!("{}: returned void", name)))?;
+        let char_list = self.cstring_to_char_list(cstr_result.into_pointer_value())?;
+        Ok(Some(char_list.into()))
+    }
+
     fn lower_builtin_lines(
         &mut self,
         str_expr: &Expr,
@@ -59045,6 +59219,8 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "catch" => Some(2),
         "handle" => Some(2),
         "try" => Some(1),
+        "tryIOError" => Some(1),
+        "catchIOError" => Some(2),
         "bracket" => Some(3),
         "finally" | "onException" => Some(2),
         "mask" | "mask_" | "uninterruptibleMask" | "uninterruptibleMask_" => Some(1),
@@ -59274,6 +59450,9 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "isRelative" => Some(1),
         "hasExtension" => Some(1),
         "splitExtension" => Some(1),
+        "splitPath" => Some(1),
+        "splitDirectories" => Some(1),
+        "joinPath" => Some(1),
         "setCurrentDirectory" => Some(1),
         "removeDirectory" => Some(1),
         "renameFile" => Some(2),

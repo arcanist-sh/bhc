@@ -976,7 +976,7 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         // find the instance's own `*>`.
         let name = instance_local_qualified_method(ctx, name).unwrap_or(name);
         // Check if this is a class method
-        let is_method = ctx.is_class_method(name);
+        let is_method = ctx.class_method_of_def(def_ref.def_id, name);
         // `return` is in NO class's method list: the builtin Monad layout is
         // [`>>=`, `>>`] and `return` is Applicative's `pure` under another
         // name, so `is_class_method` does not recognise it and the whole
@@ -1261,6 +1261,15 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 var.ty = occ;
             }
         }
+        // A whole-body instance alias (`label = Impl.label`) is the method
+        // at the instance; typeck records no type at its span, and without
+        // one the monomorphizer never specializes the implementation there
+        // (its `liftIO` then compiled as the identity of an unknown monad).
+        if let Some(alias_ty) = ctx.instance_alias_ty(def_ref.span) {
+            if !has_type_variables(alias_ty) {
+                var.ty = alias_ty.clone();
+            }
+        }
         core::Expr::Var(var, def_ref.span)
     } else {
         // Variable not found - this could be a builtin or external reference
@@ -1316,6 +1325,11 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 return Ok(dicted);
             }
             if all_deferred && !any_in_scope {
+                if let Some(dicted) =
+                    instance_alias_dicts(ctx, def_ref, base_expr.clone(), &user_constraints)
+                {
+                    return Ok(dicted);
+                }
                 // "Defer to App-level" assumes this reference is the head of an
                 // application, so an argument type will pin the constraint. A
                 // constrained *value* has no arguments and is never that head:
@@ -2189,6 +2203,79 @@ fn hint_lift_a2_function_ty(ctx: &mut LowerContext, f: &hir::Expr, x: &hir::Expr
 }
 
 /// Whether `BHC_DBG_DISPATCH` tracing is on, read once.
+/// Dictionaries for a constrained function used as a whole instance-method
+/// body — `fileExists = IO.fileExists` in pandoc's `instance PandocMonad
+/// PandocIO`, where `IO.fileExists :: (PandocMonad m, MonadIO m) => …`.
+///
+/// Such a body is eta-expanded only after it is lowered, so it never becomes
+/// the head of an application and the usual "defer to the application"
+/// path left it with no dictionaries: the instance method called its
+/// implementation one argument short. The instance fixes the class
+/// variable, so every constraint can be resolved here. `None` unless the
+/// reference is an instance alias and all its dictionaries resolve.
+fn instance_alias_dicts(
+    ctx: &mut LowerContext,
+    def_ref: &DefRef,
+    base_expr: core::Expr,
+    constraints: &[Constraint],
+) -> Option<core::Expr> {
+    if !ctx.is_instance_alias(def_ref.span) {
+        return None;
+    }
+    let inst_class = ctx.current_instance_class()?;
+    let inst_ty = ctx.current_instance_type().cloned()?;
+    let mut subst = bhc_types::Subst::new();
+    for c in constraints.iter().filter(|c| c.class == inst_class) {
+        for a in &c.args {
+            if let Ty::Var(v) = a {
+                subst.insert(v, inst_ty.clone());
+            }
+        }
+    }
+    if subst.is_empty() {
+        return None;
+    }
+    // When `lower_var` found no ground instance-level type for the alias,
+    // carry the scheme instantiated at the instance instead: the
+    // monomorphizer specializes the implementation from it.
+    let mut base_expr = base_expr;
+    if let core::Expr::Var(v, _) = &mut base_expr {
+        if matches!(v.ty, Ty::Error) || has_type_variables(&v.ty) {
+            if let Some(scheme) = ctx.lookup_scheme(def_ref.def_id) {
+                v.ty = subst.apply(&scheme.ty);
+            }
+        }
+    }
+    let mut result = base_expr;
+    for c in constraints {
+        let at_inst = Constraint::new_multi(
+            c.class,
+            c.args.iter().map(|a| subst.apply(a)).collect(),
+            c.span,
+        );
+        let dict = ctx.resolve_dictionary(&at_inst, def_ref.span)?;
+        result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
+    }
+    Some(result)
+}
+
+/// The `IO` head of a monad-family occurrence's own recorded type (`IO b` for
+/// `a >> b`, after stripping the arrows of a partial application), or `None`
+/// when typeck recorded anything else.
+fn io_occurrence_head(ctx: &LowerContext, span: Span) -> Option<Ty> {
+    let ty = ctx.resolved_expr_ty_opt(span)?;
+    let mut cur = &ty;
+    while let Ty::Fun(_, r) = cur {
+        cur = r.as_ref();
+    }
+    match cur {
+        Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(c) if c.name.as_str() == "IO") => {
+            Some(head.as_ref().clone())
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn dispatch_dbg() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| std::env::var_os("BHC_DBG_DISPATCH").is_some())
@@ -4286,7 +4373,7 @@ fn lower_app(
             let method_name = canonical_functor_method(var.name);
 
             // Case 1: Class method resolution
-            if let Some(class_name) = ctx.is_class_method(method_name) {
+            if let Some(class_name) = ctx.class_method_of_def(def_ref.def_id, method_name) {
                 let is_user = ctx.is_user_class(class_name);
                 let is_monad_family = ctx.is_monad_family_class(class_name);
 
@@ -4416,21 +4503,25 @@ fn lower_app(
                         } else {
                             try_infer_arg_type(ctx, x).or_else(|| {
                                 // Fallback: use monad context stack for >>=/>>/return/pure
+                                // — after an IO head on the occurrence's own type
+                                // (see `io_occurrence_head`).
                                 if is_monad_family {
-                                    ctx.current_monad_type().cloned().or_else(|| {
-                                        // Last resort: recover the monad constructor from
-                                        // this method application's own fixpoint-resolved
-                                        // type `N b` (strip the value arg). Lets a
-                                        // user/derived monad's `>>=` dispatch when the
-                                        // operands' types are themselves unresolved — e.g.
-                                        // `return 5 >>= \x -> ...` in a top-level do-block
-                                        // over a GND newtype, where both operands are
-                                        // as-yet-undispatched `return`s.
-                                        match ctx.resolved_expr_ty_opt(span) {
-                                            Some(Ty::App(head, _)) => Some(*head),
-                                            _ => None,
-                                        }
-                                    })
+                                    io_occurrence_head(ctx, span)
+                                        .or_else(|| ctx.current_monad_type().cloned())
+                                        .or_else(|| {
+                                            // Last resort: recover the monad constructor from
+                                            // this method application's own fixpoint-resolved
+                                            // type `N b` (strip the value arg). Lets a
+                                            // user/derived monad's `>>=` dispatch when the
+                                            // operands' types are themselves unresolved — e.g.
+                                            // `return 5 >>= \x -> ...` in a top-level do-block
+                                            // over a GND newtype, where both operands are
+                                            // as-yet-undispatched `return`s.
+                                            match ctx.resolved_expr_ty_opt(span) {
+                                                Some(Ty::App(head, _)) => Some(*head),
+                                                _ => None,
+                                            }
+                                        })
                                 } else {
                                     None
                                 }
@@ -4652,7 +4743,10 @@ fn lower_app(
             // Class methods are excluded: their own class constraint must be
             // turned into a dictionary *selection* (`$sel_N $dict`) by the
             // method-selection path, not passed as an ordinary argument.
-            if ctx.is_class_method(method_name).is_none() {
+            if ctx
+                .class_method_of_def(def_ref.def_id, method_name)
+                .is_none()
+            {
                 if let Some(dicts) = resolve_constrained_fn_dicts(ctx, def_ref, &[x], span) {
                     let head = at_occurrence_ty(ctx, &var, def_ref.span);
                     let mut result = core::Expr::Var(head, def_ref.span);
@@ -4676,7 +4770,7 @@ fn lower_app(
                 eprintln!(
                     "[fmap] head={} is_method={:?} args={} occ={:?}",
                     method_name,
-                    ctx.is_class_method(method_name),
+                    ctx.class_method_of_def(head_def_ref.def_id, method_name),
                     collected_args.len(),
                     ctx.resolved_expr_ty_opt(x.span())
                         .or_else(|| ctx.expr_ty_opt(x.span()))
@@ -4684,7 +4778,7 @@ fn lower_app(
             }
 
             // Case 3a: Head is a class method (user-defined or monad-family)
-            if let Some(class_name) = ctx.is_class_method(method_name) {
+            if let Some(class_name) = ctx.class_method_of_def(head_def_ref.def_id, method_name) {
                 let is_user = ctx.is_user_class(class_name);
                 let is_monad_family = ctx.is_monad_family_class(class_name);
 
@@ -4978,8 +5072,17 @@ fn lower_app(
                                 if is_value_class {
                                     ctx.resolved_expr_ty_opt(span).filter(has_concrete_head)
                                 } else if is_monad_family {
-                                    ctx.current_monad_type()
-                                        .cloned()
+                                    // An IO action nested inside a user monad's
+                                    // do-block — `n <- liftIO (putStrLn "x" >>
+                                    // return 7)` in `App` — has operands that pin
+                                    // nothing, and the context stack holds the
+                                    // ENCLOSING monad. Typeck recorded this
+                                    // occurrence at IO; dispatching it at `App`
+                                    // ran the IO action through App's bind and
+                                    // returned a bogus value. Trust an IO head on
+                                    // the occurrence's own type before the stack.
+                                    io_occurrence_head(ctx, span)
+                                        .or_else(|| ctx.current_monad_type().cloned())
                                         .or_else(|| {
                                             if std::env::var("BHC_NO_CART").is_ok() {
                                                 return None;
@@ -5427,7 +5530,7 @@ fn lower_app(
                     return Ok(core::Expr::App(Box::new(result), Box::new(x_core), span));
                 }
             }
-            if let Some(class_name) = ctx.is_class_method(method_name) {
+            if let Some(class_name) = ctx.class_method_of_def(head_def_ref.def_id, method_name) {
                 if ctx.is_monad_family_class(class_name)
                     && (ctx.lookup_dict(class_name).is_none()
                         || !in_scope_dict_matches(ctx, class_name, span))
@@ -5666,7 +5769,7 @@ fn lower_type_app(
 
             // Check if this is a class method that needs dictionary resolution.
             // Applies to user-defined classes and monad-family classes at non-builtin types.
-            if let Some(class_name) = ctx.is_class_method(method_name) {
+            if let Some(class_name) = ctx.class_method_of_def(def_ref.def_id, method_name) {
                 let is_user = ctx.is_user_class(class_name);
                 let is_monad_family = ctx.is_monad_family_class(class_name);
                 if is_user || (is_monad_family && !LowerContext::is_builtin_monad_type(ty)) {

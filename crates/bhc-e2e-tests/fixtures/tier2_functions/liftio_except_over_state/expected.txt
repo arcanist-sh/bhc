@@ -1,0 +1,8 @@
+plain
+Right 7
+stateful
+Right 16
+before throw
+Left "boom"
+app
+Right 42

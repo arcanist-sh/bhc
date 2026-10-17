@@ -537,6 +537,8 @@ impl LowerContext {
             // Exception handling
             "catch",
             "try",
+            "tryIOError",
+            "catchIOError",
             "throw",
             "throwIO",
             "bracket",
@@ -872,6 +874,7 @@ impl LowerContext {
             "canonicalizePath",
             // System.FilePath
             "splitExtension",
+            "splitDirectories",
             // System.Process
             "createProcess_",
             "waitForProcess",

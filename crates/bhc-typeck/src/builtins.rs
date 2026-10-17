@@ -1421,6 +1421,45 @@ impl Builtins {
                 );
                 Scheme::poly(vec![a.clone(), e], Ty::fun(io_a, io_either))
             }),
+            ("tryIOError", {
+                // tryIOError :: IO a -> IO (Either IOError a)
+                //
+                // The error type is left a variable (as for `try`): there is
+                // no `IOError` constructor here, and its uses only pass the
+                // value on (`PandocIOError (pack u) e`).
+                let e = TyVar::new_star(996);
+                let io_a = Ty::App(
+                    Box::new(Ty::Con(self.io_con.clone())),
+                    Box::new(Ty::Var(a.clone())),
+                );
+                let either_result = Ty::App(
+                    Box::new(Ty::App(
+                        Box::new(Ty::Con(self.either_con.clone())),
+                        Box::new(Ty::Var(e.clone())),
+                    )),
+                    Box::new(Ty::Var(a.clone())),
+                );
+                let io_either = Ty::App(
+                    Box::new(Ty::Con(self.io_con.clone())),
+                    Box::new(either_result),
+                );
+                Scheme::poly(vec![a.clone(), e], Ty::fun(io_a, io_either))
+            }),
+            ("catchIOError", {
+                // catchIOError :: IO a -> (IOError -> IO a) -> IO a
+                let e = TyVar::new_star(996);
+                let io_a = Ty::App(
+                    Box::new(Ty::Con(self.io_con.clone())),
+                    Box::new(Ty::Var(a.clone())),
+                );
+                Scheme::poly(
+                    vec![a.clone(), e.clone()],
+                    Ty::fun(
+                        io_a.clone(),
+                        Ty::fun(Ty::fun(Ty::Var(e), io_a.clone()), io_a),
+                    ),
+                )
+            }),
             ("throw", {
                 // throw :: e -> a
                 let e = TyVar::new_star(998);

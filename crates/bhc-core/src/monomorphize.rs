@@ -372,7 +372,12 @@ fn try_seed(v: &Var, span: Span, resolved: &FxHashMap<Span, Ty>, ctx: &mut Ctx) 
             eprintln!("MONO seed {}: {what}", v.name.as_str());
         }
     };
-    let Some(rty) = resolved.get(&span) else {
+    // No span-keyed type: fall back to a ground type the reference itself
+    // carries — hir-to-core instantiates an instance-method alias's body
+    // (`fileExists = IO.fileExists`) at the instance, where typeck records
+    // nothing.
+    let carried = (!has_free_tyvar(&v.ty) && !matches!(v.ty, Ty::Error)).then_some(&v.ty);
+    let Some(rty) = resolved.get(&span).or(carried) else {
         trace("no resolved type at span");
         return None;
     };

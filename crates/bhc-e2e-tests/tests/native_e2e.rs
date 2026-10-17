@@ -743,6 +743,16 @@ fn test_tier3_filepath_basic_native() {
     run_native_test("tier3_io/filepath_basic", Profile::Default);
 }
 
+#[test]
+fn test_tier3_filepath_split_join_native() {
+    run_native_test("tier3_io/filepath_split_join", Profile::Default);
+}
+
+#[test]
+fn test_tier3_try_io_error_native() {
+    run_native_test("tier3_io/try_io_error", Profile::Default);
+}
+
 // System.Directory operations
 #[test]
 fn test_tier3_directory_ops_native() {
@@ -1025,6 +1035,21 @@ fn test_tier2_newtype_monoid_map() {
 #[test]
 fn test_tier2_newtype_monad_error() {
     run_native_test("tier2_functions/newtype_monad_error", Profile::Default);
+}
+
+#[test]
+fn test_tier2_liftio_except_over_state() {
+    run_native_test("tier2_functions/liftio_except_over_state", Profile::Default);
+}
+
+#[test]
+#[ignore = "whole-program builds (how e2e compiles) do not resolve a class \
+            method imported from another module: `kv` from `module C (K(..))` \
+            becomes a stub — no multi-module class fixture existed before \
+            this one. The behaviour under test passes under separate \
+            compilation (`-c`, the pandoc harness): prints 42 / <direct> / 41 <x>."]
+fn test_tier2_instance_alias_homonym() {
+    run_native_test("tier2_functions/instance_alias_homonym", Profile::Default);
 }
 
 #[test]

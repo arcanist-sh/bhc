@@ -1,0 +1,6 @@
+42
+caught missing file
+absent
+fallback
+absent
+io error: /nonexistent/bhc-fixture

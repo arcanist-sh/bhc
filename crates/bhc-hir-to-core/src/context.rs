@@ -200,6 +200,14 @@ pub struct LowerContext {
     /// The instantiated declared type of the instance method about to be
     /// lowered (see `instance_method_sig`); consumed by the lowering entry.
     instance_method_sig_override: Option<Ty>,
+    /// The instance method's type at the instance while its whole body is an
+    /// alias (`fileExists = IO.fileExists`): the alias reference's own type,
+    /// which typeck does not record at its span.
+    instance_alias_ty: Option<Ty>,
+    /// DefIds of the methods of classes declared in this module. Their
+    /// schemes need not carry the class constraint, so they are recognised
+    /// by identity in [`Self::class_method_of_def`].
+    local_method_defs: FxHashSet<DefId>,
 
     /// Head type constructors of instances that arrived through a module
     /// interface, keyed by class — `(Monad, ParsecT)` when compiling a module
@@ -275,6 +283,8 @@ impl LowerContext {
             current_instance_type: None,
             current_binding_sig: None,
             instance_method_sig_override: None,
+            instance_alias_ty: None,
+            local_method_defs: FxHashSet::default(),
             imported_instance_heads: FxHashSet::default(),
             type_aliases: FxHashMap::default(),
             current_instance_class: None,
@@ -2854,6 +2864,105 @@ impl LowerContext {
         crate::dictionary::select_method(dict_var, class, method_name, &self.class_registry, span)
     }
 
+    /// [`Self::is_class_method`] for a particular REFERENCE: `None` when the
+    /// definition only shares the method's name.
+    ///
+    /// The registry is keyed by bare name, so pandoc's
+    /// `Text.Pandoc.Class.IO.fileExists :: (PandocMonad m, MonadIO m) =>
+    /// FilePath -> m Bool` — a plain function with the same name as the
+    /// `PandocMonad` method it implements — was lowered as a method call,
+    /// dispatched on its `FilePath` argument, and reached the generic
+    /// `PandocMonad (t m)` instance (`fileExists = IO.fileExists` in the
+    /// `PandocIO` instance then called itself through it). A method's own
+    /// scheme constrains its class variable by its class alone; a second
+    /// class on the same variable, or (for a user class) constraints that
+    /// never mention the class, mark a homonym.
+    #[must_use]
+    pub fn class_method_of_def(&self, def_id: DefId, method_name: Symbol) -> Option<Symbol> {
+        let class = self.is_class_method(method_name)?;
+        if self.local_method_defs.contains(&def_id) {
+            return Some(class);
+        }
+        let Some(scheme) = self.lookup_scheme(def_id) else {
+            // Typeck gives every method of a user class a scheme; a reference
+            // without one is an untyped stub that only shares the name.
+            let homonym = self.is_user_class(class);
+            if homonym && std::env::var_os("BHC_DBG_HOMONYM").is_some() {
+                eprintln!(
+                    "HOMONYM {} (class {}) no scheme",
+                    method_name.as_str(),
+                    class.as_str()
+                );
+            }
+            return (!homonym).then_some(class);
+        };
+        let Some(own) = scheme.constraints.iter().find(|c| c.class == class) else {
+            // A user class's method always carries its class in the scheme
+            // typeck gives it. One that does not is a homonym: `Impl.fetch ::
+            // MonadIO m => …` beside `class Store m where fetch :: …`, or
+            // `Data.Time.getCurrentTime` (a stub) in pandoc's
+            // `getCurrentTime = liftIO Data.Time.getCurrentTime`, which was
+            // dispatched to the generic `PandocMonad (t m)` instance with null
+            // dictionaries. Builtin monad-family schemes are registered
+            // without their class, so they keep the old answer.
+            let homonym = self.is_user_class(class);
+            if homonym && std::env::var_os("BHC_DBG_HOMONYM").is_some() {
+                eprintln!(
+                    "HOMONYM {} (class {}) {:?}",
+                    method_name.as_str(),
+                    class.as_str(),
+                    scheme
+                );
+            }
+            return (!homonym).then_some(class);
+        };
+        let own_vars: Vec<&TyVar> = own
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                Ty::Var(v) => Some(v),
+                _ => None,
+            })
+            .collect();
+        // A method's recorded scheme can carry its class's SUPERCLASSES on the
+        // same variable (parsec's `Stream s m t` methods mention `Monad m`);
+        // only a class outside that closure marks a homonym.
+        let supers = self.superclass_closure(class);
+        let homonym = !own_vars.is_empty()
+            && scheme.constraints.iter().any(|c| {
+                c.class != class
+                    && !supers.contains(&c.class)
+                    && c.args
+                        .iter()
+                        .any(|a| matches!(a, Ty::Var(v) if own_vars.contains(&v)))
+            });
+        if homonym && std::env::var_os("BHC_DBG_HOMONYM").is_some() {
+            eprintln!(
+                "HOMONYM {} (class {}) {:?}",
+                method_name.as_str(),
+                class.as_str(),
+                scheme
+            );
+        }
+        (!homonym).then_some(class)
+    }
+
+    /// Every superclass of `class`, transitively (not including `class`).
+    fn superclass_closure(&self, class: Symbol) -> FxHashSet<Symbol> {
+        let mut seen = FxHashSet::default();
+        let mut todo = vec![class];
+        while let Some(c) = todo.pop() {
+            if let Some(info) = self.class_registry.classes.get(&c) {
+                for &sup in &info.superclasses {
+                    if seen.insert(sup) {
+                        todo.push(sup);
+                    }
+                }
+            }
+        }
+        seen
+    }
+
     /// Check if a symbol is a class method.
     ///
     /// Returns the class name if the symbol is a method of some class.
@@ -2987,6 +3096,14 @@ impl LowerContext {
     /// Whether the reference at `span` is a whole-body instance method alias.
     pub(crate) fn is_instance_alias(&self, span: Span) -> bool {
         self.instance_alias_span == Some(span)
+    }
+
+    /// The instance-level type of the alias reference at `span`, when that
+    /// reference is a whole-body instance method alias.
+    pub(crate) fn instance_alias_ty(&self, span: Span) -> Option<&Ty> {
+        self.instance_alias_ty
+            .as_ref()
+            .filter(|_| self.is_instance_alias(span))
     }
 
     pub(crate) fn current_instance_class(&self) -> Option<Symbol> {
@@ -4073,6 +4190,7 @@ impl LowerContext {
                         let ty = self.lookup_type(method_sig.id);
                         let var = self.named_var(method_sig.name, ty);
                         self.register_var(method_sig.id, var);
+                        self.local_method_defs.insert(method_sig.id);
                     }
 
                     // Also register variables for default method implementations
@@ -4514,6 +4632,16 @@ impl LowerContext {
                             method_def.name,
                             &instance_def.types,
                         );
+                        // The class's own signature at the instance, or — for a
+                        // class from another module, whose signatures the
+                        // registry may lack — typeck's scheme for the method.
+                        self.instance_alias_ty = self.instance_alias_span.and_then(|_| {
+                            self.instance_method_sig_override.clone().or_else(|| {
+                                self.lookup_scheme(method_def.id)
+                                    .filter(|s| s.vars.is_empty() && s.constraints.is_empty())
+                                    .map(|s| s.ty.clone())
+                            })
+                        });
                         let lowered = if inst_constraints.is_empty() && method_level.is_empty() {
                             // No instance constraints — lower normally
                             // (`lower_value_def` eta-expands point-free
@@ -4531,6 +4659,7 @@ impl LowerContext {
                         };
                         self.instance_method_sig_override = None;
                         self.instance_alias_span = None;
+                        self.instance_alias_ty = None;
                         if let Some(mut bind) = lowered {
                             if let Some(inst_ty) = self.current_instance_type.clone() {
                                 annotate_monad_head_tys(&mut bind, &inst_ty);

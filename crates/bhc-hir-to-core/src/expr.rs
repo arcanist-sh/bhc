@@ -5455,7 +5455,31 @@ fn lower_app(
                                             let Ty::Con(con) = head else {
                                                 return None;
                                             };
-                                            (!LowerContext::is_builtin_monad_type(head)
+                                            // Not when an operand's own type names a
+                                            // different monad: `evalStateT (do { modify
+                                            // (+ 1); … }) 7` in `counter :: App Int`
+                                            // binds at `StateT Int App`, and taking the
+                                            // signature's `App` ran App's `>>` on
+                                            // StateT actions.
+                                            // (Read past arrows: a partially applied
+                                            // `>>` shares its first operand's span.)
+                                            let operand_elsewhere = collected_args
+                                                .iter()
+                                                .map(|e| e.span())
+                                                .chain([x.span(), span])
+                                                .filter_map(|sp| ctx.resolved_expr_ty_opt(sp))
+                                                .any(|t| {
+                                                    let mut h = &t;
+                                                    while let Ty::Fun(_, r) = h {
+                                                        h = r.as_ref();
+                                                    }
+                                                    while let Ty::App(f2, _) = h {
+                                                        h = f2.as_ref();
+                                                    }
+                                                    matches!(h, Ty::Con(c) if c.name != con.name)
+                                                });
+                                            (!operand_elsewhere
+                                                && !LowerContext::is_builtin_monad_type(head)
                                                 && ctx.has_imported_instance(class_name, con.name))
                                             .then(|| monad.as_ref().clone())
                                         })

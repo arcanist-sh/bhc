@@ -1043,11 +1043,6 @@ fn test_tier2_liftio_except_over_state() {
 }
 
 #[test]
-#[ignore = "whole-program builds (how e2e compiles) do not resolve a class \
-            method imported from another module: `kv` from `module C (K(..))` \
-            becomes a stub — no multi-module class fixture existed before \
-            this one. The behaviour under test passes under separate \
-            compilation (`-c`, the pandoc harness): prints 42 / <direct> / 41 <x>."]
 fn test_tier2_instance_alias_homonym() {
     run_native_test("tier2_functions/instance_alias_homonym", Profile::Default);
 }

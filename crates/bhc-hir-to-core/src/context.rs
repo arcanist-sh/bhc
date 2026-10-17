@@ -3675,6 +3675,24 @@ impl LowerContext {
             }
         }
         let dbg = crate::expr::dispatch_dbg();
+        // A multi-parameter class selects its instance by ALL parameters:
+        // `getx :: m s` of `class MonadSt s m | m -> s` used at `StT Int IO
+        // Int` is `MonadSt Int (StT Int IO)`. The single-parameter paths below
+        // read only the first parameter and looked for `MonadSt Int`.
+        //
+        // A parameter typeck left unresolved is fine when another one selects
+        // the instance (a functional dependency `m -> s`): the first `getx` of
+        // `getx >>= \_ -> getx` discards its state, so `s` stays a variable
+        // while `m` is the concrete stack. Instance matching binds it.
+        if self.class_param_count(class_name) > 1 {
+            let types = self
+                .class_params_from_occurrence_any(class_name, method_def_id, span)
+                .filter(|tys| tys.iter().any(crate::expr::has_concrete_head))?;
+            if dbg {
+                eprintln!("[dispatch] {method}: multi-param instance types = {types:?}");
+            }
+            return self.resolve_method_at_concrete_types(method, class_name, &types, span);
+        }
         // Prefer the fully-substituted resolved channel: the single-pass
         // `expr_types` map can leave nested variables unsubstituted
         // (`getB`'s occurrence read as `(t -> t') -> t''`), and dispatch on

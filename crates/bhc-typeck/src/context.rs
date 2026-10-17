@@ -981,6 +981,9 @@ impl TyCtxt {
         let mut changed = true;
         let mut iterations = 0;
         const MAX_ITERATIONS: usize = 100; // Prevent infinite loops
+                                           // Constraints already improved through an instance (closure model),
+                                           // by class and arguments, so each adds its context only once.
+        let mut improved: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
 
         while changed && iterations < MAX_ITERATIONS {
             changed = false;
@@ -1020,6 +1023,13 @@ impl TyCtxt {
                         continue; // Not all "from" types are ground yet
                     }
 
+                    if crate::io_closure_mode() {
+                        if self.improve_by_instance(constraint, &args, fundep, &mut improved) {
+                            changed = true;
+                        }
+                        continue;
+                    }
+
                     // Find matching instances
                     if let Some(instances) = self.env.lookup_instances(constraint.class) {
                         for inst in instances {
@@ -1052,6 +1062,111 @@ impl TyCtxt {
                 }
             }
         }
+    }
+
+    /// One fundep improvement step through the instance that matches the
+    /// constraint's determining positions, instantiated properly.
+    ///
+    /// The instance head is matched one-way against the ground `from`
+    /// arguments; its remaining variables get fresh unification variables;
+    /// the `to` arguments are unified with the instantiated head; and the
+    /// instance's context constraints of fundep classes are added, so the
+    /// improvement continues through them. `MonadSt ?s (RdT Int (StT Int
+    /// IO))` matches `instance MonadSt s m => MonadSt s (RdT r m)`, adds
+    /// `MonadSt ?s' (StT Int IO)` with `?s ~ ?s'`, and that one pins `Int`.
+    /// The legacy step (closure IO model off) substitutes the instance's own,
+    /// uninstantiated variable and ignores the context.
+    fn improve_by_instance(
+        &mut self,
+        constraint: &Constraint,
+        args: &[Ty],
+        fundep: &crate::env::FunDep,
+        improved: &mut rustc_hash::FxHashSet<String>,
+    ) -> bool {
+        fn match_one_way(pat: &Ty, target: &Ty, theta: &mut FxHashMap<u32, Ty>) -> bool {
+            match (pat, target) {
+                (Ty::Var(v), _) => match theta.get(&v.id) {
+                    Some(bound) => bound == target,
+                    None => {
+                        theta.insert(v.id, target.clone());
+                        true
+                    }
+                },
+                (Ty::Con(a), Ty::Con(b)) => a.name == b.name,
+                (Ty::App(f1, a1), Ty::App(f2, a2)) | (Ty::Fun(f1, a1), Ty::Fun(f2, a2)) => {
+                    match_one_way(f1, f2, theta) && match_one_way(a1, a2, theta)
+                }
+                (Ty::List(a), Ty::List(b)) => match_one_way(a, b, theta),
+                (Ty::Tuple(xs), Ty::Tuple(ys)) => {
+                    xs.len() == ys.len()
+                        && xs.iter().zip(ys).all(|(x, y)| match_one_way(x, y, theta))
+                }
+                (Ty::Prim(a), Ty::Prim(b)) => a == b,
+                _ => false,
+            }
+        }
+        let key = format!("{}{:?}", constraint.class.as_str(), args);
+        if improved.contains(&key) {
+            return false;
+        }
+        let Some(instances) = self
+            .env
+            .lookup_instances(constraint.class)
+            .map(<[_]>::to_vec)
+        else {
+            return false;
+        };
+        for inst in &instances {
+            let mut theta: FxHashMap<u32, Ty> = FxHashMap::default();
+            let matches = fundep
+                .from
+                .iter()
+                .all(|&i| match (inst.types.get(i), args.get(i)) {
+                    (Some(pat), Some(arg)) => match_one_way(pat, arg, &mut theta),
+                    _ => false,
+                });
+            if !matches {
+                continue;
+            }
+            improved.insert(key);
+            let mut inst_vars: Vec<TyVar> = inst.types.iter().flat_map(Ty::free_vars).collect();
+            for c in &inst.context {
+                inst_vars.extend(c.args.iter().flat_map(Ty::free_vars));
+            }
+            let mut subst = Subst::new();
+            for v in inst_vars {
+                let t = match theta.get(&v.id) {
+                    Some(t) => t.clone(),
+                    None => {
+                        let fresh = self.fresh_ty();
+                        theta.insert(v.id, fresh.clone());
+                        fresh
+                    }
+                };
+                subst.insert(&v, t);
+            }
+            for &to in &fundep.to {
+                if let (Some(arg), Some(inst_ty)) = (args.get(to), inst.types.get(to)) {
+                    let want = subst.apply(inst_ty);
+                    self.unify(arg, &want, constraint.span);
+                }
+            }
+            for c in &inst.context {
+                let has_fundeps = self
+                    .env
+                    .lookup_class(c.class)
+                    .is_some_and(|ci| !ci.fundeps.is_empty());
+                if has_fundeps {
+                    self.constraints.push(Constraint {
+                        class: c.class,
+                        args: c.args.iter().map(|t| subst.apply(t)).collect(),
+                        span: constraint.span,
+                    });
+                }
+            }
+            return true;
+        }
+        false
     }
 
     /// Check if a type contains any unresolved type variables.
@@ -7946,8 +8061,17 @@ impl TyCtxt {
             // here would route it through the constraint solver (whose handling of
             // these placeholder-seeded method uses is incomplete) and reject
             // programs that otherwise check.
+            //
+            // Except, in the closure IO model, for a class with functional
+            // dependencies: without the constraint nothing reaches fundep
+            // improvement, and `getx >>= \_ -> …` at `RdT Int (StT Int IO)`
+            // left `getx`'s state type unsolved, so the lifted instance's
+            // context dictionary could not be built.
+            let keep_for_fundeps = crate::io_closure_mode() && !class.fundeps.is_empty();
             let mut shape_scheme = method_scheme.clone();
-            shape_scheme.constraints.clear();
+            if !keep_for_fundeps {
+                shape_scheme.constraints.clear();
+            }
             self.env.insert_global(method.id, shape_scheme);
 
             // Also store by DefId so hir-to-core can look it up
@@ -7995,7 +8119,9 @@ impl TyCtxt {
             if class_known {
                 self.check_value_def(method);
                 self.guide_instance_method_type(instance, method);
-            } else if let Some(shape) = builtin_value_method_shape(instance, method.name) {
+            } else if let Some(shape) = builtin_value_method_shape(instance, method.name)
+                .or_else(|| self.monad_family_method_shape(instance, method.name))
+            {
                 // Semigroup/Monoid are builtin (no ClassDef), but every method
                 // shape is fixed by the instance type, so the body CAN be
                 // checked. Skipping it left nothing inside with a recorded
@@ -8022,6 +8148,44 @@ impl TyCtxt {
                 self.env.insert_global(method.id, scheme);
             }
         }
+    }
+
+    /// The type of a `Functor`/`Applicative`/`Monad` method at the instance
+    /// head, with fresh variables for the method's own type parameters, so
+    /// the method body is checked and its expressions get recorded types.
+    ///
+    /// These classes are builtin (no `ClassInfo`), so their instance bodies
+    /// were never checked: nothing inside `instance Monad m => Applicative
+    /// (StT s m)` had a type, and Core lowering resolved the inner `return`
+    /// to the instance being defined. Only in the closure IO model
+    /// (`BHC_IO_MODEL=closure`, spec/BHC-BRIEF-0005), until checking these
+    /// bodies is proven on the e2e suite and pandoc.
+    fn monad_family_method_shape(&mut self, instance: &InstanceDef, method: Symbol) -> Option<Ty> {
+        if !crate::io_closure_mode()
+            || !matches!(instance.class.as_str(), "Functor" | "Applicative" | "Monad")
+            || instance.types.len() != 1
+        {
+            return None;
+        }
+        let f = instance.types[0].clone();
+        let at = |x: &Ty| Ty::App(Box::new(f.clone()), Box::new(x.clone()));
+        let fun = |a: Ty, b: Ty| Ty::Fun(Box::new(a), Box::new(b));
+        let (a, b, c) = (self.fresh_ty(), self.fresh_ty(), self.fresh_ty());
+        let shape = match method.as_str() {
+            "fmap" => fun(fun(a.clone(), b.clone()), fun(at(&a), at(&b))),
+            "<$" => fun(a.clone(), fun(at(&b), at(&a))),
+            "pure" | "return" => fun(a.clone(), at(&a)),
+            "<*>" => fun(at(&fun(a.clone(), b.clone())), fun(at(&a), at(&b))),
+            "*>" | ">>" => fun(at(&a), fun(at(&b), at(&b))),
+            "<*" => fun(at(&a), fun(at(&b), at(&a))),
+            "liftA2" => fun(
+                fun(a.clone(), fun(b.clone(), c.clone())),
+                fun(at(&a), fun(at(&b), at(&c))),
+            ),
+            ">>=" => fun(at(&a), fun(fun(a.clone(), at(&b)), at(&b))),
+            _ => return None,
+        };
+        Some(shape)
     }
 
     /// The type of an instance method of an IMPORTED class, at the instance

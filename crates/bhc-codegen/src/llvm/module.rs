@@ -181,9 +181,27 @@ impl<'ctx> LlvmModule<'ctx> {
 
         // Call Haskell main with null env pointer (uniform calling convention)
         let null_env = ptr_type.const_null();
-        self.builder
-            .build_call(haskell_main, &[null_env.into()], "")
+        let main_value = self
+            .builder
+            .build_call(haskell_main, &[null_env.into()], "main_value")
             .map_err(|e| CodegenError::Internal(format!("failed to build call: {:?}", e)))?;
+
+        // Closure IO model: `main` evaluates to an action closure; run it by
+        // calling its code (word 0) with the closure as environment.
+        if crate::io_closure_mode() {
+            if let Some(action) = main_value.try_as_basic_value().basic() {
+                let action = action.into_pointer_value();
+                let code = self
+                    .builder
+                    .build_load(ptr_type, action, "main_code")
+                    .map_err(|e| CodegenError::Internal(format!("main action load: {:?}", e)))?
+                    .into_pointer_value();
+                let run_type = ptr_type.fn_type(&[ptr_type.into()], false);
+                self.builder
+                    .build_indirect_call(run_type, code, &[action.into()], "")
+                    .map_err(|e| CodegenError::Internal(format!("main action run: {:?}", e)))?;
+            }
+        }
 
         // Handle any uncaught exception (e.g. `error`) that escaped to the top
         // level: print it and exit non-zero before normal shutdown.

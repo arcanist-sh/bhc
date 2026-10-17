@@ -514,6 +514,11 @@ pub struct Lowering<'ctx, 'm> {
     /// When a stub variable is referenced, we lazily generate an LLVM function that
     /// calls bhc_error with the stub name and cache it here.
     stub_functions: FxHashMap<String, FunctionValue<'ctx>>,
+    /// Closure IO model: lower the NEXT IO-action expression in run mode
+    /// (perform its effects now) instead of building an action closure. Set by
+    /// [`Lowering::lower_io_run`] and consumed by the first IO-action builtin
+    /// reached, so the expression's own arguments are still values.
+    io_run_next: bool,
 }
 
 impl<'ctx, 'm> Lowering<'ctx, 'm> {
@@ -562,6 +567,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             newtype_underlying: FxHashMap::default(),
             binder_field_types: FxHashMap::default(),
             stub_functions: FxHashMap::default(),
+            io_run_next: false,
         };
         lowering.declare_rts_functions();
         lowering
@@ -620,6 +626,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             newtype_underlying: FxHashMap::default(),
             binder_field_types: FxHashMap::default(),
             stub_functions: FxHashMap::default(),
+            io_run_next: false,
         };
         lowering.declare_rts_functions();
         lowering.declare_external_symbols(imported_symbols)?;
@@ -744,6 +751,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     /// Helper for recursively building the transformer stack from a type.
     fn extract_transformer_stack_recursive(&self, ty: &Ty, stack: &mut Vec<TransformerLayer>) {
+        // Closure IO model: transformers are library code (BRIEF-0005); a
+        // type named `StateT` is an ordinary newtype, not a codegen layer.
+        if crate::io_closure_mode() {
+            return;
+        }
         let unwrapped = self.see_through_monad_newtype(ty);
         let ty = unwrapped.as_ref().unwrap_or(ty);
         match ty {
@@ -911,6 +923,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         expr: &Expr,
         skip: &FxHashSet<VarId>,
     ) -> Option<TransformerLayer> {
+        if crate::io_closure_mode() {
+            return None;
+        }
         match expr {
             Expr::Var(v, _) => {
                 let name = v.name.as_str();
@@ -6356,6 +6371,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     Some(_) => return self.lower_value_monad_bind(args[0], args[1], true),
                     None => {}
                 }
+                // Closure IO model: no transformer layers; a bind is IO's.
+                if crate::io_closure_mode() {
+                    return self.lower_builtin_bind(args[0], args[1]);
+                }
                 // For ReaderT over (ExceptT over StateT) — pandoc's App stack —
                 // bypass the generic ReaderT machinery entirely and route to the
                 // flat 3-arg `ret_*` protocol (see `ret_bind`). The generic path
@@ -6431,6 +6450,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // anything else falls through to the stub rather than quietly
             // sequencing wrongly.
             "<*" => {
+                // Closure IO model (run mode): run both, keep the first result.
+                if crate::io_closure_mode()
+                    && matches!(self.current_transformer_layer(), TransformerLayer::IO)
+                {
+                    let a = self.lower_io_run(args[0])?;
+                    self.lower_io_run(args[1])?;
+                    return Ok(a);
+                }
                 if matches!(self.current_transformer_layer(), TransformerLayer::IO) {
                     // An IO action IS its value, so this is "lower both,
                     // return the first".
@@ -6496,6 +6523,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     Some(ValueMonad::Maybe | ValueMonad::Either)
                 ) {
                     return self.lower_value_monad_bind(args[0], args[1], false);
+                }
+                // Closure IO model: no transformer layers (lists keep the
+                // layer path's `concatMap`).
+                if crate::io_closure_mode()
+                    && !matches!(self.current_value_monad(args[0]), Some(ValueMonad::List))
+                {
+                    return self.lower_builtin_then(args[0], args[1]);
                 }
                 // For ReaderT over (ExceptT over StateT) — see the `>>=` arm.
                 if self
@@ -6565,6 +6599,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 // `Right x`, `[x]` — not the identity the IO layer wants.
                 if let Some(m) = self.value_monad_of_ty(&self.current_builtin_ty) {
                     return self.lower_value_monad_pure(m, args[0]);
+                }
+                // Closure IO model: run(return x) = x.
+                if crate::io_closure_mode() {
+                    return self.lower_builtin_return(args[0]);
                 }
                 // For ReaderT over (ExceptT over StateT) — pandoc's App stack.
                 if self
@@ -7835,6 +7873,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "IO.pure" => self.lower_builtin_return(args[0]),
             "IO.>>=" => self.lower_builtin_bind(args[0], args[1]),
             "IO.>>" => self.lower_builtin_then(args[0], args[1]),
+            "IO.fmap" if crate::io_closure_mode() => self.lower_io_fmap_run(args[0], args[1]),
+            "IO.<*>" if crate::io_closure_mode() => self.lower_io_ap_run(args[0], args[1]),
             "IO.fmap" | "IO.<*>" => self.lower_builtin_ap(args[0], args[1]),
 
             // ReaderT operations
@@ -14564,8 +14604,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// and wraps it in a closure. Used for `catch`, `bracket`, and similar
     /// functions that need to defer IO actions.
     fn wrap_io_as_thunk(&mut self, expr: &Expr) -> CodegenResult<PointerValue<'ctx>> {
+        // Under the closure IO model the deferred body must RUN the action
+        // (`catch act h` runs `act` inside the handler scope).
+        self.wrap_io_thunk_with(expr, crate::io_closure_mode())
+    }
+
+    /// [`Self::wrap_io_as_thunk`]; with `run`, the body lowers `expr` in run
+    /// mode (closure IO model) rather than evaluating it.
+    fn wrap_io_thunk_with(&mut self, expr: &Expr, run: bool) -> CodegenResult<PointerValue<'ctx>> {
         // If the expression is already a lambda/closure, just lower it normally
-        if matches!(expr, Expr::Lam(_, _, _)) {
+        if !run && matches!(expr, Expr::Lam(_, _, _)) {
             let val = self
                 .lower_expr(expr)?
                 .ok_or_else(|| CodegenError::Internal("wrap_io_as_thunk: no value".to_string()))?;
@@ -14615,7 +14663,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         // Lower the expression inside the thunk
-        let result = self.lower_expr(expr)?;
+        let result = if run {
+            self.lower_io_run(expr)?
+        } else {
+            self.lower_expr(expr)?
+        };
 
         // Return result
         if let Some(val) = result {
@@ -14641,6 +14693,255 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         self.alloc_closure(fn_ptr, &captured)
     }
 
+    // ========================================================================
+    // Closure IO model (BHC_IO_MODEL=closure, spec/BHC-BRIEF-0005 Phase 0)
+    // ========================================================================
+    //
+    // An `IO a` value is an action closure `fn(env) -> a` that performs its
+    // effects only when run. Every IO expression is lowered in one of two
+    // modes, decided syntactically:
+    //
+    // * value mode (the default: let RHS, argument, list element, function
+    //   result) — an IO-action expression becomes an action closure;
+    // * run mode (`lower_io_run`: the operands of a bind, the body of an
+    //   action closure) — the effect happens now; an IO builtin is lowered
+    //   directly, anything else is evaluated to an action and called.
+
+    /// Whether a saturated builtin application `name args` (whose builtin has
+    /// type `head_ty` here) is an IO action under the closure IO model.
+    fn io_action_builtin(&mut self, name: &str, args: &[&Expr], head_ty: &Ty) -> bool {
+        match name {
+            "IO.>>=" | "IO.>>" | "IO.pure" | "IO.fmap" | "IO.<*>" => true,
+            ">>=" | ">>" | "*>" | "<*" => {
+                if self.value_monad_of_ty(head_ty).is_some() {
+                    return false;
+                }
+                let saved = std::mem::replace(&mut self.current_builtin_ty, head_ty.clone());
+                let value_monad = args.first().and_then(|a| self.current_value_monad(a));
+                self.current_builtin_ty = saved;
+                value_monad.is_none()
+            }
+            "return" | "pure" => self.value_monad_of_ty(head_ty).is_none(),
+            _ => crate::is_io_primitive(name),
+        }
+    }
+
+    /// Whether `expr` is an IO-action builtin application (see
+    /// [`Self::io_action_builtin`]).
+    fn is_io_action_expr(&mut self, expr: &Expr) -> bool {
+        if let Expr::Var(v, _) = expr {
+            return self.builtin_info(v.name.as_str()) == Some(0)
+                && crate::is_io_primitive(v.name.as_str());
+        }
+        match self.is_saturated_builtin(expr) {
+            Some((name, args, head_ty)) => self.io_action_builtin(name, &args, &head_ty),
+            None => false,
+        }
+    }
+
+    /// Lower `expr` in run mode: perform its effects now and yield its result.
+    fn lower_io_run(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if self.is_io_action_expr(expr) {
+            self.io_run_next = true;
+            let result = self.lower_expr(expr);
+            self.io_run_next = false;
+            return result;
+        }
+        let action = self
+            .lower_expr(expr)?
+            .ok_or_else(|| CodegenError::Internal("run IO: action has no value".to_string()))?;
+        Ok(Some(self.run_io_action(action)?))
+    }
+
+    /// Run an action closure: call its code with the closure as environment.
+    fn run_io_action(
+        &mut self,
+        action: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let action_ptr = self.value_to_ptr(action)?;
+        let fn_ptr = self.checked_closure_fn_ptr(action_ptr, "run IO action")?;
+        let ptr_type = self.type_mapper().ptr_type();
+        let fn_type = ptr_type.fn_type(&[ptr_type.into()], false);
+        self.builder()
+            .build_indirect_call(fn_type, fn_ptr, &[action_ptr.into()], "io_run")
+            .map_err(|e| CodegenError::Internal(format!("run IO action: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("run IO action: void".to_string()))
+    }
+
+    /// Build the action closure for an IO expression: its body lowers the
+    /// expression in run mode.
+    fn build_io_action(&mut self, expr: &Expr) -> CodegenResult<PointerValue<'ctx>> {
+        self.wrap_io_thunk_with(expr, true)
+    }
+
+    /// Build an action closure from already-lowered values: `body` receives
+    /// the captured values (reloaded inside the action) and produces the
+    /// action's result, running whatever it must.
+    fn build_io_action_from_values<F>(
+        &mut self,
+        captures: &[BasicValueEnum<'ctx>],
+        body: F,
+    ) -> CodegenResult<PointerValue<'ctx>>
+    where
+        F: FnOnce(&mut Self, &[BasicValueEnum<'ctx>]) -> CodegenResult<BasicValueEnum<'ctx>>,
+    {
+        let ptr_type = self.type_mapper().ptr_type();
+        let saved_block = self.builder().get_insert_block();
+        let fn_name = self.next_closure_name();
+        let fn_type = ptr_type.fn_type(&[ptr_type.into()], false);
+        let action_fn = self.module.add_internal_function(&fn_name, fn_type);
+        let entry = self.llvm_context().append_basic_block(action_fn, "entry");
+        self.builder().position_at_end(entry);
+
+        let mut captured = Vec::with_capacity(captures.len());
+        let mut reloaded = Vec::with_capacity(captures.len());
+        for (i, v) in captures.iter().enumerate() {
+            captured.push((VarId::new(900000 + i), self.value_to_ptr(*v)?.into()));
+        }
+        if !captures.is_empty() {
+            let closure_ptr = action_fn
+                .get_first_param()
+                .ok_or_else(|| CodegenError::Internal("IO action: no env".to_string()))?
+                .into_pointer_value();
+            for i in 0..captures.len() {
+                let elem =
+                    self.extract_closure_env_elem(closure_ptr, captures.len() as u32, i as u32)?;
+                reloaded.push(elem.into());
+            }
+        }
+        let result = body(self, &reloaded)?;
+        let ret = self.value_to_ptr(result)?;
+        self.builder()
+            .build_return(Some(&ret))
+            .map_err(|e| CodegenError::Internal(format!("IO action return: {:?}", e)))?;
+        if let Some(block) = saved_block {
+            self.builder().position_at_end(block);
+        }
+        let fn_ptr = action_fn.as_global_value().as_pointer_value();
+        self.alloc_closure(fn_ptr, &captured)
+    }
+
+    /// The closure-model value of an IO builtin reached with already-lowered
+    /// arguments (a dictionary slot, a partial application): an action that
+    /// performs the builtin when run. `None` when `name` is not an IO action.
+    fn io_action_from_values(
+        &mut self,
+        name: &str,
+        args: &[BasicValueEnum<'ctx>],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let action = match name {
+            "IO.pure" | "return" | "pure" if args.len() == 1 => {
+                self.build_io_action_from_values(args, |_, v| Ok(v[0]))?
+            }
+            "IO.>>=" | ">>=" if args.len() == 2 => {
+                self.build_io_action_from_values(args, |this, v| {
+                    let a = this.run_io_action(v[0])?;
+                    let next = this.apply_closure_value(v[1], a)?;
+                    this.run_io_action(next)
+                })?
+            }
+            "IO.>>" | ">>" | "*>" if args.len() == 2 => {
+                self.build_io_action_from_values(args, |this, v| {
+                    this.run_io_action(v[0])?;
+                    this.run_io_action(v[1])
+                })?
+            }
+            "<*" if args.len() == 2 => self.build_io_action_from_values(args, |this, v| {
+                let a = this.run_io_action(v[0])?;
+                this.run_io_action(v[1])?;
+                Ok(a)
+            })?,
+            "IO.fmap" if args.len() == 2 => self.build_io_action_from_values(args, |this, v| {
+                let a = this.run_io_action(v[1])?;
+                this.apply_closure_value(v[0], a)
+            })?,
+            "IO.<*>" if args.len() == 2 => self.build_io_action_from_values(args, |this, v| {
+                let f = this.run_io_action(v[0])?;
+                let a = this.run_io_action(v[1])?;
+                this.apply_closure_value(f, a)
+            })?,
+            _ if crate::is_io_primitive(name) => {
+                let owned = name.to_string();
+                self.build_io_action_from_values(args, move |this, v| {
+                    this.io_run_next = true;
+                    let r = this.lower_builtin_direct(&owned, v);
+                    this.io_run_next = false;
+                    r?.ok_or_else(|| {
+                        CodegenError::Internal(format!("IO primitive {owned}: no value"))
+                    })
+                })?
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(action.into()))
+    }
+
+    /// Lower `args` as values and build the IO action `name` applies to them
+    /// (closure IO model; see [`Self::io_action_from_values`]).
+    fn io_action_from_exprs(
+        &mut self,
+        name: &str,
+        args: &[&Expr],
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let mut vals = Vec::with_capacity(args.len());
+        for a in args {
+            vals.push(
+                self.lower_expr(a)?
+                    .ok_or_else(|| CodegenError::Internal(format!("{name}: no value")))?,
+            );
+        }
+        self.io_action_from_values(name, &vals)
+    }
+
+    /// Wrap an exception handler `h :: e -> IO a` (closure IO model) as a
+    /// `fn(env, e) -> a` closure that runs the action `h e` returns.
+    fn handler_running_result(
+        &mut self,
+        handler: PointerValue<'ctx>,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let ptr_type = self.type_mapper().ptr_type();
+        let saved_block = self.builder().get_insert_block();
+        let fn_name = self.next_closure_name();
+        let fn_type = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        let wrapper = self.module.add_internal_function(&fn_name, fn_type);
+        let entry = self.llvm_context().append_basic_block(wrapper, "entry");
+        self.builder().position_at_end(entry);
+        let env = wrapper
+            .get_nth_param(0)
+            .ok_or_else(|| CodegenError::Internal("handler wrapper: no env".to_string()))?
+            .into_pointer_value();
+        let exc = wrapper
+            .get_nth_param(1)
+            .ok_or_else(|| CodegenError::Internal("handler wrapper: no arg".to_string()))?;
+        let h = self.extract_closure_env_elem(env, 1, 0)?;
+        let action = self.apply_closure_value(h.into(), exc)?;
+        let result = self.run_io_action(action)?;
+        let ret = self.value_to_ptr(result)?;
+        self.builder()
+            .build_return(Some(&ret))
+            .map_err(|e| CodegenError::Internal(format!("handler wrapper return: {:?}", e)))?;
+        if let Some(block) = saved_block {
+            self.builder().position_at_end(block);
+        }
+        let fn_ptr = wrapper.as_global_value().as_pointer_value();
+        self.alloc_closure(fn_ptr, &[(VarId::new(900000), handler.into())])
+    }
+
+    /// Apply a one-argument closure value to `arg`.
+    fn apply_closure_value(
+        &mut self,
+        func: BasicValueEnum<'ctx>,
+        arg: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        // Arity-aware: `(,) <$> a <*> b` applies the two-parameter `(,)`
+        // lambda one argument at a time, and a direct one-argument call into
+        // it read its second parameter from garbage.
+        let func_ptr = self.value_to_ptr(func)?;
+        self.call_closure1(func_ptr, arg, "IO apply")
+    }
+
     fn lower_builtin_catch(
         &mut self,
         action_expr: &Expr,
@@ -14663,6 +14964,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(handler_expr)?
             .ok_or_else(|| CodegenError::Internal("catch: handler has no value".to_string()))?;
         let handler_closure = self.value_to_ptr(handler_val)?;
+        // Closure IO model: the handler returns an ACTION; run it, so both
+        // outcomes of the catch yield a result.
+        let handler_closure = if crate::io_closure_mode() {
+            self.handler_running_result(handler_closure)?
+        } else {
+            handler_closure
+        };
 
         let action_fn = self.extract_closure_fn_ptr(action_closure)?;
         let handler_fn = self.extract_closure_fn_ptr(handler_closure)?;
@@ -14910,8 +15218,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(use_expr)?
             .ok_or_else(|| CodegenError::Internal("bracket: use has no value".to_string()))?;
 
-        let release_closure = self.value_to_ptr(release_val)?;
-        let use_closure = self.value_to_ptr(use_val)?;
+        let mut release_closure = self.value_to_ptr(release_val)?;
+        let mut use_closure = self.value_to_ptr(use_val)?;
+        // Closure IO model: `release r`/`use r` return actions; the RTS calls
+        // them and must get the actions' RESULTS, so run what they return.
+        if crate::io_closure_mode() {
+            release_closure = self.handler_running_result(release_closure)?;
+            use_closure = self.handler_running_result(use_closure)?;
+        }
 
         let acquire_fn = self.extract_closure_fn_ptr(acquire_closure)?;
         let release_fn = self.extract_closure_fn_ptr(release_closure)?;
@@ -17149,6 +17463,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         action_expr: &Expr,
         func_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Closure IO model (run mode): run the action, apply the
+        // continuation, run the action it returns.
+        if crate::io_closure_mode() {
+            let a = self
+                .lower_io_run(action_expr)?
+                .ok_or_else(|| CodegenError::Internal(">>=: action has no value".to_string()))?;
+            let k = self
+                .lower_expr(func_expr)?
+                .ok_or_else(|| CodegenError::Internal(">>=: function has no value".to_string()))?;
+            let next = self.apply_closure_value(k, a)?;
+            return Ok(Some(self.run_io_action(next)?));
+        }
         // Execute the first action
         let action_result = self
             .lower_expr(action_expr)?
@@ -17201,11 +17527,46 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         action1_expr: &Expr,
         action2_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Closure IO model (run mode): run both actions in order.
+        if crate::io_closure_mode() {
+            self.lower_io_run(action1_expr)?;
+            return self.lower_io_run(action2_expr);
+        }
         // Execute the first action (result is discarded)
         let _action1_result = self.lower_expr(action1_expr)?;
 
         // Execute the second action and return its result
         self.lower_expr(action2_expr)
+    }
+
+    /// Closure IO model, run mode: `fmap f m` runs `m` and applies `f`.
+    fn lower_io_fmap_run(
+        &mut self,
+        f_expr: &Expr,
+        m_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let f = self
+            .lower_expr(f_expr)?
+            .ok_or_else(|| CodegenError::Internal("IO.fmap: f has no value".to_string()))?;
+        let a = self
+            .lower_io_run(m_expr)?
+            .ok_or_else(|| CodegenError::Internal("IO.fmap: action has no value".to_string()))?;
+        Ok(Some(self.apply_closure_value(f, a)?))
+    }
+
+    /// Closure IO model, run mode: `mf <*> mx` runs both, then applies.
+    fn lower_io_ap_run(
+        &mut self,
+        mf_expr: &Expr,
+        mx_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let f = self
+            .lower_io_run(mf_expr)?
+            .ok_or_else(|| CodegenError::Internal("IO.<*>: f has no value".to_string()))?;
+        let a = self
+            .lower_io_run(mx_expr)?
+            .ok_or_else(|| CodegenError::Internal("IO.<*>: x has no value".to_string()))?;
+        Ok(Some(self.apply_closure_value(f, a)?))
     }
 
     /// Lower `return` / `pure` for monads.
@@ -28182,6 +28543,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         func_expr: &Expr,
         action_expr: &Expr,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // Closure IO model: `fmap f m` is an action that runs `m` and applies
+        // `f` — build it, as `IO.fmap` does in value mode.
+        if crate::io_closure_mode() {
+            return self.io_action_from_exprs("IO.fmap", &[func_expr, action_expr]);
+        }
         let action_result = self
             .lower_expr(action_expr)?
             .ok_or_else(|| CodegenError::Internal("fmap: no value".to_string()))?;
@@ -28262,6 +28628,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 return self.lower_builtin_writer_t_ap(func_expr, val_expr)
             }
             Some(TransformerLayer::IO) | None => {}
+        }
+        // Closure IO model: an action, as `IO.<*>` builds in value mode.
+        if crate::io_closure_mode() {
+            return self.io_action_from_exprs("IO.<*>", &[func_expr, val_expr]);
         }
         let func_result = self
             .lower_expr(func_expr)?
@@ -47072,6 +47442,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     fn detect_transformer_functions(&mut self, bindings: &[Bind]) {
+        if crate::io_closure_mode() {
+            return;
+        }
         // First pass: detect direct users of get/put/ask/throwE/tell/etc.
         for bind in bindings {
             match bind {
@@ -48005,6 +48378,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         // handle — pandoc's `--version` aborted on
                         // `stub: stdout not implemented` because the wrapper
                         // reached the closure-call path with nothing to call.
+                        //
+                        // Under the closure IO model a nullary IO primitive
+                        // (`getLine`) is an ACTION: built here, run only when
+                        // `lower_io_run` asks.
+                        if crate::io_closure_mode()
+                            && crate::is_io_primitive(name)
+                            && !std::mem::take(&mut self.io_run_next)
+                        {
+                            return Ok(Some(self.build_io_action(expr)?.into()));
+                        }
                         self.lower_builtin(name, &[])
                     } else {
                         self.create_builtin_closure(name, arity)
@@ -49011,6 +49394,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         args: &[BasicValueEnum<'ctx>],
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let ptr_type = self.type_mapper().ptr_type();
+
+        // Closure IO model: an IO builtin reached as a value (a dictionary
+        // slot, a partial application) yields an action, not its effect.
+        if crate::io_closure_mode() && !std::mem::take(&mut self.io_run_next) {
+            if let Some(action) = self.io_action_from_values(name, args)? {
+                return Ok(Some(action));
+            }
+        }
 
         match name {
             ">>" | "IO.>>" => {
@@ -54129,6 +54520,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Check if this is a saturated builtin function
         if let Some((name, builtin_args, head_ty)) = self.is_saturated_builtin(&full_app) {
+            // Closure IO model: an IO action in value position is built, not
+            // run (`lower_io_run` asks for the run).
+            if crate::io_closure_mode() {
+                let run_now = std::mem::take(&mut self.io_run_next);
+                if !run_now && self.io_action_builtin(name, &builtin_args, &head_ty) {
+                    return Ok(Some(self.build_io_action(&full_app)?.into()));
+                }
+            }
             let saved = std::mem::replace(&mut self.current_builtin_ty, head_ty);
             let result = self.lower_builtin(name, &builtin_args);
             self.current_builtin_ty = saved;

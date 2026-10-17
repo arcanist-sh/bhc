@@ -3045,6 +3045,9 @@ impl DerivingContext {
         let mut body = self.make_pure(fully_applied, span);
 
         // Wrap with let-bindings in reverse order: let r_i = f a_i in ...
+        // Under the closure IO model (spec/BHC-BRIEF-0005) `f a_i` is an
+        // action, not its result, so sequence instead: `f a_i >>= \r_i -> …`.
+        let sequence = crate::expr::io_closure_mode();
         for (opt_r, field_var) in result_vars.iter().rev() {
             if let Some(r) = opt_r {
                 let f_applied = core::Expr::App(
@@ -3052,6 +3055,18 @@ impl DerivingContext {
                     Box::new(core::Expr::Var((*field_var).clone(), span)),
                     span,
                 );
+                if sequence {
+                    let bind = core::Expr::Var(
+                        Var::new(Symbol::intern(">>="), VarId::new(0), Ty::Error),
+                        span,
+                    );
+                    body = core::Expr::App(
+                        Box::new(core::Expr::App(Box::new(bind), Box::new(f_applied), span)),
+                        Box::new(core::Expr::Lam(r.clone(), Box::new(body), span)),
+                        span,
+                    );
+                    continue;
+                }
                 body = core::Expr::Let(
                     Box::new(Bind::NonRec(r.clone(), Box::new(f_applied))),
                     Box::new(body),

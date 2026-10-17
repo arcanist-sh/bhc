@@ -1959,6 +1959,7 @@ impl Compiler {
             .map_err(|e| CompileError::CodegenError(e.to_string()))?;
 
         // Lower Core IR to LLVM IR
+        supply_io_primitives();
         lower_core_module(&ctx, &module, core)
             .map_err(|e| CompileError::CodegenError(e.to_string()))?;
 
@@ -4243,6 +4244,7 @@ impl Compiler {
             .map_err(|e| CompileError::CodegenError(e.to_string()))?;
 
         // Use multi-module lowering with name mangling and extern declarations
+        supply_io_primitives();
         lower_core_module_multimodule_with_constructors(
             &ctx,
             &module,
@@ -6517,6 +6519,19 @@ fn ty_mentions_any(ty: &bhc_types::Ty, vars: &[bhc_types::TyVar]) -> bool {
         Ty::List(a) => ty_mentions_any(a, vars),
         Ty::Tuple(ts) => ts.iter().any(|t| ty_mentions_any(t, vars)),
         _ => false,
+    }
+}
+
+/// Hand codegen the builtin IO primitives under the closure IO model
+/// (`BHC_IO_MODEL=closure`, spec/BHC-BRIEF-0005): it lowers an application of
+/// one as an action, and only the type checker's builtin schemes say which.
+fn supply_io_primitives() {
+    if bhc_codegen::io_closure_mode() {
+        bhc_codegen::set_io_primitives(
+            bhc_typeck::io_primitive_names()
+                .into_iter()
+                .map(|s| s.as_str().to_string()),
+        );
     }
 }
 

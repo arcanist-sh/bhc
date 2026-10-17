@@ -146,6 +146,51 @@ pub fn type_check_module(hir: &Module, file_id: FileId) -> Result<TypedModule, V
     type_check_module_with_defs(hir, file_id, None)
 }
 
+/// Whether the closure IO model (`BHC_IO_MODEL=closure`, spec/BHC-BRIEF-0005)
+/// is enabled; mirrors `bhc_codegen::io_closure_mode`.
+pub(crate) fn io_closure_mode() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| std::env::var("BHC_IO_MODEL").is_ok_and(|m| m == "closure"))
+}
+
+/// The builtin values whose type ends in `IO _` — the IO primitives.
+///
+/// Codegen's closure IO model (`BHC_IO_MODEL=closure`, spec/BHC-BRIEF-0005
+/// Phase 0) needs to know which builtin applications are IO actions, and Core
+/// types are too sparse to tell; the builtin schemes say it exactly.
+#[must_use]
+pub fn io_primitive_names() -> Vec<Symbol> {
+    fn result_is_io(ty: &Ty) -> bool {
+        match ty {
+            Ty::Fun(_, r) => result_is_io(r),
+            Ty::Forall(_, body) => result_is_io(body),
+            Ty::App(f, _) => matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "IO"),
+            _ => false,
+        }
+    }
+    let mut ctx = TyCtxt::new(FileId::new(0));
+    ctx.register_builtins();
+    let mut names = ctx
+        .env
+        .top_level_names_where(|scheme| result_is_io(&scheme.ty));
+    // The builtins typed by name when lowering binds them
+    // (`register_lowered_builtins`: `doesFileExist`, `createDirectory`, …),
+    // over every name the lowering context predefines.
+    let lowered = bhc_lower::LowerContext::with_builtins();
+    ctx.register_lowered_builtins(&lowered.defs, &rustc_hash::FxHashSet::default());
+    for (id, info) in &lowered.defs {
+        if ctx
+            .env
+            .lookup_global(*id)
+            .is_some_and(|scheme| result_is_io(&scheme.ty))
+            && !names.contains(&info.name)
+        {
+            names.push(info.name);
+        }
+    }
+    names
+}
+
 /// Type check a HIR module with definition mappings from the lowering pass.
 ///
 /// This function accepts the DefMap from the lowering context, which allows

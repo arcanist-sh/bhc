@@ -483,6 +483,28 @@ fn binding_returns_in_dict_monad(ctx: &LowerContext, class_name: Symbol) -> bool
         .is_some_and(|sig| same_type_head(&dict_ty, result_of(sig)))
 }
 
+/// Whether this occurrence's recorded monad is a type VARIABLE and the
+/// in-scope `Monad` dictionary is for a variable too. `askx = RdT return`
+/// under `Monad m =>` passes the inner monad's `return` as a value; the
+/// binding returns in `RdT`, so `binding_returns_in_dict_monad` says no and
+/// the bare builtin `return` was left in a dictionary-passed position.
+fn occurrence_in_dict_monad_var(ctx: &LowerContext, span: Span) -> bool {
+    fn head(ty: &Ty) -> &Ty {
+        match ty {
+            Ty::App(f, _) => head(f),
+            other => other,
+        }
+    }
+    let dict_is_var = ctx
+        .lookup_dict_ty(Symbol::intern("Monad"))
+        .is_some_and(|t| matches!(head(t), Ty::Var(_)));
+    let occ_is_var = refined_occurrence_ty(ctx, span)
+        .as_ref()
+        .and_then(monad_head_of_method_occurrence)
+        .is_some_and(|h| matches!(h, Ty::Var(_)));
+    dict_is_var && occ_is_var
+}
+
 /// Whether an in-scope dictionary for `class_name` is one this occurrence
 /// should actually be selecting a method from.
 ///
@@ -538,6 +560,12 @@ fn in_scope_dict_matches(ctx: &LowerContext, class_name: Symbol, span: Span) -> 
         // PandocMonad method the ParsecT instance defines as `lift
         // getCommonState` — was selected from the dictionary for `m` and the
         // parser was handed an ExceptT-over-StateT action to run.
+        // A multi-parameter class's dictionary is for ALL its arguments, and
+        // the monad is not necessarily the first: `MonadSt s m` records
+        // `s := Int` first, which never matched `getx`'s monad `m`.
+        Some(occ_head) if ctx.class_param_count(class_name) > 1 => ctx
+            .lookup_dict_args(class_name)
+            .is_some_and(|args| args.iter().any(|a| same_type_head(a, &occ_head))),
         Some(occ_head) => same_type_head(&dict_ty, &occ_head),
         // Nothing recorded: keep what each class kind did before.
         None => !ctx.is_monad_family_class(class_name),
@@ -995,7 +1023,8 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         if is_method.is_none()
             && name.as_str() == "return"
             && crate::dictionary::monad_witness_enabled()
-            && binding_returns_in_dict_monad(ctx, Symbol::intern("Monad"))
+            && (binding_returns_in_dict_monad(ctx, Symbol::intern("Monad"))
+                || (io_closure_mode() && occurrence_in_dict_monad_var(ctx, def_ref.span)))
         {
             if let Some(method_expr) =
                 ctx.select_method_via_superclass(Symbol::intern("Monad"), name, def_ref.span)
@@ -3338,6 +3367,15 @@ fn lower_constrained_fn_app(
             match_ty(p, &at, &mut subst);
         }
     }
+    // Then the head occurrence's recorded type, as `resolve_constrained_fn_dicts`
+    // does: `modifyx (+ 1)` at `RdT Int (StT Int IO)` pins `m` from the
+    // expected type, but only typeck (through `m`'s functional dependency)
+    // knows `s := Int`; left open, the lifted instance's context dictionary
+    // was built at `s` and came out null.
+    if let Some(occ_ty) = ctx.resolved_expr_ty_opt(def_ref.span) {
+        let occ_ty = ctx.expand_type_aliases(&occ_ty);
+        match_ty(&scheme_ty, &occ_ty, &mut subst);
+    }
 
     let Some(dicts) = resolve_user_dicts(ctx, &user_constraints, &subst, def_ref.span) else {
         return Ok(None);
@@ -3646,16 +3684,28 @@ fn traversal_monad_ty(
 /// A monad whose actions codegen runs as it builds them. For those, and only
 /// those, `mapM_ f xs` really is `map f xs` with the result dropped.
 fn monad_runs_eagerly(ty: &Ty) -> bool {
+    let head = applied_head_name(ty).map(|n| n.as_str().to_string());
+    // Under the closure IO model (BHC_IO_MODEL=closure, BRIEF-0005) an IO
+    // action is a value that runs only when run, so `mapM_ f xs` at IO must be
+    // the fold through IO's `>>=`, like any other monad's.
+    if head.as_deref() == Some("IO") && io_closure_mode() {
+        return false;
+    }
     matches!(
-        applied_head_name(ty)
-            .map(|n| n.as_str().to_string())
-            .as_deref(),
+        head.as_deref(),
         // Not the transformers: codegen's builtin `mapM` is a plain `map`
         // (it never sequences), so `mapM step xs` at `StateT s IO` built a
         // list of unrun actions and the caller ran a list as a state
         // function. Their `>>=`/`pure` resolve like any instance's.
         Some("IO" | "Identity" | "Maybe" | "Either")
     )
+}
+
+/// Whether the closure IO model is enabled (`BHC_IO_MODEL=closure`); mirrors
+/// `bhc_codegen::io_closure_mode`.
+pub(crate) fn io_closure_mode() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| std::env::var("BHC_IO_MODEL").is_ok_and(|m| m == "closure"))
 }
 
 fn nullary_var(name: &str, span: Span) -> core::Expr {
@@ -3993,6 +4043,116 @@ fn lower_monadic_ap(
     )))
 }
 
+/// `foldM`, `foldM_` and `filterM` at a monad whose actions are values (not
+/// run as they are built), as folds over that monad's own `>>=`/`pure`:
+///
+/// ```text
+/// foldM f z xs  = foldl (\k x -> k >>= \acc -> f acc x) (pure z) xs
+/// foldM_ f z xs = foldM f z xs >>= \_ -> pure ()
+/// filterM p xs  = foldr (\x k -> p x >>= \b -> k >>= \ys ->
+///                          pure (if b then x : ys else ys)) (pure []) xs
+/// ```
+///
+/// Codegen's loops for these apply the function but never run the actions it
+/// returns, which under the closure IO model (spec/BHC-BRIEF-0005) printed
+/// nothing and summed pointers.
+fn lower_monadic_fold_family(
+    ctx: &mut LowerContext,
+    name: Symbol,
+    args: &[&hir::Expr],
+    head_span: Span,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let kind = match (name.as_str(), args.len()) {
+        ("foldM", 3) | ("foldM_", 3) | ("filterM", 2) => name.as_str(),
+        _ => return Ok(None),
+    };
+    let Some(monad_ty) = traversal_monad_ty(ctx, span, head_span, args.len()) else {
+        return Ok(None);
+    };
+    if monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none() {
+        return Ok(None);
+    }
+    let (Some(bind_e), Some(pure_e)) = (
+        ctx.resolve_method_at_concrete_type(
+            Symbol::intern(">>="),
+            Symbol::intern("Monad"),
+            &monad_ty,
+            span,
+        ),
+        ctx.resolve_method_at_concrete_type(
+            Symbol::intern("pure"),
+            Symbol::intern("Applicative"),
+            &monad_ty,
+            span,
+        ),
+    ) else {
+        return Ok(None);
+    };
+    let app = |f: core::Expr, a: core::Expr| core::Expr::App(Box::new(f), Box::new(a), span);
+    let var = |v: &Var| core::Expr::Var(v.clone(), span);
+    let lam = |v: Var, body: core::Expr| core::Expr::Lam(v, Box::new(body), span);
+    let foldr = nullary_var("foldr", span);
+    let lowered: Vec<core::Expr> = args
+        .iter()
+        .map(|a| lower_expr(ctx, a))
+        .collect::<LowerResult<_>>()?;
+    let x = ctx.fresh_var("$fm_x", Ty::Error, span);
+    let k = ctx.fresh_var("$fm_k", Ty::Error, span);
+    let expr = if kind == "filterM" {
+        let b = ctx.fresh_var("$fm_b", Ty::Error, span);
+        let ys = ctx.fresh_var("$fm_ys", Ty::Error, span);
+        let kept = app(app(nullary_var(":", span), var(&x)), var(&ys));
+        let pick = make_if_expr(var(&b), kept, var(&ys), span);
+        let after_rest = app(
+            app(bind_e.clone(), var(&k)),
+            lam(ys, app(pure_e.clone(), pick)),
+        );
+        let step_body = app(
+            app(bind_e, app(lowered[0].clone(), var(&x))),
+            lam(b, after_rest),
+        );
+        let step = lam(x, lam(k, step_body));
+        let seed = app(pure_e, nullary_var("[]", span));
+        app(app(app(foldr, step), seed), lowered[1].clone())
+    } else {
+        // `k` is the action so far: `\k x -> k >>= \acc -> f acc x`.
+        let acc = ctx.fresh_var("$fm_acc", Ty::Error, span);
+        let step_body = app(
+            app(bind_e.clone(), var(&k)),
+            lam(
+                acc.clone(),
+                app(app(lowered[0].clone(), var(&acc)), var(&x)),
+            ),
+        );
+        let step = lam(k, lam(x, step_body));
+        let seed = app(pure_e.clone(), lowered[1].clone());
+        let folded = app(
+            app(app(nullary_var("foldl", span), step), seed),
+            lowered[2].clone(),
+        );
+        if kind == "foldM_" {
+            let ignored = ctx.fresh_var("$fm_ignored", Ty::Error, span);
+            app(
+                app(bind_e, folded),
+                lam(ignored, app(pure_e, nullary_var("()", span))),
+            )
+        } else {
+            folded
+        }
+    };
+    Ok(Some(expr))
+}
+
+/// Whether `name` is a traversal whose list is built from its arguments
+/// (`zipWithM`, `replicateM`, …) rather than passed in.
+fn derived_actions_name(name: Symbol) -> bool {
+    matches!(
+        name.as_str(),
+        "zipWithM" | "zipWithM_" | "replicateM" | "replicateM_"
+    )
+}
+
 fn try_lower_monadic_traversal(
     ctx: &mut LowerContext,
     f: &hir::Expr,
@@ -4060,6 +4220,9 @@ fn try_lower_monadic_traversal(
     } {
         return lower_monadic_lift(ctx, &args, n_actions, build, head_ref.span, span);
     }
+    if let Some(e) = lower_monadic_fold_family(ctx, name, &args, head_ref.span, span)? {
+        return Ok(Some(e));
+    }
     // `collect`: the result list is kept. `elems`: the arguments are already
     // actions, there is no function to apply.
     // `missing_list`: the function is there but the container is not, which is
@@ -4075,6 +4238,10 @@ fn try_lower_monadic_traversal(
         ("forM" | "for", 2) => (true, false, true, false),
         ("sequence_" | "sequenceA_", 1) => (false, true, false, false),
         ("sequence" | "sequenceA", 1) => (true, true, false, false),
+        // These are `sequence`/`sequence_` of a derived list of actions (see
+        // `derived_actions` below): `zipWith f xs ys`, `replicate n act`.
+        ("zipWithM", 3) | ("replicateM", 2) => (true, true, false, false),
+        ("zipWithM_", 3) | ("replicateM_", 2) => (false, true, false, false),
         _ => return Ok(None),
     };
     let n_arrows = if missing_list {
@@ -4144,6 +4311,52 @@ fn try_lower_monadic_traversal(
         return Ok(None);
     };
 
+    // The rewrite is a LIST fold. A `traverse` over another Traversable
+    // (`traverse f (Pair a b)`, a derived instance) must reach its instance;
+    // folding it as a list read the pair's fields as cons cells.
+    // The container's type: its own recorded type, else the traversal's
+    // parameter type at that position (`traverse :: … -> Pair a -> …`).
+    // (A point-free `traverse f` is retried without its container: the
+    // position is still 1, read off the head's type.)
+    let container_pos = if derived_actions_name(name) {
+        None
+    } else if elems || flipped {
+        Some(0)
+    } else {
+        Some(1)
+    };
+    let container_ty = container_pos.and_then(|pos| {
+        args.get(pos)
+            .and_then(|a| ctx.resolved_expr_ty_opt(a.span()))
+            .or_else(|| {
+                let mut t = ctx.resolved_expr_ty_opt(head_ref.span)?;
+                for _ in 0..pos {
+                    match t {
+                        Ty::Fun(_, r) => t = *r,
+                        _ => return None,
+                    }
+                }
+                match t {
+                    Ty::Fun(p, _) => Some(*p),
+                    _ => None,
+                }
+            })
+    });
+    if std::env::var("BHC_DBG_TRAV").is_ok() {
+        eprintln!("trav {}: container {:?}", name.as_str(), container_ty);
+    }
+    if let Some(cty) = container_ty {
+        {
+            let mut head = &cty;
+            while let Ty::App(f, _) = head {
+                head = f.as_ref();
+            }
+            if matches!(head, Ty::Con(tc) if tc.name.as_str() != "[]" && tc.name.as_str() != "List")
+            {
+                return Ok(None);
+            }
+        }
+    }
     let (fn_expr, list_expr) = if missing_list {
         (Some(args[0]), None)
     } else if elems {
@@ -4158,7 +4371,24 @@ fn try_lower_monadic_traversal(
     } else {
         None
     };
+    // `zipWithM f xs ys` traverses `zipWith f xs ys`, and `replicateM n act`
+    // traverses `replicate n act` — codegen's own loops apply `f` but never
+    // run the actions it returns.
+    let derived_actions = match name.as_str() {
+        "zipWithM" | "zipWithM_" => Some(("zipWith", vec![args[0], args[1], args[2]])),
+        "replicateM" | "replicateM_" => Some(("replicate", vec![args[0], args[1]])),
+        _ => None,
+    };
     let list_core = match (list_expr, &list_param) {
+        _ if derived_actions.is_some() => {
+            let (builder, parts) = derived_actions.unwrap_or_default();
+            let mut e = nullary_var(builder, span);
+            for part in parts {
+                let part = lower_expr(ctx, part)?;
+                e = core::Expr::App(Box::new(e), Box::new(part), span);
+            }
+            e
+        }
         (Some(e), _) => lower_expr(ctx, e)?,
         (None, Some(v)) => core::Expr::Var(v.clone(), span),
         (None, None) => return Ok(None),
@@ -4668,8 +4898,19 @@ fn lower_app(
                     //     above pins the monad there, so `return x1` stayed a
                     //     builtin and handed the Char on raw — a later
                     //     dereference of `0x61`.
-                    if let Some(inst_ty) = ctx.current_instance_type().cloned() {
-                        candidates.push(inst_ty);
+                    //     Not when typeck recorded this `return` at a monad
+                    //     VARIABLE: `pure a = StT (\s -> return (a, s))` in
+                    //     `instance Monad m => Applicative (StT s m)` returns
+                    //     in the inner `m`, whose dictionary is in scope;
+                    //     taking the instance made `pure` call itself.
+                    let at_monad_var = matches!(
+                        ctx.resolved_expr_ty_opt(span),
+                        Some(Ty::App(head, _)) if matches!(*head, Ty::Var(_))
+                    );
+                    if !at_monad_var {
+                        if let Some(inst_ty) = ctx.current_instance_type().cloned() {
+                            candidates.push(inst_ty);
+                        }
                     }
                     for monad_ty in candidates {
                         if own_is_codegen_monad {

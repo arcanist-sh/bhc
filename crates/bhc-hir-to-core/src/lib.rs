@@ -263,12 +263,18 @@ pub fn lower_module_with_imports(
             };
             for (v, e) in pairs {
                 if v.name.as_str().contains(&filter) {
-                    eprintln!(
-                        "=== CORE BIND {} :: {:?} ===\n{:#?}",
-                        v.name.as_str(),
-                        v.ty,
-                        e
-                    );
+                    // `BHC_DUMP_BIND_PRETTY` prints the Core pretty form
+                    // instead of the full `Debug` tree.
+                    if std::env::var_os("BHC_DUMP_BIND_PRETTY").is_some() {
+                        eprintln!("=== CORE BIND {} ===\n{e}", v.name.as_str());
+                    } else {
+                        eprintln!(
+                            "=== CORE BIND {} :: {:?} ===\n{:#?}",
+                            v.name.as_str(),
+                            v.ty,
+                            e
+                        );
+                    }
                 }
             }
         }

@@ -3405,9 +3405,10 @@ impl LowerContext {
     /// (MonadError String)` this builds the `MonadError String (ExceptT
     /// String (StateT Int IO))` dictionary once and makes each method of
     /// `MonadError String App` select its slot from it. A newtype is
-    /// representationally its field, so no wrapping is needed. Only a fully
-    /// concrete wrapped type is handled; otherwise `None`, and the caller
-    /// falls back to the other derivations.
+    /// representationally its field, so no wrapping is needed. The wrapped
+    /// type needs a concrete head; when its dictionary cannot be built (it
+    /// needs a context dictionary), `None`, and the caller falls back to the
+    /// other derivations.
     fn derive_newtype_via_wrapped(
         &mut self,
         deriv_ctx: &mut DerivingContext,
@@ -3439,8 +3440,15 @@ impl LowerContext {
         let Ty::App(wrapped, arg) = field else {
             return None;
         };
+        // `Future s a = Future (Reader s a)`: the instance is `ReaderT`'s.
+        let wrapped = Box::new(self.expand_type_aliases(&wrapped));
+        // The wrapped type needs a concrete head; variables under it are
+        // fine when its instance needs no dictionary for them: pandoc's
+        // `Future s` wraps `Reader s` = `ReaderT s Identity`, whose `Monad`
+        // dictionary is the same for every `s`. One that does need a context
+        // dictionary fails to construct below and falls back.
         if !matches!(arg.as_ref(), Ty::Var(v) if v.id == last.id)
-            || has_type_variables(&wrapped)
+            || !matches!(applied_head(&wrapped), Ty::Con(_))
             || clause.args.iter().any(has_type_variables)
         {
             return None;
@@ -3486,11 +3494,48 @@ impl LowerContext {
                 id: VarId::new(slot),
                 ty: Ty::Error,
             };
-            let body = core::Expr::App(
+            let selected = core::Expr::App(
                 Box::new(core::Expr::Var(selector, span)),
                 Box::new(core::Expr::Var(dict_var.clone(), span)),
                 span,
             );
+            // Eta-expanded to the method's arity (its method-level
+            // dictionaries first): an importing module calls the symbol
+            // directly with that many arguments, and the interface records
+            // the arity from the Core lambdas — a bare selection is recorded
+            // as a nullary value and a direct call then reads garbage.
+            let value_arity = class_info
+                .method_types
+                .get(method)
+                .map(|scheme| {
+                    let mut n = 0;
+                    let mut t = &scheme.ty;
+                    while let Ty::Fun(_, r) = t {
+                        n += 1;
+                        t = r.as_ref();
+                    }
+                    n
+                })
+                .filter(|n| *n > 0)
+                .or_else(|| builtin_class_method_arity(*method))
+                .unwrap_or(0);
+            let dict_arity = self
+                .method_level_dict_constraints(clause.class, *method)
+                .map_or(0, |(_, cs)| cs.len());
+            let params: Vec<Var> = (0..dict_arity + value_arity)
+                .map(|i| self.fresh_var(&format!("eta{i}"), Ty::Error, span))
+                .collect();
+            let applied = params.iter().fold(selected, |acc, p| {
+                core::Expr::App(
+                    Box::new(acc),
+                    Box::new(core::Expr::Var(p.clone(), span)),
+                    span,
+                )
+            });
+            let body = params
+                .into_iter()
+                .rev()
+                .fold(applied, |acc, p| core::Expr::Lam(p, Box::new(acc), span));
             methods.insert(*method, DefId::new(var.id.index()));
             bindings.push(Bind::NonRec(var, Box::new(body)));
         }
@@ -3872,7 +3917,7 @@ impl LowerContext {
         let fixed: Vec<usize> = (0..types.len())
             .filter(|&i| !matches!(types[i], Ty::Var(_)))
             .collect();
-        let mut found = None;
+        let mut found: Option<(&crate::dictionary::InstanceInfo, bhc_types::Subst)> = None;
         for inst in instances {
             if inst.instance_types.len() != types.len() {
                 continue;
@@ -3883,8 +3928,17 @@ impl LowerContext {
                 .collect();
             let targets: Vec<Ty> = fixed.iter().map(|&i| types[i].clone()).collect();
             if let Some(subst) = bhc_types::types_match_multi(&pats, &targets) {
-                if found.is_some() {
-                    return types;
+                // The same instance can be registered more than once (from
+                // each interface that brings it in, with fresh variables);
+                // only a DIFFERENT head is ambiguous.
+                if let Some((prev, _)) = &found {
+                    let enc = |tys: &[Ty]| -> Vec<String> {
+                        tys.iter().map(type_name_for_instance).collect()
+                    };
+                    if enc(&prev.instance_types) != enc(&inst.instance_types) {
+                        return types;
+                    }
+                    continue;
                 }
                 found = Some((inst, subst));
             }

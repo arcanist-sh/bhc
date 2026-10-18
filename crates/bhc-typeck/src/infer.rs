@@ -503,6 +503,16 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                         if let Some(expected) = all_field_types.get(&field.name) {
                             ctx.unify(&field_val_ty, expected, field.span);
                         }
+                        // An imported record's constructor carries fresh field
+                        // types; its declared ones type the new value
+                        // (closure IO model).
+                        if let Some((owner, declared)) =
+                            ctx.record_field_types.get(&field.name).cloned()
+                        {
+                            if owner == name {
+                                ctx.unify(&field_val_ty, &declared, field.span);
+                            }
+                        }
                     }
                 } else {
                     // Type has no registered constructors — just infer field values

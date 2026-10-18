@@ -375,6 +375,9 @@ pub struct ImportedClasses<'a> {
     pub fundeps: Option<&'a rustc_hash::FxHashMap<Symbol, Vec<bhc_lower::ClassFunDep>>>,
     /// Imported instances (see `bhc_lower::InterfaceInstanceEntry`).
     pub instances: &'a [bhc_lower::InterfaceInstanceEntry],
+    /// Declared field types of imported parameterless records, for record
+    /// updates (see `LowerContext::interface_record_field_types`).
+    pub record_field_types: Option<&'a rustc_hash::FxHashMap<Symbol, (Symbol, Ty)>>,
 }
 
 /// Type check a HIR module, additionally knowing imported classes.
@@ -400,6 +403,25 @@ pub fn type_check_module_with_imports(
 
     if io_closure_mode() {
         register_imported_fundep_classes(&mut ctx, imported_classes);
+        if let Some(fields) = imported_classes.record_field_types {
+            // A record this module declares itself shadows an imported one of
+            // the same name (pandoc's Powerpoint writers each have a
+            // `WriterEnv`).
+            let local: rustc_hash::FxHashSet<Symbol> = hir
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    bhc_hir::Item::Data(d) => Some(d.name),
+                    bhc_hir::Item::Newtype(n) => Some(n.name),
+                    _ => None,
+                })
+                .collect();
+            ctx.record_field_types = fields
+                .iter()
+                .filter(|(_, (owner, _))| !local.contains(owner))
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+        }
     }
 
     // If we have definition mappings from the lowering pass, use them

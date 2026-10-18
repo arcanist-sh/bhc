@@ -2255,6 +2255,21 @@ fn hint_lift_a2_function_ty(ctx: &mut LowerContext, f: &hir::Expr, x: &hir::Expr
     propagate_expected_ty(ctx, fn_arg, &want, 0);
 }
 
+/// Under the closure IO model, the monad a monad-family method application
+/// runs in as typeck recorded it on the application itself, when that names a
+/// concrete constructor: `runF (do { Pandoc _ bs <- B.doc <$> blocks; … })`
+/// inside a parser's do-block binds in `Future ParserState`, while the monad
+/// context stack still holds the enclosing `ParsecT`.
+fn own_concrete_monad(ctx: &LowerContext, span: Span) -> Option<Ty> {
+    if !io_closure_mode() {
+        return None;
+    }
+    let Some(Ty::App(monad, _)) = ctx.resolved_expr_ty_opt(span) else {
+        return None;
+    };
+    has_concrete_head(&monad).then_some(*monad)
+}
+
 /// Under the closure IO model (spec/BHC-BRIEF-0005), a `>>=`/`>>` that every
 /// dispatch path left as the builtin, at a monad typeck did not pin to a
 /// constructor, binds in the `Monad` dictionary in scope (directly or through a
@@ -4812,6 +4827,7 @@ fn lower_app(
                                 // (see `io_occurrence_head`).
                                 if is_monad_family {
                                     io_occurrence_head(ctx, span)
+                                        .or_else(|| own_concrete_monad(ctx, span))
                                         .or_else(|| ctx.current_monad_type().cloned())
                                         .or_else(|| {
                                             // Last resort: recover the monad constructor from
@@ -5398,6 +5414,7 @@ fn lower_app(
                                     // returned a bogus value. Trust an IO head on
                                     // the occurrence's own type before the stack.
                                     io_occurrence_head(ctx, span)
+                                        .or_else(|| own_concrete_monad(ctx, span))
                                         .or_else(|| ctx.current_monad_type().cloned())
                                         .or_else(|| {
                                             if std::env::var("BHC_NO_CART").is_ok() {

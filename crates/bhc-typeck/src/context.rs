@@ -140,6 +140,9 @@ pub struct TyCtxt {
     /// Constraints for these classes flow through dict-passing.
     /// Builtin classes (Show, Eq, Monad, MonadState, etc.) are handled by codegen.
     pub(crate) user_defined_classes: rustc_hash::FxHashSet<Symbol>,
+    /// Declared field types of imported parameterless records (closure IO
+    /// model), used by record updates: field name -> (record type, type).
+    pub(crate) record_field_types: FxHashMap<Symbol, (Symbol, Ty)>,
 
     /// Type names that are GADTs (have constructors with explicit return types).
     /// Used to enable save/restore of substitution in case expressions.
@@ -211,6 +214,7 @@ impl TyCtxt {
             scoped_type_variables: false,
             scoped_type_vars: FxHashMap::default(),
             user_defined_classes: rustc_hash::FxHashSet::default(),
+            record_field_types: FxHashMap::default(),
             gadt_types: rustc_hash::FxHashSet::default(),
             imported_constrained_schemes: FxHashMap::default(),
             field_name_to_con: FxHashMap::default(),

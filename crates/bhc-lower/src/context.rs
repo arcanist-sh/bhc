@@ -285,6 +285,10 @@ pub struct LowerContext {
     /// improve constraints on imported classes (`MonadState ?s (StateT Int
     /// IO)` gives `?s := Int`).
     pub interface_class_fundeps: FxHashMap<Symbol, Vec<ClassFunDep>>,
+    /// The declared type of each field of a parameterless record loaded from
+    /// an interface, with the record's type name — consulted by the type
+    /// checker for record updates only (closure IO model).
+    pub interface_record_field_types: FxHashMap<Symbol, (Symbol, bhc_types::Ty)>,
     /// Errors collected during lowering.
     pub errors: Vec<crate::LowerError>,
     /// Warnings collected during lowering.
@@ -329,6 +333,7 @@ impl LowerContext {
             interface_instances: Vec::new(),
             interface_classes: Vec::new(),
             interface_class_fundeps: FxHashMap::default(),
+            interface_record_field_types: FxHashMap::default(),
             errors: Vec::new(),
             warnings: Vec::new(),
             import_aliases: FxHashMap::default(),

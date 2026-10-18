@@ -1359,6 +1359,7 @@ impl Compiler {
                 classes: &lower_ctx.interface_classes,
                 fundeps: Some(&lower_ctx.interface_class_fundeps),
                 instances: &lower_ctx.interface_instances,
+                record_field_types: Some(&lower_ctx.interface_record_field_types),
             },
         ) {
             Ok(typed) => Ok(typed),
@@ -3836,8 +3837,16 @@ impl Compiler {
         );
         let mut exports = Self::interface_to_module_exports(&iface, module_name, ctx);
 
+        // `reexports` is a std HashMap, whose iteration order changes from
+        // run to run; resolve in a fixed order so the same interfaces always
+        // bind the same definitions.
+        let mut reexports: Vec<(&String, &String)> = iface.reexports.iter().collect();
+        // Types first: a re-exported `ExceptT (..)` brings its record fields
+        // (`runExceptT`), which a later name-level entry then finds present.
+        reexports.sort_by_key(|(key, _)| (!key.starts_with("type:"), (*key).clone()));
+
         // Whole-module re-exports: merge the origin module's full surface.
-        for (origin, kind) in &iface.reexports {
+        for &(origin, kind) in &reexports {
             if kind != "*" {
                 continue;
             }
@@ -3866,7 +3875,7 @@ impl Compiler {
         // package (Text.Pandoc.Highlighting re-exporting Skylighting's
         // `pygments`) would drop the name and every dependent fails lowering.
         let mut chased: FxHashMap<&str, Option<ModuleExports>> = FxHashMap::default();
-        for (key, origin) in &iface.reexports {
+        for &(key, origin) in &reexports {
             if origin == "*" {
                 continue;
             }
@@ -3969,6 +3978,34 @@ impl Compiler {
                     }
                 }
             }
+            // Not found among the name's own candidates: it may have come in as
+            // a child of another re-export's origin (a field of `ExceptT (..)`
+            // imported from `Control.Monad.Trans.Except`). Look there before
+            // binding an untyped placeholder.
+            let resolved = resolved.or_else(|| {
+                if is_type {
+                    return None;
+                }
+                let mut origins: Vec<&str> = reexports
+                    .iter()
+                    .flat_map(|(_, o)| o.split(';'))
+                    .filter(|c| !c.is_empty() && *c != "*")
+                    .collect();
+                origins.sort_unstable();
+                origins.dedup();
+                origins.into_iter().find_map(|candidate| {
+                    if !chased.contains_key(candidate) {
+                        let sub = self.load_interface_exports_chasing(
+                            candidate, flat_dirs, packages, ctx, visited, memo,
+                        );
+                        chased.insert(candidate, sub);
+                    }
+                    chased
+                        .get(candidate)
+                        .and_then(|sub| sub.as_ref())
+                        .and_then(|sub| sub.values.get(&sym).copied())
+                })
+            });
             let def_id = resolved.unwrap_or_else(|| {
                 let fresh = ctx.fresh_def_id();
                 let def_kind = if is_type {
@@ -4188,6 +4225,20 @@ impl Compiler {
                     // below and used under the closure IO model only.
                     let mut accessor_schemes: Vec<Option<bhc_types::Scheme>> =
                         vec![None; con.fields.len()];
+                    // Under the closure IO model the real type of each field of
+                    // a parameterless record is kept for record updates only
+                    // (`def { stateOptions = def }` must type the inner `def`);
+                    // the constructor itself keeps the fresh variables below.
+                    if bhc_types::io_closure_mode() && exported_type.params.is_empty() {
+                        if let Some(ref names) = con.field_names {
+                            converter.reset_vars();
+                            for (name, f) in names.iter().zip(&con.fields) {
+                                let ty = converter.convert_type(f);
+                                ctx.interface_record_field_types
+                                    .insert(Symbol::intern(name), (type_name, ty));
+                            }
+                        }
+                    }
                     let con_scheme = if con_param_vars.len() == exported_type.params.len()
                         && !con_param_vars.is_empty()
                     {

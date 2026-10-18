@@ -221,10 +221,8 @@ mode.
 **Runtime probes:**
 
 - the parser ladder passes 4/4 (MD1, TA, TB, OPT1);
-- `runIO`, `liftIO`, `getCommonState` and the parsec token parsers run;
-- markdown→HTML (MD2HTML) still crashes in the block parser: a parsec continuation that
-  captures the parsed token and calls `PandocMonad`'s `trace` misreads its argument;
-- a self-contained CPS repro does not reproduce it.
+- the markdown reader runs end to end (`readMarkdown` on `"hello\n"` gives one `Para`);
+- the HTML writer still crashes inside `pandocToHtml`.
 
 **Fixes this phase needed:**
 
@@ -238,7 +236,17 @@ mode.
 - constrained functions passed as values get their dictionaries;
 - interfaces record newtype-derived instances with the class's real method list;
 - a last-resort bind through the in-scope `Monad` dictionary, which may hop through a
-  multi-parameter superclass.
+  multi-parameter superclass;
+- newtype-derived methods are eta-expanded to their arity (an importer calls them
+  directly);
+- interface re-exports resolve in a fixed order, and a record field re-exported through
+  its type is found before an untyped placeholder;
+- newtype deriving works when variables sit under the wrapped type's head (pandoc's
+  `Future s` over `Reader s`);
+- duplicate instance registrations no longer block fundep-style filling;
+- record updates use imported records' declared field types;
+- a monad-family method takes its monad from its own recorded type before the enclosing
+  do-block's.
 
 **Known non-library gaps seen on the way:**
 

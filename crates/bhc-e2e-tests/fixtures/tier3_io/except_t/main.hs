@@ -1,3 +1,5 @@
+import Control.Monad.Trans.Except
+
 main = do
     result1 <- runExceptT successComp
     case result1 of
@@ -8,8 +10,10 @@ main = do
         Left e  -> putStrLn ("Left: " ++ e)
         Right a -> putStrLn ("Right: " ++ a)
 
+successComp :: ExceptT String IO String
 successComp = catchE (return "success") (\_ -> return "caught")
 
+failComp :: ExceptT String IO String
 failComp = do
     throwE "failed"
     return "unreachable"

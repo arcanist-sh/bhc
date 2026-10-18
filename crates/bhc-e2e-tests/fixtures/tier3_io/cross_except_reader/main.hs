@@ -2,6 +2,9 @@
 -- Stack: ExceptT String (ReaderT String IO) a
 -- Uses: lift ask, throwE, return, runExceptT, runReaderT
 
+import Control.Monad.Reader
+import Control.Monad.Trans.Except
+
 comp :: ExceptT String (ReaderT String IO) Int
 comp = do
     r <- lift ask

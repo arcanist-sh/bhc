@@ -10,7 +10,7 @@ class Monad m => MyMonad m where
   tag :: m Int
 
 newtype App a = App { unApp :: ExceptT String (StateT Int IO) a }
-  deriving (Functor, Applicative, Monad)
+  deriving (Functor, Applicative, Monad, MonadError String)
 
 instance MyMonad App where
   tag = return 9

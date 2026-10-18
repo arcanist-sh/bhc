@@ -2,6 +2,9 @@
 -- Stack: WriterT String (StateT Int IO) a
 -- Uses: tell, lift get, lift put, runWriterT, runStateT
 
+import Control.Monad.State
+import Control.Monad.Writer
+
 comp :: WriterT String (StateT Int IO) Int
 comp = do
     s <- lift get

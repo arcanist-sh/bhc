@@ -106,6 +106,32 @@ fn try_expand_type_alias(ctx: &TyCtxt, ty: &Ty) -> Option<Ty> {
     Some(expanded)
 }
 
+/// Expand every type synonym in `ty`, at every depth (`ExceptT String IO`
+/// becomes `ExceptT [Char] IO`), and spell `[] t` as `[t]`, so structural
+/// instance matching sees the same type the unifier does.
+pub(crate) fn expand_aliases_deep(ctx: &TyCtxt, ty: &Ty) -> Ty {
+    fn go(ctx: &TyCtxt, ty: &Ty, fuel: u32) -> Ty {
+        if fuel == 0 {
+            return ty.clone();
+        }
+        if let Some(expanded) = try_expand_type_alias(ctx, ty) {
+            return go(ctx, &expanded, fuel - 1);
+        }
+        match ty {
+            // `[] t` and `[t]` are one type; instance matching is structural.
+            Ty::App(f, a) if matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "[]") => {
+                Ty::List(Box::new(go(ctx, a, fuel)))
+            }
+            Ty::App(f, a) => Ty::App(Box::new(go(ctx, f, fuel)), Box::new(go(ctx, a, fuel))),
+            Ty::Fun(a, b) => Ty::Fun(Box::new(go(ctx, a, fuel)), Box::new(go(ctx, b, fuel))),
+            Ty::List(a) => Ty::List(Box::new(go(ctx, a, fuel))),
+            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| go(ctx, t, fuel)).collect()),
+            _ => ty.clone(),
+        }
+    }
+    go(ctx, ty, 32)
+}
+
 /// Collect a type application spine: `App(App(Con(F), a), b)` → `(Con(F), [a, b])`.
 fn collect_type_app(ty: &Ty) -> (Ty, Vec<Ty>) {
     let mut args = Vec::new();

@@ -167,6 +167,28 @@ pub struct TyCtxt {
     pub(crate) type_aliases: FxHashMap<Symbol, (Vec<bhc_types::TyVar>, Ty)>,
 }
 
+/// A scheme's printed form with its type variables numbered by first
+/// appearance, so two copies differing only in variable ids compare equal.
+fn alpha_key(scheme: &Scheme) -> String {
+    let text = format!("{:?}|{:?}", scheme.constraints, scheme.ty);
+    let mut ids: FxHashMap<String, usize> = FxHashMap::default();
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(pos) = rest.find("id: ") {
+        out.push_str(&rest[..pos + 4]);
+        rest = &rest[pos + 4..];
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let next = ids.len();
+        let n = *ids.entry(rest[..end].to_string()).or_insert(next);
+        out.push_str(&n.to_string());
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 impl TyCtxt {
     /// Create a new type checking context for the given file.
     #[must_use]
@@ -584,6 +606,19 @@ impl TyCtxt {
         if depth > 50 {
             return false;
         }
+        // Instance heads are matched structurally, so a synonym in the
+        // constraint (`MonadError [Char] (ExceptT String IO)`) must be
+        // expanded first or it never meets `MonadError e (ExceptT e m)`.
+        let expanded: Vec<Ty>;
+        let args = if crate::io_closure_mode() {
+            expanded = args
+                .iter()
+                .map(|a| crate::unify::expand_aliases_deep(self, a))
+                .collect();
+            expanded.as_slice()
+        } else {
+            args
+        };
 
         // Handle single-argument constraints with existing resolve_instance
         if args.len() == 1 {
@@ -635,6 +670,10 @@ impl TyCtxt {
                 if let Ty::App(f, _) = &args[0] {
                     if let Ty::Con(tycon) = f.as_ref() {
                         let name = tycon.name.as_str();
+                        if bhc_types::is_library_transformer_name(name) {
+                            // A library instance answers (spec/BHC-BRIEF-0005).
+                            return false;
+                        }
                         if matches!(
                             name,
                             "State"
@@ -657,6 +696,9 @@ impl TyCtxt {
                     if let Ty::App(ff, _) = f.as_ref() {
                         if let Ty::Con(tycon) = ff.as_ref() {
                             let name = tycon.name.as_str();
+                            if bhc_types::is_library_transformer_name(name) {
+                                return false;
+                            }
                             if matches!(
                                 name,
                                 "StateT"
@@ -673,7 +715,7 @@ impl TyCtxt {
                     }
                 }
                 // Also check nested transformer applications that bottom out in IO
-                self.monad_bottoms_out_in_io(&args[0])
+                !crate::io_closure_mode() && self.monad_bottoms_out_in_io(&args[0])
             }
             // Monoid instances
             "Monoid" if args.len() == 1 => {
@@ -754,6 +796,9 @@ impl TyCtxt {
                 | "MonadFail"
         ) {
             if let Some(head) = container_head_name(ty) {
+                if bhc_types::is_library_transformer_name(head) {
+                    return false;
+                }
                 if matches!(
                     head,
                     "[]" | "Maybe"
@@ -1105,6 +1150,11 @@ impl TyCtxt {
                 _ => false,
             }
         }
+        let args: Vec<Ty> = args
+            .iter()
+            .map(|a| crate::unify::expand_aliases_deep(self, a))
+            .collect();
+        let args = args.as_slice();
         let key = format!("{}{:?}", constraint.class.as_str(), args);
         if improved.contains(&key) {
             return false;
@@ -2368,6 +2418,24 @@ impl TyCtxt {
             // same-named Prelude builtin, so it must not get the hardcoded
             // builtin scheme. Its type comes from inference or its signature.
             if local_value_ids.contains(&def_info.id) {
+                continue;
+            }
+            // A value loaded from a module interface carries the scheme its
+            // module inferred; it is not a builtin, whatever its name. A class
+            // method `getModificationTime :: String -> m Int` imported from a
+            // `.bhi` took System.Directory's `FilePath -> IO UTCTime` here,
+            // and every `P.getModificationTime` use was typed at IO.
+            if def_info.type_scheme.is_some()
+                && bhc_index::Idx::index(def_info.id) >= bhc_lower::BUILTIN_DEF_LIMIT
+            {
+                continue;
+            }
+            // Under the closure IO model a transformer name is a library
+            // definition (spec/BHC-BRIEF-0005); its type comes from the
+            // library, never from the curated builtin schemes below.
+            if bhc_types::is_library_transformer_name(
+                def_info.name.as_str().rsplit('.').next().unwrap_or(""),
+            ) {
                 continue;
             }
             let raw_name = def_info.name.as_str();
@@ -8138,7 +8206,30 @@ impl TyCtxt {
                 // `instance PandocMonad PandocIO` typed `forall v. v`, so its
                 // compiled original could not see the PandocIO stack.
                 self.def_schemes.insert(method.id, scheme.clone());
-                self.env.insert_global(method.id, scheme);
+                self.env.insert_global(method.id, scheme.clone());
+                // Under the closure IO model the body is checked against that
+                // scheme (spec/BHC-BRIEF-0005): hir-to-core dispatches every
+                // monadic operation inside by its recorded type, and the
+                // transformers library's `lift m = ExceptT (m >>= \a ->
+                // return (Right a))` must `return` in the inner monad.
+                if crate::io_closure_mode() {
+                    let mut typed = method.clone();
+                    typed.sig = Some(scheme);
+                    // Only the recorded types are wanted: a body the checker
+                    // cannot follow (pandoc's roff lexers return through an
+                    // injective associated family) must not fail a module it
+                    // used to leave unchecked. Its errors are dropped.
+                    let earlier = self.diag.take_diagnostics();
+                    self.check_value_def(&typed);
+                    let body_diags = self.diag.take_diagnostics();
+                    for d in earlier.into_iter().chain(
+                        body_diags
+                            .into_iter()
+                            .filter(|d| !matches!(d.severity, bhc_diagnostics::Severity::Error)),
+                    ) {
+                        self.diag.emit(d);
+                    }
+                }
             } else {
                 // Still register the method's scheme so it can be looked up,
                 // but use a fresh type variable to avoid constraining other code.
@@ -8207,7 +8298,12 @@ impl TyCtxt {
             })
         });
         let scheme = found.next()?.clone();
-        if found.next().is_some() {
+        // The same method can arrive more than once — from its class's module
+        // and from each module re-exporting it (`lift` via
+        // `Control.Monad.Trans`). Only genuinely different schemes are
+        // ambiguous.
+        let key = alpha_key(&scheme);
+        if found.any(|other| alpha_key(other) != key) {
             return None;
         }
         let class_c = scheme

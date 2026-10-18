@@ -17,6 +17,7 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT (..))
 import Control.Monad.Trans.Maybe (MaybeT (..))
 import Control.Monad.Trans.Reader (ReaderT (..), mapReaderT)
+import qualified Control.Monad.Trans.RWS.Strict as RWS
 import Control.Monad.Trans.State.Strict (StateT (..))
 import qualified Control.Monad.Trans.Writer.Strict as W
 
@@ -69,3 +70,9 @@ instance MonadWriter w m => MonadWriter w (MaybeT m) where
   pass (MaybeT m) = MaybeT (pass (m >>= \ma -> return (case ma of
     Nothing -> (Nothing, id)
     Just (a, f) -> (Just a, f))))
+
+instance (Monoid w, Monad m) => MonadWriter w (RWS.RWST r w s m) where
+  writer = RWS.writer
+  tell = RWS.tell
+  listen = RWS.listen
+  pass = RWS.pass

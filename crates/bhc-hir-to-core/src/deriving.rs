@@ -151,7 +151,7 @@ impl DerivingContext {
     /// interface harvest externs it (driver `instance_methods`). A suffixed
     /// name breaks both. The `{method}_{Type}` portion is unique per instance,
     /// so no collision results from dropping the id.
-    fn named_instance_var(&mut self, name: &str, ty: Ty) -> Var {
+    pub(crate) fn named_instance_var(&mut self, name: &str, ty: Ty) -> Var {
         let n = self.fresh_counter;
         self.fresh_counter += 1;
         Var {
@@ -3434,6 +3434,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Eq"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3471,6 +3472,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Eq"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3525,6 +3527,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Ord"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3570,6 +3573,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Show"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3624,6 +3628,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Enum"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3678,6 +3683,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Enum"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3728,6 +3734,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Bounded"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3770,6 +3777,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Functor"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3807,6 +3815,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Functor"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3837,6 +3846,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Foldable"),
+                args: vec![],
             }],
             span: Span::default(),
         };
@@ -3874,6 +3884,7 @@ mod tests {
             deriving: vec![bhc_hir::DerivingClause {
                 strategy: bhc_hir::DerivingStrategy::Default,
                 class: Symbol::intern("Traversable"),
+                args: vec![],
             }],
             span: Span::default(),
         };

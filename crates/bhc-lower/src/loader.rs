@@ -1031,11 +1031,31 @@ pub fn register_imported_names(
             }) && ctx.defs.get(&def_id).is_some_and(|info| {
                 info.name != name && info.name.as_str().ends_with(name.as_str())
             }) && !crate::lower::is_prelude_export(name.as_str());
+        // A name the import lists explicitly is the import's, not a same-named
+        // builtin's — unless it is a Prelude name, which would be ambiguous in
+        // Haskell. `import Text.Pandoc.Class (PandocMonad, lookupEnv)` re-exports
+        // the class method, and the builtin System.Environment.lookupEnv kept
+        // the name. Closure IO model only for now (spec/BHC-BRIEF-0005).
+        let explicitly_listed = bhc_types::io_closure_mode()
+            && matches!(&import.spec, Some(ast::ImportSpec::Only(items))
+            if items.iter().any(|i| match i {
+                ast::Import::Var(id, _) => id.name == name,
+                // `PandocMonad(lookupEnv)`: a listed class method.
+                ast::Import::Type(_, Some(children), _) => {
+                    children.iter().any(|c| c.name == name)
+                }
+                _ => false,
+            }))
+            && ctx.lookup_value(name).is_some_and(|existing| {
+                bhc_index::Idx::index(existing) < crate::context::BUILTIN_DEF_LIMIT
+            })
+            && !crate::lower::is_prelude_export(name.as_str());
         if !import.qualified
             && (ctx.lookup_value(name).is_none()
                 || imported_methods.contains(&name)
                 || leaked
-                || shadows_builtin)
+                || shadows_builtin
+                || explicitly_listed)
         {
             ctx.bind_value(name, def_id);
             // A name held only by a qualified import's alias-backing stub is

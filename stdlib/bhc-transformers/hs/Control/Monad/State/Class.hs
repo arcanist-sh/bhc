@@ -18,6 +18,7 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT)
 import Control.Monad.Trans.Maybe (MaybeT)
 import Control.Monad.Trans.Reader (ReaderT)
+import qualified Control.Monad.Trans.RWS.Strict as RWS
 import qualified Control.Monad.Trans.State.Strict as S
 import Control.Monad.Trans.Writer.Strict (WriterT)
 
@@ -67,3 +68,8 @@ instance MonadState s m => MonadState s (MaybeT m) where
   get = lift get
   put s = lift (put s)
   state f = lift (state f)
+
+instance (Monoid w, Monad m) => MonadState s (RWS.RWST r w s m) where
+  get = RWS.get
+  put = RWS.put
+  state = RWS.state

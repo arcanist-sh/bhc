@@ -8443,6 +8443,13 @@ impl Builtins {
             }
         }
 
+        // Under the closure IO model the transformers are the Haskell library
+        // in stdlib/bhc-transformers/hs (spec/BHC-BRIEF-0005), so none of
+        // their types, classes or operations are builtins.
+        if crate::io_closure_mode() {
+            return;
+        }
+
         // Register transformer types and operations at fixed DefIds (10000+)
         self.register_transformer_ops(env);
 

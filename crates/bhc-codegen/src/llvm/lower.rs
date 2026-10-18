@@ -59551,6 +59551,11 @@ fn identity_based_monad_layer(name: &str) -> Option<TransformerLayer> {
 /// is not a codegen builtin. Free function so name resolution (the driver)
 /// can tell whether an imported name would be intercepted as a builtin.
 pub fn builtin_arity(name: &str) -> Option<u32> {
+    // Under the closure IO model the transformer names are library definitions
+    // (spec/BHC-BRIEF-0005), compiled like any user function.
+    if bhc_types::is_library_transformer_name(name) {
+        return None;
+    }
     match name {
         // List operations
         "head" => Some(1),

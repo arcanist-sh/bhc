@@ -16,6 +16,7 @@ import Control.Monad.Trans.Class (lift)
 import qualified Control.Monad.Trans.Except as E
 import Control.Monad.Trans.Maybe (MaybeT (..))
 import Control.Monad.Trans.Reader (ReaderT (..))
+import Control.Monad.Trans.RWS.Strict (RWST (..))
 import Control.Monad.Trans.State.Strict (StateT (..))
 import Control.Monad.Trans.Writer.Strict (WriterT (..))
 
@@ -57,3 +58,7 @@ instance (Monoid w, MonadError e m) => MonadError e (WriterT w m) where
 instance MonadError e m => MonadError e (MaybeT m) where
   throwError e = lift (throwError e)
   catchError m h = MaybeT (catchError (runMaybeT m) (\e -> runMaybeT (h e)))
+
+instance (Monoid w, MonadError e m) => MonadError e (RWST r w s m) where
+  throwError e = lift (throwError e)
+  catchError m h = RWST (\r s -> catchError (runRWST m r s) (\e -> runRWST (h e) r s))

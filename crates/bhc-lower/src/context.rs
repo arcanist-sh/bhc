@@ -161,6 +161,10 @@ impl Scope {
 /// Map from `DefId` to definition information.
 pub type DefMap = IndexMap<DefId, DefInfo>;
 
+/// A functional dependency as (determining, determined) class parameter
+/// indices: `m -> s` of `class MonadState s m` is `([1], [0])`.
+pub type ClassFunDep = (Vec<usize>, Vec<usize>);
+
 /// An imported class as threaded from module interfaces:
 /// (class name, method names, superclass names, defaulted-method names,
 /// per-method declared-type arrow counts, class type-parameter count).
@@ -181,6 +185,10 @@ pub type DefMap = IndexMap<DefId, DefInfo>;
 /// monad defined as one has its transformer layer in whatever it wraps.
 pub type InterfaceConstructorEntry = (String, u32, u32, Option<String>, bool, Vec<bhc_types::Ty>);
 
+/// An imported class as threaded from module interfaces: (name, method names,
+/// superclass names, defaulted method names, method arities, parameter count,
+/// superclass parameter indices, method-level schemes). See
+/// `LowerContext::interface_classes`.
 pub type InterfaceClassEntry = (
     Symbol,
     Vec<Symbol>,
@@ -272,6 +280,11 @@ pub struct LowerContext {
     /// that omit the method. The fifth carries each method's declared-type
     /// arrow count, used to eta-expand point-free instance-method bindings.
     pub interface_classes: Vec<InterfaceClassEntry>,
+    /// Functional dependencies of the classes in `interface_classes`, as
+    /// (determining, determined) parameter indices, so the type checker can
+    /// improve constraints on imported classes (`MonadState ?s (StateT Int
+    /// IO)` gives `?s := Int`).
+    pub interface_class_fundeps: FxHashMap<Symbol, Vec<ClassFunDep>>,
     /// Errors collected during lowering.
     pub errors: Vec<crate::LowerError>,
     /// Warnings collected during lowering.
@@ -315,6 +328,7 @@ impl LowerContext {
             interface_constructors: Vec::new(),
             interface_instances: Vec::new(),
             interface_classes: Vec::new(),
+            interface_class_fundeps: FxHashMap::default(),
             errors: Vec::new(),
             warnings: Vec::new(),
             import_aliases: FxHashMap::default(),
@@ -1234,6 +1248,9 @@ impl LowerContext {
         ];
 
         for name in builtin_funcs {
+            if bhc_types::is_library_transformer_name(name) {
+                continue;
+            }
             let sym = Symbol::intern(name);
             let def_id = self.fresh_def_id();
             self.define(def_id, sym, DefKind::Value, Span::default());
@@ -1284,6 +1301,11 @@ impl LowerContext {
         ];
 
         for &(id, name) in transformer_builtins {
+            // Under the closure IO model these come from the transformers
+            // library (spec/BHC-BRIEF-0005).
+            if bhc_types::io_closure_mode() {
+                break;
+            }
             let sym = Symbol::intern(name);
             let def_id = DefId::new(id);
             self.define(def_id, sym, DefKind::Value, Span::default());
@@ -2784,6 +2806,22 @@ impl LowerContext {
     #[must_use]
     pub fn all_class_param_counts(&self) -> &FxHashMap<Symbol, usize> {
         &self.class_param_counts
+    }
+
+    /// The method names of every class loaded from an interface, keyed by
+    /// class name — what interface generation needs to record a newtype's
+    /// derived instance of an imported class.
+    #[must_use]
+    pub fn interface_class_method_names(&self) -> std::collections::HashMap<String, Vec<String>> {
+        self.interface_classes
+            .iter()
+            .map(|c| {
+                (
+                    c.0.as_str().to_string(),
+                    c.1.iter().map(|m| m.as_str().to_string()).collect(),
+                )
+            })
+            .collect()
     }
 
     /// Register a pattern synonym definition.

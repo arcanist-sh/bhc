@@ -111,6 +111,13 @@ pub struct LowerContext {
     /// those dictionaries once, so the nested lowering of the same spine (and
     /// of its head `Var`) must not.
     pub(crate) method_level_active: FxHashSet<Span>,
+    /// Spans of variables being lowered as the HEAD of an application; a
+    /// constrained function anywhere else is a value and takes its
+    /// dictionaries at the occurrence (closure IO model).
+    pub(crate) app_head_spans: FxHashSet<Span>,
+    /// Let `select_method_via_superclass` hop through a multi-parameter
+    /// class's superclass slot (see `bind_via_scope_monad`).
+    pub(crate) allow_multi_param_hop: bool,
 
     /// Constructor metadata (`DefId` -> `ConstructorInfo`).
     /// This maps constructor `DefIds` to their metadata including tag and type.
@@ -234,8 +241,20 @@ pub struct LowerContext {
     pub(crate) existential_dict_binders: Vec<Var>,
 }
 
+/// The head of a type application (`StateT` in `StateT s m a`).
+fn applied_head(t: &Ty) -> &Ty {
+    match t {
+        Ty::App(f, _) => applied_head(f),
+        other => other,
+    }
+}
+
 /// A monad transformer applied to its arguments (`StateT s m`, `ReaderT r m`).
 pub(crate) fn transformer_headed(t: &Ty) -> bool {
+    // Library transformers are ordinary user types (spec/BHC-BRIEF-0005).
+    if bhc_types::io_closure_mode() {
+        return false;
+    }
     let mut head = t;
     while let Ty::App(f, _) = head {
         head = f;
@@ -267,6 +286,8 @@ impl LowerContext {
             resolved_expr_types: FxHashMap::default(),
             expected_arg_tys: FxHashMap::default(),
             method_level_active: FxHashSet::default(),
+            app_head_spans: FxHashSet::default(),
+            allow_multi_param_hop: false,
             constructor_map: FxHashMap::default(),
             constructor_field_types: FxHashMap::default(),
             pattern_binder_tys: FxHashMap::default(),
@@ -1427,6 +1448,13 @@ impl LowerContext {
         self.register_builtin_instance("Applicative", &io_ty, &[(10061, "pure"), (10062, "<*>")]);
         self.register_builtin_instance("Monad", &io_ty, &[(10063, ">>="), (10064, ">>")]);
 
+        // Under the closure IO model MonadTrans/MonadIO, Identity and the
+        // transformers, with all their instances, are the Haskell library in
+        // stdlib/bhc-transformers/hs (spec/BHC-BRIEF-0005).
+        if bhc_types::io_closure_mode() {
+            return;
+        }
+
         // === Register MonadTrans class ===
         // Methods: lift
         let monad_trans_class = ClassInfo {
@@ -2518,6 +2546,36 @@ impl LowerContext {
             }
         }
 
+        // 0c. Under the closure IO model (spec/BHC-BRIEF-0005), a constraint
+        // whose type has a concrete HEAD is answered by that head's instance,
+        // its context from the dictionaries in scope — before any in-scope
+        // dictionary of the class, which is for a different monad: `one ::
+        // Monad n => n Int` used at `StateT S m` inside a `Monad m =>`
+        // binding took the binding's own `Monad m` dictionary.
+        // Not when a parameter is still a bare variable (`Walkable ?a [Cell]`):
+        // instance construction would then search pandoc's generic
+        // `Walkable a (t b)` without end.
+        if bhc_types::io_closure_mode()
+            && constraint
+                .args
+                .last()
+                .is_some_and(|t| matches!(applied_head(t), Ty::Con(_)))
+            && !constraint.args.iter().any(|t| matches!(t, Ty::Var(_)))
+        {
+            let mut dict_ctx =
+                DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());
+            dict_ctx.set_scope_dicts(self.scope_dicts_for_construction());
+            dict_ctx.set_scope_super_dicts(self.scope_super_dicts_for_construction());
+            if let Some(dict_expr) = dict_ctx.get_dictionary(constraint, span) {
+                let bindings = dict_ctx.take_bindings();
+                let mut result = dict_expr;
+                for bind in bindings.into_iter().rev() {
+                    result = core::Expr::Let(Box::new(bind), Box::new(result), span);
+                }
+                return Some(result);
+            }
+        }
+
         // 1. Next, try to find an in-scope dictionary variable directly. With
         // several of the class in scope, only one whose arguments fit.
         match self.lookup_dict_for(constraint.class, &constraint.args) {
@@ -2755,7 +2813,13 @@ impl LowerContext {
                     .class_registry
                     .lookup_class(*class_name)
                     .is_some_and(|c| c.param_count == 1);
-                if !single_param && !self.superclass_hop_matches(*class_name, needed_class) {
+                // `allow_multi_param_hop` is set only by the closure IO model's
+                // last-resort bind (`bind_via_scope_monad`), where the slot is
+                // a real dictionary and the alternative is IO's bind.
+                if !single_param
+                    && !self.allow_multi_param_hop
+                    && !self.superclass_hop_matches(*class_name, needed_class)
+                {
                     continue;
                 }
                 if self.occurrence_refutes_hop(*class_name, needed_class, span) {
@@ -3008,10 +3072,15 @@ impl LowerContext {
             Ty::Con(tc) => Some(tc.name.as_str()),
             _ => None,
         };
-        matches!(
-            type_name,
-            Some("IO" | "StateT" | "ReaderT" | "ExceptT" | "WriterT" | "Identity")
-        )
+        match type_name {
+            Some("IO") => true,
+            // Library monads under the closure IO model (spec/BHC-BRIEF-0005).
+            Some(n) if bhc_types::is_library_transformer_name(n) => false,
+            t => matches!(
+                t,
+                Some("StateT" | "ReaderT" | "ExceptT" | "WriterT" | "Identity")
+            ),
+        }
     }
 
     /// Push a monad type onto the context stack.
@@ -3130,7 +3199,7 @@ impl LowerContext {
     #[must_use]
     pub fn is_user_class(&self, class_name: Symbol) -> bool {
         let name_str = class_name.as_str();
-        !crate::dictionary::BUILTIN_CLASS_NAMES.contains(&name_str)
+        !crate::dictionary::is_builtin_class_name(name_str)
             && self.class_registry.lookup_class(class_name).is_some()
     }
 
@@ -3164,6 +3233,11 @@ impl LowerContext {
             || (value_class_dicts_enabled()
                 && matches!(c.class.as_str(), "Semigroup" | "Monoid")
                 && matches!(c.args.first(), Some(Ty::Var(_))))
+            // Under the closure IO model the monad family is dictionary-passed
+            // too (spec/BHC-BRIEF-0005): the transformers library's `lift ::
+            // Monad m => m a -> t m a` binds in the inner monad through it.
+            || (bhc_types::io_closure_mode()
+                && matches!(c.class.as_str(), "Functor" | "Applicative" | "Monad"))
     }
 
     /// The dictionary-passed method-level constraints of `class.method`, in
@@ -3324,6 +3398,115 @@ impl LowerContext {
     /// Creates an empty instance (no method bindings) that relies entirely on
     /// default method implementations from the class definition. This mirrors
     /// GHC's `DeriveAnyClass` extension.
+    /// Newtype deriving under the closure IO model (spec/BHC-BRIEF-0005):
+    /// the instance's dictionary is the wrapped type's.
+    ///
+    /// For `newtype App a = App (ExceptT String (StateT Int IO) a) deriving
+    /// (MonadError String)` this builds the `MonadError String (ExceptT
+    /// String (StateT Int IO))` dictionary once and makes each method of
+    /// `MonadError String App` select its slot from it. A newtype is
+    /// representationally its field, so no wrapping is needed. Only a fully
+    /// concrete wrapped type is handled; otherwise `None`, and the caller
+    /// falls back to the other derivations.
+    fn derive_newtype_via_wrapped(
+        &mut self,
+        deriv_ctx: &mut DerivingContext,
+        newtype_def: &bhc_hir::NewtypeDef,
+        clause: &bhc_hir::DerivingClause,
+    ) -> Option<DerivedInstance> {
+        if !bhc_types::io_closure_mode()
+            || matches!(
+                clause.class.as_str(),
+                "Eq" | "Ord"
+                    | "Show"
+                    | "Read"
+                    | "Enum"
+                    | "Bounded"
+                    | "Ix"
+                    | "Generic"
+                    | "NFData"
+                    | "Foldable"
+                    | "Traversable"
+            )
+        {
+            return None;
+        }
+        let (last, init) = newtype_def.params.split_last()?;
+        let field = match &newtype_def.con.fields {
+            bhc_hir::ConFields::Positional(tys) => tys.first()?.clone(),
+            bhc_hir::ConFields::Named(fields) => fields.first()?.ty.clone(),
+        };
+        let Ty::App(wrapped, arg) = field else {
+            return None;
+        };
+        if !matches!(arg.as_ref(), Ty::Var(v) if v.id == last.id)
+            || has_type_variables(&wrapped)
+            || clause.args.iter().any(has_type_variables)
+        {
+            return None;
+        }
+        let class_info = self.class_registry.lookup_class(clause.class)?.clone();
+        let span = newtype_def.span;
+        let mut wrapped_args = clause.args.clone();
+        wrapped_args.push(*wrapped);
+        let dict = self.resolve_dictionary(
+            &Constraint::new_multi(clause.class, wrapped_args, span),
+            span,
+        )?;
+
+        let head = init.iter().fold(
+            Ty::Con(TyCon::new(newtype_def.name, Kind::star_to_star())),
+            |acc, p| Ty::App(Box::new(acc), Box::new(Ty::Var(p.clone()))),
+        );
+        // `String` written in the clause is keyed as `[Char]`: the registry
+        // retries a `String` occurrence as the list, not the reverse.
+        let mut instance_types: Vec<Ty> = clause
+            .args
+            .iter()
+            .map(crate::dictionary::string_as_char_list)
+            .collect();
+        instance_types.push(head.clone());
+        let enc = instance_types
+            .iter()
+            .map(type_name_for_instance)
+            .collect::<Vec<_>>()
+            .join("_");
+
+        let dict_var = deriv_ctx
+            .named_instance_var(&format!("$gnd_{}_{enc}", clause.class.as_str()), Ty::Error);
+        let mut bindings = vec![Bind::NonRec(dict_var.clone(), Box::new(dict))];
+        let mut methods = FxHashMap::default();
+        let first_method_slot = class_info.superclasses.len();
+        for (i, method) in class_info.methods.iter().enumerate() {
+            let slot = first_method_slot + i;
+            let var = deriv_ctx
+                .named_instance_var(&format!("$instance_{}_{enc}", method.as_str()), Ty::Error);
+            let selector = Var {
+                name: Symbol::intern(&format!("$sel_{slot}")),
+                id: VarId::new(slot),
+                ty: Ty::Error,
+            };
+            let body = core::Expr::App(
+                Box::new(core::Expr::Var(selector, span)),
+                Box::new(core::Expr::Var(dict_var.clone(), span)),
+                span,
+            );
+            methods.insert(*method, DefId::new(var.id.index()));
+            bindings.push(Bind::NonRec(var, Box::new(body)));
+        }
+        Some(DerivedInstance {
+            instance: InstanceInfo {
+                class: clause.class,
+                instance_types,
+                methods,
+                superclass_instances: vec![head; first_method_slot],
+                assoc_type_impls: FxHashMap::default(),
+                instance_constraints: vec![],
+            },
+            bindings,
+        })
+    }
+
     fn try_derive_any_class(
         &self,
         type_name: Symbol,
@@ -3595,10 +3778,10 @@ impl LowerContext {
                     .and_then(head_con)
                     .map(|c| c.name)
             })?;
-        if matches!(
-            head.as_str(),
-            "StateT" | "ReaderT" | "ExceptT" | "WriterT" | "IO"
-        ) {
+        if head.as_str() == "IO"
+            || (!bhc_types::io_closure_mode()
+                && matches!(head.as_str(), "StateT" | "ReaderT" | "ExceptT" | "WriterT"))
+        {
             return None;
         }
         let instances = self
@@ -3612,9 +3795,25 @@ impl LowerContext {
                 .is_some_and(|c| c.name == head)
         })?;
         let def_id = inst.methods.get(&method).copied()?;
-        let var = self.lookup_var(def_id).cloned()?;
+        // An instance imported from a module of the same whole-program build
+        // may have no var registered under its method's DefId; its symbol is
+        // still `$instance_{method}_{head}`.
+        let var = self.lookup_var(def_id).cloned().or_else(|| {
+            let head_ty = inst.instance_types.first()?;
+            Some(Var {
+                name: Symbol::intern(&format!(
+                    "$instance_{}_{}",
+                    method.as_str(),
+                    type_name_for_instance(head_ty)
+                )),
+                id: VarId::new(def_id.index()),
+                ty: Ty::Error,
+            })
+        })?;
         let lifted = core::Expr::Var(var, span);
-        if method.as_str() != "lift" {
+        // Under the closure IO model `lift`'s `Monad m` is an ordinary
+        // method-level dictionary, supplied by `lower_app_with_method_level`.
+        if method.as_str() != "lift" || bhc_types::io_closure_mode() {
             return Some(lifted);
         }
         // `lift :: Monad m => m a -> t m a` carries its own `Monad m`, and a
@@ -3656,6 +3855,53 @@ impl LowerContext {
     /// (`WriterOptions` at `writeHtml5String def doc`), which picks the
     /// instance directly. Only fires when that type is fully concrete —
     /// a type variable would unify-match an arbitrary instance.
+    /// Fill the bare-variable parameters of a multi-parameter constraint from
+    /// the one instance its other parameters select — what a functional
+    /// dependency does. `put` at `MonadState ?s (StateT Int m)` is answered by
+    /// `MonadState s (StateT s m)`, so `?s` is `Int`; matched as it stands,
+    /// the instance would bind `s` to both `?s` and `Int` and fail. The type
+    /// checker improves the constraint, but the occurrence's recorded type can
+    /// still carry the variable.
+    fn improve_by_unique_instance(&self, class_name: Symbol, types: Vec<Ty>) -> Vec<Ty> {
+        if !bhc_types::io_closure_mode() || !types.iter().any(|t| matches!(t, Ty::Var(_))) {
+            return types;
+        }
+        let Some(instances) = self.class_registry.instances.get(&class_name) else {
+            return types;
+        };
+        let fixed: Vec<usize> = (0..types.len())
+            .filter(|&i| !matches!(types[i], Ty::Var(_)))
+            .collect();
+        let mut found = None;
+        for inst in instances {
+            if inst.instance_types.len() != types.len() {
+                continue;
+            }
+            let pats: Vec<Ty> = fixed
+                .iter()
+                .map(|&i| inst.instance_types[i].clone())
+                .collect();
+            let targets: Vec<Ty> = fixed.iter().map(|&i| types[i].clone()).collect();
+            if let Some(subst) = bhc_types::types_match_multi(&pats, &targets) {
+                if found.is_some() {
+                    return types;
+                }
+                found = Some((inst, subst));
+            }
+        }
+        let Some((inst, subst)) = found else {
+            return types;
+        };
+        types
+            .iter()
+            .zip(&inst.instance_types)
+            .map(|(t, pat)| match t {
+                Ty::Var(_) => subst.apply(pat),
+                other => other.clone(),
+            })
+            .collect()
+    }
+
     pub(crate) fn select_method_by_result_type(
         &mut self,
         class_name: Symbol,
@@ -3691,6 +3937,7 @@ impl LowerContext {
             if dbg {
                 eprintln!("[dispatch] {method}: multi-param instance types = {types:?}");
             }
+            let types = self.improve_by_unique_instance(class_name, types);
             return self.resolve_method_at_concrete_types(method, class_name, &types, span);
         }
         // Prefer the fully-substituted resolved channel: the single-pass
@@ -4156,9 +4403,17 @@ impl LowerContext {
             // the method symbols above keep the spelling the defining module
             // used.
             let types: Vec<Ty> = types.iter().map(|t| self.expand_type_aliases(t)).collect();
+            // A multi-parameter class's superclass is at the parameter it is
+            // applied to: `class Monad m => MonadState s m` needs `Monad` at
+            // the instance's SECOND type (`StateT s m`), not its first (`s`).
             let superclass_instances: Vec<Ty> =
                 match (types.first(), self.class_registry.lookup_class(*class)) {
-                    (Some(ty), Some(cls)) => vec![ty.clone(); cls.superclasses.len()],
+                    (Some(first), Some(cls)) => (0..cls.superclasses.len())
+                        .map(|i| match cls.superclass_params.get(i).map(Vec::as_slice) {
+                            Some(&[j]) => types.get(j).unwrap_or(first).clone(),
+                            _ => first.clone(),
+                        })
+                        .collect(),
                     _ => Vec::new(),
                 };
             self.class_registry
@@ -4502,6 +4757,13 @@ impl LowerContext {
                             .iter()
                             .filter_map(|clause| {
                                 let class_name = clause.class;
+                                if let Some(derived) = self.derive_newtype_via_wrapped(
+                                    &mut deriv_ctx,
+                                    newtype_def,
+                                    clause,
+                                ) {
+                                    return Some(derived);
+                                }
                                 match &clause.strategy {
                                     bhc_hir::DerivingStrategy::Stock => {
                                         // Stock: use built-in newtype derivation
@@ -4629,7 +4891,8 @@ impl LowerContext {
                         // the inner monad, so a user transformer's `lift`
                         // takes that `Monad m` first. `select_monad_trans_method`
                         // supplies it at every use.
-                        if instance_def.class.as_str() == "MonadTrans"
+                        if !bhc_types::io_closure_mode()
+                            && instance_def.class.as_str() == "MonadTrans"
                             && method_def.name.as_str() == "lift"
                         {
                             method_level.push(Constraint::new(
@@ -6525,6 +6788,10 @@ pub(crate) fn expand_transformer_synonyms(
             Ty::Con(c) => Some(c.name.as_str()),
             _ => None,
         }
+    }
+    // Library transformers need no codegen representation hints.
+    if bhc_types::io_closure_mode() {
+        return;
     }
     let transformer: FxHashMap<Symbol, (Vec<bhc_types::TyVar>, Ty)> = aliases
         .iter()

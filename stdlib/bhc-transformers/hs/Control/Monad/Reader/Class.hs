@@ -16,6 +16,7 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT (..), mapExceptT)
 import Control.Monad.Trans.Maybe (MaybeT (..), mapMaybeT)
 import qualified Control.Monad.Trans.Reader as R
+import qualified Control.Monad.Trans.RWS.Strict as RWS
 import Control.Monad.Trans.State.Strict (StateT (..), mapStateT)
 import Control.Monad.Trans.Writer.Strict (WriterT (..), mapWriterT)
 
@@ -57,3 +58,8 @@ instance MonadReader r m => MonadReader r (MaybeT m) where
   ask = lift ask
   local f = mapMaybeT (local f)
   reader f = lift (reader f)
+
+instance (Monoid w, Monad m) => MonadReader r (RWS.RWST r w s m) where
+  ask = RWS.ask
+  local = RWS.local
+  reader = RWS.reader

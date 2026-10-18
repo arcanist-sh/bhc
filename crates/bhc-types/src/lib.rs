@@ -64,6 +64,123 @@ pub use dyn_tensor::{dyn_tensor_of, dyn_tensor_tycon, shape_witness_of, shape_wi
 pub use nat::TyNat;
 pub use ty_list::TyList;
 
+/// Whether the closure IO model is enabled (`BHC_IO_MODEL=closure`).
+///
+/// Under it an `IO a` value is an action closure that performs its effects
+/// only when run, and the monad transformers are the ordinary Haskell library
+/// in `stdlib/bhc-transformers/hs` instead of compiler builtins
+/// (spec/BHC-BRIEF-0005, Phases 0-3). The default model performs an IO
+/// expression's effects when it is evaluated. Every compiler stage reads this
+/// one switch so they cannot disagree.
+#[must_use]
+pub fn io_closure_mode() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| std::env::var("BHC_IO_MODEL").is_ok_and(|m| m == "closure"))
+}
+
+/// Every type, constructor, class and value that `stdlib/bhc-transformers/hs`
+/// defines. Under the closure IO model ([`io_closure_mode`]) no compiler stage
+/// may treat these names as builtins: they come from the library like any
+/// user definition (spec/BHC-BRIEF-0005, Phases 2-3).
+pub const TRANSFORMER_LIBRARY_NAMES: &[&str] = &[
+    // Data.Functor.Identity
+    "Identity",
+    "runIdentity",
+    // Control.Monad.Trans.Class, Control.Monad.IO.Class
+    "MonadTrans",
+    "lift",
+    "MonadIO",
+    "liftIO",
+    // State
+    "MonadState",
+    "get",
+    "put",
+    "state",
+    "modify",
+    "modify'",
+    "gets",
+    "State",
+    "runState",
+    "evalState",
+    "execState",
+    "mapState",
+    "withState",
+    "StateT",
+    "runStateT",
+    "evalStateT",
+    "execStateT",
+    "mapStateT",
+    "withStateT",
+    // Reader
+    "MonadReader",
+    "ask",
+    "local",
+    "reader",
+    "asks",
+    "Reader",
+    "runReader",
+    "mapReader",
+    "withReader",
+    "ReaderT",
+    "runReaderT",
+    "mapReaderT",
+    "withReaderT",
+    // Writer
+    "MonadWriter",
+    "writer",
+    "tell",
+    "listen",
+    "pass",
+    "listens",
+    "censor",
+    "Writer",
+    "runWriter",
+    "execWriter",
+    "WriterT",
+    "runWriterT",
+    "execWriterT",
+    "mapWriterT",
+    // Except
+    "MonadError",
+    "throwError",
+    "catchError",
+    "liftEither",
+    "Except",
+    "except",
+    "runExcept",
+    "mapExcept",
+    "withExcept",
+    "ExceptT",
+    "runExceptT",
+    "mapExceptT",
+    "withExceptT",
+    "throwE",
+    "catchE",
+    // Maybe
+    "MaybeT",
+    "runMaybeT",
+    "mapMaybeT",
+    "hoistMaybe",
+    // RWS
+    "RWS",
+    "rws",
+    "runRWS",
+    "evalRWS",
+    "execRWS",
+    "RWST",
+    "runRWST",
+    "evalRWST",
+    "execRWST",
+];
+
+/// Whether `name` is defined by the transformers library and so must not be
+/// handled as a builtin, i.e. the closure IO model is on and `name` is in
+/// [`TRANSFORMER_LIBRARY_NAMES`].
+#[must_use]
+pub fn is_library_transformer_name(name: &str) -> bool {
+    io_closure_mode() && TRANSFORMER_LIBRARY_NAMES.contains(&name)
+}
+
 use bhc_index::Idx;
 use bhc_intern::Symbol;
 use bhc_span::Span;

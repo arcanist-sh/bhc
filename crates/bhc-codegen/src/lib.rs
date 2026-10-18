@@ -68,16 +68,7 @@ use thiserror::Error;
 // Re-export the LLVM backend as the default
 pub use llvm::{LlvmBackend, LlvmContext, LlvmModule};
 
-/// Whether the closure IO model is enabled (`BHC_IO_MODEL=closure`).
-///
-/// Under it an `IO a` value is an action closure that performs its effects
-/// only when run (spec/BHC-BRIEF-0005, Phase 0); the default model performs an
-/// IO expression's effects when it is evaluated.
-#[must_use]
-pub fn io_closure_mode() -> bool {
-    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| std::env::var("BHC_IO_MODEL").is_ok_and(|m| m == "closure"))
-}
+pub use bhc_types::io_closure_mode;
 
 static IO_PRIMITIVES: std::sync::OnceLock<rustc_hash::FxHashSet<String>> =
     std::sync::OnceLock::new();

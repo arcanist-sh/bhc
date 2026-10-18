@@ -146,11 +146,146 @@ pub fn type_check_module(hir: &Module, file_id: FileId) -> Result<TypedModule, V
     type_check_module_with_defs(hir, file_id, None)
 }
 
-/// Whether the closure IO model (`BHC_IO_MODEL=closure`, spec/BHC-BRIEF-0005)
-/// is enabled; mirrors `bhc_codegen::io_closure_mode`.
-pub(crate) fn io_closure_mode() -> bool {
-    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| std::env::var("BHC_IO_MODEL").is_ok_and(|m| m == "closure"))
+pub(crate) use bhc_types::io_closure_mode;
+
+/// The instance a newtype's deriving clause produces by newtype deriving,
+/// under the closure IO model (spec/BHC-BRIEF-0005), for a class that is not
+/// stock-derivable: `newtype App a = App (ExceptT String (StateT Int IO) a)
+/// deriving (MonadError String)` gives `instance MonadError String
+/// (ExceptT String (StateT Int IO)) => MonadError String App`. The class's
+/// last parameter is the newtype minus its last parameter; the context is the
+/// same class at the wrapped type, so solving goes on through its instances.
+fn newtype_derived_instance(
+    newtype: &bhc_hir::NewtypeDef,
+    clause: &bhc_hir::DerivingClause,
+) -> Option<env::InstanceInfo> {
+    // Functor/Applicative/Monad are newtype-derived too: hir-to-core builds
+    // their dictionaries from the wrapped type's.
+    const STOCK: &[&str] = &[
+        "Eq",
+        "Ord",
+        "Show",
+        "Read",
+        "Enum",
+        "Bounded",
+        "Ix",
+        "Generic",
+        "NFData",
+        "Foldable",
+        "Traversable",
+        "Typeable",
+        "Data",
+    ];
+    if !io_closure_mode() || STOCK.contains(&clause.class.as_str()) {
+        return None;
+    }
+    let (last, init) = newtype.params.split_last()?;
+    let field = match &newtype.con.fields {
+        bhc_hir::ConFields::Positional(tys) => tys.first()?.clone(),
+        bhc_hir::ConFields::Named(fields) => fields.first()?.ty.clone(),
+    };
+    // The field must be `U last` for the class to see through the newtype.
+    let Ty::App(wrapped, arg) = field else {
+        return None;
+    };
+    if !matches!(arg.as_ref(), Ty::Var(v) if v.id == last.id) {
+        return None;
+    }
+    let head = context::TyCtxt::build_applied_type(newtype.name, init);
+    let mut types = clause.args.clone();
+    types.push(head);
+    let mut wrapped_types = clause.args.clone();
+    wrapped_types.push(*wrapped);
+    Some(env::InstanceInfo {
+        class: clause.class,
+        types,
+        context: vec![bhc_types::Constraint::new_multi(
+            clause.class,
+            wrapped_types,
+            newtype.span,
+        )],
+        methods: rustc_hash::FxHashMap::default(),
+        assoc_type_impls: Vec::new(),
+    })
+}
+
+/// Register the imported classes that have functional dependencies, with all
+/// their imported instances, so `apply_fundep_improvement` can use them, and
+/// the imported instances of the builtin monad-family classes.
+fn register_imported_fundep_classes(ctx: &mut TyCtxt, imported: &ImportedClasses<'_>) {
+    let Some(fundeps) = imported.fundeps else {
+        return;
+    };
+    for entry in imported.classes {
+        let (name, supers, param_count) = (entry.0, &entry.2, entry.5);
+        let Some(class_fundeps) = fundeps.get(&name) else {
+            continue;
+        };
+        if ctx.env.lookup_class(name).is_some() {
+            continue;
+        }
+        // Its methods' constraints are emitted at use sites like a local
+        // class's (`instantiate` only emits those of user classes).
+        ctx.user_defined_classes.insert(name);
+        let params = (0..param_count).map(|_| ctx.fresh_ty_var()).collect();
+        ctx.env.register_class(env::ClassInfo {
+            name,
+            params,
+            fundeps: class_fundeps
+                .iter()
+                .map(|(from, to)| env::FunDep {
+                    from: from.clone(),
+                    to: to.clone(),
+                })
+                .collect(),
+            supers: supers.clone(),
+            methods: rustc_hash::FxHashMap::default(),
+            assoc_types: Vec::new(),
+        });
+    }
+    // The monad-family classes have no `ClassInfo` (they are builtins), but
+    // their instances for library types must be known: `MonadError e
+    // (ExceptT e m)` needs `Monad m`, and at `m = StateT Int IO` only the
+    // library's `Monad (StateT s m)` answers.
+    const MONAD_FAMILY: &[&str] = &[
+        "Functor",
+        "Applicative",
+        "Monad",
+        "MonadFail",
+        "Alternative",
+        "MonadPlus",
+    ];
+    for (class, types, _methods, context) in imported.instances {
+        if !fundeps.contains_key(class) && !MONAD_FAMILY.contains(&class.as_str()) {
+            continue;
+        }
+        let info = expand_instance_aliases(
+            ctx,
+            env::InstanceInfo {
+                class: *class,
+                types: types.clone(),
+                context: context.clone(),
+                methods: rustc_hash::FxHashMap::default(),
+                assoc_type_impls: Vec::new(),
+            },
+        );
+        ctx.env.register_instance(info);
+    }
+}
+
+/// Expand type synonyms in an instance's head and context: instance heads
+/// are matched structurally against constraints whose synonyms the solver
+/// has expanded (`MonadError String App` must meet `MonadError [Char] App`).
+fn expand_instance_aliases(ctx: &TyCtxt, mut info: env::InstanceInfo) -> env::InstanceInfo {
+    for ty in &mut info.types {
+        *ty = unify::expand_aliases_deep(ctx, ty);
+    }
+    for c in &mut info.context {
+        for ty in &mut c.args {
+            *ty = unify::expand_aliases_deep(ctx, ty);
+        }
+    }
+    info
 }
 
 /// The builtin values whose type ends in `IO _` — the IO primitives.
@@ -221,6 +356,40 @@ pub fn type_check_module_full(
     defs: Option<&DefMap>,
     imported_aliases: &[(Symbol, Vec<bhc_types::TyVar>, Ty)],
 ) -> Result<TypedModule, Vec<Diagnostic>> {
+    type_check_module_with_imports(
+        hir,
+        file_id,
+        defs,
+        imported_aliases,
+        &ImportedClasses::default(),
+    )
+}
+
+/// Classes and instances of imported modules, as the lowering pass collected
+/// them from the module registry and `.bhi` interfaces.
+#[derive(Default)]
+pub struct ImportedClasses<'a> {
+    /// Imported classes (see `bhc_lower::InterfaceClassEntry`).
+    pub classes: &'a [bhc_lower::InterfaceClassEntry],
+    /// Functional dependencies of those classes, keyed by class name.
+    pub fundeps: Option<&'a rustc_hash::FxHashMap<Symbol, Vec<bhc_lower::ClassFunDep>>>,
+    /// Imported instances (see `bhc_lower::InterfaceInstanceEntry`).
+    pub instances: &'a [bhc_lower::InterfaceInstanceEntry],
+}
+
+/// Type check a HIR module, additionally knowing imported classes.
+///
+/// Under the closure IO model (spec/BHC-BRIEF-0005) the imported classes that
+/// have functional dependencies are registered together with their instances,
+/// so a use of an imported method improves its constraint: `get` from the
+/// transformers library at `StateT Int IO` fixes its state type to `Int`.
+pub fn type_check_module_with_imports(
+    hir: &Module,
+    file_id: FileId,
+    defs: Option<&DefMap>,
+    imported_aliases: &[(Symbol, Vec<bhc_types::TyVar>, Ty)],
+    imported_classes: &ImportedClasses<'_>,
+) -> Result<TypedModule, Vec<Diagnostic>> {
     let mut ctx = TyCtxt::new(file_id);
     ctx.overloaded_strings = hir.overloaded_strings;
     ctx.overloaded_lists = hir.overloaded_lists;
@@ -228,6 +397,10 @@ pub fn type_check_module_full(
 
     // Register built-in types
     ctx.register_builtins();
+
+    if io_closure_mode() {
+        register_imported_fundep_classes(&mut ctx, imported_classes);
+    }
 
     // If we have definition mappings from the lowering pass, use them
     // to register builtins with the correct DefIds.
@@ -600,6 +773,11 @@ pub fn type_check_module_full(
             }
             bhc_hir::Item::Newtype(newtype) => {
                 for clause in &newtype.deriving {
+                    if let Some(info) = newtype_derived_instance(newtype, clause) {
+                        let info = expand_instance_aliases(&ctx, info);
+                        ctx.env.register_instance(info);
+                        continue;
+                    }
                     let instance_type =
                         context::TyCtxt::build_applied_type(newtype.name, &newtype.params);
                     let info = env::InstanceInfo {

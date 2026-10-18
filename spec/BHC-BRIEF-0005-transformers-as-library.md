@@ -160,6 +160,94 @@ minimal slice (StateT over IO, whole-program build):
 The library tree also holds an older `BHC/Control/Monad/*.hs` copy; delete it or keep it
 off the search path.
 
+## Status (2026-10-18): Phases 2–3 gated, library path working
+
+All seven gating steps are in, under `BHC_IO_MODEL=closure`. The single switch and the
+library's name list live in `bhc-types` (`io_closure_mode`, `TRANSFORMER_LIBRARY_NAMES`).
+The driver finds the library in-tree, or through `BHC_TRANSFORMERS_PATH`, for discovered
+and explicitly listed builds.
+
+Making it work as ordinary code needed these fixes:
+
+- **Whole-program builds:**
+  - type synonyms cross modules;
+  - re-exported values keep their schemes and their definition (a `modify` defined in
+    two modules);
+  - a listed export resolves to the in-scope binding.
+- **Interfaces:** carry class fundeps (`INTERFACE_VERSION` 5, so existing `.bhi`
+  package DBs must be rebuilt).
+- **Typeck:**
+  - registers imported fundep classes with their instances, and the imported
+    Functor/Applicative/Monad instances;
+  - expands synonyms before instance matching;
+  - type-checks instance bodies of imported classes.
+- **Newtype deriving:**
+  - deriving clauses keep their class arguments (`MonadError String`);
+  - a newtype-derived instance's dictionary is the wrapped type's (hir-to-core
+    `derive_newtype_via_wrapped`).
+- **Dictionary passing:**
+  - Functor contexts and monad-family method constraints (`lift`'s `Monad m`) are
+    dictionary-passed;
+  - a concrete-headed constraint is built from its instance before falling back to an
+    in-scope dictionary;
+  - multi-parameter superclass slots sit at the right parameter;
+  - fundep-style filling of unresolved class parameters;
+  - instance-alias dictionaries are pinned by the method's instance type.
+- **Lowering:** infix operators carry their own span, so class methods used infix
+  dispatch.
+
+**Scoreboard:** all 33 transformer e2e fixtures pass in closure mode; default mode is
+unchanged (278/278). 14 fixtures relied on the builtins accepting invalid Haskell, so
+they were corrected; the 14 still pass in both modes:
+
+- 13 used `evalStateT`, `get`, … with no import; they gained imports and signatures,
+  and `reader_t`/`state_t` no longer `show` a monadic value;
+- `statet_stes_applicative` threw at a newtype that did not derive `MonadError`.
+
+## Phase 4 status (2026-10-18): pandoc builds in library mode; runtime in progress
+
+The harness (`~/Development/pandoc-harness`) builds a separate library-mode DB:
+
+```
+SNAP=snap-lib DB=lib-db LOGS=logs-lib FAILS=fails-lib.txt BHC_IO_MODEL=closure ./chain.sh …
+```
+
+`chain.sh` gained a `transformers` step that compiles this library into the DB before
+parsec.
+
+**Sweep:** 221/221 modules compile. `Text.Parsec.Token` fails as it does in default
+mode.
+
+**Runtime probes:**
+
+- the parser ladder passes 4/4 (MD1, TA, TB, OPT1);
+- `runIO`, `liftIO`, `getCommonState` and the parsec token parsers run;
+- markdown→HTML (MD2HTML) still crashes in the block parser: a parsec continuation that
+  captures the parsed token and calls `PandocMonad`'s `trace` misreads its argument;
+- a self-contained CPS repro does not reproduce it.
+
+**Fixes this phase needed:**
+
+- the library gained `Control.Monad.RWS` and `RWS.Strict` (pandoc imports them);
+- `.bhi` class methods are no longer given same-named builtin schemes (all modes);
+- explicitly imported names beat non-Prelude builtins;
+- `[] t` and `[t]` are one type in instance matching;
+- dictionary construction has a depth limit;
+- dropped errors from imported-instance body checks;
+- interface field selectors carry schemes;
+- constrained functions passed as values get their dictionaries;
+- interfaces record newtype-derived instances with the class's real method list;
+- a last-resort bind through the in-scope `Monad` dictionary, which may hop through a
+  multi-parameter superclass.
+
+**Known non-library gaps seen on the way:**
+
+- `Data.Ord.Down` is a stub constructor;
+- `show` at a polymorphic result prints a pointer.
+
+The default-mode pandoc DB must be rebuilt (interface version 5) before default-mode
+probes can be compared again.
+
 ## Risks
 
 - Phase 3 carries most of the effort: dictionary passing for higher-kinded,

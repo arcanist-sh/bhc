@@ -7909,6 +7909,16 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                     .next()
                     .is_some_and(|c| c.is_uppercase() || c == ':')
             };
+            // The operator gets a span of its own — the text between its
+            // operands — under the closure IO model (spec/BHC-BRIEF-0005).
+            // Sharing the application's span, its recorded type was the
+            // application's RESULT, so a class method written infix
+            // (``m `catchError` h``) could not be dispatched from its type.
+            let op_span = if bhc_types::io_closure_mode() && lhs.span().hi < rhs.span().lo {
+                Span::new(lhs.span().hi, rhs.span().lo)
+            } else {
+                *span
+            };
             let op_expr = if is_con {
                 // Constructor
                 if let Some(def_id) = resolve_constructor(ctx, op.name, *span) {
@@ -7922,7 +7932,7 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                 let base_name = Symbol::intern(&op_name_str[dot_pos + 1..]);
                 if let Some(def_id) = ctx.resolve_qualified_var(qualifier, base_name) {
                     ctx.warn_if_stub(def_id, op_name_str, *span);
-                    hir::Expr::Var(ctx.def_ref(def_id, *span))
+                    hir::Expr::Var(ctx.def_ref(def_id, op_span))
                 } else {
                     ctx.error(crate::LowerError::UnboundVar {
                         name: op_name_str.to_string(),
@@ -7930,17 +7940,17 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                     });
                     let def_id = ctx.fresh_def_id();
                     ctx.define(def_id, op.name, DefKind::Value, *span);
-                    hir::Expr::Var(ctx.def_ref(def_id, *span))
+                    hir::Expr::Var(ctx.def_ref(def_id, op_span))
                 }
             } else {
                 // Unqualified variable/operator
                 if let Some(def_id) = resolve_var(ctx, op.name, *span) {
-                    hir::Expr::Var(ctx.def_ref(def_id, *span))
+                    hir::Expr::Var(ctx.def_ref(def_id, op_span))
                 } else {
                     // Create placeholder
                     let def_id = ctx.fresh_def_id();
                     ctx.define(def_id, op.name, DefKind::Value, *span);
-                    hir::Expr::Var(ctx.def_ref(def_id, *span))
+                    hir::Expr::Var(ctx.def_ref(def_id, op_span))
                 }
             };
             let l = lower_expr(ctx, lhs);
@@ -9351,6 +9361,7 @@ fn lower_data_decl(ctx: &mut LowerContext, data: &ast::DataDecl) -> LowerResult<
         .map(|clause| hir::DerivingClause {
             strategy: lower_deriving_strategy(ctx, &clause.strategy),
             class: clause.class.name,
+            args: clause.args.iter().map(|t| lower_type(ctx, t)).collect(),
         })
         .collect();
 
@@ -9501,6 +9512,7 @@ fn lower_newtype_decl_with_accessors(
         .map(|clause| hir::DerivingClause {
             strategy: lower_deriving_strategy(ctx, &clause.strategy),
             class: clause.class.name,
+            args: clause.args.iter().map(|t| lower_type(ctx, t)).collect(),
         })
         .collect();
 
@@ -9699,6 +9711,7 @@ fn lower_data_instance_decl(
         .map(|clause| hir::DerivingClause {
             strategy: lower_deriving_strategy(ctx, &clause.strategy),
             class: clause.class.name,
+            args: clause.args.iter().map(|t| lower_type(ctx, t)).collect(),
         })
         .collect();
 

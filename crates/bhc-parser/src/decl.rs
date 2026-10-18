@@ -2059,14 +2059,14 @@ impl<'src> Parser<'src> {
             if !self.check(&TokenKind::RParen) {
                 // Parse a type (which may be an application like `MonadState XState`)
                 let ty = self.parse_type()?;
-                // Extract the class name from the type
-                classes.push(self.type_to_class_name(&ty));
+                // Split the type into class name and leading arguments
+                classes.push(self.type_to_class_and_args(&ty));
                 while self.eat(&TokenKind::Comma) {
                     if self.check(&TokenKind::RParen) {
                         break;
                     }
                     let ty = self.parse_type()?;
-                    classes.push(self.type_to_class_name(&ty));
+                    classes.push(self.type_to_class_and_args(&ty));
                 }
             }
             self.expect(&TokenKind::RParen)?;
@@ -2081,17 +2081,41 @@ impl<'src> Parser<'src> {
 
             Ok(classes
                 .into_iter()
-                .map(|class| DerivingClause {
+                .map(|(class, args)| DerivingClause {
                     strategy: strategy.clone(),
                     class,
+                    args,
                 })
                 .collect())
         } else {
             // Single class without parens
             let ty = self.parse_type()?;
-            let class = self.type_to_class_name(&ty);
-            Ok(vec![DerivingClause { strategy, class }])
+            let (class, args) = self.type_to_class_and_args(&ty);
+            Ok(vec![DerivingClause {
+                strategy,
+                class,
+                args,
+            }])
         }
+    }
+
+    /// Split a deriving entry into its class name and leading arguments
+    /// (`MonadState XState` -> (`MonadState`, [`XState`])).
+    fn type_to_class_and_args(&self, ty: &Type) -> (Ident, Vec<Type>) {
+        let mut args = Vec::new();
+        let mut head = ty;
+        loop {
+            match head {
+                Type::App(f, a, _) => {
+                    args.push((**a).clone());
+                    head = f;
+                }
+                Type::Paren(inner, _) if args.is_empty() => head = inner,
+                _ => break,
+            }
+        }
+        args.reverse();
+        (self.type_to_class_name(ty), args)
     }
 
     /// Extract the class name from a type (e.g., `MonadState XState` -> `MonadState`)

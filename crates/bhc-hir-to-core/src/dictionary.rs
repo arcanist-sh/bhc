@@ -270,6 +270,13 @@ pub(crate) const BUILTIN_CLASS_NAMES: &[&str] = &[
     "Default",
 ];
 
+/// Whether `name` is one of [`BUILTIN_CLASS_NAMES`]. Under the closure IO
+/// model the mtl classes (`MonadState`, `MonadIO`, ...) are library classes and
+/// get ordinary dictionary passing (spec/BHC-BRIEF-0005).
+pub(crate) fn is_builtin_class_name(name: &str) -> bool {
+    BUILTIN_CLASS_NAMES.contains(&name) && !bhc_types::is_library_transformer_name(name)
+}
+
 /// The representation suffix for a transformer whose methods depend on the
 /// layer beneath it. Mirrors the copy in `resolve_dictionary`: `ExceptT e
 /// (StateT s m)` needs `_st`, because its methods thread the state.
@@ -351,8 +358,14 @@ impl ClassRegistry {
         if monad_witness_enabled() && matches!(name, "Monad" | "Applicative") {
             return true;
         }
+        // Under the closure IO model `Functor` too: the transformers library's
+        // `instance Functor m => Functor (StateT s m)` maps through the inner
+        // functor's `fmap` (spec/BHC-BRIEF-0005).
+        if bhc_types::io_closure_mode() && name == "Functor" {
+            return true;
+        }
         matches!(name, "Semigroup" | "Monoid")
-            || (!BUILTIN_CLASS_NAMES.contains(&name) && self.lookup_class(class_name).is_some())
+            || (!is_builtin_class_name(name) && self.lookup_class(class_name).is_some())
     }
 
     /// Register a type class.
@@ -573,6 +586,9 @@ pub struct DictContext<'a> {
     /// module under whatever layer happened to be current. So the variant
     /// travels in the name: `ExceptT.pure` vs `ExceptT_st.pure`.
     transformer_variant: Option<&'static str>,
+    /// Nesting of `get_dictionary`: an instance context that leads back to
+    /// itself through ever-different types never terminates otherwise.
+    depth: u32,
     /// Dictionaries in scope at the construction site, with the constraint
     /// arguments each is for.
     ///
@@ -607,6 +623,7 @@ impl<'a> DictContext<'a> {
             dict_cache: FxHashMap::default(),
             var_map: None,
             transformer_variant: None,
+            depth: 0,
             scope_dicts: Vec::new(),
             scope_super_dicts: Vec::new(),
         }
@@ -622,6 +639,7 @@ impl<'a> DictContext<'a> {
             dict_cache: FxHashMap::default(),
             var_map: Some(var_map),
             transformer_variant: None,
+            depth: 0,
             scope_dicts: Vec::new(),
             scope_super_dicts: Vec::new(),
         }
@@ -748,7 +766,21 @@ impl<'a> DictContext<'a> {
 
         // Construct the dictionary, applying the substitution to resolve
         // type variables in superclass constraints
-        let dict_expr = self.construct_dictionary(class, instance, &subst, span)?;
+        const MAX_DICT_DEPTH: u32 = 64;
+        if self.depth >= MAX_DICT_DEPTH {
+            if std::env::var_os("BHC_DBG_DICTDEPTH").is_some() {
+                eprintln!(
+                    "[dict-depth] giving up at {} {:?}",
+                    constraint.class.as_str(),
+                    constraint.args
+                );
+            }
+            return None;
+        }
+        self.depth += 1;
+        let dict_expr = self.construct_dictionary(class, instance, &subst, span);
+        self.depth -= 1;
+        let dict_expr = dict_expr?;
 
         // Create a variable for this dictionary and cache it
         let type_names: Vec<String> = constraint.args.iter().map(type_name).collect();
@@ -1438,7 +1470,7 @@ fn apply_constraint_dicts(
 /// standard `make_tuple` would optimize away the tuple wrapper, causing
 /// `$sel_0` to fail. This function pads 1-element dictionaries with a
 /// `String` replaced by `[Char]` throughout a type.
-fn string_as_char_list(ty: &Ty) -> Ty {
+pub(crate) fn string_as_char_list(ty: &Ty) -> Ty {
     match ty {
         Ty::Con(tc) if tc.name.as_str() == "String" => Ty::List(Box::new(Ty::Con(TyCon::new(
             Symbol::intern("Char"),

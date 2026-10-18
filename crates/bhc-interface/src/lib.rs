@@ -39,7 +39,7 @@ use std::io::{Read, Write};
 use thiserror::Error;
 
 /// Current interface file format version.
-pub const INTERFACE_VERSION: u32 = 4;
+pub const INTERFACE_VERSION: u32 = 5;
 
 /// Magic bytes for interface files.
 pub const INTERFACE_MAGIC: &[u8; 4] = b"BHCI";
@@ -238,6 +238,11 @@ pub struct ExportedClass {
     pub superclasses: Vec<Constraint>,
     /// Method signatures.
     pub methods: Vec<ClassMethod>,
+    /// Functional dependencies as (determining, determined) parameter
+    /// indices: `class MonadState s m | m -> s` has `[([1], [0])]`. An
+    /// importer needs them to improve `MonadState ?s (StateT Int IO)` to
+    /// `?s := Int`.
+    pub fundeps: Vec<(Vec<usize>, Vec<usize>)>,
 }
 
 /// A type class method.

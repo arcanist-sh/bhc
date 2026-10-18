@@ -52,8 +52,8 @@ mod resolve;
 mod th_expand;
 
 pub use context::{
-    DefKind, DefMap, InterfaceConstructorEntry, InterfaceInstanceEntry, LowerContext, Scope,
-    ScopeId,
+    ClassFunDep, DefKind, DefMap, InterfaceClassEntry, InterfaceConstructorEntry,
+    InterfaceInstanceEntry, LowerContext, Scope, ScopeId, BUILTIN_DEF_LIMIT,
 };
 pub use loader::{ConstructorInfo, LoadError, ModuleCache, ModuleExports};
 pub use lower::{lower_module, lower_module_with_cache, LowerConfig};

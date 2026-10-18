@@ -24,6 +24,7 @@ pub fn generate_interface(
     ast: &AstModule,
     typed: &bhc_typeck::TypedModule,
     imported_class_params: &HashMap<String, usize>,
+    imported_class_methods: &HashMap<String, Vec<String>>,
 ) -> ModuleInterface {
     let mut iface = ModuleInterface::new(module_name);
 
@@ -133,7 +134,9 @@ pub fn generate_interface(
                 // applied to the rest — pandoc's `Future` was invisible to
                 // importing modules, so `liftA2 (<>)` in its `Semigroup`
                 // instance had no `>>=` to build from.
-                if !nt.params.is_empty() {
+                if !nt.params.is_empty() && bhc_types::io_closure_mode() {
+                    record_newtype_derived_instances(&mut iface, nt, ast, imported_class_methods);
+                } else if !nt.params.is_empty() {
                     for clause in &nt.deriving {
                         let methods: Vec<String> = match clause.class.name.as_str() {
                             "Functor" => vec!["fmap".to_string()],
@@ -248,11 +251,25 @@ pub fn generate_interface(
                     })
                     .flatten()
                     .collect();
+                let param_index = |ident: &bhc_intern::Ident| {
+                    params.iter().position(|p| p == ident.name.as_str())
+                };
+                let fundeps = cls
+                    .fundeps
+                    .iter()
+                    .map(|fd| {
+                        (
+                            fd.from.iter().filter_map(param_index).collect(),
+                            fd.to.iter().filter_map(param_index).collect(),
+                        )
+                    })
+                    .collect();
                 iface.add_class(ExportedClass {
                     name: cls.name.name.as_str().to_string(),
                     params,
                     superclasses: supers,
                     methods,
+                    fundeps,
                 });
             }
             bhc_ast::Decl::InstanceDecl(inst) => {
@@ -718,6 +735,99 @@ fn flatten_instance_head(ty: &bhc_ast::Type, param_count: usize) -> Vec<&bhc_ast
         spine.split_off(spine.len() - param_count)
     } else {
         spine
+    }
+}
+
+/// Under the closure IO model (spec/BHC-BRIEF-0005), every class a newtype
+/// derives by newtype deriving becomes an instance an importer can see:
+/// `deriving (MonadIO, MonadError String)` on pandoc's `PandocIO` gives
+/// `MonadIO PandocIO` and `MonadError [Char] PandocIO`. HIR->Core emits one
+/// `$instance_{method}_{head}` per class method (its
+/// `derive_newtype_via_wrapped`), so the method list is the class's own: the
+/// builtin monad family's as hir-to-core registers it, a local class's from
+/// this module, an imported one's from its interface. A `String` argument is
+/// written as `[Char]`, the spelling the instance is keyed at.
+fn record_newtype_derived_instances(
+    iface: &mut ModuleInterface,
+    nt: &bhc_ast::NewtypeDecl,
+    ast: &AstModule,
+    imported_class_methods: &HashMap<String, Vec<String>>,
+) {
+    const STOCK: &[&str] = &[
+        "Eq",
+        "Ord",
+        "Show",
+        "Read",
+        "Enum",
+        "Bounded",
+        "Ix",
+        "Generic",
+        "NFData",
+        "Foldable",
+        "Traversable",
+        "Typeable",
+        "Data",
+    ];
+    let local_methods = |class: &str| -> Option<Vec<String>> {
+        ast.decls.iter().find_map(|d| match d {
+            bhc_ast::Decl::ClassDecl(c) if c.name.name.as_str() == class => Some(
+                c.methods
+                    .iter()
+                    .filter_map(|m| match m {
+                        bhc_ast::Decl::TypeSig(sig) => Some(
+                            sig.names
+                                .iter()
+                                .map(|n| n.name.as_str().to_string())
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect(),
+            ),
+            _ => None,
+        })
+    };
+    let head = nt.params[..nt.params.len() - 1].iter().fold(
+        Type::Con(nt.name.name.as_str().to_string()),
+        |acc, p| {
+            Type::App(
+                Box::new(acc),
+                Box::new(Type::Var(p.name.name.as_str().to_string())),
+            )
+        },
+    );
+    for clause in &nt.deriving {
+        let class = clause.class.name.as_str();
+        if STOCK.contains(&class) {
+            continue;
+        }
+        let methods: Vec<String> = match class {
+            "Functor" => vec!["fmap".into(), "<$".into()],
+            "Applicative" => vec!["pure".into(), "<*>".into(), "*>".into(), "<*".into()],
+            "Monad" => vec![">>=".into(), ">>".into()],
+            _ => {
+                match local_methods(class).or_else(|| imported_class_methods.get(class).cloned()) {
+                    Some(m) => m,
+                    None => continue,
+                }
+            }
+        };
+        let mut types: Vec<Type> = clause
+            .args
+            .iter()
+            .map(|t| match convert_ast_type(t) {
+                Type::Con(c) if c == "String" => Type::List(Box::new(Type::Con("Char".into()))),
+                other => other,
+            })
+            .collect();
+        types.push(head.clone());
+        iface.add_instance(ExportedInstance {
+            class: class.to_string(),
+            types,
+            constraints: Vec::new(),
+            methods,
+        });
     }
 }
 

@@ -825,6 +825,9 @@ pub struct DerivingClause {
     pub strategy: DerivingStrategy,
     /// The class to derive.
     pub class: Ident,
+    /// The class's leading arguments: `String` in `deriving (MonadError
+    /// String)`. The derived type fills the last parameter.
+    pub args: Vec<Type>,
 }
 
 /// A data type declaration.

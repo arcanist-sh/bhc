@@ -546,7 +546,9 @@ fn over_applied(ty: &Ty) -> bool {
 }
 
 fn is_transformer_name(name: &str) -> bool {
-    matches!(name, "StateT" | "ExceptT" | "ReaderT" | "WriterT")
+    // Library transformers (closure IO model, spec/BHC-BRIEF-0005) are passed
+    // dictionaries like any user monad; codegen needs no specialization.
+    !bhc_types::io_closure_mode() && matches!(name, "StateT" | "ExceptT" | "ReaderT" | "WriterT")
 }
 
 fn get_or_specialize(

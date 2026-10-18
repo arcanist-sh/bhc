@@ -236,7 +236,19 @@ fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<cor
         Expr::Con(def_ref) => lower_con(ctx, def_ref),
 
         Expr::App(f, x, span) => {
-            let e = lower_app_with_method_level(ctx, f, x, *span)?;
+            let mut head = f.as_ref();
+            while let Expr::App(g, _, _) = head {
+                head = g.as_ref();
+            }
+            let head_span = match head {
+                Expr::Var(dr) => ctx.app_head_spans.insert(dr.span).then_some(dr.span),
+                _ => None,
+            };
+            let e = lower_app_with_method_level(ctx, f, x, *span);
+            if let Some(hs) = head_span {
+                ctx.app_head_spans.remove(&hs);
+            }
+            let e = bind_via_scope_monad(ctx, head, e?);
             Ok(type_state_runner(ctx, type_shown_variable(ctx, x, e)))
         }
 
@@ -495,9 +507,15 @@ fn occurrence_in_dict_monad_var(ctx: &LowerContext, span: Span) -> bool {
             other => other,
         }
     }
-    let dict_is_var = ctx
-        .lookup_dict_ty(Symbol::intern("Monad"))
-        .is_some_and(|t| matches!(head(t), Ty::Var(_)));
+    let monad = Symbol::intern("Monad");
+    // An UNTYPED `Monad` dictionary (an instance context's, or a method-level
+    // one like `lift`'s) is for the instance's inner monad variable — under
+    // the closure IO model, what `lift m = ExceptT (m >>= \a -> return (Right
+    // a))` must `return` in.
+    let dict_is_var = match ctx.lookup_dict_ty(monad) {
+        Some(t) => matches!(head(t), Ty::Var(_)),
+        None => io_closure_mode() && ctx.lookup_dict(monad).is_some(),
+    };
     let occ_is_var = refined_occurrence_ty(ctx, span)
         .as_ref()
         .and_then(monad_head_of_method_occurrence)
@@ -1558,7 +1576,8 @@ fn type_state_runner(ctx: &LowerContext, e: core::Expr) -> core::Expr {
         match e {
             core::Expr::App(f, _, _) | core::Expr::TyApp(f, _, _) => retype(f, ctx),
             core::Expr::Var(v, span)
-                if matches!(v.name.as_str(), "runStateT" | "evalStateT" | "execStateT")
+                if !io_closure_mode()
+                    && matches!(v.name.as_str(), "runStateT" | "evalStateT" | "execStateT")
                     && !inner_monad(&v.ty).is_some_and(monad_is_known) =>
             {
                 if let Some(ty) = ctx
@@ -2053,8 +2072,13 @@ fn lower_constrained_value_all_dicts(
     let mut subst = bhc_types::Subst::new();
     match_ty(scheme_ty, &occ_ty, &mut subst);
     // A function instantiation means this is a constrained *function*; those
-    // resolve at the application site, which builds its own head var.
-    if matches!(subst.apply(scheme_ty), Ty::Fun(..)) {
+    // resolve at the application site, which builds its own head var — when
+    // there is one. Under the closure IO model a function passed as an
+    // argument (`flip evalStateT def`, with the transformers library's
+    // `evalStateT :: Monad m => …`) is a value and is resolved here.
+    if matches!(subst.apply(scheme_ty), Ty::Fun(..))
+        && (!io_closure_mode() || ctx.app_head_spans.contains(&def_ref.span))
+    {
         return None;
     }
     let var = ctx.lookup_var(def_ref.def_id).cloned()?;
@@ -2231,6 +2255,52 @@ fn hint_lift_a2_function_ty(ctx: &mut LowerContext, f: &hir::Expr, x: &hir::Expr
     propagate_expected_ty(ctx, fn_arg, &want, 0);
 }
 
+/// Under the closure IO model (spec/BHC-BRIEF-0005), a `>>=`/`>>` that every
+/// dispatch path left as the builtin, at a monad typeck did not pin to a
+/// constructor, binds in the `Monad` dictionary in scope (directly or through a
+/// superclass). The builtin is IO's bind there, which is wrong for any other
+/// monad: parsec's `tokenPrimEx` binds `uncons input` inside the rank-N
+/// `ParsecT` field, where nothing recorded its monad, and with only the
+/// `Stream s m t` dictionary in scope the builtin ran an `Identity` action as
+/// IO and every token parser failed.
+fn bind_via_scope_monad(ctx: &mut LowerContext, head: &hir::Expr, e: core::Expr) -> core::Expr {
+    if !io_closure_mode() {
+        return e;
+    }
+    let Expr::Var(dr) = head else {
+        return e;
+    };
+    // Peel the (two) applications down to the head Core variable.
+    let core::Expr::App(f1, b, sp1) = e else {
+        return e;
+    };
+    let core::Expr::App(f0, a, sp0) = *f1 else {
+        return core::Expr::App(f1, b, sp1);
+    };
+    let is_builtin_bind = matches!(f0.as_ref(), core::Expr::Var(v, _)
+        if matches!(v.name.as_str(), ">>=" | ">>"));
+    let pinned = refined_occurrence_ty(ctx, dr.span)
+        .as_ref()
+        .and_then(monad_head_of_method_occurrence)
+        .is_some_and(|h| !matches!(h, Ty::Var(_)));
+    let method = match f0.as_ref() {
+        core::Expr::Var(v, _) if is_builtin_bind && !pinned => Some(v.name),
+        _ => None,
+    };
+    let selected = method.and_then(|m| {
+        ctx.allow_multi_param_hop = true;
+        let sel = ctx.select_method_via_superclass(Symbol::intern("Monad"), m, dr.span);
+        ctx.allow_multi_param_hop = false;
+        sel
+    });
+    let head_expr = selected.unwrap_or(*f0);
+    core::Expr::App(
+        Box::new(core::Expr::App(Box::new(head_expr), a, sp0)),
+        b,
+        sp1,
+    )
+}
+
 /// Whether `BHC_DBG_DISPATCH` tracing is on, read once.
 /// Dictionaries for a constrained function used as a whole instance-method
 /// body — `fileExists = IO.fileExists` in pandoc's `instance PandocMonad
@@ -2259,6 +2329,15 @@ fn instance_alias_dicts(
             if let Ty::Var(v) = a {
                 subst.insert(v, inst_ty.clone());
             }
+        }
+    }
+    // An implementation constrained only by OTHER classes (`label ::
+    // MonadIO m => String -> m String` for `instance Store App`) is pinned by
+    // the method's own type at the instance (`String -> App String`).
+    if let Some(alias_ty) = ctx.instance_alias_ty(def_ref.span).cloned() {
+        if let Some(scheme) = ctx.lookup_scheme(def_ref.def_id) {
+            let scheme_ty = ctx.expand_type_aliases(&scheme.ty);
+            match_ty(&scheme_ty, &ctx.expand_type_aliases(&alias_ty), &mut subst);
         }
     }
     if subst.is_empty() {
@@ -3701,12 +3780,7 @@ fn monad_runs_eagerly(ty: &Ty) -> bool {
     )
 }
 
-/// Whether the closure IO model is enabled (`BHC_IO_MODEL=closure`); mirrors
-/// `bhc_codegen::io_closure_mode`.
-pub(crate) fn io_closure_mode() -> bool {
-    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| std::env::var("BHC_IO_MODEL").is_ok_and(|m| m == "closure"))
-}
+pub(crate) use bhc_types::io_closure_mode;
 
 fn nullary_var(name: &str, span: Span) -> core::Expr {
     core::Expr::Var(
@@ -4272,12 +4346,13 @@ fn try_lower_monadic_traversal(
     // built from, but codegen lowers the builtin `>>=`/`return` at the layer
     // their Var's type names (see `annotate_monad_head_tys`). Codegen's own
     // `mapM` is a plain `map` that never runs the actions.
-    let builtin_layer = matches!(
-        applied_head_name(&monad_ty)
-            .map(|n| n.as_str().to_string())
-            .as_deref(),
-        Some("StateT" | "ReaderT" | "ExceptT" | "WriterT")
-    );
+    let builtin_layer = !io_closure_mode()
+        && matches!(
+            applied_head_name(&monad_ty)
+                .map(|n| n.as_str().to_string())
+                .as_deref(),
+            Some("StateT" | "ReaderT" | "ExceptT" | "WriterT")
+        );
     let typed_builtin = |name: &str| {
         core::Expr::Var(
             Var {

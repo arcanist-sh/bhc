@@ -103,6 +103,10 @@ pub struct TyCtxt {
     /// Type schemes for definitions (`DefId` -> Scheme).
     pub(crate) def_schemes: FxHashMap<DefId, Scheme>,
 
+    /// The builtin `$`, so a local binding's uses can tell `f $ x` (an
+    /// application of `f`) from `f` passed as a value.
+    pub(crate) dollar_def: Option<DefId>,
+
     /// DefIds that have explicit type signatures — their schemes should not
     /// be modified by the finalization substitution step (the type variables
     /// are universally quantified, not unification variables).
@@ -205,6 +209,7 @@ impl TyCtxt {
             file_id,
             expr_types: FxHashMap::default(),
             def_schemes: FxHashMap::default(),
+            dollar_def: None,
             explicit_sig_defs: std::collections::HashSet::new(),
             con_field_defs: FxHashMap::default(),
             constraints: Vec::new(),
@@ -2407,6 +2412,10 @@ impl TyCtxt {
             }
         }
 
+        if let Some((id, _)) = defs.iter().find(|(_, d)| d.name.as_str() == "$") {
+            self.dollar_def = Some(*id);
+        }
+
         // For each def in the lowering pass's def map, register it with a type
         for (_def_id, def_info) in defs.iter() {
             // Skip pattern variables (function parameters, let-bound vars) —
@@ -3616,6 +3625,40 @@ impl TyCtxt {
                         Box::new(self.builtins.string_ty.clone()),
                     );
                     Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), io_string))
+                }
+                // getArgs :: IO [String]. Untyped, it was missing from the
+                // IO-primitive set, and the closure IO model ran its eager
+                // result as an action (a bus error at startup).
+                "getArgs" => Scheme::mono(Ty::App(
+                    Box::new(Ty::Con(self.builtins.io_con.clone())),
+                    Box::new(Ty::List(Box::new(self.builtins.string_ty.clone()))),
+                )),
+                // getProgName, getCurrentDirectory :: IO String
+                "getProgName" | "getCurrentDirectory" => Scheme::mono(Ty::App(
+                    Box::new(Ty::Con(self.builtins.io_con.clone())),
+                    Box::new(self.builtins.string_ty.clone()),
+                )),
+                // hGetChar :: Handle -> IO Char
+                "hGetChar" => {
+                    let io_char = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(self.builtins.char_ty.clone()),
+                    );
+                    Scheme::poly(vec![a.clone()], Ty::fun(Ty::Var(a.clone()), io_char))
+                }
+                // Handle configuration: Handle -> setting -> IO (). Codegen
+                // runs them as no-ops; the IO result type is what puts them
+                // in the IO-primitive set, so the closure IO model defers
+                // them instead of running their eager result as an action.
+                "hSetBuffering" | "hSetNewlineMode" | "hSetEncoding" | "hSetBinaryMode" => {
+                    let io_unit = Ty::App(
+                        Box::new(Ty::Con(self.builtins.io_con.clone())),
+                        Box::new(Ty::unit()),
+                    );
+                    Scheme::poly(
+                        vec![a.clone(), b.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(b.clone()), io_unit)),
+                    )
                 }
                 // hClose :: Handle -> IO ()
                 // Simplified: a -> IO ()

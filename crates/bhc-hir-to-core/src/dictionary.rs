@@ -177,7 +177,15 @@ pub struct ClassRegistry {
     /// `method_types` are written in. Instantiating a method's declared type
     /// at an instance head needs them.
     pub class_params: FxHashMap<Symbol, Vec<TyVar>>,
+    /// Functional dependencies by class, as (determining, determined)
+    /// parameter indices: `MonadError e m | m -> e` is `[([1], [0])]`.
+    /// A class absent here has no recorded dependencies.
+    pub fundeps: ClassFunDeps,
 }
+
+/// Functional dependencies by class name, as (determining, determined)
+/// parameter-index lists per dependency.
+pub type ClassFunDeps = FxHashMap<Symbol, Vec<(Vec<usize>, Vec<usize>)>>;
 
 /// Give `Monad`/`Applicative` constraints a runtime witness, so a
 /// monad-polymorphic binding can dispatch `return`/`pure`.
@@ -324,6 +332,32 @@ impl ClassRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The parameter positions of `class` that its functional dependencies
+    /// determine once the positions in `fixed` are known (the closure, not
+    /// including `fixed` itself). `None` when the class has no recorded
+    /// dependencies, so callers can keep their previous behaviour.
+    #[must_use]
+    pub fn determined_positions(&self, class: Symbol, fixed: &[usize]) -> Option<Vec<usize>> {
+        let deps = self.fundeps.get(&class).filter(|d| !d.is_empty())?;
+        let mut known: Vec<usize> = fixed.to_vec();
+        loop {
+            let before = known.len();
+            for (from, to) in deps {
+                if from.iter().all(|f| known.contains(f)) {
+                    for t in to {
+                        if !known.contains(t) {
+                            known.push(*t);
+                        }
+                    }
+                }
+            }
+            if known.len() == before {
+                break;
+            }
+        }
+        Some(known.into_iter().filter(|k| !fixed.contains(k)).collect())
     }
 
     /// Whether an instance-declaration constraint of this class becomes a
@@ -652,6 +686,49 @@ impl<'a> DictContext<'a> {
         self.scope_dicts = dicts;
     }
 
+    /// The full arguments of the ONE instance of multi-parameter `class` whose
+    /// last argument fits the last of `args`, when the instance pins every
+    /// other argument (the class's fundep: `MonadError e m | m -> e`).
+    /// `args` may be just that last argument (a superclass slot records only
+    /// it). `None` when no such instance, more than one, or one that leaves
+    /// an earlier argument a variable (`MonadError e (StateT s m)`).
+    fn fill_by_unique_instance(&self, class: Symbol, args: &[Ty]) -> Option<Vec<Ty>> {
+        let target = args.last()?;
+        let mut fits = self
+            .registry
+            .instances
+            .get(&class)?
+            .iter()
+            .filter_map(|inst| {
+                let (last, _) = inst.instance_types.split_last()?;
+                if inst.instance_types.len() < 2
+                    || !instance_heads_agree(
+                        std::slice::from_ref(last),
+                        std::slice::from_ref(target),
+                    )
+                {
+                    return None;
+                }
+                let s =
+                    types_match_multi(std::slice::from_ref(last), std::slice::from_ref(target))?;
+                Some(
+                    inst.instance_types
+                        .iter()
+                        .map(|t| s.apply(t))
+                        .collect::<Vec<_>>(),
+                )
+            });
+        let filled = fits.next()?;
+        if fits.next().is_some()
+            || filled[..filled.len() - 1]
+                .iter()
+                .any(crate::context::has_type_variables)
+        {
+            return None;
+        }
+        Some(filled)
+    }
+
     /// A dictionary in scope at the construction site for this very
     /// constraint, matched by HEAD so `m` lines up with `m` and never with a
     /// different monad.
@@ -677,10 +754,30 @@ impl<'a> DictContext<'a> {
         {
             return Some(core::Expr::Var(var.clone(), span));
         }
+        // A superclass reached from a single-parameter holder records only
+        // the holder's parameter: `PandocMonad m`'s `MonadError PandocError m`
+        // is offered as `[m]`. Match it on the wanted LAST argument (the
+        // position that parameter stands for), or the StateT instance's
+        // `MonadError e m` context inside a `PandocMonad m =>` function was a
+        // null placeholder and its `catchError` jumped through it.
+        let matches_last = |class: &Symbol, args: &Vec<Ty>| {
+            *class == constraint.class
+                && args.len() == 1
+                && constraint.args.len() > 1
+                && constraint
+                    .args
+                    .last()
+                    .is_some_and(|want| same_head(&args[0], want))
+        };
         let (_, _, base, path) = self
             .scope_super_dicts
             .iter()
-            .find(|(class, args, _, _)| matches(class, args))?;
+            .find(|(class, args, _, _)| matches(class, args))
+            .or_else(|| {
+                self.scope_super_dicts
+                    .iter()
+                    .find(|(class, args, _, _)| matches_last(class, args))
+            })?;
         let mut cur = core::Expr::Var(base.clone(), span);
         for idx in path {
             cur = core::Expr::App(
@@ -846,8 +943,21 @@ impl<'a> DictContext<'a> {
                 .get(i)
                 .and_then(|super_ty| {
                     let concrete_super_ty = subst.apply(super_ty);
-                    let super_constraint = Constraint::new(*superclass, concrete_super_ty, span);
-                    self.get_dictionary(&super_constraint, span)
+                    let super_constraint =
+                        Constraint::new(*superclass, concrete_super_ty.clone(), span);
+                    self.get_dictionary(&super_constraint, span).or_else(|| {
+                        // A multi-parameter superclass is recorded at its LAST
+                        // argument alone: `PandocMonad PandocIO`'s `MonadError
+                        // PandocError m` slot asked for `MonadError PandocIO`,
+                        // which no two-argument instance matches, so the slot
+                        // was a null placeholder and every `catchError` inside
+                        // a `PandocMonad m =>` function jumped through it.
+                        let args = self.fill_by_unique_instance(
+                            *superclass,
+                            std::slice::from_ref(&concrete_super_ty),
+                        )?;
+                        self.get_dictionary(&Constraint::new_multi(*superclass, args, span), span)
+                    })
                 })
                 .or_else(|| {
                     // The instance's OWN constraints name the right type when
@@ -1002,7 +1112,27 @@ impl<'a> DictContext<'a> {
                             .map(|(_, _, var)| core::Expr::Var(var.clone(), span))
                     })
                     .flatten();
+                // A context constraint whose leading arguments are still
+                // variables but whose last is pinned: `MonadError e m` for
+                // `MonadError e (StateT s m)` built at `StateT () PandocIO`
+                // with `e` unknown at the use site. The class's fundep fixes
+                // `e` from `PandocIO`; without it the slot was a null
+                // placeholder and `catchError` at StateT jumped through it.
+                let needs_fill = concrete.args.len() > 1
+                    && concrete.args[..concrete.args.len() - 1]
+                        .iter()
+                        .any(crate::context::has_type_variables);
                 scoped
+                    .or_else(|| {
+                        if !needs_fill {
+                            return None;
+                        }
+                        let args = self.fill_by_unique_instance(concrete.class, &concrete.args)?;
+                        self.get_dictionary(
+                            &Constraint::new_multi(concrete.class, args, span),
+                            span,
+                        )
+                    })
                     .or_else(|| self.get_dictionary(&concrete, span))
                     .or_else(|| self.dict_in_scope_by_head(&concrete, span))
                     .unwrap_or_else(|| {

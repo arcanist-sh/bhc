@@ -425,6 +425,36 @@ fn test_tier3_string_literal_case_native() {
 }
 
 #[test]
+fn test_tier3_enum_compare_vars_native() {
+    run_native_test("tier3_io/enum_compare_vars", Profile::Default);
+}
+
+#[test]
+fn test_tier3_system_env_io_native() {
+    run_native_test("tier3_io/system_env_io", Profile::Default);
+}
+
+/// Library transformers only (spec/BHC-BRIEF-0005): the builtin eager-mode
+/// `StateT` loses the error value in the handler, a separate known gap.
+#[test]
+fn test_tier3_monad_error_statet_newtype_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/monad_error_statet_newtype", Profile::Default);
+}
+
+#[test]
+fn test_tier3_handle_setters_native() {
+    run_native_test("tier3_io/handle_setters", Profile::Default);
+}
+
+#[test]
+fn test_tier3_ordering_eq_native() {
+    run_native_test("tier3_io/ordering_eq", Profile::Default);
+}
+
+#[test]
 fn test_tier3_bool_immediate_native() {
     run_native_test("tier3_io/bool_immediate", Profile::Default);
 }

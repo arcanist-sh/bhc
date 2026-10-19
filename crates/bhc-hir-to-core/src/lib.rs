@@ -81,6 +81,19 @@ pub enum LowerError {
 /// Result type for lowering operations.
 pub type LowerResult<T> = Result<T, LowerError>;
 
+thread_local! {
+    static IMPORTED_CLASS_FUNDEPS: std::cell::RefCell<dictionary::ClassFunDeps> =
+        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+}
+
+/// Record the functional dependencies of the classes the next module imports
+/// (from their interfaces), for [`lower_module_with_imports`] to read.
+/// Dictionary construction uses them to fill a class argument only in the
+/// direction a dependency allows (`MonadError e m | m -> e`).
+pub fn set_imported_class_fundeps(fundeps: dictionary::ClassFunDeps) {
+    IMPORTED_CLASS_FUNDEPS.with(|f| *f.borrow_mut() = fundeps);
+}
+
 /// Lower a HIR module to Core IR.
 ///
 /// This is the main entry point for the HIR to Core transformation.
@@ -185,6 +198,9 @@ pub fn lower_module_with_imports(
     >,
 ) -> LowerResult<CoreModule> {
     let mut ctx = LowerContext::new();
+    ctx.class_registry_mut()
+        .fundeps
+        .extend(IMPORTED_CLASS_FUNDEPS.with(|f| f.borrow().clone()));
 
     // Type-synonym definitions (local + imported, from typeck): the
     // signature-fallback in dictionary resolution must see through synonyms

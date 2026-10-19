@@ -213,6 +213,24 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                 crate::binding_groups::local_binding_order(&binds, &refs)
             };
 
+            // Local functions passed or stored as values somewhere in the
+            // block or its body: those may be used at more than one monad
+            // (EPUB's `writeHtml`, called at `m` and handed to
+            // `createCoverPage` at `StateT EPUBState m`), so they stay
+            // generalized below.
+            let escaping: Vec<DefId> = {
+                let mut r = Vec::new();
+                for b in bindings.iter() {
+                    crate::binding_groups::collect_escaping_references(
+                        &b.rhs,
+                        ctx.dollar_def,
+                        &mut r,
+                    );
+                }
+                crate::binding_groups::collect_escaping_references(body, ctx.dollar_def, &mut r);
+                r
+            };
+
             for group in &group_order {
                 // Step 2: Check each binding's RHS and unify with pre-registered type
                 for &i in group {
@@ -258,7 +276,10 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                         // computation belonged.
                         let scheme = if is_join_point_name(name.as_str()) {
                             Scheme::mono(var_ty)
-                        } else if binding.sig.is_none() && !matches!(binding.rhs, Expr::Lam(..)) {
+                        } else if binding.sig.is_none()
+                            && (!matches!(binding.rhs, Expr::Lam(..))
+                                || (crate::io_closure_mode() && !escaping.contains(def_id)))
+                        {
                             // The monomorphism restriction, for the variables
                             // it matters for here: a local VALUE binding with no
                             // signature does not generalize its monad. `where
@@ -266,6 +287,14 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                             // `evalStateT go s` must stay at THAT StateT; made
                             // `forall n. n String`, its binds resolved through
                             // the enclosing `Monad m` dictionary instead.
+                            //
+                            // Under the closure IO model a local FUNCTION keeps
+                            // its monad too: Core does not abstract a local
+                            // binding over dictionaries, so pandoc's
+                            // `getTranslations`' `getTrans fp = readDataFile fp
+                            // >>= toTextM fp …`, made `forall m. PandocMonad m
+                            // => …`, had its dictionary resolved at a bogus
+                            // instance and its binds left to IO's builtin.
                             let mut scheme = ctx.generalize(&var_ty);
                             let mut applied = Vec::new();
                             applied_head_vars(&var_ty, &mut applied);

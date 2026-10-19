@@ -5953,6 +5953,83 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(tag.into_int_value())
     }
 
+    /// The constructor tag of a value of an enumeration (all constructors
+    /// nullary) whose largest tag is `max_tag`, whether it arrived boxed, as a
+    /// tagged immediate pointer, or as a plain integer.
+    fn nullary_tag_of(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        max_tag: u64,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        match value {
+            BasicValueEnum::PointerValue(p) => self.extract_nullary_tag(p, max_tag),
+            other => self.unbox_to_int(other),
+        }
+    }
+
+    /// The largest constructor tag of `type_name` when every one of its known
+    /// constructors is nullary (an enumeration), `None` otherwise.
+    fn enum_max_tag(&self, type_name: &str) -> Option<u32> {
+        self.constructor_metadata
+            .values()
+            .filter(|m| m.type_name.as_deref() == Some(type_name))
+            .try_fold(None::<u32>, |acc, m| {
+                (m.arity == 0 && !m.is_newtype)
+                    .then(|| Some(acc.map_or(m.tag, |t: u32| t.max(m.tag))))
+            })
+            .flatten()
+    }
+
+    /// The data type of a comparison's operands when the operator's own type
+    /// was erased: a variable codegen recorded as bound to an ADT value, or an
+    /// operand whose ADT it can infer structurally.
+    fn adt_name_of_operands(&self, args: &[&Expr]) -> Option<String> {
+        args.iter().find_map(|a| {
+            self.infer_adt_type_from_expr(a).or_else(|| match a {
+                Expr::Var(v, _) => self.adt_show_vars.get(&v.id).cloned(),
+                _ => None,
+            })
+        })
+    }
+
+    /// The data type a comparison operator is used at, read off its own type
+    /// (`(<=) :: V -> V -> Bool`), when that is a data type with known
+    /// constructors. Needed when neither operand is a constructor: `x <= y`
+    /// on two variables otherwise compared the boxes by address.
+    fn adt_name_of_comparison(&self, op_ty: &Ty) -> Option<String> {
+        let Ty::Fun(arg, _) = op_ty else {
+            return None;
+        };
+        let mut head = arg.as_ref();
+        while let Ty::App(f, _) = head {
+            head = f.as_ref();
+        }
+        let Ty::Con(con) = head else {
+            return None;
+        };
+        let name = con.name.as_str();
+        let short = name.rsplit('.').next().unwrap_or(name);
+        self.constructor_metadata
+            .values()
+            .filter_map(|m| m.type_name.as_deref())
+            .find(|t| *t == name || t.rsplit('.').next() == Some(short))
+            .map(str::to_string)
+    }
+
+    /// Whether `expr` is syntactically or by type an `Ordering` value: one of
+    /// its constructors, a saturated `compare`, or an `Ordering`-typed term.
+    fn is_ordering_expr(&self, expr: &Expr) -> bool {
+        if let Expr::Var(v, _) = expr {
+            if matches!(v.name.as_str(), "LT" | "EQ" | "GT") {
+                return true;
+            }
+        }
+        if matches!(expr, Expr::App(..)) && self.app_head_var_name(expr) == Some("compare") {
+            return true;
+        }
+        matches!(expr.ty(), Ty::Con(c) if c.name.as_str() == "Ordering")
+    }
+
     /// Extract a boolean tag from either a tagged-int-as-pointer (0/1) or a Bool ADT.
     /// Comparison operators return tagged-int-as-pointer, while functions like `even`/`odd`
     /// return proper Bool ADT structs. This helper handles both representations.
@@ -53293,10 +53370,27 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     return self.lower_comparison(op, lhs, rhs);
                 }
 
+                // `Ordering` is a builtin enumeration whose constructors are
+                // heap boxes, so its values compare by tag (LT=0, EQ=1, GT=2),
+                // never by address: `compare a b == LT` was always False.
+                if self.is_ordering_expr(args[0]) || self.is_ordering_expr(args[1]) {
+                    let lhs = self.lower_expr(args[0])?.ok_or_else(|| {
+                        CodegenError::Internal("ordering cmp: no lhs value".to_string())
+                    })?;
+                    let rhs = self.lower_expr(args[1])?.ok_or_else(|| {
+                        CodegenError::Internal("ordering cmp: no rhs value".to_string())
+                    })?;
+                    let lhs_tag = self.nullary_tag_of(lhs, 2)?;
+                    let rhs_tag = self.nullary_tag_of(rhs, 2)?;
+                    return self.lower_comparison(op, lhs_tag.into(), rhs_tag.into());
+                }
+
                 // Check if we're comparing user ADTs with derived Eq
                 if matches!(op, PrimOp::Eq | PrimOp::Ne) {
                     let adt_type = Self::is_user_adt_expr(args[0], &self.constructor_metadata)
-                        .or_else(|| Self::is_user_adt_expr(args[1], &self.constructor_metadata));
+                        .or_else(|| Self::is_user_adt_expr(args[1], &self.constructor_metadata))
+                        .or_else(|| self.adt_name_of_comparison(op_ty))
+                        .or_else(|| self.adt_name_of_operands(args));
                     if let Some(type_name) = adt_type {
                         if let Some(eq_var_id) = self.derived_eq_fns.get(&type_name).copied() {
                             if let Some(eq_fn) = self.functions.get(&eq_var_id).copied() {
@@ -53357,13 +53451,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                                 return Ok(Some(tag.into()));
                             }
                         }
+                        // An enumeration with no derived Eq function — a
+                        // builtin like `Ordering` — compares by tag. Falling
+                        // through compared two separately allocated boxes by
+                        // address, so `LT == LT` was False.
+                        if let Some(max_tag) = self.enum_max_tag(&type_name) {
+                            let lhs = self.lower_expr(args[0])?.ok_or_else(|| {
+                                CodegenError::Internal("eq: no lhs value".to_string())
+                            })?;
+                            let rhs = self.lower_expr(args[1])?.ok_or_else(|| {
+                                CodegenError::Internal("eq: no rhs value".to_string())
+                            })?;
+                            let lhs_tag = self.nullary_tag_of(lhs, u64::from(max_tag))?;
+                            let rhs_tag = self.nullary_tag_of(rhs, u64::from(max_tag))?;
+                            return self.lower_comparison(op, lhs_tag.into(), rhs_tag.into());
+                        }
                     }
                 }
 
                 // Check if we're comparing user ADTs with derived Ord (for <, <=, >, >=)
                 if matches!(op, PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge) {
                     let adt_type = Self::is_user_adt_expr(args[0], &self.constructor_metadata)
-                        .or_else(|| Self::is_user_adt_expr(args[1], &self.constructor_metadata));
+                        .or_else(|| Self::is_user_adt_expr(args[1], &self.constructor_metadata))
+                        .or_else(|| self.adt_name_of_comparison(op_ty))
+                        .or_else(|| self.adt_name_of_operands(args));
                     if let Some(type_name) = adt_type {
                         if let Some(cmp_var_id) = self.derived_compare_fns.get(&type_name).copied()
                         {
@@ -53465,6 +53576,21 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                                     })?;
                                 return Ok(Some(result_i64.into()));
                             }
+                        }
+                        // An enumeration whose derived Ord is not in this
+                        // module (an imported type such as pandoc's
+                        // `Verbosity`): derived Ord on an enumeration is
+                        // constructor order, which is tag order.
+                        if let Some(max_tag) = self.enum_max_tag(&type_name) {
+                            let lhs = self.lower_expr(args[0])?.ok_or_else(|| {
+                                CodegenError::Internal("ord: no lhs value".to_string())
+                            })?;
+                            let rhs = self.lower_expr(args[1])?.ok_or_else(|| {
+                                CodegenError::Internal("ord: no rhs value".to_string())
+                            })?;
+                            let lhs_tag = self.nullary_tag_of(lhs, u64::from(max_tag))?;
+                            let rhs_tag = self.nullary_tag_of(rhs, u64::from(max_tag))?;
+                            return self.lower_comparison(op, lhs_tag.into(), rhs_tag.into());
                         }
                     }
                 }

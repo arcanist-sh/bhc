@@ -1470,6 +1470,13 @@ impl Compiler {
             }
         }
 
+        bhc_hir_to_core::set_imported_class_fundeps(
+            lower_ctx
+                .interface_class_fundeps
+                .iter()
+                .map(|(class, deps)| (*class, deps.clone()))
+                .collect(),
+        );
         let mut core = bhc_hir_to_core::lower_module_with_imports(
             hir,
             Some(&def_map),
@@ -4232,8 +4239,25 @@ impl Compiler {
                     if bhc_types::io_closure_mode() && exported_type.params.is_empty() {
                         if let Some(ref names) = con.field_names {
                             converter.reset_vars();
-                            for (name, f) in names.iter().zip(&con.fields) {
+                            for (i, (name, f)) in names.iter().zip(&con.fields).enumerate() {
                                 let ty = converter.convert_type(f);
+                                // The selector's real type too, for a field of
+                                // a `Text`-bearing type with no type variable:
+                                // with a fresh one, `"translations/" <>
+                                // langLanguage lang` typed its OverloadedStrings
+                                // literals as `String` and appended a Text to a
+                                // char list. Not for every field: pinning
+                                // `TextProperties`' `Bool`/`Maybe UnderlineMode`
+                                // selectors broke ODT.ContentReader's checking.
+                                if !ty_has_vars(&ty) && ty_mentions_text(&ty) {
+                                    let record = bhc_types::Ty::Con(bhc_types::TyCon::new(
+                                        type_name,
+                                        bhc_types::Kind::Star,
+                                    ));
+                                    accessor_schemes[i] = Some(bhc_types::Scheme::mono(
+                                        bhc_types::Ty::fun(record, ty.clone()),
+                                    ));
+                                }
                                 ctx.interface_record_field_types
                                     .insert(Symbol::intern(name), (type_name, ty));
                             }
@@ -6896,6 +6920,31 @@ fn hir_con_field_types(hir: &HirModule) -> FxHashMap<bhc_intern::Symbol, Vec<bhc
 }
 
 /// Whether `ty` mentions any of `vars`.
+/// Whether `Text` (bare or qualified) appears anywhere in a type.
+fn ty_mentions_text(ty: &bhc_types::Ty) -> bool {
+    use bhc_types::Ty;
+    match ty {
+        Ty::Con(c) => c.name.as_str() == "Text" || c.name.as_str().ends_with(".Text"),
+        Ty::App(f, a) | Ty::Fun(f, a) => ty_mentions_text(f) || ty_mentions_text(a),
+        Ty::List(e) => ty_mentions_text(e),
+        Ty::Tuple(es) => es.iter().any(ty_mentions_text),
+        _ => false,
+    }
+}
+
+/// Whether a type mentions any type variable.
+fn ty_has_vars(ty: &bhc_types::Ty) -> bool {
+    use bhc_types::Ty;
+    match ty {
+        Ty::Var(_) => true,
+        Ty::App(f, a) | Ty::Fun(f, a) => ty_has_vars(f) || ty_has_vars(a),
+        Ty::List(e) => ty_has_vars(e),
+        Ty::Tuple(es) => es.iter().any(ty_has_vars),
+        Ty::Forall(..) => true,
+        _ => false,
+    }
+}
+
 fn ty_mentions_any(ty: &bhc_types::Ty, vars: &[bhc_types::TyVar]) -> bool {
     use bhc_types::Ty;
     match ty {

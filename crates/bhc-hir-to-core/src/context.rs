@@ -2097,7 +2097,11 @@ impl LowerContext {
                         .class_registry
                         .lookup_class(sup)
                         .is_some_and(|c| c.param_count == 1);
-                    if !single_param {
+                    // A DIRECT multi-parameter superclass (`PandocMonad m`'s
+                    // `MonadError PandocError m`) is offered too, recorded at
+                    // the holder's own argument; consumers match it on their
+                    // constraint's last argument (`dict_in_scope_by_head`).
+                    if !single_param && path.len() != 1 {
                         continue;
                     }
                     if out.iter().any(|(c, _, _, _)| *c == sup) {
@@ -2317,6 +2321,16 @@ impl LowerContext {
     pub(crate) fn lookup_dict_for(&self, class: Symbol, want: &[Ty]) -> Result<Option<Var>, ()> {
         fn fits(a: &Ty, b: &Ty, score: &mut usize) -> bool {
             match (a, b) {
+                // A variable never equals an application it occurs in: inside
+                // pandoc's `instance (MonadTrans t, PandocMonad m, Monad (t m))
+                // => PandocMonad (t m)`, `lift`'s `Monad m` is not the
+                // `Monad (t m)` in scope, and taking it ran StateT's `>>=` on
+                // a PandocIO action.
+                (Ty::Var(v), t @ Ty::App(..)) | (t @ Ty::App(..), Ty::Var(v))
+                    if occurs_in(v, t) =>
+                {
+                    false
+                }
                 // An in-scope dictionary is for a RIGID variable of the
                 // enclosing signature, which a transformer type never equals:
                 // inside `w :: PandocMonad m => …` the `PandocMonad (StateT Int
@@ -2340,6 +2354,15 @@ impl LowerContext {
                     xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| fits(x, y, score))
                 }
                 (Ty::Prim(x), Ty::Prim(y)) => x == y,
+                _ => false,
+            }
+        }
+        fn occurs_in(v: &bhc_types::TyVar, t: &Ty) -> bool {
+            match t {
+                Ty::Var(w) => w.id == v.id,
+                Ty::App(f, a) | Ty::Fun(f, a) => occurs_in(v, f) || occurs_in(v, a),
+                Ty::List(x) => occurs_in(v, x),
+                Ty::Tuple(xs) => xs.iter().any(|x| occurs_in(v, x)),
                 _ => false,
             }
         }
@@ -2399,6 +2422,35 @@ impl LowerContext {
         None
     }
 
+    /// An in-scope dictionary whose class has `needed` as a DIRECT superclass
+    /// about a parameter that is `want` itself — the same type, by variable
+    /// identity or structure. `None` when no holder's parameter is known to
+    /// be `want`, leaving the decision to [`Self::lookup_superclass_dict`].
+    fn lookup_superclass_dict_for(&self, needed: Symbol, want: &Ty) -> Option<(Symbol, Var)> {
+        for scope in self.dict_scope_all.iter().rev() {
+            for (class, args, var) in scope.iter().rev() {
+                let Some(info) = self.class_registry.lookup_class(*class) else {
+                    continue;
+                };
+                let Some(idx) = info.superclasses.iter().position(|s| *s == needed) else {
+                    continue;
+                };
+                let Some(arg) = info
+                    .superclass_params
+                    .get(idx)
+                    .and_then(|p| p.first())
+                    .and_then(|param| args.get(*param))
+                else {
+                    continue;
+                };
+                if arg == want {
+                    return Some((*class, var.clone()));
+                }
+            }
+        }
+        None
+    }
+
     /// Find an in-scope dictionary whose class has the given class as a superclass.
     ///
     /// For example, if we need an `Eq` dictionary but only have `Ord` in scope,
@@ -2440,6 +2492,11 @@ impl LowerContext {
     #[must_use]
     pub fn class_registry(&self) -> &ClassRegistry {
         &self.class_registry
+    }
+
+    /// Mutable access to the class registry.
+    pub fn class_registry_mut(&mut self) -> &mut ClassRegistry {
+        &mut self.class_registry
     }
 
     /// Try to resolve a dictionary for a constraint.
@@ -2584,6 +2641,26 @@ impl LowerContext {
             Err(()) => {
                 if let Some(dict_var) = self.lookup_dict(constraint.class) {
                     return Some(core::Expr::Var(dict_var.clone(), span));
+                }
+            }
+        }
+
+        // 1b. Superclass extraction from a dictionary whose superclass is
+        // about the wanted type. The class-only search below takes any
+        // holder: wanting `Monad m` with `MonadError e (t m)` and
+        // `PandocMonad m` in scope, it could hand back `Monad (t m)`.
+        if let [want] = constraint.args.as_slice() {
+            if let Some((holder, dict_var)) =
+                self.lookup_superclass_dict_for(constraint.class, want)
+            {
+                if let Some(superclass_expr) = crate::dictionary::select_superclass(
+                    &dict_var,
+                    holder,
+                    constraint.class,
+                    &self.class_registry,
+                    span,
+                ) {
+                    return Some(superclass_expr);
                 }
             }
         }
@@ -3352,18 +3429,29 @@ impl LowerContext {
             }
             None => bhc_types::Subst::new(),
         };
+        let instance_alignment = self.align_with_instance_type(occ_span);
         let dbg = ml_dbg();
         let mut dicts = Vec::with_capacity(cs.len());
         for c in cs {
-            let args: Vec<Ty> = c.args.iter().map(|a| subst.apply(a)).collect();
+            let args: Vec<Ty> = c
+                .args
+                .iter()
+                .map(|a| instance_alignment.apply(&subst.apply(a)))
+                .collect();
             let inst = Constraint::new_multi(c.class, args, occ_span);
-            let dict = self.resolve_dictionary(&inst, occ_span).or_else(|| {
-                let filled = self.complete_constraint_args(inst.class, &inst.args)?;
-                self.resolve_dictionary(
-                    &Constraint::new_multi(inst.class, filled, occ_span),
-                    occ_span,
-                )
-            });
+            let exact = match inst.args.as_slice() {
+                [want @ Ty::Var(_)] => self.dict_known_for_var(inst.class, want, occ_span),
+                _ => None,
+            };
+            let dict = exact
+                .or_else(|| self.resolve_dictionary(&inst, occ_span))
+                .or_else(|| {
+                    let filled = self.complete_constraint_args(inst.class, &inst.args)?;
+                    self.resolve_dictionary(
+                        &Constraint::new_multi(inst.class, filled, occ_span),
+                        occ_span,
+                    )
+                });
             if dbg {
                 eprintln!(
                     "[ml] {class}.{method}: {} {:?} -> {}",
@@ -3381,6 +3469,74 @@ impl LowerContext {
             );
         }
         Some(dicts)
+    }
+
+    /// Inside an instance for a variable application (`instance … =>
+    /// PandocMonad (t m)`), the variables of an occurrence whose monad has
+    /// that same shape, mapped to the instance's own. Type checking leaves a
+    /// method occurrence in an instance body at fresh variables
+    /// (`lift :: v1 a -> v0 v1 a`) not unified with the instance head, so
+    /// `lift`'s `Monad v1` could not be told apart from the context's
+    /// `Monad (t m)`. Empty unless both sides are such applications.
+    fn align_with_instance_type(&self, occ_span: Span) -> bhc_types::Subst {
+        let mut subst = bhc_types::Subst::new();
+        let (Some(inst), Some(mut occ)) = (
+            self.current_instance_type().cloned(),
+            self.resolved_expr_ty_opt(occ_span),
+        ) else {
+            return subst;
+        };
+        while let Ty::Fun(_, ret) = occ {
+            occ = *ret;
+        }
+        // The occurrence's result is `monad a`; the instance type is `monad`.
+        let Ty::App(occ_monad, _) = occ else {
+            return subst;
+        };
+        fn var_spine(t: &Ty, out: &mut Vec<bhc_types::TyVar>) -> bool {
+            match t {
+                Ty::Var(v) => {
+                    out.push(v.clone());
+                    true
+                }
+                Ty::App(f, a) => var_spine(f, out) && var_spine(a, out),
+                _ => false,
+            }
+        }
+        let (mut from, mut to) = (Vec::new(), Vec::new());
+        if !matches!(inst, Ty::App(..))
+            || !var_spine(&occ_monad, &mut from)
+            || !var_spine(&inst, &mut to)
+            || from.len() != to.len()
+        {
+            return subst;
+        }
+        for (f, t) in from.into_iter().zip(to) {
+            if f.id != t.id {
+                subst.insert(&f, Ty::Var(t));
+            }
+        }
+        subst
+    }
+
+    /// A dictionary of `class` KNOWN to be for the variable `want`: one
+    /// registered with exactly that argument, or the superclass of one whose
+    /// superclass is about it (`Monad m` out of `PandocMonad m`). The general
+    /// lookup lets a dictionary registered without arguments fit any
+    /// variable, which picks the instance context's `Monad (t m)` for `m`.
+    fn dict_known_for_var(&self, class: Symbol, want: &Ty, span: Span) -> Option<core::Expr> {
+        let direct = self
+            .dict_scope_all
+            .iter()
+            .rev()
+            .flat_map(|scope| scope.iter().rev())
+            .find(|(c, args, _)| *c == class && args.as_slice() == std::slice::from_ref(want))
+            .map(|(_, _, v)| v.clone());
+        if let Some(v) = direct {
+            return Some(core::Expr::Var(v, span));
+        }
+        let (holder, var) = self.lookup_superclass_dict_for(class, want)?;
+        crate::dictionary::select_superclass(&var, holder, class, &self.class_registry, span)
     }
 
     pub(crate) fn constraint_is_dict_passed(&self, c: &Constraint) -> bool {
@@ -3636,6 +3792,16 @@ impl LowerContext {
         self.class_registry
             .class_params
             .insert(class_def.name, class_def.params.clone());
+        if !class_def.fundeps.is_empty() {
+            self.class_registry.fundeps.insert(
+                class_def.name,
+                class_def
+                    .fundeps
+                    .iter()
+                    .map(|d| (d.from.clone(), d.to.clone()))
+                    .collect(),
+            );
+        }
 
         let class_info = ClassInfo {
             name: class_def.name,
@@ -3917,6 +4083,15 @@ impl LowerContext {
         let fixed: Vec<usize> = (0..types.len())
             .filter(|&i| !matches!(types[i], Ty::Var(_)))
             .collect();
+        // Only in the direction the class's dependencies allow: `MonadError
+        // e m | m -> e` fills `e` from `m`, never `m` from `e` (which picked
+        // a newtype's own instance for `throwError` at a StateT over it).
+        let determined = self.class_registry.determined_positions(class_name, &fixed);
+        if determined.as_ref().is_some_and(|d| {
+            (0..types.len()).any(|i| matches!(types[i], Ty::Var(_)) && !d.contains(&i))
+        }) {
+            return types;
+        }
         let mut found: Option<(&crate::dictionary::InstanceInfo, bhc_types::Subst)> = None;
         for inst in instances {
             if inst.instance_types.len() != types.len() {
@@ -3992,6 +4167,9 @@ impl LowerContext {
                 eprintln!("[dispatch] {method}: multi-param instance types = {types:?}");
             }
             let types = self.improve_by_unique_instance(class_name, types);
+            if !self.params_pinned_by_fundeps(class_name, &types) {
+                return None;
+            }
             return self.resolve_method_at_concrete_types(method, class_name, &types, span);
         }
         // Prefer the fully-substituted resolved channel: the single-pass
@@ -4159,6 +4337,73 @@ impl LowerContext {
             .lookup_class(class_name)
             .and_then(|c| c.method_types.get(&method))
             .is_some_and(|scheme| applied(&scheme.ty, param.id))
+    }
+
+    /// Whether the concrete parameters of a multi-parameter class use pin the
+    /// rest, so an instance can be chosen soundly: either the class's
+    /// functional dependencies determine every variable position from the
+    /// concrete ones, or exactly ONE instance matches the concrete ones.
+    /// `MonadError [PandocError, ?m]` is neither (`m -> e`, not `e -> m`, and
+    /// every StateT/ExceptT/newtype instance matches `e = PandocError`):
+    /// resolving it took `PandocIO`'s instance inside a function polymorphic
+    /// in its monad. `Stream [[Char], ?m, ?t]` matches only `Stream [tok] m
+    /// tok`, which stays generic in `m`.
+    pub(crate) fn params_pinned_by_fundeps(&self, class_name: Symbol, types: &[Ty]) -> bool {
+        let fixed: Vec<usize> = (0..types.len())
+            .filter(|&i| !matches!(types[i], Ty::Var(_)))
+            .collect();
+        if fixed.len() == types.len() {
+            return true;
+        }
+        self.completion_allowed(class_name, &fixed, types)
+    }
+
+    /// Whether completing the parameters of `class_name` at positions other
+    /// than `known` (whose types are `types[i]` for `i` in `known`) is sound:
+    /// the class's dependencies determine them, or a single instance matches
+    /// the known positions. With no recorded dependencies and no instances,
+    /// `true` (the previous behaviour).
+    pub(crate) fn completion_allowed(
+        &self,
+        class_name: Symbol,
+        known: &[usize],
+        types: &[Ty],
+    ) -> bool {
+        let count = self.class_param_count(class_name);
+        if let Some(determined) = self.class_registry.determined_positions(class_name, known) {
+            if (0..count).all(|i| known.contains(&i) || determined.contains(&i)) {
+                return true;
+            }
+        }
+        let Some(instances) = self.class_registry.instances.get(&class_name) else {
+            return true;
+        };
+        let pats_of = |inst: &crate::dictionary::InstanceInfo| -> Option<Vec<Ty>> {
+            known
+                .iter()
+                .map(|&i| inst.instance_types.get(i).cloned())
+                .collect()
+        };
+        let targets: Vec<Ty> = known
+            .iter()
+            .filter_map(|&i| types.get(i).cloned())
+            .collect();
+        let mut seen: Vec<Vec<String>> = Vec::new();
+        for inst in instances {
+            let Some(pats) = pats_of(inst) else { continue };
+            if bhc_types::types_match_multi(&pats, &targets).is_none() {
+                continue;
+            }
+            let enc: Vec<String> = inst
+                .instance_types
+                .iter()
+                .map(type_name_for_instance)
+                .collect();
+            if !seen.contains(&enc) {
+                seen.push(enc);
+            }
+        }
+        seen.len() <= 1
     }
 
     /// Every class parameter of a MULTI-parameter class at one use of its
@@ -5350,7 +5595,19 @@ impl LowerContext {
         // based on it — a 0-lambda function-typed binding makes every
         // importer evaluate it with no arguments (see
         // `eta_expand_point_free_method`).
-        body = self.eta_expand_point_free_method(body, value_def);
+        //
+        // Not a record field SELECTOR: importers declare and call one as a
+        // 1-ary function (the field value), so expanding `runStateT` to its
+        // type's two arrows made `runStateT m s` in another module pass one
+        // argument to a two-parameter definition — the state was a garbage
+        // register and the result was off by one application.
+        let is_selector = self
+            .constructor_map
+            .values()
+            .any(|c| c.field_names.contains(&value_def.name));
+        if !is_selector {
+            body = self.eta_expand_point_free_method(body, value_def);
+        }
 
         // If there are constraints, wrap the body in dictionary lambdas.
         // For example, a function `f :: Num a => a -> a` becomes:

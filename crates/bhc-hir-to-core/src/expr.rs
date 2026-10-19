@@ -2457,6 +2457,23 @@ pub(crate) fn propagate_expected_ty(
         Expr::Ann(inner, _, _) | Expr::TypeApp(inner, _, _) => {
             propagate_expected_ty(ctx, inner, expected, depth + 1);
         }
+        // `["a", "b"]` where `[Text]` is expected: each element is a `Text`.
+        Expr::List(elems, _) => {
+            if let Ty::List(elem_ty) = expected {
+                for e in elems {
+                    propagate_expected_ty(ctx, e, elem_ty, depth + 1);
+                }
+            }
+        }
+        Expr::Tuple(elems, _) => {
+            if let Ty::Tuple(elem_tys) = expected {
+                if elem_tys.len() == elems.len() {
+                    for (e, t) in elems.iter().zip(elem_tys) {
+                        propagate_expected_ty(ctx, e, t, depth + 1);
+                    }
+                }
+            }
+        }
         Expr::If(_, then_e, else_e, _) => {
             propagate_expected_ty(ctx, then_e, expected, depth + 1);
             propagate_expected_ty(ctx, else_e, expected, depth + 1);
@@ -2597,6 +2614,14 @@ fn propagate_spine(
     // BUILTIN head (`id`, `maybe`, `either`), which has no scheme.
     let declared = match head {
         Expr::Var(dr) => ctx.lookup_scheme(dr.def_id).map(|sc| sc.ty.clone()),
+        // A constructor's declared type is polymorphic where its occurrence
+        // may not be: typeck records `Just "US"`'s `Just` at the literal's
+        // default, `[Char] -> Maybe [Char]`, which would push `[Char]` into
+        // a field that wants `Maybe Text`.
+        Expr::Con(_) => ctx
+            .resolved_expr_ty_opt(head.span())
+            .filter(|t| arrow_count(t) >= args.len())
+            .map(|t| generalize_constructor_ty(&t)),
         _ => None,
     };
     let head_ty = declared
@@ -2650,6 +2675,45 @@ fn propagate_spine(
             ctx.record_expected_ty(dr.span, instantiated);
         }
     }
+}
+
+/// A constructor occurrence's type with each argument of its RESULT type
+/// abstracted to a variable everywhere it appears: `[Char] -> Maybe [Char]`
+/// becomes `v0 -> Maybe v0`. A data constructor's parameters are exactly its
+/// result's arguments, so this recovers the declared polymorphic type from
+/// an instantiation — which typeck may have defaulted (an OverloadedStrings
+/// literal's `[Char]`) where the caller expects something else.
+fn generalize_constructor_ty(ty: &Ty) -> Ty {
+    let mut result = ty;
+    while let Ty::Fun(_, r) = result {
+        result = r.as_ref();
+    }
+    let mut params: Vec<Ty> = Vec::new();
+    match result {
+        Ty::List(e) => params.push(e.as_ref().clone()),
+        Ty::App(..) => {
+            let mut cur = result;
+            while let Ty::App(f, a) = cur {
+                params.push(a.as_ref().clone());
+                cur = f.as_ref();
+            }
+        }
+        _ => return ty.clone(),
+    }
+    fn replace(t: &Ty, params: &[Ty]) -> Ty {
+        if let Some(i) = params.iter().position(|p| p == t) {
+            // Outside the ranges typeck and lowering allocate from.
+            return Ty::Var(bhc_types::TyVar::new_star(0xFFE1_0000 + i as u32));
+        }
+        match t {
+            Ty::Fun(a, b) => Ty::Fun(Box::new(replace(a, params)), Box::new(replace(b, params))),
+            Ty::App(f, a) => Ty::App(Box::new(replace(f, params)), Box::new(replace(a, params))),
+            Ty::List(e) => Ty::List(Box::new(replace(e, params))),
+            Ty::Tuple(es) => Ty::Tuple(es.iter().map(|e| replace(e, params)).collect()),
+            other => other.clone(),
+        }
+    }
+    replace(ty, &params)
 }
 
 /// The type of the occurrence at `span`, refined by any expected type a caller
@@ -4277,26 +4341,36 @@ fn try_lower_monadic_traversal(
     // build it, so at `ParsecT` the parser ran during construction and the
     // caller got whatever it returned.
     if let ("when" | "unless", 2) = (name.as_str(), args.len()) {
-        if let Some(monad_ty) = traversal_monad_ty(ctx, span, head_ref.span, 2) {
-            if !monad_runs_eagerly(&monad_ty) && applied_head_name(&monad_ty).is_some() {
-                if let Some(pure_e) = ctx.resolve_method_at_concrete_type(
+        let monad_ty = traversal_monad_ty(ctx, span, head_ref.span, 2);
+        let pure_e = match &monad_ty {
+            Some(m) if !monad_runs_eagerly(m) && applied_head_name(m).is_some() => ctx
+                .resolve_method_at_concrete_type(
                     Symbol::intern("pure"),
                     Symbol::intern("Applicative"),
-                    &monad_ty,
+                    m,
                     span,
-                ) {
-                    let cond = lower_expr(ctx, args[0])?;
-                    let action = lower_expr(ctx, args[1])?;
-                    let skip =
-                        core::Expr::App(Box::new(pure_e), Box::new(nullary_var("()", span)), span);
-                    let (then_e, else_e) = if name.as_str() == "when" {
-                        (action, skip)
-                    } else {
-                        (skip, action)
-                    };
-                    return Ok(Some(make_if_expr(cond, then_e, else_e, span)));
-                }
-            }
+                ),
+            // Under the closure IO model, a monad that is still a variable
+            // (`report :: PandocMonad m => …`) takes `pure` from the in-scope
+            // dictionary. The builtin's skip branch is IO's `pure ()`, which
+            // pandoc's `report` returned at `PandocIO` and crashed on.
+            Some(Ty::Var(_)) | None if io_closure_mode() => ctx.select_method_via_superclass(
+                Symbol::intern("Monad"),
+                Symbol::intern("pure"),
+                head_ref.span,
+            ),
+            _ => None,
+        };
+        if let Some(pure_e) = pure_e {
+            let cond = lower_expr(ctx, args[0])?;
+            let action = lower_expr(ctx, args[1])?;
+            let skip = core::Expr::App(Box::new(pure_e), Box::new(nullary_var("()", span)), span);
+            let (then_e, else_e) = if name.as_str() == "when" {
+                (action, skip)
+            } else {
+                (skip, action)
+            };
+            return Ok(Some(make_if_expr(cond, then_e, else_e, span)));
         }
     }
     if let Some((n_actions, build)) = match (name.as_str(), args.len()) {
@@ -4637,11 +4711,84 @@ fn propagate_constructor_field_tys(ctx: &mut LowerContext, f: &hir::Expr, x: &hi
     // recorded expected type from reaching a constrained value/method argument,
     // where it would alter dictionary resolution (see `refined_occurrence_ty`'s
     // other callers).
+    // A field type that only CONTAINS `Text` (`Maybe Text`, `[Text]`) counts
+    // too: `Lang "en" (Just "US") …` with collate's imported `Lang` left the
+    // nested literal a char list, and `renderLang` read it as a Text header.
     for (pty, a) in param_tys.iter().zip(args.iter()) {
-        if ty_head_is_text(pty) {
+        if ty_mentions_text(pty) {
             propagate_expected_ty(ctx, a, pty, 0);
         }
     }
+}
+
+/// Whether `Text` appears anywhere in a type: its head, or an argument of
+/// an application, list, tuple or function.
+fn ty_mentions_text(ty: &Ty) -> bool {
+    match ty {
+        Ty::App(f, a) | Ty::Fun(f, a) => ty_mentions_text(f) || ty_mentions_text(a),
+        Ty::List(e) => ty_mentions_text(e),
+        Ty::Tuple(es) => es.iter().any(ty_mentions_text),
+        _ => ty_head_is_text(ty),
+    }
+}
+
+/// Whether `class` has an instance whose head constructor is concrete and
+/// agrees with `ty`'s (`[a]` for `[Char]`, `Color` for `Color`). A class with
+/// no registered instances answers `true`, leaving dispatch as it was.
+fn class_has_concrete_instance_at(ctx: &LowerContext, class: Symbol, ty: &Ty) -> bool {
+    fn head(t: &Ty) -> Option<String> {
+        match t {
+            Ty::Con(c) => Some(c.name.as_str().rsplit('.').next().unwrap_or("").to_string()),
+            Ty::App(f, _) => head(f),
+            Ty::List(_) => Some("[]".to_string()),
+            Ty::Tuple(es) => Some(format!("({})", es.len())),
+            Ty::Fun(..) => Some("->".to_string()),
+            _ => None,
+        }
+    }
+    let Some(instances) = ctx.class_registry().instances.get(&class) else {
+        return true;
+    };
+    if instances.is_empty() {
+        return true;
+    }
+    let Some(want) = head(&crate::dictionary::string_as_char_list(ty)) else {
+        return true;
+    };
+    instances.iter().any(|inst| {
+        inst.instance_types
+            .first()
+            .map(crate::dictionary::string_as_char_list)
+            .and_then(|t| head(&t))
+            .is_some_and(|h| h == want)
+    })
+}
+
+/// Whether `class.method`'s declared type takes a first parameter whose head
+/// is NOT a type variable — so the argument's type cannot name the instance.
+/// `false` when the method's type is not recorded.
+fn first_param_is_concrete(ctx: &LowerContext, class: Symbol, method: Symbol) -> bool {
+    let Some(scheme) = ctx
+        .class_registry()
+        .lookup_class(class)
+        .and_then(|c| c.method_types.get(&method))
+    else {
+        return false;
+    };
+    let mut ty = &scheme.ty;
+    while let Ty::Forall(_, body) = ty {
+        ty = body;
+    }
+    let Ty::Fun(first, _) = ty else {
+        return false;
+    };
+    let mut head = first.as_ref();
+    while let Ty::App(f, _) = head {
+        head = f;
+    }
+    // An imported class's method types are arrow skeletons of `Ty::Error`:
+    // unknown, not concrete.
+    !matches!(head, Ty::Var(_) | Ty::Error)
 }
 
 /// Lower a function application, handling dictionary-passing for class methods
@@ -4766,8 +4913,17 @@ fn lower_app(
                     if param_count > 1 && is_user {
                         // Multi-param class with just one argument (user classes only).
                         // Try to infer the arg type and complete remaining
-                        // types from matching instances (fundep-style).
-                        if let Some(arg_ty) = try_infer_arg_type(ctx, x) {
+                        // types from matching instances (fundep-style) — only
+                        // in the direction the class's dependencies allow.
+                        // `throwError :: e -> m a` with `MonadError e m | m ->
+                        // e`: the argument fixes `e`, which does not determine
+                        // `m`, and completing from it picked `PandocIO`'s
+                        // instance inside a function polymorphic in `m`.
+                        let arg_ty = try_infer_arg_type(ctx, x);
+                        let completes = arg_ty.as_ref().is_none_or(|t| {
+                            ctx.completion_allowed(class_name, &[0], std::slice::from_ref(t))
+                        });
+                        if let Some(arg_ty) = arg_ty.filter(|_| completes) {
                             let mut types_for_resolution = vec![arg_ty];
                             // Search instances to complete the type list
                             if let Some(instances) = ctx.class_registry().instances.get(&class_name)
@@ -4802,6 +4958,25 @@ fn lower_app(
                                 }
                             }
                         }
+                        // No instance is pinned (`throwError e` inside
+                        // `PandocMonad m =>`, where `m` is the binding's own):
+                        // the dictionary comes from one in scope, through its
+                        // superclasses (`PandocMonad m` ⊃ `MonadError
+                        // PandocError m`). Left to the generic path, the method
+                        // was applied to that dictionary as a plain function —
+                        // a runtime stub.
+                        if !completes {
+                            if let Some(method_expr) =
+                                ctx.select_method_via_superclass(class_name, method_name, span)
+                            {
+                                let x_core = lower_expr(ctx, x)?;
+                                return Ok(core::Expr::App(
+                                    Box::new(method_expr),
+                                    Box::new(x_core),
+                                    span,
+                                ));
+                            }
+                        }
                         // Fall through to Case 3 if we couldn't resolve
                     } else {
                         // Single-param class: resolve at concrete type from argument.
@@ -4816,8 +4991,14 @@ fn lower_app(
                         // dangling closure capture). Leave `inferred` as `None` for them
                         // so control falls through to the result-type dispatch in Case
                         // 1.5 below, which is where `return` already resolves correctly.
+                        // Likewise any method whose declared first parameter is
+                        // a concrete type: `getDataFileName :: FilePath -> m
+                        // FilePath` was resolved at the argument's `[Char]` —
+                        // `PandocMonad []` — and the call jumped through a
+                        // dictionary of another monad.
                         let is_result_determined =
-                            matches!(method_name.as_str(), "pure" | "return");
+                            matches!(method_name.as_str(), "pure" | "return")
+                                || first_param_is_concrete(ctx, class_name, method_name);
                         let inferred = if is_result_determined {
                             None
                         } else {
@@ -4848,6 +5029,17 @@ fn lower_app(
                                 }
                             })
                         };
+                        // The argument names the instance only if the class HAS
+                        // one at that type. `getDataFileName "x"` (an imported
+                        // `PandocMonad` method, whose declared type the
+                        // interface does not carry) inferred `[Char]`, and a
+                        // variable-headed instance `PandocMonad (t m)` matched
+                        // it as `t = []`.
+                        let inferred = inferred.filter(|t| {
+                            is_monad_family
+                                || !is_user
+                                || class_has_concrete_instance_at(ctx, class_name, t)
+                        });
                         if let Some(concrete_ty) = inferred {
                             // `mconcat :: [a] -> a` — the class parameter is the
                             // list's ELEMENT type, and the argument is the list.
@@ -5133,13 +5325,17 @@ fn lower_app(
                                 method_name,
                                 span,
                             ),
-                            Ok(None) | Err(()) if want.iter().any(has_concrete_head) => ctx
-                                .resolve_method_at_concrete_types(
+                            Ok(None) | Err(())
+                                if want.iter().any(has_concrete_head)
+                                    && ctx.params_pinned_by_fundeps(class_name, &want) =>
+                            {
+                                ctx.resolve_method_at_concrete_types(
                                     method_name,
                                     class_name,
                                     &want,
                                     span,
-                                ),
+                                )
+                            }
                             _ => None,
                         };
                         if let Some(method_expr) = method_expr {
@@ -5276,8 +5472,15 @@ fn lower_app(
                         // calling `extract w` gives us only type `a` from the value arg.
                         // We search instances to find the matching `b`.
                         let mut types_for_resolution = concrete_types.clone();
+                        // Complete only what the class's dependencies
+                        // determine from the known leading parameters (see
+                        // `LowerContext::params_pinned_by_fundeps`).
+                        let known: Vec<usize> = (0..types_for_resolution.len()).collect();
+                        let completes =
+                            ctx.completion_allowed(class_name, &known, &types_for_resolution);
                         if types_for_resolution.len() < param_count
                             && !types_for_resolution.is_empty()
+                            && completes
                         {
                             if let Some(instances) = ctx.class_registry().instances.get(&class_name)
                             {

@@ -223,6 +223,93 @@ pub(crate) fn collect_expr_references(expr: &Expr, refs: &mut Vec<DefId>) {
     }
 }
 
+/// The references in `expr` that are NOT the head of an application —
+/// a definition passed or stored as a value rather than called. `f $ x`
+/// counts as calling `f` (`dollar` is the builtin `$`).
+pub(crate) fn collect_escaping_references(
+    expr: &Expr,
+    dollar: Option<DefId>,
+    refs: &mut Vec<DefId>,
+) {
+    match expr {
+        Expr::App(..) => {
+            let mut head = expr;
+            let mut args: Vec<&Expr> = Vec::new();
+            while let Expr::App(f, a, _) = head {
+                args.push(a);
+                head = f;
+            }
+            args.reverse();
+            while let Expr::Ann(inner, _, _) | Expr::TypeApp(inner, _, _) = head {
+                head = inner;
+            }
+            let is_dollar = matches!(head, Expr::Var(d) if Some(d.def_id) == dollar);
+            match head {
+                Expr::Var(_) | Expr::Con(_) if !is_dollar => {}
+                Expr::Var(_) => {
+                    // `f $ x`: `f` is applied, whatever it is.
+                    if let Some((first, rest)) = args.split_first() {
+                        if !matches!(first, Expr::Var(_) | Expr::Con(_)) {
+                            collect_escaping_references(first, dollar, refs);
+                        }
+                        for a in rest {
+                            collect_escaping_references(a, dollar, refs);
+                        }
+                    }
+                    return;
+                }
+                other => collect_escaping_references(other, dollar, refs),
+            }
+            for a in args {
+                collect_escaping_references(a, dollar, refs);
+            }
+        }
+        Expr::Var(def_ref) | Expr::Con(def_ref) => refs.push(def_ref.def_id),
+        Expr::Lam(_, body, _) => collect_escaping_references(body, dollar, refs),
+        Expr::Let(bindings, body, _) => {
+            for binding in bindings {
+                collect_escaping_references(&binding.rhs, dollar, refs);
+            }
+            collect_escaping_references(body, dollar, refs);
+        }
+        Expr::Case(scrut, alts, _) => {
+            collect_escaping_references(scrut, dollar, refs);
+            for alt in alts {
+                collect_escaping_references(&alt.rhs, dollar, refs);
+                for guard in &alt.guards {
+                    collect_escaping_references(&guard.cond, dollar, refs);
+                }
+            }
+        }
+        Expr::If(c, t, e, _) => {
+            collect_escaping_references(c, dollar, refs);
+            collect_escaping_references(t, dollar, refs);
+            collect_escaping_references(e, dollar, refs);
+        }
+        Expr::Tuple(elems, _) | Expr::List(elems, _) => {
+            for elem in elems {
+                collect_escaping_references(elem, dollar, refs);
+            }
+        }
+        Expr::Record(_, fields, _) => {
+            for field in fields {
+                collect_escaping_references(&field.value, dollar, refs);
+            }
+        }
+        Expr::FieldAccess(record, _, _) => collect_escaping_references(record, dollar, refs),
+        Expr::RecordUpdate(record, fields, _) => {
+            collect_escaping_references(record, dollar, refs);
+            for field in fields {
+                collect_escaping_references(&field.value, dollar, refs);
+            }
+        }
+        Expr::Ann(inner, _, _) | Expr::TypeApp(inner, _, _) => {
+            collect_escaping_references(inner, dollar, refs);
+        }
+        Expr::Lit(_, _) | Expr::Error(_) => {}
+    }
+}
+
 /// Dependency-ordered groups of LOCAL (`let` / `where`) bindings, by index.
 ///
 /// `binds[i]` is what binding `i` binds, `refs[i]` what its right-hand side

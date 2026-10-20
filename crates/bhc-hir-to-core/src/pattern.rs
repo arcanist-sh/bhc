@@ -919,8 +919,39 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                 };
 
                 // Create fresh variables for constructor fields
+                // Type them from the scrutinee where its shape says how: a
+                // `"lit" : _` row over a `[Text]` needs its head typed `Text`,
+                // or the literal is compared as a `[Char]` and never matches.
+                // Failing that, a constructor's ground declared field types
+                // (`Div Attr [Block]`) serve as well.
+                let field_tys = field_tys_from_scrutinee(
+                    &ctx.expand_type_aliases(&scrutinee.ty),
+                    *con_name,
+                    *arity as usize,
+                )
+                    .or_else(|| {
+                        let declared = ctx.constructor_field_types(*con_name)?;
+                        (declared.len() == *arity as usize).then(|| {
+                            declared
+                                .iter()
+                                .map(|t| {
+                                    let t = ctx.expand_type_aliases(t);
+                                    if crate::expr::is_fully_concrete_ty(&t) {
+                                        t
+                                    } else {
+                                        Ty::Error
+                                    }
+                                })
+                                .collect()
+                        })
+                    });
                 let field_vars: Vec<Var> = (0..*arity)
-                    .map(|i| ctx.fresh_var(&format!("_pat{col}_{i}"), Ty::Error, row_span))
+                    .map(|i| {
+                        let ty = field_tys
+                            .as_ref()
+                            .map_or(Ty::Error, |tys| tys[i as usize].clone());
+                        ctx.fresh_var(&format!("_pat{col}_{i}"), ty, row_span)
+                    })
                     .collect();
 
                 // Register variable bindings for wild/var rows participating
@@ -1163,6 +1194,26 @@ fn record_con_binder_tys(ctx: &mut LowerContext, pat: &hir::Pat) {
                 ctx.record_pattern_binder_ty(*def_id, fty);
             }
         }
+    }
+}
+
+/// Field types of constructor `con` read off a scrutinee type whose shape
+/// fixes them: `(:)` over `[t]` and an n-tuple over `(t1, .., tn)`. Returns
+/// `None` when the scrutinee type is unknown or not of that shape.
+fn field_tys_from_scrutinee(scrut_ty: &Ty, con: Symbol, arity: usize) -> Option<Vec<Ty>> {
+    match scrut_ty {
+        Ty::List(elem) if con.as_str() == ":" && arity == 2 => {
+            Some(vec![(**elem).clone(), scrut_ty.clone()])
+        }
+        Ty::App(head, elem)
+            if con.as_str() == ":"
+                && arity == 2
+                && matches!(head.as_ref(), Ty::Con(tc) if tc.name.as_str() == "[]") =>
+        {
+            Some(vec![(**elem).clone(), Ty::List(elem.clone())])
+        }
+        Ty::Tuple(tys) if tys.len() == arity && arity >= 2 => Some(tys.clone()),
+        _ => None,
     }
 }
 

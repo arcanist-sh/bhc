@@ -549,6 +549,11 @@ fn test_tier3_text_group_by_native() {
     run_native_test("tier3_io/text_group_by", Profile::Default);
 }
 
+#[test]
+fn test_tier3_text_literal_nested_pattern_native() {
+    run_native_test("tier3_io/text_literal_nested_pattern", Profile::Default);
+}
+
 /// Closure IO model only: eager mode still generalizes local functions over
 /// value-class variables.
 #[test]

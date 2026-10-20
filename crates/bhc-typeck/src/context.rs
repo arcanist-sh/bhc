@@ -7901,6 +7901,18 @@ impl TyCtxt {
             self.env.insert_global(def_info.id, scheme);
         }
 
+        // Builtin values already given a scheme, by name. An unqualified import
+        // of a builtin (`import Control.Monad (unless)`) gets a FRESH DefId of
+        // the same name and kind (codegen recognizes builtins by name), which
+        // no table here knows; given a fresh-variable scheme, `unless c (put
+        // xs)` never tied `put`'s monad to the result and its MonadState
+        // dictionary was left unresolved.
+        let builtin_by_name: rustc_hash::FxHashMap<Symbol, Scheme> = defs
+            .values()
+            .filter(|d| matches!(d.kind, DefKind::Value))
+            .filter_map(|d| Some((d.name, self.env.lookup_global(d.id)?.clone())))
+            .collect();
+
         // Second pass: register any remaining definitions (imported items not in builtins)
         // with their interface type schemes (if available) or fresh type variables.
         // We do this in a separate pass to avoid borrow conflicts with the closures above.
@@ -7941,6 +7953,15 @@ impl TyCtxt {
             })
             .and_then(|id| self.env.lookup_global(id).cloned());
             if let Some(scheme) = monad_error_method {
+                self.env.insert_global(def_info.id, scheme);
+                continue;
+            }
+            let builtin_same_name = (matches!(def_info.kind, DefKind::Value)
+                && def_info.type_scheme.is_none()
+                && !local_value_ids.contains(&def_info.id))
+            .then(|| builtin_by_name.get(&def_info.name).cloned())
+            .flatten();
+            if let Some(scheme) = builtin_same_name {
                 self.env.insert_global(def_info.id, scheme);
                 continue;
             }

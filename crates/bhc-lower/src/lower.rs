@@ -7358,7 +7358,13 @@ fn lower_clause_in(
                             for i in 0..arity {
                                 let name = Symbol::intern(&format!("_arg{i}"));
                                 let param_def_id = ctx.fresh_def_id();
-                                ctx.define(param_def_id, name, DefKind::Value, fb.span);
+                                // A lambda parameter is a pattern variable: as a
+                                // `Value` the type checker pre-registered it with a
+                                // polymorphic placeholder scheme, so each use got a
+                                // fresh type and the clauses' constructor patterns
+                                // never fixed the parameter's type (pandoc's local
+                                // `getLevel (Header …) = …` stayed `t -> Min Int`).
+                                ctx.define(param_def_id, name, DefKind::PatVar, fb.span);
                                 ctx.bind_value(name, param_def_id);
                                 param_names.push((name, param_def_id));
                                 param_pats.push(hir::Pat::Var(name, param_def_id, fb.span));
@@ -8098,7 +8104,13 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                             for i in 0..arity {
                                 let name = Symbol::intern(&format!("_arg{i}"));
                                 let param_def_id = ctx.fresh_def_id();
-                                ctx.define(param_def_id, name, DefKind::Value, fb.span);
+                                // A lambda parameter is a pattern variable: as a
+                                // `Value` the type checker pre-registered it with a
+                                // polymorphic placeholder scheme, so each use got a
+                                // fresh type and the clauses' constructor patterns
+                                // never fixed the parameter's type (pandoc's local
+                                // `getLevel (Header …) = …` stayed `t -> Min Int`).
+                                ctx.define(param_def_id, name, DefKind::PatVar, fb.span);
                                 ctx.bind_value(name, param_def_id);
                                 param_names.push((name, param_def_id));
                                 param_pats.push(hir::Pat::Var(name, param_def_id, fb.span));

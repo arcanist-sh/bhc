@@ -4526,7 +4526,14 @@ fn try_lower_monadic_traversal(
         };
         if let Some(pure_e) = pure_e {
             let cond = lower_expr(ctx, args[0])?;
-            let action = lower_expr(ctx, args[1])?;
+            // The action is an argument at `m ()`: lowered as one, so a
+            // method inside (`unless c (S.put xs)` at `State`) gets the
+            // expected type its dictionary is resolved from.
+            let action_ty = monad_ty
+                .as_ref()
+                .filter(|m| !matches!(m, Ty::Var(_)))
+                .map(|m| Ty::App(Box::new(m.clone()), Box::new(Ty::unit())));
+            let action = lower_value_arg(ctx, args[1], action_ty.as_ref())?;
             let skip = core::Expr::App(Box::new(pure_e), Box::new(nullary_var("()", span)), span);
             let (then_e, else_e) = if name.as_str() == "when" {
                 (action, skip)

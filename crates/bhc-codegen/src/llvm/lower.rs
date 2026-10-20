@@ -45018,7 +45018,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let val = self
             .lower_expr(expr)?
             .ok_or_else(|| CodegenError::Internal(format!("{}: no value", label)))?;
+        // A Char can lower to an `i32`; these RTS entries take an `i64`.
         let int_val = self.coerce_to_int(val)?;
+        let int_val = self.widen_to_i64(int_val)?;
         let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
             CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
         })?;
@@ -51506,7 +51508,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 let rts_fn = self.functions.get(&VarId::new(1000201)).ok_or_else(|| {
                     CodegenError::Internal("bhc_text_singleton not declared".to_string())
                 })?;
+                // A Char can arrive as an `i32`; the RTS entry takes an `i64`.
                 let c = self.coerce_to_int(args[0])?;
+                let c = self.widen_to_i64(c)?;
                 let result = self
                     .builder()
                     .build_call(*rts_fn, &[c.into()], "text_singleton")

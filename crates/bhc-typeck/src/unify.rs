@@ -1083,6 +1083,11 @@ fn occurs_check_ty_list(var: &TyVar, l: &TyList) -> bool {
 
 /// Bind a type variable to a type after occurs check.
 fn bind_var(ctx: &mut TyCtxt, var: &TyVar, ty: &Ty, span: Span) {
+    // Resolve the target through the substitution first: a single-pass apply
+    // leaves `w := v` chains, and binding `v := w` on top of them made cycles
+    // in which a variable never resolved (a `get` in a `State` do-block lost
+    // its monad).
+    let ty = &ctx.subst.apply_resolved(ty);
     // Skip if binding to self
     if let Ty::Var(v) = ty {
         if v.id == var.id {
@@ -1090,51 +1095,33 @@ fn bind_var(ctx: &mut TyCtxt, var: &TyVar, ty: &Ty, span: Span) {
         }
     }
 
-    // Already bound (an earlier component of the same unification bound it,
-    // and the compound cases do not re-apply the substitution between
-    // components): unify the binding instead of overwriting it. Overwriting
-    // lost `y := Integer` from `case trip n of (y, _, _) -> y >= 1601`, and the
-    // literal's defaulting then made `y` an `Int`.
+    // Already bound: an earlier component of the same unification bound it,
+    // and the compound cases do not re-apply the substitution to a fixpoint.
+    // Unify the binding with the new type instead of overwriting it when one
+    // of them is still a variable — overwriting lost `y := Integer` from
+    // `case trip n of (y, _, _) -> y >= 1601`, and the literal's defaulting
+    // then made `y` an `Int`. Two different concrete types keep the old
+    // overwrite: bhc's lenient typing of rank-2 record fields (pandoc's
+    // `engineLoadCustom`) binds a monad variable to `IO` and later to
+    // `PandocIO`, and reconciling those rejected a module that checks.
     if let Some(existing) = ctx.subst.get(var).cloned() {
         thread_local! {
             static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
         }
-        let existing = ctx.apply_subst(&existing);
-        let resolved_ty = ctx.apply_subst(ty);
-        let self_cycle = |t: &Ty| matches!(t, Ty::Var(v) if v.id == var.id) || occurs_check(var, t);
-        // Nothing to reconcile, or the substitution loops back through `var`
-        // (a single-pass apply leaves such chains): fall through to the plain
-        // rebinding, as before.
-        if existing == resolved_ty {
+        let existing = ctx.subst.apply_resolved(&existing);
+        if existing == *ty {
             return;
         }
-        // Only plain types are reconciled: an application may be an unreduced
-        // type family or synonym (`Elem [Int]`) that the overwrite used to
-        // paper over and structural unification would now reject.
-        fn has_app(t: &Ty) -> bool {
-            match t {
-                Ty::App(..) | Ty::Forall(..) => true,
-                Ty::Fun(a, b) => has_app(a) || has_app(b),
-                Ty::List(e) => has_app(e),
-                Ty::Tuple(ts) => ts.iter().any(has_app),
-                _ => false,
-            }
-        }
-        // Only a variable meeting the earlier binding is reconciled; two
-        // concrete types keep the old overwrite. bhc's lenient typing of
-        // rank-2 record fields (pandoc's `engineLoadCustom`) binds a monad
-        // variable to `IO` and later to `PandocIO`, and reconciling those
-        // turned a module that checks into a type error.
-        let one_side_var = matches!(existing, Ty::Var(_)) || matches!(resolved_ty, Ty::Var(_));
+        let is_self = |t: &Ty| matches!(t, Ty::Var(v) if v.id == var.id);
+        let one_side_var = matches!(existing, Ty::Var(_)) || matches!(ty, Ty::Var(_));
         if one_side_var
-            && !self_cycle(&existing)
-            && !self_cycle(&resolved_ty)
-            && !has_app(&existing)
-            && !has_app(&resolved_ty)
+            && !is_self(&existing)
+            && !occurs_check(var, &existing)
+            && !occurs_check(var, ty)
             && DEPTH.with(|d| d.get()) < 32
         {
             DEPTH.with(|d| d.set(d.get() + 1));
-            unify_inner(ctx, &existing, &resolved_ty, span);
+            unify_inner(ctx, &existing, ty, span);
             DEPTH.with(|d| d.set(d.get() - 1));
             return;
         }

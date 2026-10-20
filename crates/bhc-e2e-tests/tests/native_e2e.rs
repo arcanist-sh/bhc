@@ -485,6 +485,11 @@ fn test_tier3_integer_conversions_native() {
 }
 
 #[test]
+fn test_tier3_local_multiclause_param_native() {
+    run_native_test("tier3_io/local_multiclause_param", Profile::Default);
+}
+
+#[test]
 fn test_tier3_text_prefix_ops_native() {
     run_native_test("tier3_io/text_prefix_ops", Profile::Default);
 }

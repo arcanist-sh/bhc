@@ -564,6 +564,16 @@ fn test_tier3_local_named_like_method_native() {
     run_native_test("tier3_io/local_named_like_method", Profile::Default);
 }
 
+#[test]
+fn test_tier3_digit_hex_native() {
+    run_native_test("tier3_io/digit_hex", Profile::Default);
+}
+
+#[test]
+fn test_tier3_bare_sequence_value_native() {
+    run_native_test("tier3_io/bare_sequence_value", Profile::Default);
+}
+
 /// Closure IO model only: eager mode still generalizes local functions over
 /// value-class variables.
 #[test]

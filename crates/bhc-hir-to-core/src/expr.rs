@@ -942,6 +942,10 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         }
     }
 
+    if let Some(e) = try_lower_bare_sequence(ctx, def_ref)? {
+        return Ok(e);
+    }
+
     if std::env::var_os("BHC_DBG_MONOP").is_some() {
         if let Some(n) = var_name {
             if matches!(n.as_str(), ">>=" | ">>" | "=<<" | "return" | "pure") {
@@ -4530,6 +4534,36 @@ fn try_lower_monadic_traversal(
         },
         _ => return Ok(None),
     };
+    lower_monadic_traversal_spine(ctx, head_ref, args, span)
+}
+
+/// A bare `sequence`/`sequence_` used as a VALUE (`fmap sequence $ many1
+/// item` in pandoc's `bulletList`), lowered as `\xs -> sequence xs` at the
+/// monad its type names. Left as the builtin, it ran as the list version and
+/// returned a list where pandoc's `Future` reader belonged.
+fn try_lower_bare_sequence(
+    ctx: &mut LowerContext,
+    def_ref: &DefRef,
+) -> LowerResult<Option<core::Expr>> {
+    let is_sequence = ctx.lookup_var(def_ref.def_id).is_some_and(|v| {
+        matches!(
+            v.name.as_str(),
+            "sequence" | "sequenceA" | "sequence_" | "sequenceA_"
+        )
+    });
+    if !is_sequence {
+        return Ok(None);
+    }
+    lower_monadic_traversal_spine(ctx, def_ref, Vec::new(), def_ref.span)
+}
+
+/// [`try_lower_monadic_traversal`] once the head and its arguments are known.
+fn lower_monadic_traversal_spine(
+    ctx: &mut LowerContext,
+    head_ref: &DefRef,
+    args: Vec<&hir::Expr>,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
     let Some(name) = ctx.lookup_var(head_ref.def_id).map(|v| v.name) else {
         return Ok(None);
     };
@@ -4612,6 +4646,9 @@ fn try_lower_monadic_traversal(
         ("forM" | "for", 2) => (true, false, true, false),
         ("sequence_" | "sequenceA_", 1) => (false, true, false, false),
         ("sequence" | "sequenceA", 1) => (true, true, false, false),
+        // Bare, as a value: the list arrives as a lambda parameter.
+        ("sequence_" | "sequenceA_", 0) => (false, true, false, true),
+        ("sequence" | "sequenceA", 0) => (true, true, false, true),
         // These are `sequence`/`sequence_` of a derived list of actions (see
         // `derived_actions` below): `zipWith f xs ys`, `replicate n act`.
         ("zipWithM", 3) | ("replicateM", 2) => (true, true, false, false),
@@ -4732,7 +4769,9 @@ fn try_lower_monadic_traversal(
             }
         }
     }
-    let (fn_expr, list_expr) = if missing_list {
+    let (fn_expr, list_expr) = if missing_list && elems {
+        (None, None)
+    } else if missing_list {
         (Some(args[0]), None)
     } else if elems {
         (None, Some(args[0]))

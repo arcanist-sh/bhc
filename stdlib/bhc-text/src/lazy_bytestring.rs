@@ -441,7 +441,7 @@ pub extern "C" fn bhc_lazy_bs_filter(
         let all_bytes = flatten_to_bytes(lazy);
         let filtered: Vec<u8> = all_bytes
             .iter()
-            .filter(|&&b| fn_ptr(env_ptr, b as i64) != 0)
+            .filter(|&&b| crate::text::pred_holds(fn_ptr(env_ptr, b as i64)))
             .copied()
             .collect();
         if filtered.is_empty() {
@@ -706,7 +706,7 @@ pub extern "C" fn bhc_lazy_bs_char8_drop_while(
         let bytes = flatten_to_bytes(lazy);
         let mut skip = 0;
         for &b in &bytes {
-            if fn_ptr(env_ptr, b as i64) != 0 {
+            if crate::text::pred_holds(fn_ptr(env_ptr, b as i64)) {
                 skip += 1;
             } else {
                 break;

@@ -1256,7 +1256,7 @@ pub extern "C" fn bhc_text_intersperse(c: i64, text: *const u8) -> *mut u8 {
 /// its tag; reading every non-zero word as True made `T.any isSpecial "hi"`
 /// hold for pandoc's `strToHtml`, whose `isSpecial` falls back to a boxed
 /// `False`.
-fn pred_holds(v: i64) -> bool {
+pub(crate) fn pred_holds(v: i64) -> bool {
     if (0..=1).contains(&v) {
         return v != 0;
     }
@@ -1414,7 +1414,7 @@ pub extern "C" fn bhc_text_drop_while_end(
         let s = text_as_str(text);
         let mut idx = 0;
         for (i, c) in s.char_indices().rev() {
-            if fn_ptr(env_ptr, c as i64) == 0 {
+            if !pred_holds(fn_ptr(env_ptr, c as i64)) {
                 idx = i + c.len_utf8();
                 break;
             }
@@ -1437,7 +1437,7 @@ pub extern "C" fn bhc_text_take_while_end(
         let s = text_as_str(text);
         let mut idx = 0;
         for (i, c) in s.char_indices().rev() {
-            if fn_ptr(env_ptr, c as i64) == 0 {
+            if !pred_holds(fn_ptr(env_ptr, c as i64)) {
                 idx = i + c.len_utf8();
                 break;
             }

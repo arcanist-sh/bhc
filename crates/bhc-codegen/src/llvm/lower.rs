@@ -54725,8 +54725,16 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         list1_phi.add_incoming(&[(&lhs_ptr, entry_block)]);
         list2_phi.add_incoming(&[(&rhs_ptr, entry_block)]);
 
-        let list1_ptr = list1_phi.as_basic_value().into_pointer_value();
-        let list2_ptr = list2_phi.as_basic_value().into_pointer_value();
+        // A list (or its tail) may be an unevaluated thunk — `filter p xs`
+        // passed along lazily; reading its tag as a cell's made an empty list
+        // compare unequal to `[]` (pandoc's HTML writer then wrapped every
+        // header in a <section>).
+        let list1_ptr = self
+            .build_force(list1_phi.as_basic_value())?
+            .into_pointer_value();
+        let list2_ptr = self
+            .build_force(list2_phi.as_basic_value())?
+            .into_pointer_value();
 
         // Get tags
         let tag1 = self

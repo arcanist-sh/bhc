@@ -5123,7 +5123,67 @@ fn try_lower_text_group_by(
     Ok(None)
 }
 
-/// The builtin `MonadPlus`/`Alternative` structure of `Maybe` and lists.
+/// `xs \\ ys` (Data.List; codegen has no implementation and stubbed — pandoc's
+/// HTML writer takes header classes out of a section's with it) as
+/// `filter (\x -> not (any (\y -> x == y) ys)) xs`. The `==` carries the
+/// element type from the occurrence, so `Text` and tuples compare by contents.
+/// Unlike the real `(\\)`, which removes one occurrence of `x` per `y`, every
+/// occurrence is removed: the two differ only when `xs` repeats an element of
+/// `ys`.
+fn try_lower_list_difference(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let Expr::App(head, xs, _) = f else {
+        return Ok(None);
+    };
+    let Expr::Var(dr) = head.as_ref() else {
+        return Ok(None);
+    };
+    let Some(name) = ctx.lookup_var(dr.def_id).map(|v| v.name) else {
+        return Ok(None);
+    };
+    if !matches!(name.as_str(), "\\\\" | "Data.List.\\\\") {
+        return Ok(None);
+    }
+    let elem_ty = match ctx.resolved_expr_ty_opt(dr.span) {
+        Some(Ty::Fun(a, _)) => match *a {
+            Ty::List(e) => *e,
+            _ => Ty::Error,
+        },
+        _ => Ty::Error,
+    };
+    let xs = lower_expr(ctx, xs)?;
+    let ys = lower_expr(ctx, x)?;
+    let app =
+        |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+    let a = ctx.fresh_var("diff_x", elem_ty.clone(), span);
+    let b = ctx.fresh_var("diff_y", elem_ty.clone(), span);
+    let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+    let eq = core::Expr::Var(
+        Var {
+            name: Symbol::intern("=="),
+            id: VarId::new(0),
+            ty: Ty::fun(elem_ty.clone(), Ty::fun(elem_ty, bool_ty)),
+        },
+        span,
+    );
+    let same = core::Expr::Lam(
+        b.clone(),
+        Box::new(app(
+            app(eq, core::Expr::Var(a.clone(), span)),
+            core::Expr::Var(b, span),
+        )),
+        span,
+    );
+    let found = app(app(nullary_var("any", span), same), ys);
+    let keep = core::Expr::Lam(a, Box::new(app(nullary_var("not", span), found)), span);
+    Ok(Some(app(app(nullary_var("filter", span), keep), xs)))
+}
+
+/// The builtin `MonadPlus`/`Alternative` structure of `Maybe` and lists./// The builtin `MonadPlus`/`Alternative` structure of `Maybe` and lists.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PlusMonad {
     Maybe,
@@ -5330,6 +5390,9 @@ fn lower_app(
     // `Data.Text.concatMap f t` = `Data.Text.concat (map f (Data.Text.unpack
     // t))`; bhc has no builtin for it, and pandoc's XML escaping calls it
     // (point-free, `T.concatMap escape`, as well as saturated).
+    if let Some(result) = try_lower_list_difference(ctx, f, x, span)? {
+        return Ok(result);
+    }
     if let Some(result) = try_lower_text_group_by(ctx, f, x, span)? {
         return Ok(result);
     }

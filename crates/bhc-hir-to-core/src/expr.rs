@@ -4998,8 +4998,9 @@ fn try_lower_text_concat_map(
 }
 
 /// `Data.Text.groupBy p t` (no codegen implementation; it stubbed at
-/// runtime in pandoc's HTML writer) as `map pack (groupBy p (unpack t))`, and
-/// `Data.Text.group t` likewise through the list `group`.
+/// runtime in pandoc's HTML writer) as `map pack (groupBy p (unpack t))`,
+/// `Data.Text.group t` likewise through the list `group`, and
+/// `Data.Text.dropAround` through `dropWhile`/`dropWhileEnd`.
 fn try_lower_text_group_by(
     ctx: &mut LowerContext,
     f: &hir::Expr,
@@ -5024,6 +5025,32 @@ fn try_lower_text_group_by(
         )
     };
     let unpack = |t: core::Expr| app(nullary_var("Data.Text.unpack", span), t);
+    // `dropAround p t` = `dropWhile p (dropWhileEnd p t)` (no codegen
+    // implementation; pandoc's inline-code reader stubbed on it).
+    if let Expr::App(head, p, _) = f {
+        if named(ctx, head, "Data.Text.dropAround") {
+            let p = lower_expr(ctx, p)?;
+            let t = lower_expr(ctx, x)?;
+            let inner = app(
+                app(nullary_var("Data.Text.dropWhileEnd", span), p.clone()),
+                t,
+            );
+            return Ok(Some(app(
+                app(nullary_var("Data.Text.dropWhile", span), p),
+                inner,
+            )));
+        }
+    }
+    if named(ctx, f, "Data.Text.dropAround") {
+        let p = lower_expr(ctx, x)?;
+        let t = ctx.fresh_var("t", Ty::Error, span);
+        let inner = app(
+            app(nullary_var("Data.Text.dropWhileEnd", span), p.clone()),
+            core::Expr::Var(t.clone(), span),
+        );
+        let body = app(app(nullary_var("Data.Text.dropWhile", span), p), inner);
+        return Ok(Some(core::Expr::Lam(t, Box::new(body), span)));
+    }
     // `group t`.
     if named(ctx, f, "Data.Text.group") {
         let t = lower_expr(ctx, x)?;

@@ -1299,17 +1299,21 @@ pub extern "C" fn bhc_text_all(
     }
 }
 
+/// Byte index of the first character for which `p` equals `stop_when`
+/// (the text's length if there is none). `span`/`takeWhile`/`dropWhile`
+/// split at the first character NOT satisfying `p` (`stop_when = false`);
+/// they passed `true`, so `T.span (== 'a') "aab"` came out `("", "aab")`.
 unsafe fn split_at_pred(
     fn_ptr: extern "C" fn(*mut u8, i64) -> i64,
     env_ptr: *mut u8,
     text: *const u8,
-    negate: bool,
+    stop_when: bool,
 ) -> usize {
     let s = text_as_str(text);
     let mut idx = s.len();
     for (i, c) in s.char_indices() {
         let hit = pred_holds(fn_ptr(env_ptr, c as i64));
-        if hit == negate {
+        if hit == stop_when {
             idx = i;
             break;
         }
@@ -1355,7 +1359,7 @@ pub extern "C" fn bhc_text_span(
             return alloc_adt(0, &[bhc_text_empty(), bhc_text_empty()]);
         }
         let s = text_as_str(text);
-        let idx = split_at_pred(fn_ptr, env_ptr, text, true);
+        let idx = split_at_pred(fn_ptr, env_ptr, text, false);
         let a = alloc_text_from_bytes(&s.as_bytes()[..idx]);
         let b = alloc_text_from_bytes(&s.as_bytes()[idx..]);
         alloc_adt(0, &[a, b])
@@ -1374,7 +1378,7 @@ pub extern "C" fn bhc_text_take_while(
             return bhc_text_empty();
         }
         let s = text_as_str(text);
-        let idx = split_at_pred(fn_ptr, env_ptr, text, true);
+        let idx = split_at_pred(fn_ptr, env_ptr, text, false);
         alloc_text_from_bytes(&s.as_bytes()[..idx])
     }
 }
@@ -1391,7 +1395,7 @@ pub extern "C" fn bhc_text_drop_while(
             return bhc_text_empty();
         }
         let s = text_as_str(text);
-        let idx = split_at_pred(fn_ptr, env_ptr, text, true);
+        let idx = split_at_pred(fn_ptr, env_ptr, text, false);
         alloc_text_from_bytes(&s.as_bytes()[idx..])
     }
 }

@@ -485,6 +485,11 @@ fn test_tier3_integer_conversions_native() {
 }
 
 #[test]
+fn test_tier3_text_prefix_ops_native() {
+    run_native_test("tier3_io/text_prefix_ops", Profile::Default);
+}
+
+#[test]
 fn test_tier3_text_group_by_native() {
     run_native_test("tier3_io/text_group_by", Profile::Default);
 }

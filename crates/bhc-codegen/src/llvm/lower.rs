@@ -5628,8 +5628,51 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .build_return(Some(&boxed_result))
             .map_err(|e| CodegenError::Internal(format!("FFI return failed: {e:?}")))?;
 
-        // 3. Register the wrapper in the functions map
-        self.functions.insert(fi.var.id, wrapper_fn);
+        // 3. Register the wrapper in the functions map. Under the closure IO
+        // model an `IO` import must yield an action, not run on application:
+        // `t <- c_time 0` bound the raw result as if it were an action closure.
+        // The wrapper above becomes the action's body.
+        let returns_io = {
+            let mut t = &fi.var.ty;
+            while let Ty::Forall(_, body) = t {
+                t = body;
+            }
+            while let Ty::Fun(_, r) = t {
+                t = r;
+            }
+            matches!(t, Ty::App(f, _) if matches!(f.as_ref(), Ty::Con(c) if c.name.as_str() == "IO"))
+        };
+        if crate::io_closure_mode() && returns_io {
+            let io_name = format!("$ffi_io_wrapper_{}", fi.haskell_name.as_str());
+            let io_fn = self
+                .module
+                .llvm_module()
+                .add_function(&io_name, wrapper_fn_type, None);
+            let entry = self.llvm_ctx.append_basic_block(io_fn, "entry");
+            self.builder().position_at_end(entry);
+            let params: Vec<BasicValueEnum<'ctx>> = (1..=wrapper_param_count as u32)
+                .filter_map(|i| io_fn.get_nth_param(i))
+                .collect();
+            let action = self.build_io_action_from_values(&params, |this, vals| {
+                let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
+                    vec![this.type_mapper().ptr_type().const_null().into()];
+                for v in vals {
+                    call_args.push(this.value_to_ptr(*v)?.into());
+                }
+                this.builder()
+                    .build_call(wrapper_fn, &call_args, "ffi_run")
+                    .map_err(|e| CodegenError::Internal(format!("FFI action call: {e:?}")))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("FFI action: void".to_string()))
+            })?;
+            self.builder()
+                .build_return(Some(&action))
+                .map_err(|e| CodegenError::Internal(format!("FFI io return failed: {e:?}")))?;
+            self.functions.insert(fi.var.id, io_fn);
+        } else {
+            self.functions.insert(fi.var.id, wrapper_fn);
+        }
 
         Ok(())
     }
@@ -6887,6 +6930,9 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Numeric conversions (identity for BHC's single Int type)
             "fromIntegral" | "fromInteger" if self.is_integer_to_machine_int(args[0]) => {
                 self.lower_integer_to_i64(args[0])
+            }
+            "fromIntegral" | "fromInteger" if self.is_integer_to_floating() => {
+                self.lower_integer_to_floating(args[0])
             }
             "fromIntegral" | "toInteger" if self.is_machine_int_to_integer() => {
                 let v = self.lower_expr(args[0])?.ok_or_else(|| {
@@ -16220,6 +16266,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .cloned()
                 .unwrap_or(Ty::Error),
             _ => val_expr.ty(),
+        };
+        // An `Integer` argument per the type checker (recorded on this `print`
+        // by hir-to-core): a field selector's result carries no type here.
+        let expr_ty = match &self.current_builtin_ty {
+            Ty::Fun(a, _) if self.is_integer_type(a) => a.as_ref().clone(),
+            _ => expr_ty,
         };
 
         let val = self
@@ -27654,7 +27706,24 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     fn lower_builtin_show(&mut self, expr: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
-        let ty = expr.ty();
+        // The type checker's resolved argument type, when hir-to-core recorded
+        // a ground one on this `show`, beats the expression's own (often
+        // erased or approximate) type.
+        fn is_ground(t: &Ty) -> bool {
+            match t {
+                Ty::Var(_) | Ty::Error | Ty::Forall(..) => false,
+                Ty::Con(_) => true,
+                Ty::App(f, a) | Ty::Fun(f, a) => is_ground(f) && is_ground(a),
+                Ty::List(a) => is_ground(a),
+                Ty::Tuple(ts) => ts.iter().all(is_ground),
+                _ => false,
+            }
+        }
+        let stamped = match &self.current_builtin_ty {
+            Ty::Fun(a, r) if is_ground(a) && self.is_string_type(r) => Some(a.as_ref().clone()),
+            _ => None,
+        };
+        let ty = stamped.unwrap_or_else(|| expr.ty());
 
         // First try type-based dispatch (works when type info is available)
         if !matches!(ty, Ty::Error) && !matches!(ty, Ty::Var(_)) {
@@ -46429,7 +46498,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         &mut self,
         op: PrimOp,
         args: &[&Expr],
+        op_ty: &Ty,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        // The operator at `Integer -> …` (the type checker's, recorded on the
+        // operator) makes every operand an Integer, even an untyped pattern
+        // binder whose own type is lost (`addD n (D d) = D (d + n)`): a pointer
+        // operand is then a bignum, not a pointer-encoded Int to re-box.
+        let op_at_integer = matches!(op_ty, Ty::Fun(a, _) if self.is_integer_type(a));
         // Map PrimOp to RTS VarId
         let (rts_var_id, rts_name): (usize, &str) = match op {
             PrimOp::Add => (1000603, "bhc_integer_add"),
@@ -46482,6 +46557,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let rhs = self
             .lower_expr(args[1])?
             .ok_or_else(|| CodegenError::Internal("integer primop: no rhs".to_string()))?;
+        // Both operands share the operator's type, so one Integer operand makes
+        // a pointer-valued other one a bignum too (a tuple component binder
+        // has no type of its own: `(y, _, _) -> y >= 1601`).
+        let any_integer = op_at_integer || lhs_is_integer || rhs_is_integer;
+        let lhs_is_integer = lhs_is_integer || (any_integer && lhs.is_pointer_value());
+        let rhs_is_integer = rhs_is_integer || (any_integer && rhs.is_pointer_value());
 
         // Convert non-Integer operands to Integer via bhc_integer_from_i64
         let lhs_ptr = if lhs_is_integer {
@@ -46616,6 +46697,39 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
             _ => false,
         }
+    }
+
+    /// Whether the builtin being lowered is `fromIntegral`/`fromInteger` at
+    /// `Integer -> Double|Float` (machine-int sources already convert).
+    fn is_integer_to_floating(&self) -> bool {
+        let mut t = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = t {
+            t = body;
+        }
+        matches!(t, Ty::Fun(a, r)
+            if self.is_integer_type(a)
+                && matches!(r.as_ref(), Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float")))
+    }
+
+    /// An `Integer` as a double: read back through `bhc_integer_to_i64`,
+    /// then `sitofp` (a bignum beyond 64 bits loses its high part). Without
+    /// this the bignum's pointer was converted.
+    fn lower_integer_to_floating(
+        &mut self,
+        arg: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let Some(v) = self.lower_integer_to_i64(arg)? else {
+            return Ok(None);
+        };
+        let f = self
+            .builder()
+            .build_signed_int_to_float(
+                v.into_int_value(),
+                self.type_mapper().f64_type(),
+                "integer_to_double",
+            )
+            .map_err(|e| CodegenError::Internal(format!("Integer to Double: {:?}", e)))?;
+        Ok(Some(f.into()))
     }
 
     /// Read an `Integer` back as an `i64` (`bhc_integer_to_i64`).
@@ -53740,8 +53854,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             }
         }
 
-        // E.45: Check if operands are Integer (arbitrary precision) — dispatch to RTS
-        if !args.is_empty() && self.is_integer_expr(args[0]) {
+        // E.45: Check if operands are Integer (arbitrary precision) — dispatch to RTS.
+        // The operator's own type counts too: pattern binders carry none.
+        let op_at_integer = matches!(op_ty, Ty::Fun(a, _) if self.is_integer_type(a));
+        if !args.is_empty() && (op_at_integer || self.is_integer_expr(args[0])) {
             match op {
                 PrimOp::Add
                 | PrimOp::Sub
@@ -53758,7 +53874,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 | PrimOp::Le
                 | PrimOp::Gt
                 | PrimOp::Ge => {
-                    return self.lower_integer_primop(op, args);
+                    return self.lower_integer_primop(op, args, op_ty);
                 }
                 _ => {}
             }
@@ -53780,7 +53896,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 | PrimOp::Le
                 | PrimOp::Gt
                 | PrimOp::Ge => {
-                    return self.lower_integer_primop(op, args);
+                    return self.lower_integer_primop(op, args, op_ty);
                 }
                 _ => {}
             }
@@ -54009,7 +54125,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
 
                 // Check if we're comparing user ADTs with derived Ord (for <, <=, >, >=)
-                if matches!(op, PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge) {
+                // The operator's own type, when it names a primitive operand
+                // type, rules the ADT heuristics out: `m <= 2` at `Int` went to
+                // an unrelated record's derived compare.
+                let primitive_operands = matches!(
+                    op_ty,
+                    Ty::Fun(a, _) if matches!(a.as_ref(), Ty::Con(c) if matches!(
+                        c.name.as_str(),
+                        "Int" | "Integer" | "Double" | "Float" | "Char" | "Bool" | "Word"
+                    ))
+                );
+                if matches!(op, PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge)
+                    && !primitive_operands
+                {
                     let adt_type = Self::is_user_adt_expr(args[0], &self.constructor_metadata)
                         .or_else(|| Self::is_user_adt_expr(args[1], &self.constructor_metadata))
                         .or_else(|| self.adt_name_of_comparison(op_ty))
@@ -54226,6 +54354,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         expr: &Expr,
         val: BasicValueEnum<'ctx>,
     ) -> CodegenResult<FloatValue<'ctx>> {
+        if let BasicValueEnum::FloatValue(f) = val {
+            // Already converted (`fromIntegral` at a resolved `-> Double`).
+            return self.coerce_to_f64(f.into());
+        }
         if matches!(self.app_head_var_name(expr), Some("fromIntegral")) {
             let i = self.coerce_to_int(val)?;
             self.builder()
@@ -55317,7 +55449,10 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         return self.create_partial_builtin_closure(name, arity, &args);
                     } else if n_provided == arity {
                         // Exact application through builtin dispatch
-                        return self.lower_builtin(name, &args);
+                        let saved = std::mem::replace(&mut self.current_builtin_ty, var.ty.clone());
+                        let result = self.lower_builtin(name, &args);
+                        self.current_builtin_ty = saved;
+                        return result;
                     } else {
                         // Over-application: call the builtin with its expected args,
                         // then call the result (a closure/function) with remaining args.

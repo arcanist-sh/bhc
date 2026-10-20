@@ -341,6 +341,33 @@ fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<cor
 /// literal's own occurrence type.
 fn lower_lit_at(ctx: &mut LowerContext, lit: &Lit, span: Span) -> LowerResult<core::Expr> {
     let core_lit = lower_lit(lit, span)?;
+    if let Lit::Int(n) = lit {
+        // An integer literal typeck resolved at `Integer` is a bignum: as a
+        // machine int it reached an `Integer` constructor field or argument
+        // unboxed (`ModifiedJulianDay 0` stored a raw 0 the field's readers
+        // dereferenced).
+        let resolved = ctx
+            .resolved_expr_ty_opt(span)
+            .map(|t| ctx.expand_type_aliases(&t));
+        let con_name = |t: &Ty| match t {
+            Ty::Con(c) => Some(c.name.as_str().to_string()),
+            _ => None,
+        };
+        match resolved.as_ref().and_then(con_name).as_deref() {
+            Some("Integer") => {
+                let ty = Ty::Con(TyCon::new(Symbol::intern("Integer"), Kind::Star));
+                return Ok(core::Expr::Lit(Literal::Integer(*n as i128), ty, span));
+            }
+            // An integer literal at a floating type (`posixSecondsToUTCTime
+            // 1700000000`, `POSIXTime` = `Double`) passed as a machine int
+            // was read as the double with those bits — a denormal ≈ 0.
+            Some("Double") => {
+                let ty = Ty::Con(TyCon::new(Symbol::intern("Double"), Kind::Star));
+                return Ok(core::Expr::Lit(Literal::Double(*n as f64), ty, span));
+            }
+            _ => {}
+        }
+    }
     if !matches!(lit, Lit::String(_)) {
         return Ok(core_lit);
     }
@@ -832,6 +859,33 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
     let core::Expr::Var(v, _) = e else {
         return;
     };
+    if matches!(
+        v.name.as_str(),
+        "+" | "-" | "*" | "==" | "/=" | "<" | "<=" | ">" | ">=" | "div" | "mod" | "quot" | "rem"
+    ) {
+        // Core bakes the single-pass type (`t -> t -> Bool`); the resolved
+        // one tells codegen the operands are bignums when they are.
+        if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
+            if matches!(&resolved, Ty::Fun(a, _)
+                if matches!(a.as_ref(), Ty::Con(c) if c.name.as_str() == "Integer"))
+            {
+                v.ty = resolved;
+            }
+        }
+        return;
+    }
+    if matches!(v.name.as_str(), "show" | "print") {
+        // Codegen otherwise picks a Show instance from the argument's shape,
+        // which an `if` whose branches mix a literal and a variable defeats
+        // (`show (if w == 0 then 7 else w)` went to an unrelated user type's
+        // derived Show).
+        if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
+            if matches!(&resolved, Ty::Fun(a, _) if !has_type_variables(a)) {
+                v.ty = resolved;
+            }
+        }
+        return;
+    }
     if v.name.as_str() == "^" {
         // `(^)`'s base and exponent types differ (`Integer ^ Int`); codegen
         // picks the multiplication from the resolved base type.
@@ -853,8 +907,10 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
     };
     if let Ty::Fun(a, r) = &resolved {
         let is_con = |t: &Ty, name: Option<&str>| matches!(t, Ty::Con(c) if name.is_none_or(|n| c.name.as_str() == n));
+        let floating = |t: &Ty| is_con(t, Some("Double")) || is_con(t, Some("Float"));
         if (is_con(a, Some("Integer")) && is_con(r, None))
             || (is_con(a, None) && is_con(r, Some("Integer")))
+            || (is_con(a, None) && floating(r))
         {
             v.ty = resolved.clone();
         }
@@ -4976,7 +5032,10 @@ fn lower_monad_plus_builtin(
     } else {
         bare
     };
-    if !matches!(bare, "mplus" | "<|>" | "mzero" | "empty" | "msum" | "asum") {
+    if !matches!(
+        bare,
+        "mplus" | "<|>" | "mzero" | "empty" | "msum" | "asum" | "fail"
+    ) {
         return None;
     }
     let occ = refined_occurrence_ty(ctx, span)?;
@@ -4995,9 +5054,16 @@ fn lower_monad_plus_builtin(
             cands.into_iter().find(|t| plus_monad_of(t).is_some())?
         }
         ("msum" | "asum", Ty::Fun(container, r)) if matches!(container.as_ref(), Ty::List(_)) => {
-            r.as_ref().clone()
+            // `msum :: [m a] -> m a`: the element type names the monad when
+            // the (loosely typed) result is still a variable.
+            match container.as_ref() {
+                Ty::List(elem) if plus_monad_of(r).is_none() => elem.as_ref().clone(),
+                _ => r.as_ref().clone(),
+            }
         }
         ("msum" | "asum", Ty::Fun(..)) => return None,
+        // `fail :: String -> m a`; at Maybe/[] it is `const mzero`.
+        ("fail", Ty::Fun(_, r)) => r.as_ref().clone(),
         (_, t) if !matches!(t, Ty::Fun(..)) => t.clone(),
         _ => return None,
     };
@@ -5005,8 +5071,8 @@ fn lower_monad_plus_builtin(
     Some(monad_plus_expr(ctx, bare, monad, span))
 }
 
-/// The Core for `mplus`/`<|>`, `mzero`/`empty` or `msum`/`asum` (named by
-/// `bare`) at the builtin `monad`.
+/// The Core for `mplus`/`<|>`, `mzero`/`empty`, `msum`/`asum` or `fail`
+/// (named by `bare`) at the builtin `monad`.
 fn monad_plus_expr(ctx: &mut LowerContext, bare: &str, monad: PlusMonad, span: Span) -> core::Expr {
     let zero = || match monad {
         PlusMonad::Maybe => nullary_var("Nothing", span),
@@ -5052,6 +5118,10 @@ fn monad_plus_expr(ctx: &mut LowerContext, bare: &str, monad: PlusMonad, span: S
     match bare {
         "mzero" | "empty" => zero(),
         "mplus" | "<|>" => plus(ctx),
+        "fail" => {
+            let msg = ctx.fresh_var("fail_msg", Ty::Error, span);
+            core::Expr::Lam(msg, Box::new(zero()), span)
+        }
         _ => {
             let xs = ctx.fresh_var("plus_xs", Ty::Error, span);
             let f = plus(ctx);

@@ -4249,7 +4249,12 @@ impl Compiler {
                                 // char list. Not for every field: pinning
                                 // `TextProperties`' `Bool`/`Maybe UnderlineMode`
                                 // selectors broke ODT.ContentReader's checking.
-                                if !ty_has_vars(&ty) && ty_mentions_text(&ty) {
+                                // An `Integer` field likewise: a fresh variable
+                                // left `print (toModifiedJulianDay d)` unable to
+                                // tell the bignum from a machine int.
+                                if !ty_has_vars(&ty)
+                                    && (ty_mentions_text(&ty) || ty_is_integer(&ty))
+                                {
                                     let record = bhc_types::Ty::Con(bhc_types::TyCon::new(
                                         type_name,
                                         bhc_types::Kind::Star,
@@ -4306,6 +4311,40 @@ impl Compiler {
                         for s in accessor_schemes.iter_mut().flatten() {
                             s.ty = bhc_types::Ty::fun(head.clone(), s.ty.clone());
                         }
+                        let ty = field_tys
+                            .into_iter()
+                            .rev()
+                            .fold(head, |acc, f| bhc_types::Ty::fun(f, acc));
+                        Some(bhc_types::Scheme::poly(quantified, ty))
+                    } else if bhc_types::io_closure_mode()
+                        && exported_type.params.is_empty()
+                        && con
+                            .fields
+                            .iter()
+                            .any(|f| ty_is_integer(&converter.convert_type(f)))
+                    {
+                        // A parameterless type's constructor keeps fresh field
+                        // types (pinning them all broke checking elsewhere) —
+                        // except an `Integer` field: a literal argument must
+                        // be typed `Integer` to be built as a bignum
+                        // (`ModifiedJulianDay 0` stored a raw 0).
+                        let mut quantified = Vec::new();
+                        let mut field_tys = Vec::with_capacity(con.fields.len());
+                        for (i, f) in con.fields.iter().enumerate() {
+                            let converted = converter.convert_type(f);
+                            if ty_is_integer(&converted) {
+                                field_tys.push(converted);
+                            } else {
+                                #[allow(clippy::cast_possible_truncation)]
+                                let v = bhc_types::TyVar::new_star(0xFFFD_0000 + i as u32);
+                                quantified.push(v.clone());
+                                field_tys.push(bhc_types::Ty::Var(v));
+                            }
+                        }
+                        let head = bhc_types::Ty::Con(bhc_types::TyCon::new(
+                            type_name,
+                            bhc_types::Kind::Star,
+                        ));
                         let ty = field_tys
                             .into_iter()
                             .rev()
@@ -6930,6 +6969,11 @@ fn ty_mentions_text(ty: &bhc_types::Ty) -> bool {
         Ty::Tuple(es) => es.iter().any(ty_mentions_text),
         _ => false,
     }
+}
+
+/// Whether a type is exactly `Integer`.
+fn ty_is_integer(ty: &bhc_types::Ty) -> bool {
+    matches!(ty, bhc_types::Ty::Con(c) if c.name.as_str() == "Integer")
 }
 
 /// Whether a type mentions any type variable.

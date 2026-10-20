@@ -485,6 +485,21 @@ fn test_tier3_integer_conversions_native() {
 }
 
 #[test]
+fn test_tier3_foreign_import_io_native() {
+    run_native_test("tier3_io/foreign_import_io", Profile::Default);
+}
+
+/// Closure IO model only: eager mode erases the types of pattern binders and
+/// operators, so an Integer pattern field cannot be told from an Int.
+#[test]
+fn test_tier3_numeric_typing_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/numeric_typing", Profile::Default);
+}
+
+#[test]
 fn test_tier3_monadplus_builtin_native() {
     run_native_test("tier3_io/monadplus_builtin", Profile::Default);
 }

@@ -864,11 +864,17 @@ fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Exp
         "+" | "-" | "*" | "==" | "/=" | "<" | "<=" | ">" | ">=" | "div" | "mod" | "quot" | "rem"
     ) {
         // Core bakes the single-pass type (`t -> t -> Bool`); the resolved
-        // one tells codegen the operands are bignums when they are.
+        // one tells codegen the operands are bignums when they are — and, for
+        // (in)equality, the element type of compared lists: pandoc's HTML
+        // writer compares attribute lists bound by tuple patterns, which carry
+        // no type of their own (`hclasses /= dclasses` compared pointers).
         if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
-            if matches!(&resolved, Ty::Fun(a, _)
-                if matches!(a.as_ref(), Ty::Con(c) if c.name.as_str() == "Integer"))
-            {
+            let integer = matches!(&resolved, Ty::Fun(a, _)
+                if matches!(a.as_ref(), Ty::Con(c) if c.name.as_str() == "Integer"));
+            let ground_list_eq = matches!(v.name.as_str(), "==" | "/=")
+                && matches!(&resolved, Ty::Fun(a, _)
+                    if matches!(a.as_ref(), Ty::List(_)) && !has_type_variables(a));
+            if integer || ground_list_eq {
                 v.ty = resolved;
             }
         }
@@ -2222,6 +2228,17 @@ fn lower_constrained_value_all_dicts(
     }
     let var = ctx.lookup_var(def_ref.def_id).cloned()?;
     let var = at_occurrence_ty(ctx, &var, def_ref.span);
+    // First with functional-dependency completion: a constraint argument
+    // that appears only in the constraint (`t` in notFollowedBy's
+    // `Stream s m t`) is not fixed by the occurrence type, and without it
+    // `notFollowedBy . char` passed notFollowedBy with no dictionary.
+    if let Some(dicts) = resolve_user_dicts(ctx, constraints, &subst, def_ref.span) {
+        let mut result = core::Expr::Var(var, def_ref.span);
+        for dict in dicts {
+            result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
+        }
+        return Some(result);
+    }
     let mut dicts = Vec::with_capacity(constraints.len());
     let mut any_real = false;
     for c in constraints {

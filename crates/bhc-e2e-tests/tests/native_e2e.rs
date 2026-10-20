@@ -484,6 +484,16 @@ fn test_tier3_integer_conversions_native() {
     run_native_test("tier3_io/integer_conversions", Profile::Default);
 }
 
+/// Closure IO model only: eager mode does not resolve a dictionary whose
+/// class argument is fixed only by a functional dependency.
+#[test]
+fn test_tier3_constrained_fn_composed_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/constrained_fn_composed", Profile::Default);
+}
+
 /// Closure IO model only (library transformers): eager mode's hard-coded
 /// State cannot dispatch a method of a class generic in the state.
 #[test]

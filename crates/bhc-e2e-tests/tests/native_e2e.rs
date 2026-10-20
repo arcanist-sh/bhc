@@ -475,6 +475,16 @@ fn test_tier3_multiparam_default_identity_native() {
 }
 
 #[test]
+fn test_tier3_tuple_equality_native() {
+    run_native_test("tier3_io/tuple_equality", Profile::Default);
+}
+
+#[test]
+fn test_tier3_monadplus_builtin_native() {
+    run_native_test("tier3_io/monadplus_builtin", Profile::Default);
+}
+
+#[test]
 fn test_tier3_handle_setters_native() {
     run_native_test("tier3_io/handle_setters", Profile::Default);
 }

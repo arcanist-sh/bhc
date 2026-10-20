@@ -521,6 +521,12 @@ pub struct Lowering<'ctx, 'm> {
     io_run_next: bool,
 }
 
+/// The arity of a tuple constructor name (`(,)` is 2, `(,,)` is 3).
+fn tuple_literal_arity(name: &str) -> Option<usize> {
+    let inner = name.strip_prefix('(')?.strip_suffix(')')?;
+    (!inner.is_empty() && inner.chars().all(|c| c == ',')).then(|| inner.len() + 1)
+}
+
 impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Create a new lowering context.
     pub fn new(ctx: &'ctx LlvmContext, module: &'m LlvmModule<'ctx>) -> Self {
@@ -5951,6 +5957,131 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("failed to load tag: {:?}", e)))?;
 
         Ok(tag.into_int_value())
+    }
+
+    /// The type of a literal tuple expression, its components read from the
+    /// component expressions (string literals, `True`/`False`, nested
+    /// literal tuples, else the expression's own type). `None` unless `e` is
+    /// a saturated tuple constructor application.
+    fn literal_tuple_ty(&self, e: &Expr) -> Option<Ty> {
+        let n = tuple_literal_arity(self.app_head_var_name(e)?)?;
+        let mut comps: Vec<&Expr> = Vec::new();
+        let mut cur = e;
+        while let Expr::App(f, a, _) = cur {
+            comps.push(a.as_ref());
+            cur = f.as_ref();
+        }
+        if comps.len() != n {
+            return None;
+        }
+        comps.reverse();
+        let char_ty = Ty::Con(bhc_types::TyCon::new(
+            Symbol::intern("Char"),
+            bhc_types::Kind::Star,
+        ));
+        let bool_ty = Ty::Con(bhc_types::TyCon::new(
+            Symbol::intern("Bool"),
+            bhc_types::Kind::Star,
+        ));
+        Some(Ty::Tuple(
+            comps
+                .into_iter()
+                .map(|c| match c {
+                    Expr::Lit(Literal::String(_), _, _) => Ty::List(Box::new(char_ty.clone())),
+                    Expr::Var(v, _) if matches!(v.name.as_str(), "True" | "False") => {
+                        bool_ty.clone()
+                    }
+                    _ => self.literal_tuple_ty(c).unwrap_or_else(|| c.ty()),
+                })
+                .collect(),
+        ))
+    }
+
+    /// Structural equality of two values of type `ty`, as an i64 0/1.
+    ///
+    /// Tuples compare component-wise, lists and strings element-wise, `Text`
+    /// through the RTS, `Bool` by tag; anything else (Int, Char, unknown
+    /// types) by its raw representation, which is what `==` already did.
+    fn eq_by_type(
+        &mut self,
+        ty: &Ty,
+        lhs: BasicValueEnum<'ctx>,
+        rhs: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<IntValue<'ctx>> {
+        let i64_ty = self.type_mapper().i64_type();
+        // Components of a constructor can be unevaluated thunks; anything
+        // compared through its heap representation is forced first.
+        let as_ptr = |this: &Self, v: BasicValueEnum<'ctx>| -> CodegenResult<PointerValue<'ctx>> {
+            let p = this.value_to_ptr(v)?;
+            Ok(this.build_force(p.into())?.into_pointer_value())
+        };
+        match ty {
+            Ty::Tuple(elems) => {
+                let arity = elems.len() as u32;
+                let l = as_ptr(self, lhs)?;
+                let r = as_ptr(self, rhs)?;
+                let l = self.build_force(l.into())?.into_pointer_value();
+                let r = self.build_force(r.into())?.into_pointer_value();
+                let mut acc = i64_ty.const_int(1, false);
+                for (i, ety) in elems.iter().enumerate() {
+                    let lf = self.extract_adt_field(l, arity, i as u32)?;
+                    let rf = self.extract_adt_field(r, arity, i as u32)?;
+                    let e = self.eq_by_type(ety, lf.into(), rf.into())?;
+                    acc = self
+                        .builder()
+                        .build_and(acc, e, "tuple_eq_and")
+                        .map_err(|e| CodegenError::Internal(format!("tuple eq and: {:?}", e)))?;
+                }
+                Ok(acc)
+            }
+            t if self.is_text_type(t) => {
+                let eq_fn = *self.functions.get(&VarId::new(1000204)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_text_eq not declared".to_string())
+                })?;
+                let l = as_ptr(self, lhs)?;
+                let r = as_ptr(self, rhs)?;
+                let res = self
+                    .builder()
+                    .build_call(eq_fn, &[l.into(), r.into()], "text_eq")
+                    .map_err(|e| CodegenError::Internal(format!("text eq: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("text eq: void".to_string()))?;
+                Ok(res.into_int_value())
+            }
+            t if self.is_list_type(t) || self.is_string_type(t) => {
+                let l = as_ptr(self, lhs)?;
+                let r = as_ptr(self, rhs)?;
+                let res = self
+                    .lower_list_comparison(PrimOp::Eq, l.into(), r.into())?
+                    .ok_or_else(|| CodegenError::Internal("list eq: no value".to_string()))?;
+                self.coerce_to_int(res)
+            }
+            t if self.is_bool_type(t) => {
+                let l = self.extract_bool_tag(as_ptr(self, lhs)?)?;
+                let r = self.extract_bool_tag(as_ptr(self, rhs)?)?;
+                let c = self
+                    .builder()
+                    .build_int_compare(inkwell::IntPredicate::EQ, l, r, "bool_eq")
+                    .map_err(|e| CodegenError::Internal(format!("bool eq: {:?}", e)))?;
+                self.builder()
+                    .build_int_z_extend(c, i64_ty, "bool_eq_ext")
+                    .map_err(|e| CodegenError::Internal(format!("bool eq ext: {:?}", e)))
+            }
+            _ => {
+                let l = self.coerce_to_int(lhs)?;
+                let r = self.coerce_to_int(rhs)?;
+                let l = self.widen_to_i64(l)?;
+                let r = self.widen_to_i64(r)?;
+                let c = self
+                    .builder()
+                    .build_int_compare(inkwell::IntPredicate::EQ, l, r, "raw_eq")
+                    .map_err(|e| CodegenError::Internal(format!("raw eq: {:?}", e)))?;
+                self.builder()
+                    .build_int_z_extend(c, i64_ty, "raw_eq_ext")
+                    .map_err(|e| CodegenError::Internal(format!("raw eq ext: {:?}", e)))
+            }
+        }
     }
 
     /// The constructor tag of a value of an enumeration (all constructors
@@ -53355,6 +53486,46 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     || matches!(op_ty, Ty::Fun(a, _) if self.is_text_type(a))
                 {
                     return self.lower_text_comparison(op, args);
+                }
+
+                // Tuples compare component-wise, each component by its type.
+                // Falling through compared the two tuple boxes by address, so
+                // `(3, 9) == (3, 9)` was False.
+                if matches!(op, PrimOp::Eq | PrimOp::Ne) {
+                    let tuple_ty = match op_ty {
+                        Ty::Fun(a, _) if matches!(a.as_ref(), Ty::Tuple(_)) => {
+                            Some(a.as_ref().clone())
+                        }
+                        _ => [args[0].ty(), args[1].ty()]
+                            .into_iter()
+                            .find(|t| matches!(t, Ty::Tuple(_)))
+                            .or_else(|| {
+                                // Types erased (eager model): a literal tuple
+                                // on either side still gives the arity; the
+                                // components compare by representation.
+                                args.iter().find_map(|a| self.literal_tuple_ty(a))
+                            }),
+                    };
+                    if let Some(tuple_ty) = tuple_ty {
+                        let lhs = self.lower_expr(args[0])?.ok_or_else(|| {
+                            CodegenError::Internal("tuple eq: no lhs value".to_string())
+                        })?;
+                        let rhs = self.lower_expr(args[1])?.ok_or_else(|| {
+                            CodegenError::Internal("tuple eq: no rhs value".to_string())
+                        })?;
+                        let eq = self.eq_by_type(&tuple_ty, lhs, rhs)?;
+                        if matches!(op, PrimOp::Ne) {
+                            let one = self.type_mapper().i64_type().const_int(1, false);
+                            let ne =
+                                self.builder()
+                                    .build_int_sub(one, eq, "tuple_ne")
+                                    .map_err(|e| {
+                                        CodegenError::Internal(format!("tuple ne: {:?}", e))
+                                    })?;
+                            return Ok(Some(ne.into()));
+                        }
+                        return Ok(Some(eq.into()));
+                    }
                 }
 
                 // Either side settles it: `fmt == "markdown"` has a

@@ -854,6 +854,9 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
     }
 
     if let Some(name) = var_name {
+        if let Some(e) = lower_monad_plus_builtin(ctx, name, def_ref.span) {
+            return Ok(e);
+        }
         // `guard :: Alternative f => Bool -> f ()` — an external constrained
         // FUNCTION (not a class method), unimplemented as a builtin, so it
         // stubs at runtime (pandoc's `guardEnabled` = `getOption
@@ -3092,6 +3095,30 @@ fn resolve_constrained_fn_dicts(
             // `Parsec` spine misaligns against the 4-argument `ParsecT` one.
             let occ_result = result_of(&occ_ty).clone();
             let sig_result = ctx.expand_type_aliases(result_of(&sig_ty));
+            // An expected type pushed onto this application wins over the
+            // enclosing signature: under `lift` the call runs in the INNER
+            // monad (`lift $ setupTranslations meta` inside `StateT
+            // WriterState m`), and the signature would bind its monad to the
+            // whole stack — pandoc's `setupTranslations` then got the StateT
+            // `PandocMonad` dictionary. `match_ty` never overrides, so
+            // matching the hint first keeps the signature from rebinding it.
+            // (Propagation records the head's instantiated type on the head.)
+            // Often the recorded hint is just the occurrence's own unsolved
+            // type (`?m ()` under `when`): matching it binds `?m := ?m`,
+            // which would then block the signature. Keep only bindings
+            // that say something.
+            if let Some(expected) = ctx.expected_ty_opt(head_ref.span) {
+                let expected = ctx.expand_type_aliases(&expected);
+                let mut hint = bhc_types::Subst::new();
+                match_ty(&occ_result, result_of(&expected), &mut hint);
+                for v in occ_result.free_vars() {
+                    match hint.get(&v) {
+                        Some(Ty::Var(w)) if w.id == v.id => {}
+                        Some(t) if !subst.contains(&v) => subst.insert(&v, t.clone()),
+                        _ => {}
+                    }
+                }
+            }
             match_ty(&occ_result, &sig_result, &mut subst);
         }
     } else if std::env::var("BHC_DBG_DICT4").is_ok() {
@@ -4876,6 +4903,167 @@ fn try_lower_text_concat_map(
     Ok(None)
 }
 
+/// The builtin `MonadPlus`/`Alternative` structure of `Maybe` and lists.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlusMonad {
+    Maybe,
+    List,
+}
+
+/// Which of `Maybe`/list a value type `m a` is in.
+fn plus_monad_of(ty: &Ty) -> Option<PlusMonad> {
+    match ty {
+        Ty::List(_) => Some(PlusMonad::List),
+        Ty::App(f, _) => match f.as_ref() {
+            Ty::Con(c) if c.name.as_str() == "Maybe" => Some(PlusMonad::Maybe),
+            Ty::Con(c) if c.name.as_str() == "[]" => Some(PlusMonad::List),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `mplus`/`<|>`, `mzero`/`empty` and `msum`/`asum` at `Maybe` or a list, as
+/// Core. bhc has no instances for these builtin types (the methods were
+/// runtime stubs), and pandoc's `normalizeDate` takes the first parse with
+/// `msum` over `Maybe`. `None` for any other name or monad.
+fn lower_monad_plus_builtin(
+    ctx: &mut LowerContext,
+    name: Symbol,
+    span: Span,
+) -> Option<core::Expr> {
+    let bare = name.as_str().rsplit('.').next().unwrap_or("");
+    let bare = if name.as_str().ends_with("<|>") {
+        "<|>"
+    } else {
+        bare
+    };
+    if !matches!(bare, "mplus" | "<|>" | "mzero" | "empty" | "msum" | "asum") {
+        return None;
+    }
+    let occ = refined_occurrence_ty(ctx, span)?;
+    // An infix use can be recorded at the whole application's span, with the
+    // RESULT type (`Maybe Int`) rather than the operator's; the monad is the
+    // same, so a non-function type counts as the value type.
+    let value_ty = match (bare, &occ) {
+        // Both operands and the result share the monad; take whichever
+        // typeck resolved (in a chain the first operand can stay a variable).
+        ("mplus" | "<|>", Ty::Fun(a, rest)) => {
+            let mut cands = vec![a.as_ref().clone()];
+            if let Ty::Fun(b, r) = rest.as_ref() {
+                cands.push(b.as_ref().clone());
+                cands.push(r.as_ref().clone());
+            }
+            cands.into_iter().find(|t| plus_monad_of(t).is_some())?
+        }
+        ("msum" | "asum", Ty::Fun(container, r)) if matches!(container.as_ref(), Ty::List(_)) => {
+            r.as_ref().clone()
+        }
+        ("msum" | "asum", Ty::Fun(..)) => return None,
+        (_, t) if !matches!(t, Ty::Fun(..)) => t.clone(),
+        _ => return None,
+    };
+    let monad = plus_monad_of(&value_ty)?;
+    Some(monad_plus_expr(ctx, bare, monad, span))
+}
+
+/// The Core for `mplus`/`<|>`, `mzero`/`empty` or `msum`/`asum` (named by
+/// `bare`) at the builtin `monad`.
+fn monad_plus_expr(ctx: &mut LowerContext, bare: &str, monad: PlusMonad, span: Span) -> core::Expr {
+    let zero = || match monad {
+        PlusMonad::Maybe => nullary_var("Nothing", span),
+        PlusMonad::List => nullary_var("[]", span),
+    };
+    let app = |f: core::Expr, x: core::Expr| core::Expr::App(Box::new(f), Box::new(x), span);
+    let plus = |ctx: &mut LowerContext| {
+        let a = ctx.fresh_var("plus_a", Ty::Error, span);
+        let b = ctx.fresh_var("plus_b", Ty::Error, span);
+        let body = match monad {
+            PlusMonad::Maybe => {
+                let nothing = DataCon {
+                    name: Symbol::intern("Nothing"),
+                    ty_con: TyCon::new(Symbol::intern("Maybe"), Kind::Star),
+                    tag: 0,
+                    arity: 0,
+                };
+                core::Expr::Case(
+                    Box::new(core::Expr::Var(a.clone(), span)),
+                    vec![
+                        Alt {
+                            con: AltCon::DataCon(nothing),
+                            binders: vec![],
+                            rhs: core::Expr::Var(b.clone(), span),
+                        },
+                        Alt {
+                            con: AltCon::Default,
+                            binders: vec![],
+                            rhs: core::Expr::Var(a.clone(), span),
+                        },
+                    ],
+                    Ty::Error,
+                    span,
+                )
+            }
+            PlusMonad::List => app(
+                app(nullary_var("++", span), core::Expr::Var(a.clone(), span)),
+                core::Expr::Var(b.clone(), span),
+            ),
+        };
+        core::Expr::Lam(a, Box::new(core::Expr::Lam(b, Box::new(body), span)), span)
+    };
+    match bare {
+        "mzero" | "empty" => zero(),
+        "mplus" | "<|>" => plus(ctx),
+        _ => {
+            let xs = ctx.fresh_var("plus_xs", Ty::Error, span);
+            let f = plus(ctx);
+            let body = app(
+                app(app(nullary_var("foldr", span), f), zero()),
+                core::Expr::Var(xs.clone(), span),
+            );
+            core::Expr::Lam(xs, Box::new(body), span)
+        }
+    }
+}
+
+/// A saturated `mplus`/`<|>` whose occurrence type typeck left unresolved
+/// (an inner link of `a <|> b <|> c` in the eager model): its monad from the
+/// operands' types.
+fn try_lower_monad_plus_app(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let Expr::App(head, a, _) = f else {
+        return Ok(None);
+    };
+    let Expr::Var(dr) = head.as_ref() else {
+        return Ok(None);
+    };
+    let Some(name) = ctx.lookup_var(dr.def_id).map(|v| v.name) else {
+        return Ok(None);
+    };
+    if !(name.as_str() == "mplus" || name.as_str().ends_with("<|>")) {
+        return Ok(None);
+    }
+    let Some(monad) = [try_infer_arg_type(ctx, a), try_infer_arg_type(ctx, x)]
+        .into_iter()
+        .flatten()
+        .find_map(|t| plus_monad_of(&t))
+    else {
+        return Ok(None);
+    };
+    let op = monad_plus_expr(ctx, "mplus", monad, span);
+    let a = lower_expr(ctx, a)?;
+    let x = lower_expr(ctx, x)?;
+    Ok(Some(core::Expr::App(
+        Box::new(core::Expr::App(Box::new(op), Box::new(a), span)),
+        Box::new(x),
+        span,
+    )))
+}
+
 /// Lower a function application, handling dictionary-passing for class methods
 /// and constrained functions when the argument type is known.
 ///
@@ -4909,6 +5097,9 @@ fn lower_app(
     // t))`; bhc has no builtin for it, and pandoc's XML escaping calls it
     // (point-free, `T.concatMap escape`, as well as saturated).
     if let Some(result) = try_lower_text_concat_map(ctx, f, x, span)? {
+        return Ok(result);
+    }
+    if let Some(result) = try_lower_monad_plus_app(ctx, f, x, span)? {
         return Ok(result);
     }
 

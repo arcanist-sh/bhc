@@ -1,282 +1,131 @@
-# Runtime Profiles
+# Profiles
 
-BHC's profile system lets you choose the runtime behavior that best fits your application.
+A profile tells bhc which optimisation pipeline and runtime configuration to use
+for a build. This page describes what each profile does in the current compiler.
+The longer-term design is in the specification under `spec/`; this page sticks
+to observable behaviour.
 
-## Overview
+## Selecting a profile
 
-| Profile | Evaluation | GC | Fusion | SIMD | Use Case |
-|---------|------------|-----|--------|------|----------|
-| `default` | Lazy | Standard | Opportunistic | No | General Haskell |
-| `server` | Lazy | Incremental | Opportunistic | No | Web services |
-| `numeric` | Strict | Minimal | Guaranteed | Yes | ML, linear algebra |
-| `edge` | Lazy | Minimal | Opportunistic | No | WASM, serverless |
-| `realtime` | Lazy | Bounded | Opportunistic | No | Games, audio |
-| `embedded` | Strict | None | Opportunistic | Optional | Microcontrollers |
-
-## Default Profile
-
-The standard Haskell experience with lazy evaluation.
-
-### Characteristics
-
-- **Lazy evaluation** - Expressions evaluated only when needed
-- **Standard GC** - Generational garbage collector
-- **Opportunistic fusion** - Fusion applied where detected
-
-### When to Use
-
-- General-purpose Haskell code
-- When you want standard Haskell semantics
-- When lazy evaluation is beneficial
-
-### Example
-
-```haskell
--- Lazy: only computes as much as needed
-takeWhile (< 10) [1..]  -- Works on infinite list!
-```
-
-## Server Profile
-
-Optimized for web services and long-running applications.
-
-> **Status (2026-07-23):** the scheduler, STM, cancellation, and deadlines are implemented and tested **in the Rust RTS**, but the `withScope`/`spawn`/`await`/`atomically` APIs below are **not yet wired to compiled Haskell** — no compiled program reaches the scheduler yet (spec/BHC-REVIEW-0001 §5.2). "Incremental GC" is likewise a unit-tested module that is **not on the compiled-code path** (there is no live GC; §5.1). Treat this section as the intended contract, not current behavior.
-
-### Characteristics
-
-- **Structured concurrency** - `withScope`, `spawn`, `await` primitives
-- **Cooperative cancellation** - Tasks check for cancellation at safe points
-- **Incremental GC** - Lower pause times
-- **Deadlines** - Built-in timeout support
-
-### Key APIs
-
-```haskell
--- Structured concurrency
-withScope :: (Scope -> IO a) -> IO a
-spawn :: Scope -> IO a -> IO (Task a)
-await :: Task a -> IO a
-cancel :: Task a -> IO ()
-
--- Deadlines
-withDeadline :: Duration -> (Scope -> IO a) -> IO (Maybe a)
-```
-
-### Example
-
-```haskell
-{-# OPTIONS_BHC -profile=server #-}
-module Server where
-
-handleRequest :: Request -> IO Response
-handleRequest req = withDeadline (seconds 30) $ \scope -> do
-    -- These run in parallel
-    user <- spawn scope $ fetchUser (reqUserId req)
-    posts <- spawn scope $ fetchPosts (reqUserId req)
-
-    -- Wait for both
-    u <- await user
-    p <- await posts
-
-    pure (Response u p)
-```
-
-## Numeric Profile
-
-High-performance numeric computing with guaranteed optimization.
-
-> **Status (2026-07-23): the fusion contract below is the specified/normative goal, NOT yet realized on the native target.** Measured: for `sum (map (*2) [1..N])` the numeric profile shows **0 fused / 0 kernels** and runs at the same speed as the default profile. This is blocked on two deeper properties — a **typed Core IR** (Core currently erases types, so `sum/map → foldl'` can't fire) and **unboxed numeric codegen** (boxing dominates even when a rewrite fires) — not on the fusion pass itself. The Tensor/Loop IR fusion machinery exists and feeds the GPU/WASM paths + the kernel report, but native list programs are compiled unfused. See ROADMAP.md "Phase 3" for the full measurement. Treat the "fuses into a single pass" / "FUSED" claims here as the target, not current native behavior.
-
-### Characteristics
-
-- **Strict evaluation** - No lazy thunks in numeric code
-- **Guaranteed fusion** - Specified patterns MUST fuse
-- **SIMD vectorization** - Automatic use of AVX/SSE
-- **Arena allocation** - Kernel temporaries in hot arena
-- **Unboxed by default** - No boxing overhead for primitives
-
-### Guaranteed Fusion Patterns
-
-These patterns fuse into single passes with no intermediate allocation:
-
-```haskell
--- Pattern 1: Map composition
-map f (map g xs)           -- -> map (f . g) xs
-
--- Pattern 2: ZipWith with maps
-zipWith f (map g a) (map h b)  -- -> single traversal
-
--- Pattern 3: Fold of map
-sum (map f xs)             -- -> single traversal
-
--- Pattern 4: Strict fold of map
-foldl' op z (map f xs)     -- -> single traversal
-```
-
-### Fusion Verification
+The profile is chosen once per build:
 
 ```bash
-# Generate fusion report
-bhc --profile=numeric --kernel-report matrix.hs
-
-# Output:
-# [Kernel k1] dotProduct: FUSED
-#   Pattern: sum/zipWith
-#   Single traversal, SIMD width: 8 x f32
-#   Allocation: None
+bhc --profile numeric Main.hs -o main
 ```
 
-### Example
-
-```haskell
-{-# OPTIONS_BHC -profile=numeric #-}
-module Matrix where
-
--- Guaranteed to fuse into single SIMD loop
-dotProduct :: [Double] -> [Double] -> Double
-dotProduct xs ys = sum (zipWith (*) xs ys)
-
--- Matrix operations fuse
-matmul :: Matrix Double -> Matrix Double -> Matrix Double
-matmul a b = ...  -- Tiled, cache-aware, SIMD-optimized
-```
-
-## Edge Profile
-
-Minimal runtime for WebAssembly and serverless.
-
-### Characteristics
-
-- **Minimal footprint** - Small binary size
-- **No runtime threads** - Single-threaded execution
-- **Simplified GC** - Basic collector or reference counting
-- **Fast startup** - Quick initialization
-
-### When to Use
-
-- WebAssembly targets (`--target=wasi`)
-- AWS Lambda / serverless functions
-- Browser applications
-
-### Example
-
-```haskell
-{-# OPTIONS_BHC -profile=edge #-}
-module Lambda where
-
--- Minimal dependencies, fast startup
-handler :: Event -> IO Response
-handler event = do
-    let result = processEvent event
-    pure (Response 200 result)
-```
-
-## Realtime Profile
-
-Bounded GC pauses for interactive applications.
-
-### Characteristics
-
-- **Bounded GC pauses** - Maximum pause configurable (default: 1ms)
-- **Per-frame arenas** - Temporary allocations freed per frame
-- **Incremental collection** - Work spread across frames
-
-### Configuration
+or in `hx.toml`:
 
 ```toml
-[profile.realtime]
-max_gc_pause_ms = 1
-frame_arena_size = "4MB"
-```
+[compiler]
+backend = "bhc"
 
-### Example
-
-```haskell
-{-# OPTIONS_BHC -profile=realtime #-}
-module Game where
-
-gameLoop :: GameState -> IO ()
-gameLoop state = do
-    withFrameArena $ do  -- Arena freed after frame
-        input <- pollInput
-        let state' = updateGame state input
-        renderGame state'
-        gameLoop state'
-```
-
-## Embedded Profile
-
-No garbage collector, static allocation only.
-
-### Characteristics
-
-- **No GC** - All memory statically allocated
-- **Strict evaluation** - No thunks
-- **Compile-time bounds** - Array sizes known at compile time
-- **No runtime allocation** - Stack + static only
-
-### Restrictions
-
-- No recursive data types
-- No arbitrary-precision Integer
-- Fixed-size arrays only
-- No dynamic allocation
-
-### Example
-
-```haskell
-{-# OPTIONS_BHC -profile=embedded #-}
-module Sensor where
-
--- Fixed-size buffer, no allocation
-data SensorBuffer = SensorBuffer (Array 256 Float)
-
-readSensor :: IO Float
-readSensor = primReadSensor 0x4000
-
-processReading :: Float -> SensorBuffer -> SensorBuffer
-processReading val buf = shiftIn val buf
-```
-
-## Profile Selection
-
-### Command Line
-
-```bash
-bhc --profile=numeric myfile.hs
-```
-
-### Per-Module Pragma
-
-```haskell
-{-# OPTIONS_BHC -profile=numeric #-}
-module HotPath where
-```
-
-### In bhc.toml
-
-```toml
-[build]
-profile = "default"
-
-[modules."HotPath"]
+[compiler.bhc]
 profile = "numeric"
 ```
 
-## Profile Compatibility
+There is no per-module profile pragma, so every module in a build uses the
+same profile.
 
-Modules with different profiles can be mixed, with some restrictions:
+## Overview
 
-| Caller Profile | Callee Profile | Allowed? |
-|----------------|----------------|----------|
-| default | numeric | Yes |
-| numeric | default | Yes (with boxing) |
-| server | numeric | Yes |
-| embedded | default | No |
-| realtime | numeric | Yes |
+| Profile | Selectable | What it changes today |
+|---------|------------|-----------------------|
+| `default` | yes | Core simplifier, demand analysis and worker/wrapper |
+| `server` | yes | Same compiled pipeline as `default` |
+| `numeric` | yes | Core list-fusion rewrites; Tensor IR pipeline and kernel report |
+| `edge` | yes | Skips demand analysis and worker/wrapper; smaller WASM memory |
 
-## See Also
+Compiled code is lazy under every profile: infinite lists and other lazy
+idioms behave the same whichever profile you pick. `realtime` and `embedded`
+exist in the session and specification but cannot be selected from the
+command line.
 
-- [Language Guide](language.md) - Haskell syntax reference
-- [Examples](examples.md) - Profile-specific examples
-- [Tensor IR](../crates/bhc-tensor-ir/docs/README.md) - Numeric internals
+Memory: compiled programs allocate without freeing. The garbage collector
+exists as a runtime module but is not connected to compiled code, which is fine
+for short-lived programs such as compilers and document converters and is the
+main limit for long-running ones.
+
+## default
+
+General Haskell. After the Core simplifier, bhc runs demand analysis and the
+worker/wrapper transformation, then simplifies again.
+
+```haskell
+main :: IO ()
+main = print (takeWhile (< 10) [1..])
+-- [1,2,3,4,5,6,7,8,9]
+```
+
+## server
+
+Compiles exactly like `default` today. The Rust runtime contains a
+work-stealing scheduler, STM, cancellation and deadlines, but compiled programs
+cannot reach them yet, and `forkIO`/`MVar` compile but abort at run time
+([#38](https://github.com/arcanist-sh/bhc/issues/38)). Use `default` and
+sequential code for now.
+
+## numeric
+
+On native builds the numeric profile adds Core-to-Core list-fusion rewrites
+that run before code generation:
+
+- `sum`, `product` and `foldl'` over an `Int` range such as `[1 .. n]`,
+  optionally through a `map` of a named `Int -> Int` function, become a single
+  counting loop with no intermediate list;
+- `sum (map f xs)` becomes a strict `foldl'` when `f` is a named function of
+  type `Int -> Int` (a lambda passed to `map` is not rewritten yet);
+- `foldl' op z (map f xs)` becomes a single `foldl'`;
+- `map f (map g xs)` becomes one `map`.
+
+```haskell
+module Main where
+
+import Data.List (foldl')
+
+double :: Int -> Int
+double x = 2 * x
+
+main :: IO ()
+main = do
+  print (sum (map double [1 .. 1000000]))
+  print (foldl' (+) 0 (map double (map double [1 .. 1000])))
+```
+
+```bash
+bhc --profile numeric SumSq.hs -o sumsq && ./sumsq
+# 1000001000000
+# 2002000
+```
+
+The numeric profile also runs the Tensor IR and Loop IR pipeline, and
+`--kernel-report` prints its fusion, vectorisation and parallelisation report.
+Native code generation does not consume the Tensor IR, so for list programs
+like the one above the report shows zero tensor operations; the list rewrites
+above are what change the native code. The rewrites remove intermediate lists;
+values are still boxed, so they do not by themselves make numeric loops as fast
+as unboxed code.
+
+`--tensor-fusion` turns the Tensor IR pipeline on for any profile.
+
+## edge
+
+Intended for small WebAssembly and serverless builds. It skips demand analysis
+and worker/wrapper, and on the WebAssembly target it uses a smaller linear
+memory (256 KB initial, 4 MB maximum, no debug names) where the default
+profile allows 16 MB and `numeric` 32 MB. Because memory is not reclaimed,
+allocation-heavy programs reach the 4 MB limit sooner under `edge`.
+
+The WebAssembly target itself is chosen with `--target wasm32-wasi` and works
+with every profile:
+
+```bash
+bhc --profile edge --target wasm32-wasi Main.hs -o main.wasm
+wasmtime main.wasm
+```
+
+## See also
+
+- [Getting Started](getting-started.md)
+- [Examples](examples.md)
+- [Tensor IR internals](../crates/bhc-tensor-ir/docs/README.md)
+- Profile reference on the docs site: https://docs.arcanist.sh/bhc/

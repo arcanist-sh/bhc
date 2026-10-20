@@ -1,40 +1,79 @@
-# Getting Started with BHC
+# Getting Started with bhc
 
-This guide will help you install BHC and write your first program.
+This page gets you from nothing to a running program. The full guides are the
+[quick start](https://docs.arcanist.sh/bhc/docs/quickstart/) and
+[installation](https://docs.arcanist.sh/bhc/docs/installation/) pages on
+docs.arcanist.sh.
 
-## Installation
+## Install
 
-### Linux / macOS
-
-```bash
-curl -fsSL https://bhc.raskell.io/install.sh | sh
-```
-
-### Windows
-
-```powershell
-iwr -useb https://bhc.raskell.io/install.ps1 | iex
-```
-
-### From Source
+### Release archive (macOS Apple Silicon, Linux x86_64)
 
 ```bash
-git clone https://github.com/raskell-io/bhc.git
+curl -fsSL https://arcanist.sh/bhc/install.sh | sh
+```
+
+The script installs the `bhc` binary and its runtime libraries under `~/.bhc`.
+Compiled programs link against those libraries, so put both directories on
+your environment:
+
+```bash
+export PATH="$HOME/.bhc/bin:$PATH"
+export LIBRARY_PATH="$HOME/.bhc/lib:$LIBRARY_PATH"
+```
+
+Release archives are published for `aarch64-darwin` and `x86_64-linux` only.
+They are also attached to each
+[GitHub release](https://github.com/arcanist-sh/bhc/releases).
+
+### With hx
+
+hx can install and drive bhc for a project:
+
+```bash
+hx toolchain install --bhc 0.2.22
+hx build --backend bhc
+```
+
+or select it in `hx.toml`:
+
+```toml
+[compiler]
+backend = "bhc"
+
+[compiler.bhc]
+profile = "default"          # default | server | numeric | edge
+# target = "wasm32-wasi"
+# emit_kernel_report = true
+# tensor_fusion = true
+```
+
+### From source
+
+You need the Rust toolchain pinned in `rust-toolchain.toml` and LLVM 21.
+
+```bash
+git clone https://github.com/arcanist-sh/bhc.git
 cd bhc
-cargo build --release
-cargo install --path crates/bhc
+cargo build --release -p bhc -p bhc-rts \
+  -p bhc-prelude -p bhc-base -p bhc-text -p bhc-containers \
+  -p bhc-transformers -p bhc-numeric -p bhc-concurrent -p bhc-system -p bhc-utils
+export LIBRARY_PATH="$PWD/target/release:$LIBRARY_PATH"
 ```
 
-### Verify Installation
+Building only `--bin bhc` leaves out the `libbhc_*.a` runtime and standard
+library archives, and then compiled programs fail to link.
+
+### Check the install
 
 ```bash
 bhc --version
-# bhc 0.2.1
+# bhc 0.2.22
 ```
 
-## Your First Program
+## Your first program
 
-Create a file called `hello.hs`:
+`hello.hs`:
 
 ```haskell
 module Main where
@@ -43,177 +82,83 @@ main :: IO ()
 main = putStrLn "Hello, World!"
 ```
 
-Compile and run:
-
 ```bash
 bhc hello.hs -o hello
 ./hello
 # Hello, World!
 ```
 
-## Using the REPL
-
-Start the interactive REPL:
+Other subcommands:
 
 ```bash
-bhci
+bhc check hello.hs     # parse, rename and type-check only
+bhc build hello.hs     # same as `bhc hello.hs`; output named after the file
+bhc --help             # all flags
 ```
 
-Try some expressions:
+Put `-o` before the subcommand when you use one (`bhc -o hello build hello.hs`);
+the top-level form `bhc hello.hs -o hello` accepts it anywhere.
+
+`bhc run` exists but runs the program through the Core interpreter rather than
+the compiled path. It currently prints the program's output twice and ignores
+program arguments ([#44](https://github.com/arcanist-sh/bhc/issues/44)), so
+compile and run the binary instead.
+
+## WebAssembly
+
+```bash
+bhc --target wasm32-wasi hello.hs -o hello.wasm
+wasmtime hello.wasm
+# Hello, World!
+```
+
+Spell the target in full: a short triple such as `wasi` currently builds a
+native binary ([#42](https://github.com/arcanist-sh/bhc/issues/42)). File IO
+goes through the first `--dir` preopen (`wasmtime --dir=. app.wasm`). You can
+also try programs in the browser at the
+[playground](https://arcanist.sh/bhc/playground/).
+
+## Profiles
+
+```bash
+bhc --profile numeric Main.hs -o main
+```
+
+The profile is chosen per build, on the command line or in `hx.toml`. There is
+no per-module profile pragma. See [Profiles](profiles.md).
+
+## REPL
+
+`bhc repl` starts `bhci`, which must sit next to the `bhc` binary. The release
+archives do not include it yet, so the REPL is available from a source build
+(`cargo build --release -p bhci`):
 
 ```
-bhci> 2 + 2
+bhci:001> 2 + 2
 4
-
-bhci> map (*2) [1, 2, 3]
-[2, 4, 6]
-
-bhci> :type foldl
-foldl :: (b -> a -> b) -> b -> [a] -> b
-
-bhci> :quit
+  :: Int
+bhci:002> map (*2) [1, 2, 3]
+[2,4,6]
+  :: [Int]
+bhci:003> :quit
 ```
 
-## Project Setup
+## Editor support
 
-Initialize a new project:
+The repository contains a language server, `bhc-lsp` (in `crates/bhc-lsp`),
+that speaks LSP over stdio. It is not shipped in the release archives; build it
+with `cargo build --release -p bhc-lsp` and point your editor's generic LSP
+client at the binary.
 
-```bash
-bhc init my-project
-cd my-project
-```
+## Next steps
 
-This creates:
+- [Examples](examples.md) - complete programs with their verified output
+- [Language Guide](language.md) - what bhc accepts today
+- [Profiles](profiles.md) - what `--profile` changes
 
-```
-my-project/
-├── bhc.toml         # Project configuration
-├── src/
-│   └── Main.hs      # Entry point
-└── tests/
-    └── Test.hs      # Test module
-```
+## Getting help
 
-Build and run:
-
-```bash
-bhc build
-bhc run
-```
-
-## Project Configuration
-
-The `bhc.toml` file configures your project:
-
-```toml
-[package]
-name = "my-project"
-version = "0.1.0"
-edition = "H26"
-
-[build]
-profile = "default"
-optimization = 2
-
-[dependencies]
-base = "1.0"
-containers = "0.6"
-```
-
-## Using Profiles
-
-### Default Profile
-
-Standard lazy Haskell semantics:
-
-```bash
-bhc hello.hs
-```
-
-### Numeric Profile
-
-For performance-critical numeric code:
-
-```bash
-bhc --profile=numeric matrix.hs
-```
-
-Guarantees:
-- Strict evaluation
-- Guaranteed fusion
-- SIMD vectorization
-- No intermediate allocations
-
-Example:
-
-```haskell
-{-# OPTIONS_BHC -profile=numeric #-}
-module DotProduct where
-
-dotProduct :: [Double] -> [Double] -> Double
-dotProduct xs ys = sum (zipWith (*) xs ys)
--- Fuses into a single SIMD loop!
-```
-
-### Server Profile
-
-For web services with structured concurrency:
-
-```bash
-bhc --profile=server server.hs
-```
-
-Example:
-
-```haskell
-{-# OPTIONS_BHC -profile=server #-}
-module Server where
-
-import Control.Concurrent.Scope
-
-handleRequest :: Request -> IO Response
-handleRequest req = withDeadline (seconds 30) $ \scope -> do
-    user <- spawn scope $ fetchUser (reqUserId req)
-    data <- spawn scope $ fetchData (reqDataId req)
-    await user >>= \u -> await data >>= \d -> pure (Response u d)
-```
-
-## Editor Setup
-
-### VS Code
-
-Install the "BHC" extension from the marketplace.
-
-### Neovim
-
-Add to your config:
-
-```lua
-require('lspconfig').bhc.setup {
-  cmd = { "bhc-lsp" },
-  filetypes = { "haskell" },
-}
-```
-
-### Emacs
-
-```elisp
-(add-to-list 'lsp-language-id-configuration '(haskell-mode . "haskell"))
-(lsp-register-client
-  (make-lsp-client :new-connection (lsp-stdio-connection "bhc-lsp")
-                   :major-modes '(haskell-mode)
-                   :server-id 'bhc-lsp))
-```
-
-## Next Steps
-
-- [Language Guide](language.md) - Learn Haskell with BHC
-- [Profiles](profiles.md) - Deep dive into profiles
-- [Examples](examples.md) - More code examples
-
-## Getting Help
-
-- `bhc --help` - Command-line help
-- `/help` in the REPL - REPL commands
-- [GitHub Issues](https://github.com/raskell-io/bhc/issues) - Bug reports
-- [Discord](https://discord.gg/bhc) - Community support
+- `bhc --help`
+- Documentation: https://docs.arcanist.sh/bhc/
+- Status page: https://arcanist.sh/bhc/status/
+- Issues: https://github.com/arcanist-sh/bhc/issues

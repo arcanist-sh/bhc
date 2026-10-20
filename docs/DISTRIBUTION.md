@@ -1,47 +1,47 @@
-# bhc Distribution Channels
+# bhc distribution channels
 
-Tracking all places where bhc is or could be available.
+Where bhc is published, and what each channel installs. Current release:
+v0.2.22.
 
-## Live
+## Recommended
 
-| Channel | Install Command | Link |
-|---------|-----------------|------|
-| GitHub Releases | `curl -fsSL https://bhc.raskell.io/install.sh \| sh` | [releases](https://github.com/raskell-io/bhc/releases) |
-| Homebrew | `brew install raskell-io/tap/bhc` | [homebrew-tap](https://github.com/raskell-io/homebrew-tap) |
+| Channel | Install | Notes |
+|---------|---------|-------|
+| Install script | `curl -fsSL https://arcanist.sh/bhc/install.sh \| sh` | Installs to `~/.bhc`; set `PATH=~/.bhc/bin` and `LIBRARY_PATH=~/.bhc/lib` |
+| hx | `hx toolchain install --bhc 0.2.22` | Then `hx build --backend bhc`, or `[compiler] backend = "bhc"` in `hx.toml` |
+| GitHub Releases | [releases](https://github.com/arcanist-sh/bhc/releases) | `.tar.gz` per platform with `bhc` and `lib/libbhc_*.a`, plus `SHA256SUMS.txt` |
+| From source | `cargo build --release -p bhc -p bhc-rts ...` | See [Getting Started](getting-started.md#from-source); needs LLVM 21 |
 
-## Planned
+The install script does not yet check downloads against `SHA256SUMS.txt`
+([#46](https://github.com/arcanist-sh/bhc/issues/46)); verify by hand if you
+need to.
 
-| Channel | Priority | Notes |
-|---------|----------|-------|
-| Cargo | Ready | `cargo install bhc` - publishes on stable release (requires LLVM 18) |
-| Nix Flake | Medium | `nix run github:raskell-io/bhc` |
-| Scoop | Low | Windows support needed first |
+## Other channels
 
-## Not Yet (requires more platform support)
+| Channel | State |
+|---------|-------|
+| Homebrew (`arcanist-sh/tap/bhc`) | Formula is stuck at 0.2.3 and installs only `libbhc_rts.a` ([#47](https://github.com/arcanist-sh/bhc/issues/47)); use the install script instead |
+| crates.io | The release workflow has a publish job, but the `bhc` crate is not on crates.io yet |
+| Nix, asdf/mise, AUR, Scoop, WinGet, Docker | Not packaged |
 
-| Channel | Blocker |
-|---------|---------|
-| asdf | Need stable release + more platforms |
-| aqua | Need stable release |
-| mise | Uses asdf plugin |
-| AUR | Need Linux aarch64 support |
-| Nixpkgs | Need stable release |
-| WinGet | Need Windows builds |
-| Chocolatey | Need Windows builds |
-| Docker/GHCR | Could add for CI/CD use cases |
+## Platforms
 
-## Current Platform Support
+| Platform | Release archive |
+|----------|-----------------|
+| macOS aarch64 (Apple Silicon) | Yes (`aarch64-apple-darwin`) |
+| Linux x86_64 | Yes (`x86_64-unknown-linux-gnu`) |
+| macOS x86_64 (Intel) | No |
+| Linux aarch64 | No |
+| Windows | No |
 
-| Platform | Status |
-|----------|--------|
-| Linux x86_64 | ✅ Available |
-| macOS aarch64 (Apple Silicon) | ✅ Available |
-| macOS x86_64 (Intel) | ❌ Runner retired |
-| Linux aarch64 | ❌ Cross-compilation issues |
-| Windows | ❌ Not yet supported |
+Other platforms can try a source build. The WebAssembly target
+(`--target wasm32-wasi`) is available from either release build.
 
-## Plugin/Package repos
+## What a release archive contains
 
-| Repo | Purpose |
-|------|---------|
-| [raskell-io/homebrew-tap](https://github.com/raskell-io/homebrew-tap) | Homebrew formula (shared with hx) |
+- `bhc`, the compiler driver
+- `lib/libbhc_*.a`: the runtime (`libbhc_rts.a`) and the standard library
+  archives that compiled programs link against
+
+The REPL (`bhci`) and the language server (`bhc-lsp`) are not in the archives
+yet; build them from source with `cargo build --release -p bhci -p bhc-lsp`.

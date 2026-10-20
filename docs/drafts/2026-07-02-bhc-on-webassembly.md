@@ -1,5 +1,5 @@
 ---
-title: "BHC runs on WebAssembly — and we can prove how much"
+title: "bhc runs on WebAssembly — and we can prove how much"
 status: DRAFT (for review — not published)
 date: 2026-07-02
 author: (you)
@@ -10,11 +10,11 @@ notes: >
   honestly. See the trailing EDITOR NOTE for the evidence trail.
 ---
 
-# BHC runs on WebAssembly — and we can prove how much
+# bhc runs on WebAssembly — and we can prove how much
 
-One of the promises behind BHC is that the same Haskell should be able to run in
+One of the promises behind bhc is that the same Haskell should be able to run in
 more places without changing what it means. Today we can show a concrete step:
-**BHC compiles Haskell to WebAssembly (WASI), and the WASM output behaves the
+**bhc compiles Haskell to WebAssembly (WASI), and the WASM output behaves the
 same as the native binary across our differential test suite** — with a small,
 honest set of exceptions we'll name plainly.
 
@@ -23,7 +23,7 @@ claim this project exists to avoid. Instead, here's the measurement.
 
 ## The measurement
 
-BHC has two backends: native (via LLVM) and WebAssembly (WASI). We run a
+bhc has two backends: native (via LLVM) and WebAssembly (WASI). We run a
 *differential* test harness that compiles every fixture with **both** backends,
 runs each, and compares their output byte-for-byte against the expected result.
 Divergence between the two backends is the signal — it catches cases where one
@@ -59,8 +59,8 @@ sandboxing — the guest only sees directories you hand it):
 bhc --target=wasm32-wasi WordCount.hs -o wc.wasm && wasmtime --dir=. wc.wasm
 ```
 
-Or run it in the browser at [bhc.raskell.io/playground](https://bhc.raskell.io/playground/) —
-the playground *is* the WASM backend, compiled to run BHC itself in WASM.
+Or run it in the browser at [arcanist.sh/bhc/playground](https://arcanist.sh/bhc/playground/) —
+the playground *is* the WASM backend, compiled to run bhc itself in WASM.
 
 ## What doesn't work yet — said plainly
 
@@ -76,13 +76,13 @@ WASM; the native backend has them. If your program sticks to `readFile`/
 `writeFile`, you're on solid ground; if it opens `Handle`s, you're not yet.
 
 **2. The frontier is shared, not infinite.** "236/243 identical" is across *the
-programs BHC already compiles* — the same language surface the native backend
-handles. BHC is still a beta compiler; large real-world packages don't fully
+programs bhc already compiles* — the same language surface the native backend
+handles. bhc is still a beta compiler; large real-world packages don't fully
 compile on *either* backend yet. WASM is at parity with native; it is not ahead
 of the compiler as a whole.
 
 One more thing worth knowing if you're tempted to run something long-lived:
-BHC's heap is not yet garbage-collected on the compiled path — short-lived
+bhc's heap is not yet garbage-collected on the compiled path — short-lived
 programs are fine, long-running ones will grow. That's true on both backends and
 is tracked separately.
 
@@ -92,7 +92,7 @@ The point of a WASM target isn't novelty — it's that a verification-first
 compiler can now put its output somewhere a reader can check it, in a sandbox, in
 a browser, with no toolchain to install. And because we test the two backends
 *against each other*, "it runs on WASM" is a claim with evidence attached rather
-than a vibe. That's the shape we want every BHC capability to have: not "trust
+than a vibe. That's the shape we want every bhc capability to have: not "trust
 us," but "here's what we checked, and here's what we didn't."
 
 ---

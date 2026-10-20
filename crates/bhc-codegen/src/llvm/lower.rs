@@ -6100,10 +6100,42 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             t if self.is_list_type(t) || self.is_string_type(t) => {
                 let l = as_ptr(self, lhs)?;
                 let r = as_ptr(self, rhs)?;
+                let elem = match t {
+                    Ty::List(e) => Some(e.as_ref().clone()),
+                    _ => None,
+                };
                 let res = self
-                    .lower_list_comparison(PrimOp::Eq, l.into(), r.into())?
+                    .lower_list_comparison_of(PrimOp::Eq, l.into(), r.into(), elem)?
                     .ok_or_else(|| CodegenError::Internal("list eq: no value".to_string()))?;
                 self.coerce_to_int(res)
+            }
+            t if self.is_integer_type(t) => {
+                // bhc_integer_compare answers 0/1/2 for LT/EQ/GT.
+                let cmp_fn = *self.functions.get(&VarId::new(1000617)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_integer_compare not declared".to_string())
+                })?;
+                let l = as_ptr(self, lhs)?;
+                let r = as_ptr(self, rhs)?;
+                let tag = self
+                    .builder()
+                    .build_call(cmp_fn, &[l.into(), r.into()], "integer_eq_cmp")
+                    .map_err(|e| CodegenError::Internal(format!("integer eq: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("integer eq: void".to_string()))?
+                    .into_int_value();
+                let eq = self
+                    .builder()
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        tag,
+                        i64_ty.const_int(1, false),
+                        "integer_eq",
+                    )
+                    .map_err(|e| CodegenError::Internal(format!("integer eq: {:?}", e)))?;
+                self.builder()
+                    .build_int_z_extend(eq, i64_ty, "integer_eq_i64")
+                    .map_err(|e| CodegenError::Internal(format!("integer eq: {:?}", e)))
             }
             t if self.is_bool_type(t) => {
                 let l = self.extract_bool_tag(as_ptr(self, lhs)?)?;
@@ -54054,7 +54086,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     // Char comparison in pandoc's `Shared` reached it), so
                     // compare as scalars rather than crashing.
                     if lhs.is_pointer_value() && rhs.is_pointer_value() {
-                        return self.lower_list_comparison(op, lhs, rhs);
+                        let elem_of = |t: &Ty| match t {
+                            Ty::List(e) => Some(e.as_ref().clone()),
+                            _ => None,
+                        };
+                        let elem_ty = match op_ty {
+                            Ty::Fun(a, _) => elem_of(a),
+                            _ => None,
+                        }
+                        .or_else(|| elem_of(&args[0].ty()))
+                        .or_else(|| elem_of(&args[1].ty()));
+                        return self.lower_list_comparison_of(op, lhs, rhs, elem_ty);
                     }
                     return self.lower_comparison(op, lhs, rhs);
                 }
@@ -54607,6 +54649,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        self.lower_list_comparison_of(op, lhs, rhs, None)
+    }
+
+    /// List (in)equality, comparing heads by `elem_ty` when it is a type
+    /// whose values are compared by contents (`Text`, tuples, lists,
+    /// `Integer`); other heads compare as words. `[T.pack "a"] /= [T.pack "a"]`
+    /// was True — pandoc's HTML writer then wrapped every header in a
+    /// `<section>` because its classes list "differed" from the div's.
+    fn lower_list_comparison_of(
+        &mut self,
+        op: PrimOp,
+        lhs: BasicValueEnum<'ctx>,
+        rhs: BasicValueEnum<'ctx>,
+        elem_ty: Option<Ty>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let elem_ty = elem_ty.filter(|t| {
+            matches!(t, Ty::Tuple(_))
+                || self.is_text_type(t)
+                || self.is_list_type(t)
+                || self.is_string_type(t)
+                || self.is_integer_type(t)
+        });
         let tm = self.type_mapper();
         let ptr_type = tm.ptr_type();
         let i64_type = tm.i64_type();
@@ -54719,19 +54783,35 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let head1 = self.extract_adt_field(list1_ptr, 2, 0)?; // arity=2 (Cons), field=0 (head)
         let head2 = self.extract_adt_field(list2_ptr, 2, 0)?;
 
-        // Compare heads as integers (works for primitive types like Int)
-        let head1_int = self
+        let heads_equal = if let Some(ety) = &elem_ty {
+            // By contents; the comparison may add blocks of its own.
+            let eq = self.eq_by_type(ety, head1.into(), head2.into())?;
+            self.builder()
+                .build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    eq,
+                    eq.get_type().const_zero(),
+                    "heads_eq",
+                )
+                .map_err(|e| CodegenError::Internal(format!("failed to cmp: {:?}", e)))?
+        } else {
+            // Compare heads as integers (works for primitive types like Int)
+            let head1_int = self
+                .builder()
+                .build_ptr_to_int(head1, i64_type, "head1_int")
+                .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
+            let head2_int = self
+                .builder()
+                .build_ptr_to_int(head2, i64_type, "head2_int")
+                .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
+            self.builder()
+                .build_int_compare(inkwell::IntPredicate::EQ, head1_int, head2_int, "heads_eq")
+                .map_err(|e| CodegenError::Internal(format!("failed to cmp: {:?}", e)))?
+        };
+        let heads_end_block = self
             .builder()
-            .build_ptr_to_int(head1, i64_type, "head1_int")
-            .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
-        let head2_int = self
-            .builder()
-            .build_ptr_to_int(head2, i64_type, "head2_int")
-            .map_err(|e| CodegenError::Internal(format!("failed to ptr_to_int: {:?}", e)))?;
-        let heads_equal = self
-            .builder()
-            .build_int_compare(inkwell::IntPredicate::EQ, head1_int, head2_int, "heads_eq")
-            .map_err(|e| CodegenError::Internal(format!("failed to cmp: {:?}", e)))?;
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("no current block".to_string()))?;
 
         // If heads not equal, lists not equal
         self.builder()
@@ -54758,7 +54838,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .map_err(|e| CodegenError::Internal(format!("failed to build phi: {:?}", e)))?;
         result_phi.add_incoming(&[(&true_val, both_nil_block)]); // Both nil = equal
         result_phi.add_incoming(&[(&false_val, one_nil_block)]); // One nil = not equal
-        result_phi.add_incoming(&[(&false_val, compare_heads_block)]); // Heads not equal
+        result_phi.add_incoming(&[(&false_val, heads_end_block)]); // Heads not equal
 
         let result = result_phi.as_basic_value().into_int_value();
 

@@ -2872,6 +2872,34 @@ fn refined_occurrence_ty(ctx: &LowerContext, span: Span) -> Option<Ty> {
     Some(subst.apply(&recorded))
 }
 
+/// The positions of a multi-parameter constraint that select an instance for
+/// functional-dependency completion: the ground ones, and — when another
+/// position is a bare variable waiting to be determined — those with a
+/// concrete head, their inner variables treated as rigid. Inside a function
+/// generic in its state `u`, `MonadState ?s (StateT u Identity)` matches
+/// `instance MonadState s (StateT s m)` through its `StateT` position and
+/// fixes `?s = u`; with ground positions only, `modify` there was left with no
+/// dictionary.
+fn fundep_match_positions(inst_types: &[Ty], args: &[Ty]) -> (Vec<Ty>, Vec<Ty>) {
+    let has_bare_var = args.iter().any(|a| matches!(a, Ty::Var(_)));
+    let mut pat = Vec::new();
+    let mut tgt = Vec::new();
+    for (it, a) in inst_types.iter().zip(args) {
+        let headed = has_bare_var && !matches!(a, Ty::Var(_)) && has_concrete_head(a);
+        if !has_type_variables(a) || headed {
+            pat.push(it.clone());
+            tgt.push(a.clone());
+        }
+    }
+    (pat, tgt)
+}
+
+/// Whether completion determined a bare-variable position: the instance's own
+/// type there (`inst_ty`) was bound by the match to something else (`filled`).
+fn determined_by_match(ours: &Ty, filled: &Ty, inst_ty: &Ty) -> bool {
+    matches!(ours, Ty::Var(_)) && filled != inst_ty && filled != ours
+}
+
 /// Lower a value argument, applying its dictionaries when it is a constrained
 /// function/value used at a known concrete type — e.g. a parser
 /// `digit :: Stream s Identity t => Parsec s u Char` passed to `parse`, whose
@@ -3289,14 +3317,8 @@ fn resolve_constrained_fn_dicts(
                                 if inst.instance_types.len() != concrete_args.len() {
                                     return None;
                                 }
-                                let mut pat = Vec::new();
-                                let mut tgt = Vec::new();
-                                for (it, a) in inst.instance_types.iter().zip(&concrete_args) {
-                                    if !has_type_variables(a) {
-                                        pat.push(it.clone());
-                                        tgt.push(a.clone());
-                                    }
-                                }
+                                let (pat, tgt) =
+                                    fundep_match_positions(&inst.instance_types, &concrete_args);
                                 if pat.is_empty() {
                                     return None;
                                 }
@@ -3314,8 +3336,11 @@ fn resolve_constrained_fn_dicts(
                                 let merged: Vec<Ty> = filled
                                     .iter()
                                     .zip(&concrete_args)
-                                    .map(|(f, ours)| {
-                                        if has_type_variables(ours) && !has_type_variables(f) {
+                                    .zip(&inst.instance_types)
+                                    .map(|((f, ours), it)| {
+                                        if has_type_variables(ours) && !has_type_variables(f)
+                                            || determined_by_match(ours, f, it)
+                                        {
                                             f.clone()
                                         } else {
                                             ours.clone()
@@ -3489,14 +3514,8 @@ fn resolve_user_dicts(
                                 if inst.instance_types.len() != concrete_args.len() {
                                     return None;
                                 }
-                                let mut pat = Vec::new();
-                                let mut tgt = Vec::new();
-                                for (it, a) in inst.instance_types.iter().zip(&concrete_args) {
-                                    if !has_type_variables(a) {
-                                        pat.push(it.clone());
-                                        tgt.push(a.clone());
-                                    }
-                                }
+                                let (pat, tgt) =
+                                    fundep_match_positions(&inst.instance_types, &concrete_args);
                                 if pat.is_empty() {
                                     return None;
                                 }
@@ -3521,10 +3540,12 @@ fn resolve_user_dicts(
                                     .zip(&concrete_args)
                                     .map(|(it, ours)| {
                                         let f = sub.apply(it);
-                                        if has_type_variables(&f) {
-                                            ours.clone()
-                                        } else {
+                                        if !has_type_variables(&f)
+                                            || determined_by_match(ours, &f, it)
+                                        {
                                             f
+                                        } else {
+                                            ours.clone()
                                         }
                                     })
                                     .collect();

@@ -484,6 +484,26 @@ fn test_tier3_integer_conversions_native() {
     run_native_test("tier3_io/integer_conversions", Profile::Default);
 }
 
+/// Closure IO model only (library transformers): eager mode's hard-coded
+/// State cannot dispatch a method of a class generic in the state.
+#[test]
+fn test_tier3_monadstate_generic_state_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/monadstate_generic_state", Profile::Default);
+}
+
+/// Closure IO model only: eager mode erases the element types the
+/// comparison needs.
+#[test]
+fn test_tier3_list_eq_by_contents_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/list_eq_by_contents", Profile::Default);
+}
+
 #[test]
 fn test_tier3_case_qualified_scrutinee_native() {
     run_native_test("tier3_io/case_qualified_scrutinee", Profile::Default);

@@ -2642,12 +2642,23 @@ impl LowerContext {
         // Not when a parameter is still a bare variable (`Walkable ?a [Cell]`):
         // instance construction would then search pandoc's generic
         // `Walkable a (t b)` without end.
+        //
+        // A bare variable that also occurs inside another argument is
+        // determined by it (`MonadState u (StateT u Identity)` in a function
+        // generic in its state `u`), and does not open that search.
+        let bare_var_undetermined = constraint.args.iter().any(|t| match t {
+            Ty::Var(v) => !constraint
+                .args
+                .iter()
+                .any(|o| !matches!(o, Ty::Var(_)) && o.free_vars().iter().any(|w| w.id == v.id)),
+            _ => false,
+        });
         if bhc_types::io_closure_mode()
             && constraint
                 .args
                 .last()
                 .is_some_and(|t| matches!(applied_head(t), Ty::Con(_)))
-            && !constraint.args.iter().any(|t| matches!(t, Ty::Var(_)))
+            && !bare_var_undetermined
         {
             let mut dict_ctx =
                 DictContext::new_with_var_map(&self.class_registry, self.var_map.clone());

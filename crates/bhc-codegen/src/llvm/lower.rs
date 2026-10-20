@@ -6885,6 +6885,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "recip" => self.lower_builtin_rational_unary(args[0], 1000914, "recip"),
 
             // Numeric conversions (identity for BHC's single Int type)
+            "fromIntegral" | "fromInteger" if self.is_integer_to_machine_int(args[0]) => {
+                self.lower_integer_to_i64(args[0])
+            }
+            "fromIntegral" | "toInteger" if self.is_machine_int_to_integer() => {
+                let v = self.lower_expr(args[0])?.ok_or_else(|| {
+                    CodegenError::Internal("toInteger: no argument value".to_string())
+                })?;
+                // The source is a machine integer, possibly pointer-encoded;
+                // `promote_to_integer` would take a pointer for a bignum.
+                let i = self.coerce_to_int(v)?;
+                Ok(Some(self.promote_to_integer(i.into())?))
+            }
             "fromIntegral" | "toInteger" => self.lower_expr(args[0]),
             "fromInteger" => {
                 // Check if the context expects Rational
@@ -6915,6 +6927,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
             // Integer operations via RTS
             "gcd" => self.lower_builtin_int_binop_rts(args[0], args[1], 1000500, "gcd"),
+            "^" => self.lower_builtin_power(args[0], args[1]),
             "lcm" => self.lower_builtin_int_binop_rts(args[0], args[1], 1000501, "lcm"),
 
             // Division with tuples
@@ -9625,6 +9638,186 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower `replicate` - create a list with n copies of an element.
+    /// `(^) :: (Num a, Integral b) => a -> b -> a` by repeated
+    /// multiplication, at the base's representation: a machine integer, a
+    /// `Double`, or a boxed `Integer` (multiplied through `bhc_integer_mul`).
+    /// The exponent is read as an `i64` (from a bignum when it is an
+    /// `Integer`, as a defaulted literal exponent is). A negative exponent
+    /// yields 1 rather than raising.
+    fn lower_builtin_power(
+        &mut self,
+        base_expr: &Expr,
+        exp_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        enum Rep {
+            Int,
+            Double,
+            Integer,
+        }
+        let (head_base, head_exp) = {
+            let mut t = &self.current_builtin_ty;
+            while let Ty::Forall(_, body) = t {
+                t = body;
+            }
+            match t {
+                Ty::Fun(a, rest) => match rest.as_ref() {
+                    Ty::Fun(b, _) => (a.as_ref().clone(), b.as_ref().clone()),
+                    _ => (a.as_ref().clone(), Ty::Error),
+                },
+                _ => (Ty::Error, Ty::Error),
+            }
+        };
+        let base_val = self
+            .lower_expr(base_expr)?
+            .ok_or_else(|| CodegenError::Internal("^: base has no value".to_string()))?;
+        let exp_val = self
+            .lower_expr(exp_expr)?
+            .ok_or_else(|| CodegenError::Internal("^: exponent has no value".to_string()))?;
+
+        let is_double_ty =
+            |t: &Ty| matches!(t, Ty::Con(c) if matches!(c.name.as_str(), "Double" | "Float"));
+        let rep = if base_val.is_float_value()
+            || is_double_ty(&head_base)
+            || is_double_ty(&base_expr.ty())
+        {
+            Rep::Double
+        } else if self.is_integer_type(&head_base) || self.is_integer_expr(base_expr) {
+            Rep::Integer
+        } else {
+            Rep::Int
+        };
+
+        let i64_ty = self.type_mapper().i64_type();
+        let exponent = if exp_val.is_pointer_value()
+            && (self.is_integer_type(&head_exp) || self.is_integer_expr(exp_expr))
+        {
+            let forced = self.build_force(exp_val)?;
+            let to_i64 = *self.functions.get(&VarId::new(1000602)).ok_or_else(|| {
+                CodegenError::Internal("bhc_integer_to_i64 not declared".to_string())
+            })?;
+            self.builder()
+                .build_call(to_i64, &[forced.into()], "pow_exp")
+                .map_err(|e| CodegenError::Internal(format!("^ exponent: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("^ exponent: void".to_string()))?
+                .into_int_value()
+        } else {
+            self.coerce_to_int(exp_val)?
+        };
+
+        // The accumulator's initial value and the base, in the chosen representation.
+        let (one, base): (BasicValueEnum<'ctx>, BasicValueEnum<'ctx>) = match rep {
+            Rep::Int => (
+                i64_ty.const_int(1, false).into(),
+                self.coerce_to_int(base_val)?.into(),
+            ),
+            Rep::Double => (
+                self.type_mapper().f64_type().const_float(1.0).into(),
+                self.coerce_to_f64(base_val)?.into(),
+            ),
+            Rep::Integer => {
+                let b = if base_val.is_pointer_value() {
+                    self.build_force(base_val)?
+                } else {
+                    self.promote_to_integer(base_val)?
+                };
+                (
+                    self.promote_to_integer(i64_ty.const_int(1, false).into())?,
+                    b,
+                )
+            }
+        };
+
+        let current_fn = self
+            .builder()
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| CodegenError::Internal("no current function".to_string()))?;
+        let header = self
+            .llvm_context()
+            .append_basic_block(current_fn, "pow_header");
+        let body = self
+            .llvm_context()
+            .append_basic_block(current_fn, "pow_body");
+        let exit = self
+            .llvm_context()
+            .append_basic_block(current_fn, "pow_exit");
+        let entry = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("^: no block".to_string()))?;
+        self.builder()
+            .build_unconditional_branch(header)
+            .map_err(|e| CodegenError::Internal(format!("^ branch: {:?}", e)))?;
+
+        self.builder().position_at_end(header);
+        let acc_phi = self
+            .builder()
+            .build_phi(one.get_type(), "pow_acc")
+            .map_err(|e| CodegenError::Internal(format!("^ phi: {:?}", e)))?;
+        let count_phi = self
+            .builder()
+            .build_phi(i64_ty, "pow_count")
+            .map_err(|e| CodegenError::Internal(format!("^ phi: {:?}", e)))?;
+        let count = count_phi.as_basic_value().into_int_value();
+        let done = self
+            .builder()
+            .build_int_compare(
+                inkwell::IntPredicate::SLE,
+                count,
+                i64_ty.const_zero(),
+                "pow_done",
+            )
+            .map_err(|e| CodegenError::Internal(format!("^ compare: {:?}", e)))?;
+        self.builder()
+            .build_conditional_branch(done, exit, body)
+            .map_err(|e| CodegenError::Internal(format!("^ branch: {:?}", e)))?;
+
+        self.builder().position_at_end(body);
+        let acc = acc_phi.as_basic_value();
+        let next: BasicValueEnum<'ctx> = match rep {
+            Rep::Int => self
+                .builder()
+                .build_int_mul(acc.into_int_value(), base.into_int_value(), "pow_mul")
+                .map_err(|e| CodegenError::Internal(format!("^ mul: {:?}", e)))?
+                .into(),
+            Rep::Double => self
+                .builder()
+                .build_float_mul(acc.into_float_value(), base.into_float_value(), "pow_fmul")
+                .map_err(|e| CodegenError::Internal(format!("^ fmul: {:?}", e)))?
+                .into(),
+            Rep::Integer => {
+                let mul = *self.functions.get(&VarId::new(1000605)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_integer_mul not declared".to_string())
+                })?;
+                self.builder()
+                    .build_call(mul, &[acc.into(), base.into()], "pow_imul")
+                    .map_err(|e| CodegenError::Internal(format!("^ integer mul: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::Internal("^ integer mul: void".to_string()))?
+            }
+        };
+        let next_count = self
+            .builder()
+            .build_int_sub(count, i64_ty.const_int(1, false), "pow_dec")
+            .map_err(|e| CodegenError::Internal(format!("^ sub: {:?}", e)))?;
+        let body_end = self
+            .builder()
+            .get_insert_block()
+            .ok_or_else(|| CodegenError::Internal("^: no block".to_string()))?;
+        self.builder()
+            .build_unconditional_branch(header)
+            .map_err(|e| CodegenError::Internal(format!("^ branch: {:?}", e)))?;
+
+        acc_phi.add_incoming(&[(&one, entry), (&next, body_end)]);
+        count_phi.add_incoming(&[(&exponent, entry), (&next_count, body_end)]);
+
+        self.builder().position_at_end(exit);
+        Ok(Some(acc_phi.as_basic_value()))
+    }
+
     fn lower_builtin_replicate(
         &mut self,
         n_expr: &Expr,
@@ -16084,6 +16277,35 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .map_err(|e| {
                         CodegenError::Internal(format!("failed to call print_double: {:?}", e))
                     })?;
+            }
+            BasicValueEnum::PointerValue(p)
+                if self.is_integer_type(&expr_ty) || self.is_integer_expr(val_expr) =>
+            {
+                // An Integer is a boxed bignum: render it with
+                // bhc_integer_show, as `show` does. The generic pointer
+                // branches below read it as a String cons cell.
+                let forced = self.build_force(p.into())?;
+                let show_fn = *self.functions.get(&VarId::new(1000618)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_integer_show not declared".to_string())
+                })?;
+                let cstr = self
+                    .builder()
+                    .build_call(show_fn, &[forced.into()], "show_integer")
+                    .map_err(|e| CodegenError::Internal(format!("show_integer call: {:?}", e)))?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| {
+                        CodegenError::Internal("show_integer returned void".to_string())
+                    })?;
+                let print_ln = *self.functions.get(&VarId::new(1000002)).ok_or_else(|| {
+                    CodegenError::Internal("bhc_print_string_ln not declared".to_string())
+                })?;
+                self.builder()
+                    .build_call(print_ln, &[cstr.into_pointer_value().into()], "")
+                    .map_err(|e| {
+                        CodegenError::Internal(format!("print_string_ln call: {:?}", e))
+                    })?;
+                return Ok(Some(self.type_mapper().ptr_type().const_null().into()));
             }
             BasicValueEnum::PointerValue(p) => {
                 // A Rational renders as "n % d" via bhc_rational_show — otherwise
@@ -25620,6 +25842,38 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 )
                 .map_err(|e| CodegenError::Internal(format!("rat compare select2: {:?}", e)))?;
             return self.allocate_ordering_adt(tag.into_int_value(), "rational_compare");
+        }
+
+        // Arbitrary-precision Integer: bhc_integer_compare answers the
+        // Ordering tag directly (0 = LT, 1 = EQ, 2 = GT).
+        if self.is_integer_expr(a_expr) || self.is_integer_expr(b_expr) {
+            let mut operands = Vec::with_capacity(2);
+            for e in [a_expr, b_expr] {
+                let v = self
+                    .lower_expr(e)?
+                    .ok_or_else(|| CodegenError::Internal("compare: no operand".to_string()))?;
+                let v = if v.is_pointer_value() {
+                    self.build_force(v)?
+                } else {
+                    self.promote_to_integer(v)?
+                };
+                operands.push(v);
+            }
+            let rts_fn = *self.functions.get(&VarId::new(1000617)).ok_or_else(|| {
+                CodegenError::Internal("bhc_integer_compare not declared".to_string())
+            })?;
+            let tag = self
+                .builder()
+                .build_call(
+                    rts_fn,
+                    &[operands[0].into(), operands[1].into()],
+                    "integer_compare",
+                )
+                .map_err(|e| CodegenError::Internal(format!("integer compare: {:?}", e)))?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::Internal("integer compare: void".to_string()))?;
+            return self.allocate_ordering_adt(tag.into_int_value(), "integer_compare");
         }
 
         // Integer comparison fallback
@@ -46319,6 +46573,76 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(val))
     }
 
+    /// Whether the builtin being lowered converts an `Integer` (a boxed
+    /// bignum) to a machine integer: `fromIntegral`/`fromInteger` at
+    /// `Integer -> Int`. Those are not identities — the bignum has to be
+    /// read back, or the result is the heap pointer.
+    fn is_integer_to_machine_int(&self, arg: &Expr) -> bool {
+        fn param_and_result(t: &Ty) -> Option<(&Ty, &Ty)> {
+            match t {
+                Ty::Forall(_, body) => param_and_result(body),
+                Ty::Fun(a, r) => Some((a.as_ref(), r.as_ref())),
+                _ => None,
+            }
+        }
+        let Some((param, result)) = param_and_result(&self.current_builtin_ty) else {
+            return false;
+        };
+        let machine = matches!(
+            result,
+            Ty::Con(c) if matches!(
+                c.name.as_str(),
+                "Int" | "Int8" | "Int16" | "Int32" | "Int64"
+                    | "Word" | "Word8" | "Word16" | "Word32" | "Word64"
+            )
+        );
+        machine && (self.is_integer_type(param) || self.is_integer_type(&arg.ty()))
+    }
+
+    /// Whether the builtin being lowered widens a machine integer to an
+    /// `Integer` (`toInteger`/`fromIntegral` at `Int -> Integer`).
+    fn is_machine_int_to_integer(&self) -> bool {
+        let mut t = &self.current_builtin_ty;
+        while let Ty::Forall(_, body) = t {
+            t = body;
+        }
+        match t {
+            Ty::Fun(a, r) => {
+                matches!(a.as_ref(), Ty::Con(c) if matches!(
+                    c.name.as_str(),
+                    "Int" | "Int8" | "Int16" | "Int32" | "Int64"
+                        | "Word" | "Word8" | "Word16" | "Word32" | "Word64"
+                )) && self.is_integer_type(r)
+            }
+            _ => false,
+        }
+    }
+
+    /// Read an `Integer` back as an `i64` (`bhc_integer_to_i64`).
+    fn lower_integer_to_i64(&mut self, arg: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let v = self
+            .lower_expr(arg)?
+            .ok_or_else(|| CodegenError::Internal("fromInteger: no argument value".to_string()))?;
+        if v.is_int_value() {
+            // Already a machine integer (a literal lowered unboxed).
+            return Ok(Some(v));
+        }
+        let ptr = self.value_to_ptr(v)?;
+        let forced = self.build_force(ptr.into())?;
+        let to_i64 = *self
+            .functions
+            .get(&VarId::new(1000602))
+            .ok_or_else(|| CodegenError::Internal("bhc_integer_to_i64 not declared".to_string()))?;
+        let r = self
+            .builder()
+            .build_call(to_i64, &[forced.into()], "integer_to_i64")
+            .map_err(|e| CodegenError::Internal(format!("integer_to_i64: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("integer_to_i64 returned void".to_string()))?;
+        Ok(Some(r))
+    }
+
     /// E.45: Promote an Int value to Integer via bhc_integer_from_i64.
     /// If the value is already a pointer (e.g., already Integer), returns it unchanged.
     fn promote_to_integer(
@@ -48159,7 +48483,33 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 }
                 None
             }
-            Expr::App(f, _, _) => Self::is_user_adt_expr(f, constructor_metadata),
+            Expr::App(f, _, _) => Self::is_user_adt_expr(f, constructor_metadata).or_else(|| {
+                // A call of a function whose declared result is a user type
+                // (`mk 5` with `mk :: Int -> D`).
+                let mut head = f.as_ref();
+                while let Expr::App(g, _, _) = head {
+                    head = g.as_ref();
+                }
+                let Expr::Var(var, _) = head else {
+                    return None;
+                };
+                let mut t = &var.ty;
+                loop {
+                    match t {
+                        Ty::Forall(_, body) => t = body,
+                        Ty::Fun(_, r) => t = r,
+                        _ => break,
+                    }
+                }
+                let Ty::Con(c) = t else {
+                    return None;
+                };
+                let type_name = c.name.as_str();
+                constructor_metadata
+                    .values()
+                    .any(|m| m.type_name.as_deref() == Some(type_name))
+                    .then(|| type_name.to_string())
+            }),
             Expr::Let(_, body, _) => Self::is_user_adt_expr(body, constructor_metadata),
             _ => None,
         }
@@ -48431,6 +48781,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Lower the function body, handling lambda parameters
         let result = self.lower_function_body(fn_val, expr, &integer_param_positions)?;
+        let result = self.promote_integer_result(&var.ty, result)?;
 
         // Pop all the pushed layers
         if extra_layer.is_some() {
@@ -56154,6 +56505,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Handle lambda parameters
         let result = self.lower_function_body(fn_val, expr, &integer_param_positions)?;
+        let result = self.promote_integer_result(&var.ty, result)?;
 
         // Check if the current block already has a terminator (e.g., from `error` or `unreachable`)
         // If so, don't add another terminator
@@ -56254,6 +56606,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
         // Handle lambda parameters
         let result = self.lower_function_body(fn_val, expr, &integer_param_positions)?;
+        let result = self.promote_integer_result(&var.ty, result)?;
 
         // Check if the current block already has a terminator
         let current_block = self.builder().get_insert_block();
@@ -56284,6 +56637,31 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Lower a function body, handling lambda parameters.
+    /// A binding declared to return `Integer` whose body produced a machine
+    /// integer (types are erased in the eager model, so an arithmetic body
+    /// like `2 ^ 70` lowers at `Int`) returns it promoted to a bignum —
+    /// callers read the result as an `Integer` pointer.
+    fn promote_integer_result(
+        &mut self,
+        declared: &Ty,
+        result: Option<BasicValueEnum<'ctx>>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let mut t = declared;
+        loop {
+            match t {
+                Ty::Forall(_, body) => t = body,
+                Ty::Fun(_, r) => t = r,
+                _ => break,
+            }
+        }
+        match result {
+            Some(v) if v.is_int_value() && self.is_integer_type(t) => {
+                Ok(Some(self.promote_to_integer(v)?))
+            }
+            other => Ok(other),
+        }
+    }
+
     fn lower_function_body(
         &mut self,
         fn_val: FunctionValue<'ctx>,
@@ -60008,6 +60386,7 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "odd" => Some(1),
         "gcd" => Some(2),
         "lcm" => Some(2),
+        "^" => Some(2),
         "divMod" => Some(2),
         "quotRem" => Some(2),
         "%" => Some(2),

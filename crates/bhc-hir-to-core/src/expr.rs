@@ -229,7 +229,8 @@ fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<cor
         Expr::Lit(lit, span) => lower_lit_at(ctx, lit, *span),
 
         Expr::Var(def_ref) => {
-            let e = lower_var(ctx, def_ref)?;
+            let mut e = lower_var(ctx, def_ref)?;
+            stamp_integer_conversion_ty(ctx, def_ref.span, &mut e);
             Ok(apply_method_level_dicts_to_value(ctx, def_ref, e))
         }
 
@@ -823,6 +824,43 @@ fn lower_fold_map_via_monoid(ctx: &mut LowerContext, span: Span) -> Option<core:
 ///    resolve instances for concrete types.
 ///
 /// 3. **Regular variables**: Just return a variable reference.
+/// `fromIntegral`/`fromInteger`/`toInteger` between `Integer` and a machine
+/// integer are real conversions (the bignum is boxed), but the builtin's own
+/// type is a loose scheme (`a -> b`, or `Int -> Int`). Record the resolved
+/// type on the variable so codegen can tell them from the identity cases.
+fn stamp_integer_conversion_ty(ctx: &LowerContext, span: Span, e: &mut core::Expr) {
+    let core::Expr::Var(v, _) = e else {
+        return;
+    };
+    if v.name.as_str() == "^" {
+        // `(^)`'s base and exponent types differ (`Integer ^ Int`); codegen
+        // picks the multiplication from the resolved base type.
+        if let Some(resolved) = ctx.resolved_expr_ty_opt(span) {
+            if matches!(&resolved, Ty::Fun(a, _) if matches!(a.as_ref(), Ty::Con(_))) {
+                v.ty = resolved;
+            }
+        }
+        return;
+    }
+    if !matches!(
+        v.name.as_str(),
+        "fromIntegral" | "fromInteger" | "toInteger"
+    ) {
+        return;
+    }
+    let Some(resolved) = ctx.resolved_expr_ty_opt(span) else {
+        return;
+    };
+    if let Ty::Fun(a, r) = &resolved {
+        let is_con = |t: &Ty, name: Option<&str>| matches!(t, Ty::Con(c) if name.is_none_or(|n| c.name.as_str() == n));
+        if (is_con(a, Some("Integer")) && is_con(r, None))
+            || (is_con(a, None) && is_con(r, Some("Integer")))
+        {
+            v.ty = resolved.clone();
+        }
+    }
+}
+
 fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr> {
     // First, check if this is a class method reference
     let var_name = ctx.lookup_var(def_ref.def_id).map(|v| v.name);

@@ -480,6 +480,11 @@ fn test_tier3_tuple_equality_native() {
 }
 
 #[test]
+fn test_tier3_integer_conversions_native() {
+    run_native_test("tier3_io/integer_conversions", Profile::Default);
+}
+
+#[test]
 fn test_tier3_monadplus_builtin_native() {
     run_native_test("tier3_io/monadplus_builtin", Profile::Default);
 }

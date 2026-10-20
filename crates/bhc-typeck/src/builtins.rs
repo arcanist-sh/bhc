@@ -608,6 +608,16 @@ impl Builtins {
             )
         };
 
+        let power_op = || {
+            Scheme::poly(
+                vec![a.clone(), b.clone()],
+                Ty::fun(
+                    Ty::Var(a.clone()),
+                    Ty::fun(Ty::Var(b.clone()), Ty::Var(a.clone())),
+                ),
+            )
+        };
+
         let bool_binop = || {
             Scheme::mono(Ty::fun(
                 self.bool_ty.clone(),
@@ -626,8 +636,9 @@ impl Builtins {
             ("/", num_binop()),
             ("div", num_binop()),
             ("mod", num_binop()),
-            ("^", num_binop()),
-            ("^^", num_binop()),
+            // (^) :: (Num a, Integral b) => a -> b -> a (and (^^) alike)
+            ("^", power_op()),
+            ("^^", power_op()),
             ("**", num_binop()),
             // Comparison operators
             ("==", eq_binop()),
@@ -2909,8 +2920,11 @@ impl Builtins {
             }),
             // Numeric conversion (simplified)
             ("toInteger", {
-                // toInteger :: Int -> Int (identity for Int)
-                Scheme::mono(Ty::fun(self.int_ty.clone(), self.int_ty.clone()))
+                // toInteger :: Integral a => a -> Integer
+                Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), self.integer_ty.clone()),
+                )
             }),
             ("toRational", {
                 // toRational :: Real a => a -> Rational

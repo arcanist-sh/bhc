@@ -1059,16 +1059,12 @@ impl DerivingContext {
             },
         };
         let eq_expr = core::Expr::Var(eq_var, span);
-        let app1 = core::Expr::App(
-            Box::new(eq_expr),
-            Box::new(core::Expr::Var(x.clone(), span)),
-            span,
+        let (x, y) = (
+            Self::typed_operand(x, field_ty),
+            Self::typed_operand(y, field_ty),
         );
-        core::Expr::App(
-            Box::new(app1),
-            Box::new(core::Expr::Var(y.clone(), span)),
-            span,
-        )
+        let app1 = core::Expr::App(Box::new(eq_expr), Box::new(core::Expr::Var(x, span)), span);
+        core::Expr::App(Box::new(app1), Box::new(core::Expr::Var(y, span)), span)
     }
 
     /// Make a call to (&&) for two boolean expressions.
@@ -1112,7 +1108,8 @@ impl DerivingContext {
         };
 
         // case x of { Con inner_x -> case y of { Con inner_y -> inner_x == inner_y } }
-        let eq_call = self.make_eq_call(&inner_x, &inner_y, None, span);
+        let field_tys = Self::con_field_types(&newtype_def.con.fields);
+        let eq_call = self.make_eq_call(&inner_x, &inner_y, field_tys.first(), span);
 
         let inner_case = self.make_case(
             core::Expr::Var(y_var.clone(), span),
@@ -1439,16 +1436,30 @@ impl DerivingContext {
             },
         };
         let compare_expr = core::Expr::Var(compare_var, span);
+        let (x, y) = (
+            Self::typed_operand(x, field_ty),
+            Self::typed_operand(y, field_ty),
+        );
         let app1 = core::Expr::App(
             Box::new(compare_expr),
-            Box::new(core::Expr::Var(x.clone(), span)),
+            Box::new(core::Expr::Var(x, span)),
             span,
         );
-        core::Expr::App(
-            Box::new(app1),
-            Box::new(core::Expr::Var(y.clone(), span)),
-            span,
-        )
+        core::Expr::App(Box::new(app1), Box::new(core::Expr::Var(y, span)), span)
+    }
+
+    /// A compared field variable carries its field type when that is
+    /// `Integer`: codegen picks the bignum comparison from the operand types,
+    /// and the binders of a derived instance are otherwise untyped (a
+    /// `newtype Day = Day Integer` compared its fields as pointers).
+    fn typed_operand(v: &Var, field_ty: Option<&Ty>) -> Var {
+        match field_ty {
+            Some(t @ Ty::Con(c)) if c.name.as_str() == "Integer" => Var {
+                ty: t.clone(),
+                ..v.clone()
+            },
+            _ => v.clone(),
+        }
     }
 
     /// Derive Ord for a newtype.
@@ -1474,7 +1485,8 @@ impl DerivingContext {
             arity: 1,
         };
 
-        let compare_call = self.make_compare_call(&inner_x, &inner_y, None, span);
+        let field_tys = Self::con_field_types(&newtype_def.con.fields);
+        let compare_call = self.make_compare_call(&inner_x, &inner_y, field_tys.first(), span);
 
         let inner_case = self.make_case(
             core::Expr::Var(y_var.clone(), span),

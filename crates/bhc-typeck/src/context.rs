@@ -2499,7 +2499,15 @@ impl TyCtxt {
                 };
             let scheme = match name {
                 // Arithmetic operators
-                "+" | "-" | "*" | "/" | "div" | "mod" | "^" | "^^" | "**" => num_binop(),
+                // (^) :: (Num a, Integral b) => a -> b -> a (and (^^) alike)
+                "^" | "^^" => {
+                    let e = TyVar::new_star(0xFFFF_0001);
+                    Scheme::poly(
+                        vec![a.clone(), e.clone()],
+                        Ty::fun(Ty::Var(a.clone()), Ty::fun(Ty::Var(e), Ty::Var(a.clone()))),
+                    )
+                }
+                "+" | "-" | "*" | "/" | "div" | "mod" | "**" => num_binop(),
                 // Comparison operators
                 "==" | "/=" => eq_binop(),
                 "<" | "<=" | ">" | ">=" => cmp_binop(),
@@ -3238,10 +3246,10 @@ impl TyCtxt {
                     Ty::fun(Ty::Var(a.clone()), Ty::Var(b.clone())),
                 ),
                 // toInteger :: Integral a => a -> Integer
-                "toInteger" => Scheme::mono(Ty::fun(
-                    self.builtins.int_ty.clone(),
-                    self.builtins.int_ty.clone(),
-                )),
+                "toInteger" => Scheme::poly(
+                    vec![a.clone()],
+                    Ty::fun(Ty::Var(a.clone()), self.builtins.integer_ty.clone()),
+                ),
                 // any :: (a -> Bool) -> [a] -> Bool
                 "any" => {
                     let list_a = Ty::List(Box::new(Ty::Var(a.clone())));

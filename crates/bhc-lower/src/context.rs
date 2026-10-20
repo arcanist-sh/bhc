@@ -258,6 +258,10 @@ pub struct LowerContext {
     /// Constructors loaded from `.bhi` interfaces for codegen metadata:
     /// (name, tag, arity, owning type name, is_newtype).
     pub interface_constructors: Vec<InterfaceConstructorEntry>,
+    /// The `DefId` each `interface_constructors` entry was bound under, index
+    /// for index. A qualified-only import (`A.Done`) binds no bare name, so the
+    /// constructor cannot be found again by name alone.
+    pub interface_constructor_ids: Vec<DefId>,
     /// Instances loaded from `.bhi` interfaces: (class name, instance types,
     /// the instance's own method names). hir-to-core registers these so
     /// class-method calls on concrete types specialize to
@@ -330,6 +334,7 @@ impl LowerContext {
             interface_value_modules: FxHashMap::default(),
             qualified_leak_names: FxHashSet::default(),
             interface_constructors: Vec::new(),
+            interface_constructor_ids: Vec::new(),
             interface_instances: Vec::new(),
             interface_classes: Vec::new(),
             interface_class_fundeps: FxHashMap::default(),

@@ -609,17 +609,28 @@ impl Compiler {
             ]
             .into_iter()
             .collect();
-            lower_ctx
-                .interface_constructors
-                .iter()
-                .filter(|(name, _, _, _, _, _)| !builtins.contains(name.as_str()))
-                .filter_map(|(name, tag, arity, type_name, is_newtype, field_types)| {
-                    let sym = Symbol::intern(name);
-                    let def_id = lower_ctx.lookup_constructor(sym)?;
+            // Each entry is registered under the id its bare name resolves to
+            // and under the id it was bound with at load time: a qualified-only
+            // import (`A.Done`) binds no bare name, and its patterns then got
+            // a made-up tag and never matched.
+            let mut map = bhc_hir_to_core::ConstructorInfoMap::default();
+            for (i, (name, tag, arity, type_name, is_newtype, field_types)) in
+                lower_ctx.interface_constructors.iter().enumerate()
+            {
+                if builtins.contains(name.as_str()) {
+                    continue;
+                }
+                let sym = Symbol::intern(name);
+                let by_name = lower_ctx.lookup_constructor(sym);
+                let recorded = lower_ctx.interface_constructor_ids.get(i).copied();
+                for def_id in [by_name, recorded.filter(|r| Some(*r) != by_name)]
+                    .into_iter()
+                    .flatten()
+                {
                     let field_names = lower_ctx
                         .get_constructor_field_names(def_id)
                         .unwrap_or_default();
-                    Some((
+                    map.insert(
                         def_id,
                         bhc_hir_to_core::ConstructorInfo {
                             name: sym,
@@ -632,9 +643,10 @@ impl Compiler {
                             existential_classes: vec![],
                             field_types: field_types.clone(),
                         },
-                    ))
-                })
-                .collect::<bhc_hir_to_core::ConstructorInfoMap>()
+                    );
+                }
+            }
+            map
         };
         let mut imported_ctors = imported_ctors;
         add_newtype_reps(
@@ -4389,6 +4401,7 @@ impl Compiler {
                     // Record for codegen constructor metadata (tag/arity for
                     // cross-module constructor applications and matches).
                     #[allow(clippy::cast_possible_truncation)]
+                    ctx.interface_constructor_ids.push(fresh_con_id);
                     ctx.interface_constructors.push((
                         con.name.clone(),
                         tag as u32,

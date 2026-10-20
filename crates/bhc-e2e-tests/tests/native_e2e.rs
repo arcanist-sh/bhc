@@ -559,6 +559,11 @@ fn test_tier3_recursive_parser_knot_native() {
     run_native_test("tier3_io/recursive_parser_knot", Profile::Default);
 }
 
+#[test]
+fn test_tier3_local_named_like_method_native() {
+    run_native_test("tier3_io/local_named_like_method", Profile::Default);
+}
+
 /// Closure IO model only: eager mode still generalizes local functions over
 /// value-class variables.
 #[test]

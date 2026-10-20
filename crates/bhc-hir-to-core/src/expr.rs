@@ -678,7 +678,10 @@ fn method_level_target(ctx: &LowerContext, def_ref: &DefRef) -> Option<(Symbol, 
         }
         _ => name,
     };
-    let class = ctx.is_class_method(bare)?;
+    // By reference, not by name: the pattern-bound `query` of `let (query,
+    // fragment) = break …` is no `Walkable` method, and was lowered as
+    // `query 0`.
+    let class = ctx.class_method_of_def(def_ref.def_id, bare)?;
     ctx.method_level_dict_constraints(class, bare)?;
     Some((class, bare))
 }

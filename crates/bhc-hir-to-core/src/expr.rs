@@ -4997,6 +4997,60 @@ fn try_lower_text_concat_map(
     Ok(None)
 }
 
+/// `Data.Text.groupBy p t` (no codegen implementation; it stubbed at
+/// runtime in pandoc's HTML writer) as `map pack (groupBy p (unpack t))`, and
+/// `Data.Text.group t` likewise through the list `group`.
+fn try_lower_text_group_by(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let named = |ctx: &LowerContext, e: &hir::Expr, want: &str| match e {
+        Expr::Var(dr) => ctx
+            .lookup_var(dr.def_id)
+            .is_some_and(|v| v.name.as_str() == want),
+        _ => false,
+    };
+    let app =
+        |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+    let packed = |groups: core::Expr| {
+        app(
+            app(
+                nullary_var("map", span),
+                nullary_var("Data.Text.pack", span),
+            ),
+            groups,
+        )
+    };
+    let unpack = |t: core::Expr| app(nullary_var("Data.Text.unpack", span), t);
+    // `group t`.
+    if named(ctx, f, "Data.Text.group") {
+        let t = lower_expr(ctx, x)?;
+        return Ok(Some(packed(app(nullary_var("group", span), unpack(t)))));
+    }
+    // Saturated: `groupBy p t`.
+    if let Expr::App(head, p, _) = f {
+        if named(ctx, head, "Data.Text.groupBy") {
+            let p = lower_expr(ctx, p)?;
+            let t = lower_expr(ctx, x)?;
+            let groups = app(app(nullary_var("groupBy", span), p), unpack(t));
+            return Ok(Some(packed(groups)));
+        }
+    }
+    // Partial: `groupBy p` is `\t -> map pack (groupBy p (unpack t))`.
+    if named(ctx, f, "Data.Text.groupBy") {
+        let p = lower_expr(ctx, x)?;
+        let t = ctx.fresh_var("t", Ty::Error, span);
+        let groups = app(
+            app(nullary_var("groupBy", span), p),
+            unpack(core::Expr::Var(t.clone(), span)),
+        );
+        return Ok(Some(core::Expr::Lam(t, Box::new(packed(groups)), span)));
+    }
+    Ok(None)
+}
+
 /// The builtin `MonadPlus`/`Alternative` structure of `Maybe` and lists.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PlusMonad {
@@ -5204,6 +5258,9 @@ fn lower_app(
     // `Data.Text.concatMap f t` = `Data.Text.concat (map f (Data.Text.unpack
     // t))`; bhc has no builtin for it, and pandoc's XML escaping calls it
     // (point-free, `T.concatMap escape`, as well as saturated).
+    if let Some(result) = try_lower_text_group_by(ctx, f, x, span)? {
+        return Ok(result);
+    }
     if let Some(result) = try_lower_text_concat_map(ctx, f, x, span)? {
         return Ok(result);
     }

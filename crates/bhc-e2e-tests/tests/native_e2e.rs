@@ -485,6 +485,21 @@ fn test_tier3_integer_conversions_native() {
 }
 
 #[test]
+fn test_tier3_text_group_by_native() {
+    run_native_test("tier3_io/text_group_by", Profile::Default);
+}
+
+/// Closure IO model only: eager mode still generalizes local functions over
+/// value-class variables.
+#[test]
+fn test_tier3_local_value_class_mono_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/local_value_class_mono", Profile::Default);
+}
+
+#[test]
 fn test_tier3_foreign_import_io_native() {
     run_native_test("tier3_io/foreign_import_io", Profile::Default);
 }

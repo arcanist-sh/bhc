@@ -305,10 +305,26 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                             // a => …` left `char` with no dictionary.
                             if crate::io_closure_mode() {
                                 constrained_local_vars(ctx, &mut applied);
+                                value_class_constrained_vars(ctx, &mut applied);
                             }
                             scheme
                                 .vars
                                 .retain(|v| !applied.iter().any(|a| a.id == v.id));
+                            scheme
+                        } else if crate::io_closure_mode() {
+                            // A local function used as a value stays general
+                            // over its monad (EPUB's `writeHtml` runs at two),
+                            // but not over a value-class variable: the body is
+                            // compiled once, so generalizing `toDoc t | t ==
+                            // " " = space | otherwise = literal t` (pandoc's
+                            // Writers.Blaze) to `forall t. (Eq t, IsString t)
+                            // => …` let the literal default `t` to `String` —
+                            // the use at `Text` instantiated a fresh copy — and
+                            // `literal` got the `[Char]` HasChars dictionary.
+                            let mut scheme = ctx.generalize(&var_ty);
+                            let mut fixed = Vec::new();
+                            value_class_constrained_vars(ctx, &mut fixed);
+                            scheme.vars.retain(|v| !fixed.iter().any(|a| a.id == v.id));
                             scheme
                         } else {
                             ctx.generalize(&var_ty)
@@ -734,6 +750,34 @@ pub(crate) fn is_builtin_class(class: Symbol) -> bool {
             | "Monoid"
             | "IsString"
     )
+}
+
+/// Variables mentioned by a pending constraint of a builtin VALUE class
+/// (`Eq`, `IsString`, the numeric classes, …) — not the monad/functor family,
+/// over which a local function may legitimately stay general.
+fn value_class_constrained_vars(ctx: &TyCtxt, out: &mut Vec<bhc_types::TyVar>) {
+    for c in &ctx.constraints {
+        if !matches!(
+            c.class.as_str(),
+            "Eq" | "Ord"
+                | "IsString"
+                | "Show"
+                | "Num"
+                | "Integral"
+                | "Real"
+                | "Fractional"
+                | "Floating"
+                | "RealFrac"
+                | "RealFloat"
+                | "Enum"
+                | "Bounded"
+        ) {
+            continue;
+        }
+        for arg in &c.args {
+            out.extend(ctx.apply_subst(arg).free_vars());
+        }
+    }
 }
 
 fn constrained_local_vars(ctx: &TyCtxt, out: &mut Vec<bhc_types::TyVar>) {

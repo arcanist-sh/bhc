@@ -5117,6 +5117,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                 .llvm_module()
                 .add_function("bhc_try_read_int", ptr_to_ptr, None);
         self.functions.insert(VarId::new(1000541), try_read_int);
+        let reads_int = self
+            .module
+            .llvm_module()
+            .add_function("bhc_reads_int", ptr_to_ptr, None);
+        self.functions.insert(VarId::new(1000542), reads_int);
 
         // ---- Rational RTS functions (VarId 1000900-1000915) ----
         // bhc_rational_make(i64, i64) -> ptr
@@ -6963,6 +6968,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             "fromList" => self.lower_expr(args[0]), // identity: list stays as list
             "read" => self.lower_builtin_read(args[0]),
             "readMaybe" => self.lower_builtin_read_maybe(args[0]),
+            "reads" => self.lower_builtin_reads(args[0]),
 
             // Ordering
             "compare" => self.lower_builtin_compare(args[0], args[1]),
@@ -38228,6 +38234,30 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         Ok(Some(result))
     }
 
+    /// Lower `reads :: String -> [(Int, String)]` (at `Int`; see the RTS's
+    /// `bhc_reads_int`).
+    fn lower_builtin_reads(
+        &mut self,
+        str_expr: &Expr,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let str_val = self
+            .lower_expr(str_expr)?
+            .ok_or_else(|| CodegenError::Internal("reads: no string".to_string()))?;
+        let str_ptr = self.value_to_ptr(str_val)?;
+        let rts_fn = self
+            .functions
+            .get(&VarId::new(1000542))
+            .ok_or_else(|| CodegenError::Internal("bhc_reads_int not declared".to_string()))?;
+        let result = self
+            .builder()
+            .build_call(*rts_fn, &[str_ptr.into()], "reads_int")
+            .map_err(|e| CodegenError::Internal(format!("reads call failed: {:?}", e)))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::Internal("reads: returned void".to_string()))?;
+        Ok(Some(result))
+    }
+
     /// Lower `zip3 :: [a] -> [b] -> [c] -> [(a,b,c)]`.
     /// 3-list parallel iteration, build 3-tuples.
     fn lower_builtin_zip3(
@@ -60765,6 +60795,7 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         "fromList" => Some(1),
         "read" => Some(1),
         "readMaybe" => Some(1),
+        "reads" => Some(1),
 
         // Show
         "show" => Some(1),

@@ -6093,10 +6093,17 @@ fn register_standard_module_exports(
         // a function generic in the container, the dictionary) is fmap's.
         // pandoc-types' `Walkable a (t b)` walks with `T.fmapDefault`; as a
         // stub, its partial application miscompiled `walk` over lists.
-        if module_name == "Data.Traversable" {
+        //
+        // Likewise `nubOrd`/`nubInt` are `nub` (same result, only faster for
+        // `Ord` keys); stubbed, pandoc's header identifiers aborted on them.
+        if matches!(
+            module_name,
+            "Data.Traversable" | "Data.Containers.ListUtils"
+        ) {
             let target = match export {
                 "fmapDefault" => Some("fmap"),
                 "foldMapDefault" => Some("foldMap"),
+                "nubOrd" | "nubInt" => Some("nub"),
                 _ => None,
             };
             if let Some(def) = target.and_then(|t| ctx.lookup_value(Symbol::intern(t))) {

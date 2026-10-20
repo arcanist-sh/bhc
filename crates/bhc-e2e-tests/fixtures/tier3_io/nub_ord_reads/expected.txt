@@ -1,0 +1,6 @@
+[3,1,2]
+42
+-7
+Nothing
+Nothing
+15| rest

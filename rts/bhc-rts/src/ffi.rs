@@ -2738,6 +2738,63 @@ unsafe fn alloc_nil() -> *mut u8 {
     }
 }
 
+/// `reads :: String -> [(Int, String)]`, at `Int` only: optional leading
+/// whitespace, an optional `-`, then decimal digits. `[(n, rest)]` on
+/// success, `[]` otherwise. bhc has no `Read` dictionaries, so the builtin
+/// answers at the type every use in pandoc needs (list numbers via
+/// `safeRead`). The list spine is forced, since a closure-model string can
+/// arrive lazily; the elements are immediate characters.
+///
+/// # Safety
+///
+/// `str_list` must be a BHC list of characters (or a thunk evaluating to one).
+#[no_mangle]
+pub unsafe extern "C" fn bhc_reads_int(str_list: *mut u8) -> *mut u8 {
+    unsafe {
+        let tag = |p: *mut u8| *(p as *const i64);
+        let field = |p: *mut u8, i: usize| *(p.add(8 + i * 8) as *const *mut u8);
+        let mut cells: Vec<*mut u8> = Vec::new();
+        let mut list = bhc_force(str_list);
+        while tag(list) != 0 {
+            cells.push(list);
+            list = bhc_force(field(list, 1));
+        }
+        let chars: Vec<i64> = cells.iter().map(|&c| field(c, 0) as i64).collect();
+        let is_space = |c: i64| c == 32 || c == 9 || c == 10 || c == 13;
+        let mut i = 0;
+        while i < chars.len() && is_space(chars[i]) {
+            i += 1;
+        }
+        let negative = i < chars.len() && chars[i] == '-' as i64;
+        let digits_start = if negative { i + 1 } else { i };
+        let mut j = digits_start;
+        let mut n: i64 = 0;
+        while j < chars.len() && (('0' as i64)..=('9' as i64)).contains(&chars[j]) {
+            n = n.wrapping_mul(10).wrapping_add(chars[j] - '0' as i64);
+            j += 1;
+        }
+        if j == digits_start {
+            return alloc_nil();
+        }
+        if negative {
+            n = -n;
+        }
+        // The rest of the input is the original list from the first unread cell.
+        let rest = if j < cells.len() {
+            cells[j]
+        } else {
+            alloc_nil()
+        };
+        // A pair is constructor 0 with two fields.
+        let layout = std::alloc::Layout::from_size_align_unchecked(24, 8);
+        let pair = std::alloc::alloc(layout);
+        *(pair as *mut i64) = 0;
+        *(pair.add(8) as *mut *mut u8) = n as *mut u8;
+        *(pair.add(16) as *mut *mut u8) = rest;
+        alloc_cons(pair, alloc_nil())
+    }
+}
+
 /// Print a newline to stdout
 #[no_mangle]
 pub extern "C" fn bhc_print_newline() {

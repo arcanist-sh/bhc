@@ -5304,7 +5304,102 @@ fn try_lower_list_difference(
     Ok(Some(app(app(nullary_var("filter", span), keep), xs)))
 }
 
-/// The builtin `MonadPlus`/`Alternative` structure of `Maybe` and lists./// The builtin `MonadPlus`/`Alternative` structure of `Maybe` and lists.
+/// `elem v xs` / `notElem v xs` as `any (\y -> y == v) xs`, with `==` typed
+/// by the element type, when that type is compared by more than its machine
+/// word (a constructor, a tuple, `Text`, `Integer`).
+///
+/// Codegen's builtin `elem` compares addresses unless the value is a list, so
+/// `DefaultStyle `elem` [DefaultStyle, Decimal, Example]` was `False` and
+/// pandoc's `orderedList` demanded the `fancy_lists` extension for a plain
+/// `1.` list, which then read as a paragraph.
+fn try_lower_structural_elem(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let Expr::App(head, v, _) = f else {
+        return Ok(None);
+    };
+    let Expr::Var(dr) = head.as_ref() else {
+        return Ok(None);
+    };
+    let Some(name) = ctx.lookup_var(dr.def_id).map(|v| v.name) else {
+        return Ok(None);
+    };
+    let negate = match name.as_str() {
+        "elem" | "Data.List.elem" | "Data.Foldable.elem" => false,
+        "notElem" | "Data.List.notElem" | "Data.Foldable.notElem" => true,
+        _ => return Ok(None),
+    };
+    let elem_ty = match ctx.resolved_expr_ty_opt(dr.span) {
+        Some(Ty::Fun(a, rest)) => match (*a, *rest) {
+            (a, Ty::Fun(container, _))
+                if matches!(container.as_ref(), Ty::List(_))
+                    || matches!(container.as_ref(), Ty::App(h, _)
+                        if matches!(h.as_ref(), Ty::Con(c) if c.name.as_str() == "[]")) =>
+            {
+                a
+            }
+            _ => return Ok(None),
+        },
+        // An infix use can be recorded at the whole application's span, with
+        // the RESULT type; the needle's own type is the element type then.
+        Some(t) if !matches!(t, Ty::Fun(..)) => match ctx.resolved_expr_ty_opt(v.span()) {
+            Some(t) => t,
+            None => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let structural = match &elem_ty {
+        Ty::Tuple(_) => true,
+        Ty::Con(tc) => !matches!(
+            tc.name.as_str(),
+            "Int" | "Char" | "Bool" | "Word" | "Double" | "Float" | "String"
+        ),
+        Ty::App(..) => !matches!(&elem_ty, Ty::App(h, _) if matches!(h.as_ref(), Ty::Con(c) if c.name.as_str() == "[]")),
+        _ => false,
+    };
+    if !structural {
+        return Ok(None);
+    }
+    let needle = lower_expr(ctx, v)?;
+    let haystack = lower_expr(ctx, x)?;
+    let app =
+        |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+    let needle_var = ctx.fresh_var("elem_v", elem_ty.clone(), span);
+    let y = ctx.fresh_var("elem_y", elem_ty.clone(), span);
+    let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+    let eq = core::Expr::Var(
+        Var {
+            name: Symbol::intern("=="),
+            id: VarId::new(0),
+            ty: Ty::fun(elem_ty.clone(), Ty::fun(elem_ty, bool_ty)),
+        },
+        span,
+    );
+    let same = core::Expr::Lam(
+        y.clone(),
+        Box::new(app(
+            app(eq, core::Expr::Var(y, span)),
+            core::Expr::Var(needle_var.clone(), span),
+        )),
+        span,
+    );
+    let found = app(app(nullary_var("any", span), same), haystack);
+    let result = if negate {
+        app(nullary_var("not", span), found)
+    } else {
+        found
+    };
+    Ok(Some(core::Expr::Let(
+        Box::new(Bind::NonRec(needle_var, Box::new(needle))),
+        Box::new(result),
+        span,
+    )))
+}
+
+/// The builtin `MonadPlus`/`Alternative` structure of `Maybe` and lists.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PlusMonad {
     Maybe,
@@ -5511,6 +5606,9 @@ fn lower_app(
     // `Data.Text.concatMap f t` = `Data.Text.concat (map f (Data.Text.unpack
     // t))`; bhc has no builtin for it, and pandoc's XML escaping calls it
     // (point-free, `T.concatMap escape`, as well as saturated).
+    if let Some(result) = try_lower_structural_elem(ctx, f, x, span)? {
+        return Ok(result);
+    }
     if let Some(result) = try_lower_list_difference(ctx, f, x, span)? {
         return Ok(result);
     }

@@ -7907,9 +7907,15 @@ impl TyCtxt {
         // no table here knows; given a fresh-variable scheme, `unless c (put
         // xs)` never tied `put`'s monad to the result and its MonadState
         // dictionary was left unresolved.
+        //
+        // Only for `when`/`unless`: many builtin schemes are narrower than the
+        // real functions (`sortBy`, `mplus`, …), and taking them for every
+        // re-imported name rejected or mis-dispatched programs that the
+        // permissive placeholder let through.
         let builtin_by_name: rustc_hash::FxHashMap<Symbol, Scheme> = defs
             .values()
             .filter(|d| matches!(d.kind, DefKind::Value))
+            .filter(|d| matches!(d.name.as_str(), "when" | "unless"))
             .filter_map(|d| Some((d.name, self.env.lookup_global(d.id)?.clone())))
             .collect();
 

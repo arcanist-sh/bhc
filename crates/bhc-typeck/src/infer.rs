@@ -298,6 +298,14 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                             let mut scheme = ctx.generalize(&var_ty);
                             let mut applied = Vec::new();
                             applied_head_vars(&var_ty, &mut applied);
+                            // Likewise a variable a pending constraint of a
+                            // DICTIONARY-PASSED class mentions: generalizing
+                            // `space' wrap = if wrap then space else char ' '`
+                            // (pandoc's Writers.Blaze) to `forall a. HasChars
+                            // a => …` left `char` with no dictionary.
+                            if crate::io_closure_mode() {
+                                constrained_local_vars(ctx, &mut applied);
+                            }
                             scheme
                                 .vars
                                 .retain(|v| !applied.iter().any(|a| a.id == v.id));
@@ -695,6 +703,65 @@ fn infer_lit(ctx: &mut TyCtxt, lit: &Lit, span: bhc_span::Span) -> Ty {
 /// `case` (see `lower_case_with_guard_fallthrough`).
 /// Type variables in the HEAD of a type application (`m` in `m a`): the
 /// monad (or other constructor) variables of a type.
+/// The type variables mentioned by pending constraints of classes whose
+/// methods are dictionary-passed (not the builtin classes, whose operations
+/// codegen implements directly). A local binding cannot be abstracted over a
+/// dictionary, so such a variable must stay monomorphic.
+/// The builtin classes, whose operations codegen implements directly rather
+/// than through dictionaries.
+pub(crate) fn is_builtin_class(class: Symbol) -> bool {
+    matches!(
+        class.as_str(),
+        "Eq" | "Ord"
+            | "Show"
+            | "Read"
+            | "Enum"
+            | "Bounded"
+            | "Num"
+            | "Real"
+            | "Integral"
+            | "Fractional"
+            | "Floating"
+            | "RealFrac"
+            | "RealFloat"
+            | "Functor"
+            | "Applicative"
+            | "Monad"
+            | "MonadFail"
+            | "Foldable"
+            | "Traversable"
+            | "Semigroup"
+            | "Monoid"
+            | "IsString"
+    )
+}
+
+fn constrained_local_vars(ctx: &TyCtxt, out: &mut Vec<bhc_types::TyVar>) {
+    fn vars(ty: &Ty, out: &mut Vec<bhc_types::TyVar>) {
+        match ty {
+            Ty::Var(v) => out.push(v.clone()),
+            Ty::App(f, a) | Ty::Fun(f, a) => {
+                vars(f, out);
+                vars(a, out);
+            }
+            Ty::List(a) => vars(a, out),
+            Ty::Tuple(ts) => ts.iter().for_each(|t| vars(t, out)),
+            _ => {}
+        }
+    }
+    for c in &ctx.constraints {
+        if is_builtin_class(c.class) {
+            continue;
+        }
+        for arg in &c.args {
+            vars(&ctx.apply_subst(arg), out);
+        }
+    }
+    for arg in &ctx.dict_constraint_args {
+        vars(&ctx.apply_subst(arg), out);
+    }
+}
+
 fn applied_head_vars(ty: &Ty, out: &mut Vec<bhc_types::TyVar>) {
     match ty {
         Ty::App(f, a) => {

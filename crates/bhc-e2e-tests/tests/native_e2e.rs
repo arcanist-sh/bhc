@@ -445,6 +445,36 @@ fn test_tier3_monad_error_statet_newtype_native() {
 }
 
 #[test]
+fn test_tier3_lambda_pattern_fold_native() {
+    run_native_test("tier3_io/lambda_pattern_fold", Profile::Default);
+}
+
+#[test]
+fn test_tier3_fmap_default_native() {
+    run_native_test("tier3_io/fmap_default", Profile::Default);
+}
+
+#[test]
+fn test_tier3_text_concat_map_native() {
+    run_native_test("tier3_io/text_concat_map", Profile::Default);
+}
+
+/// Library transformers only (closure IO model): eager mode's builtin
+/// `fmap` cannot see the container inside a generic instance.
+#[test]
+fn test_tier3_traversable_instance_fmap_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/traversable_instance_fmap", Profile::Default);
+}
+
+#[test]
+fn test_tier3_multiparam_default_identity_native() {
+    run_native_test("tier3_io/multiparam_default_identity", Profile::Default);
+}
+
+#[test]
 fn test_tier3_handle_setters_native() {
     run_native_test("tier3_io/handle_setters", Profile::Default);
 }

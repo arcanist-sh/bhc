@@ -1050,6 +1050,28 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                 return Ok(method_expr);
             }
         }
+        // A value-position `return` whose occurrence type names a concrete,
+        // non-builtin monad (closure IO model): that monad's `pure`.
+        // pandoc-types' default `walk f = runIdentity . walkM (return . f)`
+        // has no dictionary in scope to hop from, and the bare builtin was
+        // IO's `return`, which `runIdentity` then unwrapped.
+        if is_method.is_none() && name.as_str() == "return" && io_closure_mode() {
+            let monad = refined_occurrence_ty(ctx, def_ref.span)
+                .as_ref()
+                .and_then(monad_head_of_method_occurrence);
+            if let Some(m) =
+                monad.filter(|m| has_concrete_head(m) && !LowerContext::is_builtin_monad_type(m))
+            {
+                if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
+                    Symbol::intern("pure"),
+                    Symbol::intern("Applicative"),
+                    &m,
+                    def_ref.span,
+                ) {
+                    return Ok(method_expr);
+                }
+            }
+        }
         if let Some(class_name) = is_method {
             // `mappend = (<>)` inside `instance (Semigroup a, Monoid a) =>
             // Monoid (Future s a)`: the alias is `<>` at `Future s a`. The
@@ -1246,9 +1268,18 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                         if has_concrete_head(&m_head)
                             && !LowerContext::is_builtin_monad_type(&m_head)
                         {
+                            // `return` is not a slot of the Monad layout; it IS
+                            // Applicative's `pure`. `walk f = runIdentity .
+                            // walkM (return . f)` (pandoc-types' default walk)
+                            // left a bare `return`, IO's under closure IO.
+                            let (method_name, method_class) = if name.as_str() == "return" {
+                                (Symbol::intern("pure"), Symbol::intern("Applicative"))
+                            } else {
+                                (name, class_name)
+                            };
                             if let Some(method_expr) = ctx.resolve_method_at_concrete_type(
-                                name,
-                                class_name,
+                                method_name,
+                                method_class,
                                 &m_head,
                                 def_ref.span,
                             ) {
@@ -1672,14 +1703,25 @@ fn try_infer_arg_type(ctx: &LowerContext, expr: &hir::Expr) -> Option<Ty> {
                 _ => None,
             }
         }
-        Expr::Lit(lit, _) => match lit {
+        Expr::Lit(lit, lit_span) => match lit {
             Lit::Int(_) => Some(Ty::Con(TyCon::new(Symbol::intern("Int"), Kind::Star))),
             Lit::Float(_) => Some(Ty::Con(TyCon::new(Symbol::intern("Double"), Kind::Star))),
             Lit::Char(_) => Some(Ty::Con(TyCon::new(Symbol::intern("Char"), Kind::Star))),
-            Lit::String(_) => Some(Ty::List(Box::new(Ty::Con(TyCon::new(
-                Symbol::intern("Char"),
-                Kind::Star,
-            ))))),
+            // An OverloadedStrings literal used where `Text` is expected IS a
+            // `Text` — `lower_lit_at` packs it on the same hint. Answering
+            // `[Char]` here picked `HasChars [Char]` for `literal "hello" ::
+            // Doc Text`, and the String instance walked a Text header.
+            Lit::String(_) => Some(
+                ctx.expected_ty_opt(*lit_span)
+                    .filter(ty_head_is_text)
+                    .or_else(|| refined_occurrence_ty(ctx, *lit_span).filter(ty_head_is_text))
+                    .unwrap_or_else(|| {
+                        Ty::List(Box::new(Ty::Con(TyCon::new(
+                            Symbol::intern("Char"),
+                            Kind::Star,
+                        ))))
+                    }),
+            ),
         },
         // List literal `[a, b, ...]`: infer the element type from the first
         // element, yielding `[elem]`. Enables resolving dictionaries for
@@ -4791,6 +4833,49 @@ fn first_param_is_concrete(ctx: &LowerContext, class: Symbol, method: Symbol) ->
     !matches!(head, Ty::Var(_) | Ty::Error)
 }
 
+/// `Data.Text.concatMap` applied to one or two arguments, rewritten through
+/// the builtins it is made of: `concat (map f (unpack t))`.
+fn try_lower_text_concat_map(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let is_concat_map = |ctx: &LowerContext, e: &hir::Expr| match e {
+        Expr::Var(dr) => ctx
+            .lookup_var(dr.def_id)
+            .is_some_and(|v| v.name.as_str() == "Data.Text.concatMap"),
+        _ => false,
+    };
+    let app =
+        |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+    let build = |func: core::Expr, text: core::Expr| {
+        app(
+            nullary_var("Data.Text.concat", span),
+            app(
+                app(nullary_var("map", span), func),
+                app(nullary_var("Data.Text.unpack", span), text),
+            ),
+        )
+    };
+    // Saturated: `concatMap g t`.
+    if let Expr::App(head, g, _) = f {
+        if is_concat_map(ctx, head) {
+            let g = lower_expr(ctx, g)?;
+            let t = lower_expr(ctx, x)?;
+            return Ok(Some(build(g, t)));
+        }
+    }
+    // Partial: `concatMap g` is `\t -> concat (map g (unpack t))`.
+    if is_concat_map(ctx, f) {
+        let g = lower_expr(ctx, x)?;
+        let t = ctx.fresh_var("t", Ty::Error, span);
+        let body = build(g, core::Expr::Var(t.clone(), span));
+        return Ok(Some(core::Expr::Lam(t, Box::new(body), span)));
+    }
+    Ok(None)
+}
+
 /// Lower a function application, handling dictionary-passing for class methods
 /// and constrained functions when the argument type is known.
 ///
@@ -4819,6 +4904,13 @@ fn lower_app(
     // the two actions and of the result. Push that in; `refined_occurrence_ty`
     // reads it back when the method is lowered.
     hint_lift_a2_function_ty(ctx, f, x, span);
+
+    // `Data.Text.concatMap f t` = `Data.Text.concat (map f (Data.Text.unpack
+    // t))`; bhc has no builtin for it, and pandoc's XML escaping calls it
+    // (point-free, `T.concatMap escape`, as well as saturated).
+    if let Some(result) = try_lower_text_concat_map(ctx, f, x, span)? {
+        return Ok(result);
+    }
 
     // `mapM_`/`mapM`/`sequence_`/… at a monad codegen does not run eagerly.
     if let Some(result) = try_lower_monadic_traversal(ctx, f, x, span)? {
@@ -6406,47 +6498,51 @@ fn lower_lambda(
     // Now lower the body (pattern vars are registered)
     let body_core = lower_expr(ctx, body)?;
 
-    // Build nested lambdas from right to left
-    let mut result = body_core;
-
-    for pat in pats.iter().rev() {
-        // Check if the pattern is simple (just a variable)
+    // Every parameter gets its lambda binder first, and the pattern matches
+    // go INSIDE all of them: `\(a, b) x -> e` is `\lam x -> case lam of
+    // (a, b) -> e`, one two-argument function. Matching between the lambdas
+    // (`\lam -> case lam of (a, b) -> \x -> e`) made a one-argument function
+    // returning a closure, and a builtin fold that applies its function to
+    // both arguments at once (`foldl (\(a, b) x -> …)`) crashed.
+    let mut binders: Vec<Var> = Vec::with_capacity(pats.len());
+    let mut matches: Vec<(Var, &hir::Pat)> = Vec::new();
+    for pat in pats {
         match pat {
             hir::Pat::Var(name, def_id, _) => {
-                // Simple case: pattern is just a variable
-                // Look up the var we registered earlier
                 let var = ctx.lookup_var(*def_id).cloned().unwrap_or_else(|| Var {
                     name: *name,
                     id: ctx.fresh_id(),
                     ty: Ty::Error,
                 });
-                result = core::Expr::Lam(var, Box::new(result), span);
+                binders.push(var);
             }
-            hir::Pat::Wild(_) => {
-                // Wildcard: just use a fresh variable that's not referenced
-                let arg_var = ctx.fresh_var("lam", Ty::Error, span);
-                result = core::Expr::Lam(arg_var, Box::new(result), span);
-            }
+            hir::Pat::Wild(_) => binders.push(ctx.fresh_var("lam", Ty::Error, span)),
             _ => {
-                // Complex pattern: need a case expression
                 let arg_var = ctx.fresh_var("lam", Ty::Error, span);
-                let alt = lower_pat_to_alt(ctx, pat, result.clone(), span)?;
-                let default_alt = Alt {
-                    con: AltCon::Default,
-                    binders: vec![],
-                    rhs: make_pattern_error(span),
-                };
-
-                let case_expr = core::Expr::Case(
-                    Box::new(core::Expr::Var(arg_var.clone(), span)),
-                    vec![alt, default_alt],
-                    Ty::Error,
-                    span,
-                );
-
-                result = core::Expr::Lam(arg_var, Box::new(case_expr), span);
+                binders.push(arg_var.clone());
+                matches.push((arg_var, pat));
             }
         }
+    }
+
+    // Wrap the body in the matches, the first pattern outermost.
+    let mut result = body_core;
+    for (arg_var, pat) in matches.into_iter().rev() {
+        let alt = lower_pat_to_alt(ctx, pat, result, span)?;
+        let default_alt = Alt {
+            con: AltCon::Default,
+            binders: vec![],
+            rhs: make_pattern_error(span),
+        };
+        result = core::Expr::Case(
+            Box::new(core::Expr::Var(arg_var, span)),
+            vec![alt, default_alt],
+            Ty::Error,
+            span,
+        );
+    }
+    for var in binders.into_iter().rev() {
+        result = core::Expr::Lam(var, Box::new(result), span);
     }
 
     Ok(result)

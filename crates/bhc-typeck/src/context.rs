@@ -120,6 +120,12 @@ pub struct TyCtxt {
     /// These are solved after inference completes or defaulted if ambiguous.
     pub(crate) constraints: Vec<Constraint>,
 
+    /// Arguments of constraints of dictionary-passed classes that are not
+    /// solved by the checker (imported classes): recorded at instantiation
+    /// so a local binding mentioning them is not generalized over them
+    /// (closure IO model; see `infer`'s local generalization).
+    pub(crate) dict_constraint_args: Vec<Ty>,
+
     /// Given constraints from existential pattern matches.
     /// When pattern matching on an existential constructor, the existential
     /// constraints become available as evidence in the alternative body.
@@ -210,6 +216,7 @@ impl TyCtxt {
             expr_types: FxHashMap::default(),
             def_schemes: FxHashMap::default(),
             dollar_def: None,
+            dict_constraint_args: Vec::new(),
             explicit_sig_defs: std::collections::HashSet::new(),
             con_field_defs: FxHashMap::default(),
             constraints: Vec::new(),

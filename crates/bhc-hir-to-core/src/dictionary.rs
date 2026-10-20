@@ -159,6 +159,40 @@ impl InstanceInfo {
     }
 }
 
+/// An instance context with `Functor t` added for each `Traversable t` that
+/// lacks one (closure IO model only, where `Functor` is dictionary-passed).
+///
+/// `Traversable` itself is not dictionary-passed, so a body generic in its
+/// container — pandoc-types' `instance (Foldable t, Traversable t, Walkable a
+/// b) => Walkable a (t b)` with `walk f = fmapDefault (walk f)` — had no way
+/// to map: the builtin `fmap` guessed the functor from an unknown type. Its
+/// `Functor` superclass, made a parameter of its own, carries the `fmap`.
+/// Applied both where instance methods get their dictionary lambdas and where
+/// instance dictionaries are built, so the slots line up.
+#[must_use]
+pub fn with_functor_from_traversable(constraints: &[Constraint]) -> Vec<Constraint> {
+    let mut out = constraints.to_vec();
+    if !bhc_types::io_closure_mode() {
+        return out;
+    }
+    for c in constraints {
+        if c.class.as_str() != "Traversable" {
+            continue;
+        }
+        let has_functor = out
+            .iter()
+            .any(|o| o.class.as_str() == "Functor" && o.args == c.args);
+        if !has_functor {
+            out.push(Constraint::new_multi(
+                Symbol::intern("Functor"),
+                c.args.clone(),
+                c.span,
+            ));
+        }
+    }
+    out
+}
+
 /// Registry of classes and instances for dictionary construction.
 #[derive(Clone, Debug, Default)]
 pub struct ClassRegistry {
@@ -408,7 +442,8 @@ impl ClassRegistry {
     }
 
     /// Register a type class instance.
-    pub fn register_instance(&mut self, info: InstanceInfo) {
+    pub fn register_instance(&mut self, mut info: InstanceInfo) {
+        info.instance_constraints = with_functor_from_traversable(&info.instance_constraints);
         self.instances.entry(info.class).or_default().push(info);
     }
 

@@ -6088,6 +6088,26 @@ fn register_standard_module_exports(
             .unwrap_or(raw_export);
         let unqualified = Symbol::intern(export);
 
+        // `fmapDefault`/`foldMapDefault` ARE `fmap`/`foldMap` for every lawful
+        // Traversable: bind them to those definitions, so dispatch (and, in
+        // a function generic in the container, the dictionary) is fmap's.
+        // pandoc-types' `Walkable a (t b)` walks with `T.fmapDefault`; as a
+        // stub, its partial application miscompiled `walk` over lists.
+        if module_name == "Data.Traversable" {
+            let target = match export {
+                "fmapDefault" => Some("fmap"),
+                "foldMapDefault" => Some("foldMap"),
+                _ => None,
+            };
+            if let Some(def) = target.and_then(|t| ctx.lookup_value(Symbol::intern(t))) {
+                ctx.bind_value(Symbol::intern(&format!("{qualifier}.{export}")), def);
+                if !is_qualified_import {
+                    ctx.bind_value(unqualified, def);
+                }
+                continue;
+            }
+        }
+
         // Detect if this export is a constructor (starts with uppercase or ':')
         let is_constructor = export
             .chars()

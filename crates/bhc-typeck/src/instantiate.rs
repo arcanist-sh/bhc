@@ -57,6 +57,9 @@ pub fn instantiate(ctx: &mut TyCtxt, scheme: &Scheme) -> Ty {
                 .map(|t| substitute(t, &subst))
                 .collect();
             ctx.emit_constraint_multi(constraint.class, substituted_args, constraint.span);
+        } else if crate::io_closure_mode() && !crate::infer::is_builtin_class(constraint.class) {
+            ctx.dict_constraint_args
+                .extend(constraint.args.iter().map(|t| substitute(t, &subst)));
         }
     }
 

@@ -1359,6 +1359,34 @@ impl LowerContext {
                 });
         }
 
+        // A builtin `Functor []` instance, so a `Functor t` dictionary can be
+        // built at the list type: under the closure IO model a context's
+        // `Traversable t` supplies one (`with_functor_from_traversable`), and
+        // pandoc-types' generic `Walkable a (t b)` maps lists through it.
+        {
+            // Keyed at the list CONSTRUCTOR (`Functor`'s parameter has kind
+            // `* -> *`): matching an instance head `t b` against `[x]` binds
+            // `t` to `[]`.
+            let list_head = Ty::Con(bhc_types::TyCon::new(
+                Symbol::intern("[]"),
+                bhc_types::Kind::Arrow(
+                    Box::new(bhc_types::Kind::Star),
+                    Box::new(bhc_types::Kind::Star),
+                ),
+            ));
+            let mut fn_methods = FxHashMap::default();
+            fn_methods.insert(Symbol::intern("fmap"), DefId::new(790_013));
+            self.class_registry
+                .register_instance(crate::dictionary::InstanceInfo {
+                    class: Symbol::intern("Functor"),
+                    instance_types: vec![list_head],
+                    methods: fn_methods,
+                    superclass_instances: Vec::new(),
+                    assoc_type_impls: FxHashMap::default(),
+                    instance_constraints: Vec::new(),
+                });
+        }
+
         // Builtin `Semigroup`/`Monoid` instances for the container builtins
         // Set and Map (same reasoning as Text above): `mempty :: Set a` has
         // no Haskell instance anywhere, so pandoc's
@@ -1638,6 +1666,8 @@ impl LowerContext {
             "Data.List.empty",
             "Data.List.concat",
             "Data.Maybe.append",
+            // 790_013: list `fmap` (the builtin `Functor []` instance).
+            "map",
         ]
         .iter()
         .enumerate()
@@ -4433,17 +4463,45 @@ impl LowerContext {
         method_def_id: DefId,
         span: Span,
     ) -> Option<Vec<Ty>> {
-        let scheme = self.lookup_scheme(method_def_id)?;
-        let params = scheme
-            .constraints
-            .iter()
-            .find(|c| c.class == class_name)?
-            .args
-            .clone();
         let occ = self.expand_type_aliases(&self.resolved_expr_ty_opt(span)?);
-        let subst = bhc_types::types_match(&scheme.ty, &occ).unwrap_or_else(|| {
+        // The method's scheme carries the class constraint naming the
+        // parameters. A method WITH a class default can be recorded without
+        // it (the default's own binding); then read the parameters off the
+        // class declaration: its declared method type is written in them.
+        let from_scheme = self.lookup_scheme(method_def_id).and_then(|scheme| {
+            let params = scheme
+                .constraints
+                .iter()
+                .find(|c| c.class == class_name)?
+                .args
+                .clone();
+            Some((scheme.ty.clone(), params))
+        });
+        let (method_ty, params) = match from_scheme {
+            Some(found) => found,
+            None => {
+                let method = self.lookup_var(method_def_id)?.name;
+                let bare = Symbol::intern(method.as_str().rsplit('.').next().unwrap_or(""));
+                let declared = self
+                    .class_registry
+                    .lookup_class(class_name)?
+                    .method_types
+                    .get(&bare)?
+                    .ty
+                    .clone();
+                let params: Vec<Ty> = self
+                    .class_registry
+                    .class_params
+                    .get(&class_name)?
+                    .iter()
+                    .map(|v| Ty::Var(v.clone()))
+                    .collect();
+                (declared, params)
+            }
+        };
+        let subst = bhc_types::types_match(&method_ty, &occ).unwrap_or_else(|| {
             let mut s = bhc_types::Subst::new();
-            crate::expr::match_ty(&scheme.ty, &occ, &mut s);
+            crate::expr::match_ty(&method_ty, &occ, &mut s);
             s
         });
         let tys: Vec<Ty> = params
@@ -5158,12 +5216,11 @@ impl LowerContext {
                     // looped forever. The filter MUST be the shared
                     // `constraint_needs_dict_param` predicate so the lambda
                     // arity matches `construct_dictionary`'s `constraint_dicts`.
-                    let inst_constraints: Vec<Constraint> = instance_def
-                        .constraints
-                        .iter()
-                        .filter(|c| self.class_registry.constraint_needs_dict_param(c.class))
-                        .cloned()
-                        .collect();
+                    let inst_constraints: Vec<Constraint> =
+                        crate::dictionary::with_functor_from_traversable(&instance_def.constraints)
+                            .into_iter()
+                            .filter(|c| self.class_registry.constraint_needs_dict_param(c.class))
+                            .collect();
 
                     // Lower instance method bodies to Core bindings.
                     // Each method in the instance provides an implementation that

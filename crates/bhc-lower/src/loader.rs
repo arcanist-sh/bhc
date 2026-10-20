@@ -940,15 +940,27 @@ pub fn apply_import_spec(exports: &ModuleExports, spec: &Option<ast::ImportSpec>
                     }
                     ast::Import::Type(ident, cons, _) => {
                         filtered.types.remove(&ident.name);
-                        // Remove constructors
-                        if let Some(constructors) = cons {
-                            for con in constructors {
-                                filtered.constructors.remove(&con.name);
+                        match cons {
+                            // `hiding (T)`: a capitalized name hides the type
+                            // AND a data constructor of that name. Pandoc's
+                            // `import Text.DocLayout hiding (Text, Empty)`
+                            // relies on it so blaze's `Empty`/`Text`
+                            // constructors are the ones in scope.
+                            None => {
+                                filtered.constructors.remove(&ident.name);
                             }
-                        } else {
-                            // Type(..) - hide all constructors
-                            // For now, we'd need to track which constructors belong to which type
-                            // This is a simplification
+                            // `hiding (T(..))` (the parser's empty list): every
+                            // constructor of `T`.
+                            Some(constructors) if constructors.is_empty() => {
+                                filtered
+                                    .constructors
+                                    .retain(|_, info| info.type_con_name != ident.name);
+                            }
+                            Some(constructors) => {
+                                for con in constructors {
+                                    filtered.constructors.remove(&con.name);
+                                }
+                            }
                         }
                     }
                     ast::Import::Pattern(ident, _) => {

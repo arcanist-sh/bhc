@@ -6919,7 +6919,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Higher-order / Monadic operations
             // `liftM`/`liftA` == `fmap` for lawful monads/applicatives; route the
             // builtin-monad case (list/Maybe/IO) through the same lowering.
-            "fmap" | "<$>" | "liftM" | "liftA" => self.lower_builtin_fmap(args[0], args[1]),
+            // `fmapDefault` is `fmap` for every lawful Traversable; pandoc's
+            // `Walkable a (t b)` walks containers with it.
+            "fmap" | "<$>" | "liftM" | "liftA" | "fmapDefault" | "Data.Traversable.fmapDefault" => {
+                self.lower_builtin_fmap(args[0], args[1])
+            }
             "<*>" => self.lower_builtin_ap(args[0], args[1]),
             "join" => self.lower_builtin_join(args[0]),
             "=<<" => self.lower_builtin_bind_flipped(args[0], args[1]),
@@ -44673,7 +44677,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(int_expr)?
             .ok_or_else(|| CodegenError::Internal(format!("{}: no int", label)))?;
         let t = self.lower_text_operand(ptr_expr)?;
-        let n_int = self.coerce_to_int(n)?;
+        let n_int = self.widen_to_i64(self.coerce_to_int(n)?)?;
         let t_ptr = self.value_to_ptr(t)?;
         let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
             CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
@@ -44732,7 +44736,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             .lower_expr(int_expr)?
             .ok_or_else(|| CodegenError::Internal(format!("{}: no int", label)))?;
         let p_ptr = self.value_to_ptr(p)?;
-        let n_int = self.coerce_to_int(n)?;
+        let n_int = self.widen_to_i64(self.coerce_to_int(n)?)?;
         let rts_fn = self.functions.get(&VarId::new(rts_id)).ok_or_else(|| {
             CodegenError::Internal(format!("{}: RTS function {} not declared", label, rts_id))
         })?;
@@ -51108,7 +51112,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .functions
                     .get(&VarId::new(1000333))
                     .ok_or_else(|| CodegenError::Internal("text_cons not declared".to_string()))?;
-                let n = self.coerce_to_int(args[0])?;
+                // The RTS takes the character as an i64; a `Char` is i32.
+                let n = self.widen_to_i64(self.coerce_to_int(args[0])?)?;
                 let result = self
                     .builder()
                     .build_call(*rts_fn, &[n.into(), args[1].into()], "text_cons")
@@ -51123,7 +51128,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                     .functions
                     .get(&VarId::new(1000334))
                     .ok_or_else(|| CodegenError::Internal("text_snoc not declared".to_string()))?;
-                let n = self.coerce_to_int(args[1])?;
+                // The RTS takes the character as an i64; a `Char` is i32.
+                let n = self.widen_to_i64(self.coerce_to_int(args[1])?)?;
                 let result = self
                     .builder()
                     .build_call(*rts_fn, &[args[0].into(), n.into()], "text_snoc")
@@ -53078,6 +53084,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     }
 
     /// Coerce a value to an integer, unboxing if needed.
+    /// Zero-extend an integer narrower than 64 bits (a `Char` is i32) to the
+    /// i64 the RTS integer parameters take.
+    fn widen_to_i64(&self, v: IntValue<'ctx>) -> CodegenResult<IntValue<'ctx>> {
+        if v.get_type().get_bit_width() >= 64 {
+            return Ok(v);
+        }
+        self.builder()
+            .build_int_z_extend(v, self.type_mapper().i64_type(), "widen_i64")
+            .map_err(|e| CodegenError::Internal(format!("widen to i64: {:?}", e)))
+    }
+
     fn coerce_to_int(&self, value: BasicValueEnum<'ctx>) -> CodegenResult<IntValue<'ctx>> {
         match value {
             BasicValueEnum::IntValue(i) => Ok(i),
@@ -59994,6 +60011,7 @@ pub fn builtin_arity(name: &str) -> Option<u32> {
         // `liftM`/`liftA` are the Monad/Applicative spellings of `fmap`.
         "liftM" => Some(2),
         "liftA" => Some(2),
+        "fmapDefault" | "Data.Traversable.fmapDefault" => Some(2),
         "<*>" => Some(2),
         "join" => Some(1),
         "=<<" => Some(2),

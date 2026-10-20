@@ -4069,6 +4069,67 @@ fn monad_runs_eagerly(ty: &Ty) -> bool {
 
 pub(crate) use bhc_types::io_closure_mode;
 
+/// `>>=` and `pure` for `Maybe` and `Either e`, written out as `case`.
+///
+/// Codegen's builtin `mapM` at these monads is a plain `map`: it never stops
+/// at a `Nothing`, so pandoc's `isJust (mapM toTaskListItem items)` was always
+/// true and every bullet list rendered as a task list. Traversals at them are
+/// folded through these instead.
+fn short_circuit_monad_ops(
+    ctx: &mut LowerContext,
+    monad_ty: &Ty,
+    span: Span,
+) -> Option<(core::Expr, core::Expr)> {
+    let (type_name, fail_name, fail_tag, ok_name) = match applied_head_name(monad_ty)?.as_str() {
+        "Maybe" => ("Maybe", "Nothing", 0, "Just"),
+        "Either" => ("Either", "Left", 0, "Right"),
+        _ => return None,
+    };
+    let tycon = TyCon::new(Symbol::intern(type_name), Kind::Star);
+    let con = |name: &str, tag: u32| DataCon {
+        name: Symbol::intern(name),
+        ty_con: tycon.clone(),
+        tag,
+        arity: 1,
+    };
+    let m = ctx.fresh_var("$sc_m", Ty::Error, span);
+    let k = ctx.fresh_var("$sc_k", Ty::Error, span);
+    let v = ctx.fresh_var("$sc_v", Ty::Error, span);
+    let var = |x: &Var| core::Expr::Var(x.clone(), span);
+    let mut fail_con = con(fail_name, fail_tag);
+    let (fail_binders, fail_rhs) = if fail_name == "Nothing" {
+        fail_con.arity = 0;
+        (vec![], nullary_var("Nothing", span))
+    } else {
+        // `Left e` is rebuilt at the result's own type.
+        let e = ctx.fresh_var("$sc_e", Ty::Error, span);
+        let rhs = core::Expr::App(Box::new(nullary_var("Left", span)), Box::new(var(&e)), span);
+        (vec![e], rhs)
+    };
+    let alts = vec![
+        Alt {
+            con: AltCon::DataCon(fail_con),
+            binders: fail_binders,
+            rhs: fail_rhs,
+        },
+        Alt {
+            con: AltCon::DataCon(con(ok_name, 1)),
+            binders: vec![v.clone()],
+            rhs: core::Expr::App(Box::new(var(&k)), Box::new(var(&v)), span),
+        },
+    ];
+    let bind = core::Expr::Lam(
+        m.clone(),
+        Box::new(core::Expr::Lam(
+            k,
+            Box::new(core::Expr::Case(Box::new(var(&m)), alts, Ty::Error, span)),
+            span,
+        )),
+        span,
+    );
+    Some((bind, nullary_var(ok_name, span)))
+}
+
 fn nullary_var(name: &str, span: Span) -> core::Expr {
     core::Expr::Var(
         Var {
@@ -4676,7 +4737,10 @@ fn lower_monadic_traversal_spine(
             applied_head_name(&monad_ty)
         );
     }
-    if monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none() {
+    let short_circuit = short_circuit_monad_ops(ctx, &monad_ty, span);
+    if short_circuit.is_none()
+        && (monad_runs_eagerly(&monad_ty) || applied_head_name(&monad_ty).is_none())
+    {
         return Ok(None);
     }
     // A builtin transformer (`StateT s IO`) has no instance a dictionary can be
@@ -4700,27 +4764,32 @@ fn lower_monadic_traversal_spine(
             span,
         )
     };
-    let Some(bind_e) = ctx
-        .resolve_method_at_concrete_type(
-            Symbol::intern(">>="),
-            Symbol::intern("Monad"),
-            &monad_ty,
-            span,
-        )
-        .or_else(|| builtin_layer.then(|| typed_builtin(">>=")))
-    else {
-        return Ok(None);
-    };
-    let Some(pure_e) = ctx
-        .resolve_method_at_concrete_type(
-            Symbol::intern("pure"),
-            Symbol::intern("Applicative"),
-            &monad_ty,
-            span,
-        )
-        .or_else(|| builtin_layer.then(|| typed_builtin("return")))
-    else {
-        return Ok(None);
+    let (bind_e, pure_e) = if let Some(ops) = short_circuit {
+        ops
+    } else {
+        let Some(bind_e) = ctx
+            .resolve_method_at_concrete_type(
+                Symbol::intern(">>="),
+                Symbol::intern("Monad"),
+                &monad_ty,
+                span,
+            )
+            .or_else(|| builtin_layer.then(|| typed_builtin(">>=")))
+        else {
+            return Ok(None);
+        };
+        let Some(pure_e) = ctx
+            .resolve_method_at_concrete_type(
+                Symbol::intern("pure"),
+                Symbol::intern("Applicative"),
+                &monad_ty,
+                span,
+            )
+            .or_else(|| builtin_layer.then(|| typed_builtin("return")))
+        else {
+            return Ok(None);
+        };
+        (bind_e, pure_e)
     };
 
     // The rewrite is a LIST fold. A `traverse` over another Traversable

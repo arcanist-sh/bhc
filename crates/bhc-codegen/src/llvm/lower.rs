@@ -49057,6 +49057,22 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             Expr::Var(var, _span) => {
                 let name = var.name.as_str();
 
+                // `mzero`/`empty` at a value monad its type names: the clone a
+                // `MonadPlus m =>` function is specialized to at `Maybe` or a
+                // list (pandoc's `toTaskListItem`) carries that type here.
+                if matches!(name, "mzero" | "empty")
+                    && !self.env.contains_key(&var.id)
+                    && !self.functions.contains_key(&var.id)
+                {
+                    // `Nothing` and `[]` are both the nullary tag-0 constructor.
+                    if matches!(
+                        self.value_monad_of_ty(&var.ty),
+                        Some(ValueMonad::Maybe | ValueMonad::List)
+                    ) {
+                        return self.lower_constructor_application(0, 0, &[]);
+                    }
+                }
+
                 // First, check if this is a nullary constructor (like [], True, False, Nothing)
                 if let Some((tag, arity)) = self.constructor_info(name) {
                     if arity == 0 {

@@ -574,6 +574,11 @@ fn test_tier3_bare_sequence_value_native() {
     run_native_test("tier3_io/bare_sequence_value", Profile::Default);
 }
 
+#[test]
+fn test_tier3_monadplus_poly_builtin_native() {
+    run_native_test("tier3_io/monadplus_poly_builtin", Profile::Default);
+}
+
 /// Closure IO model only: eager mode still generalizes local functions over
 /// value-class variables.
 #[test]

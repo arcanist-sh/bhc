@@ -54584,8 +54584,13 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let rhs = self
             .lower_expr(args[1])?
             .ok_or_else(|| CodegenError::Internal("text cmp: no rhs value".to_string()))?;
+        // An operand bound by a pattern can still be an unevaluated thunk
+        // (pandoc's `Header _ (hident, _, _) _` attribute fields); the RTS
+        // reads a Text header.
         let lhs = self.value_to_ptr(lhs)?;
+        let lhs = self.build_force(lhs.into())?.into_pointer_value();
         let rhs = self.value_to_ptr(rhs)?;
+        let rhs = self.build_force(rhs.into())?.into_pointer_value();
         let i64_type = self.type_mapper().i64_type();
         match op {
             PrimOp::Eq | PrimOp::Ne => {

@@ -4318,21 +4318,29 @@ impl Compiler {
                         Some(bhc_types::Scheme::poly(quantified, ty))
                     } else if bhc_types::io_closure_mode()
                         && exported_type.params.is_empty()
-                        && con
-                            .fields
-                            .iter()
-                            .any(|f| ty_is_integer(&converter.convert_type(f)))
+                        && con.fields.iter().any(|f| {
+                            pinnable_field(&expand_interface_alias(
+                                &converter.convert_type(f),
+                                &ctx.interface_type_aliases,
+                            ))
+                        })
                     {
                         // A parameterless type's constructor keeps fresh field
                         // types (pinning them all broke checking elsewhere) —
-                        // except an `Integer` field: a literal argument must
-                        // be typed `Integer` to be built as a bignum
-                        // (`ModifiedJulianDay 0` stored a raw 0).
+                        // except an `Integer` field (a literal argument must
+                        // be typed `Integer` to be built as a bignum:
+                        // `ModifiedJulianDay 0` stored a raw 0) and a ground
+                        // field mentioning `Text` (pandoc's `Header _ attr _`
+                        // pattern left `attr`'s key-value list untyped, and
+                        // its comparison fell back to comparing pointers).
                         let mut quantified = Vec::new();
                         let mut field_tys = Vec::with_capacity(con.fields.len());
                         for (i, f) in con.fields.iter().enumerate() {
-                            let converted = converter.convert_type(f);
-                            if ty_is_integer(&converted) {
+                            let converted = expand_interface_alias(
+                                &converter.convert_type(f),
+                                &ctx.interface_type_aliases,
+                            );
+                            if pinnable_field(&converted) {
                                 field_tys.push(converted);
                             } else {
                                 #[allow(clippy::cast_possible_truncation)]
@@ -6969,6 +6977,46 @@ fn ty_mentions_text(ty: &bhc_types::Ty) -> bool {
         Ty::Tuple(es) => es.iter().any(ty_mentions_text),
         _ => false,
     }
+}
+
+/// Whether an imported constructor field's real type is kept (see the
+/// parameterless-type constructor scheme): ground and `Integer`, or ground and
+/// mentioning `Text`.
+fn pinnable_field(ty: &bhc_types::Ty) -> bool {
+    // Only plain data shapes: pinning a field that mentions another data
+    // type (a `[Block]`, an external package's type) rejected
+    // Text.Pandoc.Parsing.GridTable, which the placeholder let through.
+    fn plain_shape(ty: &bhc_types::Ty) -> bool {
+        use bhc_types::Ty;
+        match ty {
+            Ty::Con(c) => {
+                matches!(
+                    c.name.as_str(),
+                    "Text" | "Int" | "Integer" | "Bool" | "Char" | "Double"
+                ) || c.name.as_str().ends_with(".Text")
+            }
+            Ty::List(e) => plain_shape(e),
+            Ty::Tuple(es) => es.iter().all(plain_shape),
+            _ => false,
+        }
+    }
+    !ty_has_vars(ty) && (ty_is_integer(ty) || (ty_mentions_text(ty) && plain_shape(ty)))
+}
+
+/// Expand a parameterless interface type synonym (`Attr`), once.
+fn expand_interface_alias(
+    ty: &bhc_types::Ty,
+    aliases: &[(bhc_intern::Symbol, Vec<bhc_types::TyVar>, bhc_types::Ty)],
+) -> bhc_types::Ty {
+    if let bhc_types::Ty::Con(c) = ty {
+        if let Some((_, _, body)) = aliases
+            .iter()
+            .find(|(name, params, _)| *name == c.name && params.is_empty())
+        {
+            return body.clone();
+        }
+    }
+    ty.clone()
 }
 
 /// Whether a type is exactly `Integer`.

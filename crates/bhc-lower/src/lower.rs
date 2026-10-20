@@ -6496,6 +6496,26 @@ fn register_standard_module_exports(
                     }
                 }
             }
+        } else if is_constructor {
+            // The bare name is already some OTHER module's constructor
+            // (`Text.Pandoc.Definition.Cell` when `import qualified
+            // Text.GridTable as GT` follows it). The qualified name must not
+            // fall back to it: `GT.Cell c rs cs` then matched pandoc's `Cell`
+            // and typed `c` as its `Attr`. Give the qualified name its own
+            // stub constructor.
+            let aliased_qual_sym = Symbol::intern(&format!("{qualifier}.{export}"));
+            if ctx.lookup_constructor(aliased_qual_sym).is_none() {
+                let def_id = ctx.fresh_def_id();
+                let full = Symbol::intern(&format!("{module_name}.{export}"));
+                ctx.define(def_id, full, DefKind::StubConstructor, Span::default());
+                ctx.bind_constructor(aliased_qual_sym, def_id);
+                if ctx.lookup_value(aliased_qual_sym).is_none() {
+                    ctx.bind_value(aliased_qual_sym, def_id);
+                }
+                if qualifier != module_name && ctx.lookup_constructor(full).is_none() {
+                    ctx.bind_constructor(full, def_id);
+                }
+            }
         }
     }
 }

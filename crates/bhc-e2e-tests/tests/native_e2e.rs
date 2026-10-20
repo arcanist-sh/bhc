@@ -554,6 +554,11 @@ fn test_tier3_text_literal_nested_pattern_native() {
     run_native_test("tier3_io/text_literal_nested_pattern", Profile::Default);
 }
 
+#[test]
+fn test_tier3_recursive_parser_knot_native() {
+    run_native_test("tier3_io/recursive_parser_knot", Profile::Default);
+}
+
 /// Closure IO model only: eager mode still generalizes local functions over
 /// value-class variables.
 #[test]

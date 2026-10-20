@@ -488,6 +488,14 @@ pub struct Lowering<'ctx, 'm> {
     /// infinite `block()` -> `yamlMetaBlock'()` -> `block()` call cycle
     /// (stack overflow). Non-recursive CAF references keep the eager call.
     recursive_caf_ids: FxHashSet<VarId>,
+    /// The top-level binding whose body is being lowered. An argument that
+    /// refers back to it is a recursive knot and is passed lazily through a
+    /// closure call (see `lower_closure_call`).
+    current_top_fn: Option<VarId>,
+    /// Set for one `lower_lazy` call: the thunk forces its own result, for a
+    /// recursive-knot argument whose value can be a thunk passed through
+    /// unevaluated (see `lower_closure_call`).
+    lazy_force_result: bool,
     /// E.45: Set of variable IDs that hold Integer (arbitrary precision) values.
     /// Used by show dispatch to route to bhc_integer_show instead of show_int.
     integer_vars: FxHashSet<VarId>,
@@ -567,6 +575,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             thunked_vars: FxHashSet::default(),
             bottom_cafs: FxHashSet::default(),
             recursive_caf_ids: FxHashSet::default(),
+            current_top_fn: None,
+            lazy_force_result: false,
             integer_vars: FxHashSet::default(),
             adt_show_vars: FxHashMap::default(),
             con_field_types: FxHashMap::default(),
@@ -626,6 +636,8 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             thunked_vars: FxHashSet::default(),
             bottom_cafs: FxHashSet::default(),
             recursive_caf_ids: FxHashSet::default(),
+            current_top_fn: None,
+            lazy_force_result: false,
             integer_vars: FxHashSet::default(),
             adt_show_vars: FxHashMap::default(),
             con_field_types: FxHashMap::default(),
@@ -47645,6 +47657,34 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Whether `expr` references the variable `id` anywhere.
+    fn expr_mentions_var(expr: &Expr, id: VarId) -> bool {
+        match expr {
+            Expr::Var(v, _) => v.id == id,
+            Expr::Lit(..) | Expr::Type(..) | Expr::Coercion(..) => false,
+            Expr::App(f, a, _) => {
+                Self::expr_mentions_var(f, id) || Self::expr_mentions_var(a, id)
+            }
+            Expr::TyApp(e, _, _)
+            | Expr::Lam(_, e, _)
+            | Expr::TyLam(_, e, _)
+            | Expr::Lazy(e, _)
+            | Expr::Cast(e, _, _)
+            | Expr::Tick(_, e, _) => Self::expr_mentions_var(e, id),
+            Expr::Let(bind, body, _) => {
+                let in_rhs = match bind.as_ref() {
+                    Bind::NonRec(_, rhs) => Self::expr_mentions_var(rhs, id),
+                    Bind::Rec(bs) => bs.iter().any(|(_, rhs)| Self::expr_mentions_var(rhs, id)),
+                };
+                in_rhs || Self::expr_mentions_var(body, id)
+            }
+            Expr::Case(scrut, alts, _, _) => {
+                Self::expr_mentions_var(scrut, id)
+                    || alts.iter().any(|alt| Self::expr_mentions_var(&alt.rhs, id))
+            }
+        }
+    }
+
     fn is_trivial_expr(expr: &Expr) -> bool {
         match expr {
             // Literals are trivial
@@ -48885,6 +48925,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Lower a function definition.
     fn lower_function_def(&mut self, var: &Var, expr: &Expr) -> CodegenResult<()> {
         self.dbg_enclosing_bind = var.name.as_str().to_string();
+        self.current_top_fn = Some(var.id);
         let fn_val = self.functions.get(&var.id).copied().ok_or_else(|| {
             CodegenError::Internal(format!("function not declared: {}", var.name.as_str()))
         })?;
@@ -49452,6 +49493,7 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
     /// Creates a thunk that suspends the evaluation of the inner expression.
     /// The thunk is evaluated when forced (via bhc_force).
     fn lower_lazy(&mut self, inner: &Expr) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        let force_result = std::mem::take(&mut self.lazy_force_result);
         // Compute free variables in the lazy expression
         let free = self.free_vars(inner);
 
@@ -49523,7 +49565,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
 
         // Lower the inner expression (this produces the actual computation)
-        let result = self.lower_expr(inner)?;
+        let mut result = self.lower_expr(inner)?;
+        // A heap result may itself be a thunk (a lazily passed argument the
+        // callee returned as is); evaluate through it when asked to.
+        if force_result {
+            if let Some(BasicValueEnum::PointerValue(p)) = result {
+                let has_terminator = self
+                    .builder()
+                    .get_insert_block()
+                    .is_some_and(|bb| bb.get_terminator().is_some());
+                if !has_terminator {
+                    result = Some(self.build_force(p.into())?);
+                }
+            }
+        }
 
         // Build return — but only if the current block doesn't already have a terminator.
         // Expressions like `error "..."` generate an `unreachable` terminator.
@@ -55998,7 +56053,18 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // string"`) — to a parser that never calls it. Evaluating it here
             // made every `many` in pandoc report that error, whatever the
             // parser consumed.
-            if self.arg_should_thunk(arg_expr) {
+            //
+            // So is a non-trivial argument that calls back into the function
+            // being defined. pandoc's `quotedTitle c = try $ char c >> (let
+            // nested = … <$> quotedTitle c in … nested <|> …)` evaluated the
+            // `>>` continuation while constructing the parser, which built
+            // `quotedTitle c` again, without end (stack overflow on any link).
+            let recursive_knot = !Self::is_trivial_expr(arg_expr)
+                && self
+                    .current_top_fn
+                    .is_some_and(|id| Self::expr_mentions_var(arg_expr, id));
+            if recursive_knot || self.arg_should_thunk(arg_expr) {
+                self.lazy_force_result = recursive_knot;
                 if let Some(thunk) = self.lower_lazy(arg_expr)? {
                     arg_vals.push(self.value_to_ptr(thunk)?);
                     continue;

@@ -485,6 +485,11 @@ fn test_tier3_integer_conversions_native() {
 }
 
 #[test]
+fn test_tier3_case_qualified_scrutinee_native() {
+    run_native_test("tier3_io/case_qualified_scrutinee", Profile::Default);
+}
+
+#[test]
 fn test_tier3_nub_ord_reads_native() {
     run_native_test("tier3_io/nub_ord_reads", Profile::Default);
 }

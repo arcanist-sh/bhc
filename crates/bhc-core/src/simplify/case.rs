@@ -106,15 +106,32 @@ fn peel_constructor_app(expr: &Expr) -> Option<(String, Vec<Expr>)> {
 }
 
 /// Check if a name looks like a data constructor.
+///
+/// A qualified name is judged by its last component: `Data.Text.length` is a
+/// function (its module qualifier starts with an uppercase letter), and
+/// taking it for a constructor made `case T.length t of 1 -> …` always pick
+/// the default alternative.
 fn is_constructor_name(name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
-    let first = name.chars().next().unwrap();
-    first.is_uppercase()
-        || name == ":"
-        || name == "[]"
-        || name.starts_with('(') && name.ends_with(')')
+    if name == ":" || name == "[]" || name.starts_with('(') && name.ends_with(')') {
+        return true;
+    }
+    // `M.x` → `x`; an operator such as `Data.Map.!` or the bare `.` keeps a
+    // non-alphabetic last component, and a dot inside an operator name is not
+    // a qualifier.
+    let base = match name.rfind('.') {
+        Some(i)
+            if i + 1 < name.len() && name[..i].chars().next().is_some_and(char::is_uppercase) =>
+        {
+            &name[i + 1..]
+        }
+        _ => name,
+    };
+    base.chars()
+        .next()
+        .is_some_and(|c| c.is_uppercase() || c == ':')
 }
 
 /// Match a known constructor application against case alternatives.
@@ -327,6 +344,17 @@ mod tests {
             }
             other => panic!("expected Let, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn qualified_function_is_not_a_constructor() {
+        assert!(!is_constructor_name("Data.Text.length"));
+        assert!(!is_constructor_name("Data.Map.!"));
+        assert!(!is_constructor_name("."));
+        assert!(is_constructor_name("Text.Pandoc.Definition.Str"));
+        assert!(is_constructor_name("Just"));
+        assert!(is_constructor_name(":"));
+        assert!(is_constructor_name("(,)"));
     }
 
     #[test]

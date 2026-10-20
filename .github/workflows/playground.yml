@@ -69,29 +69,30 @@ jobs:
           wasm-bindgen --out-dir playground-out --target web \
             target/wasm32-unknown-unknown/release/bhc_playground.wasm
 
+      # The playground is served from arcanist.sh/bhc/playground/ (www.arcanist.sh, static/bhc/playground/)
       - name: Checkout website repo
         uses: actions/checkout@v4
         with:
-          repository: arcanist-sh/bhc.arcanist.sh
+          repository: arcanist-sh/www.arcanist.sh
           path: website
           token: ${{ secrets.DOCS_DEPLOY_TOKEN2 }}
 
       - name: Update playground files
         run: |
-          cp playground-out/bhc_playground.js website/static/playground/
-          cp playground-out/bhc_playground_bg.wasm website/static/playground/
+          cp playground-out/bhc_playground.js website/static/bhc/playground/
+          cp playground-out/bhc_playground_bg.wasm website/static/bhc/playground/
 
       - name: Commit and push
         run: |
           cd website
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add static/playground
+          git add static/bhc/playground
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
             git commit -m "chore: update playground WASM from bhc@${{ github.sha }}"
             # Best-effort deploy: do not fail the workflow if the token lacks
             # write access to the site repo (surfaces as a warning instead).
-            git push || echo "::warning::playground deploy skipped — DOCS_DEPLOY_TOKEN2 needs write access to arcanist-sh/bhc.arcanist.sh"
+            git push || echo "::warning::playground deploy skipped — DOCS_DEPLOY_TOKEN2 needs write access to arcanist-sh/www.arcanist.sh"
           fi

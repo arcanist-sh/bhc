@@ -49,7 +49,7 @@ jobs:
           mkdir -p docs-site/static/api
           ./target/release/bhc-docs build stdlib \
             -o docs-site/static/api \
-            --base-url "/docs/api" \
+            --base-url "/bhc/api" \
             --version "${{ github.ref_name }}" \
             --source-url "https://github.com/arcanist-sh/bhc/blob/${{ github.sha }}"
 

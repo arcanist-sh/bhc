@@ -385,7 +385,10 @@ fn try_seed(v: &Var, span: Span, resolved: &FxHashMap<Span, Ty>, ctx: &mut Ctx) 
     // Only the MONAD's image must be ground (`instantiation_of` checks it): a
     // value type typeck left open (`getsCommonState stVerbosity`'s `a`) does
     // not affect the transformer stack the clone is compiled for.
-    let transformer = mentions_transformer(&cty);
+    if !mentions_transformer(&cty) {
+        trace(&format!("no transformer in type: {cty:?}"));
+        return None;
+    }
     let Some((orig_var, orig_body)) = ctx.source_binding(v) else {
         trace("no source binding");
         return None;
@@ -394,19 +397,6 @@ fn try_seed(v: &Var, span: Span, resolved: &FxHashMap<Span, Ty>, ctx: &mut Ctx) 
         trace(&format!("no instantiation of {:?}", orig_var.ty));
         return None;
     };
-    // Besides transformer stacks, the builtin monads whose `pure`/`mzero`
-    // codegen picks by type: a `MonadPlus m =>` function (pandoc's
-    // `toTaskListItem`) compiled once from its polymorphic type returned
-    // neither `Nothing` nor `[]` at them.
-    // Judged on the type as written: a user newtype over a function into
-    // `Maybe` (a parser `P a = P (String -> Maybe (a, String))`) unfolds to
-    // one whose result is `Maybe`, and is no `Maybe` monad.
-    let builtin_plus = !transformer
-        && instantiation_of(&orig_var.ty, rty).is_some_and(|i| is_builtin_plus_monad(&i.monad));
-    if !transformer && !builtin_plus {
-        trace(&format!("no transformer in type: {cty:?}"));
-        return None;
-    }
     let r = get_or_specialize(&orig_var, &orig_body, &inst, ctx);
     trace(if r.is_some() {
         "specialized"
@@ -571,9 +561,7 @@ fn get_or_specialize(
     collect_tyvars(&orig_var.ty, &mut binder_vars);
     let mb = monad_var_of(&orig_var.ty, &binder_vars)?;
     let concrete_monad = inst.monad.clone();
-    if has_free_tyvar(&concrete_monad)
-        || !(mentions_transformer(&concrete_monad) || is_builtin_plus_monad(&concrete_monad))
-    {
+    if has_free_tyvar(&concrete_monad) || !mentions_transformer(&concrete_monad) {
         return None;
     }
 
@@ -891,19 +879,6 @@ fn specialize_body(e: &Expr, subst: &Subst, ctx: &mut Ctx) -> Expr {
                     }
                 }
             }
-            // A builtin `mzero`/`empty` whose type is erased or still open (an
-            // imported clone body carries no span types) takes the clone's
-            // own monad, so codegen builds that monad's zero: pandoc's
-            // `toTaskListItem` from `Writers.Shared` returned no `Nothing` at
-            // `Maybe` in the HTML writer.
-            let new_ty = if matches!(v.name.as_str(), "mzero" | "empty")
-                && (matches!(new_ty, Ty::Error) || has_free_tyvar(&new_ty))
-                && is_builtin_plus_monad(&ctx.cur_monad)
-            {
-                Ty::App(Box::new(ctx.cur_monad.clone()), Box::new(Ty::Error))
-            } else {
-                new_ty
-            };
             Expr::Var(Var::new(v.name, v.id, new_ty), *span)
         }
         Expr::Lit(l, ty, span) => Expr::Lit(l.clone(), subst.apply(ty), *span),
@@ -1096,15 +1071,6 @@ fn has_free_tyvar(ty: &Ty) -> bool {
         Ty::Forall(_, b) => has_free_tyvar(b),
         _ => false,
     }
-}
-
-/// `Maybe`, `Either e` or the list monad, as a monad variable's image.
-fn is_builtin_plus_monad(monad: &Ty) -> bool {
-    let mut head = monad;
-    while let Ty::App(f, _) = head {
-        head = f.as_ref();
-    }
-    matches!(head, Ty::Con(c) if matches!(c.name.as_str(), "Maybe" | "Either" | "[]" | "List"))
 }
 
 fn mentions_transformer(ty: &Ty) -> bool {

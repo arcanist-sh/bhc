@@ -2543,6 +2543,13 @@ impl LowerContext {
         constraint: &Constraint,
         span: Span,
     ) -> Option<core::Expr> {
+        // The builtin value monads (`Maybe`, lists) have no instances to
+        // build a monad-family dictionary from; it is written out instead.
+        if crate::dictionary::monad_witness_enabled() {
+            if let Some(dict) = crate::builtin_dicts::value_monad_dict(self, constraint, span) {
+                return Some(dict);
+            }
+        }
         // 0. A fully concrete constraint names its instance directly. The
         // in-scope lookup below matches by CLASS alone and can hand back a
         // dictionary for a DIFFERENT type: readMarkdown's `ToSources a`
@@ -3583,7 +3590,10 @@ impl LowerContext {
     pub(crate) fn constraint_is_dict_passed(&self, c: &Constraint) -> bool {
         self.is_user_class(c.class)
             || (crate::dictionary::monad_witness_enabled()
-                && matches!(c.class.as_str(), "Monad" | "Applicative")
+                && matches!(
+                    c.class.as_str(),
+                    "Monad" | "Applicative" | "MonadPlus" | "Alternative"
+                )
                 && matches!(c.args.first(), Some(Ty::Var(_))))
             || (value_class_dicts_enabled()
                 && matches!(c.class.as_str(), "Semigroup" | "Monoid")

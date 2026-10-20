@@ -2228,8 +2228,18 @@ fn lower_constrained_value_all_dicts(
     // there is one. Under the closure IO model a function passed as an
     // argument (`flip evalStateT def`, with the transformers library's
     // `evalStateT :: Monad m => …`) is a value and is resolved here.
+    // So, in either model, is one whose every constraint is a monad witness
+    // (`task :: MonadPlus m => …` in `mapM task xs` at `Maybe`): nothing at
+    // the use site supplies it later.
+    let only_monad_witnesses = constraints.iter().all(|c| {
+        matches!(
+            c.class.as_str(),
+            "Monad" | "Applicative" | "MonadPlus" | "Alternative"
+        )
+    });
     if matches!(subst.apply(scheme_ty), Ty::Fun(..))
-        && (!io_closure_mode() || ctx.app_head_spans.contains(&def_ref.span))
+        && (!(io_closure_mode() || only_monad_witnesses)
+            || ctx.app_head_spans.contains(&def_ref.span))
     {
         return None;
     }

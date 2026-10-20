@@ -579,6 +579,11 @@ fn test_tier3_monadplus_poly_builtin_native() {
     run_native_test("tier3_io/monadplus_poly_builtin", Profile::Default);
 }
 
+#[test]
+fn test_tier3_monad_witness_builtin_native() {
+    run_native_test("tier3_io/monad_witness_builtin", Profile::Default);
+}
+
 /// Closure IO model only: eager mode still generalizes local functions over
 /// value-class variables.
 #[test]

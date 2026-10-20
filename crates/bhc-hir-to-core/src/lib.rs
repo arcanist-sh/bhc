@@ -14,6 +14,7 @@
 #![warn(missing_docs)]
 
 mod binding;
+mod builtin_dicts;
 mod context;
 pub mod deriving;
 pub mod dictionary;

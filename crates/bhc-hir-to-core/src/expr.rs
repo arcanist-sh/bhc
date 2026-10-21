@@ -5552,6 +5552,73 @@ fn lower_value_pure_at_builtin(
     Some(core::Expr::Lam(x, Box::new(body), span))
 }
 
+/// `Data.Set.member k s` (and the other key-first container operations) with
+/// a variable key: give the key its typeck type. Codegen compares boxed keys
+/// by content only when it can tell their type, and a function parameter
+/// reaches it untyped — pandoc's `extensionEnabled x (Extensions exts) = x
+/// `Set.member` exts` compared `Extension` values by address and every
+/// extension read as disabled.
+fn try_lower_typed_container_key(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let Expr::Var(head) = f else {
+        return Ok(None);
+    };
+    let Some(name) = ctx.lookup_var(head.def_id).map(|v| v.name) else {
+        return Ok(None);
+    };
+    let n = name.as_str();
+    let (module, op) = match n.rsplit_once('.') {
+        Some(parts) => parts,
+        None => return Ok(None),
+    };
+    let is_container = matches!(
+        module,
+        "Data.Set" | "Data.Map" | "Data.Map.Strict" | "Data.Map.Lazy" | "Data.Set.Internal"
+    );
+    if !is_container
+        || !matches!(
+            op,
+            "member"
+                | "notMember"
+                | "insert"
+                | "delete"
+                | "lookup"
+                | "findWithDefault"
+                | "insertWith"
+                | "adjust"
+                | "alter"
+        )
+    {
+        return Ok(None);
+    }
+    if !matches!(x, Expr::Var(_)) {
+        return Ok(None);
+    }
+    let key_ty = match ctx.resolved_expr_ty_opt(head.span) {
+        Some(Ty::Fun(a, _)) if is_fully_concrete_ty(&a) => *a,
+        _ => match ctx.resolved_expr_ty_opt(x.span()) {
+            Some(t) if is_fully_concrete_ty(&t) && !matches!(t, Ty::Fun(..)) => t,
+            _ => return Ok(None),
+        },
+    };
+    let head_core = lower_expr(ctx, f)?;
+    let mut key_core = lower_expr(ctx, x)?;
+    if let core::Expr::Var(v, _) = &mut key_core {
+        if matches!(v.ty, Ty::Error) {
+            v.ty = key_ty;
+        }
+    }
+    Ok(Some(core::Expr::App(
+        Box::new(head_core),
+        Box::new(key_core),
+        span,
+    )))
+}
+
 /// The builtin `MonadPlus`/`Alternative` structure of `Maybe` and lists.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PlusMonad {
@@ -5763,6 +5830,9 @@ fn lower_app(
         return Ok(result);
     }
     if let Some(result) = try_lower_structural_lookup(ctx, f, x, span)? {
+        return Ok(result);
+    }
+    if let Some(result) = try_lower_typed_container_key(ctx, f, x, span)? {
         return Ok(result);
     }
     if let Some(result) = try_lower_list_difference(ctx, f, x, span)? {

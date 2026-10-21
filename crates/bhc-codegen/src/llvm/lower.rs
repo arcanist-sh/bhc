@@ -16968,9 +16968,63 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             1
         } else if self.is_string_type(ty) {
             2
+        } else if let Some(kind) = self.enum_key_kind(ty) {
+            kind
         } else {
             0
         }
+    }
+
+    /// The container key kind for a data type whose field-less constructors
+    /// are identified by their tag: `3 | threshold << 16`, where every
+    /// field-less constructor's tag is below `threshold` and every other
+    /// constructor's is at or above it. Each use of a nullary constructor
+    /// allocates afresh, so as a key compared by address `Set.member
+    /// Ext_smart pandocExtensions` was always `False` (pandoc's `Extension`
+    /// is 88 nullary constructors and `CustomExtension Text`).
+    fn enum_key_kind(&self, ty: &Ty) -> Option<u64> {
+        let Ty::Con(tc) = ty else {
+            return None;
+        };
+        let name = tc.name.as_str();
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        if matches!(bare, "Bool" | "Ordering" | "()") {
+            return None;
+        }
+        let mut nullary_tags: Vec<u32> = Vec::new();
+        let mut fielded_tags: Vec<u32> = Vec::new();
+        for meta in self.constructor_metadata.values() {
+            let Some(type_name) = meta.type_name.as_deref() else {
+                continue;
+            };
+            if type_name.rsplit('.').next().unwrap_or(type_name) != bare {
+                continue;
+            }
+            if meta.is_newtype {
+                return None;
+            }
+            if meta.arity == 0 {
+                nullary_tags.push(meta.tag);
+            } else {
+                fielded_tags.push(meta.tag);
+            }
+        }
+        // A derived `Generic` instance's `L1`/`R1` are recorded under the
+        // deriving type's name; a real constructor never shares a tag with
+        // another of its type, so a fielded entry on a nullary tag is foreign.
+        let max_nullary = nullary_tags.iter().copied().max();
+        let min_fielded = fielded_tags
+            .iter()
+            .copied()
+            .filter(|t| !nullary_tags.contains(t))
+            .min();
+        let max_nullary = max_nullary?;
+        let threshold = match min_fielded {
+            Some(t) if t <= max_nullary => return None,
+            Some(t) => u64::from(t),
+            None => u64::from(max_nullary) + 1,
+        };
+        Some(3 | (threshold << 16))
     }
 
     /// The key type of a `Map k v` or `Set k`, if the type says.
@@ -17014,6 +17068,20 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             let kind = self.key_kind_of_ty(&k.ty());
             if kind != 0 {
                 return kind;
+            }
+            // An imported constructor reaches codegen untyped; its data type
+            // is in the constructor metadata (`Set.member Ext_smart exts`).
+            if let Some(type_name) = Self::head_var_name(k)
+                .and_then(|n| self.constructor_metadata.get(n))
+                .and_then(|m| m.type_name.clone())
+            {
+                let ty = Ty::Con(bhc_types::TyCon::new(
+                    Symbol::intern(&type_name),
+                    bhc_types::Kind::Star,
+                ));
+                if let Some(kind) = self.enum_key_kind(&ty) {
+                    return kind;
+                }
             }
         }
         if let Some(c) = container {

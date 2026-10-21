@@ -76,6 +76,17 @@ unsafe fn char_list_key_bytes(mut p: *const u8) -> Vec<u8> {
     out
 }
 
+/// Kind 3 carries, above these bits, the first tag of a constructor that has
+/// fields: `3 | threshold << ENUM_KIND_SHIFT`.
+const ENUM_KIND_MASK: i64 = 0xFFFF;
+const ENUM_KIND_SHIFT: i64 = 16;
+
+/// The constructor tag of a nullary-constructor value (`[tag]`).
+unsafe fn enum_key_bytes(p: *const u8) -> Vec<u8> {
+    let tag = unsafe { *(p as *const i64) };
+    tag.to_le_bytes().to_vec()
+}
+
 /// Canonicalize a container key so that equal CONTENTS become the same key.
 ///
 /// A Map or Set orders its keys as machine words, which is right for an `Int`
@@ -93,16 +104,27 @@ unsafe fn char_list_key_bytes(mut p: *const u8) -> Vec<u8> {
 ///
 /// # Safety
 /// For `kind` 1 the key must be a live `BhcText`; for `kind` 2 a `[Char]`
-/// cons list. Kind 0 does not dereference.
+/// cons list; for `kind` 3 a constructor of a type whose field-less
+/// constructors all have tags below the threshold in the kind's upper bits
+/// (pandoc's `Set Extension`). Kind 0 does not dereference.
 #[no_mangle]
 pub unsafe extern "C" fn bhc_container_key(kind: i64, raw: i64) -> i64 {
     if kind == 0 || raw == 0 {
         return raw;
     }
     let ptr = raw as *const u8;
-    let bytes = match kind {
+    let bytes = match kind & ENUM_KIND_MASK {
         1 => unsafe { text_key_bytes(ptr) },
         2 => unsafe { char_list_key_bytes(ptr) },
+        3 => {
+            // Tags below the threshold are the type's field-less
+            // constructors; a constructor with fields keeps its address.
+            let threshold = kind >> ENUM_KIND_SHIFT;
+            if unsafe { *(ptr as *const i64) } >= threshold {
+                return raw;
+            }
+            unsafe { enum_key_bytes(ptr) }
+        }
         _ => return raw,
     };
     let mut guard = match INTERNED_KEYS.lock() {

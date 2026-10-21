@@ -421,12 +421,18 @@ pub fn lower_pat_to_alt_with_fallthrough(
                 *view_span,
             );
 
-            // Create a nested case: case (f tmp) of { result_pat -> rhs }
-            let inner_alt = lower_pat_to_alt(ctx, result_pat, rhs, span)?;
+            // Create a nested case: case (f tmp) of { result_pat -> rhs }. A
+            // result that does not match — at its head or in a nested
+            // sub-pattern — resumes at the enclosing fallthrough: pandoc's
+            // `case T.break p ln of { (_, T.uncons -> Just ('|', _)) -> …;
+            // _ -> mzero }` raised a pattern-match error on every line
+            // without a pipe.
+            let inner_alt =
+                lower_pat_to_alt_with_fallthrough(ctx, result_pat, rhs, span, fallthrough.clone())?;
             let default_alt = Alt {
                 con: AltCon::Default,
                 binders: vec![],
-                rhs: make_pattern_error(span),
+                rhs: fallthrough.unwrap_or_else(|| make_pattern_error(span)),
             };
 
             let inner_case = core::Expr::Case(
@@ -1532,17 +1538,34 @@ fn compile_equations_linear(
             *view_span,
         );
 
-        let inner_alt = lower_pat_to_alt(ctx, result_pat, rhs, eq.span)?;
+        // The remaining equations, bound once: reached when the view's result
+        // does not match at its head AND when a nested sub-pattern fails
+        // (`f (T.uncons -> Just ('|', _)) = …` on "x" — the `'|'` misses
+        // inside the `Just`, which raised a pattern-match error instead of
+        // trying `f _ = …`).
+        let resume = ctx.fresh_var("$viewfail", Ty::Error, *view_span);
+        let resume_ref = core::Expr::Var(resume.clone(), *view_span);
+        let inner_alt = lower_pat_to_alt_with_fallthrough(
+            ctx,
+            result_pat,
+            rhs,
+            eq.span,
+            Some(resume_ref.clone()),
+        )?;
         let fallthrough_alt = Alt {
             con: AltCon::Default,
             binders: vec![],
-            rhs: fallthrough_expr,
+            rhs: resume_ref,
         };
 
-        let view_case = core::Expr::Case(
-            Box::new(applied),
-            vec![inner_alt, fallthrough_alt],
-            Ty::Error,
+        let view_case = core::Expr::Let(
+            Box::new(core::Bind::NonRec(resume, Box::new(fallthrough_expr))),
+            Box::new(core::Expr::Case(
+                Box::new(applied),
+                vec![inner_alt, fallthrough_alt],
+                Ty::Error,
+                *view_span,
+            )),
             *view_span,
         );
 

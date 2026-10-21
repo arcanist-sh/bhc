@@ -624,6 +624,16 @@ fn test_tier3_map_char_key_local_native() {
     run_native_test("tier3_io/map_char_key_local", Profile::Default);
 }
 
+#[test]
+fn test_tier3_set_enum_keys_native() {
+    run_native_test("tier3_io/set_enum_keys", Profile::Default);
+}
+
+#[test]
+fn test_tier3_view_pattern_fallthrough_native() {
+    run_native_test("tier3_io/view_pattern_fallthrough", Profile::Default);
+}
+
 /// Closure IO model only: eager mode still generalizes local functions over
 /// value-class variables.
 #[test]

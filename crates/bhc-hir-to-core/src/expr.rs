@@ -1131,6 +1131,9 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
         // `do` block it reached. Drop the qualifier and let the dispatch below
         // find the instance's own `*>`.
         let name = instance_local_qualified_method(ctx, name).unwrap_or(name);
+        if let Some(e) = lower_value_pure_at_builtin(ctx, name, def_ref.span) {
+            return Ok(e);
+        }
         // Check if this is a class method
         let is_method = ctx.class_method_of_def(def_ref.def_id, name);
         // `return` is in NO class's method list: the builtin Monad layout is
@@ -5516,6 +5519,39 @@ fn try_lower_structural_lookup(
     )))
 }
 
+/// A value-position `pure`/`return` at a list or `Maybe` type: `\x -> [x]`
+/// or `\x -> Just x`. The bare builtin carries no monad, so `fmap pure p`
+/// handed `p`'s `Char` straight through where a one-character `String` was
+/// due (pandoc's `uri` parser then `T.pack`ed a `Char` on every `.`).
+fn lower_value_pure_at_builtin(
+    ctx: &mut LowerContext,
+    name: Symbol,
+    span: Span,
+) -> Option<core::Expr> {
+    let bare = name.as_str().rsplit('.').next().unwrap_or("");
+    if !matches!(bare, "pure" | "return") {
+        return None;
+    }
+    let Ty::Fun(_, result) = refined_occurrence_ty(ctx, span)? else {
+        return None;
+    };
+    let monad = match result.as_ref() {
+        Ty::Con(c) if c.name.as_str() == "String" => PlusMonad::List,
+        other => plus_monad_of(other)?,
+    };
+    let x = ctx.fresh_var("pure_x", Ty::Error, span);
+    let app =
+        |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+    let body = match monad {
+        PlusMonad::Maybe => app(nullary_var("Just", span), core::Expr::Var(x.clone(), span)),
+        PlusMonad::List => app(
+            app(nullary_var(":", span), core::Expr::Var(x.clone(), span)),
+            nullary_var("[]", span),
+        ),
+    };
+    Some(core::Expr::Lam(x, Box::new(body), span))
+}
+
 /// The builtin `MonadPlus`/`Alternative` structure of `Maybe` and lists.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PlusMonad {
@@ -7979,7 +8015,11 @@ fn lower_case(
 
     // Check if any alternative has a nested/complex sub-pattern that needs
     // fallthrough support (e.g., `Lit 0` where the literal match may fail).
-    let needs_fallthrough = alts.iter().any(|alt| has_complex_subpatterns(&alt.pat));
+    // So does a guarded alternative: when its guards all fail, the match
+    // resumes at the next alternative.
+    let needs_fallthrough = alts
+        .iter()
+        .any(|alt| has_complex_subpatterns(&alt.pat) || !alt.guards.is_empty());
 
     if !needs_fallthrough {
         // Simple case: no nested patterns, use the fast path
@@ -8028,10 +8068,22 @@ fn lower_case(
     // Bind the scrutinee to a variable so fallthrough can re-case on it.
     let scrut_var = ctx.fresh_var("scrut", Ty::Error, span);
 
+    // A local multi-clause function cases on the tuple of its parameters;
+    // their types let a nested literal sub-pattern compare as `Text`.
+    let scrut_ty = case_scrutinee_ty(ctx, scrutinee);
+
+    // The resume point of each alternative after the first, named up front:
+    // a guarded alternative whose guards all fail resumes at the NEXT
+    // alternative, so its RHS refers to that variable before it is bound.
+    let n = alts.len();
+    let resume_vars: Vec<Option<core::Var>> = (0..=n)
+        .map(|i| (i > 0 && i < n).then(|| ctx.fresh_var(&format!("$fallthru{i}"), Ty::Error, span)))
+        .collect();
+
     // First, lower all alternatives' RHS and patterns (we need them all
     // to build fallthrough expressions).
     let mut lowered_alts: Vec<(hir::Pat, core::Expr)> = Vec::with_capacity(alts.len());
-    for alt in alts {
+    for (i, alt) in alts.iter().enumerate() {
         bind_pattern_vars(ctx, &alt.pat, None);
 
         let existential_classes = get_existential_classes(ctx, &alt.pat);
@@ -8050,7 +8102,11 @@ fn lower_case(
         let rhs = if alt.guards.is_empty() {
             lower_expr(ctx, &alt.rhs)?
         } else {
-            lower_guarded_rhs(ctx, &alt.guards, &alt.rhs, span)?
+            let on_failure = match &resume_vars[i + 1] {
+                Some(v) => core::Expr::Var(v.clone(), span),
+                None => make_pattern_error(span),
+            };
+            lower_guarded_rhs_or(ctx, &alt.guards, &alt.rhs, on_failure, span)?
         };
         if !existential_classes.is_empty() {
             ctx.pop_dict_scope();
@@ -8068,8 +8124,6 @@ fn lower_case(
     //   $fallthru_i = case scrut of { alt_i; _ -> $fallthru_{i+1} }
     // — and reference it by VARIABLE. Each alternative body appears at most
     // twice (outer dispatch + its resume point), keeping the total linear.
-    let n = lowered_alts.len();
-    let mut resume_vars: Vec<Option<_>> = (0..=n).map(|_| None).collect();
     let mut resume_binds: Vec<core::Bind> = Vec::new(); // pushed f_{n-1} first
     let mut outer_alts_rev: Vec<core::Alt> = Vec::with_capacity(n);
 
@@ -8078,7 +8132,11 @@ fn lower_case(
         let fallthrough = resume_vars[i + 1]
             .as_ref()
             .map(|v: &core::Var| core::Expr::Var(v.clone(), span));
-        let core_alt = lower_pat_to_alt_with_fallthrough(ctx, pat, rhs.clone(), span, fallthrough)?;
+        let mut core_alt =
+            lower_pat_to_alt_with_fallthrough(ctx, pat, rhs.clone(), span, fallthrough)?;
+        if let Some(t) = &scrut_ty {
+            type_tuple_alt_binders(&mut core_alt, t);
+        }
 
         // Resume point used by alternatives BEFORE i: try alt i, else resume
         // at i+1 (or fail the match).
@@ -8100,9 +8158,10 @@ fn lower_case(
                 Ty::Error,
                 span,
             );
-            let f = ctx.fresh_var(&format!("$fallthru{i}"), Ty::Error, span);
-            resume_binds.push(core::Bind::NonRec(f.clone(), Box::new(resume_case)));
-            resume_vars[i] = Some(f);
+            let f = resume_vars[i]
+                .clone()
+                .expect("resume var for alternative i > 0");
+            resume_binds.push(core::Bind::NonRec(f, Box::new(resume_case)));
         }
 
         outer_alts_rev.push(core_alt);
@@ -8123,6 +8182,126 @@ fn lower_case(
 
     let bind = core::Bind::NonRec(scrut_var, Box::new(scrutinee_core));
     Ok(core::Expr::Let(Box::new(bind), Box::new(case_expr), span))
+}
+
+/// The type of a `case` scrutinee that is a tuple of variables, field by
+/// field; a field whose type is unknown or not concrete is `Ty::Error`.
+///
+/// A local multi-clause function cases on the tuple of its synthetic
+/// parameters, which share the function's span and have no typeck scheme of
+/// their own; the type recorded at that span is the whole function's, so its
+/// argument types are the fields'.
+fn case_scrutinee_ty(ctx: &LowerContext, scrutinee: &hir::Expr) -> Option<Ty> {
+    let Expr::Tuple(elems, _) = scrutinee else {
+        return None;
+    };
+    let concrete = |t: Ty| {
+        if crate::expr::is_fully_concrete_ty(&t) {
+            t
+        } else {
+            Ty::Error
+        }
+    };
+    let spans: Vec<Span> = elems
+        .iter()
+        .filter_map(|e| match e {
+            Expr::Var(dr) => Some(dr.span),
+            _ => None,
+        })
+        .collect();
+    let shared_fn_args = (spans.len() == elems.len() && spans.windows(2).all(|w| w[0] == w[1]))
+        .then(|| ctx.resolved_expr_ty_opt(spans[0]))
+        .flatten()
+        .and_then(|mut t| {
+            let mut args = Vec::with_capacity(elems.len());
+            while args.len() < elems.len() {
+                let Ty::Fun(a, r) = t else {
+                    return None;
+                };
+                args.push(*a);
+                t = *r;
+            }
+            Some(args)
+        });
+    let tys: Vec<Ty> = match shared_fn_args {
+        Some(args) => args.into_iter().map(concrete).collect(),
+        None => elems
+            .iter()
+            .map(|e| match e {
+                Expr::Var(dr) => concrete(ctx.lookup_type(dr.def_id)),
+                _ => Ty::Error,
+            })
+            .collect(),
+    };
+    tys.iter()
+        .any(|t| !matches!(t, Ty::Error))
+        .then_some(Ty::Tuple(tys))
+}
+
+/// Give a tuple alternative's untyped binders their field types from the
+/// scrutinee's tuple type, at the binders and at every use in the body. A
+/// `"\""` sub-pattern on a `Text` field is matched by codegen only when the
+/// cased variable is known to be `Text`; untyped, it was compared as a
+/// `[Char]` and never matched (pandoc's `strToHtml` escaped every quote).
+fn type_tuple_alt_binders(alt: &mut core::Alt, scrut_ty: &Ty) {
+    let AltCon::DataCon(con) = &alt.con else {
+        return;
+    };
+    let Ty::Tuple(tys) = scrut_ty else {
+        return;
+    };
+    if !con.name.as_str().starts_with("(,") || alt.binders.len() != tys.len() {
+        return;
+    }
+    for (binder, ty) in alt.binders.iter_mut().zip(tys) {
+        if matches!(binder.ty, Ty::Error) && !matches!(ty, Ty::Error) {
+            binder.ty = ty.clone();
+            retype_var_uses(&mut alt.rhs, binder.id, ty);
+        }
+    }
+}
+
+/// Set the type of every untyped occurrence (and binder) of variable `id`.
+fn retype_var_uses(expr: &mut core::Expr, id: VarId, ty: &Ty) {
+    let fix = |v: &mut Var| {
+        if v.id == id && matches!(v.ty, Ty::Error) {
+            v.ty = ty.clone();
+        }
+    };
+    match expr {
+        core::Expr::Var(v, _) => fix(v),
+        core::Expr::App(f, a, _) => {
+            retype_var_uses(f, id, ty);
+            retype_var_uses(a, id, ty);
+        }
+        core::Expr::TyApp(e, _, _)
+        | core::Expr::TyLam(_, e, _)
+        | core::Expr::Lazy(e, _)
+        | core::Expr::Cast(e, _, _)
+        | core::Expr::Tick(_, e, _) => retype_var_uses(e, id, ty),
+        core::Expr::Lam(_, body, _) => retype_var_uses(body, id, ty),
+        core::Expr::Let(bind, body, _) => {
+            match bind.as_mut() {
+                Bind::NonRec(_, rhs) => retype_var_uses(rhs, id, ty),
+                Bind::Rec(bs) => {
+                    for (_, rhs) in bs {
+                        retype_var_uses(rhs, id, ty);
+                    }
+                }
+            }
+            retype_var_uses(body, id, ty);
+        }
+        core::Expr::Case(scrut, alts, _, _) => {
+            retype_var_uses(scrut, id, ty);
+            for alt in alts {
+                for b in &mut alt.binders {
+                    fix(b);
+                }
+                retype_var_uses(&mut alt.rhs, id, ty);
+            }
+        }
+        core::Expr::Lit(..) | core::Expr::Type(..) | core::Expr::Coercion(..) => {}
+    }
 }
 
 /// Get the existential class names for a constructor pattern.
@@ -8162,10 +8341,21 @@ fn lower_guarded_rhs(
     rhs: &hir::Expr,
     span: Span,
 ) -> LowerResult<core::Expr> {
+    lower_guarded_rhs_or(ctx, guards, rhs, make_pattern_error(span), span)
+}
+
+/// [`lower_guarded_rhs`] resuming at `on_failure` when every guard fails.
+fn lower_guarded_rhs_or(
+    ctx: &mut LowerContext,
+    guards: &[hir::Guard],
+    rhs: &hir::Expr,
+    on_failure: core::Expr,
+    span: Span,
+) -> LowerResult<core::Expr> {
     let rhs_core = lower_expr(ctx, rhs)?;
 
     // Build nested ifs from right to left
-    let mut result = make_pattern_error(span); // Default if no guard matches
+    let mut result = on_failure;
 
     for guard in guards.iter().rev() {
         let cond = lower_expr(ctx, &guard.cond)?;

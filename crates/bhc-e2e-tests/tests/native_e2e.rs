@@ -604,6 +604,26 @@ fn test_tier3_instance_passes_own_dict_native() {
     run_native_test("tier3_io/instance_passes_own_dict", Profile::Default);
 }
 
+#[test]
+fn test_tier3_guard_fallthrough_clauses_native() {
+    run_native_test("tier3_io/guard_fallthrough_clauses", Profile::Default);
+}
+
+#[test]
+fn test_tier3_text_literal_local_clauses_native() {
+    run_native_test("tier3_io/text_literal_local_clauses", Profile::Default);
+}
+
+#[test]
+fn test_tier3_pure_value_builtin_native() {
+    run_native_test("tier3_io/pure_value_builtin", Profile::Default);
+}
+
+#[test]
+fn test_tier3_map_char_key_local_native() {
+    run_native_test("tier3_io/map_char_key_local", Profile::Default);
+}
+
 /// Closure IO model only: eager mode still generalizes local functions over
 /// value-class variables.
 #[test]

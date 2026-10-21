@@ -6769,7 +6769,11 @@ fn subst_pat(pat: &ast::Pat, subst: &FxHashMap<Symbol, &ast::Pat>, span: Span) -
 /// Lower a top-level pattern binding to multiple value definitions.
 ///
 /// Look up (or dynamically register) a tuple constructor of the given arity.
-fn ensure_tuple_constructor(ctx: &mut LowerContext, arity: usize, span: Span) -> hir::DefId {
+pub(crate) fn ensure_tuple_constructor(
+    ctx: &mut LowerContext,
+    arity: usize,
+    span: Span,
+) -> hir::DefId {
     let tuple_sym = Symbol::intern(&format!("({})", ",".repeat(arity.saturating_sub(1))));
     if let Some(id) = ctx.lookup_constructor(tuple_sym) {
         return id;
@@ -7041,7 +7045,15 @@ fn lower_clause_in(
                 // `strToHtml` (`| T.any isSpecial t = … where isSpecial …`)
                 // aborted the HTML writer. Desugar into the RHS instead.
                 let sole_with_wheres = sole && !clause.wheres.is_empty();
-                let single_scrutinee = clause.pats.len() == 1 && !sole_with_wheres;
+                // A multi-argument clause keeps its guards too when it has no
+                // `where` (whose bindings the HIR guard would sit outside of):
+                // the equation compiler resumes at the next equation by
+                // re-casing on the argument tuple. Desugared, pandoc's
+                // `strToHtml` helper `go h txt | T.length txt == 1 && … = …`
+                // raised "Non-exhaustive patterns" for every other
+                // one-character text instead of reaching `go h txt = …`.
+                let single_scrutinee = (clause.pats.len() == 1 && !sole_with_wheres)
+                    || (clause.pats.len() > 1 && clause.wheres.is_empty());
                 let single_boolean = guarded_rhss.len() == 1
                     && guarded_rhss[0]
                         .guards
@@ -7424,8 +7436,11 @@ fn lower_clause_in(
                                 };
 
                                 // Handle per-clause where bindings
+                                let mut clause_guards = Vec::new();
                                 let body = if clause.wheres.is_empty() {
-                                    lower_rhs(ctx, &clause.rhs)
+                                    let (body, guards) = lower_alt_rhs_and_guards(ctx, &clause.rhs);
+                                    clause_guards = guards;
+                                    body
                                 } else {
                                     ctx.enter_scope();
                                     // Pre-bind where names
@@ -7534,7 +7549,7 @@ fn lower_clause_in(
                                 ctx.exit_scope();
                                 alts.push(hir::CaseAlt {
                                     pat,
-                                    guards: Vec::new(),
+                                    guards: clause_guards,
                                     rhs: body,
                                     span: clause.span,
                                 });
@@ -7727,6 +7742,89 @@ fn lower_clause_rhs_with_wheres(ctx: &mut LowerContext, clause: &ast::Clause) ->
     } else {
         lower_body_with_wheres(ctx, &clause.rhs, &clause.wheres, clause.span)
     }
+}
+
+/// A local multi-clause function's clause RHS as a case alternative's RHS and
+/// guards. Boolean guards stay in the HIR, so a clause whose guards all fail
+/// resumes at the NEXT clause (`lower_case` routes guard failure to its
+/// resume point); desugared, they could only end in "Non-exhaustive
+/// patterns". Several boolean alternatives become one guard, their
+/// disjunction, over the desugared nested ifs. A pattern guard keeps the old
+/// desugaring.
+fn lower_alt_rhs_and_guards(
+    ctx: &mut LowerContext,
+    rhs: &ast::Rhs,
+) -> (hir::Expr, Vec<hir::Guard>) {
+    let ast::Rhs::Guarded(guarded_rhss, span) = rhs else {
+        return (lower_rhs(ctx, rhs), Vec::new());
+    };
+    let all_boolean = !guarded_rhss.is_empty()
+        && guarded_rhss.iter().all(|g| {
+            !g.guards.is_empty() && g.guards.iter().all(|x| matches!(x, ast::Guard::Expr(_, _)))
+        });
+    if !all_boolean {
+        return (lower_rhs(ctx, rhs), Vec::new());
+    }
+    if guarded_rhss.len() == 1 {
+        let grhs = &guarded_rhss[0];
+        let guards = grhs
+            .guards
+            .iter()
+            .filter_map(|g| match g {
+                ast::Guard::Expr(e, sp) => Some(hir::Guard {
+                    cond: lower_expr(ctx, e),
+                    span: *sp,
+                }),
+                ast::Guard::Pattern(..) => None,
+            })
+            .collect();
+        return (lower_expr(ctx, &grhs.body), guards);
+    }
+    let mk_bool = |ctx: &mut LowerContext, name: &str| -> hir::Expr {
+        let sym = Symbol::intern(name);
+        match ctx
+            .lookup_constructor(sym)
+            .or_else(|| ctx.lookup_value(sym))
+        {
+            Some(id) => hir::Expr::Con(ctx.def_ref(id, *span)),
+            None => {
+                let id = ctx.fresh_def_id();
+                ctx.define(id, sym, DefKind::Constructor, *span);
+                hir::Expr::Con(ctx.def_ref(id, *span))
+            }
+        }
+    };
+    let mut disjunction: Option<hir::Expr> = None;
+    for grhs in guarded_rhss.iter().rev() {
+        let mut conj: Option<hir::Expr> = None;
+        for g in grhs.guards.iter().rev() {
+            let ast::Guard::Expr(e, gsp) = g else {
+                continue;
+            };
+            let cond = lower_expr(ctx, e);
+            conj = Some(match conj {
+                None => cond,
+                Some(rest) => {
+                    let f = mk_bool(ctx, "False");
+                    hir::Expr::If(Box::new(cond), Box::new(rest), Box::new(f), *gsp)
+                }
+            });
+        }
+        if let Some(c) = conj {
+            disjunction = Some(match disjunction {
+                None => c,
+                Some(rest) => {
+                    let t = mk_bool(ctx, "True");
+                    hir::Expr::If(Box::new(c), Box::new(t), Box::new(rest), *span)
+                }
+            });
+        }
+    }
+    let body = lower_rhs(ctx, rhs);
+    let guards = disjunction
+        .map(|cond| vec![hir::Guard { cond, span: *span }])
+        .unwrap_or_default();
+    (body, guards)
 }
 
 fn lower_rhs(ctx: &mut LowerContext, rhs: &ast::Rhs) -> hir::Expr {
@@ -8162,20 +8260,21 @@ fn lower_expr(ctx: &mut LowerContext, expr: &ast::Expr) -> hir::Expr {
                                         fb.span,
                                     )
                                 };
-                                let clause_body = if clause.wheres.is_empty() {
-                                    lower_rhs(ctx, &clause.rhs)
+                                let (clause_body, clause_guards) = if clause.wheres.is_empty() {
+                                    lower_alt_rhs_and_guards(ctx, &clause.rhs)
                                 } else {
-                                    lower_body_with_wheres(
+                                    let body = lower_body_with_wheres(
                                         ctx,
                                         &clause.rhs,
                                         &clause.wheres,
                                         fb.span,
-                                    )
+                                    );
+                                    (body, Vec::new())
                                 };
                                 ctx.exit_scope();
                                 alts.push(hir::CaseAlt {
                                     pat,
-                                    guards: Vec::new(),
+                                    guards: clause_guards,
                                     rhs: clause_body,
                                     span: clause.span,
                                 });

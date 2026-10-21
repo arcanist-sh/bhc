@@ -1617,16 +1617,24 @@ fn compile_equations_linear(
         // arguments, and casing arg0 against those alternatives matches a
         // tuple's alternatives against a single value:
         // `lookup' k ((k', v) : rest) | k == k' = v` segfaulted.
-        let single_scrutinee = eq.pats.len() == 1;
-        let join_point_affordable = single_scrutinee
-            && (!eq.guards.is_empty() || total_equations <= JOIN_POINT_EQUATION_BUDGET);
-        let fallthrough = match (&remaining_alts, args.first()) {
-            (Some(remaining), Some(arg)) if join_point_affordable => Some(core::Expr::Case(
-                Box::new(core::Expr::Var(arg.clone(), span)),
-                remaining.clone(),
-                Ty::Error,
-                span,
-            )),
+        // So a multi-argument join point re-cases on the argument TUPLE,
+        // the same scrutinee `compile_match_to_expr` dispatches on.
+        let join_point_affordable =
+            !eq.guards.is_empty() || total_equations <= JOIN_POINT_EQUATION_BUDGET;
+        let fallthrough = match &remaining_alts {
+            Some(remaining) if join_point_affordable && !args.is_empty() => {
+                let scrutinee = if eq.pats.len() == 1 {
+                    core::Expr::Var(args[0].clone(), span)
+                } else {
+                    args_tuple(args, span)
+                };
+                Some(core::Expr::Case(
+                    Box::new(scrutinee),
+                    remaining.clone(),
+                    Ty::Error,
+                    span,
+                ))
+            }
             _ => None,
         };
 
@@ -1669,7 +1677,13 @@ fn compile_equations_linear(
             )?;
             these_alts.extend(expanded_alts);
         } else {
-            let tuple_alt = compile_tuple_pattern(ctx, &eq.pats, rhs, eq.span)?;
+            let tuple_alt = compile_tuple_pattern(
+                ctx,
+                &eq.pats,
+                rhs,
+                eq.span,
+                join_var.as_ref().map(|_| guard_failure.clone()),
+            )?;
             these_alts.push(tuple_alt);
         }
 
@@ -1828,11 +1842,16 @@ fn is_irrefutable_pat(pat: &Pat) -> bool {
 }
 
 /// Compile a tuple of patterns into a single alternative.
+/// A refutable sub-pattern that fails resumes at `fallthrough` (the next
+/// equation's join point) when there is one: the tuple itself always
+/// matches, so the alternatives after this one are never reached by
+/// matching.
 fn compile_tuple_pattern(
     ctx: &mut LowerContext,
     pats: &[hir::Pat],
     rhs: core::Expr,
     span: Span,
+    fallthrough: Option<core::Expr>,
 ) -> LowerResult<Alt> {
     // Create a tuple pattern that matches all the individual patterns
     let tuple_name = Symbol::intern(&format!("({})", ",".repeat(pats.len() - 1)));
@@ -1860,7 +1879,9 @@ fn compile_tuple_pattern(
             _ => {
                 // Complex sub-pattern: need nested case
                 let sub_alt = lower_pat_to_alt(ctx, pat, inner_rhs.clone(), span)?;
-                let default_rhs = make_pattern_error(span);
+                let default_rhs = fallthrough
+                    .clone()
+                    .unwrap_or_else(|| make_pattern_error(span));
                 let default_alt = Alt {
                     con: AltCon::Default,
                     binders: vec![],
@@ -1893,6 +1914,27 @@ fn compile_tuple_pattern(
         binders,
         rhs: inner_rhs,
     })
+}
+
+/// `(a0, a1, …)` over the function's arguments.
+fn args_tuple(args: &[Var], span: Span) -> core::Expr {
+    let tuple_con_name = Symbol::intern(&format!("({})", ",".repeat(args.len() - 1)));
+    let mut expr = core::Expr::Var(
+        Var {
+            name: tuple_con_name,
+            id: VarId::new(0),
+            ty: Ty::Error,
+        },
+        span,
+    );
+    for arg in args {
+        expr = core::Expr::App(
+            Box::new(expr),
+            Box::new(core::Expr::Var(arg.clone(), span)),
+            span,
+        );
+    }
+    expr
 }
 
 /// Create an if expression (case on Bool).

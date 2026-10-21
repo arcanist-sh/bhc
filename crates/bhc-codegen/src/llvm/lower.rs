@@ -36169,15 +36169,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         let tail_ptr =
             self.extract_adt_field(list_phi.as_basic_value().into_pointer_value(), 2, 1)?;
 
-        // In reverse: cons element first, then sep on top
-        let with_elem = self.build_cons(head_ptr.into(), result_phi.as_basic_value())?;
-        let with_sep = self.build_cons(sep_ptr.into(), with_elem.into())?;
+        // Built reversed, so the separator goes on before the element: the
+        // accumulator `x1 : …` becomes `x2 : sep : x1 : …`, which reverses to
+        // `… x1, sep, x2`. Elements first put every separator AFTER its
+        // element (`intersperse 0 [1, 2] == [1, 2, 0]`), which is how pandoc's
+        // HTML writer put a nested list's newline after the `</ul>`.
+        let with_sep = self.build_cons(sep_ptr.into(), result_phi.as_basic_value())?;
+        let with_elem = self.build_cons(head_ptr.into(), with_sep.into())?;
 
         self.builder()
             .build_unconditional_branch(loop_header)
             .map_err(|e| CodegenError::Internal(format!("branch: {:?}", e)))?;
 
-        result_phi.add_incoming(&[(&first_cons, first_block), (&with_sep, loop_body)]);
+        result_phi.add_incoming(&[(&first_cons, first_block), (&with_elem, loop_body)]);
         list_phi.add_incoming(&[(&first_tail, first_block), (&tail_ptr, loop_body)]);
 
         // Loop exit: reverse the result
@@ -53841,6 +53845,12 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
 
     fn coerce_to_int(&self, value: BasicValueEnum<'ctx>) -> CodegenResult<IntValue<'ctx>> {
         match value {
+            // A `Char` is an `i32` once its type is known; the RTS container
+            // keys are `i64` (a `Map Char v` lookup failed LLVM verification).
+            BasicValueEnum::IntValue(i) if i.get_type().get_bit_width() < 64 => self
+                .builder()
+                .build_int_z_extend(i, self.type_mapper().i64_type(), "widen_int")
+                .map_err(|e| CodegenError::Internal(format!("int widen failed: {:?}", e))),
             BasicValueEnum::IntValue(i) => Ok(i),
             BasicValueEnum::PointerValue(p) => self.ptr_to_int(p),
             BasicValueEnum::FloatValue(f) => {

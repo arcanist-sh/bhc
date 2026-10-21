@@ -1461,6 +1461,23 @@ impl LowerContext {
         };
         self.class_registry.register_class(monad_plus_class);
 
+        // === Register MonadFail class ===
+        // Method: fail. Superclass: Monad. Without it `fail` was no class's
+        // method, so `Prelude.fail "…"` in a parsec parser never reached
+        // `instance MonadFail (ParsecT s u m)` and ran the builtin stub
+        // (pandoc's `oneOfStrings`, on any `<` or `&` in markdown).
+        let monad_fail_class = ClassInfo {
+            name: Symbol::intern("MonadFail"),
+            param_count: 1,
+            methods: vec![Symbol::intern("fail")],
+            method_types: FxHashMap::default(),
+            superclasses: vec![Symbol::intern("Monad")],
+            superclass_params: vec![],
+            defaults: FxHashMap::default(),
+            assoc_types: vec![],
+        };
+        self.class_registry.register_class(monad_fail_class);
+
         // === Register IO instances for Functor/Applicative/Monad ===
         // IO has kind * -> *, so we construct it as a type application
         let io_kind = Kind::Arrow(Box::new(Kind::Star), Box::new(Kind::Star));

@@ -589,6 +589,21 @@ fn test_tier3_elem_structural_native() {
     run_native_test("tier3_io/elem_structural", Profile::Default);
 }
 
+#[test]
+fn test_tier3_monadfail_user_instance_native() {
+    run_native_test("tier3_io/monadfail_user_instance", Profile::Default);
+}
+
+#[test]
+fn test_tier3_lookup_structural_native() {
+    run_native_test("tier3_io/lookup_structural", Profile::Default);
+}
+
+#[test]
+fn test_tier3_instance_passes_own_dict_native() {
+    run_native_test("tier3_io/instance_passes_own_dict", Profile::Default);
+}
+
 /// Closure IO model only: eager mode still generalizes local functions over
 /// value-class variables.
 #[test]

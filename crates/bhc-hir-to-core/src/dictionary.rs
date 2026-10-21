@@ -258,6 +258,7 @@ pub(crate) const MONAD_FAMILY_CLASSES: &[&str] = &[
     "Monad",
     "Alternative",
     "MonadPlus",
+    "MonadFail",
     "Semigroup",
     "Monoid",
     // `Default`'s `def` is a bare result-type-determined value method, dispatched

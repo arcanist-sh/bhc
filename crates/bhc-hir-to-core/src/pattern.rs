@@ -929,22 +929,22 @@ fn build_decision_tree(ctx: &mut LowerContext, matrix: MatchMatrix, span: Span) 
                     *con_name,
                     *arity as usize,
                 )
-                    .or_else(|| {
-                        let declared = ctx.constructor_field_types(*con_name)?;
-                        (declared.len() == *arity as usize).then(|| {
-                            declared
-                                .iter()
-                                .map(|t| {
-                                    let t = ctx.expand_type_aliases(t);
-                                    if crate::expr::is_fully_concrete_ty(&t) {
-                                        t
-                                    } else {
-                                        Ty::Error
-                                    }
-                                })
-                                .collect()
-                        })
-                    });
+                .or_else(|| {
+                    let declared = ctx.constructor_field_types(*con_name)?;
+                    (declared.len() == *arity as usize).then(|| {
+                        declared
+                            .iter()
+                            .map(|t| {
+                                let t = ctx.expand_type_aliases(t);
+                                if crate::expr::is_fully_concrete_ty(&t) {
+                                    t
+                                } else {
+                                    Ty::Error
+                                }
+                            })
+                            .collect()
+                    })
+                });
                 let field_vars: Vec<Var> = (0..*arity)
                     .map(|i| {
                         let ty = field_tys

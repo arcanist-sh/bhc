@@ -47657,31 +47657,42 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
-    /// Whether `expr` references the variable `id` anywhere.
-    fn expr_mentions_var(expr: &Expr, id: VarId) -> bool {
+    /// Whether evaluating `expr` may call the variable `id`: `id` heads an
+    /// application outside any lambda. A reference to `id` as a plain value
+    /// (`(,) $instance_query_Inline 0`, the dictionary an instance method
+    /// passes for its own class) builds nothing recursive and does not count;
+    /// an application under a lambda only runs once the lambda is called.
+    fn expr_calls_var(expr: &Expr, id: VarId) -> bool {
         match expr {
-            Expr::Var(v, _) => v.id == id,
-            Expr::Lit(..) | Expr::Type(..) | Expr::Coercion(..) => false,
+            Expr::Var(..) | Expr::Lit(..) | Expr::Type(..) | Expr::Coercion(..) => false,
+            Expr::Lam(..) | Expr::TyLam(..) | Expr::Lazy(..) => false,
             Expr::App(f, a, _) => {
-                Self::expr_mentions_var(f, id) || Self::expr_mentions_var(a, id)
+                matches!(Self::peel_expr(Self::app_head(f)), Expr::Var(v, _) if v.id == id)
+                    || Self::expr_calls_var(f, id)
+                    || Self::expr_calls_var(a, id)
             }
-            Expr::TyApp(e, _, _)
-            | Expr::Lam(_, e, _)
-            | Expr::TyLam(_, e, _)
-            | Expr::Lazy(e, _)
-            | Expr::Cast(e, _, _)
-            | Expr::Tick(_, e, _) => Self::expr_mentions_var(e, id),
+            Expr::TyApp(e, _, _) | Expr::Cast(e, _, _) | Expr::Tick(_, e, _) => {
+                Self::expr_calls_var(e, id)
+            }
             Expr::Let(bind, body, _) => {
                 let in_rhs = match bind.as_ref() {
-                    Bind::NonRec(_, rhs) => Self::expr_mentions_var(rhs, id),
-                    Bind::Rec(bs) => bs.iter().any(|(_, rhs)| Self::expr_mentions_var(rhs, id)),
+                    Bind::NonRec(_, rhs) => Self::expr_calls_var(rhs, id),
+                    Bind::Rec(bs) => bs.iter().any(|(_, rhs)| Self::expr_calls_var(rhs, id)),
                 };
-                in_rhs || Self::expr_mentions_var(body, id)
+                in_rhs || Self::expr_calls_var(body, id)
             }
             Expr::Case(scrut, alts, _, _) => {
-                Self::expr_mentions_var(scrut, id)
-                    || alts.iter().any(|alt| Self::expr_mentions_var(&alt.rhs, id))
+                Self::expr_calls_var(scrut, id)
+                    || alts.iter().any(|alt| Self::expr_calls_var(&alt.rhs, id))
             }
+        }
+    }
+
+    /// The function at the head of a chain of applications.
+    fn app_head(expr: &Expr) -> &Expr {
+        match Self::peel_expr(expr) {
+            Expr::App(f, _, _) => Self::app_head(f),
+            other => other,
         }
     }
 
@@ -56075,10 +56086,14 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // nested = … <$> quotedTitle c in … nested <|> …)` evaluated the
             // `>>` continuation while constructing the parser, which built
             // `quotedTitle c` again, without end (stack overflow on any link).
+            // Only a CALL counts: an instance method handing its own class
+            // dictionary to a helper (pandoc-types' `query f x = f x <>
+            // queryInline f x`) merely names itself, and a thunk there reached
+            // the builtin `<>`, which does not force its operands.
             let recursive_knot = !Self::is_trivial_expr(arg_expr)
                 && self
                     .current_top_fn
-                    .is_some_and(|id| Self::expr_mentions_var(arg_expr, id));
+                    .is_some_and(|id| Self::expr_calls_var(arg_expr, id));
             if recursive_knot || self.arg_should_thunk(arg_expr) {
                 self.lazy_force_result = recursive_knot;
                 if let Some(thunk) = self.lower_lazy(arg_expr)? {

@@ -5357,7 +5357,9 @@ fn try_lower_structural_elem(
             tc.name.as_str(),
             "Int" | "Char" | "Bool" | "Word" | "Double" | "Float" | "String"
         ),
-        Ty::App(..) => !matches!(&elem_ty, Ty::App(h, _) if matches!(h.as_ref(), Ty::Con(c) if c.name.as_str() == "[]")),
+        Ty::App(..) => {
+            !matches!(&elem_ty, Ty::App(h, _) if matches!(h.as_ref(), Ty::Con(c) if c.name.as_str() == "[]"))
+        }
         _ => false,
     };
     if !structural {
@@ -5394,6 +5396,121 @@ fn try_lower_structural_elem(
     };
     Ok(Some(core::Expr::Let(
         Box::new(Bind::NonRec(needle_var, Box::new(needle))),
+        Box::new(result),
+        span,
+    )))
+}
+
+/// Saturated `lookup k xs` at a non-scalar key type: `case find (\p -> fst p
+/// == k) xs of { Nothing -> Nothing; Just p -> Just (snd p) }`, with `==`
+/// typed at the key type.
+///
+/// The codegen builtin compares keys as machine words, which is only right
+/// for scalars: a `String` or `Text` key compared heap addresses, so the
+/// vendored `Commonmark.Entity`'s `lookup "amp;" table` was always
+/// `Nothing` and pandoc rendered `&amp;` as `&amp;amp;`.
+fn try_lower_structural_lookup(
+    ctx: &mut LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    span: Span,
+) -> LowerResult<Option<core::Expr>> {
+    let Expr::App(head, k, _) = f else {
+        return Ok(None);
+    };
+    let Expr::Var(dr) = head.as_ref() else {
+        return Ok(None);
+    };
+    let Some(name) = ctx.lookup_var(dr.def_id).map(|v| v.name) else {
+        return Ok(None);
+    };
+    if !matches!(
+        name.as_str(),
+        "lookup" | "Data.List.lookup" | "Prelude.lookup"
+    ) {
+        return Ok(None);
+    }
+    let (key_ty, result_ty) = match ctx.resolved_expr_ty_opt(dr.span) {
+        Some(Ty::Fun(a, rest)) => {
+            let result = match *rest {
+                Ty::Fun(_, r) => *r,
+                _ => Ty::Error,
+            };
+            (*a, result)
+        }
+        _ => match ctx.resolved_expr_ty_opt(k.span()) {
+            Some(t) => (t, ctx.resolved_expr_ty_opt(span).unwrap_or(Ty::Error)),
+            None => return Ok(None),
+        },
+    };
+    let structural = match &key_ty {
+        Ty::Tuple(_) | Ty::List(_) | Ty::App(..) => true,
+        Ty::Con(tc) => !matches!(
+            tc.name.as_str(),
+            "Int" | "Char" | "Bool" | "Word" | "Double" | "Float" | "Integer"
+        ),
+        _ => false,
+    };
+    if !structural {
+        return Ok(None);
+    }
+    let key = lower_expr(ctx, k)?;
+    let table = lower_expr(ctx, x)?;
+    let app =
+        |fun: core::Expr, arg: core::Expr| core::Expr::App(Box::new(fun), Box::new(arg), span);
+    let key_var = ctx.fresh_var("lookup_k", key_ty.clone(), span);
+    let pair = ctx.fresh_var("lookup_p", Ty::Error, span);
+    let found = ctx.fresh_var("lookup_f", Ty::Error, span);
+    let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+    let eq = core::Expr::Var(
+        Var {
+            name: Symbol::intern("=="),
+            id: VarId::new(0),
+            ty: Ty::fun(key_ty.clone(), Ty::fun(key_ty, bool_ty)),
+        },
+        span,
+    );
+    let same = core::Expr::Lam(
+        pair.clone(),
+        Box::new(app(
+            app(
+                eq,
+                app(nullary_var("fst", span), core::Expr::Var(pair, span)),
+            ),
+            core::Expr::Var(key_var.clone(), span),
+        )),
+        span,
+    );
+    let search = app(app(nullary_var("find", span), same), table);
+    let maybe = TyCon::new(Symbol::intern("Maybe"), Kind::Star);
+    let alts = vec![
+        Alt {
+            con: AltCon::DataCon(DataCon {
+                name: Symbol::intern("Nothing"),
+                ty_con: maybe.clone(),
+                tag: 0,
+                arity: 0,
+            }),
+            binders: vec![],
+            rhs: nullary_var("Nothing", span),
+        },
+        Alt {
+            con: AltCon::DataCon(DataCon {
+                name: Symbol::intern("Just"),
+                ty_con: maybe,
+                tag: 1,
+                arity: 1,
+            }),
+            binders: vec![found.clone()],
+            rhs: app(
+                nullary_var("Just", span),
+                app(nullary_var("snd", span), core::Expr::Var(found, span)),
+            ),
+        },
+    ];
+    let result = core::Expr::Case(Box::new(search), alts, result_ty, span);
+    Ok(Some(core::Expr::Let(
+        Box::new(Bind::NonRec(key_var, Box::new(key))),
         Box::new(result),
         span,
     )))
@@ -5607,6 +5724,9 @@ fn lower_app(
     // t))`; bhc has no builtin for it, and pandoc's XML escaping calls it
     // (point-free, `T.concatMap escape`, as well as saturated).
     if let Some(result) = try_lower_structural_elem(ctx, f, x, span)? {
+        return Ok(result);
+    }
+    if let Some(result) = try_lower_structural_lookup(ctx, f, x, span)? {
         return Ok(result);
     }
     if let Some(result) = try_lower_list_difference(ctx, f, x, span)? {

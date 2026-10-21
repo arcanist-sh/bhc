@@ -224,6 +224,66 @@ fn annotate_ty(ctx: &LowerContext, span: bhc_span::Span, core: core::Expr) -> co
     }
 }
 
+/// A saturated `a == b` / `a /= b` on `Text` whose operator type is unknown
+/// or still has type variables: type it `Text -> Text -> Bool`. An infix operator's span is
+/// the whole expression's, so the type recorded there is the result `Bool`,
+/// and codegen, which picks the comparison from the operator's type,
+/// compared two `Text` fields of a parametric constructor (`TagOpen n _` at
+/// `Tag Text`) by address — tagsoup's `~==` never matched.
+fn type_equality_operator(
+    ctx: &LowerContext,
+    f: &hir::Expr,
+    x: &hir::Expr,
+    e: core::Expr,
+) -> core::Expr {
+    let Expr::App(op, a, _) = f else {
+        return e;
+    };
+    let Expr::Var(dr) = op.as_ref() else {
+        return e;
+    };
+    let is_eq = ctx
+        .lookup_var(dr.def_id)
+        .is_some_and(|v| matches!(v.name.as_str(), "==" | "/="));
+    if !is_eq {
+        return e;
+    }
+    // Only `Text`, and only when BOTH operands say so: a scalar operand typed
+    // `Char` made codegen force a raw character as a boxed object, and a
+    // desugared section's operand carries a synthetic span whose recorded
+    // type is some other expression's — `(== '\n')` came out `Text -> Text ->
+    // Bool` and crashed every markdown read in `anyLine`.
+    let is_text = |o: &hir::Expr| matches!(ctx.resolved_expr_ty_opt(o.span()), Some(Ty::Con(c)) if c.name.as_str() == "Text");
+    if !(is_text(a) && is_text(x)) {
+        return e;
+    }
+    let t = Ty::Con(TyCon::new(Symbol::intern("Text"), Kind::Star));
+    let bool_ty = Ty::Con(TyCon::new(Symbol::intern("Bool"), Kind::Star));
+    match e {
+        core::Expr::App(g, rhs, sp) => match *g {
+            core::Expr::App(head, lhs, sp2) => match *head {
+                core::Expr::Var(mut v, vs)
+                    if !is_fully_concrete_ty(&v.ty) && matches!(v.name.as_str(), "==" | "/=") =>
+                {
+                    v.ty = Ty::fun(t.clone(), Ty::fun(t, bool_ty));
+                    core::Expr::App(
+                        Box::new(core::Expr::App(Box::new(core::Expr::Var(v, vs)), lhs, sp2)),
+                        rhs,
+                        sp,
+                    )
+                }
+                other => core::Expr::App(
+                    Box::new(core::Expr::App(Box::new(other), lhs, sp2)),
+                    rhs,
+                    sp,
+                ),
+            },
+            other => core::Expr::App(Box::new(other), rhs, sp),
+        },
+        other => other,
+    }
+}
+
 fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<core::Expr> {
     match expr {
         Expr::Lit(lit, span) => lower_lit_at(ctx, lit, *span),
@@ -250,6 +310,7 @@ fn lower_expr_inner(ctx: &mut LowerContext, expr: &hir::Expr) -> LowerResult<cor
                 ctx.app_head_spans.remove(&hs);
             }
             let e = bind_via_scope_monad(ctx, head, e?);
+            let e = type_equality_operator(ctx, f, x, e);
             Ok(type_state_runner(ctx, type_shown_variable(ctx, x, e)))
         }
 
@@ -8087,9 +8148,12 @@ fn lower_case(
     // fallthrough support (e.g., `Lit 0` where the literal match may fail).
     // So does a guarded alternative: when its guards all fail, the match
     // resumes at the next alternative.
-    let needs_fallthrough = alts
-        .iter()
-        .any(|alt| has_complex_subpatterns(&alt.pat) || !alt.guards.is_empty());
+    // So does an as- or view-pattern over a refutable pattern: it lowers to a
+    // default alternative that binds, then inspects, and must resume at the
+    // next alternative when the inspection fails.
+    let needs_fallthrough = alts.iter().any(|alt| {
+        has_complex_subpatterns(&alt.pat) || !alt.guards.is_empty() || binds_then_inspects(&alt.pat)
+    });
 
     if !needs_fallthrough {
         // Simple case: no nested patterns, use the fast path
@@ -8237,6 +8301,18 @@ fn lower_case(
         outer_alts_rev.push(core_alt);
     }
     outer_alts_rev.reverse();
+    // Codegen dispatches on constructors first and takes a default only when
+    // none matches, so a default alternative (an as- or view-pattern, which
+    // binds and then inspects) must be the last one: a later `x : rest`
+    // alternative otherwise beat an earlier `inp@('<' : _)` for every
+    // non-empty list. What follows the first default is reachable only
+    // through its resume point anyway.
+    if let Some(first_default) = outer_alts_rev
+        .iter()
+        .position(|alt| matches!(alt.con, core::AltCon::Default))
+    {
+        outer_alts_rev.truncate(first_default + 1);
+    }
 
     let mut case_expr = core::Expr::Case(
         Box::new(core::Expr::Var(scrut_var.clone(), span)),
@@ -8387,6 +8463,18 @@ fn get_existential_classes(ctx: &LowerContext, pat: &hir::Pat) -> Vec<Symbol> {
             vec![]
         }
         _ => vec![],
+    }
+}
+
+/// An as-pattern over a refutable pattern, or a view pattern.
+fn binds_then_inspects(pat: &hir::Pat) -> bool {
+    match pat {
+        hir::Pat::As(_, _, inner, _) => {
+            !matches!(inner.as_ref(), hir::Pat::Var(..) | hir::Pat::Wild(_))
+        }
+        hir::Pat::View(..) => true,
+        hir::Pat::Ann(inner, _, _) => binds_then_inspects(inner),
+        _ => false,
     }
 }
 

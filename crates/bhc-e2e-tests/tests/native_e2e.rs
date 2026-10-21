@@ -634,6 +634,16 @@ fn test_tier3_view_pattern_fallthrough_native() {
     run_native_test("tier3_io/view_pattern_fallthrough", Profile::Default);
 }
 
+#[test]
+fn test_tier3_as_pattern_order_native() {
+    run_native_test("tier3_io/as_pattern_order", Profile::Default);
+}
+
+#[test]
+fn test_tier3_eq_parametric_field_native() {
+    run_native_test("tier3_io/eq_parametric_field", Profile::Default);
+}
+
 /// Closure IO model only: eager mode still generalizes local functions over
 /// value-class variables.
 #[test]

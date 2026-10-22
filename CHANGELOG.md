@@ -60,8 +60,6 @@ extension can be enabled without crashing.
   - A method-level dictionary is passed only for real class-method references.
   - Class methods passed as values resolve at their class parameter.
   - Methods inside instance bodies dispatch correctly.
-  - A method of a multi-parameter class is selected from the dictionary in
-    scope even when its result type wraps the class's monad.
 - **Imports and interfaces:**
   - An import whose name shadows a codegen builtin wins over the builtin.
   - Constructors reached through qualified imports keep their interface tags.

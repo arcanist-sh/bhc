@@ -654,6 +654,16 @@ fn test_tier3_instance_context_hop_native() {
     run_native_test("tier3_io/instance_context_hop", Profile::Default);
 }
 
+/// Closure IO model only: eager mode cannot yet run a user-defined state
+/// transformer over a polymorphic inner monad at all.
+#[test]
+fn test_tier3_instance_context_bind_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/instance_context_bind", Profile::Default);
+}
+
 /// Closure IO model only: eager mode still generalizes local functions over
 /// value-class variables.
 #[test]

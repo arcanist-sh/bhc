@@ -2079,13 +2079,7 @@ impl LowerContext {
         // ParserState m`, `getQuoteContext = stateQuoteContext <$> getState`
         // maps over a ParsecT, and hopping from `Monad m` to its Functor ran
         // `m`'s fmap on a parser (every smart-quote parse crashed).
-        let constrained = constrained.or_else(|| {
-            self.current_instance_context
-                .iter()
-                .find(|c| c.class == holder)
-                .and_then(|c| c.args.first().cloned())
-                .filter(|t| matches!(t, Ty::Var(_)))
-        });
+        let constrained = constrained.or_else(|| self.instance_context_var_arg(holder));
         if dbg {
             eprintln!(
                 "[hop] {holder} -> {needed} @ {span:?}: occ_head={occ_head:?} constrained={constrained:?}"
@@ -2453,6 +2447,19 @@ impl LowerContext {
             }
         }
         Ok(best.map(|(_, v)| v.clone()))
+    }
+
+    /// The first argument of the enclosing instance's context constraint on
+    /// `class_name`, when it is a type variable (`m` in `instance Monad m =>
+    /// HasQuoteContext ParserState m`). Those dictionaries are registered
+    /// untyped; this says which monad they are for.
+    #[must_use]
+    pub(crate) fn instance_context_var_arg(&self, class_name: Symbol) -> Option<Ty> {
+        self.current_instance_context
+            .iter()
+            .find(|c| c.class == class_name)
+            .and_then(|c| c.args.first().cloned())
+            .filter(|t| matches!(t, Ty::Var(_)))
     }
 
     /// The constraint arguments an in-scope dictionary for `class_name` is

@@ -16,8 +16,11 @@ All notable changes to BHC are recorded here. The format follows
   ordinary argument and the method reached codegen as a stub.
 - Inside an instance whose context constrains the inner monad, `<$>` over the
   instance's own monad no longer takes `fmap` from that inner monad.
-- With all pandoc extensions enabled, emphasis and links render (11 of 21
-  extension test inputs now match pandoc).
+- Inside such an instance, a do-block in the instance's own monad binds with
+  that monad's `>>=` rather than the inner monad's. pandoc's
+  `withQuoteContext` crashed, and with it every smart-quote parse.
+- With all pandoc extensions enabled, emphasis, links and smart quotes render
+  (12 of 21 extension test inputs now match pandoc).
 
 ## [0.2.23] - 2026-10-22
 

@@ -629,6 +629,33 @@ fn occurrence_in_dict_monad_var(ctx: &LowerContext, span: Span) -> bool {
 /// below; refusing restores exactly that behaviour instead of guessing.
 fn in_scope_dict_matches(ctx: &LowerContext, class_name: Symbol, span: Span) -> bool {
     let Some(dict_ty) = ctx.lookup_dict_ty(class_name).cloned() else {
+        // An instance context's monad dictionary is registered untyped, but
+        // the context says it is for a type variable: an occurrence at a
+        // CONCRETE monad is not its. pandoc's `withQuoteContext` (in `instance
+        // Monad m => HasQuoteContext ParserState m`) ran its ParsecT do-block
+        // with `m`'s `>>=`. An unrecorded occurrence keeps the old answer.
+        if ctx.instance_context_var_arg(class_name).is_some() {
+            fn result_head(t: &Ty) -> &Ty {
+                match t {
+                    Ty::Fun(_, r) => result_head(r),
+                    Ty::App(f, _) => result_head(f),
+                    other => other,
+                }
+            }
+            // A do-block bind's recorded type can lack its first argument
+            // (`(a -> ParsecT …) -> ParsecT …`); its RESULT still names the
+            // monad.
+            let occ = refined_occurrence_ty(ctx, span);
+            let occ_head = occ
+                .as_ref()
+                .and_then(monad_head_of_method_occurrence)
+                .or_else(|| occ.as_ref().map(|t| result_head(t).clone()));
+            // The monad itself is usually applied (`ParsecT s u m`): look
+            // at its head constructor.
+            if matches!(occ_head.as_ref().map(result_head), Some(Ty::Con(_))) {
+                return false;
+            }
+        }
         // No recorded type: this dictionary predates the witness (an
         // existential pattern match, say), so keep the old behaviour.
         return true;

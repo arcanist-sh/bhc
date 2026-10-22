@@ -21,6 +21,33 @@ use rustc_hash::FxHashSet;
 
 use crate::context::TyCtxt;
 
+/// The ids of the type variables free in the environment, with the lexical
+/// scopes read AFTER applying the current substitution.
+///
+/// The environment holds types as they were bound, so a lambda argument's
+/// variable `a` that unification has since mapped to another variable `b`
+/// still reads `a` there, while the binding being generalized reads `b`.
+/// Without the substitution `b` looked free in the type only and was
+/// quantified: `let heads' = take n heads` became polymorphic, and a
+/// constrained function applied to it was instantiated at a fresh variable
+/// that nothing ever solved, so it got no dictionary.
+///
+/// Only the lexical scopes are resolved. The DefId-keyed globals also keep
+/// every pattern variable bound earlier in the module, out of scope by now;
+/// resolved, their stale types pinned unrelated variables, and a class
+/// default's `getsLvl f = f <$> getLvl` stopped being polymorphic in `a`.
+/// Likewise the let group being generalized (`TyCtxt::generalizing`): its
+/// own monomorphic entries would pin every variable of its type.
+fn env_free_var_ids(ctx: &TyCtxt) -> FxHashSet<u32> {
+    let mut ids: FxHashSet<u32> = ctx.env.free_vars().iter().map(|v| v.id).collect();
+    for v in ctx.env.local_free_vars_except(&ctx.generalizing) {
+        for w in ctx.subst.apply_resolved(&Ty::Var(v)).free_vars() {
+            ids.insert(w.id);
+        }
+    }
+    ids
+}
+
 /// Generalize a type into a type scheme.
 ///
 /// Quantifies over all type variables that are:
@@ -43,7 +70,7 @@ pub fn generalize(ctx: &TyCtxt, ty: &Ty) -> Scheme {
     let type_fvs = ty.free_vars();
 
     // Get free variables in the environment
-    let env_fvs: FxHashSet<u32> = ctx.env.free_vars().iter().map(|v| v.id).collect();
+    let env_fvs = env_free_var_ids(ctx);
 
     // Quantify over variables free in type but not in environment
     let quantified: Vec<TyVar> = type_fvs
@@ -69,7 +96,7 @@ pub fn generalize_with_constraints(
 ) -> Scheme {
     let ty = ctx.apply_subst(ty);
     let type_fvs = ty.free_vars();
-    let env_fvs: FxHashSet<u32> = ctx.env.free_vars().iter().map(|v| v.id).collect();
+    let env_fvs = env_free_var_ids(ctx);
 
     let quantified: Vec<TyVar> = type_fvs
         .into_iter()

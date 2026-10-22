@@ -1113,7 +1113,14 @@ fn bind_var(ctx: &mut TyCtxt, var: &TyVar, ty: &Ty, span: Span) {
             return;
         }
         let is_self = |t: &Ty| matches!(t, Ty::Var(v) if v.id == var.id);
-        let one_side_var = matches!(existing, Ty::Var(_)) || matches!(ty, Ty::Var(_));
+        // Two bindings of the same shape where one still has variables
+        // inside (`[c]` and then `[Text]`) are one type learned twice, not a
+        // conflict: overwriting dropped `c := Text`, and `let heads' = heads
+        // in map realLength heads'` left realLength with no dictionary.
+        let same_shape_open =
+            (has_ty_vars(&existing) || has_ty_vars(ty)) && same_outer_shape(&existing, ty);
+        let one_side_var =
+            matches!(existing, Ty::Var(_)) || matches!(ty, Ty::Var(_)) || same_shape_open;
         if one_side_var
             && !is_self(&existing)
             && !occurs_check(var, &existing)
@@ -1135,6 +1142,31 @@ fn bind_var(ctx: &mut TyCtxt, var: &TyVar, ty: &Ty, span: Span) {
 
     // Add binding to substitution
     ctx.subst.insert(var, ty.clone());
+}
+
+/// Whether a type mentions any type variable.
+fn has_ty_vars(ty: &Ty) -> bool {
+    !ty.free_vars().is_empty()
+}
+
+/// Whether two types have the same outermost constructor: both lists, both
+/// functions, tuples of one arity, or applications of the same named head.
+fn same_outer_shape(a: &Ty, b: &Ty) -> bool {
+    fn app_head(t: &Ty) -> Option<&Ty> {
+        match t {
+            Ty::App(f, _) => app_head(f).or(Some(f)),
+            _ => None,
+        }
+    }
+    match (a, b) {
+        (Ty::List(_), Ty::List(_)) | (Ty::Fun(..), Ty::Fun(..)) => true,
+        (Ty::Tuple(x), Ty::Tuple(y)) => x.len() == y.len(),
+        (Ty::App(..), Ty::App(..)) => matches!(
+            (app_head(a), app_head(b)),
+            (Some(Ty::Con(c1)), Some(Ty::Con(c2))) if c1.name == c2.name
+        ),
+        _ => false,
+    }
 }
 
 /// Check if a type variable occurs in a type (prevents infinite types).

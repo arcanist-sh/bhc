@@ -19,6 +19,11 @@ All notable changes to BHC are recorded here. The format follows
 - Inside such an instance, a do-block in the instance's own monad binds with
   that monad's `>>=` rather than the inner monad's. pandoc's
   `withQuoteContext` crashed, and with it every smart-quote parse.
+- A let-bound alias of a function argument keeps the argument's type, so a
+  class-constrained function applied to it gets its dictionary. Two typechecker
+  bugs dropped it: let generalization read the environment without the
+  current substitution, and a variable bound twice to types of one shape
+  (`[c]`, then `[Text]`) kept only the second, losing `c := Text`.
 - With all pandoc extensions enabled, emphasis, links and smart quotes render
   (12 of 21 extension test inputs now match pandoc).
 

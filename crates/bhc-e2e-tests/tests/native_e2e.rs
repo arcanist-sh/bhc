@@ -1389,6 +1389,16 @@ fn test_tier2_synonym_dict_resolution() {
     run_native_test("tier2_functions/synonym_dict_resolution", Profile::Default);
 }
 
+/// Closure IO model only: eager mode cannot pass a constrained function as a
+/// value (`map totalWidth cells`) at all.
+#[test]
+fn test_tier2_let_alias_class_arg() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier2_functions/let_alias_class_arg", Profile::Default);
+}
+
 #[test]
 fn test_tier3_derive_ord() {
     run_native_test("tier3_io/derive_ord", Profile::Default);

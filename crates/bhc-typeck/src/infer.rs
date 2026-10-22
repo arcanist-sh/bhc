@@ -254,6 +254,10 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                 // For pattern bindings, check_pattern has already set the correct types.
                 // We need to look up each variable's actual type and generalize it,
                 // rather than using the whole binding type.
+                ctx.generalizing = group
+                    .iter()
+                    .flat_map(|&i| binding_types[i].0.iter().map(|(name, _)| *name))
+                    .collect();
                 for &i in group {
                     let binding = &bindings[i];
                     let var_ids = &binding_types[i].0;
@@ -340,6 +344,7 @@ fn infer_expr_compute(ctx: &mut TyCtxt, expr: &Expr) -> Ty {
                         }
                     }
                 }
+                ctx.generalizing.clear();
             }
 
             // Infer body type

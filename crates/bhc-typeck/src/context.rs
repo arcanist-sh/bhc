@@ -88,6 +88,11 @@ pub struct TyCtxt {
     /// Type environment (bindings in scope).
     pub(crate) env: TypeEnv,
 
+    /// The names of the let/where group being generalized. Their own
+    /// monomorphic entries in the innermost scope must not count as the
+    /// environment pinning their types.
+    pub(crate) generalizing: Vec<Symbol>,
+
     /// Diagnostic handler for error collection.
     diag: DiagnosticHandler,
 
@@ -210,6 +215,7 @@ impl TyCtxt {
             ty_var_gen: TyVarGen::new(),
             subst: Subst::new(),
             env: TypeEnv::new(),
+            generalizing: Vec::new(),
             diag: DiagnosticHandler::new(),
             builtins: Builtins::default(),
             file_id,

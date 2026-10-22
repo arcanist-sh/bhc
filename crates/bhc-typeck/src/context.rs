@@ -7914,14 +7914,22 @@ impl TyCtxt {
         // xs)` never tied `put`'s monad to the result and its MonadState
         // dictionary was left unresolved.
         //
-        // Only for `when`/`unless`: many builtin schemes are narrower than the
-        // real functions (`sortBy`, `mplus`, …), and taking them for every
-        // re-imported name rejected or mis-dispatched programs that the
-        // permissive placeholder let through.
+        // Only for names whose builtin scheme IS the real type: many builtin
+        // schemes are narrower than the real functions (`sortBy`, `mplus`, …),
+        // and taking them for every re-imported name rejected or
+        // mis-dispatched programs that the permissive placeholder let through.
+        // `intersperse`/`intercalate` (Data.List) are exact; typed fresh,
+        // pandoc's `intersperse nl <$> mapM …` lost its element type and the
+        // `mconcat` of the result found no Monoid instance.
         let builtin_by_name: rustc_hash::FxHashMap<Symbol, Scheme> = defs
             .values()
             .filter(|d| matches!(d.kind, DefKind::Value))
-            .filter(|d| matches!(d.name.as_str(), "when" | "unless"))
+            .filter(|d| {
+                matches!(
+                    d.name.as_str(),
+                    "when" | "unless" | "intersperse" | "intercalate"
+                )
+            })
             .filter_map(|d| Some((d.name, self.env.lookup_global(d.id)?.clone())))
             .collect();
 

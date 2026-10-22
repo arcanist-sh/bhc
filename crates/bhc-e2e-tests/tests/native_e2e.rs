@@ -1400,6 +1400,11 @@ fn test_tier2_synonym_dict_resolution() {
 }
 
 #[test]
+fn test_tier2_intersperse_typed() {
+    run_native_test("tier2_functions/intersperse_typed", Profile::Default);
+}
+
+#[test]
 fn test_tier2_nonempty_cons() {
     run_native_test("tier2_functions/nonempty_cons", Profile::Default);
 }

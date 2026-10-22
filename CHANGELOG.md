@@ -27,8 +27,12 @@ All notable changes to BHC are recorded here. The format follows
 - A multi-clause helper in the `where` of a local function (itself in a
   `where` or `let`) is no longer dropped. pandoc-types' `placeRowSection` called
   its nested `go` as a stub whenever a table was built.
-- With all pandoc extensions enabled, emphasis, links and smart quotes render
-  (12 of 21 extension test inputs now match pandoc).
+- An under-applied constructor used as a function value (`rowLen . Row "b"`)
+  builds a partial application. It used to compile to a call of a
+  `stub: Row not implemented` function; pandoc-types' `simpleTable` and table
+  normalization hit it.
+- With all pandoc extensions enabled, emphasis, links, smart quotes and fenced
+  divs render (13 of 21 extension test inputs now match pandoc).
 
 ## [0.2.23] - 2026-10-22
 

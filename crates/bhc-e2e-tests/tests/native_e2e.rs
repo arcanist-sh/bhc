@@ -1390,6 +1390,11 @@ fn test_tier2_synonym_dict_resolution() {
 }
 
 #[test]
+fn test_tier2_partial_constructor_value() {
+    run_native_test("tier2_functions/partial_constructor_value", Profile::Default);
+}
+
+#[test]
 fn test_tier2_nested_where_multiclause() {
     run_native_test("tier2_functions/nested_where_multiclause", Profile::Default);
 }

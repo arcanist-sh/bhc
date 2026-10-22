@@ -55664,6 +55664,17 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
                         // Nullary constructor like True, False, Nothing, ()
                         return self.lower_constructor_application(tag, 0, &[]);
                     }
+                    // An UNDER-applied constructor (`rowLen . Row "b"`) is a
+                    // function value: its closure applied to the arguments
+                    // given so far, which forms a PAP. Nothing below knows
+                    // constructors, so this used to end at the
+                    // `stub: Row not implemented` fallback (pandoc-types'
+                    // `toRow = Row nullAttr . map simpleCell`).
+                    if (args.len() as u32) < arity {
+                        if let Some(closure) = self.create_constructor_closure(name, arity)? {
+                            return self.lower_closure_call(closure, &args);
+                        }
+                    }
                 }
 
                 // Check if this is an RTS builtin

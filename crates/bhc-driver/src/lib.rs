@@ -4121,6 +4121,16 @@ impl Compiler {
                 Some(owner) if owner != module_name => {
                     Symbol::intern(&format!("{}.{}", module_name, value.name))
                 }
+                // The same module's interface converted again (it was already
+                // loaded for another import's dependencies) must name a builtin-
+                // shadowing value the same way as the first time. The bare name
+                // made it the builtin: in pandoc's Readers.HTML, importing
+                // Readers.LaTeX first left `try` as the permissive builtin, so
+                // `endAngle = try $ do char '>' …` got no type and its `char`
+                // no dictionaries.
+                Some(_) if shadows_builtin => {
+                    Symbol::intern(&format!("{}.{}", module_name, value.name))
+                }
                 Some(_) => name,
                 None if shadows_builtin => {
                     let qualified = Symbol::intern(&format!("{}.{}", module_name, value.name));
@@ -7562,6 +7572,47 @@ exposed-modules: Data.Text Data.Text.Internal
 
     /// Test that interface_to_module_exports correctly creates DefInfos
     /// with type schemes from a ModuleInterface.
+    /// A value whose name is also a codegen builtin keeps its module-qualified
+    /// Core name when its module's interface is converted a second time (once
+    /// while chasing another import's re-exports, once for the module's own
+    /// import). The bare name made it the builtin: in pandoc's Readers.HTML,
+    /// importing Readers.LaTeX before Text.Pandoc.Parsing left `try` as the
+    /// permissive builtin, so `endAngle = try $ do char '>' …` was untyped and
+    /// its `char` got no dictionaries.
+    #[test]
+    fn test_reconverted_interface_keeps_builtin_shadowing_name() {
+        use bhc_interface::{ExportedValue, ModuleInterface, Type as IfaceType, TypeSignature};
+
+        let mut iface = ModuleInterface::new("Owner");
+        iface.add_value(ExportedValue {
+            name: "try".to_string(),
+            signature: TypeSignature {
+                type_vars: vec![],
+                constraints: vec![],
+                ty: IfaceType::Fun(
+                    Box::new(IfaceType::Con("Int".to_string())),
+                    Box::new(IfaceType::Con("Int".to_string())),
+                ),
+            },
+            inline: bhc_interface::InlineInfo::None,
+            arity: Some(1),
+        });
+
+        let mut ctx = bhc_lower::LowerContext::new();
+        let core_name = |ctx: &bhc_lower::LowerContext, exports: &ModuleExports| {
+            let id = exports.values[&Symbol::intern("try")];
+            ctx.lookup_def(id).expect("try has a DefInfo").name
+        };
+        let first = Compiler::interface_to_module_exports(&iface, "Owner", &mut ctx);
+        let second = Compiler::interface_to_module_exports(&iface, "Owner", &mut ctx);
+        assert_eq!(core_name(&ctx, &first).as_str(), "Owner.try");
+        assert_eq!(
+            core_name(&ctx, &second).as_str(),
+            "Owner.try",
+            "a second conversion must not hand out the builtin's bare name"
+        );
+    }
+
     #[test]
     fn test_interface_to_module_exports_preserves_types() {
         use bhc_interface::{ExportedValue, ModuleInterface, Type as IfaceType, TypeSignature};

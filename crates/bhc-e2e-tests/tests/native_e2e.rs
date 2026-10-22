@@ -1390,6 +1390,14 @@ fn test_tier2_synonym_dict_resolution() {
 }
 
 #[test]
+fn test_tier2_multimodule_qualified_con_collision() {
+    run_native_test(
+        "tier2_functions/multimodule_qualified_con_collision",
+        Profile::Default,
+    );
+}
+
+#[test]
 fn test_tier2_partial_constructor_value() {
     run_native_test("tier2_functions/partial_constructor_value", Profile::Default);
 }

@@ -2669,6 +2669,16 @@ impl LowerContext {
         self.import_aliases.insert(alias, module);
     }
 
+    /// Every qualified spelling (`Alias.name`) registered for `unqualified`.
+    #[must_use]
+    pub fn qualified_spellings_of(&self, unqualified: Symbol) -> Vec<Symbol> {
+        self.qualified_names
+            .iter()
+            .filter(|(_, u)| **u == unqualified)
+            .map(|(q, _)| *q)
+            .collect()
+    }
+
     /// Registers a qualified name mapping.
     ///
     /// For `import Data.Map (lookup)`, register:

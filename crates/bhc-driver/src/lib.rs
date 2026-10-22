@@ -613,7 +613,15 @@ impl Compiler {
             // and under the id it was bound with at load time: a qualified-only
             // import (`A.Done`) binds no bare name, and its patterns then got
             // a made-up tag and never matched.
+            //
+            // Recorded ids go in first and win: the bare name may belong to a
+            // DIFFERENT constructor. With `import Text.Pandoc.Definition` and
+            // `import qualified Text.Pandoc.Writers.AnnotatedTable as Ann`,
+            // `Ann.Table`'s bare name resolves to `Block`'s `Table`, and
+            // registering it there gave `Block`'s `Table` tag 0 — a table
+            // then matched no alternative of the HTML writer's case.
             let mut map = bhc_hir_to_core::ConstructorInfoMap::default();
+            let mut by_name_ids = Vec::new();
             for (i, (name, tag, arity, type_name, is_newtype, field_types)) in
                 lower_ctx.interface_constructors.iter().enumerate()
             {
@@ -623,28 +631,28 @@ impl Compiler {
                 let sym = Symbol::intern(name);
                 let by_name = lower_ctx.lookup_constructor(sym);
                 let recorded = lower_ctx.interface_constructor_ids.get(i).copied();
-                for def_id in [by_name, recorded.filter(|r| Some(*r) != by_name)]
-                    .into_iter()
-                    .flatten()
-                {
-                    let field_names = lower_ctx
+                let info = |def_id| bhc_hir_to_core::ConstructorInfo {
+                    name: sym,
+                    type_name: type_name.as_ref().map_or(sym, |t| Symbol::intern(t)),
+                    tag: *tag,
+                    arity: *arity,
+                    field_names: lower_ctx
                         .get_constructor_field_names(def_id)
-                        .unwrap_or_default();
-                    map.insert(
-                        def_id,
-                        bhc_hir_to_core::ConstructorInfo {
-                            name: sym,
-                            type_name: type_name.as_ref().map_or(sym, |t| Symbol::intern(t)),
-                            tag: *tag,
-                            arity: *arity,
-                            field_names,
-                            is_newtype: *is_newtype,
-                            existential_dict_count: 0,
-                            existential_classes: vec![],
-                            field_types: field_types.clone(),
-                        },
-                    );
+                        .unwrap_or_default(),
+                    is_newtype: *is_newtype,
+                    existential_dict_count: 0,
+                    existential_classes: vec![],
+                    field_types: field_types.clone(),
+                };
+                if let Some(def_id) = recorded {
+                    map.insert(def_id, info(def_id));
                 }
+                if let Some(def_id) = by_name.filter(|b| Some(*b) != recorded) {
+                    by_name_ids.push((def_id, info(def_id)));
+                }
+            }
+            for (def_id, info) in by_name_ids {
+                map.entry(def_id).or_insert(info);
             }
             map
         };
@@ -3192,8 +3200,36 @@ impl Compiler {
                     continue;
                 }
 
-                // Find the remapped DefId for this constructor in the lower context
-                if let Some(def_id) = lower_ctx.lookup_constructor(con_name) {
+                // Find the remapped DefId for this constructor in the lower context.
+                // The bare name can belong to ANOTHER type's constructor (a
+                // `qualified` import's `Ann.Table` next to `Block`'s `Table`);
+                // registering there gave `Block`'s `Table` the wrong tag.
+                let unqualified = |n: Symbol| -> Symbol {
+                    let s = n.as_str();
+                    Symbol::intern(s.rsplit('.').next().unwrap_or(s))
+                };
+                let same_type = |def_id: bhc_hir::DefId| {
+                    lower_ctx
+                        .defs
+                        .get(&def_id)
+                        .and_then(|d| d.type_con_name)
+                        .is_none_or(|t| unqualified(t) == unqualified(con_info.type_con_name))
+                };
+                // Also every qualified spelling bound to a constructor of THIS
+                // type: a qualified-only import binds no bare name.
+                let mut ids: Vec<bhc_hir::DefId> = lower_ctx
+                    .lookup_constructor(con_name)
+                    .filter(|d| same_type(*d))
+                    .into_iter()
+                    .collect();
+                for q in lower_ctx.qualified_spellings_of(con_name) {
+                    if let Some(d) = lower_ctx.lookup_constructor(q).filter(|d| same_type(*d)) {
+                        if !ids.contains(&d) {
+                            ids.push(d);
+                        }
+                    }
+                }
+                for def_id in ids {
                     result.insert(
                         def_id,
                         bhc_hir_to_core::ConstructorInfo {

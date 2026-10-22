@@ -31,6 +31,11 @@ All notable changes to BHC are recorded here. The format follows
   builds a partial application. It used to compile to a call of a
   `stub: Row not implemented` function; pandoc-types' `simpleTable` and table
   normalization hit it.
+- An imported constructor keeps its own tag when a `qualified` import brings
+  a same-named constructor of another type (pandoc's `Block`'s `Table` next to
+  the HTML writer's `qualified AnnotatedTable as Ann`). The qualified one was
+  registered under the bare name too, so a table matched `Plain`, or no
+  alternative at all.
 - With all pandoc extensions enabled, emphasis, links, smart quotes and fenced
   divs render (13 of 21 extension test inputs now match pandoc).
 

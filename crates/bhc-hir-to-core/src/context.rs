@@ -1871,8 +1871,39 @@ impl LowerContext {
     #[must_use]
     pub fn lookup_constructor_or_by_name(&self, def_id: DefId) -> Option<&ConstructorInfo> {
         self.lookup_constructor(def_id).or_else(|| {
-            self.lookup_var(def_id)
-                .and_then(|v| self.lookup_constructor_by_name(v.name))
+            let v = self.lookup_var(def_id)?;
+            // Two imported data types can both have a constructor of this
+            // name (pandoc's `Block`'s `Table` and the HTML writer's
+            // `qualified AnnotatedTable as Ann`'s `Table`). The reference's
+            // own type names its data type: prefer the candidate whose type
+            // that is. An arbitrary first match gave `Block`'s `Table`
+            // `Ann.Table`'s tag 0, so a table matched no alternative.
+            let result_head = |t: &Ty| -> Option<Symbol> {
+                let mut t = t;
+                loop {
+                    match t {
+                        Ty::Forall(_, b) => t = b,
+                        Ty::Fun(_, r) => t = r,
+                        Ty::App(f, _) => t = f,
+                        Ty::Con(tc) => return Some(tc.name),
+                        _ => return None,
+                    }
+                }
+            };
+            let unqualified = |n: Symbol| -> Symbol {
+                let s = n.as_str();
+                Symbol::intern(s.rsplit('.').next().unwrap_or(s))
+            };
+            if let Some(type_name) = result_head(&v.ty).map(unqualified) {
+                if let Some(info) = self
+                    .constructor_map
+                    .values()
+                    .find(|info| info.name == v.name && unqualified(info.type_name) == type_name)
+                {
+                    return Some(info);
+                }
+            }
+            self.lookup_constructor_by_name(v.name)
         })
     }
 

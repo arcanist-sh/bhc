@@ -55,6 +55,10 @@ All notable changes to BHC are recorded here. The format follows
 - `intersperse` and `intercalate` imported from `Data.List` keep their real
   types. They were typed as fresh variables, so pandoc's `intersperse nl <$>
   mapM …` lost its element type and the `mconcat` of the result ran as a stub.
+- A function above its data type's declaration gets that type's real
+  constructor tags. Constructors were registered in declaration order, so an
+  earlier `case` switched on made-up tags; pandoc's HTML writer crashed on
+  every table (`TablePart` is declared below `tablePartToHtml`).
 - With all pandoc extensions enabled, emphasis, links, smart quotes and fenced
   divs render (13 of 21 extension test inputs now match pandoc).
 

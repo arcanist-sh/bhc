@@ -1,0 +1,7 @@
+11
+21
+31
+True
+dot
+rect 6
+circle 5

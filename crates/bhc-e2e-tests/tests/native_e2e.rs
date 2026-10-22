@@ -1400,6 +1400,11 @@ fn test_tier2_synonym_dict_resolution() {
 }
 
 #[test]
+fn test_tier2_data_declared_after_use() {
+    run_native_test("tier2_functions/data_declared_after_use", Profile::Default);
+}
+
+#[test]
 fn test_tier2_intersperse_typed() {
     run_native_test("tier2_functions/intersperse_typed", Profile::Default);
 }

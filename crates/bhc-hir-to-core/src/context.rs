@@ -4977,6 +4977,146 @@ impl LowerContext {
         }
     }
 
+    /// Register a local `data` declaration's constructors (vars, field
+    /// selectors, tags). Called for every data declaration BEFORE any value is
+    /// lowered: a value above its type's declaration (pandoc's HTML writer
+    /// matches `TablePart` in `tablePartToHtml`, declared further down) was
+    /// lowered with no constructor info, so its `case` switched on made-up
+    /// tags and matched nothing.
+    fn register_data_constructors(&mut self, data_def: &bhc_hir::DataDef) {
+        // Register data constructors with their metadata
+        // The tag is the 0-based position in the constructor list
+        for (tag, con) in data_def.cons.iter().enumerate() {
+            let var = self.named_var(con.name, Ty::Error);
+            self.register_var(con.id, var);
+
+            // Calculate arity and field names based on field type
+            let (arity, field_names) = match &con.fields {
+                bhc_hir::ConFields::Positional(fields) => (fields.len() as u32, vec![]),
+                bhc_hir::ConFields::Named(fields) => {
+                    // Register field selector functions
+                    for field in fields {
+                        // The accessor is emitted as a separate value
+                        // binding (id == field.id) and its var is
+                        // already registered by the pre-pass over all
+                        // items. Do NOT overwrite it with a fresh var
+                        // here: a value that forward-references the
+                        // accessor (a field used above its `data`
+                        // declaration, e.g. Text.Parsec's
+                        // `unknownError s = … statePos s` above
+                        // `data State`) is lowered before this Data
+                        // item and would then reference the pre-pass
+                        // var while the accessor binding uses the
+                        // fresh one — an undeclared, stubbed selector.
+                        if self.lookup_var(field.id).is_none() {
+                            let selector_var = self.named_var(field.name, Ty::Error);
+                            self.register_var(field.id, selector_var);
+                        }
+                        // Also register field metadata for later lookup
+                        self.register_field_selector(
+                            field.name,
+                            FieldSelectorInfo {
+                                field_name: field.name,
+                                con_id: con.id,
+                                con_name: con.name,
+                                type_name: data_def.name,
+                                field_index: fields
+                                    .iter()
+                                    .position(|f| f.id == field.id)
+                                    .unwrap_or(0),
+                                total_fields: fields.len(),
+                            },
+                        );
+                    }
+                    let names: Vec<Symbol> = fields.iter().map(|f| f.name).collect();
+                    (fields.len() as u32, names)
+                }
+            };
+
+            // Record declared field types (already `bhc_types::Ty`)
+            // so codegen can recover a pattern-bound field's type for
+            // `show`/`print` dispatch (otherwise erased).
+            let field_tys: Vec<Ty> = match &con.fields {
+                bhc_hir::ConFields::Positional(tys) => tys.clone(),
+                bhc_hir::ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
+            };
+            self.constructor_field_types
+                .insert(con.name, field_tys.clone());
+
+            // Register constructor metadata
+            // Only count user-defined class constraints for dict fields.
+            // Builtin classes (Show, Eq, etc.) use codegen dispatch, not dicts.
+            let user_existential: Vec<Symbol> = con
+                .existential_context
+                .iter()
+                .filter(|c| self.is_user_class(c.class))
+                .map(|c| c.class)
+                .collect();
+            let existential_dict_count = user_existential.len() as u32;
+            let existential_classes = user_existential;
+            // Arity includes dict fields for existential constructors
+            let total_arity = arity + existential_dict_count;
+            self.register_constructor(
+                con.id,
+                ConstructorInfo {
+                    name: con.name,
+                    type_name: data_def.name,
+                    tag: tag as u32,
+                    arity: total_arity,
+                    field_names,
+                    is_newtype: false,
+                    existential_dict_count,
+                    existential_classes,
+                    field_types: field_tys.clone(),
+                },
+            );
+        }
+    }
+
+    /// Register a local `newtype`'s constructor; see
+    /// [`register_data_constructors`](Self::register_data_constructors).
+    fn register_newtype_constructor(&mut self, newtype_def: &bhc_hir::NewtypeDef) {
+        // Register the newtype constructor
+        let var = self.named_var(newtype_def.con.name, Ty::Error);
+        self.register_var(newtype_def.con.id, var);
+
+        // Register constructor metadata for codegen (newtype = identity)
+        let arity = match &newtype_def.con.fields {
+            bhc_hir::ConFields::Positional(fields) => fields.len() as u32,
+            bhc_hir::ConFields::Named(fields) => fields.len() as u32,
+        };
+        let field_names = match &newtype_def.con.fields {
+            bhc_hir::ConFields::Positional(_) => vec![],
+            bhc_hir::ConFields::Named(fields) => fields.iter().map(|f| f.name).collect(),
+        };
+        // What the newtype WRAPS. Codegen reads this to find the
+        // transformer layer of a monad defined as a newtype —
+        // pandoc's `newtype Future s a = Future (Reader s a)`
+        // derives its Monad, so `return x :: Future s a` must
+        // build the Reader closure `runF` calls. Data declarations
+        // record the same thing further down.
+        let field_tys: Vec<Ty> = match &newtype_def.con.fields {
+            bhc_hir::ConFields::Positional(tys) => tys.clone(),
+            bhc_hir::ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
+        };
+        self.constructor_field_types
+            .insert(newtype_def.con.name, field_tys);
+        self.register_constructor(
+            newtype_def.con.id,
+            ConstructorInfo {
+                name: newtype_def.con.name,
+                type_name: newtype_def.name,
+                tag: 0,
+                arity,
+                field_names,
+                is_newtype: true,
+                existential_dict_count: 0,
+                existential_classes: vec![],
+                field_types: Vec::new(),
+            },
+        );
+    }
+
     /// Lower a HIR module to Core.
     pub fn lower_module(&mut self, module: &HirModule) -> LowerResult<CoreModule> {
         // Propagate extension flags
@@ -5097,102 +5237,23 @@ impl LowerContext {
 
         for item in &module.items {
             match item {
+                Item::Data(data_def) => self.register_data_constructors(data_def),
+                Item::Newtype(newtype_def) => self.register_newtype_constructor(newtype_def),
+                _ => {}
+            }
+        }
+
+        for item in &module.items {
+            match item {
                 Item::Value(value_def) => {
                     if let Some(bind) = self.lower_value_def(value_def)? {
                         bindings.push(bind);
                     }
                 }
                 Item::Data(data_def) => {
-                    // Register data constructors with their metadata
-                    // The tag is the 0-based position in the constructor list
-                    for (tag, con) in data_def.cons.iter().enumerate() {
-                        let var = self.named_var(con.name, Ty::Error);
-                        self.register_var(con.id, var);
-
-                        // Calculate arity and field names based on field type
-                        let (arity, field_names) = match &con.fields {
-                            bhc_hir::ConFields::Positional(fields) => (fields.len() as u32, vec![]),
-                            bhc_hir::ConFields::Named(fields) => {
-                                // Register field selector functions
-                                for field in fields {
-                                    // The accessor is emitted as a separate value
-                                    // binding (id == field.id) and its var is
-                                    // already registered by the pre-pass over all
-                                    // items. Do NOT overwrite it with a fresh var
-                                    // here: a value that forward-references the
-                                    // accessor (a field used above its `data`
-                                    // declaration, e.g. Text.Parsec's
-                                    // `unknownError s = … statePos s` above
-                                    // `data State`) is lowered before this Data
-                                    // item and would then reference the pre-pass
-                                    // var while the accessor binding uses the
-                                    // fresh one — an undeclared, stubbed selector.
-                                    if self.lookup_var(field.id).is_none() {
-                                        let selector_var = self.named_var(field.name, Ty::Error);
-                                        self.register_var(field.id, selector_var);
-                                    }
-                                    // Also register field metadata for later lookup
-                                    self.register_field_selector(
-                                        field.name,
-                                        FieldSelectorInfo {
-                                            field_name: field.name,
-                                            con_id: con.id,
-                                            con_name: con.name,
-                                            type_name: data_def.name,
-                                            field_index: fields
-                                                .iter()
-                                                .position(|f| f.id == field.id)
-                                                .unwrap_or(0),
-                                            total_fields: fields.len(),
-                                        },
-                                    );
-                                }
-                                let names: Vec<Symbol> = fields.iter().map(|f| f.name).collect();
-                                (fields.len() as u32, names)
-                            }
-                        };
-
-                        // Record declared field types (already `bhc_types::Ty`)
-                        // so codegen can recover a pattern-bound field's type for
-                        // `show`/`print` dispatch (otherwise erased).
-                        let field_tys: Vec<Ty> = match &con.fields {
-                            bhc_hir::ConFields::Positional(tys) => tys.clone(),
-                            bhc_hir::ConFields::Named(fs) => {
-                                fs.iter().map(|f| f.ty.clone()).collect()
-                            }
-                        };
-                        self.constructor_field_types
-                            .insert(con.name, field_tys.clone());
-
-                        // Register constructor metadata
-                        // Only count user-defined class constraints for dict fields.
-                        // Builtin classes (Show, Eq, etc.) use codegen dispatch, not dicts.
-                        let user_existential: Vec<Symbol> = con
-                            .existential_context
-                            .iter()
-                            .filter(|c| self.is_user_class(c.class))
-                            .map(|c| c.class)
-                            .collect();
-                        let existential_dict_count = user_existential.len() as u32;
-                        let existential_classes = user_existential;
-                        // Arity includes dict fields for existential constructors
-                        let total_arity = arity + existential_dict_count;
-                        self.register_constructor(
-                            con.id,
-                            ConstructorInfo {
-                                name: con.name,
-                                type_name: data_def.name,
-                                tag: tag as u32,
-                                arity: total_arity,
-                                field_names,
-                                is_newtype: false,
-                                existential_dict_count,
-                                existential_classes,
-                                field_types: field_tys.clone(),
-                            },
-                        );
-                    }
-
+                    // Constructors were registered by the pre-pass
+                    // (`register_data_constructors`), before any value was
+                    // lowered.
                     // Process deriving clauses with strategy dispatch
                     if !data_def.deriving.is_empty() {
                         let derived_instances: Vec<_> = data_def
@@ -5249,48 +5310,7 @@ impl LowerContext {
                     }
                 }
                 Item::Newtype(newtype_def) => {
-                    // Register the newtype constructor
-                    let var = self.named_var(newtype_def.con.name, Ty::Error);
-                    self.register_var(newtype_def.con.id, var);
-
-                    // Register constructor metadata for codegen (newtype = identity)
-                    let arity = match &newtype_def.con.fields {
-                        bhc_hir::ConFields::Positional(fields) => fields.len() as u32,
-                        bhc_hir::ConFields::Named(fields) => fields.len() as u32,
-                    };
-                    let field_names = match &newtype_def.con.fields {
-                        bhc_hir::ConFields::Positional(_) => vec![],
-                        bhc_hir::ConFields::Named(fields) => {
-                            fields.iter().map(|f| f.name).collect()
-                        }
-                    };
-                    // What the newtype WRAPS. Codegen reads this to find the
-                    // transformer layer of a monad defined as a newtype —
-                    // pandoc's `newtype Future s a = Future (Reader s a)`
-                    // derives its Monad, so `return x :: Future s a` must
-                    // build the Reader closure `runF` calls. Data declarations
-                    // record the same thing further down.
-                    let field_tys: Vec<Ty> = match &newtype_def.con.fields {
-                        bhc_hir::ConFields::Positional(tys) => tys.clone(),
-                        bhc_hir::ConFields::Named(fs) => fs.iter().map(|f| f.ty.clone()).collect(),
-                    };
-                    self.constructor_field_types
-                        .insert(newtype_def.con.name, field_tys);
-                    self.register_constructor(
-                        newtype_def.con.id,
-                        ConstructorInfo {
-                            name: newtype_def.con.name,
-                            type_name: newtype_def.name,
-                            tag: 0,
-                            arity,
-                            field_names,
-                            is_newtype: true,
-                            existential_dict_count: 0,
-                            existential_classes: vec![],
-                            field_types: Vec::new(),
-                        },
-                    );
-
+                    // Registered by the pre-pass (`register_newtype_constructor`).
                     // Process deriving clauses with strategy dispatch
                     if !newtype_def.deriving.is_empty() {
                         let derived_instances: Vec<_> = newtype_def

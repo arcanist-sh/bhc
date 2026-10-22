@@ -122,6 +122,9 @@ pub struct LowerContext {
     /// Constructor metadata (`DefId` -> `ConstructorInfo`).
     /// This maps constructor `DefIds` to their metadata including tag and type.
     constructor_map: FxHashMap<DefId, ConstructorInfo>,
+    /// Constructor names shared by more than one data type, computed on
+    /// first use and reset whenever a constructor is registered.
+    ambiguous_con_names: Option<FxHashSet<Symbol>>,
     /// Declared field types per constructor name, from user data declarations.
     /// Threaded into `CoreConstructor::field_types` for codegen `show` dispatch.
     constructor_field_types: FxHashMap<Symbol, Vec<Ty>>,
@@ -294,6 +297,7 @@ impl LowerContext {
             app_head_spans: FxHashSet::default(),
             allow_multi_param_hop: false,
             constructor_map: FxHashMap::default(),
+            ambiguous_con_names: None,
             constructor_field_types: FxHashMap::default(),
             pattern_binder_tys: FxHashMap::default(),
             field_selector_map: FxHashMap::default(),
@@ -1865,6 +1869,7 @@ impl LowerContext {
 
     /// Register a data constructor with its metadata.
     pub fn register_constructor(&mut self, def_id: DefId, info: ConstructorInfo) {
+        self.ambiguous_con_names = None;
         self.constructor_map.insert(def_id, info);
     }
 
@@ -1902,6 +1907,37 @@ impl LowerContext {
     #[must_use]
     pub fn lookup_constructor_by_name(&self, name: Symbol) -> Option<&ConstructorInfo> {
         self.constructor_map.values().find(|info| info.name == name)
+    }
+
+    /// Whether constructors of more than one data type are known under `name`.
+    pub fn constructor_name_is_ambiguous(&mut self, name: Symbol) -> bool {
+        if self.ambiguous_con_names.is_none() {
+            // A constructor is identified by its type's (unqualified) name
+            // AND its arity: pandoc's Definition `Cell` and AnnotatedTable's
+            // `Cell` are both constructors of a type named `Cell`.
+            let mut types_of: FxHashMap<Symbol, (Symbol, u32)> = FxHashMap::default();
+            let mut ambiguous = FxHashSet::default();
+            for info in self.constructor_map.values() {
+                let s = info.type_name.as_str();
+                let t = (
+                    Symbol::intern(s.rsplit('.').next().unwrap_or(s)),
+                    info.arity,
+                );
+                match types_of.get(&info.name) {
+                    None => {
+                        types_of.insert(info.name, t);
+                    }
+                    Some(prev) if *prev != t => {
+                        ambiguous.insert(info.name);
+                    }
+                    Some(_) => {}
+                }
+            }
+            self.ambiguous_con_names = Some(ambiguous);
+        }
+        self.ambiguous_con_names
+            .as_ref()
+            .is_some_and(|set| set.contains(&name))
     }
 
     /// Look up constructor info by `DefId`, falling back to the constructor's

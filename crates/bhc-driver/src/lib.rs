@@ -3208,12 +3208,14 @@ impl Compiler {
                     let s = n.as_str();
                     Symbol::intern(s.rsplit('.').next().unwrap_or(s))
                 };
+                // Type name AND arity: two types may share a name too
+                // (Definition's `Cell` and AnnotatedTable's `Cell`).
                 let same_type = |def_id: bhc_hir::DefId| {
-                    lower_ctx
-                        .defs
-                        .get(&def_id)
-                        .and_then(|d| d.type_con_name)
-                        .is_none_or(|t| unqualified(t) == unqualified(con_info.type_con_name))
+                    lower_ctx.defs.get(&def_id).is_none_or(|d| {
+                        d.type_con_name
+                            .is_none_or(|t| unqualified(t) == unqualified(con_info.type_con_name))
+                            && d.arity.is_none_or(|a| a == con_info.arity)
+                    })
                 };
                 // Also every qualified spelling bound to a constructor of THIS
                 // type: a qualified-only import binds no bare name.

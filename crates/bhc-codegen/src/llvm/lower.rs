@@ -1928,6 +1928,28 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         }
     }
 
+    /// Also register constructor `name` of `type_name` under the
+    /// type-qualified key `Type::Con#arity`, a copy of its metadata.
+    ///
+    /// Constructor references in Core are bare names, so two imported
+    /// constructors of one name (pandoc's `Block`/`Cell` and the HTML writer's
+    /// `qualified AnnotatedTable as Ann` `Table`/`Cell`) shared one entry: the
+    /// later import's arity and tag won, and building the other ended in a
+    /// `stub: Cell` call. hir-to-core spells an AMBIGUOUS constructor
+    /// reference `Type::Con#arity` (the arity too: both of those `Cell`s
+    /// belong to a type named `Cell`); this is the entry that spelling finds.
+    fn register_typed_constructor_alias(
+        &mut self,
+        name: &str,
+        type_name: &str,
+        meta: ConstructorMeta,
+    ) {
+        let type_name = type_name.rsplit('.').next().unwrap_or(type_name);
+        let arity = meta.arity;
+        self.constructor_metadata
+            .insert(format!("{type_name}::{name}#{arity}"), meta);
+    }
+
     /// Check if a constructor is a newtype constructor (identity at runtime).
     pub fn is_newtype_constructor(&self, name: &str) -> bool {
         self.constructor_metadata
@@ -48018,6 +48040,19 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
         // even if they are only used as values (not in case alternatives).
         for con in &core_module.constructors {
             self.register_constructor(&con.name, con.tag, con.arity);
+            if let Some(type_name) = &con.type_name {
+                self.register_typed_constructor_alias(
+                    &con.name,
+                    type_name,
+                    ConstructorMeta {
+                        tag: con.tag,
+                        arity: con.arity,
+                        type_name: Some(type_name.clone()),
+                        is_newtype: con.is_newtype,
+                        field_types: con.field_types.clone(),
+                    },
+                );
+            }
             if !con.field_types.is_empty() {
                 self.con_field_types
                     .insert(con.name.clone(), con.field_types.clone());
@@ -60669,6 +60704,9 @@ pub fn lower_core_module_multimodule_with_constructors<'ctx>(
     // constructors from other modules (e.g., Types.hs constructors used in Parser.hs).
     for (name, meta) in imported_constructors {
         lowering.register_constructor(name, meta.tag, meta.arity);
+        if let Some(type_name) = &meta.type_name {
+            lowering.register_typed_constructor_alias(name, type_name, meta.clone());
+        }
         if meta.is_newtype {
             if let Some(m) = lowering.constructor_metadata.get_mut(name.as_str()) {
                 m.is_newtype = true;

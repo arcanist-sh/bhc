@@ -7609,7 +7609,23 @@ fn lower_con(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
     // Constructors are represented as variables in Core
     // (they get special treatment during optimization)
     if let Some(var) = ctx.lookup_var(def_ref.def_id) {
-        Ok(core::Expr::Var(var.clone(), def_ref.span))
+        let mut var = var.clone();
+        // Codegen finds a constructor by NAME. When two known constructors
+        // share this one's name (`Block`'s `Table` and the HTML writer's
+        // `Ann.Table`), spell it `Type::Con#arity`, which codegen also
+        // registers.
+        let found = ctx
+            .lookup_constructor_or_by_name(def_ref.def_id)
+            .map(|info| (info.name, info.type_name, info.arity));
+        if let Some((con_name, type_name, arity)) = found {
+            if ctx.constructor_name_is_ambiguous(con_name) {
+                let type_name = type_name.as_str();
+                let type_name = type_name.rsplit('.').next().unwrap_or(type_name);
+                var.name =
+                    Symbol::intern(&format!("{}::{}#{}", type_name, con_name.as_str(), arity));
+            }
+        }
+        Ok(core::Expr::Var(var, def_ref.span))
     } else {
         let placeholder = Var {
             name: Symbol::intern("Con"),

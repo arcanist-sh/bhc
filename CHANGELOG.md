@@ -31,11 +31,14 @@ All notable changes to BHC are recorded here. The format follows
   builds a partial application. It used to compile to a call of a
   `stub: Row not implemented` function; pandoc-types' `simpleTable` and table
   normalization hit it.
-- An imported constructor keeps its own tag when a `qualified` import brings
-  a same-named constructor of another type (pandoc's `Block`'s `Table` next to
-  the HTML writer's `qualified AnnotatedTable as Ann`). The qualified one was
-  registered under the bare name too, so a table matched `Plain`, or no
-  alternative at all.
+- An imported constructor keeps its own tag and arity when a `qualified`
+  import brings a same-named constructor of another type (pandoc's `Block`'s
+  `Table` and Definition's `Cell` next to the HTML writer's
+  `qualified AnnotatedTable as Ann`). The qualified one was registered under
+  the bare name too, so a table matched `Plain` or no alternative at all, and
+  building the other one called a `stub: Cell`. Codegen now also knows each
+  constructor as `Type::Con#arity`, the spelling hir-to-core uses for an
+  ambiguous name.
 - `()` has builtin `Semigroup` and `Monoid` instances. An `RWS` computation
   with a `()` writer (pandoc's `AnnotatedTable`) combined its output through a
   `<>` stub and crashed.

@@ -47192,6 +47192,11 @@ impl<'ctx, 'm> Lowering<'ctx, 'm> {
             // Unit constructor
             "()" => return Some((0, 0)), // tag=0, arity=0
 
+            // NonEmpty constructor. typeck models `NonEmpty a` as `[a]` (and
+            // `(:|) :: a -> [a] -> [a]`), so `x :| xs` IS a cons cell: the
+            // list builtins, `fmap` and every list pattern read it as one.
+            ":|" => return Some((1, 2)), // tag=1, arity=2 (Cons)
+
             // Ordering constructors
             "LT" => return Some((0, 0)), // tag=0, arity=0
             "EQ" => return Some((1, 0)), // tag=1, arity=0

@@ -1400,6 +1400,11 @@ fn test_tier2_synonym_dict_resolution() {
 }
 
 #[test]
+fn test_tier2_nonempty_cons() {
+    run_native_test("tier2_functions/nonempty_cons", Profile::Default);
+}
+
+#[test]
 fn test_tier2_unit_monoid() {
     run_native_test("tier2_functions/unit_monoid", Profile::Default);
 }

@@ -46,6 +46,9 @@ All notable changes to BHC are recorded here. The format follows
 - A local function calling a `Monad m =>` helper keeps its monad when `m` is
   an argument of the type (`RS r s m a`) rather than its head; it was
   generalized and the helper ran with no dictionary.
+- `x :| xs` compiles to a list cons cell under separate compilation, matching
+  how bhc types `NonEmpty a` (as `[a]`). It compiled to a `:|` stub, so
+  pandoc's HTML writer crashed on table cells.
 - With all pandoc extensions enabled, emphasis, links, smart quotes and fenced
   divs render (13 of 21 extension test inputs now match pandoc).
 

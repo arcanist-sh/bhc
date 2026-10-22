@@ -2022,6 +2022,9 @@ fn get_constructor_tag(name: &str, fallback: u32) -> u32 {
         // List constructors
         "[]" => 0,
         ":" => 1,
+        // `NonEmpty`'s `x :| xs` is a cons cell: typeck models `NonEmpty a`
+        // as `[a]`, so its values come from (and go to) list code.
+        ":|" => 1,
 
         // Unit constructor
         "()" => 0,

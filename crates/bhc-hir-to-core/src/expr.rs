@@ -2417,6 +2417,19 @@ fn callee_param_tys_and_subst(
         cur = r.as_ref();
     }
     let mut subst = bhc_types::Subst::new();
+    // The occurrence's FIXPOINT-resolved type goes first: it is this
+    // instantiation of the scheme with everything typeck learned, while an
+    // argument's single-pass type can still hold variables that only look
+    // open. `asks fst` with `fst : (t1, t2) -> t1` bound `r := (t1, t2)`,
+    // and since `match_ty` never overrides, the occurrence's `r := ([Int],
+    // Int)` was lost — `MonadReader r (RWST r …)` then matched no instance
+    // and `asks` ran with no dictionary (pandoc's AnnotatedTable crashed).
+    let resolved_occ = ctx
+        .resolved_expr_ty_opt(head_ref.span)
+        .map(|t| crate::context::canonical_list_spelling(&t));
+    if let Some(occ_ty) = &resolved_occ {
+        match_ty(&scheme_ty, occ_ty, &mut subst);
+    }
     for (p, arg) in param_tys.iter().zip(args.iter()) {
         if let Some(at) = try_infer_arg_type(ctx, arg) {
             match_ty(p, &at, &mut subst);
@@ -2428,11 +2441,10 @@ fn callee_param_tys_and_subst(
     // instantiated type (concrete via the binding's annotation); match the
     // scheme against it to fill the remaining variables (argument-driven
     // bindings win — `match_ty` never overrides).
-    if let Some(occ_ty) = ctx
-        .resolved_expr_ty_opt(head_ref.span)
-        .or_else(|| ctx.expr_ty_opt(head_ref.span))
-    {
-        match_ty(&scheme_ty, &occ_ty, &mut subst);
+    if resolved_occ.is_none() {
+        if let Some(occ_ty) = ctx.expr_ty_opt(head_ref.span) {
+            match_ty(&scheme_ty, &occ_ty, &mut subst);
+        }
     }
     Some((param_tys, subst))
 }
@@ -3285,8 +3297,15 @@ fn resolve_constrained_fn_dicts(
         cur = r.as_ref();
     }
 
-    // Instantiate the constrained type variables from the argument types.
+    // Instantiate the constrained type variables from the argument types —
+    // after the occurrence's fixpoint-resolved type, which knows more than a
+    // single-pass argument type (see `callee_param_tys_and_subst`: `asks fst`
+    // bound `r` to `fst`'s open `(t1, t2)` and resolved no dictionary).
     let mut subst = bhc_types::Subst::new();
+    if let Some(occ_ty) = ctx.resolved_expr_ty_opt(head_ref.span) {
+        let occ_ty = crate::context::canonical_list_spelling(&ctx.expand_type_aliases(&occ_ty));
+        match_ty(&scheme_ty, &occ_ty, &mut subst);
+    }
     for (p, arg) in param_tys.iter().zip(args.iter()) {
         if let Some(at) = try_infer_arg_type(ctx, arg) {
             match_ty(p, &at, &mut subst);

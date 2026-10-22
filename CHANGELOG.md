@@ -39,6 +39,13 @@ All notable changes to BHC are recorded here. The format follows
 - `()` has builtin `Semigroup` and `Monoid` instances. An `RWS` computation
   with a `()` writer (pandoc's `AnnotatedTable`) combined its output through a
   `<>` stub and crashed.
+- `asks fst` in a reader whose environment holds a list gets its
+  `MonadReader` dictionary. The function argument's single-pass type left the
+  environment type open and overrode the occurrence's resolved type, and the
+  resolved type spelled the list `[] Int`, which matched no instance head.
+- A local function calling a `Monad m =>` helper keeps its monad when `m` is
+  an argument of the type (`RS r s m a`) rather than its head; it was
+  generalized and the helper ran with no dictionary.
 - With all pandoc extensions enabled, emphasis, links, smart quotes and fenced
   divs render (13 of 21 extension test inputs now match pandoc).
 

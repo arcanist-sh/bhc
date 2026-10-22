@@ -657,6 +657,16 @@ fn test_tier3_instance_context_hop_native() {
 /// Closure IO model only: eager mode cannot yet run a user-defined state
 /// transformer over a polymorphic inner monad at all.
 #[test]
+fn test_tier3_fundep_reader_list_env_native() {
+    if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
+        return;
+    }
+    run_native_test("tier3_io/fundep_reader_list_env", Profile::Default);
+}
+
+/// Closure IO model only: eager mode cannot yet run a user-defined state
+/// transformer over a polymorphic inner monad at all.
+#[test]
 fn test_tier3_instance_context_bind_native() {
     if std::env::var("BHC_IO_MODEL").as_deref() != Ok("closure") {
         return;

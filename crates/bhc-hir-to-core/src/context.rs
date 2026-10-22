@@ -7396,3 +7396,33 @@ mod tests {
         assert_ne!(v1.id, v2.id);
     }
 }
+
+/// Spell every list type as `Ty::List`. A resolved type can carry the
+/// constructor form `[] a` (`App(Con "[]", a)`) where instance heads and
+/// declared types use `Ty::List`, and the two never match: `MonadReader
+/// ([] Int, Int) (RWST ([Int], Int) …)` found no instance, so `asks` ran
+/// without a dictionary. Only for matching a scheme to find dictionaries:
+/// monad-head dispatch recognises the list monad by its `[]` constructor.
+pub(crate) fn canonical_list_spelling(ty: &Ty) -> Ty {
+    match ty {
+        Ty::App(f, a) => {
+            if let Ty::Con(tc) = f.as_ref() {
+                if tc.name.as_str() == "[]" {
+                    return Ty::List(Box::new(canonical_list_spelling(a)));
+                }
+            }
+            Ty::App(
+                Box::new(canonical_list_spelling(f)),
+                Box::new(canonical_list_spelling(a)),
+            )
+        }
+        Ty::Fun(a, r) => Ty::Fun(
+            Box::new(canonical_list_spelling(a)),
+            Box::new(canonical_list_spelling(r)),
+        ),
+        Ty::List(e) => Ty::List(Box::new(canonical_list_spelling(e))),
+        Ty::Tuple(es) => Ty::Tuple(es.iter().map(canonical_list_spelling).collect()),
+        Ty::Forall(vs, b) => Ty::Forall(vs.clone(), Box::new(canonical_list_spelling(b))),
+        other => other.clone(),
+    }
+}

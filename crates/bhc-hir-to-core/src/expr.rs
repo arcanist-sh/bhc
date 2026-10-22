@@ -670,9 +670,24 @@ fn in_scope_dict_matches(ctx: &LowerContext, class_name: Symbol, span: Span) -> 
         // A multi-parameter class's dictionary is for ALL its arguments, and
         // the monad is not necessarily the first: `MonadSt s m` records
         // `s := Int` first, which never matched `getx`'s monad `m`.
-        Some(occ_head) if ctx.class_param_count(class_name) > 1 => ctx
-            .lookup_dict_args(class_name)
-            .is_some_and(|args| args.iter().any(|a| same_type_head(a, &occ_head))),
+        // Nor need the class's monad be the occurrence's head: pandoc's
+        // `HasQuoteContext st m` has `getQuoteContext :: ParsecT s st m
+        // QuoteContext`, whose head is ParsecT while the dictionary is for `st`
+        // and the INNER `m`. A dictionary argument that is a type variable the
+        // occurrence type mentions is that dictionary's; otherwise the method
+        // fell to a stub inside `failIfInQuoteContext`, and every markdown read
+        // with `smart` on aborted.
+        Some(occ_head) if ctx.class_param_count(class_name) > 1 => {
+            let occ = refined_occurrence_ty(ctx, span);
+            ctx.lookup_dict_args(class_name).is_some_and(|args| {
+                args.iter().any(|a| {
+                    same_type_head(a, &occ_head)
+                        || matches!(a, Ty::Var(v) if occ.as_ref().is_some_and(|o| {
+                            o.free_vars().iter().any(|fv| fv.id == v.id)
+                        }))
+                })
+            })
+        }
         Some(occ_head) => same_type_head(&dict_ty, &occ_head),
         // Nothing recorded: keep what each class kind did before.
         None => !ctx.is_monad_family_class(class_name),
@@ -1359,6 +1374,23 @@ fn lower_var(ctx: &mut LowerContext, def_ref: &DefRef) -> LowerResult<core::Expr
                             &inst_ty,
                             def_ref.span,
                         ) {
+                            return Ok(method_expr);
+                        }
+                    }
+                }
+                // A multi-parameter class method used as a VALUE (a parser
+                // action, `context <- getQuoteContext`): no argument will drive
+                // resolution later, so build its dictionary from the instance
+                // the occurrence's class parameters pick.
+                if ctx.is_user_class(class_name) && ctx.class_param_count(class_name) > 1 {
+                    if let Some(want) = ctx.class_params_from_occurrence_any(
+                        class_name,
+                        def_ref.def_id,
+                        def_ref.span,
+                    ) {
+                        if let Some(method_expr) =
+                            method_from_instance_dict(ctx, class_name, name, &want, def_ref.span)
+                        {
                             return Ok(method_expr);
                         }
                     }
@@ -2314,11 +2346,7 @@ fn lower_constrained_value_all_dicts(
     // `Stream s m t`) is not fixed by the occurrence type, and without it
     // `notFollowedBy . char` passed notFollowedBy with no dictionary.
     if let Some(dicts) = resolve_user_dicts(ctx, constraints, &subst, def_ref.span) {
-        let mut result = core::Expr::Var(var, def_ref.span);
-        for dict in dicts {
-            result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
-        }
-        return Some(result);
+        return Some(apply_value_dicts(ctx, def_ref, var, constraints, dicts));
     }
     let mut dicts = Vec::with_capacity(constraints.len());
     let mut any_real = false;
@@ -2345,10 +2373,7 @@ fn lower_constrained_value_all_dicts(
     if !any_real {
         return None;
     }
-    let mut result = core::Expr::Var(var, def_ref.span);
-    for dict in dicts {
-        result = core::Expr::App(Box::new(result), Box::new(dict), def_ref.span);
-    }
+    let result = apply_value_dicts(ctx, def_ref, var, constraints, dicts);
     Some(result)
 }
 
@@ -5680,6 +5705,84 @@ fn try_lower_typed_container_key(
     )))
 }
 
+/// A constrained value applied to its dictionaries, one per constraint in
+/// order. For a user-class METHOD the dictionary of its own class SELECTS the
+/// method and only the rest (its method-level constraints) are applied:
+/// passed as an ordinary argument, `getQuoteContext $dHasQuoteContext
+/// $dStream` reached codegen as a stub (pandoc's `failIfInQuoteContext` and
+/// every smart-quote parser).
+fn apply_value_dicts(
+    ctx: &mut LowerContext,
+    def_ref: &DefRef,
+    var: Var,
+    constraints: &[Constraint],
+    dicts: Vec<core::Expr>,
+) -> core::Expr {
+    let span = def_ref.span;
+    let own = ctx
+        .class_method_of_def(def_ref.def_id, var.name)
+        .filter(|class| ctx.is_user_class(*class))
+        .and_then(|class| {
+            constraints
+                .iter()
+                .position(|c| c.class == class)
+                .map(|i| (class, i))
+        });
+    let mut dicts = dicts;
+    let mut result = core::Expr::Var(var.clone(), span);
+    // Only from a real dictionary: an unresolved constraint is filled with a
+    // literal placeholder, and selecting from one fails codegen (parsec's
+    // Text.Parsec.Prim stopped compiling).
+    if let Some((class, i)) = own
+        .filter(|(_, i)| *i < dicts.len())
+        .filter(|(_, i)| !matches!(dicts[*i], core::Expr::Lit(..)))
+    {
+        let dict = dicts.remove(i);
+        let dict_var = ctx.fresh_var("$dself", Ty::Error, span);
+        if let Some(selected) = ctx.select_method_from_dict(&dict_var, class, var.name, span) {
+            result = core::Expr::Let(
+                Box::new(Bind::NonRec(dict_var, Box::new(dict))),
+                Box::new(selected),
+                span,
+            );
+        } else {
+            dicts.insert(i, dict);
+        }
+    }
+    for dict in dicts {
+        result = core::Expr::App(Box::new(result), Box::new(dict), span);
+    }
+    result
+}
+
+/// A multi-parameter class method selected from a dictionary built for the
+/// class parameters `want`, at least one of them concrete. An instance whose
+/// head leaves a parameter as a variable (pandoc's `instance Monad m =>
+/// HasQuoteContext ParserState m`) is resolved like a constrained function's
+/// dictionary, its context from the dictionaries in scope. Without this the
+/// method stayed bare: applied, its dictionary was passed as an ordinary
+/// argument; as a value, it reached codegen as a stub.
+fn method_from_instance_dict(
+    ctx: &mut LowerContext,
+    class_name: Symbol,
+    method_name: Symbol,
+    want: &[Ty],
+    span: Span,
+) -> Option<core::Expr> {
+    if !want.iter().any(has_concrete_head) {
+        return None;
+    }
+    let constraint = Constraint::new_multi(class_name, want.to_vec(), span);
+    let dict = ctx.resolve_dictionary(&constraint, span)?;
+    let dict_var = ctx.fresh_var("$dmulti", Ty::Error, span);
+    let selected = ctx.select_method_from_dict(&dict_var, class_name, method_name, span)?;
+    Some(core::Expr::Let(
+        Box::new(Bind::NonRec(dict_var, Box::new(dict))),
+        Box::new(selected),
+        span,
+    ))
+}
+
 /// The builtin `MonadPlus`/`Alternative` structure of `Maybe` and lists.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PlusMonad {
@@ -6427,6 +6530,23 @@ fn lower_app(
                             }
                             _ => None,
                         };
+                        // An instance whose head leaves a parameter as a
+                        // variable (pandoc's `instance Monad m => HasQuoteContext
+                        // ParserState m`) is resolved like a constrained
+                        // function's dictionary — its context from the
+                        // dictionaries in scope — and the method SELECTED from
+                        // it. Left to the later cases, the dictionary was passed
+                        // to `withQuoteContext` as an ordinary argument and the
+                        // method reached codegen as a stub.
+                        let method_expr = method_expr.or_else(|| {
+                            method_from_instance_dict(
+                                ctx,
+                                class_name,
+                                method_name,
+                                &want,
+                                head_def_ref.span,
+                            )
+                        });
                         if let Some(method_expr) = method_expr {
                             let mut result = method_expr;
                             for arg in &collected_args {

@@ -191,6 +191,11 @@ pub struct LowerContext {
     /// The class of the instance whose method bodies are being lowered
     /// (paired with `current_instance_type`).
     current_instance_class: Option<Symbol>,
+    /// The context constraints of the instance whose method is being lowered.
+    /// Their dictionaries are registered untyped (see
+    /// `lower_instance_method_with_constraints`); this keeps what each is for,
+    /// so a superclass hop can still be refused for another monad.
+    current_instance_context: Vec<Constraint>,
     /// Span of the class-method reference that IS an instance method's whole
     /// body — the alias in `mappend = (<>)` or `(<*>) = ap`. That reference
     /// means the method at the instance's own type, never the element
@@ -309,6 +314,7 @@ impl LowerContext {
             imported_instance_heads: FxHashSet::default(),
             type_aliases: FxHashMap::default(),
             current_instance_class: None,
+            current_instance_context: Vec::new(),
             instance_alias_span: None,
             superclass_bind_depth: 0,
             existential_dict_binders: Vec::new(),
@@ -2068,6 +2074,18 @@ impl LowerContext {
         } else {
             self.superclass_constrained_ty(holder, needed)
         };
+        // An instance context's dictionary is registered untyped, but the
+        // context says what it is for: in `instance Monad m => HasQuoteContext
+        // ParserState m`, `getQuoteContext = stateQuoteContext <$> getState`
+        // maps over a ParsecT, and hopping from `Monad m` to its Functor ran
+        // `m`'s fmap on a parser (every smart-quote parse crashed).
+        let constrained = constrained.or_else(|| {
+            self.current_instance_context
+                .iter()
+                .find(|c| c.class == holder)
+                .and_then(|c| c.args.first().cloned())
+                .filter(|t| matches!(t, Ty::Var(_)))
+        });
         if dbg {
             eprintln!(
                 "[hop] {holder} -> {needed} @ {span:?}: occ_head={occ_head:?} constrained={constrained:?}"
@@ -3134,10 +3152,22 @@ impl LowerContext {
         // same variable (parsec's `Stream s m t` methods mention `Monad m`);
         // only a class outside that closure marks a homonym.
         let supers = self.superclass_closure(class);
+        // Nor do the method's OWN constraints: `getQuoteContext :: Stream s m
+        // t => ParsecT s st m QuoteContext` in `class HasQuoteContext st m`
+        // mentions the class's `m` through `Stream`, and taking that for a
+        // homonym left the method a plain constrained value — its class
+        // dictionary passed as an argument, and a stub at runtime.
+        let method_level: Vec<Symbol> = self
+            .class_registry
+            .method_level
+            .get(&(class, method_name))
+            .map(|s| s.constraints.iter().map(|c| c.class).collect())
+            .unwrap_or_default();
         let homonym = !own_vars.is_empty()
             && scheme.constraints.iter().any(|c| {
                 c.class != class
                     && !supers.contains(&c.class)
+                    && !method_level.contains(&c.class)
                     && c.args
                         .iter()
                         .any(|a| matches!(a, Ty::Var(v) if own_vars.contains(&v)))
@@ -5830,10 +5860,15 @@ impl LowerContext {
         if let Some(sig) = self.current_binding_sig.clone() {
             self.push_sig_into_equations(method_def, &sig);
         }
+        let saved_context = std::mem::replace(
+            &mut self.current_instance_context,
+            inst_constraints.to_vec(),
+        );
 
         // Compile the method body (now with constraint dicts in scope)
         let body = self.compile_equations(method_def);
         self.current_binding_sig = saved_binding_sig;
+        self.current_instance_context = saved_context;
         let mut body = body?;
 
         self.pop_dict_scope();

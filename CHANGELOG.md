@@ -6,6 +6,19 @@ All notable changes to BHC are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Methods of multi-parameter classes whose result type wraps the class's
+  monad (pandoc's `HasQuoteContext st m`) are selected from their dictionary:
+  from the one in scope, from an instance whose monad parameter is a variable
+  (`instance Monad m => HasQuoteContext ParserState m`), and when the method
+  has constraints of its own. Before, the dictionary was passed as an
+  ordinary argument and the method reached codegen as a stub.
+- Inside an instance whose context constrains the inner monad, `<$>` over the
+  instance's own monad no longer takes `fmap` from that inner monad.
+- With all pandoc extensions enabled, emphasis and links render (11 of 21
+  extension test inputs now match pandoc).
+
 ## [0.2.23] - 2026-10-22
 
 The pandoc release: pandoc's markdown reader and HTML writer now run end to

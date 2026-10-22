@@ -644,6 +644,16 @@ fn test_tier3_eq_parametric_field_native() {
     run_native_test("tier3_io/eq_parametric_field", Profile::Default);
 }
 
+#[test]
+fn test_tier3_multiparam_dict_inner_monad_native() {
+    run_native_test("tier3_io/multiparam_dict_inner_monad", Profile::Default);
+}
+
+#[test]
+fn test_tier3_instance_context_hop_native() {
+    run_native_test("tier3_io/instance_context_hop", Profile::Default);
+}
+
 /// Closure IO model only: eager mode still generalizes local functions over
 /// value-class variables.
 #[test]

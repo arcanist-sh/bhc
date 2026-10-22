@@ -24,6 +24,9 @@ All notable changes to BHC are recorded here. The format follows
   bugs dropped it: let generalization read the environment without the
   current substitution, and a variable bound twice to types of one shape
   (`[c]`, then `[Text]`) kept only the second, losing `c := Text`.
+- A multi-clause helper in the `where` of a local function (itself in a
+  `where` or `let`) is no longer dropped. pandoc-types' `placeRowSection` called
+  its nested `go` as a stub whenever a table was built.
 - With all pandoc extensions enabled, emphasis, links and smart quotes render
   (12 of 21 extension test inputs now match pandoc).
 

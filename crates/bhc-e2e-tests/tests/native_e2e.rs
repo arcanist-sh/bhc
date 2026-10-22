@@ -1389,6 +1389,11 @@ fn test_tier2_synonym_dict_resolution() {
     run_native_test("tier2_functions/synonym_dict_resolution", Profile::Default);
 }
 
+#[test]
+fn test_tier2_nested_where_multiclause() {
+    run_native_test("tier2_functions/nested_where_multiclause", Profile::Default);
+}
+
 /// Closure IO model only: eager mode cannot pass a constrained function as a
 /// value (`map totalWidth cells`) at all.
 #[test]
